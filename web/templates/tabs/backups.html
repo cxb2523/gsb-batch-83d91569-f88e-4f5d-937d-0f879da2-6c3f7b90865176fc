@@ -1,0 +1,43 @@
+{% from "components/icons.html" import icon %}
+<!-- TAB: BACKUPS & RESPALDOS -->
+<div class="card">
+  <div class="tab-header tab-header-center">
+    <div>
+      <h2 class="tab-title">
+        {{ icon("hard-drive", 20, "text-info") }}
+        <span>Copias de Seguridad (SavedArks)</span>
+      </h2>
+      <p class="tab-subtitle">
+        Archivos comprimidos .tar.gz de la carpeta de mundos guardados.
+      </p>
+    </div>
+    <div class="toolbar-group">
+      <button type="button" class="btn btn-outline btn-sm" onclick="loadBackups()">
+        {{ icon("refresh-cw", 13) }}
+        <span>Refrescar</span>
+      </button>
+      <button type="button" class="btn btn-primary btn-sm" onclick="createBackupNow()">
+        {{ icon("plus", 13) }}
+        <span>Crear Copia Ahora</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="custom-table table-full">
+      <thead>
+        <tr>
+          <th>Nombre de Archivo</th>
+          <th>Tamaño</th>
+          <th>Fecha de Creación</th>
+          <th>Acciones</th>
+        </tr>
+      </thead>
+      <tbody id="backups-table-body">
+        <tr>
+          <td colspan="4" class="table-empty">Cargando copias de seguridad...</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>

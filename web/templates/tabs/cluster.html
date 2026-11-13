@@ -1,0 +1,193 @@
+{% from "components/icons.html" import icon %}
+<!-- TAB: ADMINISTRACIÓN DE CLÚSTER MULTI-MAPA -->
+<div class="card">
+  <div class="tab-header">
+    <div>
+      <h2 class="tab-title">
+        {{ icon("layers", 22, "text-info") }}
+        <span>Red de Clúster Multi-Mapa</span>
+      </h2>
+      <p class="tab-subtitle">
+        Administración centralizada de mapas de ARK vinculados por obeliscos para transferencia libre de supervivientes y dinos.
+      </p>
+    </div>
+    <div class="toolbar-group">
+      <button type="button" class="btn btn-outline btn-sm" onclick="syncClusterRatesModal()">
+        {{ icon("repeat", 14) }}
+        <span>Sincronizar Tasas</span>
+      </button>
+      <button type="button" class="btn btn-secondary btn-sm tone-success" onclick="startAllCluster()">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        <span>Iniciar Todo</span>
+      </button>
+      <button type="button" class="btn btn-outline btn-sm tone-danger" onclick="stopAllCluster()">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+        <span>Detener Todo</span>
+      </button>
+      <button type="button" class="btn btn-primary btn-sm" onclick="openAddInstanceModal()">
+        {{ icon("plus", 14) }}
+        <span>Nuevo Mapa</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Resumen de Métricas del Clúster (Subcards) -->
+  <div class="setting-grid mb-lg">
+    <div class="subcard subcard-summary">
+      <div class="icon-box-lg tone-info">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+      </div>
+      <div>
+        <div class="summary-kicker">Cluster ID</div>
+        <div id="cluster-summary-id" class="summary-val text-info mono">ArkCluster</div>
+      </div>
+    </div>
+
+    <div class="subcard subcard-summary">
+      <div class="icon-box-lg tone-success">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg>
+      </div>
+      <div>
+        <div class="summary-kicker">Nodos Activos</div>
+        <div id="cluster-summary-nodes" class="summary-val">1 / 1 Online</div>
+      </div>
+    </div>
+
+    <div class="subcard subcard-summary">
+      <div class="icon-box-lg tone-warning">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      </div>
+      <div>
+        <div class="summary-kicker">Obeliscos (En Nube)</div>
+        <div id="cluster-summary-tributes" class="summary-val text-warning">0 elementos</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Nodos del Clúster -->
+  <div class="section-subbar">
+    <h3 class="section-heading-sub">
+      {{ icon("hard-drive", 18) }}
+      <span>Mapas y Servidores Vinculados</span>
+    </h3>
+  </div>
+
+  <div id="cluster-instances-grid" class="cluster-nodes-grid">
+    <!-- Renderizado dinámicamente vía app.js -->
+    <div class="table-empty grid-full">Cargando nodos del clúster...</div>
+  </div>
+
+  <!-- Explorador de Datos de Obeliscos / Tributos del Clúster -->
+  <div class="section-divider">
+    <div class="section-subbar">
+      <div>
+        <h3 class="section-heading-sub">
+          {{ icon("package", 18, "text-warning") }}
+          <span>Explorador de Datos en Obeliscos (/clusters)</span>
+        </h3>
+        <p class="tab-subtitle">
+          Supervivientes, dinosaurios y tributos actualmente subidos a las terminales y disponibles para transferir entre mapas.
+        </p>
+      </div>
+      <button type="button" class="btn btn-secondary btn-sm" onclick="loadClusterTributes()">
+        {{ icon("refresh-cw", 13) }}
+        <span>Refrescar Datos</span>
+      </button>
+    </div>
+
+    <div class="table-container table-wrap-scroll">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Archivo</th>
+            <th>Tipo de Objeto</th>
+            <th>SteamID Propietario</th>
+            <th>Tamaño</th>
+            <th>Fecha de Subida</th>
+            <th class="th-right">Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="cluster-tributes-tbody">
+          <tr>
+            <td colspan="6" class="table-empty">
+              No hay transferencias pendientes en la nube de los obeliscos.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Modal para Crear Nuevo Mapa en el Clúster -->
+<div class="modal-backdrop modal-dialog-backdrop" id="modal-add-instance" style="display: none;">
+  <div class="modal-box modal-dialog-box modal-box-md">
+    <div class="modal-header">
+      <div class="modal-title-row">
+        <div class="icon-box-md tone-info">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg>
+        </div>
+        <h3 class="card-title-sm">Agregar Mapa al Clúster</h3>
+      </div>
+      <button class="action-icon-btn" type="button" onclick="closeAddInstanceModal()" aria-label="Cerrar">
+        {{ icon("x", 14) }}
+      </button>
+    </div>
+
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label" for="add-inst-name">Nombre Identificativo:</label>
+        <input type="text" id="add-inst-name" class="form-input" placeholder="ej: Scorched Earth">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="add-inst-map">Mapa Oficial:</label>
+        <select id="add-inst-map" class="form-select" onchange="onMapSelectionChange(this.value)">
+          <!-- Poblado por app.js -->
+        </select>
+      </div>
+
+      <div class="setting-grid-2 mb-sm">
+        <div class="form-group mb-0">
+          <label class="form-label" for="add-inst-port">Puerto Juego (UDP):</label>
+          <input type="number" id="add-inst-port" class="form-input" value="7779">
+        </div>
+        <div class="form-group mb-0">
+          <label class="form-label" for="add-inst-query">Puerto Query (UDP):</label>
+          <input type="number" id="add-inst-query" class="form-input" value="27016">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="add-inst-players">Límite Máximo de Supervivientes:</label>
+        <input type="number" id="add-inst-players" class="form-input" value="20">
+      </div>
+
+      <div class="setting-grid-2 mb-sm">
+        <div class="form-group mb-0">
+          <div class="field-label-row">
+            <label class="form-label" for="add-inst-rcon">Puerto RCON (Interno):</label>
+            <span class="badge-xs tone-info">Automático</span>
+          </div>
+          <input type="number" id="add-inst-rcon" class="form-input form-input-readonly" value="27021" readonly tabindex="-1">
+        </div>
+        <div class="form-group mb-0">
+          <div class="field-label-row">
+            <label class="form-label" for="add-inst-altsave">Carpeta (AltSaveDir):</label>
+            <span class="badge-xs tone-success">Automática</span>
+          </div>
+          <input type="text" id="add-inst-altsave" class="form-input form-input-readonly" placeholder="ej: ScorchedEarth" readonly tabindex="-1">
+        </div>
+      </div>
+      <small class="field-help field-help-inline">
+        {{ icon("info", 14) }}
+        <span>El puerto RCON interno (127.0.0.1) y la contraseña de administrador son gestionados automáticamente por el panel para la consola y comandos de este mapa.</span>
+      </small>
+    </div>
+
+    <div class="modal-footer modal-footer-end">
+      <button type="button" class="btn btn-outline" onclick="closeAddInstanceModal()">Cancelar</button>
+      <button type="button" class="btn btn-primary" onclick="submitNewInstance()">Crear Servidor</button>
+    </div>
+  </div>
+</div>

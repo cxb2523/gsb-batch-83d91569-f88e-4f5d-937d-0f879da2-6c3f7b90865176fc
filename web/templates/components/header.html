@@ -1,0 +1,34 @@
+{% from "components/icons.html" import icon %}
+<!-- Top Utility Bar -->
+<header class="header topbar">
+  <div class="topbar-left">
+    <button type="button" class="topbar-menu-btn" id="btn-mobile-menu" onclick="toggleMobileSidebar()" aria-label="Abrir navegación">
+      {{ icon("menu", 18) }}
+    </button>
+    <span class="topbar-section-title" id="topbar-section-title">{% if not is_installed %}Instalación{% else %}Consola{% endif %}</span>
+  </div>
+
+  <div class="header-status">
+    <div id="status-pill" class="status-pill {% if not is_installed %}offline{% else %}{{ status.lower() }}{% endif %}">
+      <span class="status-dot"></span>
+      <span id="status-text">{% if not is_installed %}OFFLINE{% else %}{{ status }}{% endif %}</span>
+    </div>
+
+    <!-- Selector de Servidor / Mapa Activo en Clúster (Dinámico) -->
+    <div class="cluster-selector-wrapper" id="cluster-selector-wrapper">
+      <div id="cluster-single-badge" class="cluster-single-badge" title="Mapa Activo">
+        <span class="cluster-dot"></span>
+        <span id="cluster-single-map-name">{{ world }}</span>
+      </div>
+      <select id="cluster-server-select" class="form-select cluster-server-select" onchange="onSwitchClusterServer(this.value)" title="Cambiar mapa / servidor activo" style="display: none;">
+        <option value="main">Principal ({{ world }})</option>
+      </select>
+    </div>
+
+    <!-- Botón de Cerrar Sesión -->
+    <a href="/logout" id="btn-logout" class="btn-logout" title="Cerrar Sesión de Administrador">
+      {{ icon("log-out", 15) }}
+      <span class="logout-text">Salir</span>
+    </a>
+  </div>
+</header>

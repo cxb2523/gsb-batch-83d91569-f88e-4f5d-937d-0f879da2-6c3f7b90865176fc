@@ -1,0 +1,147 @@
+{% from "components/icons.html" import icon %}
+<!-- TAB: TAREAS PROGRAMADAS Y AUTOMATIZACIONES -->
+<div class="card">
+  <div class="tab-header tab-header-center">
+    <div>
+      <h2 class="tab-title">
+        {{ icon("clock", 20, "text-info") }}
+        <span>Automatizaciones y Tareas Periódicas</span>
+      </h2>
+      <p class="tab-subtitle">
+        Control de horario de encendido/apagado (Power Schedule), respaldos automáticos, dino wipes y reinicios programados.
+      </p>
+    </div>
+    <div class="toolbar-group">
+      <span id="tasks-last-saved" class="last-saved-hint"></span>
+      <button type="button" class="btn btn-primary btn-sm" id="btn-save-tasks" onclick="saveTaskSettings()">
+        {{ icon("save", 14) }}
+        <span>Guardar Horarios</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Estado en tiempo real del Planificador de Tareas (Subcard) -->
+  <div class="subcard status-strip">
+    <div class="status-strip-row">
+      <div class="status-strip-main">
+        <span class="status-dot-sm" id="ts-status-dot"></span>
+        <strong>Planificador:</strong>
+        <span id="ts-running">--</span>
+        <span class="text-dim">(ciclos: <span id="ts-ticks">0</span> &middot; errores: <span id="ts-errors">0</span>)</span>
+      </div>
+      <div><strong>Horario:</strong> <span id="ts-schedule">--</span> <span class="text-dim" id="ts-power-event"></span></div>
+      <div><strong>Respaldo auto:</strong> <span id="ts-backup">--</span></div>
+      <div><strong>Dino Wipe:</strong> <span id="ts-wipe">--</span></div>
+      <div><strong>Reinicio auto:</strong> <span id="ts-restart">--</span></div>
+      <div><strong>Limpieza logs:</strong> <span id="ts-cleanup">--</span></div>
+      <div class="text-dim" id="ts-error-msg"></div>
+    </div>
+  </div>
+
+  <div class="setting-grid-3">
+    <!-- Subcard 1: Horario de Encendido/Apagado -->
+    <div class="subcard subcard-vertical">
+      <div>
+        <h3 class="subcard-title text-info">
+          {{ icon("clock", 16) }}
+          <span>Horario de Actividad (Power Schedule)</span>
+        </h3>
+        <p class="subcard-desc">
+          Enciende el servidor a la hora fijada y lo apaga tras dar aviso in-game si no hay supervivientes conectados.
+        </p>
+
+        <div class="form-group">
+          <label class="form-label form-label-sm" for="task-schedule-enabled">Estado del Horario:</label>
+          <select id="task-schedule-enabled" class="form-select">
+            <option value="false">Desactivado (Servidor 24/7)</option>
+            <option value="true">Activo (Control Horario)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label form-label-sm" for="task-schedule-start">Hora de Inicio (HH:MM):</label>
+          <input type="time" id="task-schedule-start" class="form-input" value="20:00">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label form-label-sm" for="task-schedule-stop">Hora de Apagado (HH:MM):</label>
+          <input type="time" id="task-schedule-stop" class="form-input" value="00:00">
+        </div>
+      </div>
+
+      <div class="form-group mb-0">
+        <label class="form-label form-label-sm" for="task-schedule-warn">Aviso Previo in-game (minutos):</label>
+        <input type="number" id="task-schedule-warn" class="form-input" min="1" max="60" value="10">
+      </div>
+    </div>
+
+    <!-- Subcard 2: Copias de Seguridad Automáticas -->
+    <div class="subcard subcard-vertical">
+      <div>
+        <h3 class="subcard-title text-success">
+          {{ icon("save", 16) }}
+          <span>Respaldos Automáticos</span>
+        </h3>
+        <p class="subcard-desc">
+          Genera copias comprimidas de los mundos y rota las copias antiguas para optimizar el almacenamiento.
+        </p>
+
+        <div class="form-group">
+          <label class="form-label form-label-sm" for="task-backup-enabled">Respaldos Periódicos:</label>
+          <select id="task-backup-enabled" class="form-select">
+            <option value="true">Activo</option>
+            <option value="false">Desactivado</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label form-label-sm" for="task-backup-hours">Intervalo (cada X horas):</label>
+          <input type="number" id="task-backup-hours" class="form-input" min="1" max="168" value="6">
+        </div>
+
+        <div class="form-group mb-0">
+          <label class="form-label form-label-sm" for="task-backup-max-count">Copias Máximas a Conservar:</label>
+          <input type="number" id="task-backup-max-count" class="form-input" min="1" max="100" value="10">
+        </div>
+      </div>
+    </div>
+
+    <!-- Subcard 3: Dino Wipe & Reinicio Automático -->
+    <div class="subcard subcard-vertical">
+      <div>
+        <h3 class="subcard-title text-warning">
+          {{ icon("repeat", 16) }}
+          <span>Dino Wipe &amp; Reinicios</span>
+        </h3>
+        <p class="subcard-desc">
+          Automatiza <code>DestroyWildDinos</code> y reinicios periódicos programados para mantener la fluidez del servidor.
+        </p>
+
+        <div class="form-group">
+          <label class="form-label form-label-sm" for="task-dino-wipe-enabled">Dino Wipe Automático:</label>
+          <select id="task-dino-wipe-enabled" class="form-select">
+            <option value="false">Desactivado</option>
+            <option value="true">Activo</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label form-label-sm" for="task-dino-wipe-hours">Intervalo Dino Wipe (cada X horas):</label>
+          <input type="number" id="task-dino-wipe-hours" class="form-input" min="1" max="168" value="24">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label form-label-sm" for="task-restart-hours">Reinicio Automático (Horas, 0 = Off):</label>
+          <input type="number" id="task-restart-hours" class="form-input" min="0" max="720" value="0">
+        </div>
+      </div>
+
+      <div>
+        <button type="button" class="btn btn-warning btn-sm btn-block" onclick="triggerRestartSafeModal()">
+          {{ icon("refresh-cw", 13) }}
+          <span>Reiniciar Servidor (Aviso 5 Min)</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>

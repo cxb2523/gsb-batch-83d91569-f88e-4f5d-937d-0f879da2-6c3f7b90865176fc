@@ -1,0 +1,124 @@
+{% from "components/icons.html" import icon %}
+<!-- TAB: WEBHOOKS DISCORD -->
+<div class="card">
+  <div class="tab-header tab-header-center">
+    <div>
+      <h2 class="tab-title">
+        {{ icon("bell", 20, "text-info") }}
+        <span>Integración con Discord Webhooks</span>
+      </h2>
+      <p class="tab-subtitle">
+        Notificaciones automáticas en tiempo real con embeds enriquecidos hacia tu canal de Discord.
+      </p>
+    </div>
+    <div class="toolbar-group">
+      <button type="button" class="btn btn-primary btn-sm" onclick="saveWebhookSettings()">
+        {{ icon("save", 14) }}
+        <span>Guardar Webhook</span>
+      </button>
+      <button type="button" class="btn btn-secondary btn-sm" onclick="testWebhookNotification()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        <span>Probar Notificación</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Parámetros Principales de Conexión -->
+  <div class="setting-grid-2-wide">
+    <div class="form-group mb-0">
+      <label class="form-label" for="webhook-url">Discord Webhook URL</label>
+      <input type="text" id="webhook-url" class="form-input mono" placeholder="https://discord.com/api/webhooks/...">
+      <small class="field-help">
+        Obtén la URL en Discord: <em>Ajustes del Canal &rarr; Integraciones &rarr; Webhooks &rarr; Copiar URL</em>.
+      </small>
+    </div>
+
+    <div class="form-group mb-0">
+      <label class="form-label" for="webhook-lang">Idioma de Notificaciones</label>
+      <select id="webhook-lang" class="form-select">
+        <option value="es">Español (es)</option>
+        <option value="en">English (en)</option>
+      </select>
+      <small class="field-help">
+        Idioma en el que se redactarán los títulos y descripciones del embed.
+      </small>
+    </div>
+  </div>
+
+  <!-- Selección de Tipos de Eventos -->
+  <div>
+    <h3 class="section-heading text-info">
+      {{ icon("check", 16) }}
+      <span>Eventos Activos a Notificar</span>
+    </h3>
+    <p class="subcard-desc">
+      Elige qué sucesos enviarán un mensaje a tu canal de Discord para mantener informada a tu comunidad.
+    </p>
+
+    <div class="events-grid">
+      <label class="subcard-check">
+        <input type="checkbox" id="wh-evt-start" checked>
+        <div>
+          <strong class="subcard-check-title text-success">{{ icon("power", 14) }}<span>Servidor 100% Online</span></strong>
+          <span class="subcard-check-desc">Avisa cuando el servidor termina de cargar y está listo para recibir jugadores.</span>
+        </div>
+      </label>
+
+      <label class="subcard-check">
+        <input type="checkbox" id="wh-evt-starting" checked>
+        <div>
+          <strong class="subcard-check-title text-amber">{{ icon("loader", 14) }}<span>Inicio de Arranque</span></strong>
+          <span class="subcard-check-desc">Avisa en cuanto se enciende el proceso y comienza a cargar mods y mundo en RAM.</span>
+        </div>
+      </label>
+
+      <label class="subcard-check">
+        <input type="checkbox" id="wh-evt-shutdown" checked>
+        <div>
+          <strong class="subcard-check-title text-danger">{{ icon("power-off", 14) }}<span>Servidor Apagado</span></strong>
+          <span class="subcard-check-desc">Notifica cuando el servidor se detiene de forma limpia y segura.</span>
+        </div>
+      </label>
+
+      <label class="subcard-check">
+        <input type="checkbox" id="wh-evt-shutdown-warn" checked>
+        <div>
+          <strong class="subcard-check-title text-warning">{{ icon("alert-triangle", 14) }}<span>Aviso de Apagado por Horario</span></strong>
+          <span class="subcard-check-desc">Envía una alerta previa minutos antes del corte fijado en el Power Schedule.</span>
+        </div>
+      </label>
+
+      <label class="subcard-check">
+        <input type="checkbox" id="wh-evt-backup" checked>
+        <div>
+          <strong class="subcard-check-title text-info">{{ icon("archive", 14) }}<span>Copias de Seguridad</span></strong>
+          <span class="subcard-check-desc">Informa cuando se completa un respaldo periódico con su peso en megabytes.</span>
+        </div>
+      </label>
+
+      <label class="subcard-check">
+        <input type="checkbox" id="wh-evt-dino-wipe" checked>
+        <div>
+          <strong class="subcard-check-title text-warning">{{ icon("sparkles", 14) }}<span>Dino Wipe (Repoblación)</span></strong>
+          <span class="subcard-check-desc">Notifica cuando se limpian los dinos salvajes para renovar niveles en el mapa.</span>
+        </div>
+      </label>
+
+      <label class="subcard-check">
+        <input type="checkbox" id="wh-evt-restart" checked>
+        <div>
+          <strong class="subcard-check-title text-purple">{{ icon("repeat", 14) }}<span>Reinicios Programados</span></strong>
+          <span class="subcard-check-desc">Avisa cuando se inicia la cuenta regresiva de reinicio periódico de fluidez.</span>
+        </div>
+      </label>
+
+      <label class="subcard-check">
+        <input type="checkbox" id="wh-evt-players">
+        <div>
+          <strong class="subcard-check-title text-cyan-soft">{{ icon("users", 14) }}<span>Supervivientes (Entradas / Salidas)</span></strong>
+          <span class="subcard-check-desc">Notifica cuando jugadores entran o abandonan el servidor.</span>
+        </div>
+      </label>
+    </div>
+  </div>
+</div>

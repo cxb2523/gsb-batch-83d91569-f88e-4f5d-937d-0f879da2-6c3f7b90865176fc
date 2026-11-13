@@ -1,0 +1,247 @@
+{% from "components/icons.html" import icon %}
+<!-- TAB: CONFIGURACIÓN & MULTIPLICADORES -->
+<div class="card">
+  <div class="tab-header tab-header-center">
+    <div>
+      <h2 class="tab-title">
+        {{ icon("settings", 20, "text-info") }}
+        <span>Configuraciones del Servidor de ARK</span>
+        <span id="settings-instance-badge" class="badge tone-info badge-solid">Nodo: Principal (main)</span>
+      </h2>
+      <p class="tab-subtitle">
+        Control visual de directivas de GameUserSettings.ini, Game.ini y parámetros de ejecución por instancia.
+      </p>
+    </div>
+    <button type="button" class="btn btn-primary btn-sm" onclick="saveSettings()">
+      {{ icon("save", 14) }}
+      <span>Guardar Cambios</span>
+    </button>
+  </div>
+
+  <form id="ark-settings-form" onsubmit="saveSettings(event)">
+    <h3 class="section-heading text-info">Identidad &amp; Acceso</h3>
+
+    <div class="setting-grid">
+      <div class="form-group">
+        <label class="form-label" for="cfg-session-name">Nombre de la Sesión</label>
+        <input type="text" id="cfg-session-name" class="form-input" placeholder="Mi Servidor ARK">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-world">Mapa Principal (World)</label>
+        <select id="cfg-world" class="form-select">
+          <option value="TheIsland">The Island (Oficial)</option>
+          <option value="TheCenter">The Center</option>
+          <option value="ScorchedEarth_P">Scorched Earth</option>
+          <option value="Ragnarok">Ragnarok</option>
+          <option value="Aberration_P">Aberration</option>
+          <option value="Extinction">Extinction</option>
+          <option value="Valguero_P">Valguero</option>
+          <option value="Genesis">Genesis: Part 1</option>
+          <option value="CrystalIsles">Crystal Isles</option>
+          <option value="Gen2">Genesis: Part 2</option>
+          <option value="LostIsland">Lost Island</option>
+          <option value="Fjordur">Fjordur</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-server-pass">Contraseña de Acceso (Opcional)</label>
+        <input type="text" id="cfg-server-pass" class="form-input" placeholder="Dejar vacío para público">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-admin-pass">Contraseña Admin (Cheats &amp; RCON)</label>
+        <input type="text" id="cfg-admin-pass" class="form-input" placeholder="adminpass">
+        <small class="field-help">Usada para <code>enablecheats &lt;password&gt;</code> en el juego y RCON.</small>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-max-players">Límite Máximo de Supervivientes</label>
+        <input type="number" id="cfg-max-players" class="form-input" min="1" max="100" value="20">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-autostart-server">Autoinicio del Servidor de ARK</label>
+        <select id="cfg-autostart-server" class="form-select">
+          <option value="true">Activado (Arrancar ARK al abrir el contenedor)</option>
+          <option value="false">Desactivado (Solo encender manualmente desde la web)</option>
+        </select>
+      </div>
+    </div>
+
+    <h3 class="section-heading text-success">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+      <span>Multiplicadores de Jugabilidad (Rates)</span>
+    </h3>
+
+    <div class="setting-grid-compact">
+      <div class="form-group">
+        <label class="form-label" for="cfg-xp">Multiplicador XP</label>
+        <input type="number" step="0.5" id="cfg-xp" class="form-input" value="1.0">
+        <small class="field-help">
+          Mayor valor = más experiencia obtenida por acción (ej: 2.0 = doble de XP).
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-taming">Velocidad de Tameo</label>
+        <input type="number" step="0.5" id="cfg-taming" class="form-input" value="1.0">
+        <small class="field-help">
+          Mayor valor = dinosaurios domesticados más rápido (ej: 3.0 = triple de veloz).
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-harvest">Cantidad de Cosecha</label>
+        <input type="number" step="0.5" id="cfg-harvest" class="form-input" value="1.0">
+        <small class="field-help">
+          Mayor valor = más materiales recolectados por golpe (ej: 2.0 = el doble de recursos).
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-hatch">Incubación de Huevos</label>
+        <input type="number" step="0.5" id="cfg-hatch" class="form-input" value="1.0">
+        <small class="field-help">
+          Mayor valor = huevos fertilizados eclosionan en menos tiempo (ej: 5.0 = 5x más veloz).
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-mature">Maduración de Crías</label>
+        <input type="number" step="0.5" id="cfg-mature" class="form-input" value="1.0">
+        <small class="field-help">
+          Mayor valor = los bebés crecen a adulto más rápido (ej: 5.0 = crecen 5 veces más rápido).
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-mating">Intervalo Apareamiento</label>
+        <input type="number" step="0.1" id="cfg-mating" class="form-input" value="1.0">
+        <small class="field-help-inline text-warning">
+          {{ icon("alert-triangle", 13) }}
+          <span><strong>Menor valor</strong> = menos tiempo de espera para volver a aparear (ej: 0.2 = 80% menos espera).</span>
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-crafting">Velocidad de Crafteo</label>
+        <input type="number" step="0.5" id="cfg-crafting" class="form-input" value="1.0">
+        <small class="field-help">
+          Mayor valor = creación acelerada de recetas y objetos en inventario y mesas.
+        </small>
+      </div>
+    </div>
+
+    <h3 class="section-heading text-amber">
+      {{ icon("sun", 16) }}
+      <span>Ciclo de Día y Noche (Duración del Tiempo)</span>
+    </h3>
+
+    <div class="setting-grid">
+      <div class="form-group">
+        <label class="form-label" for="cfg-day-cycle">Escala Ciclo Completo (DayCycleSpeedScale)</label>
+        <input type="number" step="0.1" id="cfg-day-cycle" class="form-input" value="1.0">
+        <small class="field-help">
+          Velocidad general del ciclo 24h. <strong>Menor valor</strong> = el día completo (día + noche) dura más tiempo real.
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-day-time">Velocidad del Día (DayTimeSpeedScale)</label>
+        <input type="number" step="0.1" id="cfg-day-time" class="form-input" value="1.0">
+        <small class="field-help-inline text-info">
+          {{ icon("sun", 13) }}
+          <span><strong>Menor valor</strong> = el DÍA dura más tiempo real (ej: 0.5 = el día dura el doble de horas reales).</span>
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-night-time">Velocidad de la Noche (NightTimeSpeedScale)</label>
+        <input type="number" step="0.1" id="cfg-night-time" class="form-input" value="1.0">
+        <small class="field-help-inline text-purple">
+          {{ icon("moon", 13) }}
+          <span><strong>Mayor valor</strong> = la NOCHE pasa más rápido y dura menos tiempo real (ej: 2.0 = noche dura la mitad).</span>
+        </small>
+      </div>
+    </div>
+
+    <h3 class="section-heading text-warning">Reglas del Servidor &amp; Calidad de Vida</h3>
+
+    <div class="setting-grid">
+      <div class="form-group">
+        <label class="form-label" for="cfg-mode">Modo de Juego</label>
+        <select id="cfg-mode" class="form-select">
+          <option value="pvp">PvP (Jugador contra Jugador)</option>
+          <option value="pve">PvE (Jugador contra Entorno)</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-battleeye">Anticheat BattlEye</label>
+        <select id="cfg-battleeye" class="form-select">
+          <option value="false">Desactivado (Recomendado para servidores privados)</option>
+          <option value="true">Activado</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-update-on-start">Actualización al Iniciar</label>
+        <select id="cfg-update-on-start" class="form-select">
+          <option value="true">Activado (Verificar y actualizar ARK y Mods)</option>
+          <option value="false">Desactivado (Arranque más rápido sin verificar Steam)</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-show-map-player">Superviviente en el Mapa</label>
+        <select id="cfg-show-map-player" class="form-select">
+          <option value="true">Activado (Mostrar marcador del jugador en mapa)</option>
+          <option value="false">Desactivado (Estilo hardcore sin marcador)</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-third-person">Vista en 3ra Persona</label>
+        <select id="cfg-third-person" class="form-select">
+          <option value="true">Permitida (Permitir alejar cámara en 3ra persona)</option>
+          <option value="false">Bloqueada (Solo 1ra persona)</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-crosshair">Retícula / Mira en Pantalla</label>
+        <select id="cfg-crosshair" class="form-select">
+          <option value="true">Activada</option>
+          <option value="false">Desactivada</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cfg-pvp-gamma">Ajuste de Brillo (Gamma)</label>
+        <select id="cfg-pvp-gamma" class="form-select">
+          <option value="true">Permitido (Comando gamma habilitado)</option>
+          <option value="false">Bloqueado</option>
+        </select>
+      </div>
+    </div>
+
+    <h3 class="section-heading text-purple">Clúster &amp; Argumentos Avanzados</h3>
+
+    <div class="setting-grid">
+      <div class="form-group">
+        <label class="form-label" for="cfg-cluster-id">ID de Clúster</label>
+        <input type="text" id="cfg-cluster-id" class="form-input" placeholder="ej: MiClusterArk">
+        <small class="field-help">Identificador compartido para obeliscos y transferencias entre mapas.</small>
+      </div>
+    </div>
+    <input type="hidden" id="cfg-mods" value="">
+
+    <div class="form-group mb-md">
+      <label class="form-label" for="cfg-additional-args">Argumentos Adicionales de ShooterGameServer</label>
+      <input type="text" id="cfg-additional-args" class="form-input" placeholder="ej: -automanagedmods -ServerHardcore -ForceAllowCaveFlyers">
+    </div>
+
+  </form>
+</div>

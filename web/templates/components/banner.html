@@ -1,0 +1,74 @@
+{% from "components/icons.html" import icon %}
+<!-- Streamlined Server Overview Strip -->
+<div class="server-overview-banner" id="server-overview-banner">
+  <!-- Mobile Summary & Toggle Header -->
+  <div class="banner-mobile-bar" id="banner-mobile-bar" role="button" tabindex="0" onclick="document.getElementById('server-overview-banner').classList.toggle('expanded');">
+    <div class="banner-mobile-left">
+      <span class="status-dot {% if not is_installed %}offline{% else %}{{ status.lower() }}{% endif %}" id="banner-mob-dot"></span>
+      <span class="banner-mob-title" id="banner-mob-title">Resumen del Servidor</span>
+      <span class="banner-mob-pill tone-info" id="banner-mob-map">{{ world }}</span>
+    </div>
+    <div class="banner-mobile-right" id="banner-mobile-toggle-btn">
+      <span class="banner-toggle-hint">Detalles</span>
+      {{ icon("chevron-down", 14, "banner-chevron-icon") }}
+    </div>
+  </div>
+
+  <div class="overview-grid" id="overview-grid">
+    <!-- Bloque 1: Identidad & Estado -->
+    <div class="overview-col">
+      <div class="overview-item">
+        <span class="overview-label">Sesión</span>
+        <span class="overview-val highlight-name" id="top-server-name">{{ session_name }}</span>
+      </div>
+      <div class="overview-item">
+        <span class="overview-label">Estado & Actividad</span>
+        <span class="overview-val-group">
+          <span class="overview-val status-text-inline {% if not is_installed %}offline{% else %}{{ status.lower() }}{% endif %}" id="top-server-status">
+            {% if not is_installed %}Sin instalar{% else %}{{ status }}{% endif %}
+          </span>
+          <span class="overview-sep">&middot;</span>
+          <span class="overview-val uptime-live" id="top-server-uptime">{{ metrics.uptime_formatted }}</span>
+        </span>
+      </div>
+      <div class="overview-item">
+        <span class="overview-label">Zona horaria</span>
+        <span class="overview-val highlight-tz" id="top-server-timezone">{{ timezone }}</span>
+      </div>
+    </div>
+
+    <!-- Bloque 2: Recursos en Vivo -->
+    <div class="overview-col">
+      <div class="overview-item">
+        <span class="overview-label">CPU Servidor</span>
+        <span class="overview-val mono-val" id="top-server-cpu">{{ metrics.cpu_percent }} %</span>
+      </div>
+      <div class="overview-item">
+        <span class="overview-label">RAM Servidor</span>
+        <span class="overview-val mono-val highlight-accent" id="top-server-ark-memory">{{ metrics.ark_ram_gb }} GB</span>
+      </div>
+      <div class="overview-item">
+        <span class="overview-label">Disco</span>
+        <span class="overview-val mono-val" id="top-server-disk">{{ metrics.disk_used_gb }} / {{ metrics.disk_total_gb }} GB</span>
+      </div>
+    </div>
+
+    <!-- Bloque 3: Conectividad & Jugadores -->
+    <div class="overview-col">
+      <div class="overview-item">
+        <span class="overview-label">Supervivientes</span>
+        <span class="overview-val mono-val highlight-players" id="top-server-players">0 / {{ max_players }}</span>
+      </div>
+      <div class="overview-item overview-item-action">
+        <div class="overview-kv">
+          <span class="overview-label">Puerto</span>
+          <span class="overview-val mono-val" id="top-server-port">{{ server_port }} (UDP)</span>
+        </div>
+        <button type="button" class="btn btn-outline btn-steam-copy" onclick="copySteamConnectLink()" title="Copiar enlace directo de conexión para Steam (steam://connect/...)">
+          {{ icon("link", 12) }}
+          <span>Enlace Steam</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>

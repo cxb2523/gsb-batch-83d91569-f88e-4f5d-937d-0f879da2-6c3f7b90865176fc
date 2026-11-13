@@ -1,0 +1,80 @@
+{% from "components/icons.html" import icon %}
+{% from "components/popular_mods.html" import popular_mods_list %}
+<!-- TAB: GESTOR DE MODS DE STEAM WORKSHOP -->
+<div class="overview-banner">
+  <div class="overview-item">
+    <div class="overview-label">Mods Configurados</div>
+    <div class="overview-val" id="mods-count-val">0</div>
+  </div>
+  <div class="overview-item">
+    <div class="overview-label">Origen de Descarga</div>
+    <div class="overview-val text-cyan-soft">Steam Workshop</div>
+  </div>
+  <div class="overview-item">
+    <div class="overview-label">Estado de Versiones</div>
+    <div class="overview-val text-success" id="mods-updates-val">Al día</div>
+  </div>
+  <div class="overview-item">
+    <button type="button" class="btn btn-primary btn-sm" onclick="updateModsNow()" title="Comprobar y descargar actualizaciones de mods">
+      {{ icon("download", 14) }}
+      <span>Actualizar Mods Ahora</span>
+    </button>
+  </div>
+</div>
+
+<div class="grid-2">
+  <!-- Columna Izquierda: Mods Activos y Añadir Manual -->
+  <div class="stack-md">
+    <!-- Tarjeta: Añadir Mod Manualmente -->
+    <div class="card">
+      <div class="card-header flex-row-gap">
+        {{ icon("plus", 16) }}
+        <h3 class="card-title-sm">Añadir Mod por Steam Workshop ID</h3>
+      </div>
+      <div class="card-body">
+        <p class="tab-subtitle mb-sm">
+          Ingresa el ID numérico del mod que aparece en la URL de Steam Workshop (ej. <code>https://steamcommunity.com/sharedfiles/filedetails/?id=<b>731604991</b></code>).
+        </p>
+        <div class="toolbar-group">
+          <input type="number" id="new-mod-id" class="form-input flex-1" placeholder="Ej. 731604991" onkeydown="if(event.key==='Enter') addModManual()">
+          <button type="button" class="btn btn-primary btn-sm" onclick="addModManual()">
+            <span>Añadir Mod</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tarjeta: Lista de Mods Activos -->
+    <div class="card">
+      <div class="card-header section-subbar mb-0">
+        <div class="flex-row-gap">
+          {{ icon("package", 16) }}
+          <h3 class="card-title-sm">Mods Activos en el Servidor</h3>
+        </div>
+        <button type="button" class="btn btn-outline btn-chip" onclick="loadMods(true)" title="Refrescar metadatos de Steam Workshop">
+          {{ icon("refresh-cw", 12) }}
+          <span>Refrescar</span>
+        </button>
+      </div>
+      <div class="card-body">
+        <div id="active-mods-list" class="stack-sm">
+          <div class="table-empty">Cargando lista de mods...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Columna Derecha: Catálogo de Mods Populares Recomendados -->
+  <div class="card">
+    <div class="card-header flex-row-gap">
+      {{ icon("sparkles", 16) }}
+      <h3 class="card-title-sm">Catálogo de Mods Populares de la Comunidad</h3>
+    </div>
+    <div class="card-body stack-sm">
+      <p class="tab-subtitle mb-sm">
+        Haz clic en <b>Instalar</b> para añadir directamente cualquier mod esencial a tu lista de configuración:
+      </p>
+      {{ popular_mods_list("install") }}
+    </div>
+  </div>
+</div>

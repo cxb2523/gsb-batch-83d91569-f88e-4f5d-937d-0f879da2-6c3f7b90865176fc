@@ -1,0 +1,84 @@
+{% from "components/icons.html" import icon %}
+<!-- TAB: SUPERVIVIENTES & MODERACIÓN -->
+<div class="card players-stats-card">
+  <div class="players-stats-bar">
+    <div class="players-stats-metrics">
+      <div class="stat-metric">
+        <span class="stat-metric-label">Supervivientes En Línea</span>
+        <div class="flex-row-gap">
+          <span class="dot-inline online"></span>
+          <span id="players-online-stat" class="stat-metric-value text-success">0 / {{ max_players }}</span>
+        </div>
+      </div>
+      <div class="stat-divider"></div>
+      <div class="stat-metric">
+        <span class="stat-metric-label">Registrados (Historial)</span>
+        <span id="players-history-stat" class="stat-metric-value text-info">0</span>
+      </div>
+      <div class="stat-divider"></div>
+      <div class="stat-metric">
+        <span class="stat-metric-label">Sanciones Activas</span>
+        <span id="players-banned-stat" class="stat-metric-value text-danger">0</span>
+      </div>
+    </div>
+    <div>
+      <button type="button" class="btn btn-outline btn-sm tone-info" onclick="triggerBroadcast()" title="Enviar mensaje global in-game a todos los jugadores">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+        <span>Transmisión Global</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="card players-card">
+  <!-- Header de Control de Jugadores -->
+  <div class="tab-header tab-header-center">
+    <div class="toolbar-group">
+      <!-- Selector de Vista Segmentado -->
+      <div class="player-segmented-tabs">
+        <button type="button" class="player-seg-btn active" id="btn-tab-players-online" onclick="switchPlayerTab('online')">
+          {{ icon("users", 13) }}
+          <span>En Línea</span>
+          <span class="badge tone-success" id="count-tab-online">0</span>
+        </button>
+        <button type="button" class="player-seg-btn" id="btn-tab-players-history" onclick="switchPlayerTab('history')">
+          {{ icon("clock", 13) }}
+          <span>Historial &amp; Sanciones</span>
+          <span class="badge tone-info" id="count-tab-history">0</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Buscador en tiempo real y botón de refrescar -->
+    <div class="players-toolbar toolbar-group">
+      <div class="search-box search-box-md">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="search-icon" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="players-search-input" class="form-input search-input-wide" placeholder="Buscar superviviente o SteamID..." oninput="filterPlayers(this.value)">
+      </div>
+      <button type="button" class="btn btn-outline btn-sm" onclick="loadPlayers()" title="Recargar lista de jugadores">
+        {{ icon("refresh-cw", 13) }}
+        <span>Actualizar</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Tabla Responsiva de Jugadores -->
+  <div class="table-wrap">
+    <table class="custom-table data-table table-full">
+      <thead>
+        <tr>
+          <th class="th-min-180">Superviviente</th>
+          <th class="th-min-200">Steam ID</th>
+          <th class="th-min-140">Última Actividad</th>
+          <th class="th-min-110">Estado</th>
+          <th class="th-min-200 th-right">Acciones de Moderación</th>
+        </tr>
+      </thead>
+      <tbody id="players-table-body">
+        <tr>
+          <td colspan="5" class="table-empty">Cargando supervivientes...</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>

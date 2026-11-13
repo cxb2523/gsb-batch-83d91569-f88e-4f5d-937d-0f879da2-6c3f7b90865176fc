@@ -1,0 +1,131 @@
+{% from "components/icons.html" import icon %}
+<!-- TAB: CONSOLA & RCON -->
+<div class="card console-control-bar">
+  <div class="console-control-meta">
+    <span class="console-control-title">Control del Servidor</span>
+    <span class="badge tone-info mono">ARK RCON</span>
+  </div>
+  <div class="console-control-actions">
+    <button type="button" class="btn btn-success btn-sm" onclick="startServer()" title="Iniciar Servidor">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      <span>Iniciar</span>
+    </button>
+    <button type="button" class="btn btn-warning btn-sm" onclick="stopServer()" title="Detener Servidor">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+      <span>Detener</span>
+    </button>
+    <button type="button" class="btn btn-outline btn-sm" onclick="restartServer()" title="Reiniciar Servidor">
+      {{ icon("refresh-cw", 14) }}
+      <span>Reiniciar</span>
+    </button>
+  </div>
+</div>
+
+<!-- Live Terminal Box -->
+<div class="terminal-wrapper">
+  <div class="terminal-header terminal-header-bar">
+    <div class="terminal-title terminal-title-bar">
+      <span>TERMINAL & RCON</span>
+      <span class="badge tone-info badge-xs" id="terminal-map-badge">MAPA: {{ world }}</span>
+      <span class="badge tone-success badge-xs" id="terminal-rcon-badge">RCON: {{ rcon_port }}</span>
+    </div>
+
+    <!-- Live Filter & Download Tools -->
+    <div class="toolbar-group">
+      <div class="search-box">
+        <input type="text" id="console-filter-input" class="search-input-compact" placeholder="Filtrar logs..." oninput="filterConsoleLogs(this.value)">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="search-icon"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      </div>
+      <a href="/api/server/logs/download" class="btn btn-outline btn-chip" title="Descargar log completo (ShooterGame.log)" download>
+        {{ icon("download", 13) }}
+        <span>Descargar Log</span>
+      </a>
+      <button type="button" class="btn btn-outline btn-chip btn-chip-warning" onclick="triggerDinoWipe()" title="DestroyWildDinos (Dino Wipe)">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg>
+        <span>Dino Wipe</span>
+      </button>
+      <button type="button" class="btn btn-outline btn-chip btn-chip-info" onclick="triggerSaveWorld()" title="Guardar Mundo (SaveWorld)">
+        {{ icon("save", 13) }}
+        <span>Guardar Mundo</span>
+      </button>
+      <button type="button" class="btn btn-outline btn-chip" onclick="triggerBroadcast()" title="Broadcast mensaje">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+        <span>Broadcast</span>
+      </button>
+      <button type="button" class="btn btn-outline btn-chip" onclick="document.getElementById('console-output').innerHTML=''" title="Limpiar Consola">
+        {{ icon("trash-2", 13) }}
+        <span>Limpiar</span>
+      </button>
+      <button type="button" class="btn btn-outline btn-chip btn-chip-success" id="btn-autoscroll" onclick="toggleAutoScroll()" title="Pausar o reanudar desplazamiento automático">
+        <span id="autoscroll-text">Auto-scroll: ON</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="terminal-body terminal-body-panel" id="console-output">
+    <!-- Live log lines stream here -->
+  </div>
+
+  <!-- Terminal Input Bar -->
+  <div class="terminal-input-row">
+    <span class="terminal-prompt terminal-prompt-char">&gt;</span>
+    <input type="text" class="form-input flex-1" id="console-input" placeholder="Escribe un comando de ARK o RCON (ej. listplayers, cheat god, SaveWorld)..." autocomplete="off" spellcheck="false" onkeydown="if(event.key==='Enter') sendConsoleCommand()">
+    <button type="button" class="btn btn-primary btn-sm" onclick="sendConsoleCommand()">
+      <span>Enviar</span>
+    </button>
+  </div>
+
+  <!-- Barra de Comandos RCON Rápidos -->
+  <div class="rcon-quick-row">
+    <span class="rcon-quick-label">Comandos Rápidos RCON:</span>
+    <button type="button" class="btn btn-outline btn-chip" onclick="sendQuickRcon('SetTimeOfDay 08:00')" title="Fija la hora del servidor a las 08:00 AM">{{ icon("sun", 13) }}<span>Día (08:00)</span></button>
+    <button type="button" class="btn btn-outline btn-chip" onclick="sendQuickRcon('SetTimeOfDay 22:00')" title="Fija la hora del servidor a las 10:00 PM">{{ icon("moon", 13) }}<span>Noche (22:00)</span></button>
+    <button type="button" class="btn btn-outline btn-chip" onclick="sendQuickRcon('listplayers')" title="Muestra supervivientes conectados con SteamID y ping">{{ icon("users", 13) }}<span>Listar Conectados</span></button>
+    <button type="button" class="btn btn-outline btn-chip" onclick="sendQuickRcon('getchat')" title="Muestra los últimos mensajes del chat del servidor">{{ icon("message-square", 13) }}<span>Ver Chat In-Game</span></button>
+    <button type="button" class="btn btn-outline btn-chip" onclick="sendQuickRcon('DestroyAll DroppedItemGeneric_C')" title="Elimina bolsas e ítems tirados en el suelo para reducir lag">{{ icon("trash-2", 13) }}<span>Limpiar Suelo (Anti-Lag)</span></button>
+    <button type="button" class="btn btn-outline btn-chip" onclick="sendQuickRcon('slomo 0')" title="Pausa la simulación del mundo en caso de emergencia">{{ icon("pause", 13) }}<span>Pausar Juego</span></button>
+    <button type="button" class="btn btn-outline btn-chip" onclick="sendQuickRcon('slomo 1')" title="Restaura la velocidad normal de simulación (1.0)">{{ icon("play", 13) }}<span>Reanudar (Slomo 1)</span></button>
+    <button type="button" class="btn btn-outline btn-chip" onclick="sendQuickRcon('DestroyUnconnectedWaterPipes true')" title="Elimina tuberías de agua y cables desconectados para reducir lag en bases antiguas">{{ icon("wrench", 13) }}<span>Limpiar Tuberías/Cables</span></button>
+  </div>
+</div>
+
+<!-- Tarjeta de Historial de Auditoría (Audit Log - 7 Días) -->
+<div class="card">
+  <div class="card-header toolbar-group tab-header-center card-header-between">
+    <div class="flex-row-gap">
+      {{ icon("clock", 16) }}
+      <h3 class="card-title-sm">Historial de Auditoría (Últimos 7 Días)</h3>
+      <span class="badge badge-solid badge-solid-muted" id="audit-count-badge">0 registros</span>
+    </div>
+
+    <div class="toolbar-group">
+      <div class="search-box">
+        <input type="text" id="audit-filter-input" class="search-input-compact" placeholder="Filtrar eventos..." oninput="filterActivityLogs(this.value)">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="search-icon"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      </div>
+      <a href="/api/activity/download" class="btn btn-outline btn-chip" download title="Descargar auditoría de los últimos 7 días en JSON">
+        {{ icon("download", 12) }}
+        <span>Descargar</span>
+      </a>
+      <button type="button" class="btn btn-outline btn-chip" onclick="loadActivityLogs()" title="Recargar auditoría">
+        {{ icon("refresh-cw", 12) }}
+        <span>Refrescar</span>
+      </button>
+    </div>
+  </div>
+  <div class="card-body audit-body">
+    <table class="table audit-table">
+      <thead>
+        <tr class="audit-thead-row">
+          <th class="th-w-140">Fecha y Hora</th>
+          <th class="th-w-110">Categoría</th>
+          <th class="th-w-120">Usuario</th>
+          <th>Acción / Detalle</th>
+        </tr>
+      </thead>
+      <tbody id="activity-log-body">
+        <tr><td colspan="4" class="table-empty">Cargando historial de actividad...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>

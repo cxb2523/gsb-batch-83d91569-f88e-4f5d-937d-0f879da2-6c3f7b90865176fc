@@ -1,0 +1,234 @@
+{% from "components/icons.html" import icon %}
+{% from "components/popular_mods.html" import popular_mods_list %}
+<!-- TAB: ASISTENTE INICIAL & SETUP -->
+<div class="card">
+  <div class="tab-header tab-header-center">
+    <div>
+      <h2 class="tab-title">
+        {{ icon("download", 22, "text-info") }}
+        <span>Asistente de Configuración Inicial &amp; Descarga de ARK</span>
+      </h2>
+      <p class="tab-subtitle">
+        Personaliza los parámetros fundamentales antes de descargar los archivos con SteamCMD (20-35 GB).
+      </p>
+    </div>
+  </div>
+
+  <form id="ark-installer-form" onsubmit="startServerInstallation(event)">
+
+    <!-- Paso 1: Selección de Mapa -->
+    <div class="step-section">
+      <label class="step-label">
+        1. Selecciona el Mapa del Servidor (World)
+      </label>
+      <input type="hidden" id="wizard-map" value="TheIsland">
+
+      <div class="map-grid">
+        <div class="map-card selected" onclick="selectMap('TheIsland', this)">
+          <span class="map-card-type">Oficial</span>
+          <span class="map-card-name">The Island</span>
+          <span class="map-card-desc">Mapa clásico original</span>
+        </div>
+
+        <div class="map-card" onclick="selectMap('Ragnarok', this)">
+          <span class="map-card-type text-info">Comunidad</span>
+          <span class="map-card-name">Ragnarok</span>
+          <span class="map-card-desc">Fantasía y castillos</span>
+        </div>
+
+        <div class="map-card" onclick="selectMap('Fjordur', this)">
+          <span class="map-card-type text-info">Comunidad</span>
+          <span class="map-card-name">Fjordur</span>
+          <span class="map-card-desc">Reinos nórdicos y nieve</span>
+        </div>
+
+        <div class="map-card" onclick="selectMap('ScorchedEarth_P', this)">
+          <span class="map-card-type">DLC Oficial</span>
+          <span class="map-card-name">Scorched Earth</span>
+          <span class="map-card-desc">Desierto extremo</span>
+        </div>
+
+        <div class="map-card" onclick="selectMap('Aberration_P', this)">
+          <span class="map-card-type">DLC Oficial</span>
+          <span class="map-card-name">Aberration</span>
+          <span class="map-card-desc">Subterráneo radiactivo</span>
+        </div>
+
+        <div class="map-card" onclick="selectMap('Extinction', this)">
+          <span class="map-card-type">DLC Oficial</span>
+          <span class="map-card-name">Extinction</span>
+          <span class="map-card-desc">Tierra destruida</span>
+        </div>
+
+        <div class="map-card" onclick="selectMap('Genesis', this)">
+          <span class="map-card-type">DLC Oficial</span>
+          <span class="map-card-name">Genesis: Parte 1</span>
+          <span class="map-card-desc">Simulación de biomas</span>
+        </div>
+
+        <div class="map-card" onclick="selectMap('Gen2', this)">
+          <span class="map-card-type">DLC Oficial</span>
+          <span class="map-card-name">Genesis: Parte 2</span>
+          <span class="map-card-desc">Nave colonial masiva</span>
+        </div>
+
+        <div class="map-card" onclick="selectMap('LostIsland', this)">
+          <span class="map-card-type text-info">Comunidad</span>
+          <span class="map-card-name">Lost Island</span>
+          <span class="map-card-desc">Selvas y ruinas mayas</span>
+        </div>
+
+        <div class="map-card" onclick="selectMap('Valguero_P', this)">
+          <span class="map-card-type text-info">Comunidad</span>
+          <span class="map-card-name">Valguero</span>
+          <span class="map-card-desc">Valles y abismo blanco</span>
+        </div>
+
+        <div class="map-card" onclick="selectMap('CrystalIsles', this)">
+          <span class="map-card-type text-info">Comunidad</span>
+          <span class="map-card-name">Crystal Isles</span>
+          <span class="map-card-desc">Islas de cristal</span>
+        </div>
+
+        <div class="map-card" onclick="selectMap('TheCenter', this)">
+          <span class="map-card-type">Oficial</span>
+          <span class="map-card-name">The Center</span>
+          <span class="map-card-desc">Océanos y cueva flotante</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Paso 2: Parámetros del Servidor -->
+    <div class="step-section">
+      <label class="step-label">
+        2. Configuración de Identidad y Acceso
+      </label>
+
+      <div class="setting-grid mb-0">
+        <div class="form-group">
+          <label class="form-label" for="wizard-session-name">Nombre de Sesión (SessionName)</label>
+          <input type="text" id="wizard-session-name" class="form-input" value="ARK Server" required>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="wizard-server-pass">Contraseña de Acceso (Opcional)</label>
+          <input type="text" id="wizard-server-pass" class="form-input" placeholder="Vacío si es público">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="wizard-admin-pass">Contraseña Admin / RCON</label>
+          <input type="text" id="wizard-admin-pass" class="form-input" value="adminpass" required>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="wizard-max-players">Jugadores Máximos</label>
+          <input type="number" id="wizard-max-players" class="form-input" min="1" max="100" value="20" required>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="wizard-mode">Modo de Servidor</label>
+          <select id="wizard-mode" class="form-select">
+            <option value="pvp">PvP (Jugador contra Jugador)</option>
+            <option value="pve">PvE (Jugador contra Entorno)</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Paso 3: Multiplicadores Iniciales -->
+    <div class="step-section">
+      <label class="step-label">
+        3. Multiplicadores Iniciales de Jugabilidad
+      </label>
+
+      <div class="setting-grid-compact mb-0">
+        <div class="form-group">
+          <label class="form-label" for="wizard-xp">Multiplicador XP</label>
+          <input type="number" step="0.5" id="wizard-xp" class="form-input" value="2.0">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="wizard-taming">Velocidad de Tameo</label>
+          <input type="number" step="0.5" id="wizard-taming" class="form-input" value="3.0">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="wizard-harvest">Cantidad de Cosecha</label>
+          <input type="number" step="0.5" id="wizard-harvest" class="form-input" value="2.0">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="wizard-hatch">Incubación de Huevos</label>
+          <input type="number" step="0.5" id="wizard-hatch" class="form-input" value="3.0">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="wizard-mature">Maduración de Crías</label>
+          <input type="number" step="0.5" id="wizard-mature" class="form-input" value="3.0">
+        </div>
+      </div>
+    </div>
+
+    <!-- Paso 4: Mods de Steam Workshop & Catálogo Recomendado -->
+    <div class="step-section">
+      <div class="step-header">
+        <label class="step-label" for="wizard-mods">
+          4. Mods de Steam Workshop (Opcional)
+        </label>
+        <span class="step-hint">Selecciona mods populares con 1-clic o añade IDs manuales</span>
+      </div>
+      <input type="text" id="wizard-mods" class="form-input mb-sm" placeholder="IDs separados por comas, ej: 731604991,893735676">
+      <span class="field-help mb-sm">
+        Los mods especificados se descargarán e instalarán automáticamente durante el despliegue del servidor.
+      </span>
+
+      <!-- Selector Rápido de Mods Populares con 1-Clic -->
+      <div class="wizard-mods-box">
+        <div class="wizard-mods-title">
+          {{ icon("sparkles", 14) }}
+          <span>Catálogo de Mods Populares para Añadir al Servidor</span>
+        </div>
+        {{ popular_mods_list("wizard") }}
+      </div>
+    </div>
+
+    <div class="wizard-footer">
+      <button type="submit" class="btn btn-primary">
+        {{ icon("download", 16) }}
+        <span>Guardar Configuración y Comenzar Descarga</span>
+      </button>
+    </div>
+  </form>
+</div>
+
+<script>
+function toggleWizardMod(modId, cardElem) {
+  const input = document.getElementById("wizard-mods");
+  if (!input) return;
+  let ids = input.value.split(",").map(s => s.trim()).filter(Boolean);
+  const tag = cardElem.querySelector(".mod-status-tag");
+  
+  if (ids.includes(modId)) {
+    ids = ids.filter(id => id !== modId);
+    cardElem.style.borderColor = "var(--border-color)";
+    cardElem.style.backgroundColor = "var(--bg-subtle)";
+    if (tag) {
+      tag.textContent = "+ Añadir";
+      tag.style.backgroundColor = "var(--tone-info-bg)";
+      tag.style.borderColor = "var(--tone-info-border)";
+      tag.style.color = "var(--tone-info-text)";
+    }
+  } else {
+    ids.push(modId);
+    cardElem.style.borderColor = "#205938";
+    cardElem.style.backgroundColor = "#10261a";
+    if (tag) {
+      tag.innerHTML = `<svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg><span>Añadido</span>`;
+      tag.style.backgroundColor = "#238636";
+      tag.style.borderColor = "#2ea043";
+      tag.style.color = "#ffffff";
+    }
+  }
+  input.value = ids.join(",");
+}
+</script>

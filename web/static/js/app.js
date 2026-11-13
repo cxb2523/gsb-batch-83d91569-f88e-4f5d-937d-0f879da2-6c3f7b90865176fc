@@ -1,0 +1,2635 @@
+// --- Sanitización XSS Global ---
+function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+// Escapa una cadena para insertarla DENTRO de un string de JS delimitado por
+// comillas simples, dentro de un atributo HTML onclick="...". Previene que datos
+// externos (p. ej. nombres de jugadores) rompan el atributo o inyecten código.
+function attrJsStr(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/\r/g, '\\r')
+        .replace(/\n/g, '\\n')
+        .replace(/\u2028/g, '\\u2028')
+        .replace(/\u2029/g, '\\u2029')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+// --- Helper global de iconos SVG vectoriales (sin emojis) ---
+const UI_ICON_PATHS = {
+    check: '<polyline points="20 6 9 17 4 12"/>',
+    'alert-triangle': '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+    'alert-circle': '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>',
+    info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>'
+};
+
+function uiIcon(name, size = 14) {
+    const body = UI_ICON_PATHS[name] || UI_ICON_PATHS.info;
+    return `<svg class="ui-icon" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+}
+
+// ARK Server Manager Main Client Script
+let metricsChart = null;
+let currentInstanceId = localStorage.getItem("ark_active_instance") || "main";
+let clusterData = null;
+let isAutoScroll = true;
+let commandHistory = JSON.parse(localStorage.getItem("ark_cmd_history") || "[]");
+let cmdHistoryIndex = -1;
+let cmdDraft = "";
+
+// Inicialización
+document.addEventListener("DOMContentLoaded", () => {
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") closeMobileSidebar();
+    });
+
+    initTabs();
+    initWebSocket();
+    initMetricsPolling();
+    initChart();
+    loadPlayers();
+    loadBackups();
+    loadSettings();
+    loadTaskSettings();
+    loadClusterInstances();
+    loadClusterTributes();
+    loadMods();
+    loadActivityLogs();
+    initConsoleHistory();
+    if (typeof Files !== "undefined" && Files.init) {
+        Files.init();
+    }
+
+    // Restaurar pestaña activa guardada
+    const hash = window.location.hash ? window.location.hash.substring(1) : "";
+    const savedTab = hash || localStorage.getItem("ark_active_tab");
+    if (savedTab && savedTab !== "console" && document.getElementById(`tab-${savedTab}`)) {
+        switchTab(savedTab);
+    } else {
+        const activeNav = document.querySelector(".nav-btn.active");
+        const topbarTitle = document.getElementById("topbar-section-title");
+        if (activeNav && topbarTitle) {
+            const labelEl = activeNav.querySelector(".nav-label");
+            topbarTitle.textContent = (labelEl ? labelEl.textContent : activeNav.textContent).trim();
+        }
+    }
+});
+
+// --- Navegación Lateral (Sidebar & Drawer Móvil) ---
+function toggleMobileSidebar() {
+    document.body.classList.toggle("sidebar-open");
+}
+
+function closeMobileSidebar() {
+    document.body.classList.remove("sidebar-open");
+}
+
+// --- Pestañas ---
+function initTabs() {
+    const navItems = document.querySelectorAll(".nav-btn, .nav-item");
+    navItems.forEach(item => {
+        item.addEventListener("click", (e) => {
+            e.preventDefault();
+            const tabId = item.getAttribute("data-tab");
+            switchTab(tabId);
+        });
+    });
+}
+
+function switchTab(tabId) {
+    document.querySelectorAll(".nav-btn, .nav-item").forEach(el => el.classList.remove("active"));
+    document.querySelectorAll(".tab-pane").forEach(el => el.classList.remove("active"));
+
+    const navLink = document.querySelector(`.nav-btn[data-tab="${tabId}"], .nav-item[data-tab="${tabId}"]`);
+    const targetPane = document.getElementById(`tab-${tabId}`);
+
+    if (navLink) {
+        navLink.classList.add("active");
+        const topbarTitle = document.getElementById("topbar-section-title");
+        if (topbarTitle) {
+            const labelEl = navLink.querySelector(".nav-label");
+            topbarTitle.textContent = (labelEl ? labelEl.textContent : navLink.textContent).trim();
+        }
+    }
+    if (targetPane) targetPane.classList.add("active");
+    closeMobileSidebar();
+
+    localStorage.setItem("ark_active_tab", tabId);
+    if (window.history.replaceState) {
+        window.history.replaceState(null, null, `#${tabId}`);
+    }
+
+    if (tabId === "metrics") {
+        if (!metricsChart) {
+            initChart();
+        } else {
+            metricsChart.resize();
+        }
+        fetchMetricsOnce();
+    }
+
+    if (tabId === "players") {
+        loadPlayers();
+    }
+
+    if (tabId === "tasks") {
+        loadTaskSettings();
+        pollTasksStatusIfActive();
+    } else {
+        stopTasksStatusPolling();
+    }
+
+    if (tabId === "webhooks") {
+        loadWebhookSettings();
+    }
+
+    if (tabId === "cluster") {
+        loadClusterInstances();
+        loadClusterTributes();
+    }
+
+    if (tabId === "mods") {
+        loadMods();
+    }
+
+    if (tabId === "console") {
+        loadActivityLogs();
+    }
+
+    if (tabId === "files") {
+        if (typeof Files !== "undefined") {
+            Files.loadDirectory(Files.currentPath || "");
+        }
+    } else {
+        if (typeof Files !== "undefined" && Files.hideContextMenu) {
+            Files.hideContextMenu();
+        }
+    }
+}
+
+// --- WebSocket de Consola ---
+let ws = null;
+let wsReconnectTimer = null;
+let wsShouldReconnect = true;
+
+function scheduleWsReconnect() {
+    if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = setTimeout(initWebSocket, 3000);
+}
+
+function initWebSocket() {
+    if (wsReconnectTimer) {
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+    }
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const instParam = encodeURIComponent(currentInstanceId || "main");
+    const wsUrl = `${protocol}//${window.location.host}/ws/console?instance=${instParam}`;
+    const consoleOutput = document.getElementById("console-output");
+
+    let socket;
+    try {
+        socket = new WebSocket(wsUrl);
+    } catch (e) {
+        scheduleWsReconnect();
+        return;
+    }
+    ws = socket;
+
+    socket.onmessage = (event) => {
+        if (!consoleOutput) return;
+        const text = event.data;
+        // Heartbeat del servidor: no se muestra en la consola
+        if (text === "\u200b") return;
+        const line = document.createElement("div");
+        line.textContent = text;
+        consoleOutput.appendChild(line);
+
+        // Optimización: Limitar el DOM a un máximo de 1.000 líneas visibles
+        while (consoleOutput.children.length > 1000) {
+            consoleOutput.removeChild(consoleOutput.firstChild);
+        }
+
+        if (isAutoScroll) {
+            consoleOutput.scrollTop = consoleOutput.scrollHeight;
+        }
+    };
+
+    if (consoleOutput && !consoleOutput.dataset.scrollBound) {
+        consoleOutput.dataset.scrollBound = "true";
+        consoleOutput.addEventListener("scroll", () => {
+            const distanceFromBottom = consoleOutput.scrollHeight - consoleOutput.scrollTop - consoleOutput.clientHeight;
+            const btn = document.getElementById("btn-autoscroll");
+            const text = document.getElementById("autoscroll-text");
+            if (distanceFromBottom > 40) {
+                isAutoScroll = false;
+                if (btn) {
+                    btn.style.borderColor = "#d29922";
+                    btn.style.color = "#e3b341";
+                }
+                if (text) text.textContent = "Auto-scroll: PAUSADO";
+            } else {
+                isAutoScroll = true;
+                if (btn) {
+                    btn.style.borderColor = "#238636";
+                    btn.style.color = "#3fb950";
+                }
+                if (text) text.textContent = "Auto-scroll: ON";
+            }
+        });
+    }
+
+    socket.onclose = (ev) => {
+        // Solo reconectar si este socket sigue siendo el actual (evita sockets huérfanos
+        // duplicados al cambiar de nodo o al reconectar).
+        if (ws !== socket) return;
+        ws = null;
+        // Cierre por sesión expirada / no autorizado: no reintentar en bucle infinito.
+        if (ev && ev.code === 1008) {
+            wsShouldReconnect = false;
+            return;
+        }
+        if (wsShouldReconnect) {
+            scheduleWsReconnect();
+        }
+    };
+}
+
+function toggleAutoScroll() {
+    const consoleOutput = document.getElementById("console-output");
+    isAutoScroll = !isAutoScroll;
+    const btn = document.getElementById("btn-autoscroll");
+    const text = document.getElementById("autoscroll-text");
+    if (isAutoScroll) {
+        if (btn) {
+            btn.style.borderColor = "#238636";
+            btn.style.color = "#3fb950";
+        }
+        if (text) text.textContent = "Auto-scroll: ON";
+        if (consoleOutput) consoleOutput.scrollTop = consoleOutput.scrollHeight;
+    } else {
+        if (btn) {
+            btn.style.borderColor = "#d29922";
+            btn.style.color = "#e3b341";
+        }
+        if (text) text.textContent = "Auto-scroll: PAUSADO";
+    }
+}
+
+function initConsoleHistory() {
+    const input = document.getElementById("console-input");
+    if (!input || input.dataset.historyBound) return;
+    input.dataset.historyBound = "true";
+
+    input.addEventListener("keydown", (e) => {
+        if (e.key === "ArrowUp") {
+            if (commandHistory.length === 0) return;
+            e.preventDefault();
+            if (cmdHistoryIndex === -1) {
+                cmdDraft = input.value;
+            }
+            if (cmdHistoryIndex < commandHistory.length - 1) {
+                cmdHistoryIndex++;
+                input.value = commandHistory[commandHistory.length - 1 - cmdHistoryIndex];
+                input.setSelectionRange(input.value.length, input.value.length);
+            }
+        } else if (e.key === "ArrowDown") {
+            if (cmdHistoryIndex > 0) {
+                e.preventDefault();
+                cmdHistoryIndex--;
+                input.value = commandHistory[commandHistory.length - 1 - cmdHistoryIndex];
+                input.setSelectionRange(input.value.length, input.value.length);
+            } else if (cmdHistoryIndex === 0) {
+                e.preventDefault();
+                cmdHistoryIndex = -1;
+                input.value = cmdDraft;
+            }
+        }
+    });
+}
+
+async function copySteamConnectLink() {
+    try {
+        const res = await fetch("/api/settings");
+        const data = await res.json();
+        const qPort = data.query_port || "27015";
+        const host = window.location.hostname || "127.0.0.1";
+        const link = `steam://connect/${host}:${qPort}`;
+        await navigator.clipboard.writeText(link);
+        showToast(`¡Enlace copiado! (${link})`, "success");
+    } catch (e) {
+        const host = window.location.hostname || "127.0.0.1";
+        const link = `steam://connect/${host}:27015`;
+        await navigator.clipboard.writeText(link);
+        showToast(`¡Enlace copiado! (${link})`, "success");
+    }
+}
+
+function sendConsoleCommand() {
+    const input = document.getElementById("console-input");
+    if (!input || !input.value.trim()) return;
+    const cmd = input.value.trim();
+
+    // Guardar comando en historial
+    if (commandHistory.length === 0 || commandHistory[commandHistory.length - 1] !== cmd) {
+        commandHistory.push(cmd);
+        if (commandHistory.length > 50) commandHistory.shift();
+        localStorage.setItem("ark_cmd_history", JSON.stringify(commandHistory));
+    }
+    cmdHistoryIndex = -1;
+    cmdDraft = "";
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(cmd);
+    } else {
+        const url = (currentInstanceId && currentInstanceId !== "main")
+            ? `/api/cluster/instances/${currentInstanceId}/command`
+            : "/api/server/command";
+        fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ command: cmd })
+        });
+    }
+    input.value = "";
+}
+
+// --- Controles de Servidor ---
+async function startServer() {
+    if (currentInstanceId && currentInstanceId !== "main") {
+        return startClusterInstance(currentInstanceId);
+    }
+    showToast("Iniciando servidor de ARK...", "info");
+    const res = await fetch("/api/server/start", { method: "POST" });
+    const data = await res.json();
+    if (data.success) {
+        showToast("Servidor de ARK arrancado.", "success");
+    } else {
+        showToast("No se pudo iniciar el servidor.", "error");
+    }
+}
+
+async function stopServer() {
+    if (currentInstanceId && currentInstanceId !== "main") {
+        return stopClusterInstance(currentInstanceId);
+    }
+    const ok = await App.confirm({
+        title: "Detener Servidor",
+        message: "¿Deseas detener el servidor de ARK? Se guardará el estado del mundo (SaveWorld) antes de apagar.",
+        confirmText: "Detener Servidor",
+        danger: true
+    });
+    if (!ok) return;
+    showToast("Deteniendo servidor...", "info");
+    const res = await fetch("/api/server/stop", { method: "POST" });
+    const data = await res.json();
+    if (data.success) {
+        showToast("Servidor detenido.", "success");
+    }
+}
+
+async function restartServer() {
+    if (currentInstanceId && currentInstanceId !== "main") {
+        return restartClusterInstance(currentInstanceId);
+    }
+    const ok = await App.confirm({
+        title: "Reiniciar Servidor",
+        message: "¿Deseas reiniciar el servidor de ARK inmediatamente? Se guardará el progreso antes del reinicio.",
+        confirmText: "Reiniciar Ahora",
+        warning: true
+    });
+    if (!ok) return;
+    showToast("Reiniciando servidor...", "info");
+    await fetch("/api/server/restart", { method: "POST" });
+}
+
+// --- Acciones Rápidas de ARK ---
+async function triggerDinoWipe() {
+    const ok = await App.confirm({
+        title: "Limpieza de Dinos (Dino Wipe)",
+        message: "¿Ejecutar DestroyWildDinos? Todos los dinosaurios salvajes desaparecerán para regenerar nueva fauna.",
+        confirmText: "Ejecutar Dino Wipe",
+        warning: true
+    });
+    if (!ok) return;
+    showToast("Ejecutando Dino Wipe...", "info");
+    const url = (currentInstanceId && currentInstanceId !== "main")
+        ? `/api/cluster/instances/${currentInstanceId}/command`
+        : "/api/server/dinowipe";
+    const body = (currentInstanceId && currentInstanceId !== "main")
+        ? JSON.stringify({ command: "DestroyWildDinos" })
+        : undefined;
+    const res = await fetch(url, {
+        method: "POST",
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body: body
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast("¡Dino Wipe completado con éxito!", "success");
+    }
+}
+
+async function triggerSaveWorld() {
+    showToast("Guardando estado del mundo...", "info");
+    const url = (currentInstanceId && currentInstanceId !== "main")
+        ? `/api/cluster/instances/${currentInstanceId}/command`
+        : "/api/server/saveworld";
+    const body = (currentInstanceId && currentInstanceId !== "main")
+        ? JSON.stringify({ command: "SaveWorld" })
+        : undefined;
+    const res = await fetch(url, {
+        method: "POST",
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body: body
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast("Mundo guardado en disco.", "success");
+    }
+}
+
+async function triggerBroadcast() {
+    const msg = await App.prompt({
+        title: "Anuncio Broadcast In-Game",
+        message: "Escribe el mensaje flotante para enviar en vivo a todos los jugadores:",
+        placeholder: "ej: Reinicio en 10 minutos por mantenimiento...",
+        confirmText: "Enviar Anuncio"
+    });
+    if (!msg || !msg.trim()) return;
+    const url = (currentInstanceId && currentInstanceId !== "main")
+        ? `/api/cluster/instances/${currentInstanceId}/command`
+        : "/api/server/broadcast";
+    const body = (currentInstanceId && currentInstanceId !== "main")
+        ? JSON.stringify({ command: `ServerChat ${msg}` })
+        : JSON.stringify({ message: msg });
+    const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: body
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast("Aviso enviado a los jugadores.", "success");
+    }
+}
+
+// --- Métricas y Gráfico ---
+function initChart() {
+    const ctx = document.getElementById("metrics-chart");
+    if (!ctx) return;
+
+    metricsChart = new Chart(ctx, {
+        type: "line",
+        data: {
+            labels: [],
+            datasets: [
+                {
+                    label: "CPU (%)",
+                    borderColor: "#10b981",
+                    backgroundColor: "#10b981",
+                    data: [],
+                    tension: 0.3,
+                    fill: false,
+                    pointRadius: 2,
+                    pointHoverRadius: 4
+                },
+                {
+                    label: "RAM Servidor (GB)",
+                    borderColor: "#06b6d4",
+                    backgroundColor: "#06b6d4",
+                    data: [],
+                    tension: 0.3,
+                    fill: false,
+                    pointRadius: 2,
+                    pointHoverRadius: 4
+                },
+                {
+                    label: "Disco (%)",
+                    borderColor: "#a371f7",
+                    backgroundColor: "#a371f7",
+                    data: [],
+                    tension: 0.3,
+                    fill: false,
+                    pointRadius: 2,
+                    pointHoverRadius: 4
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                y: { beginAtZero: true, grid: { color: "#21262d" } },
+                x: { grid: { display: false } }
+            },
+            plugins: {
+                legend: { labels: { color: "#94a3b8" } }
+            }
+        }
+    });
+}
+
+let metricsPollTimer = null;
+
+async function fetchMetricsOnce() {
+    try {
+        const res = await fetch("/api/metrics");
+        const data = await res.json();
+        const curr = data.current;
+        const isOffline = curr.status === "OFFLINE";
+
+        // Actualizar Tarjetas de Métricas
+        if (document.getElementById("val-cpu")) document.getElementById("val-cpu").textContent = `${curr.cpu_percent}%`;
+        if (document.getElementById("val-ram")) document.getElementById("val-ram").textContent = `${curr.ram_used_gb} / ${curr.ram_total_gb} GB`;
+        if (document.getElementById("val-ark-ram")) document.getElementById("val-ark-ram").textContent = `${curr.ark_ram_gb} GB`;
+        if (document.getElementById("val-disk")) document.getElementById("val-disk").textContent = `${curr.disk_used_gb} / ${curr.disk_total_gb} GB`;
+        const valDiskPct = document.getElementById("val-disk-pct");
+        if (valDiskPct && curr.disk_percent !== undefined) {
+            valDiskPct.textContent = `${curr.disk_percent}%`;
+        }
+        const valDiskBar = document.getElementById("val-disk-bar");
+        if (valDiskBar && curr.disk_percent !== undefined) {
+            valDiskBar.style.width = `${Math.min(100, curr.disk_percent)}%`;
+            valDiskBar.style.background = curr.disk_alert_level === "critical"
+                ? "#f85149"
+                : (curr.disk_alert_level === "warning" ? "#d29922" : "#a371f7");
+        }
+        const valDiskFree = document.getElementById("val-disk-free");
+        if (valDiskFree && curr.disk_total_gb !== undefined) {
+            const freeGb = curr.disk_free_gb !== undefined
+                ? curr.disk_free_gb
+                : Math.max(0, curr.disk_total_gb - curr.disk_used_gb).toFixed(1);
+            valDiskFree.textContent = `Libre: ${freeGb} GB`;
+        }
+        const diskBanner = document.getElementById("disk-alert-banner");
+        if (diskBanner) {
+            const alertLvl = curr.disk_alert_level || "normal";
+            if (alertLvl === "critical" || alertLvl === "warning") {
+                diskBanner.style.display = "block";
+                const isCrit = alertLvl === "critical";
+                diskBanner.style.borderColor = isCrit ? "#73262d" : "#694914";
+                diskBanner.style.backgroundColor = isCrit ? "#2c1418" : "#291e0c";
+                const iconEl = document.getElementById("disk-alert-icon");
+                if (iconEl) iconEl.style.color = isCrit ? "#f85149" : "#d29922";
+                const titleEl = document.getElementById("disk-alert-title");
+                if (titleEl) {
+                    titleEl.textContent = isCrit
+                        ? `Alerta Crítica de Almacenamiento (${curr.disk_percent}%)`
+                        : `Advertencia de Espacio en Disco (${curr.disk_percent}%)`;
+                }
+                const descEl = document.getElementById("disk-alert-desc");
+                if (descEl) {
+                    descEl.textContent = isCrit
+                        ? `Quedan solo ${curr.disk_free_gb ?? Math.max(0, (curr.disk_total_gb - curr.disk_used_gb)).toFixed(1)} GB disponibles. Elimina copias antiguas o registros para evitar corrupción en el guardado de ARK.`
+                        : `El disco ha superado el 75% de capacidad (${curr.disk_used_gb} / ${curr.disk_total_gb} GB usados).`;
+                }
+            } else {
+                diskBanner.style.display = "none";
+            }
+        }
+        const valRamPct = document.getElementById("val-ram-pct");
+        if (valRamPct && curr.ram_percent !== undefined) {
+            valRamPct.textContent = `${curr.ram_percent}%`;
+        }
+
+        // Guardar max_players globalmente para sincronizar contadores
+        window._arkMaxPlayers = curr.max_players || 20;
+
+        // Actualizar Tarjeta de Supervivientes en Métricas
+        const metricPlayers = document.getElementById("val-players-metric");
+        if (metricPlayers) {
+            const pOnline = curr.players_online !== undefined ? curr.players_online : 0;
+            const pMax = curr.max_players || 20;
+            metricPlayers.textContent = `${pOnline} / ${pMax}`;
+        }
+
+        // Actualizar Banner Superior
+        const topStatus = document.getElementById("top-server-status");
+        if (topStatus) {
+            topStatus.textContent = curr.status;
+            topStatus.className = `overview-val status-text-inline ${curr.status.toLowerCase()}`;
+        }
+        const topUptime = document.getElementById("top-server-uptime");
+        if (topUptime) topUptime.textContent = curr.uptime_formatted;
+        const topCpu = document.getElementById("top-server-cpu");
+        if (topCpu) topCpu.textContent = `${isOffline ? 0.0 : curr.cpu_percent} %`;
+        const topArkMem = document.getElementById("top-server-ark-memory");
+        if (topArkMem) topArkMem.textContent = `${curr.ark_ram_gb} GB`;
+        const topDisk = document.getElementById("top-server-disk");
+        if (topDisk) topDisk.textContent = `${curr.disk_used_gb} / ${curr.disk_total_gb} GB`;
+        const topPlayers = document.getElementById("top-server-players");
+        if (topPlayers) {
+            const pOnline = curr.players_online !== undefined ? curr.players_online : 0;
+            const pMax = curr.max_players || 20;
+            topPlayers.textContent = `${pOnline} / ${pMax}`;
+        }
+
+        // Header Status Pill
+        const statusPill = document.getElementById("status-pill");
+        if (statusPill) statusPill.className = `status-pill ${curr.status.toLowerCase()}`;
+        const statusText = document.getElementById("status-text");
+        if (statusText) statusText.textContent = curr.status;
+
+        // Stat Boxes de Consola
+        const cpuValToDisplay = isOffline ? 0.0 : curr.cpu_percent;
+        const statCpuVal = document.getElementById("stat-cpu-val");
+        if (statCpuVal) statCpuVal.textContent = `${cpuValToDisplay}%`;
+        const statCpuBar = document.getElementById("stat-cpu-bar");
+        if (statCpuBar) statCpuBar.style.width = `${Math.min(cpuValToDisplay, 100)}%`;
+        const statCpuSub = document.getElementById("stat-cpu-subtext");
+        if (statCpuSub) {
+            statCpuSub.textContent = isOffline
+                ? "Servidor inactivo (0.0%)"
+                : `Carga Servidor ARK (Host: ${curr.host_cpu_percent || 0}%)`;
+        }
+        const valCpuSub = document.getElementById("val-cpu-subtext");
+        if (valCpuSub) {
+            valCpuSub.textContent = isOffline
+                ? "Servidor inactivo (0.0%)"
+                : `Carga Servidor ARK (Host: ${curr.host_cpu_percent || 0}%)`;
+        }
+
+        const statMemVal = document.getElementById("stat-mem-val");
+        if (statMemVal) statMemVal.textContent = `${curr.ark_ram_gb} GB`;
+        const statMemBar = document.getElementById("stat-mem-bar");
+        if (statMemBar) statMemBar.style.width = `${curr.ram_percent}%`;
+
+        const statDiskVal = document.getElementById("stat-disk-val");
+        if (statDiskVal) statDiskVal.textContent = `${curr.disk_used_gb} / ${curr.disk_total_gb} GB`;
+        const statDiskBar = document.getElementById("stat-disk-bar");
+        if (statDiskBar) statDiskBar.style.width = `${curr.disk_percent}%`;
+
+        // Actualizar Gráfico
+        if (metricsChart && data.history) {
+            metricsChart.data.labels = data.history.map(h => h.timestamp);
+            metricsChart.data.datasets[0].data = data.history.map(h => h.cpu_percent);
+            metricsChart.data.datasets[1].data = data.history.map(h => h.ark_ram_gb);
+            if (metricsChart.data.datasets[2]) {
+                metricsChart.data.datasets[2].data = data.history.map(h =>
+                    h.disk_percent !== undefined ? h.disk_percent : (curr.disk_percent || 0)
+                );
+            }
+            metricsChart.update("none");
+        }
+    } catch (e) {}
+}
+
+function scheduleNextMetricsPoll() {
+    clearTimeout(metricsPollTimer);
+    // Page Visibility API: 2.5s activa, 10s en segundo plano o minimizada
+    const delay = document.hidden ? 10000 : 2500;
+    metricsPollTimer = setTimeout(async () => {
+        await fetchMetricsOnce();
+        scheduleNextMetricsPoll();
+    }, delay);
+}
+
+function initMetricsPolling() {
+    fetchMetricsOnce();
+    scheduleNextMetricsPoll();
+
+    // Reaccionar inmediatamente cuando la pestaña vuelve a ser visible
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) {
+            fetchMetricsOnce();
+            scheduleNextMetricsPoll();
+        }
+    });
+}
+
+// --- Jugadores & Moderación (Dockraft Enhanced) ---
+let playersCache = { online: [], history: [] };
+let activePlayerTab = "online";
+let playerSearchQuery = "";
+
+// Paleta de gradientes atractivos para avatares de supervivientes
+const AVATAR_GRADIENTS = [
+    "linear-gradient(135deg, #4f46e5, #06b6d4)",
+    "linear-gradient(135deg, #10b981, #059669)",
+    "linear-gradient(135deg, #f59e0b, #d97706)",
+    "linear-gradient(135deg, #ec4899, #8b5cf6)",
+    "linear-gradient(135deg, #3b82f6, #1d4ed8)",
+    "linear-gradient(135deg, #8b5cf6, #6366f1)"
+];
+
+function getAvatarGradient(name) {
+    let hash = 0;
+    for (let i = 0; i < (name || "").length; i++) {
+        hash = name.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const idx = Math.abs(hash) % AVATAR_GRADIENTS.length;
+    return AVATAR_GRADIENTS[idx];
+}
+
+async function loadPlayers() {
+    try {
+        const res = await fetch("/api/players");
+        const data = await res.json();
+        playersCache = {
+            online: data.online || [],
+            history: data.history || []
+        };
+
+        // 1. Actualizar métricas del banner superior de jugadores
+        const statOnline = document.getElementById("players-online-stat");
+        if (statOnline) {
+            const maxP = window._arkMaxPlayers || 20;
+            statOnline.textContent = `${playersCache.online.length} / ${maxP}`;
+        }
+        const statHist = document.getElementById("players-history-stat");
+        if (statHist) statHist.textContent = playersCache.history.length;
+
+        const bannedCount = playersCache.history.filter(p => p.banned).length;
+        const statBanned = document.getElementById("players-banned-stat");
+        if (statBanned) statBanned.textContent = bannedCount;
+
+        // 2. Actualizar contadores en selector segmentado
+        const countOnline = document.getElementById("count-tab-online");
+        if (countOnline) countOnline.textContent = playersCache.online.length;
+        const countHist = document.getElementById("count-tab-history");
+        if (countHist) countHist.textContent = playersCache.history.length;
+
+        renderPlayersList();
+    } catch (e) {
+        console.error("Error cargando jugadores:", e);
+    }
+}
+
+function switchPlayerTab(tab) {
+    activePlayerTab = tab;
+    document.querySelectorAll(".player-seg-btn").forEach(btn => btn.classList.remove("active"));
+    const activeBtn = document.getElementById(`btn-tab-players-${tab}`);
+    if (activeBtn) activeBtn.classList.add("active");
+    renderPlayersList();
+}
+
+function filterPlayers(query) {
+    playerSearchQuery = (query || "").toLowerCase().trim();
+    renderPlayersList();
+}
+
+function renderPlayersList() {
+    const tbody = document.getElementById("players-table-body");
+    if (!tbody) return;
+
+    let list = [];
+    if (activePlayerTab === "online") {
+        list = playersCache.online.map(p => ({
+            name: p.name,
+            steam_id: p.steam_id,
+            is_online: true,
+            banned: false,
+            last_seen: p.last_seen || "En juego ahora"
+        }));
+    } else {
+        // En historial, cruzar con online para marcar los que estén activos
+        const onlineSteamIds = new Set(playersCache.online.map(p => p.steam_id));
+        list = playersCache.history.map(p => ({
+            name: p.name,
+            steam_id: p.steam_id,
+            is_online: onlineSteamIds.has(p.steam_id),
+            banned: !!p.banned,
+            last_seen: p.last_seen || p.first_seen || "-"
+        }));
+    }
+
+    if (playerSearchQuery) {
+        list = list.filter(p =>
+            p.name.toLowerCase().includes(playerSearchQuery) ||
+            p.steam_id.toLowerCase().includes(playerSearchQuery)
+        );
+    }
+
+    tbody.innerHTML = "";
+
+    if (list.length === 0) {
+        const emptyMsg = playerSearchQuery
+            ? `No se encontraron supervivientes que coincidan con "${escapeHtml(playerSearchQuery)}".`
+            : (activePlayerTab === "online"
+                ? "No hay supervivientes conectados actualmente en este servidor."
+                : "No hay historial registrado de supervivientes.");
+
+        tbody.innerHTML = `
+            <tr>
+                <td colspan="5" style="text-align: center; color: var(--text-dim); padding: 40px 20px;">
+                    <div style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
+                        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#484f58" stroke-width="1.6"><circle cx="12" cy="12" r="10"/><path d="M16 16s-1.5-2-4-2-4 2-4 2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+                        <span style="font-size: 0.88rem; color: #8b949e;">${emptyMsg}</span>
+                    </div>
+                </td>
+            </tr>
+        `;
+        return;
+    }
+
+    list.forEach(p => {
+        const tr = document.createElement("tr");
+        const initial = (p.name || "?").charAt(0).toUpperCase();
+        const gradient = getAvatarGradient(p.name);
+        const hasValidSteamId = p.steam_id && p.steam_id !== "N/A" && p.steam_id !== "Desconocido";
+
+        let statusBadge = "";
+        if (p.banned) {
+            statusBadge = `<span class="status-pill tone-danger" style="font-size: 0.72rem; padding: 2px 8px;"><span class="dot-inline danger"></span><span>Baneado</span></span>`;
+        } else if (p.is_online) {
+            statusBadge = `<span class="status-pill online" style="font-size: 0.72rem; padding: 2px 8px;"><span class="dot-inline online"></span><span>En línea</span></span>`;
+        } else {
+            statusBadge = `<span class="status-pill offline" style="font-size: 0.72rem; padding: 2px 8px; color: #8b949e;"><span class="dot-inline offline"></span><span>Desconectado</span></span>`;
+        }
+
+        tr.innerHTML = `
+            <td>
+                <div class="player-info-cell">
+                    <div class="player-avatar-badge" style="background: ${gradient};">
+                        ${escapeHtml(initial)}
+                    </div>
+                    <div>
+                        <div class="player-name-text">
+                            <span>${escapeHtml(p.name)}</span>
+                            ${p.is_online ? '<span style="width: 6px; height: 6px; border-radius: 50%; background: #3fb950; display: inline-block;" title="Actualmente jugando"></span>' : ''}
+                        </div>
+                        ${hasValidSteamId ? `
+                            <a href="https://steamcommunity.com/profiles/${escapeHtml(p.steam_id)}" target="_blank" rel="noopener noreferrer" class="player-steam-link" title="Ver perfil público en Steam">
+                                <span>Perfil de Steam</span>
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                            </a>
+                        ` : '<span style="font-size: 0.72rem; color: var(--text-dim);">Consulta local</span>'}
+                    </div>
+                </div>
+            </td>
+            <td>
+                <div class="steam-id-pill">
+                    <span>${escapeHtml(p.steam_id)}</span>
+                    ${hasValidSteamId ? `
+                        <button type="button" class="btn-copy-steam" onclick="copySteamId('${attrJsStr(p.steam_id)}')" title="Copiar SteamID al portapapeles">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                        </button>
+                    ` : ''}
+                </div>
+            </td>
+            <td>
+                <div style="font-size: 0.8rem; color: #8b949e; display: flex; align-items: center; gap: 5px;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                    <span>${escapeHtml(p.last_seen)}</span>
+                </div>
+            </td>
+            <td>${statusBadge}</td>
+            <td style="text-align: right;">
+                <div style="display: inline-flex; gap: 6px; align-items: center; justify-content: flex-end;">
+                    ${p.is_online && hasValidSteamId ? `
+                        <button class="btn btn-outline" style="padding: 4px 10px; font-size: 0.76rem; border-color: #58a6ff; color: #79c0ff;" onclick="messagePlayer('${attrJsStr(p.steam_id)}', '${attrJsStr(p.name)}')">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                            <span>Mensaje</span>
+                        </button>
+                    ` : ''}
+                    ${p.is_online && hasValidSteamId ? `
+                        <button class="btn btn-danger" style="padding: 4px 10px; font-size: 0.76rem;" onclick="kickPlayer('${attrJsStr(p.steam_id)}', '${attrJsStr(p.name)}')">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+                            <span>Expulsar</span>
+                        </button>
+                    ` : ''}
+                    ${!p.banned && hasValidSteamId ? `
+                        <button class="btn btn-secondary" style="padding: 4px 10px; font-size: 0.76rem;" onclick="banPlayer('${attrJsStr(p.steam_id)}', '${attrJsStr(p.name)}')">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                            <span>Banear</span>
+                        </button>
+                    ` : ''}
+                    ${p.banned && hasValidSteamId ? `
+                        <button class="btn btn-success" style="padding: 4px 10px; font-size: 0.76rem;" onclick="unbanPlayer('${attrJsStr(p.steam_id)}', '${attrJsStr(p.name)}')">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+                            <span>Desbanear</span>
+                        </button>
+                    ` : ''}
+                </div>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+function copySteamId(steamId) {
+    if (!steamId) return;
+    navigator.clipboard.writeText(steamId).then(() => {
+        showToast(`SteamID ${steamId} copiado al portapapeles.`, "success");
+    }).catch(() => {
+        showToast(`SteamID: ${steamId}`, "info");
+    });
+}
+
+async function messagePlayer(steamId, name) {
+    const msg = await App.prompt({
+        title: `Mensaje a ${name}`,
+        message: `Escribe el mensaje privado in-game que se enviará en vivo a este jugador:`,
+        placeholder: "ej: Hola, por favor mueve tu base del obelisco...",
+        confirmText: "Enviar Mensaje"
+    });
+    if (!msg || !msg.trim()) return;
+
+    try {
+        const res = await fetch("/api/players/message", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ steam_id: steamId, message: msg.trim() })
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(`Mensaje enviado a ${name}.`, "success");
+        } else {
+            showToast("Error enviando mensaje privado.", "error");
+        }
+    } catch (e) {
+        showToast("Error de conexión al enviar mensaje.", "error");
+    }
+}
+
+async function kickPlayer(steamId, name) {
+    const ok = await App.confirm({
+        title: "Expulsar Superviviente",
+        message: `¿Expulsar del servidor al superviviente "${name}" (SteamID: ${steamId})?`,
+        confirmText: "Expulsar",
+        danger: true
+    });
+    if (!ok) return;
+    try {
+        await fetch("/api/players/kick", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ steam_id: steamId })
+        });
+        showToast(`Superviviente ${name} expulsado.`, "info");
+        loadPlayers();
+    } catch (e) {
+        showToast("Error al expulsar superviviente.", "error");
+    }
+}
+
+async function banPlayer(steamId, name) {
+    const ok = await App.confirm({
+        title: "Banear Superviviente",
+        message: `¿Banear permanentemente del servidor al superviviente "${name}" (SteamID: ${steamId})?`,
+        confirmText: "Banear",
+        danger: true
+    });
+    if (!ok) return;
+    try {
+        await fetch("/api/players/ban", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ steam_id: steamId })
+        });
+        showToast(`Superviviente ${name} baneado.`, "error");
+        loadPlayers();
+    } catch (e) {
+        showToast("Error al banear superviviente.", "error");
+    }
+}
+
+async function unbanPlayer(steamId, name) {
+    const ok = await App.confirm({
+        title: "Desbanear Superviviente",
+        message: `¿Remover la sanción y permitir que "${name}" (SteamID: ${steamId}) vuelva a ingresar al servidor?`,
+        confirmText: "Desbanear"
+    });
+    if (!ok) return;
+    try {
+        await fetch("/api/players/unban", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ steam_id: steamId })
+        });
+        showToast(`Sanción removida para ${name}.`, "success");
+        loadPlayers();
+    } catch (e) {
+        showToast("Error al desbanear superviviente.", "error");
+    }
+}
+
+// --- Backups ---
+async function loadBackups() {
+    try {
+        const res = await fetch("/api/backups");
+        const data = await res.json();
+        const tbody = document.getElementById("backups-table-body");
+        if (!tbody) return;
+        tbody.innerHTML = "";
+
+        if (data.backups.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; color: var(--text-dim);">No existen copias de seguridad aún.</td></tr>`;
+            return;
+        }
+
+        data.backups.forEach(b => {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+                <td><strong>${escapeHtml(b.filename)}</strong></td>
+                <td>${b.size_mb} MB</td>
+                <td>${b.created_at}</td>
+                <td>
+                    <div style="display: inline-flex; align-items: center; gap: 6px;">
+                        <a href="/api/backups/download/${encodeURIComponent(b.filename)}" class="btn btn-outline" title="Descargar copia de seguridad" download style="padding: 4px 8px; font-size: 11px; display: inline-flex; align-items: center; justify-content: center; color: #79c0ff; border-color: #254b7c; background-color: #132238; text-decoration: none; border-radius: 6px;">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                        </a>
+                        <button class="btn btn-warning" style="padding: 4px 10px; font-size: 11px;" onclick="restoreBackup('${attrJsStr(b.filename)}')">Restaurar</button>
+                        <button class="btn btn-danger" style="padding: 4px 10px; font-size: 11px;" onclick="deleteBackup('${attrJsStr(b.filename)}')">Eliminar</button>
+                    </div>
+                </td>
+            `;
+            tbody.appendChild(tr);
+        });
+    } catch (e) {}
+}
+
+async function createBackupNow() {
+    const name = await App.prompt({
+        title: "Crear Copia de Seguridad",
+        message: "Nombre descriptivo para identificar este respaldo (opcional):",
+        placeholder: "ej: antes_del_boss",
+        confirmText: "Crear Copia"
+    });
+    if (name === null) return;
+    showToast("Comprimiendo mundo guardado...", "info");
+    const res = await fetch("/api/backups/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name || null })
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast("Copia de seguridad generada con éxito.", "success");
+        loadBackups();
+    } else {
+        showToast(`Error creando backup: ${data.error}`, "error");
+    }
+}
+
+async function restoreBackup(filename) {
+    const ok = await App.confirm({
+        title: "Restaurar Copia de Seguridad",
+        message: `¿Restaurar '${filename}'?\n\nLos datos actuales del mundo serán reemplazados (se creará una salvaguarda automática antes) y el servidor se reiniciará.`,
+        confirmText: "Restaurar Respaldo",
+        danger: true
+    });
+    if (!ok) return;
+    showToast("Restaurando copia...", "info");
+    const res = await fetch("/api/backups/restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: filename })
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast("Mundo restaurado con éxito.", "success");
+    } else {
+        showToast(`Error al restaurar: ${data.error}`, "error");
+    }
+}
+
+async function deleteBackup(filename) {
+    const ok = await App.confirm({
+        title: "Eliminar Copia de Seguridad",
+        message: `¿Estás seguro de eliminar permanentemente la copia '${filename}'?`,
+        confirmText: "Eliminar",
+        danger: true
+    });
+    if (!ok) return;
+    await fetch("/api/backups/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: filename })
+    });
+    showToast("Copia eliminada.", "info");
+    loadBackups();
+}
+
+// --- Configuraciones ---
+async function loadSettings() {
+    try {
+        const instParam = encodeURIComponent(currentInstanceId || "main");
+        const res = await fetch(`/api/settings?instance=${instParam}`);
+        const s = await res.json();
+        
+        // Servidor
+        if (document.getElementById("cfg-session-name")) {
+            document.getElementById("cfg-session-name").value = (s.server && s.server.session_name) || "";
+            if (document.getElementById("cfg-world")) document.getElementById("cfg-world").value = (s.server && s.server.world) || "TheIsland";
+            document.getElementById("cfg-server-pass").value = (s.server && s.server.server_password) || "";
+            document.getElementById("cfg-admin-pass").value = (s.server && s.server.admin_password) || "";
+            document.getElementById("cfg-max-players").value = (s.server && s.server.max_players) || "20";
+            if (document.getElementById("cfg-cluster-id")) document.getElementById("cfg-cluster-id").value = (s.server && s.server.cluster_id) || "";
+            if (document.getElementById("cfg-mods")) document.getElementById("cfg-mods").value = (s.server && s.server.mod_ids) || "";
+            if (document.getElementById("cfg-additional-args")) document.getElementById("cfg-additional-args").value = (s.server && s.server.additional_args) || "";
+            if (document.getElementById("cfg-battleeye")) document.getElementById("cfg-battleeye").value = String(!!(s.server && s.server.battleeye));
+            if (document.getElementById("cfg-update-on-start")) document.getElementById("cfg-update-on-start").value = String(s.server && s.server.update_on_start !== false);
+            if (document.getElementById("cfg-autostart-server")) document.getElementById("cfg-autostart-server").value = String(s.server && s.server.autostart_server !== false);
+        }
+
+        // Multiplicadores
+        if (document.getElementById("cfg-xp")) {
+            document.getElementById("cfg-xp").value = (s.multipliers && s.multipliers.xp) || "1.0";
+            document.getElementById("cfg-taming").value = (s.multipliers && s.multipliers.taming) || "1.0";
+            document.getElementById("cfg-harvest").value = (s.multipliers && s.multipliers.harvest) || "1.0";
+            if (document.getElementById("cfg-mating")) document.getElementById("cfg-mating").value = (s.multipliers && s.multipliers.mating) || "1.0";
+            document.getElementById("cfg-hatch").value = (s.multipliers && s.multipliers.hatch) || "1.0";
+            document.getElementById("cfg-mature").value = (s.multipliers && s.multipliers.mature) || "1.0";
+            if (document.getElementById("cfg-crafting")) document.getElementById("cfg-crafting").value = (s.multipliers && s.multipliers.crafting) || "1.0";
+            if (document.getElementById("cfg-day-cycle")) document.getElementById("cfg-day-cycle").value = (s.multipliers && s.multipliers.day_cycle) || "1.0";
+            if (document.getElementById("cfg-day-time")) document.getElementById("cfg-day-time").value = (s.multipliers && s.multipliers.day_time) || "1.0";
+            if (document.getElementById("cfg-night-time")) document.getElementById("cfg-night-time").value = (s.multipliers && s.multipliers.night_time) || "1.0";
+        }
+
+        // Reglas
+        if (document.getElementById("cfg-mode")) {
+            document.getElementById("cfg-mode").value = (s.rules && s.rules.pve_mode) ? "pve" : "pvp";
+        }
+        if (document.getElementById("cfg-show-map-player")) {
+            document.getElementById("cfg-show-map-player").value = String(s.rules && s.rules.show_map_player !== false);
+        }
+        if (document.getElementById("cfg-third-person")) {
+            document.getElementById("cfg-third-person").value = String(s.rules && s.rules.third_person !== false);
+        }
+        if (document.getElementById("cfg-crosshair")) {
+            document.getElementById("cfg-crosshair").value = String(s.rules && s.rules.crosshair !== false);
+        }
+        if (document.getElementById("cfg-pvp-gamma")) {
+            document.getElementById("cfg-pvp-gamma").value = String(s.rules && s.rules.pvp_gamma !== false);
+        }
+    } catch (e) {
+        console.error("Error al cargar configuraciones:", e);
+    }
+}
+
+async function saveSettings(e) {
+    if (e) e.preventDefault();
+    const payload = {
+        server: {
+            session_name: document.getElementById("cfg-session-name")?.value || "",
+            world: document.getElementById("cfg-world")?.value || "TheIsland",
+            server_password: document.getElementById("cfg-server-pass")?.value || "",
+            admin_password: document.getElementById("cfg-admin-pass")?.value || "",
+            max_players: parseInt(document.getElementById("cfg-max-players")?.value) || 20,
+            cluster_id: document.getElementById("cfg-cluster-id")?.value || "",
+            mod_ids: document.getElementById("cfg-mods")?.value || "",
+            additional_args: document.getElementById("cfg-additional-args")?.value || "",
+            battleeye: document.getElementById("cfg-battleeye")?.value === "true",
+            update_on_start: document.getElementById("cfg-update-on-start")?.value === "true",
+            autostart_server: document.getElementById("cfg-autostart-server")?.value === "true"
+        },
+        multipliers: {
+            xp: document.getElementById("cfg-xp")?.value || "1.0",
+            taming: document.getElementById("cfg-taming")?.value || "1.0",
+            harvest: document.getElementById("cfg-harvest")?.value || "1.0",
+            mating: document.getElementById("cfg-mating")?.value || "1.0",
+            hatch: document.getElementById("cfg-hatch")?.value || "1.0",
+            mature: document.getElementById("cfg-mature")?.value || "1.0",
+            crafting: document.getElementById("cfg-crafting")?.value || "1.0",
+            day_cycle: document.getElementById("cfg-day-cycle")?.value || "1.0",
+            day_time: document.getElementById("cfg-day-time")?.value || "1.0",
+            night_time: document.getElementById("cfg-night-time")?.value || "1.0"
+        },
+        rules: {
+            pve_mode: document.getElementById("cfg-mode")?.value === "pve",
+            show_map_player: document.getElementById("cfg-show-map-player")?.value === "true",
+            third_person: document.getElementById("cfg-third-person")?.value === "true",
+            crosshair: document.getElementById("cfg-crosshair")?.value === "true",
+            pvp_gamma: document.getElementById("cfg-pvp-gamma")?.value === "true"
+        }
+    };
+
+    try {
+        const instParam = encodeURIComponent(currentInstanceId || "main");
+        const res = await fetch(`/api/settings?instance=${instParam}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast("Configuración guardada en GameUserSettings.ini y Game.ini", "success");
+        } else {
+            showToast("Error al guardar configuraciones.", "error");
+        }
+    } catch (err) {
+        showToast("Error de conexión al guardar configuraciones.", "error");
+    }
+}
+
+// --- Tareas Programadas y Automatizaciones ---
+async function loadTaskSettings() {
+    try {
+        const res = await fetch("/api/tasks/config");
+        const cfg = await res.json();
+
+        const setVal = (id, val) => {
+            const el = document.getElementById(id);
+            if (el) el.value = val;
+        };
+
+        setVal("task-schedule-enabled", String(!!cfg.schedule_enabled));
+        setVal("task-schedule-start", cfg.schedule_start || "20:00");
+        setVal("task-schedule-stop", cfg.schedule_stop || "00:00");
+        setVal("task-schedule-warn", cfg.schedule_warn_mins || 10);
+        setVal("task-backup-enabled", String(cfg.auto_backup_enabled !== false));
+        setVal("task-backup-hours", cfg.auto_backup_interval_hours || 6);
+        setVal("task-backup-max-count", cfg.backup_max_count || 10);
+        setVal("task-dino-wipe-enabled", String(!!cfg.auto_dino_wipe_enabled));
+        setVal("task-dino-wipe-hours", cfg.auto_dino_wipe_hours || 24);
+        setVal("task-restart-hours", cfg.auto_restart_hours || 0);
+    } catch (e) {
+        console.error("Error al cargar configuración de tareas:", e);
+    }
+}
+
+async function saveTaskSettings() {
+    const getVal = (id, fallback) => {
+        const el = document.getElementById(id);
+        return el ? el.value : fallback;
+    };
+
+    const payload = {
+        schedule_enabled: getVal("task-schedule-enabled", "false") === "true",
+        schedule_start: getVal("task-schedule-start", "20:00"),
+        schedule_stop: getVal("task-schedule-stop", "00:00"),
+        schedule_warn_mins: parseInt(getVal("task-schedule-warn", "10")) || 10,
+        auto_backup_enabled: getVal("task-backup-enabled", "true") === "true",
+        auto_backup_interval_hours: parseInt(getVal("task-backup-hours", "6")) || 6,
+        backup_max_count: parseInt(getVal("task-backup-max-count", "10")) || 10,
+        auto_dino_wipe_enabled: getVal("task-dino-wipe-enabled", "false") === "true",
+        auto_dino_wipe_hours: parseInt(getVal("task-dino-wipe-hours", "24")) || 24,
+        auto_restart_hours: parseInt(getVal("task-restart-hours", "0")) || 0
+    };
+
+    const btn = document.getElementById("btn-save-tasks");
+    if (btn) {
+        btn.disabled = true;
+        btn.querySelector("span").textContent = "Guardando...";
+    }
+    try {
+        const res = await fetch("/api/tasks/config", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast("Horarios y automatizaciones guardados con éxito", "success");
+            const savedEl = document.getElementById("tasks-last-saved");
+            if (savedEl) {
+                const now = new Date();
+                const hh = String(now.getHours()).padStart(2, "0");
+                const mm = String(now.getMinutes()).padStart(2, "0");
+                const ss = String(now.getSeconds()).padStart(2, "0");
+                savedEl.innerHTML = `${uiIcon("check", 13)} Guardado ${hh}:${mm}:${ss} (se aplica en <=30 s)`;
+            }
+            // Recargar desde el servidor para reflejar exactamente lo persistido
+            await loadTaskSettings();
+            await loadTasksStatus();
+        } else {
+            showToast("Error al guardar tareas programadas.", "error");
+        }
+    } catch (e) {
+        showToast("Error de conexión al guardar tareas.", "error");
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.querySelector("span").textContent = "Guardar Horarios";
+        }
+    }
+}
+
+// --- Estado en tiempo real del planificador de tareas ---
+function fmtCountdown(sec) {
+    if (sec === null || sec === undefined || sec < 0) return "--";
+    if (sec === 0) return "ahora";
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h > 0) return `en ${h}h ${m}m`;
+    if (m > 0) return `en ${m}m ${s}s`;
+    return `en ${s}s`;
+}
+
+async function loadTasksStatus() {
+    const el = (id) => document.getElementById(id);
+    try {
+        const res = await fetch("/api/tasks/status");
+        if (!res.ok) return;
+        const s = await res.json();
+        const cfg = s.config || {};
+        const sch = s.schedule || {};
+
+        // Píldora de estado del planificador
+        const dot = el("ts-status-dot");
+        if (dot) dot.style.background = s.running ? "#3fb950" : (s.errors ? "#f85149" : "#d29922");
+        if (el("ts-running")) el("ts-running").textContent = s.running ? "ACTIVO" : "DETENIDO";
+        if (el("ts-ticks")) el("ts-ticks").textContent = s.ticks;
+        if (el("ts-errors")) {
+            el("ts-errors").textContent = s.errors;
+            el("ts-errors").style.color = s.errors ? "#f85149" : "";
+        }
+
+        // Horario / Power schedule
+        const schState = cfg.schedule_enabled ? `Activo (${sch.start} – ${sch.stop})` : "Desactivado (24/7)";
+        if (el("ts-schedule")) el("ts-schedule").textContent = schState;
+        if (el("ts-power-event")) {
+            let lastEv = "";
+            if (sch.last_event) {
+                lastEv = ` · último evento: ${sch.last_event}`;
+                if (sch.last_event_at) lastEv += ` (${sch.last_event_at})`;
+            }
+            el("ts-power-event").textContent = lastEv;
+        }
+
+        // Respaldo
+        if (el("ts-backup")) {
+            el("ts-backup").textContent = cfg.backup_enabled
+                ? `activo cada ${cfg.auto_backup_interval_hours}h · último: ${s.last_backup || "—"} · próximo ${fmtCountdown(s.next_backup_seconds)}`
+                : "desactivado";
+        }
+        // Dino Wipe
+        if (el("ts-wipe")) {
+            el("ts-wipe").textContent = cfg.auto_dino_wipe_hours
+                ? `cada ${cfg.auto_dino_wipe_hours}h · último: ${s.last_dino_wipe || "—"} · próximo ${fmtCountdown(s.next_dino_wipe_seconds)}`
+                : "desactivado";
+        }
+        // Reinicio
+        if (el("ts-restart")) {
+            el("ts-restart").textContent = cfg.auto_restart_hours
+                ? `cada ${cfg.auto_restart_hours}h · último: ${s.last_restart || "—"} · próximo ${fmtCountdown(s.next_restart_seconds)}`
+                : "desactivado";
+        }
+        if (el("ts-cleanup")) el("ts-cleanup").textContent = s.last_cleanup || "pendiente (cada 24h)";
+        if (el("ts-error-msg")) {
+            el("ts-error-msg").innerHTML = s.last_error
+                ? `<span style="color: #e3b341; display: inline-flex; align-items: center; gap: 4px;">${uiIcon("alert-triangle", 13)}<span>último error: ${escapeHtml(s.last_error)}</span></span>`
+                : "";
+        }
+    } catch (e) {
+        console.error("Error cargando estado de tareas:", e);
+    }
+}
+
+let tasksStatusTimer = null;
+function stopTasksStatusPolling() {
+    if (tasksStatusTimer) {
+        clearTimeout(tasksStatusTimer);
+        tasksStatusTimer = null;
+    }
+}
+
+async function pollTasksStatusIfActive() {
+    stopTasksStatusPolling();
+    const pane = document.getElementById("tab-tasks");
+    if (!pane || !pane.classList.contains("active")) return;
+    await loadTasksStatus();
+    tasksStatusTimer = setTimeout(pollTasksStatusIfActive, 20000);
+}
+
+async function triggerRestartSafeModal() {
+    const confirmed = await App.confirm({
+        title: "Reinicio Seguro de Servidor",
+        message: "¿Iniciar reinicio programado con cuenta regresiva de 5 minutos y avisos globales en el chat in-game?",
+        confirmText: "Iniciar Reinicio",
+        warning: true
+    });
+    if (!confirmed) return;
+
+    try {
+        showToast("Iniciando cuenta regresiva de reinicio (5 min)...", "info");
+        const res = await fetch("/api/server/restart_safe", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ minutes: 5 })
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(data.message || "Reinicio seguro iniciado.", "success");
+        } else {
+            showToast("Error al iniciar reinicio seguro.", "error");
+        }
+    } catch (e) {
+        showToast("Error de conexión al solicitar reinicio.", "error");
+    }
+}
+
+// --- Sistema de Diálogos Modales y Notificaciones (Dockraft Style) ---
+const App = {
+  showToast(message, type = 'info') {
+    let container = document.getElementById('toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'toast-container';
+      container.className = 'toast-container';
+      container.style.cssText = 'position:fixed; bottom:20px; right:20px; z-index:9999; display:flex; flex-direction:column; gap:8px;';
+      document.body.appendChild(container);
+    }
+    while (container.children.length >= 4) {
+      container.removeChild(container.firstChild);
+    }
+    const typeStyles = {
+      success: { bg: '#238636', border: '#2ea043' },
+      danger:  { bg: '#da3633', border: '#f85149' },
+      error:   { bg: '#da3633', border: '#f85149' },
+      warning: { bg: '#9e6a03', border: '#d29922' },
+      info:    { bg: '#1f6feb', border: '#388bfd' },
+    };
+    const style = typeStyles[type] || typeStyles.info;
+    const toast = document.createElement('div');
+    toast.style.cssText = `
+      background: ${style.bg};
+      border: 1px solid ${style.border};
+      color: white;
+      padding: 10px 16px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      box-shadow: 0 0 0 1px #0d1117;
+      animation: fadeIn 0.15s ease-out;
+      max-width: 340px;
+      word-break: break-word;
+    `;
+    toast.textContent = message;
+    container.appendChild(toast);
+    setTimeout(() => {
+      toast.style.transform = 'translateX(20px)';
+      toast.style.transition = 'transform 0.2s ease';
+      setTimeout(() => toast.remove(), 200);
+    }, 3500);
+  },
+
+  ensureConfirmModal() {
+    let modal = document.getElementById('modal-app-confirm');
+    if (modal) return modal;
+    modal = document.createElement('div');
+    modal.className = 'modal-backdrop modal-dialog-backdrop';
+    modal.id = 'modal-app-confirm';
+    modal.style.zIndex = '2200';
+    modal.innerHTML = `
+      <div class="modal-box modal-dialog-box" style="max-width: 480px;">
+        <div class="modal-header" style="padding: 16px 20px; border-bottom: 1px solid #30363d;">
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <div id="modal-confirm-icon" style="width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"></div>
+            <h3 id="modal-confirm-title-text" style="font-size: 1.05rem; font-weight: 600; color: #f0f6fc; margin: 0;">Confirmación</h3>
+          </div>
+          <button class="action-icon-btn" id="modal-confirm-btn-close" type="button" aria-label="Cerrar">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <div class="modal-body" style="padding: 20px;">
+          <div id="modal-confirm-message" style="font-size: 0.92rem; line-height: 1.6; color: #cbd5e1; white-space: pre-line; word-break: break-word;"></div>
+        </div>
+        <div class="modal-footer" style="padding: 14px 20px; border-top: 1px solid #30363d; display: flex; justify-content: flex-end; gap: 10px;">
+          <button type="button" class="btn btn-outline" id="modal-confirm-btn-cancel">Cancelar</button>
+          <button type="button" class="btn btn-danger" id="modal-confirm-btn-ok">Confirmar</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    return modal;
+  },
+
+  ensurePromptModal() {
+    let modal = document.getElementById('modal-app-prompt');
+    if (modal) return modal;
+    modal = document.createElement('div');
+    modal.className = 'modal-backdrop modal-dialog-backdrop';
+    modal.id = 'modal-app-prompt';
+    modal.style.zIndex = '2200';
+    modal.innerHTML = `
+      <div class="modal-box modal-dialog-box" style="max-width: 480px;">
+        <div class="modal-header" style="padding: 16px 20px; border-bottom: 1px solid #30363d;">
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <div id="modal-prompt-icon" style="width: 36px; height: 36px; border-radius: 8px; background-color: #132238; border: 1px solid #254b7c; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            </div>
+            <h3 id="modal-prompt-title-text" style="font-size: 1.05rem; font-weight: 600; color: #f0f6fc; margin: 0;">Entrada Requerida</h3>
+          </div>
+          <button class="action-icon-btn" id="modal-prompt-btn-close" type="button" aria-label="Cerrar">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <div class="modal-body" style="padding: 20px;">
+          <div id="modal-prompt-message" style="font-size: 0.92rem; line-height: 1.5; color: #cbd5e1; margin-bottom: 14px; white-space: pre-line; word-break: break-word;"></div>
+          <div class="form-group" style="margin-bottom: 0;">
+            <input type="text" class="form-input" id="modal-prompt-input" autocomplete="off" spellcheck="false" style="font-size: 0.95rem; padding: 9px 12px;">
+          </div>
+        </div>
+        <div class="modal-footer" style="padding: 14px 20px; border-top: 1px solid #30363d; display: flex; justify-content: flex-end; gap: 10px;">
+          <button type="button" class="btn btn-outline" id="modal-prompt-btn-cancel">Cancelar</button>
+          <button type="button" class="btn btn-primary" id="modal-prompt-btn-ok">Aceptar</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    return modal;
+  },
+
+  confirm(options) {
+    return new Promise((resolve) => {
+      const modal = this.ensureConfirmModal();
+      const opts = typeof options === 'string' ? { message: options } : (options || {});
+      const isDanger = Boolean(opts.danger || opts.type === 'danger');
+      const isWarning = Boolean(opts.warning || opts.type === 'warning');
+
+      const titleEl = document.getElementById('modal-confirm-title-text');
+      const iconEl = document.getElementById('modal-confirm-icon');
+      const msgEl = document.getElementById('modal-confirm-message');
+      const btnOk = document.getElementById('modal-confirm-btn-ok');
+      const btnCancel = document.getElementById('modal-confirm-btn-cancel');
+      const btnClose = document.getElementById('modal-confirm-btn-close');
+
+      if (titleEl) titleEl.textContent = opts.title || (isDanger ? 'Confirmación requerida' : 'Confirmar Acción');
+      if (msgEl) msgEl.textContent = opts.message || '¿Estás seguro de continuar con esta acción?';
+
+      if (btnOk) {
+        btnOk.textContent = opts.confirmText || (isDanger ? 'Eliminar' : 'Confirmar');
+        btnOk.className = isDanger ? 'btn btn-danger' : (isWarning ? 'btn btn-warning' : 'btn btn-primary');
+      }
+      if (btnCancel) {
+        btnCancel.textContent = opts.cancelText || 'Cancelar';
+      }
+
+      if (iconEl) {
+        if (isDanger) {
+          iconEl.style.backgroundColor = '#2c1418';
+          iconEl.style.border = '1px solid #73262d';
+          iconEl.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f85149" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
+        } else if (isWarning) {
+          iconEl.style.backgroundColor = '#291e0c';
+          iconEl.style.border = '1px solid #694914';
+          iconEl.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#d29922" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
+        } else {
+          iconEl.style.backgroundColor = '#132238';
+          iconEl.style.border = '1px solid #254b7c';
+          iconEl.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>';
+        }
+      }
+
+      let resolved = false;
+      const finish = (result) => {
+        if (resolved) return;
+        resolved = true;
+        modal.classList.remove('open');
+        window.removeEventListener('keydown', onKeyDown);
+        resolve(result);
+      };
+
+      const onKeyDown = (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          finish(false);
+        } else if (e.key === 'Enter') {
+          if (document.activeElement === btnCancel) {
+            e.preventDefault();
+            finish(false);
+          } else {
+            e.preventDefault();
+            finish(true);
+          }
+        }
+      };
+
+      if (btnOk) btnOk.onclick = () => finish(true);
+      if (btnCancel) btnCancel.onclick = () => finish(false);
+      if (btnClose) btnClose.onclick = () => finish(false);
+      modal.onclick = (e) => {
+        if (e.target === modal) finish(false);
+      };
+
+      window.addEventListener('keydown', onKeyDown);
+      modal.classList.add('open');
+
+      if (isDanger && btnCancel) {
+        btnCancel.focus();
+      } else if (btnOk) {
+        btnOk.focus();
+      }
+    });
+  },
+
+  prompt(options) {
+    return new Promise((resolve) => {
+      const modal = this.ensurePromptModal();
+      const opts = typeof options === 'string' ? { message: options } : (options || {});
+      const titleEl = document.getElementById('modal-prompt-title-text');
+      const msgEl = document.getElementById('modal-prompt-message');
+      const inputEl = document.getElementById('modal-prompt-input');
+      const btnOk = document.getElementById('modal-prompt-btn-ok');
+      const btnCancel = document.getElementById('modal-prompt-btn-cancel');
+      const btnClose = document.getElementById('modal-prompt-btn-close');
+
+      if (titleEl) titleEl.textContent = opts.title || 'Entrada Requerida';
+      if (msgEl) msgEl.textContent = opts.message || '';
+      if (inputEl) {
+        inputEl.placeholder = opts.placeholder || '';
+        inputEl.value = opts.defaultValue || '';
+      }
+      if (btnOk) btnOk.textContent = opts.confirmText || 'Aceptar';
+      if (btnCancel) btnCancel.textContent = opts.cancelText || 'Cancelar';
+
+      let resolved = false;
+      const finish = (result) => {
+        if (resolved) return;
+        resolved = true;
+        modal.classList.remove('open');
+        window.removeEventListener('keydown', onKeyDown);
+        resolve(result);
+      };
+
+      const onKeyDown = (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          finish(null);
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          finish(inputEl ? inputEl.value : '');
+        }
+      };
+
+      if (btnOk) btnOk.onclick = () => finish(inputEl ? inputEl.value : '');
+      if (btnCancel) btnCancel.onclick = () => finish(null);
+      if (btnClose) btnClose.onclick = () => finish(null);
+      modal.onclick = (e) => {
+        if (e.target === modal) finish(null);
+      };
+
+      window.addEventListener('keydown', onKeyDown);
+      modal.classList.add('open');
+
+      if (inputEl) {
+        setTimeout(() => {
+          inputEl.focus();
+          inputEl.select();
+        }, 50);
+      }
+    });
+  }
+};
+
+window.App = App;
+function showToast(message, type = "info") {
+  App.showToast(message, type);
+}
+
+// --- Asistente de Configuración Inicial & Descarga ---
+function selectMap(mapName, element) {
+    const hiddenInput = document.getElementById("wizard-map");
+    if (hiddenInput) hiddenInput.value = mapName;
+    document.querySelectorAll(".map-card").forEach(c => c.classList.remove("selected"));
+    if (element) element.classList.add("selected");
+}
+
+async function startServerInstallation(e) {
+    if (e) e.preventDefault();
+    const ok = await App.confirm({
+        title: "Instalación del Servidor ARK",
+        message: "¿Deseas guardar estas configuraciones e iniciar la descarga del servidor de ARK con SteamCMD?",
+        confirmText: "Instalar Servidor"
+    });
+    if (!ok) return;
+
+    const payload = {
+        world: document.getElementById("wizard-map") ? document.getElementById("wizard-map").value : "TheIsland",
+        session_name: document.getElementById("wizard-session-name") ? document.getElementById("wizard-session-name").value : "ARK Server",
+        server_password: document.getElementById("wizard-server-pass") ? document.getElementById("wizard-server-pass").value : "",
+        admin_password: document.getElementById("wizard-admin-pass") ? document.getElementById("wizard-admin-pass").value : "adminpass",
+        max_players: document.getElementById("wizard-max-players") ? parseInt(document.getElementById("wizard-max-players").value) || 20 : 20,
+        server_pve: document.getElementById("wizard-mode") ? document.getElementById("wizard-mode").value === "pve" : false,
+        xp_multiplier: document.getElementById("wizard-xp") ? document.getElementById("wizard-xp").value : "1.0",
+        taming_multiplier: document.getElementById("wizard-taming") ? document.getElementById("wizard-taming").value : "1.0",
+        harvest_multiplier: document.getElementById("wizard-harvest") ? document.getElementById("wizard-harvest").value : "1.0",
+        hatch_multiplier: document.getElementById("wizard-hatch") ? document.getElementById("wizard-hatch").value : "1.0",
+        mature_multiplier: document.getElementById("wizard-mature") ? document.getElementById("wizard-mature").value : "1.0",
+        mod_ids: document.getElementById("wizard-mods") ? document.getElementById("wizard-mods").value : ""
+    };
+
+    showToast("Iniciando descarga con SteamCMD...", "info");
+    try {
+        const res = await fetch("/api/server/install", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast("Descarga iniciada. Redirigiendo a la consola...", "success");
+            switchTab("console");
+        } else {
+            showToast(data.error || "Error al iniciar la instalación.", "error");
+        }
+    } catch (err) {
+        showToast("Error de conexión al iniciar instalación.", "error");
+    }
+}
+
+
+// ==========================================
+// --- Módulo de Clúster & Multi-Instancia ---
+// ==========================================
+
+async function loadClusterInstances() {
+    try {
+        const res = await fetch("/api/cluster/instances");
+        clusterData = await res.json();
+        const instances = clusterData.instances || [];
+
+        // 1. Actualizar el selector en el Header (Condicional: badge si <= 1, selector si > 1)
+        const singleBadge = document.getElementById("cluster-single-badge");
+        const singleMapName = document.getElementById("cluster-single-map-name");
+        const select = document.getElementById("cluster-server-select");
+
+        if (instances.length <= 1) {
+            if (singleBadge) {
+                singleBadge.style.display = "inline-flex";
+                if (singleMapName && instances[0]) {
+                    singleMapName.textContent = instances[0].map || "The Island";
+                }
+            }
+            if (select) select.style.display = "none";
+        } else {
+            if (singleBadge) singleBadge.style.display = "none";
+            if (select) {
+                select.style.display = "inline-block";
+                select.innerHTML = "";
+                instances.forEach(inst => {
+                    const opt = document.createElement("option");
+                    opt.value = inst.id;
+                    const statusDot = inst.status === "RUNNING" ? "● " : "○ ";
+                    let displayName = inst.name;
+                    if (inst.is_primary && /servidor\s+prin/i.test(displayName)) {
+                        displayName = displayName.replace(/Servidor\s+Prin[cd]ipal/i, "Principal").replace(/\(TheIsland\)/i, "(The Island)");
+                        inst.name = displayName;
+                    }
+                    opt.textContent = `${statusDot}${displayName}`;
+                    if (inst.id === currentInstanceId) opt.selected = true;
+                    select.appendChild(opt);
+                });
+            }
+        }
+
+        // 2. Actualizar tarjetas de nodos en tab-cluster
+        const grid = document.getElementById("cluster-instances-grid");
+        if (grid) {
+            grid.innerHTML = "";
+            let onlineCount = 0;
+
+            instances.forEach(inst => {
+                const isOnline = inst.status === "RUNNING";
+                if (isOnline) onlineCount++;
+                const isSelected = inst.id === currentInstanceId;
+
+                const card = document.createElement("div");
+                card.className = "card";
+                card.style.padding = "22px 24px";
+                card.style.backgroundColor = isSelected ? "#132238" : "var(--bg-subtle)";
+                card.style.borderColor = isSelected ? "#254b7c" : "var(--border-color)";
+
+                card.innerHTML = `
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; gap: 12px;">
+                        <div>
+                            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px;">
+                                <h4 style="margin: 0; font-size: 1.05rem; font-weight: 700; color: #f0f6fc;">${escapeHtml(inst.name)}</h4>
+                                ${inst.is_primary ? '<span class="badge" style="font-size: 0.68rem; background: #238636; color: #fff; padding: 2px 7px; border-radius: 4px;">Principal</span>' : ''}
+                                ${isSelected ? '<span class="badge" style="font-size: 0.68rem; background: #1f6feb; color: #fff; padding: 2px 7px; border-radius: 4px;">Activo en Panel</span>' : ''}
+                            </div>
+                            <div style="font-size: 0.8rem; color: #8b949e;">
+                                Mapa oficial: <code style="color: #79c0ff; background-color: #132238; border: 1px solid #254b7c; padding: 2px 6px; border-radius: 4px;">${inst.map}</code>
+                            </div>
+                        </div>
+                        <span class="status-pill ${isOnline ? 'running' : 'offline'}" style="font-size: 0.74rem; padding: 3px 10px; flex-shrink: 0;">
+                            <span class="status-dot"></span>
+                            <span>${isOnline ? 'En línea' : 'Detenido'}</span>
+                        </span>
+                    </div>
+
+                    <div style="background-color: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; margin-bottom: 18px; font-size: 0.82rem; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                        <div><span style="color: #8b949e;">Puerto Juego:</span> <strong style="color: #f0f6fc;">${inst.server_port}/UDP</strong></div>
+                        <div><span style="color: #8b949e;">Puerto Query:</span> <strong style="color: #f0f6fc;">${inst.query_port}/UDP</strong></div>
+                        <div><span style="color: #8b949e;">Puerto RCON:</span> <strong style="color: #f0f6fc;">${inst.rcon_port}/TCP</strong></div>
+                        <div><span style="color: #8b949e;">Límite Slots:</span> <strong style="color: #f0f6fc;">${inst.max_players} max</strong></div>
+                    </div>
+
+                    <div style="display: flex; gap: 10px; align-items: center; margin-top: 4px;">
+                        ${isOnline ? `
+                            <button class="btn btn-outline" onclick="stopClusterInstance('${inst.id}')" style="padding: 7px 14px; font-size: 0.82rem; color: #ff7b72; background-color: #2c1418; border-color: #73262d;">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+                                <span>Detener</span>
+                            </button>
+                            <button class="btn btn-secondary" onclick="restartClusterInstance('${inst.id}')" style="padding: 7px 14px; font-size: 0.82rem;">
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                                <span>Reiniciar</span>
+                            </button>
+                        ` : `
+                            <button class="btn btn-success" onclick="startClusterInstance('${inst.id}')" style="padding: 7px 16px; font-size: 0.82rem;">
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                                <span>Iniciar</span>
+                            </button>
+                        `}
+                        <button class="btn btn-primary" onclick="onSwitchClusterServer('${inst.id}')" style="padding: 7px 18px; font-size: 0.82rem;">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>
+                            <span>Administrar</span>
+                        </button>
+                        ${!inst.is_primary ? `
+                            <button class="action-icon-btn" onclick="deleteClusterInstance('${attrJsStr(inst.id)}', '${attrJsStr(inst.name)}')" title="Eliminar del clúster" style="padding: 7px 10px; color: #ff7b72; background-color: #2c1418; border: 1px solid #73262d; border-radius: 6px; margin-left: auto;">
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                            </button>
+                        ` : ''}
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
+
+            // Resumen superior
+            const summaryId = document.getElementById("cluster-summary-id");
+            if (summaryId && clusterData.cluster_id) summaryId.textContent = clusterData.cluster_id;
+            const summaryNodes = document.getElementById("cluster-summary-nodes");
+            if (summaryNodes) summaryNodes.textContent = `${onlineCount} / ${instances.length} Online`;
+        }
+
+        // 3. Poblador de selector de mapas en el modal
+        const mapSelect = document.getElementById("add-inst-map");
+        if (mapSelect && clusterData.maps && mapSelect.children.length === 0) {
+            clusterData.maps.forEach(m => {
+                const opt = document.createElement("option");
+                opt.value = m.id;
+                opt.textContent = `${m.name} (${m.id})`;
+                mapSelect.appendChild(opt);
+            });
+        }
+    } catch (e) {
+        console.error("Error cargando instancias del clúster:", e);
+    }
+}
+
+async function loadClusterTributes() {
+    try {
+        const res = await fetch("/api/cluster/tributes");
+        const data = await res.json();
+        const tributes = data.tributes || [];
+
+        const summaryTributes = document.getElementById("cluster-summary-tributes");
+        if (summaryTributes) summaryTributes.textContent = `${tributes.length} elementos`;
+
+        const tbody = document.getElementById("cluster-tributes-tbody");
+        if (!tbody) return;
+        tbody.innerHTML = "";
+
+        if (tributes.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-dim); padding: 18px;">No hay supervivientes ni tributos en tránsito en la carpeta compartida /clusters.</td></tr>`;
+            return;
+        }
+
+        tributes.forEach(t => {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+                <td><code>${escapeHtml(t.filename)}</code></td>
+                <td><span class="badge" style="font-size: 0.72rem;">${t.data_type}</span></td>
+                <td>${t.steam_id ? `<code>${t.steam_id}</code>` : '<span style="color:var(--text-dim);">-</span>'}</td>
+                <td>${t.size_kb} KB</td>
+                <td>${t.updated_at}</td>
+                <td style="text-align: right;">
+                    <button class="btn btn-danger" style="padding: 3px 8px; font-size: 0.72rem;" onclick="deleteTribute('${attrJsStr(t.filename)}')" title="Eliminar si está corrupto o atascado">
+                        Eliminar
+                    </button>
+                </td>
+            `;
+            tbody.appendChild(tr);
+        });
+    } catch (e) {
+        console.error("Error cargando tributos de clúster:", e);
+    }
+}
+
+function onSwitchClusterServer(instanceId) {
+    currentInstanceId = instanceId;
+    localStorage.setItem("ark_active_instance", instanceId);
+
+    // Sincronizar el select del header
+    const select = document.getElementById("cluster-server-select");
+    if (select) select.value = instanceId;
+
+    let targetInst = null;
+    // Actualizar datos del mapa y puertos en banner superior
+    if (clusterData && clusterData.instances) {
+        targetInst = clusterData.instances.find(i => i.id === instanceId);
+        if (targetInst) {
+            const topPort = document.getElementById("top-server-port");
+            const gPort = targetInst.server_port || targetInst.game_port;
+            if (topPort && gPort) topPort.textContent = `${gPort} (UDP)`;
+            const topRcon = document.getElementById("top-server-rcon");
+            if (topRcon && targetInst.rcon_port) topRcon.textContent = `${targetInst.rcon_port} (Interno)`;
+            const topMap = document.getElementById("top-server-map");
+            if (topMap && targetInst.map) topMap.textContent = targetInst.map;
+            const mobMap = document.getElementById("banner-mob-map");
+            if (mobMap && targetInst.map) mobMap.textContent = targetInst.map;
+            const singleMap = document.getElementById("cluster-single-map-name");
+            if (singleMap && targetInst.map) singleMap.textContent = targetInst.map;
+        }
+    }
+
+    // Actualizar badges en la cabecera de la terminal
+    const termMap = document.getElementById("terminal-map-badge");
+    const termRcon = document.getElementById("terminal-rcon-badge");
+    if (termMap && targetInst) termMap.textContent = `MAPA: ${targetInst.map || targetInst.name}`;
+    if (termRcon && targetInst) termRcon.textContent = `RCON: ${targetInst.rcon_port || 27020}`;
+
+    // Reconectar la consola WebSocket al nodo seleccionado
+    if (ws) {
+        try { ws.close(); } catch(e) {}
+        ws = null;
+    }
+    wsShouldReconnect = true;
+    const consoleOut = document.getElementById("console-output");
+    if (consoleOut) {
+        const nodeTitle = targetInst ? targetInst.name : instanceId;
+        consoleOut.innerHTML = `<div class="log-line info console-node-banner">[ARK Server Manager] Conectando consola a nodo: ${escapeHtml(nodeTitle)}...</div>`;
+    }
+    initWebSocket();
+
+    showToast(`Cambiando contexto a nodo: ${instanceId}`, "info");
+
+    // Recargar datos para el nuevo mapa activo
+    loadSettings();
+    loadPlayers();
+    loadClusterInstances();
+}
+
+function openAddInstanceModal() {
+    const modal = document.getElementById("modal-add-instance");
+    if (!modal) return;
+
+    const mapSelect = document.getElementById("add-inst-map");
+    if (mapSelect && clusterData && clusterData.maps) {
+        mapSelect.innerHTML = "";
+        const existingMaps = (clusterData.instances || []).map(i => i.map);
+        
+        clusterData.maps.forEach(m => {
+            const opt = document.createElement("option");
+            opt.value = m.id;
+            const inUse = existingMaps.includes(m.id);
+            opt.textContent = inUse ? `${m.name} (${m.id}) - [En uso]` : `${m.name} (${m.id})`;
+            mapSelect.appendChild(opt);
+        });
+
+        // Seleccionar por defecto el primer mapa oficial no agregado
+        const unadded = clusterData.maps.find(m => !existingMaps.includes(m.id));
+        if (unadded) {
+            mapSelect.value = unadded.id;
+        } else if (clusterData.maps.length > 0) {
+            mapSelect.value = clusterData.maps[0].id;
+        }
+    }
+
+    if (mapSelect && mapSelect.value) {
+        onMapSelectionChange(mapSelect.value);
+    }
+
+    modal.style.display = "flex";
+}
+
+function closeAddInstanceModal() {
+    const modal = document.getElementById("modal-add-instance");
+    if (modal) modal.style.display = "none";
+}
+
+function onMapSelectionChange(mapId) {
+    const mapObj = clusterData && clusterData.maps ? clusterData.maps.find(m => m.id === mapId) : null;
+    const nameInput = document.getElementById("add-inst-name");
+    const portInput = document.getElementById("add-inst-port");
+    const queryInput = document.getElementById("add-inst-query");
+    const rconInput = document.getElementById("add-inst-rcon");
+    const altSaveInput = document.getElementById("add-inst-altsave");
+
+    if (mapObj) {
+        if (nameInput) {
+            nameInput.value = mapObj.name;
+            nameInput.dataset.autofilled = "true";
+        }
+
+        let servPort = mapObj.server_port || 7779;
+        let qPort = mapObj.query_port || 27016;
+        let rcPort = mapObj.rcon_port || 27021;
+
+        if (clusterData && clusterData.instances) {
+            const usedServ = clusterData.instances.map(i => i.server_port);
+            const usedQ = clusterData.instances.map(i => i.query_port);
+            const usedRc = clusterData.instances.map(i => i.rcon_port);
+            if ((usedServ.includes(servPort) || usedQ.includes(qPort) || usedRc.includes(rcPort)) && clusterData.suggested_ports) {
+                servPort = clusterData.suggested_ports.server_port;
+                qPort = clusterData.suggested_ports.query_port;
+                rcPort = clusterData.suggested_ports.rcon_port;
+            }
+        }
+
+        if (portInput) portInput.value = servPort;
+        if (queryInput) queryInput.value = qPort;
+        if (rconInput) rconInput.value = rcPort;
+        if (altSaveInput) altSaveInput.value = mapObj.alt_save_dir || mapId.replace("_P", "");
+    }
+}
+
+async function submitNewInstance() {
+    const name = document.getElementById("add-inst-name").value.trim();
+    const map = document.getElementById("add-inst-map").value;
+    const portVal = parseInt(document.getElementById("add-inst-port").value);
+    const queryVal = parseInt(document.getElementById("add-inst-query").value);
+    const rconVal = parseInt(document.getElementById("add-inst-rcon").value);
+    const server_port = isNaN(portVal) ? undefined : portVal;
+    const query_port = isNaN(queryVal) ? undefined : queryVal;
+    const rcon_port = isNaN(rconVal) ? undefined : rconVal;
+    const max_players = parseInt(document.getElementById("add-inst-players").value) || 20;
+    const alt_save_dir = document.getElementById("add-inst-altsave").value.trim() || map;
+
+    if (!name) {
+        showToast("Por favor ingresa un nombre para el servidor.", "error");
+        return;
+    }
+
+    const payload = {
+        name: name,
+        map: map,
+        server_port: server_port,
+        query_port: query_port,
+        rcon_port: rcon_port,
+        max_players: max_players,
+        alt_save_dir: alt_save_dir
+    };
+
+    try {
+        const res = await fetch("/api/cluster/instances", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(`¡Mapa '${name}' añadido exitosamente al clúster!`, "success");
+            closeAddInstanceModal();
+            loadClusterInstances();
+        } else {
+            showToast(data.error || "Error al crear instancia en el clúster.", "error");
+        }
+    } catch (e) {
+        showToast("Error de conexión al añadir mapa.", "error");
+    }
+}
+
+async function startClusterInstance(instanceId) {
+    showToast(`Iniciando mapa ${instanceId}...`, "info");
+    const res = await fetch(`/api/cluster/instances/${instanceId}/start`, { method: "POST" });
+    const data = await res.json();
+    if (data.success) {
+        showToast(`Servidor ${instanceId} iniciado.`, "success");
+        loadClusterInstances();
+    } else {
+        showToast(`Error al iniciar ${instanceId}.`, "error");
+    }
+}
+
+async function stopClusterInstance(instanceId) {
+    const confirmed = await App.confirm({
+        title: "Detener Servidor del Clúster",
+        message: `¿Detener ${instanceId}? Se guardará el mundo antes de apagar.`,
+        confirmText: "Detener Servidor",
+        warning: true
+    });
+    if (!confirmed) return;
+
+    showToast(`Deteniendo ${instanceId}...`, "info");
+    const res = await fetch(`/api/cluster/instances/${instanceId}/stop`, { method: "POST" });
+    const data = await res.json();
+    if (data.success) {
+        showToast(`Servidor ${instanceId} detenido.`, "success");
+        loadClusterInstances();
+    }
+}
+
+async function restartClusterInstance(instanceId) {
+    const confirmed = await App.confirm({
+        title: "Reiniciar Servidor del Clúster",
+        message: `¿Reiniciar el mapa ${instanceId} ahora?`,
+        confirmText: "Reiniciar",
+        warning: true
+    });
+    if (!confirmed) return;
+
+    showToast(`Reiniciando ${instanceId}...`, "info");
+    await fetch(`/api/cluster/instances/${instanceId}/restart`, { method: "POST" });
+    showToast(`Reinicio enviado a ${instanceId}.`, "success");
+    loadClusterInstances();
+}
+
+async function deleteClusterInstance(instanceId, name) {
+    const confirmed = await App.confirm({
+        title: "Eliminar Mapa del Clúster",
+        message: `¿Eliminar ${name || instanceId} del clúster? La configuración del nodo será removida.`,
+        confirmText: "Eliminar Nodo",
+        danger: true
+    });
+    if (!confirmed) return;
+
+    const res = await fetch(`/api/cluster/instances/${instanceId}`, { method: "DELETE" });
+    const data = await res.json();
+    if (data.success) {
+        showToast(`Mapa ${name || instanceId} eliminado del clúster.`, "info");
+        if (currentInstanceId === instanceId) {
+            onSwitchClusterServer("main");
+        } else {
+            loadClusterInstances();
+        }
+    } else {
+        showToast(data.error || "No se pudo eliminar el mapa.", "error");
+    }
+}
+
+async function startAllCluster() {
+    const confirmed = await App.confirm({
+        title: "Iniciar Todo el Clúster",
+        message: "¿Deseas encender todos los mapas del clúster de forma escalonada?",
+        confirmText: "Iniciar Clúster",
+        warning: true
+    });
+    if (!confirmed) return;
+
+    showToast("Iniciando todos los nodos del clúster...", "info");
+    await fetch("/api/cluster/start_all", { method: "POST" });
+    showToast("Comando de inicio global transmitido.", "success");
+    setTimeout(loadClusterInstances, 2000);
+}
+
+async function stopAllCluster() {
+    const confirmed = await App.confirm({
+        title: "Detener Todo el Clúster",
+        message: "¿Detener todos los servidores del clúster? Se guardará el progreso en todos los mapas.",
+        confirmText: "Detener Todo",
+        danger: true
+    });
+    if (!confirmed) return;
+
+    showToast("Deteniendo todos los servidores...", "info");
+    await fetch("/api/cluster/stop_all", { method: "POST" });
+    showToast("Todos los mapas detenidos.", "info");
+    setTimeout(loadClusterInstances, 2000);
+}
+
+async function syncClusterRatesModal() {
+    try {
+        // 1. Obtener las tasas reales actuales configuradas en el servidor principal
+        let curRates = {};
+        try {
+            const settingsRes = await fetch("/api/settings");
+            const settingsData = await settingsRes.json();
+            curRates = settingsData.multipliers || {};
+        } catch (_) {}
+
+        const xp = curRates.xp || document.getElementById("cfg-xp")?.value || "2.0";
+        const taming = curRates.taming || document.getElementById("cfg-taming")?.value || "3.0";
+        const harvest = curRates.harvest || document.getElementById("cfg-harvest")?.value || "2.0";
+
+        // 2. Pedir confirmación clara mostrando las tasas exactas a replicar
+        const confirmed = await App.confirm({
+            title: "Sincronizar Multiplicadores del Clúster",
+            message: `¿Deseas replicar las tasas del servidor principal (XP: x${xp}, Tameo: x${taming}, Cosecha: x${harvest}) a TODOS los mapas vinculados del clúster?`,
+            confirmText: "Sincronizar Todo",
+            warning: true
+        });
+        if (!confirmed) return;
+
+        showToast("Sincronizando tasas en todos los archivos de configuración...", "info");
+
+        const ratesPayload = {
+            xp: xp,
+            taming: taming,
+            harvest: harvest,
+            mating: curRates.mating || document.getElementById("cfg-mating")?.value || "1.0",
+            hatch: curRates.hatch || document.getElementById("cfg-hatch")?.value || "3.0",
+            mature: curRates.mature || document.getElementById("cfg-mature")?.value || "3.0"
+        };
+
+        const res = await fetch("/api/cluster/sync_rates", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ rates: ratesPayload })
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(`¡Multiplicadores sincronizados exitosamente en ${data.synced_nodes} mapas del clúster!`, "success");
+        } else {
+            showToast(data.error || "Error al sincronizar multiplicadores.", "error");
+        }
+    } catch (e) {
+        showToast("Error de conexión al sincronizar tasas.", "error");
+    }
+}
+
+async function deleteTribute(filename) {
+    const confirmed = await App.confirm({
+        title: "Eliminar Archivo de Obelisco",
+        message: `¿Eliminar ${filename} de la carpeta compartida del clúster? Usa esto solo si el dato está huérfano o corrupto.`,
+        confirmText: "Eliminar Archivo",
+        danger: true
+    });
+    if (!confirmed) return;
+
+    const res = await fetch(`/api/cluster/tributes/${encodeURIComponent(filename)}`, { method: "DELETE" });
+    const data = await res.json();
+    if (data.success) {
+        showToast("Archivo de obelisco eliminado.", "info");
+        loadClusterTributes();
+    } else {
+        showToast("No se pudo eliminar el archivo.", "error");
+    }
+}
+
+
+
+// --- GESTIÓN DE MODS DE STEAM WORKSHOP ---
+let activeModsList = [];
+
+async function loadMods(forceRefresh = false) {
+    try {
+        const url = forceRefresh ? "/api/mods?refresh=true" : "/api/mods";
+        const res = await fetch(url);
+        const data = await res.json();
+        activeModsList = data.mods || [];
+
+        const countEl = document.getElementById("mods-count-val");
+        if (countEl) countEl.textContent = activeModsList.length;
+
+        const updatesEl = document.getElementById("mods-updates-val");
+        if (updatesEl) {
+            const updCount = Number(data.updates_available || 0);
+            updatesEl.textContent = updCount > 0 ? `${updCount} disponible${updCount > 1 ? "s" : ""}` : "Al día";
+        }
+
+        const listContainer = document.getElementById("active-mods-list");
+        if (!listContainer) return;
+
+        if (activeModsList.length === 0) {
+            listContainer.innerHTML = `
+                <div style="text-align: center; padding: 24px; color: var(--text-dim); font-size: 0.85rem;">
+                    No hay mods configurados en el servidor actualmente.<br>
+                    Puedes añadir uno manualmente arriba o seleccionar uno del catálogo recomendado.
+                </div>`;
+            return;
+        }
+
+        const detailsMap = {};
+        const rawDetails = data.details;
+        if (Array.isArray(rawDetails)) {
+            rawDetails.forEach(d => {
+                if (d && d.id) detailsMap[String(d.id)] = d;
+            });
+        } else if (rawDetails && typeof rawDetails === "object") {
+            Object.entries(rawDetails).forEach(([k, d]) => {
+                if (d) detailsMap[String(d.id || k)] = d;
+            });
+        }
+
+        listContainer.innerHTML = activeModsList.map((modId, index) => {
+            const meta = detailsMap[String(modId)] || {};
+            const modTitle = meta.title || `Mod ID: ${modId}`;
+            const sizeLabel = meta.local_size_mb ? `${meta.local_size_mb} MB instalados` : (meta.file_size_mb ? `${meta.file_size_mb} MB` : "");
+            const thumbHtml = meta.preview_url
+                ? `<img src="${escapeHtml(meta.preview_url)}" alt="" style="width: 38px; height: 38px; border-radius: 6px; object-fit: cover; border: 1px solid var(--border-color); flex-shrink: 0;">`
+                : `<span style="font-size: 0.8rem; font-weight: 700; color: var(--text-dim); width: 24px; text-align: center;">#${index + 1}</span>`;
+            const isInstalled = Boolean(meta.installed ?? meta.installed_locally);
+            const updateBadge = meta.update_available
+                ? `<span style="font-size: 0.7rem; font-weight: 600; padding: 2px 7px; border-radius: 4px; background-color: #291e0c; color: #e3b341; border: 1px solid #694914;">Actualización Disponible</span>`
+                : (isInstalled ? `<span style="font-size: 0.7rem; font-weight: 600; padding: 2px 7px; border-radius: 4px; background-color: #10261a; color: #56d364; border: 1px solid #205938;">Instalado</span>` : "");
+
+            return `
+            <div class="mod-card" style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: var(--bg-subtle); border: 1px solid var(--border-color); border-radius: 6px; gap: 10px; flex-wrap: wrap;">
+                <div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
+                    ${thumbHtml}
+                    <div style="min-width: 0;">
+                        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                            <span style="font-weight: 600; font-size: 0.9rem; color: #f0f6fc;">${escapeHtml(modTitle)}</span>
+                            <code style="font-size: 0.75rem; color: #79c0ff; background-color: #132238; border: 1px solid #254b7c; padding: 1px 6px; border-radius: 4px;">ID: ${escapeHtml(modId)}</code>
+                            ${updateBadge}
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 10px; margin-top: 3px; font-size: 0.75rem; color: var(--text-dim);">
+                            <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=${encodeURIComponent(modId)}" target="_blank" rel="noopener noreferrer" style="color: #58a6ff; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
+                                <span>Ver en Steam Workshop</span>
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                            </a>
+                            ${sizeLabel ? `<span>• ${escapeHtml(sizeLabel)}</span>` : ""}
+                        </div>
+                    </div>
+                </div>
+                <button type="button" class="btn btn-outline" onclick="removeMod('${attrJsStr(modId)}')" title="Quitar mod" style="padding: 4px 10px; font-size: 0.78rem; border-color: #f85149; color: #ff7b72;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    <span>Quitar</span>
+                </button>
+            </div>
+        `}).join("");
+    } catch (e) {
+        console.error("Error cargando mods:", e);
+    }
+}
+
+async function addModManual() {
+    const input = document.getElementById("new-mod-id");
+    if (!input) return;
+    const modId = input.value.trim();
+    if (!modId || !/^[0-9]+$/.test(modId)) {
+        showToast("Por favor ingresa un Mod ID numérico válido de Steam.", "error");
+        return;
+    }
+    if (activeModsList.includes(modId)) {
+        showToast(`El mod ${modId} ya se encuentra en la lista.`, "warning");
+        return;
+    }
+    activeModsList.push(modId);
+    await saveModsList();
+    input.value = "";
+}
+
+async function addPresetMod(modId, modName) {
+    if (activeModsList.includes(modId)) {
+        showToast(`El mod ${modName} ya está añadido.`, "warning");
+        return;
+    }
+    activeModsList.push(modId);
+    await saveModsList();
+    showToast(`Mod "${modName}" añadido correctamente.`, "success");
+}
+
+async function removeMod(modId) {
+    const ok = await App.confirm({
+        title: "Quitar Mod",
+        message: `¿Deseas quitar el Mod ID ${modId} de la lista activa del servidor?`,
+        confirmText: "Quitar Mod",
+        warning: true
+    });
+    if (!ok) return;
+    activeModsList = activeModsList.filter(id => id !== modId);
+    await saveModsList();
+    showToast(`Mod ${modId} eliminado.`, "info");
+}
+
+async function saveModsList() {
+    try {
+        const raw_ids = activeModsList.join(",");
+        const res = await fetch("/api/mods", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mod_ids: raw_ids })
+        });
+        const data = await res.json();
+        if (data.success) {
+            loadMods();
+        } else {
+            showToast("Error al guardar la lista de mods.", "error");
+        }
+    } catch (e) {
+        showToast("Error de conexión al guardar mods.", "error");
+    }
+}
+
+async function updateModsNow() {
+    showToast("Iniciando actualización de mods en segundo plano...", "info");
+    try {
+        const res = await fetch("/api/mods/update", { method: "POST" });
+        const data = await res.json();
+        if (data.success) {
+            showToast("Comprobando actualizaciones de mods. Revisa la consola en vivo.", "success");
+        } else {
+            showToast("No se pudo iniciar la actualización de mods.", "error");
+        }
+    } catch (e) {
+        showToast("Error de conexión al solicitar actualización.", "error");
+    }
+}
+
+// --- COMANDOS RCON RÁPIDOS ---
+async function sendQuickRcon(command) {
+    showToast(`Ejecutando: ${command}...`, "info");
+    try {
+        const url = (currentInstanceId && currentInstanceId !== "main")
+            ? `/api/cluster/instances/${currentInstanceId}/command`
+            : "/api/server/command";
+        const res = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ command })
+        });
+        const data = await res.json();
+        const respText = data.response ? `[RCON] ${data.response}` : `[RCON] Comando '${command}' ejecutado.`;
+        
+        // Reflejar en la consola web
+        const consoleOutput = document.getElementById("console-output");
+        if (consoleOutput) {
+            const line = document.createElement("div");
+            line.style.color = "#58a6ff";
+            line.textContent = respText;
+            consoleOutput.appendChild(line);
+            consoleOutput.scrollTop = consoleOutput.scrollHeight;
+        }
+        showToast("Comando RCON ejecutado con éxito.", "success");
+        loadActivityLogs();
+    } catch (e) {
+        showToast("Error al enviar comando RCON.", "error");
+    }
+}
+
+// --- FILTRO DE CONSOLA EN VIVO ---
+function filterConsoleLogs(term) {
+    const consoleOutput = document.getElementById("console-output");
+    if (!consoleOutput) return;
+    const cleanTerm = (term || "").toLowerCase().trim();
+    const lines = consoleOutput.children;
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!cleanTerm) {
+            line.style.display = "";
+        } else {
+            const matches = line.textContent.toLowerCase().includes(cleanTerm);
+            line.style.display = matches ? "" : "none";
+        }
+    }
+}
+
+// --- Webhooks de Discord (Dockraft Style) ---
+async function loadWebhookSettings() {
+    try {
+        const res = await fetch("/api/webhooks");
+        const data = await res.json();
+        
+        const input = document.getElementById("webhook-url");
+        if (input && data.url) input.value = data.url;
+
+        const langSelect = document.getElementById("webhook-lang");
+        if (langSelect && data.language) langSelect.value = data.language;
+
+        const ev = data.events || {};
+        const setCheck = (id, val) => {
+            const el = document.getElementById(id);
+            if (el) el.checked = val !== false;
+        };
+
+        setCheck("wh-evt-start", ev.start);
+        setCheck("wh-evt-starting", ev.starting);
+        setCheck("wh-evt-shutdown", ev.shutdown);
+        setCheck("wh-evt-shutdown-warn", ev.shutdown_warn);
+        setCheck("wh-evt-backup", ev.backup);
+        setCheck("wh-evt-dino-wipe", ev.dino_wipe);
+        setCheck("wh-evt-restart", ev.restart);
+        const elPlayers = document.getElementById("wh-evt-players");
+        if (elPlayers) elPlayers.checked = !!ev.players;
+    } catch (e) {
+        console.error("Error al cargar webhook:", e);
+    }
+}
+
+async function saveWebhookSettings() {
+    const input = document.getElementById("webhook-url");
+    const url = input ? input.value.trim() : "";
+    const lang = document.getElementById("webhook-lang")?.value || "es";
+
+    const getCheck = (id, fallback) => {
+        const el = document.getElementById(id);
+        return el ? el.checked : fallback;
+    };
+
+    const eventsPayload = {
+        start: getCheck("wh-evt-start", true),
+        starting: getCheck("wh-evt-starting", true),
+        shutdown: getCheck("wh-evt-shutdown", true),
+        shutdown_warn: getCheck("wh-evt-shutdown-warn", true),
+        backup: getCheck("wh-evt-backup", true),
+        dino_wipe: getCheck("wh-evt-dino-wipe", true),
+        restart: getCheck("wh-evt-restart", true),
+        players: getCheck("wh-evt-players", false)
+    };
+
+    try {
+        const res = await fetch("/api/webhooks", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: url, language: lang, events: eventsPayload })
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast("Configuración de Webhook guardada exitosamente.", "success");
+        } else {
+            showToast("Error al guardar webhook.", "error");
+        }
+    } catch (e) {
+        showToast("Error de conexión al guardar webhook.", "error");
+    }
+}
+
+async function testWebhookNotification() {
+    const input = document.getElementById("webhook-url");
+    const url = input ? input.value.trim() : "";
+    if (!url) {
+        showToast("Por favor ingresa primero la URL del Webhook.", "error");
+        return;
+    }
+    showToast("Enviando notificación de prueba a Discord...", "info");
+    try {
+        const res = await fetch("/api/webhooks/test", { method: "POST" });
+        const data = await res.json();
+        if (data.success) {
+            showToast("¡Notificación entregada con éxito a tu canal de Discord!", "success");
+        } else {
+            showToast(data.error || "No se pudo entregar la notificación a Discord.", "error");
+        }
+    } catch (e) {
+        showToast("Error al probar notificación de Discord.", "error");
+    }
+}
+
+// --- Historial de Auditoría (7 Días) ---
+let activityLogsData = [];
+
+async function loadActivityLogs() {
+    const tbody = document.getElementById("activity-log-body");
+    if (!tbody) return;
+    try {
+        const res = await fetch("/api/activity");
+        const data = await res.json();
+        activityLogsData = data.activities || [];
+        const countBadge = document.getElementById("audit-count-badge");
+        if (countBadge) countBadge.textContent = `${activityLogsData.length} registros`;
+        renderActivityLogs(activityLogsData);
+    } catch (e) {
+        if (tbody) tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--text-dim); padding: 14px;">Error cargando historial de auditoría.</td></tr>`;
+    }
+}
+
+function renderActivityLogs(logs) {
+    const tbody = document.getElementById("activity-log-body");
+    if (!tbody) return;
+    if (!logs || logs.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--text-dim); padding: 16px;">No hay actividades registradas en los últimos 7 días.</td></tr>`;
+        return;
+    }
+
+    const categoryColors = {
+        "Servidor": "#58a6ff",
+        "Seguridad": "#f85149",
+        "Consola": "#79c0ff",
+        "ARK": "#3fb950",
+        "Mods": "#d29922",
+        "Jugadores": "#a371f7",
+        "Configuración": "#38bdf8",
+        "Webhooks": "#58a6ff",
+        "Tareas": "#e3b341",
+        "Backups": "#3fb950",
+        "Archivos": "#8b949e",
+        "Clúster": "#58a6ff",
+        "Instalación": "#f0883e"
+    };
+
+    const visible = logs.slice(0, 100);
+    const rows = visible.map(item => {
+        const color = categoryColors[item.category] || "#8b949e";
+        return `
+            <tr style="border-bottom: 1px solid var(--border-color);">
+                <td style="padding: 8px 14px; font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-dim); white-space: nowrap;">${escapeHtml(item.timestamp)}</td>
+                <td style="padding: 8px 14px; white-space: nowrap;">
+                    <span style="font-size: 0.72rem; font-weight: 600; padding: 2px 7px; border-radius: 4px; background-color: #1b222c; color: ${color}; border: 1px solid #30363d;">
+                        ${escapeHtml(item.category)}
+                    </span>
+                </td>
+                <td style="padding: 8px 14px; color: var(--text-color); font-weight: 500; font-size: 0.8rem; white-space: nowrap;">${escapeHtml(item.user || "Sistema")}</td>
+                <td style="padding: 8px 14px; color: var(--text-muted); font-size: 0.82rem; word-break: break-word;">${escapeHtml(item.message)}</td>
+            </tr>
+        `;
+    }).join("");
+
+    // Limitar el DOM: se muestran las 100 más recientes (el filtro opera sobre el total)
+    if (logs.length > 100) {
+        rows += `<tr><td colspan="4" style="text-align:center; padding:10px; color:var(--text-dim); font-size:0.78rem;">Mostrando las 100 más recientes de ${logs.length} registros. Usa el buscador para filtrar.</td></tr>`;
+    }
+    tbody.innerHTML = rows;
+}
+
+function filterActivityLogs(query) {
+    if (!query || !query.trim()) {
+        renderActivityLogs(activityLogsData);
+        return;
+    }
+    const q = query.toLowerCase().trim();
+    const filtered = activityLogsData.filter(item => {
+        return (item.message && item.message.toLowerCase().includes(q)) ||
+               (item.category && item.category.toLowerCase().includes(q)) ||
+               (item.user && item.user.toLowerCase().includes(q)) ||
+               (item.timestamp && item.timestamp.toLowerCase().includes(q));
+    });
+    renderActivityLogs(filtered);
+}

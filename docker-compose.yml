@@ -1,0 +1,37 @@
+---
+name: ark-server
+services:
+  ark-server:
+    image: marcusm99/ark-server-docker:latest
+    build: .
+    platform: linux/amd64
+    restart: unless-stopped
+    container_name: ark-server
+    stop_grace_period: 30s
+    # Límite de memoria RAM del contenedor (ej: 8g, 12g, 16g).
+    mem_limit: 8g
+    ports:
+      - "8080:8080"                    # Panel Web ARK Server Manager (HTTP)
+      - "7777-7800:7777-7800/udp"      # Puertos de Juego UDP (Principal + hasta 12 Mapas Clúster)
+      - "27015-27035:27015-27035/udp"  # Puertos Query Steam UDP (Buscador de Servidores)
+      - "27020-27035:27020-27035/tcp"  # Puertos RCON TCP (Consola Remota y Administración)
+    environment:
+      # --- Zona Horaria del Contenedor ---
+      - TZ=America/Guayaquil
+
+      # --- Acceso al Panel Web (¡CAMBIA estas credenciales por defecto!) ---
+      # El panel se sirve en HTTP sin cifrar y se expone en 0.0.0.0:8080.
+      # No lo expongas a Internet con las contraseñas por defecto; usa un proxy
+      # inverso con TLS y contraseñas largas/aleatorias.
+      - PANEL_USER=admin
+      - PANEL_PASSWORD=adminpassword
+
+      # NOTA: En la versión 2.0+, toda la configuración del juego (Nombre del servidor,
+      # contraseñas, mapa, mods de Steam Workshop, webhooks de Discord, horarios,
+      # copias de seguridad y multiplicadores de rates) se gestiona 100% desde la Interfaz Web.
+    volumes:
+      - ./steamcmd/ark:/home/steam/steamcmd/ark
+      - ./ark-backups:/home/steam/ark-backups
+      - ./clusters:/home/steam/clusters
+    labels:
+      icon: https://raw.githubusercontent.com/GMS-EC/ark-server-docker/main/Documents/logo.png
