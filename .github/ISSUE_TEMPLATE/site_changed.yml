@@ -1,0 +1,58 @@
+name: Site changed
+description: TikTok changed something and this scraper no longer reads it.
+labels: ["site-change"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The most common way a scraper stops working, and worth its own report
+        because the fix is different from a code bug: something on
+        `www.tiktok.com/@handle` moved.
+
+        This repo reads one structured source, never the rendered page:
+        `<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__">` → `__DEFAULT_SCOPE__["webapp.user-detail"].userInfo`.
+
+        **Never paste an API key, a proxy password or a `ws://…` endpoint.**
+
+  - type: dropdown
+    id: what_broke
+    attributes:
+      label: What stopped working
+      options:
+        - Counts look rounded (stats_source is not statsV2)
+        - 0 rows for an account that exists
+        - A real account reported as user_unavailable
+        - Exit 3 from an address that used to work (WAF or empty 200)
+        - A column is null or wrong (say which)
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: What you asked for
+      description: The exact target, the exit you used (datacentre, residential, or Scraping Browser), and its country.
+      placeholder: "https://www.tiktok.com/@nasa (exit: datacentre, FI)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: |
+        A capture beats a description.
+
+        `python3 -c "import re,json;h=open('dump.html').read();d=json.loads(re.search(r'__UNIVERSAL_DATA_FOR_REHYDRATION__\" type=\"application/json\">(.*?)</script>',h,re.S).group(1));print(list(d['__DEFAULT_SCOPE__']))"`
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it reproduces on a second engine, from a different exit, and
+        when it last worked.
