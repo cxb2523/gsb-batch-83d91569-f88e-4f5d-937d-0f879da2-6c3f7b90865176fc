@@ -29,7 +29,18 @@ export default defineNuxtConfig({
 		"/namespaces/treemap": { headers: { "X-Robots-Tag": "noindex, follow" } },
 	},
 
+	nitro: {
+		experimental: {
+			// 启用 server/tasks 扫描与 `nitro task` 运行器。
+			tasks: true,
+		},
+	},
+
 	runtimeConfig: {
+		// 近期区块/交易留存文件路径，供 server/tasks、兜底接口和采集脚本共用。
+		recentDataFile: process.env.NUXT_RECENT_DATA_FILE || ".data/recent-data.json",
+		// 配置后允许用 POST /api/recent/collect 远程触发采集；未配置时仅允许本机。
+		recentCollectToken: process.env.NUXT_RECENT_COLLECT_TOKEN || "",
 		public: {
 			AMP: process.env.AMP,
 			apiBase: "https://alphatestnet-api.nubit.org/v1",

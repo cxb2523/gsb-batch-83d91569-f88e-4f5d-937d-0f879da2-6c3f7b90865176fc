@@ -40,6 +40,21 @@ noindex 页面允许生产爬虫抓取，以便读取 meta 和 `X-Robots-Tag`，
 
 这不是全链索引：历史数据应由索引后端提供稳定的分页 URL 清单和真实更新时间，再扩展为 sitemap index + 分片。不要在 SSR 构建中遍历无限链历史，也不要把任意地址生成成可索引页面。
 
+## 近期数据留存
+
+`server/utils/recent-data-store.js` 负责抓取、校验、合并与原子写入，规则放在 `shared/utils/recent-data.js`（纯函数，可单测）。采集最近 100 条区块与交易，写入 `.data/recent-data.json`，供索引 API 不可用时 `/blocks` 兜底。
+
+- 两个接口并发且互不影响：失败来源保留文件中原有行，另一来源照常合并；全部失败时不落盘。
+- 失败原因为 `timeout`（5 秒无响应）或 `upstream`（非 2xx、非法 JSON、非数组）。
+- 行级校验：区块高度必须为正整数，交易哈希必须为 64 位十六进制；不合规行跳过并计入跳过数。
+- 合并按高度/哈希去重，只保留最近 100 条；写入先写临时文件再 rename，避免半份数据。
+- 采集入口：`nitro task`（`server/tasks/recent-data/collect.ts`，仅开发服务器暴露 HTTP 运行入口）、独立脚本 `scripts/collect-recent-data.mjs`、生产 HTTP 接口 `POST /api/recent/collect`（未配置 token 时仅本机）。
+- 读取入口：`/api/recent/blocks`、`/api/recent/txs`，`Cache-Control: no-store`。
+
+页面在 API 正常时不请求本地文件；仅当计数或列表请求出错时通过 `useRequestFetch` 读取兜底接口，并在表格上方显示缓存提示与快照时间。数据是最后一次成功采集的结果，不是实时链状态，因此页面仍保留 noindex 之外的其他 SEO 行为不变。
+
+多实例部署时文件是本机磁盘状态：各实例需各自采集，或把 `NUXT_RECENT_DATA_FILE` 指向共享卷。该文件不进入仓库，也不用于对外提供历史归档。
+
 ## 缓存与部署
 
 保留页面 SSR，不对全部 HTML 使用长时 SWR。链状态、筛选和钱包展示不适合未经测量就统一缓存。仅近期 sitemap 来源使用短缓存；OG 图片由模块管理独立缓存。高流量生产应评估共享存储、多实例签名密钥一致性和 CDN 策略。

@@ -9,9 +9,11 @@
 		"dev": "cross-env PORT=9090 nuxt dev",
 		"generate": "nuxt generate",
 		"preview": "nuxt preview",
+		"collect:recent": "node scripts/collect-recent-data.mjs",
 		"postinstall": "nuxt prepare",
 		"test": "node --test tests/*.test.mjs",
-		"test:seo": "node tests/seo-smoke.mjs"
+		"test:seo": "node tests/seo-smoke.mjs",
+		"test:recent": "node tests/recent-data-smoke.mjs"
 	},
 	"devDependencies": {
 		"@nuxt/devtools": "4.1.0",

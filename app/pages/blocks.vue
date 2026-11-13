@@ -22,25 +22,83 @@ useExplorerSeo({
 const route = useRoute()
 const router = useRouter()
 
+const PAGE_SIZE = 20
+
 const isRefetching = ref(false)
 const blocks = ref([])
 const count = ref(0)
 
+/** 本地兜底状态：仅在索引 API 不可用时出现 */
+const isCached = ref(false)
+const cacheUpdatedAt = ref(null)
+const cacheUnavailable = ref(false)
+const cachedBlocks = ref([])
+
 const hintedBlock = ref(route.query.block)
 
-const getBlocksCount = async () => {
-	const { data: blocksCount } = await fetchBlocksCount()
-	count.value = blocksCount.value
+const page = ref(route.query.page ? parseInt(route.query.page) : 1)
+const pages = computed(() => Math.max(1, Math.ceil(count.value / PAGE_SIZE)))
+
+// 只有在 API 失败时才会请求，API 正常时不会读取本地文件。
+// useRequestFetch 让 SSR 阶段也能安全访问同源内部接口。
+const requestFetch = useRequestFetch()
+
+const loadCachedPage = async () => {
+	if (!cachedBlocks.value.length) {
+		let document
+		try {
+			document = await requestFetch("/api/recent/blocks")
+		} catch (error) {
+			console.error(error)
+			return false
+		}
+		if (!document || !Array.isArray(document.blocks)) return false
+		cachedBlocks.value = document.blocks
+		cacheUpdatedAt.value = document.updatedAt || null
+	}
+
+	if (!cachedBlocks.value.length) return false
+
+	isCached.value = true
+	cacheUnavailable.value = false
+	count.value = cachedBlocks.value.length
+	blocks.value = cachedBlocks.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE)
+	return true
 }
 
-await getBlocksCount()
+const loadPage = async () => {
+	const [countResult, blocksResult] = await Promise.all([
+		fetchBlocksCount(),
+		fetchBlocks({ limit: PAGE_SIZE, offset: (page.value - 1) * PAGE_SIZE }),
+	])
 
-const page = ref(route.query.page ? parseInt(route.query.page) : 1)
-const pages = computed(() => Math.max(1, Math.ceil(count.value / 20)))
+	const rawCount = countResult?.data?.value
+	const apiCount = rawCount === null || rawCount === undefined || rawCount === "" ? NaN : Number(rawCount)
+	const rows = blocksResult?.data?.value
+	const apiFailed = Boolean(countResult?.error?.value || blocksResult?.error?.value)
+
+	if (!apiFailed && Number.isSafeInteger(apiCount) && apiCount >= 0 && Array.isArray(rows)) {
+		count.value = apiCount
+		blocks.value = rows
+		isCached.value = false
+		cacheUpdatedAt.value = null
+		cacheUnavailable.value = false
+		// 丢掉内存里的兜底快照，避免下次故障时使用过期数据。
+		cachedBlocks.value = []
+		return
+	}
+
+	// 索引 API 超时或异常：回退到本地留存，页面继续渲染同样的表格。
+	if (await loadCachedPage()) return
+
+	count.value = 0
+	blocks.value = []
+	cacheUnavailable.value = true
+}
+
+await loadPage()
+
 if (page.value > pages.value) throw createError({ statusCode: 404, statusMessage: "Page not found", fatal: true })
-
-const { data } = await fetchBlocks({ limit: 20, offset: (page.value - 1) * 20 })
-blocks.value = data.value
 
 /** Refetch blocks */
 watch(
@@ -48,8 +106,7 @@ watch(
 	async () => {
 		isRefetching.value = true
 
-		const { data } = await fetchBlocks({ limit: 20, offset: (page.value - 1) * 20 })
-		blocks.value = data.value
+		await loadPage()
 
 		isRefetching.value = false
 
@@ -70,10 +127,22 @@ const handleNext = () => {
 }
 
 const handleLast = async () => {
-	await getBlocksCount()
+	if (isCached.value) {
+		page.value = pages.value
+		return
+	}
+
+	const { data: blocksCount } = await fetchBlocksCount()
+	count.value = blocksCount.value
 
 	page.value = pages.value
 }
+
+const cachedAtLabel = computed(() => {
+	if (!cacheUpdatedAt.value) return "unknown time"
+	const time = DateTime.fromISO(cacheUpdatedAt.value)
+	return time.isValid ? time.setLocale("en").toFormat("LLL d, t") : "unknown time"
+})
 </script>
 
 <template>
@@ -114,6 +183,16 @@ const handleLast = async () => {
 			</Flex>
 
 			<Flex direction="column" wide :class="[$style.table, isRefetching && $style.disabled]">
+				<Flex v-if="isCached || cacheUnavailable" align="center" gap="8" :class="$style.fallback_notice" data-testid="blocks-cache-notice">
+					<Icon name="info" size="14" color="yellowNew" />
+					<Text v-if="isCached" size="12" weight="600" color="yellowNew">
+						Index API unavailable — showing cached data from {{ cachedAtLabel }}
+					</Text>
+					<Text v-else size="12" weight="600" color="yellowNew">
+						Index API unavailable and no cached data is available yet
+					</Text>
+				</Flex>
+
 				<div :class="$style.table_scroller">
 					<table>
 						<thead>
@@ -393,6 +472,10 @@ tbody tr td {
 .table.disabled {
 	opacity: 0.5;
 	pointer-events: none;
+}
+
+.fallback_notice {
+	padding: 12px 16px 0;
 }
 
 @media (max-width: 500px) {

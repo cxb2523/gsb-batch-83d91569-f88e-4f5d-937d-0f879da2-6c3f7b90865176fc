@@ -29,13 +29,15 @@ pnpm dev
 开发地址：`http://localhost:9090`。按 [.env.example](.env.example) 配置站点 URL、链 API、WebSocket 和 OG 签名密钥。示例默认禁止索引，生产确认配置后将 `NUXT_SITE_INDEXABLE` 改为 `true`。
 
 ```bash
-pnpm test             # canonical、索引策略、JSON-LD 和错误状态单测
+pnpm test             # canonical、索引策略、JSON-LD、错误状态与近期数据留存单测
 pnpm build            # SSR 生产构建
 pnpm test:seo         # 启动生产产物及模拟链 API，验证 HTTP / HTML
+pnpm test:recent      # 生产产物 + 模拟 API：采集摘要、校验跳过、原子续跑与 /blocks 兜底
+pnpm collect:recent   # 不启动服务，直接抓取最近 100 区块/交易写入本地文件
 pnpm preview
 ```
 
-`test:seo` 使用临时端口和随机签名密钥，结束后关闭进程，不连接真实链或钱包。运行前须先构建。当前没有独立 lint 或浏览器 E2E 脚本。
+`test:seo` 与 `test:recent` 使用临时端口和随机签名密钥，结束后关闭进程，不连接真实链或钱包。运行前须先构建。当前没有独立 lint 或浏览器 E2E 脚本。
 
 ## 目录与职责
 
@@ -45,8 +47,9 @@ pnpm preview
 | `app/components/` | UI、数据表格、钱包弹窗与 `.satori.vue` OG 模板 |
 | `app/composables/` | 统一页面 SEO、详情请求和错误语义 |
 | `app/services/`、`app/store/` | 链 API、协议编码、钱包和 Pinia 状态 |
-| `server/` | robots、索引响应头、近期动态 sitemap 来源 |
+| `server/` | robots、索引响应头、近期动态 sitemap 来源、近期数据采集任务与兜底接口 |
 | `shared/utils/`、`tests/` | 前后端共用 SEO 规则、单测和 SSR 冒烟测试 |
+| `scripts/` | 独立运行的近期数据采集脚本（cron / CI） |
 
 项目使用 Nuxt 4 默认 `app/` 结构和分环境 TypeScript references。`modules/`、`server/`、`shared/`、`public/` 保留在项目根目录。`@/` 和 `~/` 指向 `app/`。
 
@@ -61,6 +64,27 @@ pnpm preview
 - 列表首屏数据参与 SSR；分页提供实际 href。实时页面不启用全站 HTML 缓存，浏览器继续通过 WebSocket 更新。
 
 策略、限制与扩展方式见 [架构与 SEO 设计](docs/architecture-seo.md)。
+
+## 近期数据留存与兜底
+
+`/blocks` 与首页依赖外部索引 API。服务端可定期把最近 100 条区块和交易写入 `.data/recent-data.json`，API 超时或异常时列表页回退读取该文件并在页面上标注缓存来源。
+
+- 抓取复用 `NUXT_PUBLIC_API_BASE` 的 `/block` 与 `/tx`（`limit=100&sort=desc`）；单次请求超时 5 秒、不重试。
+- 两个接口相互独立：任一成功即落盘该来源，失败来源保留文件中原有行。全部失败时文件保持不变。
+- 写入前校验区块高度为正整数、交易哈希为 64 位十六进制，不合规行跳过并计入跳过数。
+- 每次运行先读旧文件，按高度/哈希合并去重，只保留最近 100 条，用临时文件 + rename 原子替换。
+- 运行结束输出摘要：两个来源各自的成功/失败、失败原因（`timeout` / `upstream error`）、写入数、跳过数与文件内总数。
+
+触发方式（任选其一）：
+
+```bash
+pnpm collect:recent                                   # 独立脚本，适合 cron / CI
+curl -X POST -H "x-recent-collect-token: $NUXT_RECENT_COLLECT_TOKEN" \
+  https://explorer.example.com/api/recent/collect      # 生产 HTTP 触发
+curl -X POST localhost:9090/_nitro/tasks/recent-data:collect   # 开发服务器的 Nitro 任务
+```
+
+生产构建不会注册 `/_nitro/tasks` 路由，生产请使用前两种方式。`POST /api/recent/collect` 未配置 `NUXT_RECENT_COLLECT_TOKEN` 时仅接受本机回环地址调用；配置后需带同名请求头。兜底读取接口为 `/api/recent/blocks` 与 `/api/recent/txs`，均返回 `Cache-Control: no-store`。本地文件内容会随部署环境变化，不要提交到代码仓库；多实例部署需要共享该文件或用同一触发源分别采集。
 
 ## 生产部署
 
@@ -78,6 +102,8 @@ node .output/server/index.mjs
 | `NUXT_PUBLIC_API_BASE` | 索引 API 基址，默认 Nubit alphatestnet `/v1` |
 | `NUXT_PUBLIC_WS_URL` | 对应链的 WebSocket 地址 |
 | `NUXT_APP_SECRET` | 至少 32 字符随机值，用于 OG 图片签名；多实例必须一致 |
+| `NUXT_RECENT_DATA_FILE` | 近期数据留存文件路径，默认 `.data/recent-data.json` |
+| `NUXT_RECENT_COLLECT_TOKEN` | 允许 `POST /api/recent/collect` 远程触发；未设置时仅本机可调用 |
 
 `NUXT_PUBLIC_*` 对浏览器可见，不能存放密钥。修改 API 时需同时核对钱包链配置 `app/services/chains.js`。旧的按访问域名选择网络逻辑已移除，部署不同网络需分别配置环境变量。
 
