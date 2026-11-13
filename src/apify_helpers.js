@@ -1,0 +1,963 @@
+const _ = require('lodash');
+const dayjs = require('dayjs');
+const { BUILD_TAG_LATEST, ACTOR_JOB_TERMINAL_STATUSES, ACTOR_JOB_STATUSES, APIFY_ID_REGEX } = require('@apify/consts');
+const { ApifyClient } = require('apify-client');
+const { APIFY_API_ENDPOINTS, DEFAULT_KEY_VALUE_STORE_KEYS, LEGACY_PHANTOM_JS_CRAWLER_ID,
+    OMIT_ACTOR_RUN_FIELDS, FETCH_DATASET_ITEMS_ITEMS_LIMIT, DATASET_ITEMS_INLINE_MAX_BYTES,
+    ALLOWED_MEMORY_MBYTES_LIST, DEFAULT_ACTOR_MEMORY_MBYTES, ACTOR_RUN_TERMINAL_STATUSES,
+    ACTOR_RUN_TERMINAL_EVENT_TYPES,
+    DATASET_MAX_SIZE_MARGIN,
+    DEFAULT_SYNC_RUN_TIMEOUT_SECS,
+} = require('./consts');
+const { wrapRequestWithRetries, isNotFoundError } = require('./request_helpers');
+
+// Key of field to use internally to compute changes in fields.
+const ACTOR_ID_REFERENCE_FIELD_KEY = 'referenceActorId';
+
+// A full-string Apify resource ID; anything else is treated as a resource name.
+const looksLikeApifyId = (value) => new RegExp(`^${APIFY_ID_REGEX.source}$`).test(value);
+
+// API wordings: "Actor was not found", "Actor was not found or access denied" (ID form),
+// "Actor with this name was not found" (username~name form). Anchored, because matching just
+// "actor" + "not found" would also swallow missing build and run errors.
+const ACTOR_NOT_FOUND_MESSAGE_REGEX = /^actor (?:with this name )?was not found/;
+
+const isActorNotFoundError = (err) => ACTOR_NOT_FOUND_MESSAGE_REGEX.test((err.message || '').toLowerCase());
+
+// Shown by Run Actor and Run Actor and Fetch Results, whose Actor value can come from anywhere. Mapping the bare
+// `name` from Search Apify Store is the common mistake, so the hint names it but stays conditional.
+const getActorNotFoundMessage = (actorId) => {
+    const message = `Actor "${actorId}" was not found or your Apify account cannot access it. `
+        + 'Check that the Actor ID or username~name is correct.';
+    const isBareName = !actorId.includes('~') && !looksLikeApifyId(actorId);
+    return isBareName
+        ? `${message} A name without the username is not enough. `
+            + 'If you mapped it from Search Apify Store, map Actor slug or Actor ID instead.'
+        : message;
+};
+
+/** Rethrows a generic "not found" API error with the Actor ID; other errors pass through. */
+const requestActorOrThrowNotFound = async (z, options, actorId) => {
+    try {
+        return await wrapRequestWithRetries(z.request, options);
+    } catch (err) {
+        if (isActorNotFoundError(err)) throw new Error(getActorNotFoundMessage(actorId));
+        throw err;
+    }
+};
+
+const processInputField = (key, value, inputSchema) => {
+    const inputSchemaProp = inputSchema.properties[key];
+    if (!inputSchemaProp) return value; // This should never happen
+
+    const { editor, title, type } = inputSchemaProp;
+
+    switch (editor) {
+        case 'datepicker':
+            return dayjs(value).format('YYYY-MM-DD');
+        case 'requestListSources':
+            return value.map((url) => ({ url: url.trim() }));
+        case 'pseudoUrls':
+            return value.map((purl) => ({ purl: purl.trim() }));
+        case 'globs':
+            return value.map((glob) => ({ glob: glob.trim() }));
+        case 'proxy':
+        case 'json':
+        case 'keyValue':
+            try {
+                return JSON.parse(value);
+            } catch (err) {
+                throw new Error(`${title} is not a valid JSON, please check it. Error: ${err.message}`);
+            }
+        case 'schemaBased':
+            if (type === 'array') {
+                const itemsType = inputSchemaProp.items.type;
+                if (['string', 'number', 'boolean', 'integer'].includes(itemsType)) {
+                    return value;
+                }
+
+                return JSON.parse(value);
+            }
+
+            // eslint-disable-next-line no-case-declarations
+            const result = {};
+            // eslint-disable-next-line no-restricted-syntax
+            for (const [propKey, propValue] of Object.entries(value[0])) {
+                const realPropKey = propKey.substring(propKey.indexOf('.') + 1); // propKey is like "input-my-object.key1 but can have more dots
+                result[realPropKey] = processInputField(realPropKey, propValue, inputSchemaProp);
+            }
+            return result;
+        default:
+            return value;
+    }
+};
+
+const getDatasetPublicUrl = async (token, datasetIdOrName) => {
+    const apifyClient = new ApifyClient({ token });
+    const datasetClient = apifyClient.dataset(datasetIdOrName);
+
+    return datasetClient.createItemsPublicUrl();
+};
+
+const createDatasetUrls = async (datasetId, token, cleanParamName) => {
+    const publicUrl = await getDatasetPublicUrl(token, datasetId);
+
+    const createDatasetUrl = (format) => {
+        const url = new URL(publicUrl);
+
+        url.searchParams.set(cleanParamName, 'true');
+        url.searchParams.set('attachment', 'true');
+        url.searchParams.set('format', format);
+
+        return url.toString();
+    };
+    return {
+        xml: createDatasetUrl('xml'),
+        csv: createDatasetUrl('csv'),
+        json: createDatasetUrl('json'),
+        xlsx: createDatasetUrl('xlsx'),
+        html: createDatasetUrl('html'),
+        rss: createDatasetUrl('rss'),
+    };
+};
+
+/**
+ * Checks whether a dataset is too large to download inline by fetching a single item
+ * and checking if that item alone would push the full download over the limit.
+ * Returns null if the size is acceptable, or { singleItemMB, downloadItems } if the limit is exceeded.
+ */
+const isTooLargeToDownload = async (z, datasetId, params) => {
+    const sampleResponse = await wrapRequestWithRetries(z.request, {
+        url: `${APIFY_API_ENDPOINTS.datasets}/${datasetId}/items`,
+        params: { ...params, limit: 1 },
+    });
+
+    const singleItemBytes = Buffer.byteLength(sampleResponse.content);
+    if (singleItemBytes <= 2) return null; // empty array "[]" — nothing to download
+
+    // Without an explicit limit the whole dataset gets downloaded, so the guard has to size it by the total item count.
+    const totalItemsCount = Number(sampleResponse.getHeader('x-apify-pagination-total'));
+    const downloadItems = params.limit || totalItemsCount || FETCH_DATASET_ITEMS_ITEMS_LIMIT;
+
+    if (singleItemBytes * downloadItems * DATASET_MAX_SIZE_MARGIN <= DATASET_ITEMS_INLINE_MAX_BYTES) return null;
+
+    return {
+        singleItemMB: (singleItemBytes / (1024 * 1024)).toFixed(1),
+        downloadItems,
+    };
+};
+
+/**
+ * Get items from dataset and urls to file attachments. If there are more than limit items,
+ * it will attach item with info about reaching limit.
+ */
+// eslint-disable-next-line default-param-last
+const getDatasetItems = async (z, datasetId, token, params = {}, actorId, runFromTrigger = false) => {
+    /**
+     * For backwards compatible with old phantomJs crawler we need to use
+     * simplified dataset instead of clean.
+     */
+    let cleanParamName = 'clean';
+    if (actorId === LEGACY_PHANTOM_JS_CRAWLER_ID) {
+        cleanParamName = 'simplified';
+    }
+    params[cleanParamName] = true;
+
+    if (runFromTrigger) {
+        const tooLarge = await isTooLargeToDownload(z, datasetId, params);
+        if (tooLarge) {
+            const limitMB = DATASET_ITEMS_INLINE_MAX_BYTES / (1024 * 1024);
+            const limitWarning = 'Dataset items are too large to download inline '
+                + `(first item is ~${tooLarge.singleItemMB} MB, limit is ${limitMB} MB for ${tooLarge.downloadItems} items total). `
+                + 'Use field selection options to limit which fields are downloaded, '
+                + 'or use the dataset file URL fields to download your data instead.';
+
+            return {
+                items: [
+                    { warning: limitWarning },
+                ],
+                itemsFileUrls: await createDatasetUrls(datasetId, token, cleanParamName),
+            };
+        }
+    }
+
+    const itemsResponse = await wrapRequestWithRetries(z.request, {
+        url: `${APIFY_API_ENDPOINTS.datasets}/${datasetId}/items`,
+        params,
+    });
+
+    const totalItemsCount = itemsResponse.getHeader('x-apify-pagination-total');
+    const items = JSON.parse(itemsResponse.content);
+
+    // TODO: Add limit and skip options into triggers input and remove this warning.
+    if (runFromTrigger && params.limit && totalItemsCount > params.limit) {
+        items.push({
+            warning: `Some items were omitted! The maximum number of items you can get is ${params.limit}. `
+                + 'If you want to get more items you need to add action "Fetch Dataset Items" with run.defaultDatasetId with dataset ID set.',
+        });
+    }
+
+    return {
+        items,
+        itemsFileUrls: await createDatasetUrls(datasetId, token, cleanParamName),
+    };
+};
+
+/**
+ * Get values from key-value store, it skips all non json values.
+ */
+const getValuesFromKeyValueStore = async (z, storeId, keys) => {
+    const values = {};
+
+    await Promise.all(keys.map((key) => {
+        const url = `${APIFY_API_ENDPOINTS.keyValueStores}/${storeId}/records/${key}`;
+        return z
+            .request(url)
+            .then((response) => {
+                if (response.status === 404) {
+                    values[key] = {
+                        error: `Cannot find "${key}" in the key-value store`,
+                    };
+                    return;
+                }
+                const contentType = response.getHeader('content-type');
+                if (contentType.includes('application/json')) {
+                    try {
+                        const maybeObject = JSON.parse(response.content);
+                        values[key] = maybeObject;
+                    } catch (err) {
+                        values[key] = {
+                            error: `Cannot parse the key-value store record: ${err.message}`,
+                        };
+                    }
+                } else {
+                    // Treat all other content types as files.
+                    values[key] = {
+                        file: url,
+                        filename: key,
+                        contentType,
+                    };
+                }
+            });
+    }));
+
+    return values;
+};
+
+/**
+ * Enriches actor run object with data from dataset and key-value store.
+ * It is used for actor runs same as task runs.
+ */
+const enrichActorRun = async (z, token, run, storeKeysToInclude = []) => {
+    const { defaultKeyValueStoreId, defaultDatasetId } = run;
+
+    if (defaultKeyValueStoreId) {
+        const keys = storeKeysToInclude.concat(DEFAULT_KEY_VALUE_STORE_KEYS);
+        const keyValueStoreValues = await getValuesFromKeyValueStore(z, defaultKeyValueStoreId, keys);
+        run = { ...run, ...keyValueStoreValues };
+    }
+
+    if (defaultDatasetId) {
+        const datasetItems = await getDatasetItems(z, defaultDatasetId, token, { limit: FETCH_DATASET_ITEMS_ITEMS_LIMIT }, run.actId, true);
+        run.datasetItems = datasetItems.items;
+        run.datasetItemsFileUrls = datasetItems.itemsFileUrls;
+    }
+
+    // Attach Apify app URL to detail of run
+    run.detailsPageUrl = run.actorTaskId
+        ? `https://console.apify.com/actors/tasks/${run.actorTaskId}/runs/${run.id}`
+        : `https://console.apify.com/actors/${run.actId}/runs/${run.id}`;
+
+    // Omit fields, which are useless for Zapier users.
+    return _.omit(run, OMIT_ACTOR_RUN_FIELDS);
+};
+
+// Get actor statuses from bundle input data. This method makes sure that each status is unique and that it is valid
+const getActorStatusesFromBundle = (bundle) => {
+    if (bundle.inputData.statuses && bundle.inputData.statuses.length > 0) {
+        const statuses = Array.from(new Set(bundle.inputData.statuses));
+        const filteredStatuses = statuses
+            .filter((status) => Object.keys(ACTOR_RUN_TERMINAL_STATUSES).includes(status));
+
+        return filteredStatuses.length > 0 ? filteredStatuses : ACTOR_JOB_TERMINAL_STATUSES;
+    }
+
+    return ACTOR_JOB_TERMINAL_STATUSES;
+};
+
+// Process to subscribe to Apify webhook
+const subscribeWebhook = async (z, bundle, condition) => {
+    const statuses = getActorStatusesFromBundle(bundle);
+
+    const eventTypes = statuses.map((status) => ACTOR_RUN_TERMINAL_EVENT_TYPES[status]).filter((status) => status !== undefined);
+
+    const webhookOpts = {
+        eventTypes,
+        condition,
+        requestUrl: bundle.targetUrl,
+    };
+    const response = await wrapRequestWithRetries(z.request, {
+        url: APIFY_API_ENDPOINTS.webhooks,
+        method: 'POST',
+        json: webhookOpts,
+    });
+
+    return response.data;
+};
+
+// Process to unsubscribe to Apify webhook
+const unsubscribeWebhook = async (z, bundle) => {
+    // bundle.subscribeData contains the parsed response JSON from the subscribe
+    const webhookId = bundle.subscribeData.id;
+
+    await wrapRequestWithRetries(z.request, {
+        url: `${APIFY_API_ENDPOINTS.webhooks}/${webhookId}`,
+        method: 'DELETE',
+    });
+
+    return {};
+};
+
+// Gets actor run from bundle clean request and enriches it.
+const getActorRun = async (z, bundle) => {
+    const run = bundle.cleanedRequest.resource;
+    const enrichedRun = await enrichActorRun(z, bundle.authData.access_token, run);
+    return [enrichedRun];
+};
+
+/**
+ * Encodes an ad-hoc webhook for the `webhooks` param of a run start request. Such a webhook rides along with
+ * the run itself, so it fires even if the run finishes before the start request returns.
+ */
+const buildRunCallbackWebhookParam = (callbackUrl) => Buffer.from(JSON.stringify([{
+    eventTypes: Object.values(ACTOR_RUN_TERMINAL_EVENT_TYPES),
+    requestUrl: callbackUrl,
+}]), 'utf8').toString('base64');
+
+/**
+ * Loads the finished run when Zapier resumes a paused step. The run is re-fetched instead of taken from the
+ * webhook payload, so the output matches exactly what the asynchronous path returns.
+ */
+const getActorRunOnResume = async (z, bundle, hasSyncField = false) => {
+    const runId = bundle.outputData?.id || bundle.cleanedRequest?.resource?.id;
+    if (!runId) {
+        throw new Error('The Apify run callback did not contain a run ID, so the run results could not be loaded.');
+    }
+
+    const { data: run } = await wrapRequestWithRetries(z.request, {
+        url: `${APIFY_API_ENDPOINTS.actorRuns}/${runId}`,
+    });
+
+    if (run.status === ACTOR_JOB_STATUSES.TIMED_OUT) {
+        const timeoutSecs = run.options?.timeoutSecs || DEFAULT_SYNC_RUN_TIMEOUT_SECS;
+        // Only Run Actor and Run Task have the "Run synchronously" field.
+        const asyncSuffix = hasSyncField
+            ? 'To handle longer runs, set "Run synchronously" to "no" and process the results in a second Zap '
+                + 'that starts with a finished run trigger.'
+            : 'To handle longer runs, use the Run Actor action with "Run synchronously" set to "no" and process the results '
+                + 'in a second Zap that starts with the Finished Actor Run trigger.';
+        throw new Error(
+            `Run did not finish within the ${timeoutSecs}s timeout and was stopped (run ID: ${runId}). `
+            + `Check its log and partial results in Apify Console (https://console.apify.com/view/runs/${runId}). ${asyncSuffix}`,
+        );
+    }
+
+    return run;
+};
+
+// The API resolves an ID or `username~name`, the `~name` shorthand means a name in the token owner's account.
+const toStorageLookupId = (idOrName) => (
+    looksLikeApifyId(idOrName) || idOrName.includes('~') ? idOrName : `~${idOrName}`
+);
+
+/**
+ * Get a dataset or a key-value store by ID or by name, a storage that does not exist throws.
+ * @param z
+ * @param storageIdOrName - Storage ID or name
+ * @param options - API and Apify Console URLs of the storage type, and its label used in the error message
+ */
+const findStorageOrThrow = async (z, storageIdOrName, { apiUrl, consoleUrl, label }) => {
+    try {
+        const storageResponse = await wrapRequestWithRetries(z.request, {
+            url: `${apiUrl}/${toStorageLookupId(storageIdOrName)}`,
+            method: 'GET',
+        });
+        return storageResponse.data;
+    } catch (err) {
+        if (!isNotFoundError(err)) throw err;
+
+        const notFoundUrl = looksLikeApifyId(storageIdOrName) ? `${consoleUrl}/${storageIdOrName}` : consoleUrl;
+        throw new z.errors.Error(
+            `${label} "${storageIdOrName}" does not exist or your Apify account cannot access it. `
+            + `Check the ${label.toLowerCase()} name or ID in Apify Console: ${notFoundUrl}`,
+        );
+    }
+};
+
+/**
+ * Get store by ID or by name. A name that does not exist is created, an ID that does not exist throws.
+ * @param z
+ * @param storeIdOrName - Key-value store ID or name
+ */
+const getOrCreateKeyValueStore = async (z, storeIdOrName) => {
+    let store;
+    // The first try to get store by ID.
+    try {
+        const storeResponse = await wrapRequestWithRetries(z.request, {
+            url: `${APIFY_API_ENDPOINTS.keyValueStores}/${storeIdOrName}`,
+            method: 'GET',
+        });
+        store = storeResponse.data;
+    } catch (err) {
+        if (!isNotFoundError(err)) throw err;
+        // ID-shaped input can't be a name to create, so a not-found ID is a real miss; names fall through to create below.
+        if (looksLikeApifyId(storeIdOrName)) {
+            throw new z.errors.Error(
+                `Key-value store "${storeIdOrName}" does not exist or your Apify account cannot access it. `
+                + 'Check the key-value store ID in Apify Console: '
+                + `https://console.apify.com/storage/key-value-stores/${storeIdOrName}`,
+            );
+        }
+    }
+
+    // The second creates store with name, in case storeId not found.
+    if (!store) {
+        const storeResponse = await wrapRequestWithRetries(z.request, {
+            url: `${APIFY_API_ENDPOINTS.keyValueStores}`,
+            method: 'POST',
+            params: {
+                name: storeIdOrName,
+            },
+        });
+        store = storeResponse.data;
+    }
+    return store;
+};
+
+/**
+ * It picks from input schema prefill values.
+ * NOTE: Input schema was validated on app, we don't have to check structure here.
+ * @param inputSchema
+ */
+const getPrefilledValuesFromInputSchema = (inputSchema) => {
+    const prefilledObject = {};
+    const { properties } = inputSchema;
+
+    Object.keys(properties).forEach((propKey) => {
+        if (properties[propKey].prefill) prefilledObject[propKey] = properties[propKey].prefill;
+        else if (properties[propKey].type === 'boolean' && _.isBoolean(properties[propKey].default)) {
+            prefilledObject[propKey] = properties[propKey].default;
+        }
+    });
+
+    return prefilledObject;
+};
+
+/**
+ * Prefix input field key with input string.
+ * @param fieldKey
+ * @returns string
+ */
+const prefixInputFieldKey = (fieldKey) => {
+    return `input-${fieldKey}`;
+};
+
+/**
+ * Parse input field key to get original key.
+ * @param fieldKey
+ * @returns string
+ */
+const parseInputFieldKey = (fieldKey) => {
+    return fieldKey.replace('input-', '');
+};
+
+/**
+ * Slugify text to be used in input field key.
+ * @param text
+ * @returns {string}
+ */
+const slugifyText = (text) => {
+    return text
+        .trim()
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[^a-z0-9 -]/g, '')
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-');
+};
+
+/**
+ * Converts single property from Apify input schema to Zapier input fields.
+ * NOTE: It can return more than one field, in case of sectionCaption or object with schemaBased editor.
+ * @param required - List of required properties
+ * @param propertyKey
+ * @param definition
+ * @returns {*[]}
+ */
+const convertPropertyToInputFields = (z, propertyKey, definition, required) => {
+    const fields = [];
+
+    if (definition.editor === 'hidden') return [];
+    // NOTE: Handle sectionCaption with info box with helpText. It is not possible to do stackable fields in Zapier.
+    if (definition.sectionCaption && definition.sectionCaption.length) {
+        const helpText = definition.sectionDescription
+            ? `${definition.sectionCaption} - ${definition.sectionDescription}`
+            : definition.sectionCaption;
+        fields.push({
+            label: definition.sectionCaption,
+            key: prefixInputFieldKey(`sectionCaption-${propertyKey}`),
+            type: 'copy',
+            helpText,
+        });
+    }
+    const field = {
+        label: definition.title,
+        helpText: definition.description,
+        key: prefixInputFieldKey(propertyKey),
+        required: required && required.includes(propertyKey),
+        // NOTE: From Zapier docs: A default value that is saved the first time a Zap is created.
+        // It is what prefill is in Apify input schema.
+        default: definition.prefill,
+        // NOTE: From Zapier docs: An example value that is not saved.
+        // It is what default is in Apify input schema.
+        placeholder: definition.default,
+    };
+    switch (definition.type) {
+        case 'string': {
+        // NOTE: Cannot provide alternative in fields schema for options pattern, minLength, maxLength, nullable
+        // These options will not cover UI validation and we need to handle it in code.
+            field.type = 'string'; // editor = textfield, datepicker
+            if (['javascript', 'python'].includes(definition.editor)) {
+                field.type = 'code';
+            } else if (definition.editor === 'textarea') {
+                field.type = 'text';
+            } else if (definition.editor === 'datepicker') {
+                field.type = 'datetime';
+            } else if (definition.editor === 'select' || definition.enum || definition.enumSuggestedValues) {
+            // NOTE: Editor is not required, enum is enough. Also support enumSuggestedValues as fallback.
+                const enumValues = definition.enum || definition.enumSuggestedValues;
+                if (enumValues) {
+                    field.choices = {};
+                    enumValues.forEach((key, i) => {
+                        field.choices[key] = definition.enumTitles ? definition.enumTitles[i] : key;
+                    });
+                }
+            }
+            if (definition.isSecret) {
+                field.type = 'password';
+            }
+            break;
+        }
+        case 'integer': {
+        // NOTE: Cannot provide alternative in fields schema for options maximum, minimum, unit, nullable
+            field.type = 'integer';
+            break;
+        }
+        case 'boolean':
+        // NOTE: Cannot provide alternative in fields schema for options groupCaption, groupDescription, nullable
+            field.type = 'boolean';
+            break;
+        case 'array': {
+            const parsedPrefillValue = definition.prefill;
+            const parsedDefaultValue = definition.default;
+            // NOTE: Cannot provide alternative in fields schema for options placeholderKey, placeholderValue, patternKey,
+            // patternValue, maxItems, minItems, uniqueItems, nullable
+            if (definition.editor === 'json' || definition.editor === 'keyValue') {
+                field.type = 'text';
+                if (parsedPrefillValue) field.default = JSON.stringify(parsedPrefillValue, null, 2);
+                else if (parsedDefaultValue) field.placeholder = JSON.stringify(parsedDefaultValue, null, 2);
+            } else if (['requestListSources', 'pseudoUrls', 'globs', 'stringList'].includes(definition.editor)) {
+            // NOTE: These options are not supported in Zapier and Apify UI specific.
+            // We will use stringList type instead for simplicity. We will covert them into spec. format before run.
+                field.type = 'string';
+                field.list = true;
+                // NOTE: Use placeholder (not default) for prefill values. Setting default on a list field causes Zapier
+                // to pre-populate a non-removable first item, which duplicates entries and prevents users from
+                // controlling which values are sent.
+                if (parsedPrefillValue && Array.isArray(parsedPrefillValue) && parsedPrefillValue[0]) {
+                    const firstItem = parsedPrefillValue[0];
+                    if (typeof firstItem === 'string') field.placeholder = firstItem;
+                    else if (typeof firstItem === 'object') field.placeholder = firstItem.url || firstItem.purl || firstItem.glob;
+                    else field.placeholder = firstItem; // NOTE: We do not know what it is, let's print it as it is, but it should not happen.
+                    field.default = undefined;
+                } else if (parsedDefaultValue && Array.isArray(parsedDefaultValue) && parsedDefaultValue[0]) {
+                    const firstItem = parsedDefaultValue[0];
+                    if (typeof firstItem === 'string') field.placeholder = firstItem;
+                    else if (typeof firstItem === 'object') field.placeholder = firstItem.url || firstItem.purl || firstItem.glob;
+                    else field.placeholder = firstItem; // NOTE: We do not know what it is, let's print it as it is, but it should not happen.
+                    field.default = undefined;
+                } else {
+                    field.default = undefined;
+                    field.placeholder = undefined;
+                }
+            } else if (definition.editor === 'select') {
+                field.type = 'string';
+                field.list = true;
+                field.choices = {};
+
+                definition.items.enum.forEach((key, i) => {
+                    field.choices[key] = definition.items.enumTitles ? definition.items.enumTitles[i] : key;
+                });
+            } else if (definition.editor === 'schemaBased') {
+                const itemsType = definition.items.type;
+
+                if (itemsType === 'object') {
+                    field.type = 'text';
+                    if (parsedPrefillValue) field.default = JSON.stringify(parsedPrefillValue, null, 2);
+                    else if (parsedDefaultValue) field.placeholder = JSON.stringify(parsedDefaultValue, null, 2);
+                } else {
+                    field.type = itemsType;
+                    field.list = true;
+                }
+            }
+            break;
+        }
+        case 'object':
+        {
+            if (definition.editor === 'json') {
+                field.type = 'text';
+            } else if (definition.editor === 'proxy') {
+            // This field is Apify specific, we do not support nice UI for it. Let's print note about it into UI.
+                fields.push({
+                    label: 'Proxy',
+                    key: prefixInputFieldKey('proxyWarning'),
+                    type: 'copy',
+                    helpText: `${definition.title} depends on the Apify platform and is not supported in Zapier. `
+                        + 'Set this value in Apify Console instead.',
+                });
+                field.type = 'text';
+            } else if (definition.editor === 'schemaBased') {
+            // NOTE: This is a hack to have nested input fields at least somewhat reasonable label due to this bug:
+            // https://github.com/zapier/zapier-platform/issues/1178
+                field.key = `input-${slugifyText(definition.title)}`;
+                field.children = [];
+                delete field.type;
+                const requiredSubKeys = definition.required?.map((key) => `${propertyKey}.${key}`);
+                // eslint-disable-next-line no-restricted-syntax
+                for (const [subKey, subDefinition] of Object.entries(definition.properties || {})) {
+                    if (definition.default && definition.default[subKey]) {
+                        subDefinition.default = definition.default[subKey];
+                    }
+
+                    if (definition.prefill && definition.prefill[subKey]) {
+                        subDefinition.prefill = definition.prefill[subKey];
+                    }
+                    try {
+                        const newFields = convertPropertyToInputFields(z, `${propertyKey}.${subKey}`, subDefinition, requiredSubKeys);
+                        field.children.push(...newFields);
+                    } catch (err) {
+                        z.console.log(`Failed to convert field "${propertyKey}.${subKey}" to input field. Error: ${err.message}`);
+                        z.console.log(`Field definition: ${JSON.stringify(subDefinition)}`);
+                    }
+                }
+            }
+            if (definition.prefill) {
+                field.default = JSON.stringify(definition.prefill, null, 2);
+            } else if (field.default) {
+                field.placeholder = JSON.stringify(definition.default, null, 2);
+            }
+            break;
+        }
+        default: {
+        // This should not happen.
+            console.log(`Unknown input schema type: ${definition.type}`, definition);
+            return [];
+        }
+    }
+
+    fields.push(field);
+    return fields;
+};
+
+/**
+ * Converts Apify input schema to Zapier input fields.
+ * Input schema spec.
+ * https://docs.apify.com/platform/actors/development/actor-definition/input-schema Fields schema
+ * spec. https://zapier.github.io/zapier-platform-schema/build/schema.html#fieldschema
+ * @param inputSchema
+ * @param actor
+ */
+const createFieldsFromInputSchemaV1 = (z, inputSchema, actor) => {
+    const { properties, required, description } = inputSchema;
+    const fields = [
+        // The first field is info box with input schema description or actor title, same as on Apify platform.
+        {
+            label: actor.title,
+            key: prefixInputFieldKey(`actor-${actor.id}-info`),
+            type: 'copy',
+            helpText: description || `Input for ${actor.title}. `
+                + `See the [${actor.title} page in Apify Store](https://apify.com/${actor.username}/${actor.name}) for field details.`,
+        },
+    ];
+    // eslint-disable-next-line no-restricted-syntax
+    for (const [propertyKey, definition] of Object.entries(properties)) {
+        try {
+            const newFields = convertPropertyToInputFields(z, propertyKey, definition, required);
+            fields.push(...newFields);
+        } catch (err) {
+            // If there is an error while creating the property, log it so we can fix it later
+            z.console.log(`Failed to convert field "${propertyKey}" to input field. Error: ${err.message}`);
+            z.console.log(`Field definition: ${JSON.stringify(definition)}`);
+        }
+    }
+    return fields;
+};
+
+const maybeGetInputSchemaFromActor = async (z, actor, buildTag) => {
+    const defaultBuild = actor.taggedBuilds && actor.taggedBuilds[buildTag];
+    if (defaultBuild) {
+        const buildResponse = await wrapRequestWithRetries(z.request, {
+            url: `${APIFY_API_ENDPOINTS.actors}/${actor.id}/builds/${defaultBuild.buildId}`,
+        });
+        const inputSchemaJSON = buildResponse.data && buildResponse.data.inputSchema;
+        try {
+            return JSON.parse(inputSchemaJSON);
+        } catch (err) {
+            // This should never happen, but if it does, we will ignore it
+            // and continue without input schema.
+        }
+    }
+};
+
+// Shared by every create that runs an Actor, so each only has to add its own webhook/timeout handling on top.
+const buildActorRunRequestOptions = async (z, bundle) => {
+    const { actorId, inputBody, inputContentType, build, timeoutSecs, memoryMbytes } = bundle.inputData;
+
+    const requestOpts = {
+        url: `${APIFY_API_ENDPOINTS.actors}/${actorId}/runs`,
+        method: 'POST',
+        params: {
+            build,
+            timeout: timeoutSecs,
+            memory: parseInt(memoryMbytes, 10),
+        },
+    };
+
+    if (inputContentType) {
+        requestOpts.headers = {
+            'Content-Type': inputContentType,
+        };
+    }
+    if (inputBody !== undefined) {
+        if (inputContentType && inputContentType.includes('application/json')) {
+            try {
+                JSON.parse(inputBody);
+            } catch (err) {
+                throw new Error(`The Input body is not valid JSON: ${err.message}. Please provide a valid JSON object.`);
+            }
+        }
+        requestOpts.body = inputBody;
+    } else {
+        const actorResponse = await requestActorOrThrowNotFound(z, {
+            url: `${APIFY_API_ENDPOINTS.actors}/${actorId}`,
+        }, actorId);
+        const inputSchema = await maybeGetInputSchemaFromActor(z, actorResponse.data, build);
+        if (inputSchema) {
+            const input = {};
+            const inputSchemaKeys = Object.keys(inputSchema.properties);
+            inputSchemaKeys.forEach((key) => {
+                const fieldKey = prefixInputFieldKey(key);
+                const fieldTitle = prefixInputFieldKey(slugifyText(inputSchema.properties[key].title));
+
+                // NOTE: Due to this bug: https://github.com/zapier/zapier-platform/issues/1178 we're using title property
+                // from the input schema as a key for some of the input fields.
+                const value = bundle.inputData[fieldKey] ?? bundle.inputData[fieldTitle];
+                if (value !== undefined && value !== null) { // NOTE: value can be false or 0, these are legit value.
+                    input[key] = processInputField(key, value, inputSchema);
+                }
+            });
+            requestOpts.body = JSON.stringify(input);
+            requestOpts.headers = {
+                'Content-Type': 'application/json; charset=utf-8',
+            };
+        } else {
+            // This can happen in very rare cases, when user deletes input schema by build actor without schema.
+            throw new Error(`It cannot run Actor, the build ${build} has no input schema, but the Zap was set up with it.`);
+        }
+    }
+
+    return requestOpts;
+};
+
+/**
+ * This method loads additional input fields regarding actor default values.
+ * @param hasSyncField - Whether the Timeout helpText should reference a "Run synchronously" field.
+ */
+const getActorAdditionalFields = async (z, bundle, { hasSyncField = true } = {}) => {
+    const { actorId } = bundle.inputData;
+    // Actor not selected yet, so tell the user where its input fields will appear.
+    if (!actorId) {
+        return [{
+            label: 'Actor input',
+            key: 'actorInputHint',
+            type: 'copy',
+            helpText: 'Select an Actor to see its input fields.',
+        }];
+    }
+
+    const previousActorId = bundle.inputData[ACTOR_ID_REFERENCE_FIELD_KEY];
+    const wasActorChanged = actorId !== previousActorId; // If Actor ID changed from the last input field generation.
+
+    let actorResponse;
+    try {
+        actorResponse = await wrapRequestWithRetries(z.request, {
+            url: `${APIFY_API_ENDPOINTS.actors}/${actorId}`,
+        });
+    } catch (err) {
+        if (!isActorNotFoundError(err)) throw err;
+        // The Zap editor does not show errors thrown while loading fields, so the reason is shown as a read-only field.
+        // Running the step still fails with the same message, as it looks the Actor up again.
+        return [{
+            label: 'Actor not found',
+            key: 'actorNotFound',
+            type: 'copy',
+            helpText: getActorNotFoundMessage(actorId),
+        }];
+    }
+
+    const actor = actorResponse.data;
+    const { build: defaultBuild, timeoutSecs, memoryMbytes } = actor.defaultRunOptions;
+    const actorBuildTag = wasActorChanged
+        ? defaultBuild || BUILD_TAG_LATEST
+        : bundle.inputData.build || defaultBuild || BUILD_TAG_LATEST;
+
+    let inputBody;
+    let inputContentType;
+    // Get input schema from build
+    const inputSchema = await maybeGetInputSchemaFromActor(z, actor, actorBuildTag);
+    if (inputSchema) {
+        inputContentType = 'application/json; charset=utf-8';
+        inputBody = JSON.stringify(getPrefilledValuesFromInputSchema(inputSchema), null, 2);
+    }
+
+    const baseFields = [
+        {
+            label: 'Reference Actor ID',
+            key: ACTOR_ID_REFERENCE_FIELD_KEY,
+            helpText: 'ID of Actor the UI was generated for.',
+            type: 'string',
+            default: actorId,
+            computed: true, // This field is hidden in UI, used for checking if actorId change between input fields generation.
+        },
+        {
+            label: 'Build',
+            helpText: 'Tag or number of the build to run, e.g. `latest`, `beta`, or `1.2.34`.',
+            key: 'build',
+            required: false,
+            default: actorBuildTag,
+            // NOTE: Change build value recomputes fields as input schema can change.
+            altersDynamicFields: true,
+            type: 'string',
+        },
+        {
+            label: 'Timeout',
+            helpText: hasSyncField
+                ? 'Run timeout in seconds. `0` means no timeout. '
+                    + `When **Run synchronously** is \`yes\`, the timeout is capped at ${DEFAULT_SYNC_RUN_TIMEOUT_SECS} seconds.`
+                : `Run timeout in seconds, capped at ${DEFAULT_SYNC_RUN_TIMEOUT_SECS} seconds. \`0\` uses the cap.`,
+            key: 'timeoutSecs',
+            required: false,
+            default: timeoutSecs || 0,
+            type: 'integer',
+        },
+        {
+            label: 'Memory',
+            helpText: 'Memory for the Actor run, in megabytes. More memory usually makes the run faster.',
+            key: 'memoryMbytes',
+            required: false,
+            // NOTE: Zapier UI allows only choices with strings
+            default: (memoryMbytes || DEFAULT_ACTOR_MEMORY_MBYTES).toString(),
+            choices: ALLOWED_MEMORY_MBYTES_LIST.map((val) => val.toString()),
+            type: 'string',
+        },
+    ];
+
+    if (inputSchema && (inputSchema.schemaVersion === 1 || !inputSchema.schemaVersion)) {
+        const fieldsFromInputSchema = createFieldsFromInputSchemaV1(z, inputSchema, actor);
+        return [
+            ...fieldsFromInputSchema,
+            {
+                label: 'Options',
+                key: `actor-${actor.id}-options`,
+                type: 'copy',
+                helpText: 'Actor run options. See [Usage and resources](https://docs.apify.com/platform/actors/running/usage-and-resources)'
+                    + ' for details.',
+            },
+            ...baseFields,
+        ];
+    }
+
+    // Parse and stringify json input body if there is
+    let isContentTypeJson = inputContentType && inputContentType.includes('application/json');
+    if (actor.exampleRunInput) {
+        const { body, contentType } = actor.exampleRunInput;
+        inputContentType = contentType;
+        isContentTypeJson = contentType.includes('application/json');
+        // Try to parse JSON body
+        if (isContentTypeJson) {
+            try {
+                const parsedBody = JSON.parse(body);
+                inputBody = JSON.stringify(parsedBody, null, 2);
+            } catch (err) {
+                // There can be invalid JSON, but show must go on.
+                inputBody = body;
+            }
+        } else {
+            inputBody = body;
+        }
+    }
+    let inputBodyHelpText = 'Input for the Actor.';
+    if (actor.isPublic) {
+        inputBodyHelpText += ` See the [input schema](https://apify.com/${actor.username}/${actor.name}/input-schema) `
+                + 'for field details.';
+    }
+    return [
+        {
+            label: `Input body${isContentTypeJson ? ' (JSON)' : ''}`,
+            helpText: inputBodyHelpText,
+            key: 'inputBody',
+            required: false,
+            default: inputBody ?? (isContentTypeJson ? '{}' : ''),
+            type: 'text', // NICE TO HAVE: Input type 'file' regarding content type
+        },
+        {
+            label: 'Input content type',
+            helpText: '`Content-Type` of the input body, e.g. `application/json`.',
+            key: 'inputContentType',
+            required: false,
+            default: inputContentType || '',
+            type: 'string',
+        },
+        ...baseFields,
+    ];
+};
+
+const printPrettyActorOrTaskName = (actorOrTask) => {
+    const idLikeName = actorOrTask.username ? `${actorOrTask.username}/${actorOrTask.name}` : actorOrTask.name;
+    return actorOrTask.title
+        ? `${actorOrTask.title} (${idLikeName})`
+        : idLikeName;
+};
+
+module.exports = {
+    enrichActorRun,
+    subscribeWebhook,
+    unsubscribeWebhook,
+    getActorRun,
+    buildRunCallbackWebhookParam,
+    buildActorRunRequestOptions,
+    requestActorOrThrowNotFound,
+    getActorRunOnResume,
+    getOrCreateKeyValueStore,
+    findStorageOrThrow,
+    getDatasetItems,
+    getActorAdditionalFields,
+    getPrefilledValuesFromInputSchema,
+    createFieldsFromInputSchemaV1,
+    maybeGetInputSchemaFromActor,
+    printPrettyActorOrTaskName,
+    parseInputFieldKey,
+    prefixInputFieldKey,
+    getActorStatusesFromBundle,
+    slugifyText,
+};

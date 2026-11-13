@@ -1,0 +1,35 @@
+# Zapier Apify Integration
+
+The Apify integration to Zapier allows you to connect Apify platform with 600+ app.
+
+## Resources
+
+* [Apify documentation](https://docs.apify.com/tutorials/integrations#get-started)
+* [Getting started tutorial](https://help.apify.com/en/articles/3034235-getting-started-with-apify-integration-for-zapier)
+* [Apify integration](https://zapier.com/apps/Apify/integrations) page on Zapier platform
+
+
+## Development
+
+If you are interested in adding a new feature or fixing a bug in the integration, feel free to open a pull request.
+
+### Tests
+
+The test suite is able to run against the Apify platform or it can mock any requests to the Apify API.
+
+Mocked tests are invoked by running:
+```
+npm run test
+```
+
+But if you want to run the tests against the Apify platform you will need your Apify API token before you run tests.
+You can find the token [on the Integrations page of your Apify account](https://console.apify.com/settings/integrations?utm_source=zapier&utm_medium=integrations).
+Run this command to test the app:
+```text
+TEST_USER_TOKEN=apify_api_token npm run test
+```
+
+### Release
+
+New versions should be released using the [Zapier CLI](https://github.com/zapier/zapier-platform-cli#promoting-an-app-version).
+Only Apify team members can deploy new versions, and there is a [document in Notion on how to do it](https://www.notion.so/apify/Zapier-integration-f6f60d2a830b4bd79ffd2212d0c1566b).

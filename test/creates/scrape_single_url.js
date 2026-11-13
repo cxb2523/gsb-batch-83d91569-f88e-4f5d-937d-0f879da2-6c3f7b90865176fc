@@ -1,0 +1,332 @@
+/* eslint-env mocha */
+const { expect } = require('chai');
+const zapier = require('zapier-platform-core');
+const chai = require('chai');
+const chaiAsPromised = require('chai-as-promised');
+const nock = require('nock');
+const { WEBHOOK_EVENT_TYPES } = require('@apify/consts');
+const { TEST_USER_TOKEN, apifyClient, getMockRun, mockDatasetPublicUrl, TEST_CALLBACK_URL,
+    parseRunCallbackWebhookParam, performAndResume, randomString } = require('../helpers');
+const App = require('../../index');
+const { SCRAPE_SINGLE_URL_RUN_SAMPLE, SCRAPE_SINGLE_URL_RUN_TIMEOUT_SECS } = require('../../src/consts');
+
+const appTester = zapier.createAppTester(App);
+
+chai.use(chaiAsPromised);
+
+describe('scrape single URL', () => {
+    afterEach(async () => {
+        nock.cleanAll();
+    });
+
+    it('runs scrape single URL with correct output fields (mocked)', async function () {
+        if (TEST_USER_TOKEN) this.skip();
+
+        const options = {
+            url: 'https://www.example.com',
+            crawlerType: 'cheerio',
+        };
+        const bundle = {
+            authData: {
+                access_token: TEST_USER_TOKEN,
+            },
+            inputData: options,
+        };
+
+        const mockRun = getMockRun({
+            actId: 'aYG0l9s7dbB7j3gbS',
+            isStatusMessageTerminal: true,
+            statusMessage: 'OK',
+        });
+        delete mockRun.OUTPUT;
+        delete mockRun.datasetItems;
+        delete mockRun.datasetItemsFileUrls;
+        delete mockRun.consoleUrl;
+
+        let webhooksParam;
+        const mockDatasetItem = {
+            url: 'https://www.example.com',
+            metadata: {
+                canonicalUrl: 'https://example.com/',
+                title: 'Example Domain',
+                description: null,
+                author: null,
+                keywords: null,
+                languageCode: null,
+            },
+            html: '<html><head><title>Example Domain</title></head><body></body></html>',
+            markdown: '# Example Domain\n\nThis domain is for use in illustrative examples in documents.',
+            text: 'Example Domain\n\nThis domain is for use in illustrative examples in documents.',
+        };
+
+        const scope = nock('https://api.apify.com');
+        scope.post(`/v2/acts/${mockRun.actId}/runs`, {
+            startUrls: [{ url: options.url }],
+            crawlerType: options.crawlerType,
+            maxCrawlDepth: 0,
+            maxCrawlPages: 1,
+            maxResults: 1,
+            proxyConfiguration: {
+                useApifyProxy: true,
+            },
+            removeCookieWarnings: true,
+            saveHtml: true,
+            saveMarkdown: true,
+        })
+            .query((query) => {
+                webhooksParam = query.webhooks;
+                return query.memory === '1024'
+                    && query.timeout === `${SCRAPE_SINGLE_URL_RUN_TIMEOUT_SECS}`
+                    && !!query.webhooks;
+            })
+            .reply(200, { data: mockRun });
+        scope.get(`/v2/datasets/${mockRun.defaultDatasetId}/items`)
+            .query({ limit: 1, clean: true })
+            .reply(200, [mockDatasetItem]);
+        scope.get(`/v2/datasets/${mockRun.defaultDatasetId}/items`)
+            .query({ limit: 1, clean: true })
+            .reply(200, [mockDatasetItem]);
+        scope.get(`/v2/datasets/${mockRun.defaultDatasetId}`)
+            .reply(200, mockDatasetPublicUrl(mockRun.defaultDatasetId));
+        scope.get(`/v2/actor-runs/${mockRun.id}`)
+            .reply(200, { data: mockRun });
+
+        const testResult = await performAndResume(appTester, App.creates.scrapeSingleUrl, bundle);
+
+        expect(parseRunCallbackWebhookParam(webhooksParam)).to.be.eql([{
+            eventTypes: [
+                WEBHOOK_EVENT_TYPES.ACTOR_RUN_SUCCEEDED,
+                WEBHOOK_EVENT_TYPES.ACTOR_RUN_FAILED,
+                WEBHOOK_EVENT_TYPES.ACTOR_RUN_TIMED_OUT,
+                WEBHOOK_EVENT_TYPES.ACTOR_RUN_ABORTED,
+            ],
+            requestUrl: TEST_CALLBACK_URL,
+        }]);
+        expect(testResult).to.have.all.keys(Object.keys(SCRAPE_SINGLE_URL_RUN_SAMPLE));
+        expect(testResult.detailsPageUrl).to.eql(`https://console.apify.com/actors/${mockRun.actId}/runs/${mockRun.id}`);
+        expect(testResult.pageUrl).to.eql('https://www.example.com');
+        expect(testResult.pageMetadata).to.eql(mockDatasetItem.metadata);
+        expect(testResult.pageContent).to.have.all.keys(['html', 'markdown', 'text']);
+        expect(testResult.pageContent.html).to.eql(mockDatasetItem.html);
+        expect(testResult.pageContent.markdown).to.equal(mockDatasetItem.markdown);
+        expect(testResult.pageContent.text).to.equal(mockDatasetItem.text);
+
+        scope.done();
+    });
+
+    if (TEST_USER_TOKEN) {
+        it('runs scrape single URL with correct output fields (E2E)', async () => {
+            const options = {
+                url: 'https://www.example.com',
+                crawlerType: 'cheerio',
+            };
+            const bundle = {
+                authData: {
+                    access_token: TEST_USER_TOKEN,
+                },
+                inputData: options,
+            };
+
+            const testResult = await performAndResume(appTester, App.creates.scrapeSingleUrl, bundle);
+            const scrapeSingleUrlRun = await apifyClient.run(testResult.id).get();
+            const datasetClient = await apifyClient.dataset(scrapeSingleUrlRun.defaultDatasetId);
+            const datasetItems = await datasetClient.listItems({ limit: 1 });
+            const kvsClient = await apifyClient.keyValueStore(scrapeSingleUrlRun.defaultKeyValueStoreId);
+            const input = await kvsClient.getRecord('INPUT');
+
+            const expectedKeys = [...Object.keys(SCRAPE_SINGLE_URL_RUN_SAMPLE), 'consoleUrl'];
+            expect(testResult).to.have.all.keys(expectedKeys);
+            expect(scrapeSingleUrlRun.status).to.be.eql('SUCCEEDED');
+            // Run scraper just one single URL
+            expect(datasetItems.items.length).to.be.eql(1);
+
+            // Correctly set type of crawler
+            expect(input.value.crawlerType).to.be.eql(options.crawlerType);
+
+            // Check that output fields are correct
+            const result = datasetItems.items[0];
+            expect(testResult.pageUrl).to.be.eql(result.url);
+            expect(testResult.pageContent).to.be.eql({
+                html: result.html,
+                markdown: result.markdown,
+                text: result.text,
+            });
+            expect(testResult.pageMetadata).to.be.eql(result.metadata);
+        }).timeout(60000);
+    }
+
+    it('performResume rejects a timed out run and points at the Run Actor action', async function () {
+        if (TEST_USER_TOKEN) this.skip();
+
+        const timedOutRun = getMockRun({
+            actId: 'aYG0l9s7dbB7j3gbS',
+            status: 'TIMED-OUT',
+            options: { timeoutSecs: SCRAPE_SINGLE_URL_RUN_TIMEOUT_SECS },
+        });
+        const bundle = {
+            authData: { access_token: randomString() },
+            inputData: { url: 'https://www.example.com', crawlerType: 'cheerio' },
+            outputData: { id: timedOutRun.id },
+        };
+
+        const scope = nock('https://api.apify.com');
+        scope.get(`/v2/actor-runs/${timedOutRun.id}`)
+            .reply(200, { data: timedOutRun });
+
+        let error;
+        try {
+            await appTester(App.creates.scrapeSingleUrl.operation.performResume, bundle);
+        } catch (err) {
+            error = err;
+        }
+
+        expect(error.message).to.include(`did not finish within the ${SCRAPE_SINGLE_URL_RUN_TIMEOUT_SECS}s timeout`);
+        expect(error.message).to.include('use the Run Actor action with "Run synchronously" set to "no"');
+        expect(error.message).to.not.include('set "Run synchronously" to "no" and process');
+
+        scope.done();
+    });
+
+    it('test step returns the scraped content without a callback', async function () {
+        if (TEST_USER_TOKEN) this.skip();
+
+        const options = {
+            url: 'https://www.example.com',
+            crawlerType: 'cheerio',
+        };
+        const bundle = {
+            authData: {
+                access_token: randomString(),
+            },
+            inputData: options,
+            meta: {
+                isLoadingSample: true,
+            },
+        };
+
+        const mockRun = getMockRun({ actId: 'aYG0l9s7dbB7j3gbS' });
+        const mockDatasetItem = {
+            url: options.url,
+            metadata: { title: 'Example Domain' },
+            html: '<html></html>',
+            markdown: '# Example Domain',
+            text: 'Example Domain',
+        };
+
+        const scope = nock('https://api.apify.com');
+        scope.post(`/v2/acts/${mockRun.actId}/runs`)
+            // No callback webhook, the step is not paused in the editor.
+            .query((query) => query.webhooks === undefined)
+            .reply(200, { data: { ...mockRun, status: 'RUNNING' } });
+        scope.get(`/v2/actor-runs/${mockRun.id}`)
+            .query((query) => !!query.waitForFinish)
+            .reply(200, { data: mockRun });
+        scope.get(`/v2/datasets/${mockRun.defaultDatasetId}/items`)
+            .query({ limit: 1, clean: true })
+            .reply(200, [mockDatasetItem]);
+        scope.get(`/v2/datasets/${mockRun.defaultDatasetId}/items`)
+            .query({ limit: 1, clean: true })
+            .reply(200, [mockDatasetItem]);
+        scope.get(`/v2/datasets/${mockRun.defaultDatasetId}`)
+            .reply(200, mockDatasetPublicUrl(mockRun.defaultDatasetId));
+
+        const testResult = await appTester(App.creates.scrapeSingleUrl.operation.perform, bundle);
+
+        expect(testResult.pageUrl).to.be.eql(options.url);
+        expect(testResult.pageContent.text).to.be.eql(mockDatasetItem.text);
+
+        scope.done();
+    }).timeout(60000);
+
+    it('test step surfaces the scrape diagnostic when a finished run has no content', async function () {
+        if (TEST_USER_TOKEN) this.skip();
+
+        const options = {
+            url: 'https://www.example.com',
+            crawlerType: 'cheerio',
+        };
+        const bundle = {
+            authData: {
+                access_token: randomString(),
+            },
+            inputData: options,
+            meta: {
+                isLoadingSample: true,
+            },
+        };
+
+        // The run is finished, so there is no more content coming and the empty-fields fallback must not kick in.
+        const mockRun = getMockRun({ actId: 'aYG0l9s7dbB7j3gbS', status: 'SUCCEEDED' });
+
+        const scope = nock('https://api.apify.com');
+        scope.post(`/v2/acts/${mockRun.actId}/runs`)
+            .query((query) => query.webhooks === undefined)
+            .reply(200, { data: { ...mockRun, status: 'RUNNING' } });
+        scope.get(`/v2/actor-runs/${mockRun.id}`)
+            .query((query) => !!query.waitForFinish)
+            .reply(200, { data: mockRun });
+        scope.get(`/v2/datasets/${mockRun.defaultDatasetId}/items`)
+            .query({ limit: 1, clean: true })
+            .reply(200, []);
+        scope.get(`/v2/datasets/${mockRun.defaultDatasetId}/items`)
+            .query({ limit: 1, clean: true })
+            .reply(200, []);
+        scope.get(`/v2/datasets/${mockRun.defaultDatasetId}`)
+            .reply(200, mockDatasetPublicUrl(mockRun.defaultDatasetId));
+
+        await expect(appTester(App.creates.scrapeSingleUrl.operation.perform, bundle))
+            .to.be.rejectedWith(/No content was scraped/);
+
+        scope.done();
+    }).timeout(60000);
+
+    it('throws if there are no data', async () => {
+        const options = {
+            url: 'https://www.zz-this-page-doesn-not-exists-xx.com',
+            crawlerType: 'cheerio',
+        };
+        const bundle = {
+            authData: {
+                access_token: TEST_USER_TOKEN,
+            },
+            inputData: options,
+        };
+
+        let scope;
+        if (!TEST_USER_TOKEN) {
+            scope = nock('https://api.apify.com');
+            scope.post('/v2/acts/aYG0l9s7dbB7j3gbS/runs', {
+                startUrls: [{ url: options.url }],
+                crawlerType: options.crawlerType,
+                maxCrawlDepth: 0,
+                maxCrawlPages: 1,
+                maxResults: 1,
+                proxyConfiguration: {
+                    useApifyProxy: true,
+                },
+                removeCookieWarnings: true,
+                saveHtml: true,
+                saveMarkdown: true,
+            })
+                .query((query) => query.memory === '1024'
+                    && query.timeout === `${SCRAPE_SINGLE_URL_RUN_TIMEOUT_SECS}`
+                    && !!query.webhooks)
+                .reply(200, { data: SCRAPE_SINGLE_URL_RUN_SAMPLE });
+            scope.get(`/v2/datasets/${SCRAPE_SINGLE_URL_RUN_SAMPLE.defaultDatasetId}/items`)
+                .query({ limit: 1, clean: true })
+                .reply(200, []);
+            scope.get(`/v2/datasets/${SCRAPE_SINGLE_URL_RUN_SAMPLE.defaultDatasetId}/items`)
+                .query({ limit: 1, clean: true })
+                .reply(200, []);
+
+            scope.get(`/v2/actor-runs/${SCRAPE_SINGLE_URL_RUN_SAMPLE.id}`)
+                .query(true)
+                .reply(200, { data: SCRAPE_SINGLE_URL_RUN_SAMPLE });
+            scope.get(`/v2/datasets/${SCRAPE_SINGLE_URL_RUN_SAMPLE.defaultDatasetId}`)
+                .reply(200, mockDatasetPublicUrl(SCRAPE_SINGLE_URL_RUN_SAMPLE.defaultDatasetId));
+        }
+
+        await expect(performAndResume(appTester, App.creates.scrapeSingleUrl, bundle)).to.be.rejectedWith(/No content was scraped/);
+        scope?.done();
+    }).timeout(120_000);
+});

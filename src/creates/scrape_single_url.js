@@ -1,0 +1,172 @@
+const _ = require('lodash');
+const {
+    APIFY_API_ENDPOINTS,
+    SCRAPE_SINGLE_URL_RUN_SAMPLE,
+    OMIT_ACTOR_RUN_FIELDS,
+    SCRAPE_SINGLE_URL_RUN_OUTPUT_FIELDS,
+    SCRAPE_SINGLE_URL_RUN_TIMEOUT_SECS,
+    ACTOR_RUN_TERMINAL_STATUSES,
+} = require('../consts');
+const { wrapRequestWithRetries, waitForRunToFinish, getRemainingTestStepWaitSecs } = require('../request_helpers');
+const { getDatasetItems, buildRunCallbackWebhookParam, getActorRunOnResume } = require('../apify_helpers');
+
+const WEBSITE_CONTENT_CRAWLER_ACTOR_ID = 'aYG0l9s7dbB7j3gbS';
+
+const buildScrapeResult = async (z, bundle, run, { allowUnfinished = false } = {}) => {
+    const { url, crawlerType } = bundle.inputData;
+
+    const { defaultDatasetId } = run;
+    // Attach Apify app URL to detail of run
+    run.detailsPageUrl = `https://console.apify.com/actors/${run.actId}/runs/${run.id}`;
+
+    if (defaultDatasetId) {
+        const datasetItems = await getDatasetItems(z, defaultDatasetId, bundle.authData.access_token, { limit: 1 }, run.actId, true);
+        if (!datasetItems.items || datasetItems.items.length === 0) {
+            // A test step returns empty fields, so they can still be mapped. A finished run has no more content
+            // coming, so it falls through to the diagnostic below instead.
+            if (allowUnfinished && !Object.keys(ACTOR_RUN_TERMINAL_STATUSES).includes(run.status)) {
+                return _.omit({
+                    ...run,
+                    pageUrl: url,
+                    pageMetadata: {},
+                    pageContent: { html: '', markdown: '', text: '' },
+                    warning: `The run has not scraped ${url} yet (run status: ${run.status}). `
+                        + `Test the whole Zap to get the page content, or check the run: ${run.detailsPageUrl}`,
+                }, OMIT_ACTOR_RUN_FIELDS);
+            }
+
+            const statusInfo = run.statusMessage
+                ? `Run status: ${run.status} (${run.statusMessage}).`
+                : `Run status: ${run.status}.`;
+            const jsRenderingCause = crawlerType === 'cheerio'
+                ? 'needs JavaScript rendering (try a headless browser crawler type instead of the Raw HTTP client)'
+                : 'needs JavaScript rendering';
+            throw new Error(
+                `No content was scraped from ${url}. ${statusInfo} `
+                + `Common causes: the page is protected by anti-bot measures, ${jsRenderingCause}, or requires login. `
+                + `See the run log for details: ${run.detailsPageUrl}#log`,
+            );
+        }
+        run.pageUrl = datasetItems.items[0].url;
+        run.pageMetadata = datasetItems.items[0].metadata;
+        run.pageContent = {
+            html: datasetItems.items[0].html,
+            markdown: datasetItems.items[0].markdown,
+            text: datasetItems.items[0].text,
+        };
+    }
+
+    // Omit fields, which are useless for Zapier users.
+    return _.omit(run, OMIT_ACTOR_RUN_FIELDS);
+};
+
+const runWebsiteContentCrawler = async (z, bundle) => {
+    const stepStartedAt = Date.now();
+    const { url, crawlerType } = bundle.inputData;
+
+    // We can use lower memory for Cheerio crawler, because it's not using browser.
+    const memory = crawlerType === 'cheerio' ? 1024 : 4096;
+
+    const input = {
+        startUrls: [{ url }],
+        crawlerType,
+        maxCrawlDepth: 0,
+        maxCrawlPages: 1,
+        maxResults: 1,
+        proxyConfiguration: {
+            useApifyProxy: true,
+        },
+        removeCookieWarnings: true,
+        saveHtml: true,
+        saveMarkdown: true,
+    };
+
+    const requestOpts = {
+        url: `${APIFY_API_ENDPOINTS.actors}/${WEBSITE_CONTENT_CRAWLER_ACTOR_ID}/runs`,
+        method: 'POST',
+        params: {
+            memory,
+            timeout: SCRAPE_SINGLE_URL_RUN_TIMEOUT_SECS,
+        },
+        headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify(input),
+    };
+
+    // The Zap editor cannot wait for the callback, so a test step waits for the content inline.
+    const isTestStep = !!bundle.meta?.isLoadingSample;
+
+    // Calling z.generateCallbackUrl() pauses the Zap step, performResume then finishes it once the run is done.
+    if (!isTestStep) requestOpts.params.webhooks = buildRunCallbackWebhookParam(z.generateCallbackUrl());
+
+    const { data: run } = await wrapRequestWithRetries(z.request, requestOpts);
+
+    if (!isTestStep) return _.omit(run, OMIT_ACTOR_RUN_FIELDS);
+
+    const waitedRun = await waitForRunToFinish(z.request, run.id, getRemainingTestStepWaitSecs(stepStartedAt));
+    return buildScrapeResult(z, bundle, waitedRun || run, { allowUnfinished: true });
+};
+
+const resumeWebsiteContentCrawler = async (z, bundle) => {
+    const run = await getActorRunOnResume(z, bundle);
+    return buildScrapeResult(z, bundle, run);
+};
+
+module.exports = {
+    key: 'scrapeSingleUrl',
+    noun: 'Scrape Single URL',
+    display: {
+        label: 'Scrape Single URL',
+        description: 'Runs a scraper on a website and returns its content as text, Markdown, and HTML. '
+            + 'Made for getting the content of a single page, e.g. for large language model (LLM) workflows.',
+        /**
+         * Deprecated in favour of the Web Fetch action. Removing it instead would break those Zaps and raise a
+         * publishing task that blocks promoting the integration.
+         */
+        hidden: true,
+    },
+    operation: {
+        inputFields: [
+            {
+                label: 'Note',
+                key: 'note',
+                type: 'copy',
+                // Copy fields only render Markdown, there is no warning style, so the emoji stands in for one.
+                helpText: '⚠️ **Deprecated: use the Web Fetch action instead.**',
+            },
+            {
+                label: 'URL',
+                helpText: 'The URL of the website to scrape.',
+                key: 'url',
+                required: true,
+                type: 'string',
+            },
+            {
+                label: 'Crawler type',
+                helpText: '- **Headless browser (Chrome+Playwright)**: for modern websites with anti-scraping protection and JavaScript rendering. '
+                    + 'It detects common blocking, such as CAPTCHAs, and retries blocked requests with new sessions. \n'
+                    + '- **Headless browser (stealthy Firefox+Playwright)**: a headless browser with anti-blocking measures. '
+                    + 'Try it if the website blocks the other options. \n'
+                    + '- **Raw HTTP client (Cheerio)** (default): fetches pages with plain HTTP requests. '
+                    + 'Faster and cheaper, but it does not work on every website.',
+                key: 'crawlerType',
+                required: true,
+                type: 'string',
+                choices: {
+                    'playwright:firefox': 'Headless browser (stealthy Firefox+Playwright) - '
+                        + 'Very reliable. Great for avoiding blocking, but it might be slow',
+                    'playwright:chrome': 'Headless browser (Chrome+Playwright) - Reliable, but might be slow',
+                    cheerio: 'Raw HTTP client (Cheerio) - Extremely fast, but cannot handle dynamic content',
+                },
+                default: 'cheerio',
+            },
+        ],
+
+        perform: runWebsiteContentCrawler,
+        performResume: resumeWebsiteContentCrawler,
+
+        sample: SCRAPE_SINGLE_URL_RUN_SAMPLE,
+        outputFields: SCRAPE_SINGLE_URL_RUN_OUTPUT_FIELDS,
+    },
+};

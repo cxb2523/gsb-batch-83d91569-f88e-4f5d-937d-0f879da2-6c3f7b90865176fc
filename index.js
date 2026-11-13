@@ -1,0 +1,87 @@
+const zapierCore = require('zapier-platform-core');
+const apifyApp = require('./package.json');
+const authentication = require('./src/authentication');
+const { parseDataApiObject, setApifyRequestHeaders, validateApiResponse } = require('./src/request_helpers');
+const taskRunFinishedTrigger = require('./src/triggers/task_run_finished');
+const tasksTrigger = require('./src/triggers/tasks');
+const actorRunFinishedTrigger = require('./src/triggers/actor_run_finished');
+const actorsTrigger = require('./src/triggers/actors');
+const actorsWithStoreTrigger = require('./src/triggers/actors_with_store');
+const getActorAdditionalFieldsTest = require('./src/triggers/actor_additional_fields');
+const getActorDatasetOutputFieldsTest = require('./src/triggers/actor_dataset_additional_output_fields');
+const taskRunCreate = require('./src/creates/task_run');
+const actorRunCreate = require('./src/creates/actor_run');
+const runActorAndFetchResultsCreate = require('./src/creates/run_actor_and_fetch_results');
+const scrapeSingleUrlCreate = require('./src/creates/scrape_single_url');
+const webFetchCreate = require('./src/creates/web_fetch');
+const setValueCreate = require('./src/creates/set_value');
+const abortActorRunCreate = require('./src/creates/abort_actor_run');
+const taskLastRunSearch = require('./src/searches/task_last_run');
+const actorLastRunSearch = require('./src/searches/actor_last_run');
+const getRunSearch = require('./src/searches/get_run');
+const getValueSearch = require('./src/searches/get_value');
+const fetchItemsSearch = require('./src/searches/fetch_items');
+const getActorSearch = require('./src/searches/get_actor');
+const searchStoreSearch = require('./src/searches/search_store');
+
+/**
+ * Apify APP definition
+  */
+const App = {
+    version: apifyApp.version,
+    platformVersion: zapierCore.version,
+
+    authentication,
+
+    beforeRequest: [
+        setApifyRequestHeaders,
+    ],
+
+    afterResponse: [
+        parseDataApiObject,
+        validateApiResponse,
+    ],
+
+    // If you want to define optional resources to simplify creation of triggers, searches, creates - do that here!
+    resources: {
+    },
+
+    // If you want your trigger to show up, you better include it here!
+    triggers: {
+        [taskRunFinishedTrigger.key]: taskRunFinishedTrigger,
+        [tasksTrigger.key]: tasksTrigger,
+        [actorRunFinishedTrigger.key]: actorRunFinishedTrigger,
+        [actorsTrigger.key]: actorsTrigger,
+        [getActorAdditionalFieldsTest.key]: getActorAdditionalFieldsTest,
+        [getActorDatasetOutputFieldsTest.key]: getActorDatasetOutputFieldsTest,
+        [actorsWithStoreTrigger.key]: actorsWithStoreTrigger,
+    },
+
+    hydrators: {
+        ...getValueSearch.hydrators,
+    },
+
+    // If you want your searches to show up, you better include it here!
+    searches: {
+        [taskLastRunSearch.key]: taskLastRunSearch,
+        [actorLastRunSearch.key]: actorLastRunSearch,
+        [getRunSearch.key]: getRunSearch,
+        [getValueSearch.perform.key]: getValueSearch.perform,
+        [fetchItemsSearch.key]: fetchItemsSearch,
+        [getActorSearch.key]: getActorSearch,
+        [searchStoreSearch.key]: searchStoreSearch,
+    },
+
+    // If you want your creates to show up, you better include it here!
+    creates: {
+        [taskRunCreate.key]: taskRunCreate,
+        [actorRunCreate.key]: actorRunCreate,
+        [runActorAndFetchResultsCreate.key]: runActorAndFetchResultsCreate,
+        [setValueCreate.key]: setValueCreate,
+        [scrapeSingleUrlCreate.key]: scrapeSingleUrlCreate,
+        [webFetchCreate.key]: webFetchCreate,
+        [abortActorRunCreate.key]: abortActorRunCreate,
+    },
+};
+
+module.exports = App;
