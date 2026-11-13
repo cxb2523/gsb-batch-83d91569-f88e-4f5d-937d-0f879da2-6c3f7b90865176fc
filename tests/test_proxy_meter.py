@@ -14,11 +14,13 @@ import argparse
 import asyncio
 import json
 import os
+import queue as queue_mod
 import shutil
 import socket
 import sys
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 
@@ -157,8 +159,14 @@ class Budget(unittest.TestCase):
         self.assertEqual(fired, [1], "the callback fires once")
         with self.assertRaises(proxy_meter.ProxyBudgetExceeded):
             meter.check()
-        self.assertEqual(meter.sidecar(), {"proxy_bytes": 1_000_006, "proxy_budget_bytes": 1_000_000,
-                                           "proxy_budget_exceeded": True})
+        # No page ever started here, so the bytes are reported as one
+        # unattributed entry rather than silently dropped from the ledger.
+        self.assertEqual(
+            meter.sidecar(),
+            {"proxy_bytes": 1_000_006, "proxy_budget_bytes": 1_000_000,
+             "proxy_budget_exceeded": True,
+             "proxy_pages": [{"page": None, "bytes": 1_000_006, "ok": None,
+                              "budget_exceeded": True}]})
         self.assertEqual(meter.summary_line(), "Proxy traffic: 1.0 MB of 1 MB budget")
 
     def test_zero_is_unlimited(self):
@@ -171,7 +179,7 @@ class Budget(unittest.TestCase):
         meter = proxy_meter.ProxyMeter(0.001, active=False)
         meter.add(10 ** 9)
         self.assertEqual(meter.sidecar(), {"proxy_bytes": None, "proxy_budget_bytes": None,
-                                           "proxy_budget_exceeded": False})
+                                           "proxy_budget_exceeded": False, "proxy_pages": None})
         self.assertFalse(meter.exceeded)
 
     def test_start_replaces_the_run_meter(self):
@@ -182,7 +190,331 @@ class Budget(unittest.TestCase):
         self.assertEqual(proxy_meter.current().budget_bytes, 10_000_000)
 
 
-class HttpClient(unittest.TestCase):
+class PageLedger(unittest.TestCase):
+    """The per-page traffic account written beside the run."""
+
+    def test_bytes_are_charged_to_the_page_they_were_spent_on(self):
+        meter = proxy_meter.ProxyMeter(0, active=True)
+        meter.begin_page(1)
+        meter.add(500)
+        meter.end_page(1, True)
+        meter.begin_page(2)
+        meter.add(300)
+        meter.add(200)
+        meter.end_page(2, False)
+        self.assertEqual(meter.ledger(), [
+            {"page": 1, "bytes": 500, "ok": True, "budget_exceeded": False},
+            {"page": 2, "bytes": 500, "ok": False, "budget_exceeded": False},
+        ])
+        self.assertEqual(sum(e["bytes"] for e in meter.ledger()), meter.bytes)
+
+    def test_the_page_that_spent_the_budget_is_marked_and_earlier_pages_are_not(self):
+        meter = proxy_meter.ProxyMeter(0.001, active=True)  # 1,000 bytes
+        meter.begin_page(1)
+        meter.add(600)          # page 1: under
+        meter.end_page(1, True)
+        meter.begin_page(2)
+        meter.add(600)          # page 2: over, and it is page 2's byte
+        self.assertFalse(meter.ledger()[0]["budget_exceeded"])
+        self.assertTrue(meter.ledger()[1]["budget_exceeded"])
+        # A page still loading when the budget trips is allowed to finish: its
+        # later bytes count, but it is NOT marked as the trigger.
+        meter.begin_page(3)
+        meter.add(400)
+        meter.end_page(3, True)
+        meter.end_page(2, True)
+        self.assertEqual([e["page"] for e in meter.ledger()], [1, 2, 3])
+        self.assertFalse(meter.ledger()[2]["budget_exceeded"])
+        self.assertEqual(meter.ledger()[1]["bytes"], 600)
+        self.assertEqual(sum(e["bytes"] for e in meter.ledger()), 1600)
+
+    def test_a_page_that_spends_nothing_is_still_listed(self):
+        meter = proxy_meter.ProxyMeter(10, active=True)
+        meter.begin_page(4)
+        meter.end_page(4, True)
+        self.assertEqual(meter.ledger(), [
+            {"page": 4, "bytes": 0, "ok": True, "budget_exceeded": False}])
+
+    def test_no_proxy_means_a_null_ledger_not_zeroes(self):
+        meter = proxy_meter.ProxyMeter(0.001, active=False)
+        meter.begin_page(1)
+        meter.add(10 ** 9)
+        meter.end_page(1, True)
+        self.assertIsNone(meter.ledger())
+        self.assertIsNone(meter.sidecar()["proxy_pages"])
+
+    def test_zero_budget_still_records_bytes_and_never_trips(self):
+        meter = proxy_meter.ProxyMeter(0, active=True)
+        for page in (1, 2):
+            meter.begin_page(page)
+            meter.add(5000)
+            meter.end_page(page, True)
+        self.assertFalse(meter.exceeded)
+        self.assertFalse(any(e["budget_exceeded"] for e in meter.ledger()))
+        self.assertEqual([e["bytes"] for e in meter.ledger()], [5000, 5000])
+
+    def test_concurrent_workers_keep_the_ledger_additive(self):
+        """Every worker opens pages on its own thread; whatever order the
+        bytes land, the entries add up to `proxy_bytes` EXACTLY — never more,
+        and never a page missing."""
+        meter = proxy_meter.ProxyMeter(0, active=True)
+        ids = list(range(2, 14))
+        work = queue_mod.Queue()
+        for n in ids:
+            work.put(n)
+        lock, spent = threading.Lock(), []
+
+        def worker():
+            while True:
+                try:
+                    page = work.get_nowait()
+                except queue_mod.Empty:
+                    return
+                meter.begin_page(page)
+                for _ in range(3):        # several requests per page
+                    meter.add(100)
+                meter.end_page(page, True)
+                with lock:
+                    spent.append(page)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        ledger = meter.ledger()
+        self.assertEqual(sorted(e["page"] for e in ledger), sorted(spent))
+        self.assertEqual(sum(e["bytes"] for e in ledger), meter.bytes)
+        self.assertEqual(meter.bytes, 3 * 100 * len(ids))
+        self.assertTrue(all(e["bytes"] == 300 for e in ledger))
+
+    def test_a_page_still_loading_keeps_its_bytes_but_is_not_the_trigger(self):
+        """A page that began before the budget tripped, and is still loading
+        when a sibling's byte crosses the line, finishes: its bytes are
+        charged to it and it is not marked `budget_exceeded`."""
+        meter = proxy_meter.ProxyMeter(0.001, active=True)  # 1,000 bytes
+        page2_crossed = threading.Event()
+
+        def slow_page():
+            meter.begin_page(1)
+            meter.add(400)              # 400
+            page2_crossed.wait(5)       # its last byte arrives AFTER page 2's
+            meter.add(400)              # 800 in total
+            meter.end_page(1, True)
+
+        def fast_page():
+            meter.begin_page(2)
+            meter.add(300)              # 700
+            meter.add(400)              # 1,100: THIS page crosses the budget
+            page2_crossed.set()
+            meter.end_page(2, True)
+
+        slow = threading.Thread(target=slow_page)
+        slow.start()
+        time.sleep(0.02)                # let page 1 begin first
+        fast = threading.Thread(target=fast_page)
+        fast.start()
+        slow.join(5)
+        fast.join(5)
+        ledger = {e["page"]: e for e in meter.ledger()}
+        self.assertEqual(ledger[1]["bytes"], 800, "the slow page kept its late byte")
+        self.assertFalse(ledger[1]["budget_exceeded"],
+                         "it began before the budget was spent")
+        self.assertTrue(ledger[2]["budget_exceeded"])
+        self.assertEqual(sum(e["bytes"] for e in ledger.values()), meter.bytes)
+
+    def test_unattributed_bytes_are_a_null_page_entry_not_page_one(self):
+        """The pre-check HEAD goes through the proxy before any page exists.
+        Its bytes belong to the run, not to a page, so they are reported as
+        one `page: null` entry — the pages' own figures stay honest and the
+        entries still sum to `proxy_bytes`."""
+        meter = proxy_meter.ProxyMeter(0.001, active=True)
+        meter.add(1100)  # the pre-check HEAD alone spends the 1,000-byte budget
+        self.assertTrue(meter.ledger()[0]["budget_exceeded"])
+        meter.begin_page(1)
+        meter.add(500)   # page 1's own request still uses the wire
+        meter.end_page(1, True)
+        ledger = meter.ledger()
+        self.assertEqual([e["page"] for e in ledger], [1, None])
+        self.assertEqual(ledger[0]["bytes"], 500)
+        self.assertEqual(ledger[1]["bytes"], 1100)
+        self.assertEqual(sum(e["bytes"] for e in ledger), meter.bytes)
+        self.assertFalse(ledger[0]["budget_exceeded"],
+                         "page 1 did not spend it; the run did, before page 1")
+        self.assertTrue(ledger[1]["budget_exceeded"])
+
+    def test_a_bound_loop_thread_charges_its_owner_s_page(self):
+        """pyppeteer reports CDP events on its own loop thread. The binding
+        makes those bytes land on the worker's page, not on page 1."""
+        meter = proxy_meter.ProxyMeter(0, active=True)
+        ready, go, done = threading.Event(), threading.Event(), threading.Event()
+        lent = {}
+
+        def loop_thread():
+            lent["ident"] = threading.get_ident()
+            ready.set()
+            go.wait(5)
+            for _ in range(3):
+                meter.add(100)          # the CDP event, on the loop's thread
+            done.set()
+
+        worker = threading.Thread(target=loop_thread)
+        worker.start()
+        ready.wait(5)
+        meter.bind_source(lent["ident"], threading.get_ident())
+        meter.begin_page(2)
+        meter.add(50)                   # a byte on the worker's own thread
+        go.set()
+        done.wait(5)
+        worker.join(5)
+        meter.end_page(2, True)
+        ledger = meter.ledger()
+        self.assertEqual(ledger[0]["page"], 2)
+        self.assertEqual(ledger[0]["bytes"], 350, "the loop's bytes land on page 2 too")
+        self.assertEqual(sum(e["bytes"] for e in ledger), meter.bytes)
+
+    def test_the_ledger_is_stable_when_read_twice(self):
+        meter = proxy_meter.ProxyMeter(0, active=True)
+        meter.add(300)  # no page: one null-owner entry
+        fake = argparse.Namespace()
+        for _ in range(2):
+            fake.first, fake.second = meter.sidecar(), meter.sidecar()
+        self.assertEqual(fake.first, fake.second)
+        self.assertEqual(fake.first["proxy_pages"],
+                         [{"page": None, "bytes": 300, "ok": None,
+                           "budget_exceeded": False}])
+        self.assertEqual(sum(e["bytes"] for e in fake.first["proxy_pages"]), meter.bytes)
+
+
+class RunLedger(unittest.TestCase):
+    """`page_flow.run_pages` end to end with a fake browser: the sidecar's
+    per-page account, the summary line and the exit code."""
+
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        import smoke_test
+        self.smoke = smoke_test
+
+    def tearDown(self):
+        proxy_meter.start(None, active=False)
+
+    def _run(self, answers, *, budget_mb, cost, pages=5, proxied=True):
+        return self.smoke._budget_run(answers, budget_mb=budget_mb, cost=cost,
+                                      pages=pages, proxied=proxied)
+
+    def test_a_spent_budget_names_the_trigger_and_the_pages_never_started(self):
+        # 1,000-byte budget, 600 bytes a page: over it on page 2.
+        rc, meta, attempt, rows, ops, out = self._run(
+            self.smoke._pages("srp_camry_p1", "srp_camry_p2", "srp_camry_p2",
+                              "srp_camry_p2", "srp_camry_p2"),
+            budget_mb=0.001, cost=600)
+        self.assertEqual(rc, 6)
+        self.assertEqual(meta["proxy_bytes"], 1200)
+        pages = meta["proxy_pages"]
+        self.assertEqual([p["page"] for p in pages], [1, 2])
+        self.assertEqual([p["bytes"] for p in pages], [600, 600])
+        self.assertEqual([p["ok"] for p in pages], [True, True])
+        self.assertEqual([p["budget_exceeded"] for p in pages], [False, True])
+        self.assertEqual(meta["pages_unattempted"], [3, 4, 5])
+        self.assertEqual(meta["pages_failed"], [])
+        self.assertEqual(sum(p["bytes"] for p in pages), meta["proxy_bytes"])
+        # The rows already read are kept, and the summary line is still there.
+        self.assertEqual(len(rows or []), 7)
+        self.assertEqual(out.count("Proxy traffic: 0.0 MB of 0.001 MB budget"), 1)
+
+    def test_a_failed_page_is_recorded_as_not_ok_with_its_bytes(self):
+        rc, meta, attempt, rows, ops, out = self._run(
+            {self.smoke.SEARCH: [(200, self.smoke.fx("refused_unavailable"), None)]},
+            budget_mb=0.001, cost=5000, pages=1)
+        self.assertEqual(rc, 5)  # no rows: exit 5, not 3, above a block
+        self.assertIsNone(meta)  # nothing written beside intact previous data
+        self.assertEqual(attempt["stop_reason"], proxy_budget_exceeded())
+        pages = attempt["proxy_pages"]
+        self.assertEqual([(p["page"], p["bytes"], p["ok"], p["budget_exceeded"])
+                          for p in pages], [(1, 5000, False, True)])
+        self.assertEqual(sum(p["bytes"] for p in pages), attempt["proxy_bytes"])
+
+    def test_no_proxy_leaves_the_ledger_null(self):
+        rc, meta, attempt, rows, ops, out = self._run(
+            self.smoke._pages("srp_camry_p1", "srp_camry_p2"), budget_mb=0.001,
+            cost=10 ** 9, pages=2, proxied=False)
+        self.assertEqual((rc, len(ops.gotos)), (0, 2))
+        self.assertIsNone(meta["proxy_pages"])
+        self.assertIsNone(meta["proxy_bytes"])
+
+    def test_zero_budget_records_bytes_and_does_not_stop(self):
+        rc, meta, attempt, rows, ops, out = self._run(
+            self.smoke._pages("srp_camry_p1", "srp_camry_p2"), budget_mb=0,
+            cost=5000, pages=2)
+        self.assertEqual(rc, 0)
+        self.assertEqual(meta["proxy_bytes"], 10000)
+        self.assertFalse(meta["proxy_budget_exceeded"])
+        self.assertEqual([(p["page"], p["bytes"], p["budget_exceeded"])
+                          for p in meta["proxy_pages"]],
+                         [(1, 5000, False), (2, 5000, False)])
+
+    def test_a_run_under_its_budget_has_a_full_account(self):
+        rc, meta, attempt, rows, ops, out = self._run(
+            self.smoke._pages("srp_camry_p1", "srp_camry_p2"), budget_mb=10,
+            cost=1000, pages=2)
+        self.assertEqual(rc, 0)
+        self.assertEqual([p["page"] for p in meta["proxy_pages"]], [1, 2])
+        self.assertTrue(all(p["ok"] for p in meta["proxy_pages"]))
+        self.assertEqual(sum(p["bytes"] for p in meta["proxy_pages"]),
+                         meta["proxy_bytes"])
+
+    def test_concurrent_workers_reconcile_with_the_sidecar_total(self):
+        """Four workers, real worker loops, a budget spent partway: the
+        ledger names each attempted page once, marks exactly one trigger, and
+        adds up to `proxy_bytes` exactly."""
+        import page_flow
+        import product_parser as P
+        answers = self.smoke._pages(*(["srp_camry_p1"] + ["srp_camry_p2"] * 11))
+
+        def run_concurrently(pages, currency):
+            work = queue_mod.Queue()
+            for n in pages:
+                work.put(n)
+            results, lock, exhausted = [], threading.Lock(), threading.Event()
+            args = types.SimpleNamespace(delay=0, retries=2, retry_delay=0, pages=12,
+                                         headless=False, proxy_block_retries=2,
+                                         dump_html=None, out=os.devnull)
+
+            def worker():
+                ops = self.smoke._MeteredOps(answers, 600)
+                page_flow.worker_loop(ops, args, P.Query(mode="listing"), work,
+                                      results, lock, exhausted, "w")
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(20)
+            left = []
+            while True:
+                try:
+                    left.append(work.get_nowait())
+                except queue_mod.Empty:
+                    break
+            return results, sorted(left), exhausted.is_set()
+
+        rc, meta, attempt, rows, ops, out = self.smoke._budget_run(
+            answers, budget_mb=0.003, cost=600, pages=12, concurrency=4,
+            run_concurrently=run_concurrently)
+        self.assertEqual(rc, 6)
+        pages = meta["proxy_pages"]
+        attempted = [p["page"] for p in pages]
+        self.assertEqual(len(attempted), len(set(attempted)), "one entry per page")
+        self.assertEqual(sorted(attempted), sorted(set(attempted)))
+        self.assertEqual(sum(p["bytes"] for p in pages), meta["proxy_bytes"])
+        triggers = [p for p in pages if p["budget_exceeded"]]
+        self.assertEqual(len(triggers), 1, pages)
+        # Every page is either attempted or named as never started.
+        planned = set(range(1, 13))
+        self.assertEqual(set(attempted) | set(meta["pages_unattempted"]), planned)
+
+
+def proxy_budget_exceeded():
+    return proxy_meter.STOP_REASON
     def test_requests_through_the_stub_proxy_matches_its_count(self):
         import requests
         proxy = StubProxy()

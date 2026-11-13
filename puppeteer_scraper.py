@@ -98,6 +98,13 @@ class _AsyncBridge:
                                         name="pyppeteer-loop")
         self._thread.start()
 
+    @property
+    def thread_ident(self):
+        """The event-loop thread's ident, for the proxy meter's per-page
+        ledger: pyppeteer's CDP events arrive on this thread, not on the
+        worker that opened the page."""
+        return self._thread.ident
+
     def _serve(self):
         asyncio.set_event_loop(self.loop)
         self.loop.set_exception_handler(self._on_loop_exception)
@@ -258,6 +265,11 @@ class _Ops:
             self.bridge.run(pyppeteer_block_media(self.page), timeout=30)
         if self.pool:
             # --proxy-budget-mb: count this page's traffic over its own CDP session.
+            # Its events arrive on the bridge's loop thread, so bind that
+            # thread to THIS worker before the first page is opened; the
+            # per-page ledger then charges each page to its own worker.
+            proxy_meter.current().bind_source(self.bridge.thread_ident,
+                                              threading.get_ident())
             self.bridge.run(proxy_meter.current().attach_pyppeteer(self.page), timeout=30)
         return self
 

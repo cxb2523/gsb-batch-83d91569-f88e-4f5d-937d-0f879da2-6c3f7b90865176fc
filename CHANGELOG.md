@@ -41,6 +41,17 @@ said so at the top of its release notes.
   `proxy_budget_exceeded` and, after a stop, `pages_unattempted`; a proxied
   run ends with one `Proxy traffic: X.X MB of Y MB budget` line. New flag
   `--proxy-budget-mb` (default 10).
+- A per-page traffic ledger in the sidecar (`proxy_pages`): one entry per
+  page that was attempted — `{"page", "bytes", "ok", "budget_exceeded"}` —
+  sorted by page number. It names the page whose traffic spent the budget
+  and whether each page came back with rows; pages never started stay in
+  `pages_unattempted`. The entries add up to `proxy_bytes` exactly whatever
+  the worker count (a byte that crossed while no page was loading, such as
+  the pre-check `HEAD`, is one entry with `"page": null` rather than being
+  blamed on a page), it is `null` with no local proxy rather than a list of
+  zeroes, and `--proxy-budget-mb 0` records the bytes without ever marking a
+  trigger. A page that had already begun loading when the budget was spent
+  may finish; it is charged its bytes but is not marked as the trigger.
 - CI only: the canary passes `--proxy-budget-mb 10` to both runs, writes
   `**run listing**` / `**run vehicle**: proxy traffic X.X MB of 10 MB` to
   the job summary, and fails with `::error::stopped: proxy budget 10 MB

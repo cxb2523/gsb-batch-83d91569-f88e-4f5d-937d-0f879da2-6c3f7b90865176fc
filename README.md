@@ -239,14 +239,27 @@ to the same exit), and produced identical rows for the same cars.
   A proxied run prints one line at the end, e.g. `Proxy traffic: 3.2 MB of
   10 MB budget`, and the sidecar records `proxy_bytes`, `proxy_budget_bytes`
   and `proxy_budget_exceeded` (`null` / `null` / `false` with no local
-  proxy), plus `pages_unattempted`. A proxied run that writes no rows
-  records them in `<out>.latest_attempt.meta.json`, leaving the data and
-  `<out>.meta.json` as they were. The count is an estimate of the tunnelled
-  payload: request line, headers and body sent, response headers and body as
-  received. TLS records, the `CONNECT` exchange, WebSocket frames and
-  Chrome's own background requests are not visible to it, so the proxy's
-  bill is a few per cent higher. 1 MB = 1,000,000 bytes. Playwright sums
-  `request.sizes()` of every finished or failed request; pyppeteer and
+  proxy), plus `pages_unattempted`. It also carries `proxy_pages`: one entry
+  per page that was **attempted**, `{"page", "bytes", "ok",
+  "budget_exceeded"}`, sorted by page number. That is the account a stopped
+  run needs — which page spent the traffic (`budget_exceeded`), what each
+  page cost, and which pages came back with rows (`ok`); the pages never
+  started are the separate `pages_unattempted` list. The entries always add
+  up to `proxy_bytes` exactly, whatever the worker count: a byte that
+  crossed while no page was loading (the pre-check `HEAD`, a browser's
+  start-up) is one extra entry with `"page": null`, rather than being
+  blamed on a page that did not send it. With no local proxy the ledger is
+  `null` rather than a list of zeroes, and `--proxy-budget-mb 0` records the
+  bytes without ever marking a trigger. A page that had already begun loading
+  when the budget was spent is allowed to finish: its bytes are counted, but
+  it is not the page marked as the trigger. A proxied run that writes no
+  rows records all of this in `<out>.latest_attempt.meta.json`, leaving the
+  data and `<out>.meta.json` as they were. The count is an estimate of the
+  tunnelled payload: request line, headers and body sent, response headers
+  and body as received. TLS records, the `CONNECT` exchange, WebSocket
+  frames and Chrome's own background requests are not visible to it, so the
+  proxy's bill is a few per cent higher. 1 MB = 1,000,000 bytes. Playwright
+  sums `request.sizes()` of every finished or failed request; pyppeteer and
   Selenium (from Chrome's performance log) read CDP
   `Network.loadingFinished.encodedDataLength` of every response that came
   over the network, plus each request's line, headers and body; the

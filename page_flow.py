@@ -358,11 +358,15 @@ class PageOutcome:
     # record for. All of them is `parser_failed`; some is counted.
     results_without_record: int = 0
     parser_failed: bool = False
+    # False when the run's --proxy-budget-mb was already spent before this
+    # page could be navigated. Such a page never started: it is named in
+    # `pages_unattempted`, not among the failed pages or the traffic ledger.
+    attempted: bool = True
 
     @property
     def ok(self) -> bool:
-        return (not self.load_failed and self.blocked_by is None
-                and not self.parser_failed)
+        return (self.attempted and not self.load_failed
+                and self.blocked_by is None and not self.parser_failed)
 
 
 # How full a column must be, across a RUN, before the run is reported as
@@ -471,8 +475,36 @@ def fetch_one_page(ops, args, pool, query: Query, page_num: int,
     """
     url = request_for(query, page_num)
     outcome = PageOutcome(page_num=page_num, url=url)
+    if proxy_meter.exceeded():
+        # --proxy-budget-mb was spent before this page could start (the
+        # pre-check HEAD, or a sibling worker). Nothing was navigated, so no
+        # ledger entry is opened and the page is not a FAILED page: it is one
+        # that never started, and the run reports it as `pages_unattempted`.
+        outcome.attempted = False
+        return outcome
+    # The per-page traffic ledger opens HERE, before the first navigation, so
+    # every byte this page spends is charged to it. The `finally` closes the
+    # entry whatever happens, and records whether it yielded rows — a page
+    # that raised is recorded as not ok, never as a success.
+    meter = proxy_meter.current()
+    meter.begin_page(page_num)
+    ok = False
+    try:
+        result = _fetch_one_page(ops, args, pool, query, page_num, outcome, mask,
+                                 currency_hint)
+        ok = result.ok
+        return result
+    finally:
+        meter.end_page(page_num, ok)
+
+
+def _fetch_one_page(ops, args, pool, query: Query, page_num: int,
+                    outcome: PageOutcome, mask: Callable[[str], str],
+                    currency_hint: Optional[str]) -> PageOutcome:
+    """`fetch_one_page`'s body, after the ledger entry is opened."""
     mode = query.mode
     expect_id = query.vehicle_ids[page_num - 1] if mode == "vehicle" else None
+    url = outcome.url
 
     has_pool = bool(pool and len(pool) > 1)
     block_retries = 0 if not RETRY_ON_BLOCKED else (
@@ -670,7 +702,7 @@ def finish(args, query: Query, outcomes: List[PageOutcome], stop_reason: str,
         rows.extend(fresh)
 
     ok_pages = [o for o in outcomes if o.ok]
-    failed_pages = sorted(o.page_num for o in outcomes if not o.ok)
+    failed_pages = sorted(o.page_num for o in outcomes if not o.ok and o.attempted)
     last_ok = max([o.page_num for o in ok_pages] or [1])
     coverage = field_coverage(rows, query.mode)
     below = fields_below_floor(coverage, query.mode)
@@ -855,9 +887,28 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
         if ops is not None:
             close_ops(ops)
     if proxy_meter.exceeded():
-        attempted = {o.page_num for o in outcomes}
-        unattempted = sorted(set(unattempted) | {n for n in rest if n not in attempted})
+        # Every page that was PLANNED but never asked for is named, so the
+        # operator can see how much of the run the budget cut off. "Asked for"
+        # means it has a ledger entry: a page that never got to start (page 1
+        # when the pre-check HEAD spent the budget, or a page a sibling worker
+        # never picked up) belongs in this list, not in the account.
+        started = {entry["page"] for entry in (proxy_meter.current().ledger() or [])
+                   if entry["page"] is not None}
+        planned = set(range(1, _planned_count(args, query, outcomes) + 1))
+        unattempted = sorted((set(unattempted) | planned) - started)
     return finish(args, query, outcomes, stop_reason, blocked, pool, unattempted)
+
+
+def _planned_count(args, query: Query, outcomes: List[PageOutcome]) -> int:
+    """The number of pages this run set out to fetch, for the budget stop's
+    list of pages that never started."""
+    if query.mode == "vehicle":
+        return len(query.vehicle_ids)
+    first = next((o for o in outcomes if o.page_num == 1), None)
+    available = getattr(first, "pages_available", None) if first is not None else None
+    if available is not None:
+        available = max(0, available - query.first_page + 1)
+    return pages_to_plan(args.pages, available)
 
 
 def worker_loop(ops, args, query: Query, work, results, results_lock,

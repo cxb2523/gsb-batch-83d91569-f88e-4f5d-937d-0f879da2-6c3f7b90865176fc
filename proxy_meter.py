@@ -30,6 +30,18 @@ running total goes past it, the engine stops fetching new pages, any request
 the browser still tries is aborted, the rows already gathered are kept, and
 the run ends with stop_reason `proxy_budget_exceeded` — exit 6 when it has
 rows, 5 when it has none. It never silently goes on.
+
+The run's sidecar also carries a per-page ledger (`proxy_pages`): for every
+page that was ATTEMPTED, the bytes it spent, whether it succeeded, and
+whether its traffic is what first took the run over the budget. Pages that
+were never started are listed separately (`pages_unattempted`, written by
+page_flow). This is what lets an operator see, after a stop, which page spent
+the budget and how much of the plan was never reached. Bytes that no page was
+loading for when they crossed (the pre-check `HEAD`, a browser's own
+start-up) are reported as one `page: null` entry, never blamed on a page that
+did not send them; either way the ledger always adds up to `proxy_bytes`
+exactly under concurrent workers. With no local proxy, the ledger is null:
+nothing was metered and no zeroes are invented.
 """
 
 from __future__ import annotations
@@ -46,7 +58,10 @@ from urllib.parse import urlsplit
 MB = 1_000_000
 DEFAULT_BUDGET_MB = 10.0
 STOP_REASON = "proxy_budget_exceeded"
-SIDECAR_KEYS = ("proxy_bytes", "proxy_budget_bytes", "proxy_budget_exceeded")
+# The sidecar keys `ProxyMeter.sidecar()` writes: the run's total, its cap,
+# whether the cap was spent, and the per-page account.
+SIDECAR_KEYS = ("proxy_bytes", "proxy_budget_bytes", "proxy_budget_exceeded",
+                "proxy_pages")
 
 
 class ProxyBudgetExceeded(RuntimeError):
@@ -72,7 +87,8 @@ def add_budget_argument(parser, *, env_var: Optional[str] = None) -> None:
         help="Stop once this many megabytes have gone through --proxy / --proxy-file (default %g; 0 = "
              "unlimited%s). The rows gathered so far are kept and the run exits 6 (5 with no rows), "
              "stop_reason proxy_budget_exceeded. The count is an estimate of the tunnelled payload "
-             "(TLS/CONNECT overhead not included). Not applied with --cdp-endpoint or with no proxy"
+             "(TLS/CONNECT overhead not included). The sidecar's proxy_pages names each page's bytes "
+             "and the page that spent the budget. Not applied with --cdp-endpoint or with no proxy"
              % (DEFAULT_BUDGET_MB, "; or set %s" % env_var if env_var else ""))
 
 
@@ -96,7 +112,14 @@ def _request_line_bytes(method: Optional[str], url: str) -> int:
 
 
 class ProxyMeter:
-    """A thread-safe running byte count with a budget."""
+    """A thread-safe running byte count with a budget, and a per-page ledger.
+
+    The ledger answers, after a run that stopped at the budget, the question
+    the operator actually has: which page spent the traffic, and which pages
+    never started. It is maintained under the same lock as the total, so the
+    entries can never add up to more than `proxy_bytes`, and it is ALWAYS
+    reconciled to `proxy_bytes` exactly (see `ledger`).
+    """
 
     def __init__(self, budget_mb: float = DEFAULT_BUDGET_MB, active: bool = False):
         self.active = bool(active)
@@ -107,6 +130,22 @@ class ProxyMeter:
         self._reported = False
         self._on_exceeded: list = []
         self._partial: dict = {}
+        # Per-page ledger. `_pages` is every ATTEMPTED page keyed by number;
+        # `_page[thread]` is the page that thread is loading right now.
+        # pyppeteer delivers its CDP events on its own event-loop thread, not
+        # the worker thread that opened the page, so `_sources[owner]` names
+        # those loop threads and their `_page` entry follows the owner's.
+        # `_unattributed` holds bytes with no page of their own (the pre-check
+        # HEAD, browser start-up); `ledger` reports them as one `page: null`
+        # entry, so it always adds up to `proxy_bytes`.
+        self._page: dict = {}
+        self._pages: dict = {}
+        self._sources: dict = {}
+        self._unattributed = 0
+        # Set when the byte that spent the budget belonged to no page (the
+        # pre-check HEAD, browser start-up): the `page: null` entry carries
+        # the flag, so no page is blamed for traffic it did not send.
+        self._trigger_unattributed = False
 
     # ------------------------------------------------------------- counting
     def add(self, n: Any) -> bool:
@@ -122,8 +161,27 @@ class ProxyMeter:
         fire = False
         with self._lock:
             self.bytes += n
-            if self.budget_bytes and self.bytes > self.budget_bytes and not self.exceeded:
+            page = self._page.get(threading.get_ident())
+            entry = self._pages.get(page) if page is not None else None
+            if entry is None:
+                # No page is loading on this thread/source right now: the
+                # pre-check HEAD, or a browser's own start-up. Held apart and
+                # reported as one `page: null` entry, so the ledger still adds
+                # up to `proxy_bytes` exactly.
+                self._unattributed += n
+            else:
+                entry["bytes"] += n
+            if (self.budget_bytes and self.bytes > self.budget_bytes
+                    and not self.exceeded):
                 self.exceeded = fire = True
+                # The page whose traffic put the total over the line. A page
+                # that began BEFORE it is not marked: it may finish, and is
+                # charged its bytes without the flag. Traffic with no page of
+                # its own (the pre-check HEAD) marks the run-level entry instead.
+                if entry is not None:
+                    entry["budget_exceeded"] = True
+                else:
+                    self._trigger_unattributed = True
         if fire:
             print("[!] Proxy budget of %s exceeded (%.1f MB so far): no new requests; the rows gathered so far "
                   "are kept (stop_reason %s). Raise it with --proxy-budget-mb (0 = unlimited)."
@@ -151,6 +209,92 @@ class ProxyMeter:
         if self.exceeded:
             raise ProxyBudgetExceeded(STOP_REASON)
 
+    # ------------------------------------------------------------- page ledger
+    def bind_source(self, source: int, owner: int) -> None:
+        """Attribute bytes counted on the `source` thread to the page that the
+        `owner` thread is loading. pyppeteer delivers its CDP events on its
+        own event-loop thread, so without this a concurrent pyppeteer run
+        would charge every page to whichever worker's loop arrived first."""
+        if not self.active or source is None or owner is None:
+            return
+        source, owner = int(source), int(owner)
+        if source == owner:
+            return
+        with self._lock:
+            self._sources.setdefault(owner, set()).add(source)
+            page = self._page.get(owner)
+            if page is not None:
+                self._page[source] = page
+
+    def begin_page(self, page_num: Any) -> None:
+        """Attribute the bytes counted on this thread to `page_num` from now
+        on. Called by page_flow just before a page's first navigation.
+        A page that spends no bytes still appears in the ledger: an attempted
+        page is an attempted page."""
+        if not self.active:
+            return
+        page_num = int(page_num)
+        with self._lock:
+            ident = threading.get_ident()
+            self._page[ident] = page_num
+            for source in self._sources.get(ident, ()):
+                self._page[source] = page_num
+            self._ensure_page_locked(page_num)
+
+    def end_page(self, page_num: Any, ok: bool) -> None:
+        """Record whether the page yielded its rows. The thread KEEPS the
+        page it was loading: a browser can report a request that was in
+        flight when the page loop moved on, and those late bytes belong to
+        the page that caused them, not to the next one. `begin_page` replaces
+        the binding when the same thread starts another page."""
+        if not self.active:
+            return
+        page_num = int(page_num)
+        with self._lock:
+            self._ensure_page_locked(page_num)["ok"] = bool(ok)
+
+    def _ensure_page_locked(self, page_num: int) -> dict:
+        entry = self._pages.get(page_num)
+        if entry is None:
+            entry = self._pages[page_num] = {"bytes": 0, "budget_exceeded": False,
+                                             "ok": None}
+        return entry
+
+    def _unattributed_row_locked(self) -> Optional[dict]:
+        """The bytes no page was loading for when they crossed: the pre-check
+        `HEAD`, a browser's start-up. They belong to the RUN, not to a page,
+        so they are reported as ONE `page: null` entry rather than being
+        blamed on a page that did not spend them. That keeps the ledger's sum
+        equal to `proxy_bytes` (nothing is lost) while leaving each page's
+        own figure honest."""
+        if not self._unattributed:
+            return None
+        return {"page": None, "bytes": self._unattributed, "ok": None,
+                "budget_exceeded": self._trigger_unattributed}
+
+    def ledger(self) -> Optional[list]:
+        """The per-page ledger, or null when no local proxy was metered.
+
+        One entry per ATTEMPTED page, sorted by page number: `page`, `bytes`
+        spent, `ok` (whether the page yielded its rows; null until its outcome
+        was recorded) and `budget_exceeded` (whether THIS page's traffic is
+        what first took the run over the budget). Pages never started are not
+        here — page_flow lists them as `pages_unattempted`. The bytes add up
+        to `proxy_bytes` exactly, however many workers were accumulating: a
+        byte that crossed while no page was loading (the pre-check `HEAD`, a
+        browser's start-up) is one extra entry with `page: null`, so nothing
+        is lost and no page is charged for it. Reading the ledger does not
+        mutate it, so repeated writes agree.
+        """
+        if not self.active:
+            return None
+        with self._lock:
+            rows = [{"page": n, **self._pages[n]} for n in sorted(self._pages)]
+            row = self._unattributed_row_locked()
+            if row is not None:
+                rows.append(row)
+            return rows
+
     # ------------------------------------------------------------- reporting
     def budget_text(self) -> str:
         return "%g MB" % (self.budget_bytes / MB) if self.budget_bytes else "no (unlimited)"
@@ -159,11 +303,13 @@ class ProxyMeter:
         return "Proxy traffic: %.1f MB of %s budget" % (self.bytes / MB, self.budget_text())
 
     def sidecar(self) -> dict:
-        """The three sidecar keys. null when no local proxy was metered."""
+        """The sidecar keys. null when no local proxy was metered — and the
+        per-page ledger is null too rather than a list of zeroes."""
         return {
             "proxy_bytes": self.bytes if self.active else None,
             "proxy_budget_bytes": (self.budget_bytes or None) if self.active else None,
             "proxy_budget_exceeded": bool(self.exceeded),
+            "proxy_pages": self.ledger(),
         }
 
     def report(self) -> None:
@@ -295,7 +441,13 @@ class ProxyMeter:
 
     async def attach_pyppeteer(self, page) -> None:
         """Count a pyppeteer page's traffic over its own CDP session; once
-        the budget is spent, block every further URL in that page."""
+        the budget is spent, block every further URL in that page.
+
+        The CDP events arrive on the event loop's thread, while `begin_page`
+        is called on the worker's thread. The loop is therefore bound to
+        whoever is running this coroutine (the worker), so each page's bytes
+        are charged to that page and not to whichever worker arrived first.
+        """
         if not self.active:
             return
         client = await page.target.createCDPSession()

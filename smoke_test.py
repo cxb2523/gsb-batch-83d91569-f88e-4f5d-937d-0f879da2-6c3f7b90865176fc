@@ -2198,7 +2198,8 @@ class _MeteredOps(_FakeOps):
         return super().goto(url)
 
 
-def _budget_run(answers, *, budget_mb, cost, pages=5, proxied=True, concurrency=1, run_concurrently=None):
+def _budget_run(answers, *, budget_mb, cost, pages=5, proxied=True, concurrency=1,
+                run_concurrently=None, precheck=None):
     """run_pages through a (never contacted) proxy pool, the pre-check stubbed out."""
     import contextlib
     import io
@@ -2208,7 +2209,7 @@ def _budget_run(answers, *, budget_mb, cost, pages=5, proxied=True, concurrency=
     from proxy_pool import ProxyPool
     pool = ProxyPool(["http://127.0.0.1:1"], rotate="per-run") if proxied else None
     real = proxy_pool.precheck_proxy
-    proxy_pool.precheck_proxy = lambda *a, **k: None
+    proxy_pool.precheck_proxy = precheck or (lambda *a, **k: None)
     out = io.StringIO()
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2258,6 +2259,184 @@ def check_proxy_budget_stops_the_page_loop_and_keeps_the_rows():
           meta and (meta.get("pages_unattempted"), meta["pages_failed"]), ([3, 4, 5], []))
     equal("budget: ...one 'Proxy traffic' line", out.count("Proxy traffic: 0.0 MB of 0.001 MB budget"), 1)
     equal("budget: ...and no attempt sidecar beside written rows", attempt, None)
+
+
+def check_proxy_budget_leaves_a_per_page_account():
+    """The sidecar's `proxy_pages`: which page spent the budget, what each
+    attempted page cost, and how much of the plan was never started."""
+    rc, meta, attempt, rows, ops, out = _budget_run(
+        _pages("srp_camry_p1", "srp_camry_p2", "srp_camry_p2", "srp_camry_p2", "srp_camry_p2"),
+        budget_mb=0.001, cost=600)
+    pages = meta and meta["proxy_pages"]
+    equal("ledger: one entry per attempted page, by page number",
+          [p and p["page"] for p in pages or []], [1, 2])
+    equal("ledger: each page's own bytes", [p["bytes"] for p in pages or []], [600, 600])
+    equal("ledger: which page succeeded", [p["ok"] for p in pages or []], [True, True])
+    equal("ledger: only the page that spent the budget is marked",
+          [p["budget_exceeded"] for p in pages or []], [False, True])
+    equal("ledger: the entries add up to proxy_bytes exactly",
+          sum(p["bytes"] for p in pages or []), meta["proxy_bytes"])
+    equal("ledger: the pages never started stay a separate list",
+          meta.get("pages_unattempted"), [3, 4, 5])
+
+    # No local proxy: null, not a list of zeroes.
+    rc, meta, attempt, rows, ops, out = _budget_run(
+        _pages("srp_camry_p1", "srp_camry_p2"), budget_mb=0.001, cost=10 ** 9,
+        pages=2, proxied=False)
+    equal("ledger: with no local proxy it is null", meta and meta["proxy_pages"], None)
+
+    # --proxy-budget-mb 0: bytes recorded, nothing marked, nothing stopped.
+    rc, meta, attempt, rows, ops, out = _budget_run(
+        _pages("srp_camry_p1", "srp_camry_p2"), budget_mb=0, cost=5000, pages=2)
+    equal("ledger: budget 0 records bytes without a trigger",
+          (rc, meta and [(p["page"], p["bytes"], p["budget_exceeded"])
+                         for p in meta["proxy_pages"]]),
+          (0, [(1, 5000, False), (2, 5000, False)]))
+
+    # Page 1 begins under the budget; page 2's byte spends it; page 3 then
+    # begins and spends its own later byte. Only page 2 is the trigger, and
+    # each page keeps its own bytes.
+    import page_flow
+    import proxy_meter
+    meter = proxy_meter.ProxyMeter(0.001, active=True)
+    meter.begin_page(1)
+    meter.add(600)
+    meter.begin_page(2)       # began before the budget was spent
+    meter.add(600)            # this byte spends it: page 2 is the trigger
+    meter.begin_page(3)       # begins after: its own bytes are still counted
+    meter.add(100)
+    meter.end_page(1, True)
+    meter.end_page(2, True)
+    meter.end_page(3, True)
+    pages = meter.ledger()
+    equal("ledger: only the page whose byte spent the budget is marked",
+          [p["budget_exceeded"] for p in pages], [False, True, False])
+    equal("ledger: ...and each page keeps its own bytes",
+          [p["bytes"] for p in pages], [600, 600, 100])
+    equal("ledger: ...the entries still add up", sum(p["bytes"] for p in pages), meter.bytes)
+
+
+def check_a_budget_spent_before_page_one_still_has_an_account():
+    """The pre-check HEAD can spend the budget before any browser starts.
+    It is a `page: null` entry (the run spent it, not page 1), and every
+    page is named as never started."""
+    import page_flow
+    import proxy_meter
+    rc, meta, attempt, rows, ops, out = _budget_run(
+        _pages("srp_camry_p1", "srp_camry_p2"), budget_mb=0.001, cost=5000,
+        pages=1)
+    equal("ledger: a page 1 that spent the budget and still yielded rows",
+          (rc, meta and [(p["page"], p["ok"], p["budget_exceeded"])
+                         for p in meta["proxy_pages"]]),
+          (6, [(1, True, True)]))
+    equal("ledger: ...and pages 2+ were never planned, so never listed",
+          meta.get("pages_unattempted"), None)
+
+    # Charge the pre-check HEAD from inside the stubbed pre-check: no page
+    # has started, so the bytes belong to the run.
+    def spending_precheck(*a, **k):
+        proxy_meter.current().add(5000)
+        return None
+
+    rc, meta, attempt, rows, ops, out = _budget_run(
+        _pages("srp_camry_p1", "srp_camry_p2"), budget_mb=0.001, cost=600,
+        pages=3, precheck=spending_precheck)
+    pages = attempt and attempt["proxy_pages"]
+    equal("ledger: the pre-check's bytes are a page:null entry, not page 1's",
+          [(p["page"], p["bytes"], p["budget_exceeded"]) for p in pages or []],
+          [(None, 5000, True)])
+    equal("ledger: ...so no page was attempted",
+          attempt and (ops.gotos, attempt["pages_unattempted"]), ([], [1, 2, 3]))
+    equal("ledger: ...and the entries still add up",
+          sum(p["bytes"] for p in pages or []), attempt["proxy_bytes"])
+
+
+def check_a_page_in_flight_when_the_budget_is_spent_is_charged_but_not_the_trigger():
+    """Two pages begin before the budget trips; the byte that spends it is
+    charged to page 2, and page 1 — still loading — finishes and is charged
+    its own bytes without the flag."""
+    import page_flow
+    import proxy_meter
+    import types
+
+    class Ops:
+        """Page 1 loads a large script AFTER page 2's byte has spent the
+        budget, so its late bytes must land on page 1, not page 2."""
+        pool, dump_html, headless = None, None, False
+
+        def __init__(self, answers):
+            self.answers, self.text, self.gotos = answers, "", []
+
+        def goto(self, url):
+            meter = proxy_meter.current()
+            self.gotos.append(url)
+            status, text, final = self.answers.get(url, [(200, "", None)])[0]
+            self.text = text
+            if len(self.gotos) == 1:
+                meter.add(600)          # page 1, under
+                self._late = True
+            else:
+                meter.add(600)          # page 2: total 1200 > the 1,000 budget
+            return status, final or url
+
+        def document_text(self):
+            if getattr(self, "_late", False):
+                self._late = False
+                proxy_meter.current().add(100)   # page 1's late request
+            return self.text
+
+        def wait_ms(self, ms): pass
+        def solve_captcha(self): return False
+        def relaunch(self): pass
+        def proxy_failure(self, text): return ""
+        def close(self): pass
+
+    answers = {SEARCH: [(200, fx("srp_camry_p1"), None)],
+               SEARCH + "?page=2": [(200, fx("srp_camry_p2"), None)]}
+    ops = Ops(answers)
+    meter = proxy_meter.start(0.001, active=True)
+    for page_num in (1, 2):
+        page_flow.fetch_one_page(ops, types.SimpleNamespace(
+            retries=1, retry_delay=0, pages=2, proxy_block_retries=0,
+            headless=False, out=os.devnull, dump_html=None), None, _q(), page_num)
+    pages = meter.ledger()
+    proxy_meter.start(None, active=False)
+    equal("ledger: two pages, by number", [p["page"] for p in pages], [1, 2])
+    equal("ledger: the page whose byte spent the budget is the trigger",
+          [p["budget_exceeded"] for p in pages], [False, True])
+    equal("ledger: ...the late byte still lands on the page that caused it",
+          [p["bytes"] for p in pages], [700, 600])
+    equal("ledger: ...and the entries add up", sum(p["bytes"] for p in pages), meter.bytes)
+
+
+def check_the_per_page_ledger_is_charged_by_fetch_one_page():
+    """`fetch_one_page` opens and closes a ledger entry, so a run using the
+    real page loop (not a stub) still accounts for every page it tried."""
+    import page_flow
+    import proxy_meter
+    src = _src("page_flow")
+    """`fetch_one_page` opens and closes a ledger entry, so a run using the
+    real page loop (not a stub) still accounts for every page it tried."""
+    import page_flow
+    import proxy_meter
+    src = _src("page_flow")
+    check("ledger: fetch_one_page opens the entry before the page's first byte",
+          "meter.begin_page(page_num)" in src
+          and src.index("meter.begin_page(page_num)") < src.index("_fetch_one_page(ops, args, pool, query, page_num"))
+    check("ledger: ...and closes it in a finally, with whether it yielded rows",
+          "finally:\n        meter.end_page(page_num, ok)" in src)
+
+    real = page_flow.fetch_one_page
+    answers = _pages("srp_camry_p1", "srp_camry_p2")
+    try:
+        rc, meta, attempt, rows, ops, out = _budget_run(answers, budget_mb=10,
+                                                        cost=1000, pages=2)
+    finally:
+        page_flow.fetch_one_page = real
+    equal("ledger: a real-loop run lists every page it fetched",
+          [p["page"] for p in meta["proxy_pages"]], [1, 2])
+    equal("ledger: ...with its outcome", [p["ok"] for p in meta["proxy_pages"]],
+          [True, True])
 
 
 def check_proxy_budget_with_no_rows_is_exit_5_above_a_block():
@@ -2378,7 +2557,8 @@ def check_proxy_budget_flag():
 def check_proxy_meter_wiring_per_engine():
     import proxy_meter
     check("meter: pyppeteer counts a proxied local page over its own CDP session",
-          "if self.pool:\n            # --proxy-budget-mb: count this page's traffic over its own CDP session.\n"
+          "proxy_meter.current().bind_source(self.bridge.thread_ident,\n"
+          "                                              threading.get_ident())\n"
           "            self.bridge.run(proxy_meter.current().attach_pyppeteer(self.page)" in _src("puppeteer_scraper"))
     check("meter: selenium turns the performance log on and polls it after each navigation",
           "selenium_logging_prefs(options)" in _src("selenium_scraper")
