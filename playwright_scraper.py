@@ -186,6 +186,22 @@ class PageOutcome:
     unobtained: Optional[str] = None
     # Paced retries of a page turn that never came back (0 or 1).
     throttle_retries: int = 0
+    # The pagination-audit evidence gathered while fetching THIS page. The
+    # audit survives even when the page is popped out of the result list (a
+    # throttled turn), so it is kept on the outcome at fetch time and copied
+    # into the run's separate `pagination` log afterwards — it cannot be
+    # reconstructed from the outcomes the run chose to keep.
+    # How the page was reached: page 1 has an address, every later page is
+    # the result of pressing the site's own button.
+    reached_by: Optional[str] = None
+    # /graphql HTTP 429 responses observed during this page's turn/load.
+    # None means "not measurable" (this engine does measure, so it is an int
+    # here; the field stays Optional for parity with the other two engines).
+    graphql_429: Optional[int] = None
+    # Whether the first card's link changed across the turn, and what the
+    # first card link was afterwards. None when no grid existed to read.
+    first_card_changed: Optional[bool] = None
+    first_card_href: Optional[str] = None
 
     @property
     def ok(self) -> bool:
@@ -355,6 +371,24 @@ def _min_matches(args, html: str = "") -> int:
 
 def _classify(page, html: str, status=None) -> str:
     return page_flow.classify(html, status, page.url)
+
+
+def _audit(outcome) -> "page_flow.PageTurnRecord":
+    """Build this outcome's pagination-audit record and log it.
+
+    One place so every return path of `_fetch_one_page` records the same
+    fields. The record is the durable copy: a throttled outcome is popped out
+    of the run's result list, but its record stays in the pagination log.
+    """
+    record = page_flow.turn_record_from_outcome(
+        outcome,
+        reached_by=outcome.reached_by or page_flow.REACHED_BY_ADDRESS,
+        graphql_429=outcome.graphql_429,
+        throttle_retries=outcome.throttle_retries,
+        first_card_changed=outcome.first_card_changed,
+        first_card_href=outcome.first_card_href)
+    logger.info("Pagination audit: %s", page_flow.summarize_turn_record(record))
+    return record
 
 
 def _same_url(a: str, b: str) -> bool:
@@ -881,6 +915,10 @@ def _fetch_one_page(session, args, pool, page_num: int, url: Optional[str]) -> P
     exactly the bug _BrowserSession exists to prevent.
     """
     outcome = PageOutcome(page_num=page_num, url=url or session.page.url)
+    # The audit's first fact: page 1 is the only page this site gives an
+    # address to; pages 2..N are reached only by pressing its button.
+    outcome.reached_by = (page_flow.REACHED_BY_ADDRESS if url is not None
+                          else page_flow.REACHED_BY_BUTTON)
 
     has_pool = bool(pool and len(pool) > 1)
     # `RETRY_ON_BLOCKED` is CONSULTED, not merely documented — a policy
@@ -908,6 +946,11 @@ def _fetch_one_page(session, args, pool, page_num: int, url: Optional[str]) -> P
 
         if url is not None:
             logger.info("Fetching page %d/%d: %s", page_num, args.pages, url)
+            # Baseline for the page-1 /graphql 429 count: the same session
+            # counter the button branch deltas against, so a first page that
+            # is rate limited or challenged still reports how many 429s it
+            # saw rather than an unearned zero.
+            throttled_before = _graphql_throttled(session)
             for attempt in range(1, args.retries + 1):
                 proxy_meter.check(args)
                 try:
@@ -939,6 +982,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: Optional[str]) -> P
                         page_num, args.pages, page_num)
             proxy_meter.check(args)
             throttled_before = _graphql_throttled(session)
+            href_before = _first_card_href(session.page)
             # One paced retry of a turn that never came back, in this same
             # browser session (see page_flow.advance_with_throttle_retry).
             turn, outcome.throttle_retries = page_flow.advance_with_throttle_retry(
@@ -949,10 +993,23 @@ def _fetch_one_page(session, args, pool, page_num: int, url: Optional[str]) -> P
                 args.throttle_wait_seconds,
                 lambda: proxy_meter.check(args),
                 throttled=lambda: _graphql_throttled(session) - throttled_before)
+            # The per-page audit: how many /graphql 429s this turn took and
+            # whether the first card's link actually changed. Counted here,
+            # at the turn, because the counter is a session-wide running
+            # total that later pages would otherwise fold into their own
+            # numbers.
+            outcome.graphql_429 = (_graphql_throttled(session)
+                                   - throttled_before)
+            href_after = _first_card_href(session.page)
+            outcome.first_card_href = href_after
+            if href_before is not None or href_after is not None:
+                outcome.first_card_changed = page_flow.card_link_changed(
+                    href_before, href_after)
             if turn == page_flow.NO_BUTTON:
                 # The listing genuinely ran out. A complete answer.
                 outcome.state = "exhausted"
                 outcome.final_url = session.page.url
+                _audit(outcome)
                 return outcome
             if turn == page_flow.NO_TURNOVER:
                 # Pressed, and the grid never came back. On this site that is
@@ -962,7 +1019,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: Optional[str]) -> P
                 # container and zero cards. Reporting this as the end of the
                 # listing would make a throttled run say "complete" while
                 # holding one page of six, so it is a FAILURE here.
-                throttled = _graphql_throttled(session) - throttled_before
+                throttled = outcome.graphql_429
                 outcome.state = "no_turnover"
                 outcome.load_failed = True
                 outcome.final_url = session.page.url
@@ -979,6 +1036,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: Optional[str]) -> P
                     " on both attempts" if outcome.throttle_retries else "",
                     f" — {throttled} /graphql response(s) were HTTP 429"
                     if throttled else "", args.delay)
+                _audit(outcome)
                 return outcome
 
         if exit_failed and has_pool and block_attempt < block_retries:
@@ -1090,9 +1148,18 @@ def _fetch_one_page(session, args, pool, page_num: int, url: Optional[str]) -> P
     if load_failed:
         logger.error("Gave up loading %s after %d attempt(s).", url, args.retries)
         outcome.load_failed = True
+        # A navigation timeout still happened on a page the run accounted
+        # for; the audit says so rather than letting the page vanish.
+        if outcome.graphql_429 is None and url is not None:
+            outcome.graphql_429 = _graphql_throttled(session) - throttled_before
+        _audit(outcome)
         return outcome
 
     outcome.state = state
+    if outcome.graphql_429 is None and url is not None:
+        # Address navigation (page 1): count whatever /graphql 429s the load
+        # and readiness wait accumulated. Button pages set this at the turn.
+        outcome.graphql_429 = _graphql_throttled(session) - throttled_before
 
     if page_flow.counts_as_blocked(state):
         debug_html = f"{args.out}_page{page_num}_debug.html"
@@ -1120,6 +1187,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: Optional[str]) -> P
             "no-response" if not html
             else f"http_{status}" if status and status != 429 else "bot-or-not")
         outcome.final_url = session.page.url
+        _audit(outcome)
         return outcome
 
     if page_flow.should_parse(state):
@@ -1244,16 +1312,39 @@ def _fetch_one_page(session, args, pool, page_num: int, url: Optional[str]) -> P
 
     outcome.products = products
     outcome.final_url = session.page.url
+    # The first card the arrived page actually shows. For a button page the
+    # before/after comparison was taken at the turn; for an address page there
+    # is no predecessor, so first_card_changed stays None.
+    if outcome.first_card_href is None:
+        outcome.first_card_href = _first_card_href(session.page)
+    _audit(outcome)
     return outcome
 
 
 def scrape(args) -> int:
     outcomes: List[PageOutcome] = []
+    # The separate pagination audit. This list is deliberately independent of
+    # `outcomes`: a throttled or exhausted turn is popped out of `outcomes`
+    # (it must not count as a fetched page), yet its record — page number,
+    # 429s, retries, conclusion — must remain on disk and in the sidecar.
+    # Nothing here is removed, so the audit answers "what happened at every
+    # page the run accounted for" even when the result list cannot.
+    turn_records: List[page_flow.PageTurnRecord] = []
     seen_keys = set()
     throttle_retries = 0
     blocked = False
     dedupe_key = "sku"
-    stop_reason = "single_page_mode" if args.mode == "property" else "completed"
+    stop_reason = ("single_page_mode" if args.mode == "property"
+                   else page_flow.STOP_COMPLETED)
+
+    def _record(oc: PageOutcome) -> page_flow.PageTurnRecord:
+        return page_flow.turn_record_from_outcome(
+            oc,
+            reached_by=oc.reached_by or page_flow.REACHED_BY_ADDRESS,
+            graphql_429=oc.graphql_429,
+            throttle_retries=oc.throttle_retries,
+            first_card_changed=oc.first_card_changed,
+            first_card_href=oc.first_card_href)
 
     pool = proxy_pool_from_args(args)
     if pool and args.cdp_endpoint:
@@ -1289,6 +1380,10 @@ def scrape(args) -> int:
         try:
             first = _fetch_one_page(session, args, pool, 1, args.url)
             outcomes.append(first)
+            # Page 1's record is kept however the run ends — including a
+            # first-page block or challenge, which is why this is a separate
+            # list and not derived from the kept outcomes.
+            turn_records.append(_record(first))
 
             if not first.ok:
                 stop_reason = page_flow.failure_stop_reason(first)
@@ -1306,7 +1401,7 @@ def scrape(args) -> int:
                             "deeper walk is a bill rather than a dataset — "
                             "narrow the search with the site's own filters "
                             "instead.", PAGE_CAP)
-                        stop_reason = "page_cap"
+                        stop_reason = page_flow.STOP_PAGE_CAP
                         break
                     # A new exit per page is what actually spreads a run's
                     # volume — but it cannot be done here, and saying so is
@@ -1328,19 +1423,23 @@ def scrape(args) -> int:
                     outcome = _fetch_one_page(session, args, pool, page_num, None)
                     throttle_retries += outcome.throttle_retries
                     outcomes.append(outcome)
+                    # The record is retained BEFORE the two pop() branches:
+                    # those outcomes leave the result list, but the audit of
+                    # the attempted turn must not.
+                    turn_records.append(_record(outcome))
 
                     if outcome.state == "exhausted":
                         logger.info("The site offered no further page after "
                                     "page %d — treating that as the end of "
                                     "the listing.", page_num - 1)
-                        stop_reason = "pagination_exhausted"
+                        stop_reason = page_flow.STOP_PAGINATION_EXHAUSTED
                         outcomes.pop()  # nothing was fetched; do not count it
                         break
                     if outcome.state == "no_turnover":
                         # Deliberately NOT "pagination_exhausted", which is a
                         # COMPLETE stop reason: a throttled turn is a partial
                         # run, not a finished one.
-                        stop_reason = "next_page_throttled"
+                        stop_reason = page_flow.STOP_NEXT_PAGE_THROTTLED
                         outcomes.pop()
                         break
                     if not outcome.ok:
@@ -1363,7 +1462,7 @@ def scrape(args) -> int:
                         logger.info("Page %d added no rows not already seen — "
                                     "treating that as the end of the "
                                     "listing.", page_num)
-                        stop_reason = "no_new_products"
+                        stop_reason = page_flow.STOP_NO_NEW_PRODUCTS
                         break
         except proxy_meter.ProxyBudgetExceeded as e:
             logger.error("Stopping: %s. The pages already gathered are "
@@ -1427,9 +1526,10 @@ def scrape(args) -> int:
             # healthy page reaches its stated 50 of 50 every time, so a gap
             # is abnormal rather than routine (blocked != empty !=
             # partial).
-            if stop_reason in ("completed", "pagination_exhausted",
-                               "no_new_products"):
-                stop_reason = "cards_missing"
+            if stop_reason in (page_flow.STOP_COMPLETED,
+                               page_flow.STOP_PAGINATION_EXHAUSTED,
+                               page_flow.STOP_NO_NEW_PRODUCTS):
+                stop_reason = page_flow.STOP_CARDS_MISSING
         if total_available:
             logger.info("This search holds %s%d propert(ies); this run took "
                         "%d (%.1f%%).", "at least " if total_is_floor else "",
@@ -1438,6 +1538,15 @@ def scrape(args) -> int:
 
     ok_pages = [o for o in outcomes if o.ok]
     failed_pages = [o.page_num for o in outcomes if not o.ok]
+    # Pages whose turn never produced content were popped out of `outcomes`,
+    # so they are added back to the failed-page list from the audit: the
+    # sidecar's pages_failed must name every page number that did not yield
+    # data, whether or not its outcome object survived. A no_button record is
+    # excluded — a vanished button is the site's own end-of-listing, a
+    # complete stop rather than a failed page.
+    audited_failed = [r.page for r in turn_records
+                      if r.conclusion in page_flow.UNOBTAINED_TURNS]
+    failed_pages = sorted(set(failed_pages) | set(audited_failed))
     final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
                  if ok_pages else args.url)
 
@@ -1450,17 +1559,32 @@ def scrape(args) -> int:
         cards_missing = {o.page_num: o.gap for o in outcomes if o.gap}
         unsettled = sorted(n for n, s in scrolls.items()
                            if s and not s.get("settled"))
+        known_429 = [r.graphql_429 for r in turn_records
+                     if r.graphql_429 is not None]
         extra = {"scroll": scrolls, "page_counters": counters,
                  "cards_missing": cards_missing,
                  "results_total": total_available,
                  "results_total_is_floor": total_is_floor,
                  "pages_still_growing": unsettled,
-                 "throttle_retries": throttle_retries}
+                 "throttle_retries": throttle_retries,
+                 # The per-page paper trail: one record per page the run
+                 # accounted for, INCLUDING turns that returned no content.
+                 # It is the JSON the CSV sidecar shares and a consumer
+                 # branches on; a throttled run is never complete as long as
+                 # one of these records is unobtained.
+                 "pagination": [r.to_dict() for r in turn_records],
+                 # Sum of the /graphql 429s that were observable. Null only
+                 # when no engine in the run can count them (Selenium).
+                 "graphql_429_total": (sum(known_429) if known_429 else None)}
         if unsettled:
             logger.warning(
                 "Page(s) %s were still filling when the scroll budget ran "
                 "out, so their row counts are floors rather than the "
                 "listing.", ", ".join(str(n) for n in unsettled))
+        logger.info("Pagination audit (%d page record(s)):", len(turn_records))
+        for record in turn_records:
+            logger.info("  %s", page_flow.summarize_turn_record(record))
+        logger.info("Run stop reason: %s", stop_reason)
 
     extra = captcha_fields(args, extra)
     extra = session_fields(pool, extra)

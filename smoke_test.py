@@ -50,6 +50,7 @@ import os
 import re
 import sys
 import tempfile
+import types
 from dataclasses import asdict, fields, replace
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -962,13 +963,99 @@ def test_throttle_is_not_completion():
                 "pagination_exhausted" in COMPLETE_STOP_REASONS)
     ok &= check("no_new_products IS complete",
                 "no_new_products" in COMPLETE_STOP_REASONS)
-    # And the engines must actually use those names.
+    # And the engines must actually use those names. The canonical strings now
+    # live as page_flow.STOP_* constants, so the engines reference the
+    # constants rather than re-typing the literals; the check asserts they use
+    # the shared symbol (a renamed or dropped constant would fail to import)
+    # and that the constant still carries the contracted string value.
+    ok &= check("the stop-reason constants keep their contracted strings",
+                (page_flow.STOP_NEXT_PAGE_THROTTLED,
+                 page_flow.STOP_CARDS_MISSING,
+                 page_flow.STOP_PAGINATION_EXHAUSTED,
+                 page_flow.STOP_PAGE_CAP,
+                 page_flow.STOP_COMPLETED)
+                == ("next_page_throttled", "cards_missing",
+                    "pagination_exhausted", "page_cap", "completed"))
     for engine in ENGINES:
         src = open(os.path.join(REPO_ROOT, f"{engine}.py"), encoding="utf-8").read()
-        ok &= check(f"{engine} reports next_page_throttled",
-                    '"next_page_throttled"' in src)
-        ok &= check(f"{engine} downgrades a card gap to cards_missing",
-                    '"cards_missing"' in src)
+        ok &= check(f"{engine} reports next_page_throttled via the shared "
+                    f"constant",
+                    "STOP_NEXT_PAGE_THROTTLED" in src)
+        ok &= check(f"{engine} downgrades a card gap to cards_missing via the "
+                    f"shared constant",
+                    "STOP_CARDS_MISSING" in src)
+    return ok
+
+
+def test_turn_record_mapping():
+    group("PageTurnRecord: outcome -> audit conclusion, and link comparison")
+    import types
+    ok = True
+
+    def outcome(**kw):
+        base = dict(page_num=2, url="u", state="content", blocked_by=None,
+                    unobtained=None, load_failed=False, products=[object()],
+                    throttle_retries=0)
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    def record(oc):
+        return page_flow.turn_record_from_outcome(
+            oc, reached_by=page_flow.REACHED_BY_BUTTON, graphql_429=3,
+            throttle_retries=oc.throttle_retries, first_card_changed=True,
+            first_card_href="/pdp/lo/9")
+
+    ok &= check("a content page with rows is obtained",
+                record(outcome()).conclusion == "obtained"
+                and record(outcome()).obtained is True)
+    ok &= check("an empty answer is obtained with zero rows (a real answer)",
+                record(outcome(state="empty", products=[])).conclusion
+                == "empty"
+                and record(outcome(state="empty", products=[])).obtained is True)
+    ok &= check("an exhausted (no-button) outcome maps to no_button",
+                record(outcome(state="exhausted", products=[])).conclusion
+                == "no_button")
+    ok &= check("a no_turnover outcome maps to no_turnover and is unobtained",
+                record(outcome(state="no_turnover", products=[],
+                               load_failed=True)).conclusion == "no_turnover"
+                and record(outcome(state="no_turnover", products=[])).obtained
+                is False)
+    blocked = record(outcome(state="blocked", products=[],
+                             blocked_by="datadome-challenge"))
+    ok &= check("a blocked outcome maps to blocked with the vendor as detail",
+                blocked.conclusion == "blocked" and blocked.obtained is False
+                and blocked.detail == "datadome-challenge")
+    not_obt = record(outcome(state="shell", products=[],
+                             unobtained="served_without_results"))
+    ok &= check("an unobtained served page maps to not_obtained",
+                not_obt.conclusion == "not_obtained"
+                and not_obt.detail == "served_without_results")
+
+    # The record serialises to a plain dict and survives JSON round-tripping.
+    d = record(outcome()).to_dict()
+    ok &= check("the record is JSON-serialisable with the required fields",
+                set(d) >= {"page", "reached_by", "conclusion", "obtained",
+                           "graphql_429", "throttle_retry",
+                           "first_card_changed", "first_card_href", "rows",
+                           "detail"}
+                and json.loads(json.dumps(d))["graphql_429"] == 3)
+
+    # Tracking noise must not masquerade as a changed first card.
+    ok &= check("the same card with fresh tracking params is NOT a change",
+                page_flow.card_link_changed(
+                    "/pdp/lo/9?pwa_ts=1", "/pdp/lo/9?pwa_ts=2") is False)
+    ok &= check("different cards ARE a change",
+                page_flow.card_link_changed("/pdp/lo/9", "/pdp/lo/10")
+                is True)
+    ok &= check("two missing links cannot be a change",
+                page_flow.card_link_changed(None, None) is False
+                and page_flow.card_link_changed("/pdp/lo/9", None) is False)
+
+    # no_button is a complete signal; the other unobtained conclusions are not.
+    ok &= check("no_button is excluded from UNOBTAINED_TURNS",
+                "no_button" not in page_flow.UNOBTAINED_TURNS
+                and {"no_turnover", "blocked", "not_obtained"}
+                <= set(page_flow.UNOBTAINED_TURNS))
     return ok
 
 
@@ -1082,6 +1169,65 @@ def test_writers_and_finish_run():
                     meta["cards_missing"] == {"2": 10})
         ok &= check("extra cannot overwrite a run field",
                     meta["status"] == "partial")
+
+        group("The pagination audit decides completeness, not just the reason")
+        # A throttled turn must never read complete even if some engine handed
+        # in a complete-sounding stop reason: the unobtained audit record is
+        # the stronger evidence and wins.
+        out = os.path.join(tmp, "audit-complete-reason")
+        throttled_extra = {"pagination": [
+            {"page": 1, "reached_by": "address_navigation",
+             "conclusion": "obtained", "obtained": True, "rows": 2},
+            {"page": 2, "reached_by": "button_press",
+             "conclusion": "no_turnover", "obtained": False,
+             "graphql_429": 4, "throttle_retry": True,
+             "first_card_changed": False, "rows": 0}]}
+        code = finish_run(rows, out, "json", False, blocked=False,
+                          stop_reason="completed", pages_requested=3,
+                          pages_completed=1, pages_failed=[], start_url="u",
+                          final_url="u", extra=throttled_extra)
+        ameta = json.load(open(out + ".meta.json"))
+        ok &= check("an unobtained audit record forces partial even with a "
+                    "completed reason",
+                    code == EXIT_PARTIAL and ameta["status"] == "partial")
+        # A benign no_button record (the site ran out) does NOT block
+        # completeness: it is an end-of-listing signal, not a failed page.
+        out2 = os.path.join(tmp, "audit-no-button")
+        exhausted_extra = {"pagination": [
+            {"page": 1, "reached_by": "address_navigation",
+             "conclusion": "obtained", "obtained": True, "rows": 2},
+            {"page": 2, "reached_by": "button_press",
+             "conclusion": "no_button", "obtained": False,
+             "graphql_429": 0, "throttle_retry": False,
+             "first_card_changed": False, "rows": 0}]}
+        code = finish_run(rows, out2, "json", False, blocked=False,
+                          stop_reason="pagination_exhausted",
+                          pages_requested=3, pages_completed=1,
+                          pages_failed=[], start_url="u", final_url="u",
+                          extra=exhausted_extra)
+        bmeta = json.load(open(out2 + ".meta.json"))
+        ok &= check("a no_button record still allows a complete exhausted run",
+                    code == 0 and bmeta["status"] == "complete")
+        # A zero-row throttled run leaves its audit in the ATTEMPT sidecar so
+        # "rate limited" is still distinguishable from "empty catalogue". With
+        # no rows at all the exit is EXIT_FETCH_FAILED (5), not the partial 6
+        # (which by contract means some rows were gathered); what matters is
+        # that it is never exit 4 (an empty catalogue) and the audit survives.
+        out3 = os.path.join(tmp, "audit-zero-rows")
+        code = finish_run([], out3, "json", False, blocked=False,
+                          stop_reason="next_page_throttled",
+                          pages_requested=2, pages_completed=0,
+                          pages_failed=[1], start_url="u", final_url="u",
+                          extra=throttled_extra)
+        zero_meta = (json.load(open(out3 + ".latest_attempt.meta.json"))
+                     if os.path.exists(out3 + ".latest_attempt.meta.json")
+                     else {})
+        ok &= check("a zero-row throttled run exits fetch-failed (5), never "
+                    "empty (4), and keeps its audit in the attempt sidecar",
+                    code == EXIT_API_ERROR and code != EXIT_NO_PRODUCTS
+                    and not os.path.exists(out3 + ".meta.json")
+                    and zero_meta.get("status") == "failed"
+                    and len(zero_meta.get("pagination", [])) == 2)
 
     group("Merging and dedupe")
     seen = set()
@@ -2132,6 +2278,19 @@ class _FakePage:
 
     def execute_script(self, *a, **k):
         return None
+
+    # The pagination audit reads the first card's link at the end of every
+    # page fetch. A fake page with no grid answers like an empty one: no
+    # element and zero matches. The tests that need a real link patch
+    # _first_card_href itself.
+    def query_selector(self, *a, **k):
+        return None
+
+    def query_selector_all(self, *a, **k):
+        return []
+
+    def find_elements(self, *a, **k):       # selenium driver
+        return []
 
     def reload(self, *a, **k):
         return None
@@ -4115,6 +4274,573 @@ def test_throttle_retry():
 
 
 # ---------------------------------------------------------------------------
+# The per-page pagination audit, end to end, on self-made HTML and responses
+# ---------------------------------------------------------------------------
+# Everything here is built locally — no real site, no credentials. The HTML is
+# hand-written against the parser's OWN selectors (data-stid cards, the
+# pagination counter, the next button) and the "network" is a counter that
+# stands in for POST /graphql answering HTTP 429, so the three required
+# walks — two healthy pages, a throttled second page, and a vanished button —
+# are fully deterministic and offline.
+_PAGINATION_URL = ("https://www.vrbo.com/search?destination=Testtown"
+                   "&startDate=2026-12-01&endDate=2026-12-03")
+
+
+def _listing_html(page_num: int, skus, *, first_index: int, last_index: int,
+                  total: int, with_button: bool) -> str:
+    """A minimal but REAL listing page: cards the production parser reads,
+    the site's own counter, and optionally its next button."""
+    cards = []
+    for position, sku in enumerate(skus, start=1):
+        cards.append(
+            f'<div data-stid="lodging-card-responsive">'
+            f'<a data-stid="open-product-information" '
+            f'href="/pdp/lo/{sku}?pwa_ts=123"></a>'
+            f'<h3 class="uitk-heading-5">Test property {sku}</h3>'
+            f'<div data-stid="product-price-summary"><div>$100</div></div>'
+            f'</div>')
+    button = ('<button data-stid="next-button" type="button">Next</button>'
+              if with_button else "")
+    return (
+        '<html><head><script>{"currency":"USD"}</script></head><body>'
+        '<div class="scrollable-result-section">'
+        f'<div data-stid="pagination-navigation">{first_index} - {last_index} '
+        f'of {total}+</div>'
+        + "".join(cards) + button +
+        '</div></body></html>')
+
+
+# A self-made /graphql refusal, modelled on the measured body. It never hits
+# a network: the fake browser increments a counter when its site "serves" it.
+GRAPHQL_429_SAMPLE = {
+    "status": 429,
+    "body": ('{"error":"Too Many Requests","message":"Provisioned request '
+             'rate has been exceeded"}'),
+}
+
+
+class _FakeListingPage:
+    """The DOM of a button-paginated listing, driven without a browser.
+
+    `turn_on` is the set of 1-based press numbers whose /graphql answer
+    "arrives" (the grid turns over); every other press is the measured
+    throttle — a 429 is counted and the first card does NOT change. A press
+    when `button` is false reports no next page at all. `page1_html` is what
+    an address navigation (page 1) returns.
+    """
+
+    def __init__(self, page1_html, *, turn_on=(), button=True,
+                 graphql_429_per_failed_turn=2):
+        self.url = _PAGINATION_URL
+        self._page1_html = page1_html
+        self.turn_on = set(turn_on)
+        self.button = button
+        self._429_per_failed = graphql_429_per_failed_turn
+        self.presses = 0
+        self.graphql_429 = 0
+        self.current_html = page1_html
+        self.navigations = 0
+        # Playwright's real page emits a "response" event per HTTP response;
+        # _watch_graphql subscribes to count the /graphql 429s. The fake page
+        # keeps the listener and replays a synthetic 429 response per failed
+        # turn, so the engine's OWN counting path is exercised, not bypassed.
+        self._response_listeners = []
+
+    def on(self, event, handler=None):
+        if event == "response" and handler is not None:
+            self._response_listeners.append(handler)
+
+    def _emit_graphql_429(self):
+        response = types.SimpleNamespace(
+            url="https://www.vrbo.com/graphql", status=429)
+        for handler in list(self._response_listeners):
+            handler(response)
+
+    # -- the address path (page 1) --------------------------------------
+    def goto(self, url, *a, **k):
+        self.navigations += 1
+        self.current_html = self._page1_html
+        return _FakeResponse(200)
+
+    def get(self, url):                       # selenium driver.get
+        self.navigations += 1
+        self.current_html = self._page1_html
+
+    def content(self):
+        return self.current_html
+
+    @property
+    def page_source(self):
+        return self.current_html
+
+    # -- the button path (pages 2..N) -----------------------------------
+    def _do_press(self):
+        if not self.button:
+            return False
+        self.presses += 1
+        if self.presses in self.turn_on:
+            # A healthy GraphQL answer: page 2's grid, a different first card.
+            self.current_html = _listing_html(
+                2, [201, 202], first_index=51, last_index=52, total=100,
+                with_button=False)
+        else:
+            # The measured throttle: the POST answers 429 and the grid stays
+            # on page 1's cards.
+            self.graphql_429 += self._429_per_failed
+            for _ in range(self._429_per_failed):
+                self._emit_graphql_429()
+        return True
+
+    def click(self, *a, **k):
+        return self._do_press()
+
+    # -- driver-shaped primitives the engines call ----------------------
+    def query_selector(self, selector):
+        return self._element(selector)
+
+    def querySelector(self, selector):              # pyppeteer camel-case
+        return self._element(selector)
+
+    def query_selector_all(self, selector):
+        return self._elements(selector)
+
+    def querySelectorAll(self, selector):          # pyppeteer camel-case
+        return self._elements(selector)
+
+    def find_elements(self, by=None, selector=None):
+        return self._elements(selector)
+
+    def _elements(self, selector):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(self.current_html, "html.parser")
+        return [_FakeElement(str(el), self) for el in soup.select(selector)]
+
+    def _element(self, selector):
+        els = self._elements(selector)
+        if not els:
+            return None
+        if "next-button" in selector:
+            return _FakeButton(self)
+        return els[0]
+
+    def evaluate(self, *a, **k):
+        # pyppeteer drives first-card reads and next-presses through
+        # evaluate() with a JS body plus a selector argument; Selenium uses
+        # current_url for location. Emulate the handful of operations the
+        # pagination path needs, against the parsed hand-made HTML, rather than
+        # answering every evaluate with None (which made pyppeteer's turn
+        # never register a click or a changed first card).
+        if a and isinstance(a[0], str):
+            script = a[0]
+            selector = a[1] if len(a) > 1 else None
+            if "location.href" in script:
+                return self.url
+            if selector and "el.click()" in script:
+                # A next-button press: only succeeds when the button exists.
+                if self._element(selector) is not None:
+                    self._do_press()
+                    return True
+                return False
+            if selector and "getAttribute('href')" in script:
+                el = self._element(selector)
+                return el.get_attribute("href") if el is not None else None
+        return None
+
+    def execute_script(self, *a, **k):
+        return None
+
+    # Selenium reads the live URL off the driver.
+    @property
+    def current_url(self):
+        return self.url
+
+    def wait_for_timeout(self, ms):
+        return None
+
+    def reload(self, *a, **k):
+        return None
+
+    def refresh(self):
+        return None
+
+    def screenshot(self, *a, **k):
+        return None
+
+    def save_screenshot(self, *a, **k):
+        return None
+
+    # The DataDome/challenge helpers enumerate frames and cookies; on a
+    # blocked-page test there are none, and empty answers keep those paths
+    # inert without any real browser.
+    @property
+    def frames(self):
+        return []
+
+    def new_cdp_session(self, *a, **k):
+        return _FakeCDPSession()
+
+
+class _FakeCDPSession:
+    def send(self, *a, **k):
+        return None
+
+    def on(self, *a, **k):
+        return None
+
+
+class _FakeElement:
+    def __init__(self, html_fragment, page=None):
+        from bs4 import BeautifulSoup
+        self._node = BeautifulSoup(html_fragment, "html.parser").find()
+        self._page = page
+
+    def get_attribute(self, name):
+        if self._node is None:
+            return None
+        value = self._node.get(name)
+        # Selenium's get_attribute returns the RESOLVED absolute DOM property
+        # for href; the engines strip tracking before comparing, so a bare
+        # path is resolved against the listing's own origin here too.
+        if name == "href" and value and value.startswith("/"):
+            return "https://www.vrbo.com" + value
+        return value
+
+    # Selenium shape
+    get_attribute_ = get_attribute
+
+    @property
+    def text(self):
+        return self._node.get_text() if self._node else ""
+
+    # Selenium calls .click() directly on the element found for the button.
+    def click(self, *a, **k):
+        if self._page is not None:
+            return self._page._do_press()
+        return None
+
+
+class _FakeButton(_FakeElement):
+    def __init__(self, fake_page):
+        super().__init__('<button data-stid="next-button"></button>',
+                         fake_page)
+        self._page = fake_page
+
+    def scroll_into_view_if_needed(self, *a, **k):
+        return None
+
+    def click(self, *a, **k):
+        return self._page._do_press()
+
+
+class _FakeListingSession:
+    """Enough of each engine's session object to run the real scrape()."""
+
+    def __init__(self, fake_page, pool=None):
+        self.page = self.driver = fake_page
+        self.remote = False
+        self.relaunches = 0
+        self.pool = pool
+        self.args = None
+        # Playwright's real _BrowserSession.open() calls _watch_graphql to
+        # zero this and subscribe to response events; the harness mocks open()
+        # away, so the engine attaches its own listener after construction
+        # (see _run_audit_scrape). The attribute exists up front either way.
+        self._graphql_429 = 0
+        self.bridge = type("Bridge", (),
+                           {"run": staticmethod(lambda x: x)})()
+
+    def open(self):
+        return self
+
+    def relaunch(self):
+        self.relaunches += 1
+
+    def close(self):
+        return None
+
+    def open(self):
+        return self
+
+    def relaunch(self):
+        self.relaunches += 1
+
+    def close(self):
+        return None
+
+
+def _run_audit_scrape(engine_mod, tmp, scenario, *, pages=2, wait_seconds=0.0):
+    """Drive an engine's real scrape() over the fake listing.
+
+    Returns (rc, meta, fake_page). `wait_seconds` 0 disables the paced retry,
+    matching the "pressed, no grid, give up now" path; the throttle-RETRIED
+    case uses a short positive value.
+    """
+    import contextlib as _ctx
+    from unittest import mock
+    name = engine_mod.__name__
+    page1 = _listing_html(1, [101, 102], first_index=1, last_index=2,
+                          total=100, with_button=scenario["button_page1"])
+    fake_page = _FakeListingPage(
+        page1, turn_on=scenario.get("turn_on", ()),
+        button=scenario.get("button_after", True),
+        graphql_429_per_failed_turn=scenario.get("429_per_turn", 2))
+    session = _FakeListingSession(fake_page)
+    # Reproduce _BrowserSession.open()'s GraphQL watcher for the Playwright
+    # engine: attach its real response listener to the fake page, so its own
+    # counting path turns synthetic 429 events into the session counter.
+    if "playwright" in name and hasattr(engine_mod, "_watch_graphql"):
+        engine_mod._watch_graphql(session)
+
+    if "playwright" in name:
+        sessions = ["sync_playwright", "_BrowserSession"]
+    elif "puppeteer" in name:
+        sessions = ["_AsyncBridge", "_Session"]
+    else:
+        sessions = ["_Session"]
+
+    argv = [name, "--url", _PAGINATION_URL, "--out",
+            os.path.join(tmp, "audit"), "--pages", str(pages),
+            "--format", "both", "--delay", "0",
+            "--throttle-wait-seconds", str(wait_seconds),
+            "--retries", "1"]
+    with mock.patch.object(sys, "argv", argv), \
+            mock.patch.object(env_config, "load_env", lambda *a, **k: None):
+        args = engine_mod.parse_args()
+
+    def fake_session_open(*a, **k):
+        return session
+
+    with _ctx.ExitStack() as stack:
+        for attr in sessions:
+            stack.enter_context(mock.patch.object(engine_mod, attr))
+        # Every engine names its session class; point construction at ours.
+        # The engine calls `SessionCls(...).open()`, so the patched class must
+        # RETURN an object whose .open() is our fake session — patching .open
+        # on the class alone leaves `SessionCls(...)` a MagicMock.
+        if "playwright" in name:
+            stack.enter_context(mock.patch.object(
+                engine_mod._BrowserSession, "return_value", session))
+        else:
+            stack.enter_context(mock.patch.object(
+                engine_mod._Session, "return_value", session))
+        # No real proxy pre-check or meter traffic.
+        stack.enter_context(mock.patch.object(
+            engine_mod.proxy_check, "gate", lambda *a, **k: None))
+        stack.enter_context(mock.patch.object(
+            engine_mod.proxy_meter, "start",
+            lambda *a, **k: mock.Mock(exceeded=False)))
+        stack.enter_context(mock.patch.object(
+            engine_mod.proxy_meter, "check", lambda *a, **k: None))
+        stack.enter_context(mock.patch.object(
+            engine_mod.proxy_meter, "finish", lambda a, extra=None: extra or {}))
+        stack.enter_context(mock.patch.object(
+            engine_mod.proxy_meter, "drain_selenium", lambda *a, **k: None))
+        stack.enter_context(mock.patch.object(engine_mod.time, "sleep"))
+        stack.enter_context(_captured_output())
+        try:
+            rc = engine_mod.scrape(args)
+        except BaseException as e:  # noqa: BLE001 — fail BY NAME
+            rc = f"raised {type(e).__name__}: {e}"
+    out = os.path.join(tmp, "audit")
+    meta_path = out + ".meta.json"
+    attempt_path = out + ".latest_attempt.meta.json"
+    meta = (json.load(open(meta_path, encoding="utf-8"))
+            if os.path.exists(meta_path) else {})
+    attempt = (json.load(open(attempt_path, encoding="utf-8"))
+               if os.path.exists(attempt_path) else {})
+    return rc, meta, attempt, fake_page
+
+
+def test_pagination_audit():
+    group("The per-page pagination audit: HTML + 429 samples, fully offline")
+    from unittest import mock
+    ok = True
+    with tempfile.TemporaryDirectory() as tmp:
+        for engine in ENGINES:
+            mod = _load_engine_copy(engine)
+            short = engine.split("_")[0]
+            can_count_429 = "playwright" in engine
+
+            # -- Scenario 1: a healthy two-page walk ----------------------
+            rc, meta, attempt, page = _run_audit_scrape(
+                mod, tmp,
+                {"button_page1": True, "button_after": True, "turn_on": {1}})
+            pag = meta.get("pagination") or []
+            ok &= check(f"{short}: two healthy pages exit 0 (rc={rc})",
+                        rc == 0 and meta.get("status") == "complete")
+            ok &= check(f"{short}: two page records, page 1 by address and "
+                        f"page 2 by button",
+                        [r.get("reached_by") for r in pag]
+                        == [page_flow.REACHED_BY_ADDRESS,
+                            page_flow.REACHED_BY_BUTTON])
+            ok &= check(f"{short}: the button turn reports the first card "
+                        f"link changed",
+                        len(pag) == 2 and pag[1].get("first_card_changed") is True
+                        and pag[1].get("conclusion") == "obtained"
+                        and pag[1].get("obtained") is True)
+            ok &= check(f"{short}: page 1 has no predecessor link change",
+                        pag[0].get("first_card_changed") is None
+                        and pag[0].get("conclusion") == "obtained")
+            ok &= check(f"{short}: no throttle retry on a healthy walk",
+                        all(r.get("throttle_retry") is False for r in pag)
+                        and meta.get("throttle_retries") == 0)
+            if can_count_429:
+                ok &= check(f"{short}: zero /graphql 429s counted and summed",
+                            all(r.get("graphql_429") == 0 for r in pag)
+                            and meta.get("graphql_429_total") == 0)
+            else:
+                ok &= check(f"{short}: 429 count is null, never a guessed zero",
+                            all(r.get("graphql_429") is None for r in pag)
+                            and meta.get("graphql_429_total") is None)
+            ok &= check(f"{short}: both pages count as completed",
+                        meta.get("pages_completed") == 2
+                        and meta.get("pages_failed") == [])
+
+            # -- Scenario 2: page 2 429s, the retry is refused too --------
+            rc, meta, attempt, page = _run_audit_scrape(
+                mod, tmp,
+                {"button_page1": True, "button_after": True,
+                 "turn_on": (), "429_per_turn": 2},
+                wait_seconds=0.05)
+            pag = meta.get("pagination") or attempt.get("pagination") or []
+            ok &= check(f"{short}: a twice-refused turn is partial exit 6, "
+                        f"never complete (rc={rc}, "
+                        f"{meta.get('stop_reason') or attempt.get('stop_reason')})",
+                        rc == 6 and (meta.get("status") == "partial"
+                                     or attempt.get("status") == "partial"))
+            reason = meta.get("stop_reason") or attempt.get("stop_reason")
+            ok &= check(f"{short}: stop reason is next_page_throttled",
+                        reason == "next_page_throttled")
+            # The throttled page's record must survive even though its
+            # outcome was popped out of the result list.
+            p2 = next((r for r in pag if r.get("page") == 2), None)
+            ok &= check(f"{short}: the unreturned page 2 still has an audit "
+                        f"record", p2 is not None)
+            if p2:
+                ok &= check(f"{short}: page 2 reached by button, conclusion "
+                            f"no_turnover, not obtained",
+                            p2.get("reached_by") == page_flow.REACHED_BY_BUTTON
+                            and p2.get("conclusion") == "no_turnover"
+                            and p2.get("obtained") is False
+                            and p2.get("rows") == 0)
+                ok &= check(f"{short}: the first card did NOT change",
+                            p2.get("first_card_changed") is False)
+            if can_count_429:
+                # Two presses (the first and its one paced retry), each
+                # answering the two 429s the scenario configures per turn.
+                expected_429 = 2 * 2
+                ok &= check(f"{short}: the failed turn carries its 429 count "
+                            f"({p2 and p2.get('graphql_429')})",
+                            p2 is not None
+                            and p2.get("graphql_429") == expected_429
+                            and (meta.get("graphql_429_total")
+                                 or attempt.get("graphql_429_total"))
+                            == expected_429)
+            else:
+                ok &= check(f"{short}: the failed turn's 429 count is null "
+                            f"where the driver cannot see responses",
+                            p2 is not None and p2.get("graphql_429") is None)
+            ok &= check(f"{short}: only page 1 completed; page 2 is failed and "
+                        f"not counted as a row",
+                        (meta.get("pages_completed")
+                         or attempt.get("pages_completed")) == 1
+                        and 2 in (meta.get("pages_failed")
+                                  or attempt.get("pages_failed") or [])
+                        and (meta.get("products")
+                             or attempt.get("products")) == 2)
+
+            # -- Scenario 3: the next button disappears -------------------
+            rc, meta, attempt, page = _run_audit_scrape(
+                mod, tmp,
+                {"button_page1": False, "button_after": False})
+            pag = meta.get("pagination") or []
+            ok &= check(f"{short}: a vanished button completes the walk "
+                        f"(rc={rc}, {meta.get('stop_reason')})",
+                        rc == 0 and meta.get("status") == "complete"
+                        and meta.get("stop_reason") == "pagination_exhausted")
+            p2 = next((r for r in pag if r.get("page") == 2), None)
+            ok &= check(f"{short}: the no-button turn is audited as no_button "
+                        f"and unobtained",
+                        p2 is not None and p2.get("conclusion") == "no_button"
+                        and p2.get("obtained") is False
+                        and p2.get("reached_by") == page_flow.REACHED_BY_BUTTON)
+            ok &= check(f"{short}: the no-button page is not a failed page or "
+                        f"row",
+                        meta.get("pages_completed") == 1
+                        and meta.get("pages_failed") == []
+                        and meta.get("products") == 2)
+
+            # -- Scenario 4: page 1 blocked/challenged — rows kept, never an
+            # empty catalogue ------------------------------------------------
+            blocked_html = FIXTURES["BLOCK_429"]
+            block_page = _FakeListingPage(blocked_html, turn_on=())
+            block_session = _FakeListingSession(block_page)
+            argv = [mod.__name__, "--url", URLS["BLOCK_429"], "--out",
+                    os.path.join(tmp, "blocked"), "--pages", "1",
+                    "--format", "json", "--retries", "1",
+                    "--block-retry-delay", "0"]
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(env_config, "load_env",
+                                      lambda *a, **k: None):
+                bargs = mod.parse_args()
+            block_sessions = (["sync_playwright", "_BrowserSession"]
+                              if "playwright" in engine else
+                              (["_AsyncBridge", "_Session"]
+                               if "puppeteer" in engine else ["_Session"]))
+            with contextlib.ExitStack() as stack:
+                for attr in block_sessions:
+                    stack.enter_context(mock.patch.object(mod, attr))
+                session_cls = (mod._BrowserSession if "playwright" in engine
+                               else mod._Session)
+                stack.enter_context(
+                    mock.patch.object(session_cls, "return_value",
+                                      block_session))
+                stack.enter_context(mock.patch.object(
+                    mod.proxy_check, "gate", lambda *a, **k: None))
+                stack.enter_context(mock.patch.object(
+                    mod.proxy_meter, "start",
+                    lambda *a, **k: mock.Mock(exceeded=False)))
+                stack.enter_context(mock.patch.object(
+                    mod.proxy_meter, "check", lambda *a, **k: None))
+                stack.enter_context(mock.patch.object(
+                    mod.proxy_meter, "finish",
+                    lambda a, extra=None: extra or {}))
+                stack.enter_context(mock.patch.object(
+                    mod.proxy_meter, "drain_selenium", lambda *a, **k: None))
+                stack.enter_context(mock.patch.object(mod.time, "sleep"))
+                stack.enter_context(_captured_output())
+                try:
+                    brc = mod.scrape(bargs)
+                except BaseException as e:  # noqa: BLE001
+                    brc = f"raised {type(e).__name__}: {e}"
+            bmeta_path = os.path.join(tmp, "blocked.meta.json")
+            battempt_path = os.path.join(tmp,
+                                         "blocked.latest_attempt.meta.json")
+            bmeta = (json.load(open(bmeta_path, encoding="utf-8"))
+                     if os.path.exists(bmeta_path) else {})
+            battempt = (json.load(open(battempt_path, encoding="utf-8"))
+                        if os.path.exists(battempt_path) else {})
+            sidecar = bmeta or battempt
+            ok &= check(f"{short}: a blocked page 1 exits 3, not the empty "
+                        f"exit 4 (rc={brc})", brc == 3)
+            ok &= check(f"{short}: a blocked first page is never reported as "
+                        f"an empty search",
+                        sidecar.get("status") == "failed"
+                        and sidecar.get("products") == 0
+                        and sidecar.get("stop_reason") != "completed")
+            bp1 = next((r for r in (sidecar.get("pagination") or [])
+                        if r.get("page") == 1), None)
+            ok &= check(f"{short}: the blocked page 1 still has an audit "
+                        f"record by address, unobtained",
+                        bp1 is not None
+                        and bp1.get("reached_by")
+                        == page_flow.REACHED_BY_ADDRESS
+                        and bp1.get("obtained") is False
+                        and bp1.get("conclusion") == "blocked")
+    return ok
+
+
+# ---------------------------------------------------------------------------
 # DataDome: solve through the browser's own exit, apply, re-load, validate
 # ---------------------------------------------------------------------------
 # No request here leaves 127.0.0.1: the solver API is a stub server, and
@@ -4990,7 +5716,9 @@ def main() -> int:
     ok &= test_grid_lazy_tail()
     ok &= test_newer_card_layout()
     ok &= test_throttle_is_not_completion()
+    ok &= test_turn_record_mapping()
     ok &= test_throttle_retry()
+    ok &= test_pagination_audit()
     ok &= test_output_contract()
     ok &= test_writers_and_finish_run()
     ok &= test_diff()

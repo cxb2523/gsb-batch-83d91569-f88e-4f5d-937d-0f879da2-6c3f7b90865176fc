@@ -10,6 +10,26 @@ that is a fix, and the release notes lead with it.
 
 ## [Unreleased]
 
+> **Added — a per-page pagination audit in the run metadata.** Listing runs
+> now write a `pagination` list to the `.meta.json` sidecar (and, for a run
+> that gathered no rows, to the `.latest_attempt.meta.json`), one record per
+> page the run accounted for. Each record states how the page was reached
+> (`address_navigation` for page 1, `button_press` afterwards), whether the
+> first card's link changed across the turn, the number of `/graphql` 429s
+> observed while on that page (null where the driver cannot see responses),
+> whether the single throttle retry was used, the row count, and a
+> `conclusion` (`obtained`, `empty`, `no_button`, `no_turnover`, `blocked`,
+> `not_obtained`) with an explicit `obtained` flag. A page whose press
+> returned no grid is still recorded here even though it is dropped from the
+> result list, so it cannot be mistaken for a fetched page or silently turn a
+> rate-limited run into a "complete" one; any unobtained record forces
+> `status: partial`. A new `graphql_429_total` sums the observable 429s. The
+> stop-reason vocabulary now covers all five endings plus normal completion,
+> and a first-page block or challenge keeps gathered rows with a block stop
+> reason rather than reading as an empty search. The new behaviour is
+> covered by an offline suite that drives all three engines over hand-made
+> HTML and a synthetic `/graphql` 429 — no real site or credentials.
+
 > **Behaviour change.** When Expedia's handler picks **DataDome**, a run with
 > `TWOCAPTCHA_KEY` and a `--proxy` that the browser itself exits through now
 > **buys at most one DataDome solve per page** (`DataDomeSliderTask`,

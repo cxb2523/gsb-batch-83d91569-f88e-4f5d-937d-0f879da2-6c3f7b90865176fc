@@ -54,7 +54,8 @@ from __future__ import annotations
 
 import logging
 import random
-from typing import Callable, Dict, List, Optional, Tuple
+from dataclasses import dataclass, asdict
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from product_parser import (SELECTORS, NEXT_PAGE_SELECTOR, PAGE_CAP,
                             challenge_vendor, detect_block_marker,
@@ -619,6 +620,170 @@ NO_BUTTON = "no_button"          # the listing genuinely ran out
 NO_TURNOVER = "no_turnover"      # pressed, and the grid never came back
 
 
+# ---------------------------------------------------------------------------
+# The per-page pagination audit — one row per page the run ACCOUNTED for
+# ---------------------------------------------------------------------------
+# A page that never returns its grid is popped out of the engine's result
+# list (it must not count as a fetched page or as rows), so the audit of what
+# happened at that page cannot live on the PageOutcome objects the engine
+# keeps. PageTurnRecord is the separate, always-kept paper trail: even the
+# page whose content was never obtained gets one, with its page number, its
+# /graphql 429 count, its retry count and a conclusion, and is explicitly NOT
+# counted in pages_completed or in the row total.
+#
+# How the page was reached. Page 1 of a Vrbo listing is the only page with an
+# address; every later page exists solely behind a button press. Recording
+# which one each record was makes "we never even tried to fetch page 3"
+# distinguishable from "we pressed for it and were refused".
+REACHED_BY_ADDRESS = "address_navigation"
+REACHED_BY_BUTTON = "button_press"
+
+# Turn conclusions for a page reached (or attempted) by button. These name
+# the state of the TURN itself, before anything on the arrived page is read:
+#
+#   advanced            the press returned a grid whose first card changed
+#   no_button           the site offers no next page — the listing ran out
+#   no_turnover         the press went through but no new grid came back,
+#                       even after the single paced retry — on this site,
+#                       almost always a /graphql 429
+#
+# Conclusions for a page reached by address (page 1), and for what happened
+# AFTER a successful turn when the arrived page itself is read. Kept in one
+# vocabulary so a consumer switches on a single field:
+#
+#   obtained            the page answered and its rows were parsed
+#   blocked             the page was refused / an unsolved challenge stood
+#                       in front of it (nothing was read)
+#   not_obtained        served, but the grid never painted or the parser
+#                       found nothing on a page that stated cards
+#   empty               the site's own "nothing matched" answer
+TURN_ADVANCED = "advanced"
+TURN_NO_BUTTON = "no_button"
+TURN_NO_TURNOVER = "no_turnover"
+TURN_OBTAINED = "obtained"
+TURN_BLOCKED = "blocked"
+TURN_NOT_OBTAINED = "not_obtained"
+TURN_EMPTY = "empty"
+
+# Conclusions that mean the record's page contributed NO usable content and
+# must stay out of pages_completed and the row total. `no_button` is
+# deliberately NOT here: a vanished next button is the site's own end-of-
+# listing signal and therefore a COMPLETE stop, not a failed page — its
+# record exists only to say "the run asked and the site had no page N". The
+# engines build their "unobtained pages" list from this set rather than from
+# the result outcomes.
+UNOBTAINED_TURNS = frozenset((TURN_NO_TURNOVER, TURN_BLOCKED,
+                              TURN_NOT_OBTAINED))
+
+
+@dataclass
+class PageTurnRecord:
+    """What happened at one page of a listing walk, independently of whether
+    that page's content survived in the engine's result list.
+
+    One record is written for every page the run accounts for — page 1 and
+    every page number a next-press was attempted for, including presses that
+    returned nothing. It is the auditable answer to four questions:
+
+      * how was the page reached — an address, or the site's own button;
+      * did the first card's link change after the turn (a button page only);
+      * how many /graphql 429s were observed while on this page (null where
+        the driver cannot see responses — Selenium has no response listener);
+      * was the single throttle retry triggered for this turn.
+
+    `conclusion` is the machine-readable verdict using the TURN_* vocabulary
+    above; `obtained` is the explicit boolean that says whether this record
+    counts as a successful page and as rows. A page is `obtained` only when
+    its content was actually read, so a throttled or refused turn can never
+    be mistaken for a fetched page.
+    """
+    page: int
+    reached_by: str
+    conclusion: str
+    obtained: bool
+    graphql_429: Optional[int] = None
+    throttle_retry: bool = False
+    # Whether the first card's link changed across the turn. None for an
+    # address page (nothing precedes it) and for a turn that never produced a
+    # grid to read a first card from.
+    first_card_changed: Optional[bool] = None
+    first_card_href: Optional[str] = None
+    rows: int = 0
+    detail: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+def turn_record_from_outcome(outcome, *, reached_by: str,
+                             graphql_429: Optional[int],
+                             throttle_retries: int,
+                             first_card_changed: Optional[bool],
+                             first_card_href: Optional[str]) -> PageTurnRecord:
+    """Build the audit record for one engine PageOutcome.
+
+    Kept here, rather than copied across the three engines, so the mapping
+    from an outcome's state to a TURN_* conclusion cannot drift between them
+    — the same reason the rest of the page policy lives in this module.
+
+    A page whose state is `exhausted` (the next button was already gone) or
+    `no_turnover` (pressed, no grid back) never became content, and neither
+    did a blocked or unobtained one. Only a parsed content/empty page is
+    `obtained`; `empty` is obtained with zero rows because the site answered
+    the question it was asked.
+    """
+    state = getattr(outcome, "state", None)
+    if state == "exhausted":
+        conclusion = TURN_NO_BUTTON
+    elif state == "no_turnover":
+        conclusion = TURN_NO_TURNOVER
+    elif getattr(outcome, "blocked_by", None) is not None:
+        conclusion = TURN_BLOCKED
+    elif getattr(outcome, "unobtained", None) is not None:
+        conclusion = TURN_NOT_OBTAINED
+    elif state == "empty":
+        conclusion = TURN_EMPTY
+    else:
+        conclusion = TURN_OBTAINED
+    obtained = conclusion in (TURN_OBTAINED, TURN_EMPTY)
+    detail = None
+    if conclusion == TURN_NOT_OBTAINED:
+        detail = getattr(outcome, "unobtained", None)
+    elif conclusion == TURN_BLOCKED:
+        detail = getattr(outcome, "blocked_by", None)
+    elif getattr(outcome, "load_failed", False):
+        detail = "page_load_failed"
+    return PageTurnRecord(
+        page=outcome.page_num,
+        reached_by=reached_by,
+        conclusion=conclusion,
+        obtained=obtained,
+        graphql_429=graphql_429,
+        throttle_retry=bool(throttle_retries),
+        first_card_changed=first_card_changed,
+        first_card_href=first_card_href,
+        rows=len(getattr(outcome, "products", None) or []),
+        detail=detail)
+
+
+def summarize_turn_record(record: PageTurnRecord) -> str:
+    """One human-readable line for the run log, spelling out every field."""
+    bits = [f"page {record.page} reached by {record.reached_by}",
+            f"conclusion={record.conclusion}",
+            f"obtained={record.obtained}",
+            f"rows={record.rows}"]
+    if record.graphql_429 is None:
+        bits.append("graphql_429=unknown (this driver cannot see responses)")
+    else:
+        bits.append(f"graphql_429={record.graphql_429}")
+    bits.append(f"throttle_retry={record.throttle_retry}")
+    if record.first_card_changed is not None:
+        bits.append(f"first_card_changed={record.first_card_changed}")
+    if record.detail:
+        bits.append(f"detail={record.detail}")
+    return "; ".join(bits)
+
+
 def advance_to_next_page(press_next: Callable[[], bool],
                          first_card_href: Callable[[], Optional[str]],
                          count: Callable[[str], int],
@@ -655,6 +820,21 @@ def advance_to_next_page(press_next: Callable[[], bool],
 def _first_sku(first_card_href: Callable[[], Optional[str]]) -> Optional[str]:
     href = first_card_href()
     return sku_from_url(strip_tracking(href or "")) if href else None
+
+
+def card_link_changed(href_before: Optional[str],
+                      href_after: Optional[str]) -> bool:
+    """Whether the first card's link changed across a page turn.
+
+    The turnover test the engines use, expressed on two already-read hrefs
+    rather than on a callable: an audit record is built AFTER the turn, so it
+    asks this once on the before/after links it saved. Tracking noise is
+    stripped first — the same card re-rendered with a fresh `pwa_ts` must not
+    read as a new page. Two missing links cannot constitute a change.
+    """
+    if not href_before or not href_after:
+        return False
+    return strip_tracking(href_before) != strip_tracking(href_after)
 
 
 def _turned_over(first_card_href, count, before_sku) -> bool:
@@ -763,6 +943,36 @@ def advance_with_throttle_retry(press_next: Callable[[], bool],
 
 def page_cap_reached(page_num: int) -> bool:
     return page_num >= PAGE_CAP
+
+
+# ---------------------------------------------------------------------------
+# Stop reasons — the five (plus the normal completion) ways a walk ends
+# ---------------------------------------------------------------------------
+# One named vocabulary for every way a listing walk stops, so a sidecar's
+# `stop_reason` is exhaustive rather than a grab-bag the engines extend ad
+# hoc. The split that matters most is the one this family was built to keep
+# honest: the first two are FACTS ABOUT THE CATALOGUE (a complete view), the
+# next three are FACTS ABOUT THE RUN (an incomplete view that must never be
+# reported as complete):
+#
+#   completed              every requested page was fetched and parsed
+#   pagination_exhausted   the site stopped offering a next page (no button)
+#   next_page_throttled    a next-press got no grid back — a /graphql 429 or
+#                          an unresponsive turn — even after the paced retry
+#   cards_missing          a fetched page held fewer cards than its own
+#                          counter says exist
+#   page_cap               the run reached this scraper's --pages/PAGE_CAP
+#                          limit; more catalogue exists but was not walked
+#
+# Page-load and block failures reuse failure_stop_reason()'s names
+# (page_load_timeout, blocked_*, served_without_results, ...): they are run
+# failures too, and like next_page_throttled they are never complete.
+STOP_COMPLETED = "completed"
+STOP_PAGINATION_EXHAUSTED = "pagination_exhausted"
+STOP_NO_NEW_PRODUCTS = "no_new_products"
+STOP_NEXT_PAGE_THROTTLED = "next_page_throttled"
+STOP_CARDS_MISSING = "cards_missing"
+STOP_PAGE_CAP = "page_cap"
 
 
 # ---------------------------------------------------------------------------

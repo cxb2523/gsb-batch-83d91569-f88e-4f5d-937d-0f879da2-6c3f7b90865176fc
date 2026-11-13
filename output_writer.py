@@ -631,6 +631,20 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     does not overwrite) — the two files would contradict each other, and
     diff_runs.py would refuse to compare data that is in fact fine.
     """
+    # Defense in depth for the pagination audit. `pages_failed` already
+    # carries failed page numbers, but a throttled turn is deliberately NOT a
+    # member of the engine's outcome list (it is popped, and recorded only in
+    # `pagination`), so a completeness rule keyed on pages_failed alone has a
+    # hole: an engine that ever reported a complete stop reason while its
+    # pagination log held an unobtained turn would write a self-contradicting
+    # "complete" sidecar. The audit record is the stronger signal, and it
+    # wins. Imported lazily to avoid an import cycle at module load.
+    from page_flow import UNOBTAINED_TURNS
+    pagination = (extra or {}).get("pagination") or []
+    unobtained_turns = [r for r in pagination
+                        if isinstance(r, dict)
+                        and r.get("conclusion") in UNOBTAINED_TURNS
+                        and not r.get("obtained")]
     # Completeness is decided by the reason AND by the evidence. A named
     # list of stop reasons cannot cover a failure recorded somewhere else,
     # and `pages_failed` is somewhere else: a run whose loop ended for a
@@ -644,7 +658,8 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     # fix: 28 of 32 repos behaved this way. Same shape as the exit-code
     # unification this file already carries — a rule keyed on a list of
     # names has a hole for every name nobody added to it.
-    complete = stop_reason in COMPLETE_STOP_REASONS and not pages_failed
+    complete = (stop_reason in COMPLETE_STOP_REASONS and not pages_failed
+                and not unobtained_turns)
     row_cls = ROW_CLASS_BY_MODE.get(mode, Product)
     write_stats: dict = {}
     rc = save(rows, out_prefix, fmt, allow_empty=allow_empty, row_cls=row_cls,
@@ -670,6 +685,14 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
         # itself in the attempt sidecar, every time: a run that wrote no
         # rows leaves no `<out>.meta.json`, and what it spent through the
         # proxy or on a solve must still be on disk somewhere.
+        write_attempt_meta(out_prefix, meta)
+    elif not wrote_output and unobtained_turns:
+        # A run that gathered no rows because a page turn was refused or
+        # never came back writes no row file and therefore no run sidecar —
+        # but the per-page pagination audit is exactly the evidence that
+        # says "rate limited / challenged on page N", not "the catalogue is
+        # empty". Persist it in the attempt sidecar so that distinction is
+        # still checkable after the process exits.
         write_attempt_meta(out_prefix, meta)
 
     if not rows:

@@ -80,6 +80,20 @@ session and exit, then pressed next again. `throttle_retries` in the sidecar
 counts those retries. `next_page_throttled` means the retry was refused too
 (or the proxy budget was spent first, which reads `proxy_budget_exceeded`).
 
+The sidecar's `pagination` list gives the per-page detail behind that
+verdict, one record per page the run accounted for. For the page that
+stalled you can read its number, that it was reached by a `button_press`,
+that `first_card_changed` is `false`, the `/graphql` 429 count for that page
+(`graphql_429`; null on Selenium/pyppeteer, which have no response
+listener), and `throttle_retry: true`. The record's `conclusion` is
+`no_turnover` and `obtained` is `false`, and it is kept even though the page
+is removed from the result list — so it is never mistaken for a fetched
+page, and it forces the run to `partial` rather than `complete`. An
+unresponsive turn with no observable 429 records the same conclusion with a
+null count, so "the button did nothing" and "the site has no next page"
+(`conclusion: no_button`, a complete `pagination_exhausted` stop) stay
+distinguishable.
+
 In order of cost:
 
 1. `--delay 15` (the default is 5)

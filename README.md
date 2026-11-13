@@ -141,6 +141,31 @@ never "the listing ended" — and says how many 429s it counted (Playwright
 only). `--delay` (default **5.0s**, higher than the family default) is the
 cheap lever; `--proxy-file` is the one that scales.
 
+The sidecar keeps a per-page paper trail under `pagination`, one record for
+every page the run accounted for — including a page whose button press
+returned nothing. Each record says how the page was reached
+(`address_navigation` for page 1, `button_press` afterwards), whether the
+first card's link changed across the turn (`first_card_changed`), how many
+`/graphql` 429s were observed while on that page (`graphql_429`, null where
+the driver cannot see responses), whether the one throttle retry was used
+(`throttle_retry`), how many rows the page contributed, and a machine-
+readable `conclusion` (`obtained`, `empty`, `no_button`, `no_turnover`,
+`blocked`, `not_obtained`) with an explicit `obtained` boolean. A turn that
+never brought content back is recorded here even though it is removed from
+the result list, so it is never silently treated as a fetched page; an
+unobtained record in this log forces the run status to `partial` regardless
+of the stop-reason string. `graphql_429_total` sums the observable 429s.
+
+The `stop_reason` distinguishes every way a walk ends: `completed` (all
+requested pages read), `pagination_exhausted` (the site stopped offering a
+next page), `next_page_throttled` (a press got no grid back — a 429 or an
+unresponsive turn — even after the paced retry), `cards_missing` (a fetched
+page held fewer cards than its own counter states), `page_cap` (the run hit
+its page limit with more catalogue left), plus the page-load/block reasons.
+A first page that is rate limited or challenged keeps any rows already
+gathered and reports the block reason — it is never reported as an empty
+search.
+
 ### 4. The results list is an inner scroller, and the page body never scrolls
 
 `document.body.scrollHeight === window.innerHeight` on every capture. The
@@ -730,6 +755,14 @@ no engine library installed — the skips are reported, and CI fails on an
 unexpected one. Fixtures are cut from
 real captures by `make_fixtures.py`, which proves each one parses
 *identically* to its untrimmed original, column for column.
+
+The pagination audit is exercised without any real site or credentials:
+hand-written listing HTML (real `data-stid` cards, the counter and the next
+button) plus a synthetic `/graphql` HTTP 429 drive each engine's full
+`scrape()` through a healthy two-page walk, a second page whose turn is 429ed
+on both the press and its paced retry, and a walk whose next button
+disappears — asserting the per-page records, the 429 counts, the stop
+reasons and that a throttled run is never reported complete.
 
 `TROUBLESHOOTING.md` covers what to do when a column comes back empty.
 
