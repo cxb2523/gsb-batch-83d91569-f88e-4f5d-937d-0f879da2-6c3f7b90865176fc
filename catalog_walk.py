@@ -129,6 +129,18 @@ class WalkResult:
     # A run with a non-empty list here is NOT complete, whatever it managed
     # to collect — see `settle()`.
     failures: List[Dict[str, Any]] = field(default_factory=list)
+    # One conclusion per grid this run SELECTED, in menu order: id, menu
+    # trail, status, the rows it contributed and, when it failed, a
+    # checkable cause. Grader-ready rather than log-shaped — see
+    # `output_writer.write_grids_report`. An entry is created before the
+    # grid is touched, so a grid the walk never reached is reported as
+    # `not_attempted` instead of silently missing.
+    grid_entries: List[Dict[str, Any]] = field(default_factory=list)
+    # Why there is no per-grid conclusion at all, when that is the case
+    # (the menu itself was not obtained, a category matched no grid, or
+    # --mode product walked none). None means "the entries speak for
+    # themselves".
+    grids_note: Optional[str] = None
     stop_reason: str = "completed"
 
     def record_failure(self, kind: str, url: str, detail: str,
@@ -335,6 +347,70 @@ def select_grids(grids: Sequence[P.MenuGrid], category: Optional[str] = None,
     return picked[:limit] if limit else picked
 
 
+def _grid_entry(grid: P.MenuGrid) -> Dict[str, Any]:
+    """The record for one selected grid, before anything has been tried.
+
+    Every field a reader needs is here from the start, with `not_attempted`
+    as the honest default: a grid that is selected but never reached keeps
+    this record and gains no invented failure reason.
+    """
+    return {
+        "grid_id": str(grid.grid_id),
+        "trail": grid.trail,
+        "status": "not_attempted",
+        "attempted": False,
+        "sku_rows": 0,
+        "product_ids": None,
+        "products_requested": 0,
+        "payload_errors": 0,
+        "reason": None,
+        "kind": None,
+        "status_code": None,
+        "url": None,
+        "request_url": None,
+        "error_type": None,
+        "refused_by": None,
+    }
+
+
+def _mark(entry: Dict[str, Any], status: str, **fields: Any) -> None:
+    """Set a grid's conclusion and the cause that belongs to it.
+
+    A field that is `None` is not written: `EdgeRefusal` and `RobotsRefusal`
+    carry no `url` of their own, and letting that overwrite the grid URL the
+    entry already holds would leave the reader with no address to check.
+    """
+    entry["status"] = status
+    for key, value in fields.items():
+        if value is not None:
+            entry[key] = value
+
+
+def _failure_cause(exc: Exception) -> Dict[str, Any]:
+    """The cause fields for a grid request that failed.
+
+    A reason has to be checkable against the run, so it carries whichever of
+    HTTP status / error type the exception actually has — never a guess.
+    """
+    kind = {
+        "RobotsRefusal": "robots_refusal",
+        "EdgeRefusal": "edge_refusal",
+        "HttpError": "http_error",
+        "SchemaError": "schema_error",
+        "TransportError": "transport_error",
+    }.get(type(exc).__name__, type(exc).__name__)
+    return {
+        "kind": kind,
+        "reason": str(exc),
+        "status_code": getattr(exc, "status", None),
+        "error_type": type(exc).__name__,
+        # The request that failed, which for a productsArray failure is not
+        # the grid URL: `url` on the entry stays the grid, this is the
+        # address to check.
+        "request_url": getattr(exc, "url", None),
+    }
+
+
 def walk_grids(fetch: Callable[[str], Fetched], store: P.StoreConfig,
                grids: Sequence[P.MenuGrid], locale: str = P.DEFAULT_LOCALE,
                delay: float = 0.0, max_skus: Optional[int] = None,
@@ -349,10 +425,19 @@ def walk_grids(fetch: Callable[[str], Fetched], store: P.StoreConfig,
     so `category` on a row names the first menu trail that reached it — not
     the only one. That is a real limitation and it is written down rather
     than papered over by inventing a category list column nobody measured.
+
+    Each grid also leaves one record on `result.grid_entries`, whether it was
+    read, was empty, failed, was refused, or was never reached — see
+    `output_writer.write_grids_report`. The counts below are kept as they
+    were, so existing callers and the exit-code contract do not move.
     """
     result = result if result is not None else WalkResult()
     result.store = store
     result.grids_seen = len(grids)
+    # One record per selected grid, created up front. A `break` later leaves
+    # the rest as `not_attempted`, which is a fact about this run and not a
+    # failure to invent a cause for.
+    result.grid_entries = [_grid_entry(g) for g in grids]
     seen_sku: set = set()
     # One map for the whole walk — see parse_products_array's `owners`.
     owners: Dict[Any, Dict[str, Any]] = {}
@@ -372,8 +457,11 @@ def walk_grids(fetch: Callable[[str], Fetched], store: P.StoreConfig,
     # entry id -> bundle, filled while parsing, so a row can be joined back
     # to every grid that listed any entry pointing at its bundle.
     bundle_entries: Dict[Any, set] = {}
+    # A mid-walk EdgeRefusal ends the run (see `crawl`), but the grid it was
+    # raised on is still a record here. Set before leaving the loop.
+    stop_exc: Optional[Exception] = None
 
-    for grid in grids:
+    for grid, entry in zip(grids, result.grid_entries):
         if max_skus is not None and len(result.rows) >= max_skus:
             result.stop_reason = "max_skus_reached"
             break
@@ -384,30 +472,48 @@ def walk_grids(fetch: Callable[[str], Fetched], store: P.StoreConfig,
         if on_grid is not None:
             on_grid()
         grid_url = P.grid_url(store.store_id, grid.grid_id)
+        entry["attempted"] = True
+        entry["url"] = grid_url
         try:
             got = _get(fetch, grid_url, result, rules)
             _json_or_raise(got, grid_url, "productIds")
         except RobotsRefusal as exc:
             result.record_failure("robots_refusal", grid_url, str(exc))
+            _mark(entry, "refused", refused_by="robots", **_failure_cause(exc))
             continue
+        except EdgeRefusal as exc:
+            # The exit was refused. The grid was not read, and nothing after
+            # this grid can be tried from the same address either — so this
+            # grid is `refused`, the walk stops, and the remaining selections
+            # keep the `not_attempted` they were created with. The failure
+            # itself is recorded by `crawl`, exactly once, as before; here it
+            # is only attributed to the grid.
+            _mark(entry, "refused", refused_by="edge", **_failure_cause(exc))
+            stop_exc = exc
+            break
         except HttpError as exc:
             # The grid was not read. Recording it and moving on keeps one bad
             # category from ending a run, while `settle()` makes sure the run
             # can never call itself complete afterwards.
             result.record_failure("http_error", grid_url, str(exc), exc.status)
+            _mark(entry, "failed", **_failure_cause(exc))
             continue
         except SchemaError as exc:
             result.record_failure("schema_error", grid_url, str(exc))
+            _mark(entry, "failed", **_failure_cause(exc))
             continue
         except TransportError as exc:
             result.record_failure("transport_error", grid_url, str(exc))
+            _mark(entry, "failed", **_failure_cause(exc))
             continue
         result.grids_fetched += 1
         result.grid_ids.append(str(grid.grid_id))
         parsed = P.parse_grid(got.body)
         ids = parsed.product_ids
+        entry["product_ids"] = len(ids)
         if not ids:
             logger.info("grid %s (%s) listed no products", grid.grid_id, grid.trail)
+            _mark(entry, "empty")
             continue
         if len(parsed.sorted_product_ids) != len(ids):
             # Not an error. The SALE dresses grid served 14 and 13 on
@@ -426,6 +532,10 @@ def walk_grids(fetch: Callable[[str], Fetched], store: P.StoreConfig,
             logger.info("grid %s: %d of %d product(s) already fetched this run",
                         grid.grid_id, len(ids) - len(fresh), len(ids))
         fetched_ids.update(fresh)
+        # The grid itself was read; whether the products under it were is
+        # what the next loop decides, and `entry` is only finalised after it.
+        _mark(entry, "fetched")
+        rows_before = len(result.rows)
         for start in range(0, len(fresh), P.PRODUCTS_PER_CALL):
             batch = fresh[start:start + P.PRODUCTS_PER_CALL]
             url = P.products_array_url(store.store_id, store.catalog_id, batch)
@@ -434,22 +544,40 @@ def walk_grids(fetch: Callable[[str], Fetched], store: P.StoreConfig,
                 _json_or_raise(got, url, "products")
             except RobotsRefusal as exc:
                 result.record_failure("robots_refusal", url, str(exc))
+                # robots is a per-URL rule: the remaining batches and grids
+                # may still be allowed, so this does not stop the walk.
+                _mark(entry, "refused", refused_by="robots", **_failure_cause(exc))
                 continue
+            except EdgeRefusal as exc:
+                # Same exit, no point continuing anywhere in this run. `crawl`
+                # records it once when it stops the run; this only attributes
+                # it to the grid whose products were being read.
+                _mark(entry, "refused", refused_by="edge", **_failure_cause(exc))
+                stop_exc = stop_exc or exc
+                break
             except HttpError as exc:
                 result.record_failure("http_error", url, str(exc), exc.status)
+                _mark(entry, "failed", **_failure_cause(exc))
                 continue
             except SchemaError as exc:
                 result.record_failure("schema_error", url, str(exc))
+                _mark(entry, "failed", **_failure_cause(exc))
                 continue
             except TransportError as exc:
                 result.record_failure("transport_error", url, str(exc))
+                _mark(entry, "failed", **_failure_cause(exc))
                 continue
             result.products_requested += len(batch)
+            entry["products_requested"] += len(batch)
             parsed_products = P.parse_products_array(
                 got.body, store, locale=locale, category=grid.trail,
                 grid_id=grid.grid_id, page=1, owners=owners,
                 bundle_entries=bundle_entries)
             result.payload_errors.extend(parsed_products.errors)
+            # Errors the API put INSIDE an HTTP 200 (an `_ERR_PRODUCT_NOT_FOUND`
+            # record). Counted per grid so a grid whose products were served
+            # but partly refused is not read as cleanly fetched.
+            entry["payload_errors"] += len(parsed_products.errors)
             result.duplicate_bundles += parsed_products.duplicate_bundles
             check_parsed(got.body, parsed_products, url, result)
             for row in parsed_products.rows:
@@ -465,8 +593,16 @@ def walk_grids(fetch: Callable[[str], Fetched], store: P.StoreConfig,
             if max_skus is not None and len(result.rows) >= max_skus:
                 result.stop_reason = "max_skus_reached"
                 break
+        entry["sku_rows"] = len(result.rows) - rows_before
+        if stop_exc is not None:
+            break
     _canonicalise(result, owners, id_trails, bundle_entries, locale)
-    return result.settle()
+    result.settle()
+    if stop_exc is not None:
+        # Re-raised so `crawl` keeps mapping a mid-walk refusal to its stop
+        # reason exactly as it did before. The grid records are already set.
+        raise stop_exc
+    return result
 
 
 def _canonicalise(result: WalkResult, owners: Dict[Any, Dict[str, Any]],
@@ -527,6 +663,13 @@ def crawl(fetch: Callable[[str], Fetched], store_id: int,
         result.record_failure(type(exc).__name__, getattr(exc, "url", ""), str(exc),
                               getattr(exc, "status", None))
         result.stop_reason = "setup_failed"
+        # No grid was ever selected, so there is no per-grid conclusion to
+        # give. Said explicitly rather than by an empty list a reader could
+        # mistake for "the walk covered nothing and all was fine".
+        result.grids_note = (
+            "no grids to account for: the store config or the menu was not "
+            "obtained, so no grid was selected and none was attempted. See "
+            "failures for the request that failed.")
         return result
 
     picked = select_grids(grids, category, max_grids)
@@ -534,6 +677,11 @@ def crawl(fetch: Callable[[str], Fetched], store_id: int,
         result.stop_reason = ("no_grid_matched_category" if category
                               else "menu_listed_no_grids")
         result.grids_seen = 0
+        result.grids_note = (
+            "no grids to account for: the menu was read but "
+            + (f"no grid's trail contains {category!r}." if category
+               else "it listed no grid at all.")
+            + " Nothing was attempted, so no grid entries were invented.")
         return result
 
     try:

@@ -59,7 +59,7 @@ from catalog_walk import (EdgeRefusal, Fetched, HttpError, RobotsRefusal,
                           _json_or_raise, check_parsed, crawl, listed_products,
                           load_store)
 from output_writer import (EXIT_BLOCKED, EXIT_REMOTE_API_ERROR, Product,
-                           finish_run, scope_fingerprint)
+                           finish_run, scope_fingerprint, write_pre_grid_failure)
 
 logger = logging.getLogger("api_scraper")
 
@@ -234,6 +234,12 @@ def run_product_mode(args, fetch, store: P.StoreConfig) -> WalkResult:
     product is gone.
     """
     result = WalkResult(store=store)
+    # `--mode product` walks no grid: there is no menu trail and no grid id
+    # behind the one id. Saying so is the honest per-grid conclusion, rather
+    # than inventing a single entry with a made-up id.
+    result.grids_note = (
+        "no grids to account for: --mode product requests one product id "
+        "directly, so no grid was selected or attempted.")
     url = P.products_array_url(store.store_id, store.catalog_id, [args.product_id])
     try:
         got = _get(fetch, url, result)
@@ -277,13 +283,23 @@ def scrape(args) -> int:
                            on_grid=on_grid, store=store)
     except RobotsRefusal as exc:
         print(f"[!] {exc}")
+        _write_refusal_report(args, "robots_refusal", exc)
         return EXIT_BLOCKED
     except EdgeRefusal as exc:
         print(f"[!] {exc}")
         print("[!] Change exit — a retry from this address will get the same 403.")
+        _write_refusal_report(args, "edge_refusal", exc)
         return EXIT_BLOCKED
+    except SystemExit as exc:
+        # `resolve_store` raises this when the storefront carries no store id
+        # or is still serving a challenge. It is a pre-grid stop like any
+        # other, so it leaves the same "nothing to account for" report; the
+        # exit code is the one already passed to SystemExit.
+        _write_refusal_report(args, type(exc).__name__, exc)
+        raise
     except Exception as exc:  # noqa: BLE001 - reported, then mapped to an exit code
         logger.error("%s: %s", type(exc).__name__, exc)
+        _write_refusal_report(args, type(exc).__name__, exc)
         return EXIT_REMOTE_API_ERROR
 
     _report(result)
@@ -298,7 +314,22 @@ def scrape(args) -> int:
             locale=args.site_locale, category=args.category,
             grid_ids=result.grid_ids, max_grids=args.max_grids,
             max_skus=args.max_skus),
-        start_url=start_url, final_url=P.BASE, mode=args.mode)
+        start_url=start_url, final_url=P.BASE, mode=args.mode,
+        grids=result.grid_entries, grids_note=result.grids_note,
+        failures=result.failures)
+
+
+def _write_refusal_report(args, kind: str, exc: Exception) -> None:
+    """`grids_report.json` for a run stopped before any grid record existed.
+
+    The exception escaped `crawl`/`run_product_mode` (a refused storefront,
+    a refused menu), so no grid was selected. The report says exactly that,
+    keeps the exception as the evidence, and invents no grid entry. Reached
+    only when the failure happened outside the per-grid walk; an in-walk
+    refusal already carries its grid record and writes through `finish_run`.
+    """
+    write_pre_grid_failure(args.out, locale=args.site_locale,
+                           category=args.category, stop_reason=kind, exc=exc)
 
 
 def _report(result: WalkResult) -> None:

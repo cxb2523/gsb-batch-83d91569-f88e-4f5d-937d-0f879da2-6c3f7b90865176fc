@@ -7,6 +7,8 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`grids_report.json`, written beside every run.** One record per selected grid with its id, menu trail, status (`fetched` / `empty` / `failed` / `refused` / `not_attempted`), the SKU rows it contributed, and a checkable cause on failure (HTTP status or error type; `refused_by` naming the exit address vs robots). Grids a mid-walk refusal left untried are recorded as `not_attempted` rather than silently missing, and no failure reason is invented for them. When the grid list itself could not be obtained, `grids` is empty and `note` says there is nothing to account for. The report is written even on a zero-row failure (exit 3/5), where no product file or `.meta.json` is written; exit codes are unchanged.
+
 - `playwright_scraper.py --fingerprint` (with `--fp-tags`, `--fp-country`, `--fp-refresh`) fetches a profile from the 2Captcha Fingerprint API and applies it to the locally launched Chromium: user agent with matching client hints, locale, timezone, screen, navigator values and WebGL strings. The values are read back from the page after the first navigation and recorded under `transport_facts.fingerprint` in the run metadata. Never applied over the Scraping Browser API: a typed `--cdp-endpoint` with `--fingerprint` exits 2, and an endpoint from `.env` is ignored for that run. A missing key exits 2; a Fingerprint API refusal exits 5 before any page is fetched. The Selenium and pyppeteer engines reject the flag (exit 2).
 
 ### Changed

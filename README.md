@@ -52,6 +52,66 @@ A run prints what it did and what it cost:
 `sample_output.json` / `.csv` in this repo are a real run, not a mock-up:
 131 rows, 36 columns, 131 of 131 priced.
 
+### `grids_report.json` — one conclusion per grid
+
+Beside the JSON/CSV and the `.meta.json` sidecar, every `--mode category` run
+writes `grids_report.json` into the same output directory. It answers the
+question the row count cannot: **which grids did I actually read, and is this
+run usable?**
+
+```json
+{
+  "scope": {"store": 44009506, "locale": "gb", "category": "WOMEN / SALE"},
+  "grids": [
+    {"grid_id": "87687eba-…", "trail": "WOMEN / SALE / Dresses and jumpsuits",
+     "status": "fetched", "attempted": true, "sku_rows": 131,
+     "product_ids": 14, "products_requested": 14, "payload_errors": 1,
+     "reason": null, "kind": null, "status_code": null,
+     "url": "…/grid/87687eba-…", "request_url": null},
+    {"grid_id": "0b1c…", "trail": "WOMEN / SALE / Tops",
+     "status": "failed", "attempted": true, "sku_rows": 0,
+     "reason": "HTTP 500 for …productsArray?productIds=…",
+     "kind": "http_error", "status_code": 500, "error_type": "HttpError",
+     "url": "…/grid/0b1c…", "request_url": "…productsArray?productIds=…"}
+  ],
+  "summary": {"total": 2, "attempted": 2, "sku_rows": 131,
+              "rows": 131, "rows_written": true,
+              "fetched": 1, "empty": 0, "failed": 1, "refused": 0,
+              "not_attempted": 0},
+  "stop_reason": "requests_failed",
+  "note": null,
+  "failures": [{"kind": "http_error", "url": "…", "detail": "…", "status": 500}]
+}
+```
+
+`status` is one of:
+
+| status | meaning |
+|---|---|
+| `fetched` | the grid was read and its products requested; `sku_rows` is what it contributed |
+| `empty` | read, and it listed no product ids — a true empty answer, not a failure |
+| `failed` | a request for it (the grid or its `productsArray`) failed; `status_code` / `error_type` / `reason` say which |
+| `refused` | the exit address was refused (`refused_by: "edge"`) or robots.txt disallows it (`refused_by: "robots"`) |
+| `not_attempted` | selected but never reached — e.g. after a mid-walk refusal. No failure reason is invented for it |
+
+`payload_errors` counts error objects the API put *inside* an HTTP 200 for
+that grid (an `_ERR_PRODUCT_NOT_FOUND` record), so a grid whose products were
+served but partly refused is not read as cleanly fetched even though it
+counts as `fetched`.
+
+A failed grid is therefore distinguishable from a fetched one without reading
+the log, and a `failed` grid with `sku_rows: 0` is never mistakable for an
+empty one. When only some grids fail, the rows that did arrive are still
+written and the run exits 6; `summary.rows` / `summary.rows_written` say
+whether product files exist at all.
+
+If the grid list itself could not be obtained (the store config or menu
+failed, the category matched no trail, or `--mode product` walked none),
+`grids` is empty and `note` says *no grids to account for* — no grid entry is
+fabricated. That report is written even on a zero-row failure (exit 3 or 5),
+where no product file or `.meta.json` is written; it is the evidence of what
+went wrong.
+
 ---
 
 ## Install

@@ -2793,6 +2793,245 @@ def test_scope_guard():
     return not _failures
 
 
+def test_grids_report():
+    group("grids_report.json: one conclusion per grid, and none invented")
+    import catalog_walk
+    from output_writer import (GRIDS_REPORT_FILENAME, GRID_STATUSES,
+                               write_grids_report, finish_run,
+                               scope_fingerprint, write_pre_grid_failure)
+
+    STORE = json.dumps({"id": 44009506, "countryCode": "GB",
+                        "catalogs": [{"id": 1, "type": 1}],
+                        "details": {"imageBaseUrl": "https://x",
+                                    "locale": {"currencyCode": "GBP",
+                                               "currencyDecimals": -2}}})
+
+    # A, B, C, D: fetched, a 500, genuinely empty, and a grid a mid-walk
+    # refusal must leave untried.
+    MENU = json.dumps({"items": [
+        {"id": i, "name": name,
+         "content": {"id": "grid-" + name, "type": "grid"}, "children": []}
+        for i, name in (("1", "A"), ("2", "B"), ("3", "C"), ("4", "D"))]})
+
+    def grid(ids):
+        return json.dumps({"productIds": ids, "sortedProductIds": ids,
+                           "gridContext": {"gridId": "g"}})
+
+    def products(ids):
+        size = lambda k: {"sku": k, "name": "M", "isBuyable": True,
+                          "backSoon": "0", "price": "2099"}
+        return json.dumps({"products": [
+            {"id": i, "type": "BundleBean", "bundleProductSummaries": [
+                {"id": 200 + i, "name": "P",
+                 "detail": {"reference": "r", "colors": [
+                     {"id": "1", "name": "Blue", "sizes": [size(1000 + i)]}]}}]}
+            for i in ids]})
+
+    # A=1, B=2, C=empty, D=4, so each grid can be told apart by the rows it
+    # contributes. grid-B's productsArray is the 500 -- the grid itself is
+    # read, which is the case a reader most needs to tell from "the grid
+    # returned nothing".
+    GRID_IDS = {"grid-A": [1], "grid-B": [2], "grid-C": [], "grid-D": [4]}
+
+    def make(edge_at=None, grid_fail=None):
+        def fetch(url):
+            if "/itxrest/2/catalog/store/" in url and "productsArray" not in url \
+                    and "/menu" not in url and "/grid/" not in url:
+                return catalog_walk.Fetched(200, STORE.encode())
+            if "/menu" in url:
+                return catalog_walk.Fetched(200, MENU.encode())
+            if "/grid/" in url:
+                name = url.split("/grid/")[1].split("?")[0]
+                if name == edge_at:
+                    return catalog_walk.Fetched(
+                        403, FIX_EDGE_403.encode(), FIX_EDGE_403_HEADERS)
+                if name == grid_fail:
+                    return catalog_walk.Fetched(500, b'{"e":1}')
+                return catalog_walk.Fetched(200, grid(GRID_IDS[name]).encode())
+            if "productsArray" in url:
+                ids = [int(x) for x in url.split("productIds=")[1].split("&")[0]
+                       .split(",")]
+                if 2 in ids:
+                    return catalog_walk.Fetched(500, b'{"e":1}')
+                return catalog_walk.Fetched(200, products(ids).encode())
+            raise AssertionError(url)
+        return fetch
+
+    base_delay = catalog_walk.RETRY_BASE_DELAY
+    catalog_walk.RETRY_BASE_DELAY = 0.001
+    try:
+        res = catalog_walk.crawl(make(), 44009506)
+    finally:
+        catalog_walk.RETRY_BASE_DELAY = base_delay
+
+    by_id = {e["grid_id"]: e for e in res.grid_entries}
+    check("every selected grid has a record (%d)" % len(by_id),
+          len(by_id) == 4 and [e["grid_id"] for e in res.grid_entries]
+          == ["grid-A", "grid-B", "grid-C", "grid-D"])
+    check("a grid with rows is 'fetched'",
+          by_id["grid-A"]["status"] == "fetched")
+    check("...and its own sku_rows is counted",
+          by_id["grid-A"]["sku_rows"] == 1 and by_id["grid-A"]["attempted"])
+    check("a 500 is 'failed', distinct from empty",
+          by_id["grid-B"]["status"] == "failed")
+    check("...and carries the checkable cause (HTTP 500, not a guess)",
+          by_id["grid-B"]["status_code"] == 500
+          and by_id["grid-B"]["kind"] == "http_error"
+          and by_id["grid-B"]["error_type"] == "HttpError")
+    check("the grid URL and the failing request URL are both kept",
+          "/grid/grid-B" in by_id["grid-B"]["url"]
+          and "/grid/" not in by_id["grid-B"]["request_url"]
+          and "productsArray" in by_id["grid-B"]["request_url"])
+    check("a grid that listed no productIds is 'empty', not failed",
+          by_id["grid-C"]["status"] == "empty"
+          and by_id["grid-C"]["product_ids"] == 0
+          and by_id["grid-C"]["reason"] is None)
+    check("a failed grid contributes 0 rows while the good ones keep theirs",
+          by_id["grid-B"]["sku_rows"] == 0 and len(res.rows) == 2)
+
+    # A refusal stops the walk: the grid it hit is 'refused', the ones
+    # behind it are 'not_attempted' with no failure reason invented.
+    res = catalog_walk.crawl(make(edge_at="grid-B"), 44009506)
+    by_id = {e["grid_id"]: e for e in res.grid_entries}
+    check("an edge refusal is 'refused', and says it was the exit",
+          by_id["grid-B"]["status"] == "refused"
+          and by_id["grid-B"]["refused_by"] == "edge"
+          and by_id["grid-B"]["kind"] == "edge_refusal")
+    check("a robots refusal says it was robots",
+          by_id["grid-A"]["refused_by"] is None
+          and by_id["grid-B"]["refused_by"] != "robots")
+    check("grids after a refusal are 'not_attempted', never fabricated",
+          by_id["grid-C"]["status"] == "not_attempted"
+          and by_id["grid-D"]["status"] == "not_attempted"
+          and by_id["grid-C"]["reason"] is None
+          and by_id["grid-D"]["status_code"] is None)
+    check("...and were not marked attempted",
+          not by_id["grid-C"]["attempted"] and not by_id["grid-D"]["attempted"])
+    check("the refusal did not change the exit contract",
+          res.stop_reason == "edge_refusal" and len(res.rows) == 1)
+
+    # robots.txt is a per-URL rule: refused here, the walk continues.
+    real_allow = catalog_walk.P.is_robots_allowed
+
+    def allow_but_not_b(url, rules=None):
+        return False if "/grid/grid-B" in url else real_allow(url, rules)
+
+    catalog_walk.P.is_robots_allowed = allow_but_not_b
+    try:
+        res = catalog_walk.crawl(make(), 44009506)
+    finally:
+        catalog_walk.P.is_robots_allowed = real_allow
+    by_id = {e["grid_id"]: e for e in res.grid_entries}
+    check("a robots-disallowed grid is 'refused' by robots",
+          by_id["grid-B"]["status"] == "refused"
+          and by_id["grid-B"]["refused_by"] == "robots"
+          and by_id["grid-B"]["kind"] == "robots_refusal")
+    check("...and the grid after it is still fetched",
+          by_id["grid-C"]["status"] == "empty"
+          and by_id["grid-D"]["status"] == "fetched")
+
+    # The menu itself never arrived: the run says there is no grid to
+    # account for, rather than inventing one.
+    def menu_boom(url):
+        if "/menu" in url:
+            raise TimeoutError("read timed out")
+        return catalog_walk.Fetched(200, STORE.encode())
+
+    res = catalog_walk.crawl(menu_boom, 44009506)
+    check("a menu that was never read has a setup_failed stop reason",
+          res.stop_reason == "setup_failed")
+    check("...and NO grid entries at all", res.grid_entries == [])
+    check("...with a note saying so, not a fabricated entry",
+          res.grids_note and "no grids to account for" in res.grids_note)
+
+    # A category that matched nothing: same rule.
+    res = catalog_walk.crawl(make(), 44009506, category="NO SUCH THING")
+    check("an unmatched category also has no grid entries",
+          res.grid_entries == [] and res.grids_note
+          and "no grids to account for" in res.grids_note)
+
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "o")
+        good = [Product(sku="1")]
+        grid_rows = [{"grid_id": "g1", "trail": "A", "status": "fetched",
+                      "attempted": True, "sku_rows": 1},
+                     {"grid_id": "g2", "trail": "B", "status": "failed",
+                      "attempted": True, "sku_rows": 0,
+                      "reason": "HTTP 500", "status_code": 500},
+                     {"grid_id": "g3", "trail": "C", "status": "not_attempted",
+                      "attempted": False, "sku_rows": 0}]
+        rc = finish_run(good, prefix, "both", allow_empty=False, blocked=False,
+                        stop_reason="requests_failed", pages_requested=3,
+                        pages_completed=1, start_url="s", final_url="f",
+                        pages_failed=["u"],
+                        scope=scope_fingerprint(store_id=44009506, locale="gb",
+                                                category="A"),
+                        grids=grid_rows, grids_note=None, failures=[])
+        path = os.path.join(d, GRIDS_REPORT_FILENAME)
+        report = json.load(open(path, encoding="utf-8"))
+        check("a partial run still exits 6", rc == EXIT_PARTIAL)
+        check("the report lands in the output directory under the fixed name",
+              os.path.basename(path) == "grids_report.json"
+              and os.path.exists(prefix + ".json")
+              and os.path.exists(prefix + ".meta.json"))
+        check("its top level carries scope and grids",
+              set(report) >= {"scope", "grids"}
+              and report["scope"] == {"store": 44009506, "locale": "gb",
+                                      "category": "A"})
+        check("every grid carries id, trail, status and sku_rows",
+              all({"grid_id", "trail", "status", "sku_rows"} <= set(e)
+                  for e in report["grids"]))
+        check("a failed grid is distinguishable from a fetched one in the file",
+              report["grids"][1]["status"] == "failed"
+              and report["grids"][1]["status_code"] == 500
+              and report["grids"][0]["status"] == "fetched")
+        check("the summary counts each status once",
+              report["summary"]["failed"] == 1
+              and report["summary"]["not_attempted"] == 1
+              and report["summary"]["rows_written"] is True)
+
+        # A zero-row failure writes NO row file, but must still leave the
+        # evidence behind -- and must not fabricate a grid record when the
+        # grid list was never obtained.
+        bad = os.path.join(d, "bad")
+        rc = finish_run([], bad, "both", allow_empty=False, blocked=False,
+                        stop_reason="setup_failed", pages_requested=1,
+                        pages_completed=0, pages_failed=["menu"],
+                        start_url="s", final_url="f",
+                        grids=[], grids_note="no grids to account for",
+                        failures=[{"kind": "TransportError", "url": "menu",
+                                   "detail": "read timed out"}])
+        bad_report = json.load(open(os.path.join(d, GRIDS_REPORT_FILENAME),
+                                    encoding="utf-8"))
+        check("a zero-row failure keeps exit 5", rc == EXIT_REMOTE_API_ERROR)
+        check("...writes no row file and no metadata, but DOES write the report",
+              not os.path.exists(bad + ".json")
+              and not os.path.exists(bad + ".meta.json")
+              and os.path.exists(os.path.join(d, GRIDS_REPORT_FILENAME)))
+        check("...with grids=[] and the note saying why",
+              bad_report["grids"] == []
+              and "no grids to account for" in bad_report["note"])
+        check("...and the failure evidence kept",
+              bad_report["failures"][0]["kind"] == "TransportError")
+
+        # A pre-grid refusal path (storefront refused) writes the same shape.
+        write_pre_grid_failure(os.path.join(d, "pre"), locale="gb",
+                               category="A", stop_reason="edge_refusal",
+                               exc=catalog_walk.EdgeRefusal("edge refused"))
+        pre = json.load(open(os.path.join(d, GRIDS_REPORT_FILENAME),
+                             encoding="utf-8"))
+        check("a pre-grid refusal writes no entry either",
+              pre["grids"] == [] and pre["stop_reason"] == "edge_refusal"
+              and pre["note"] and "no grids to account for" in pre["note"])
+        check("...and keeps the exception as evidence",
+              pre["failures"][0]["kind"] == "EdgeRefusal")
+
+    check("the five grid statuses are named once, in one place",
+          GRID_STATUSES == ("fetched", "empty", "failed", "refused",
+                            "not_attempted"))
+    return not _failures
+
+
 def test_attribution_is_run_wide():
     group("a bundle's owner does not depend on batch order")
     import catalog_walk
@@ -4125,6 +4364,7 @@ def main() -> int:
     ok &= test_proxy_rotation_is_wired()
     ok &= test_robots_snapshot_travels()
     ok &= test_scope_guard()
+    ok &= test_grids_report()
     ok &= test_attribution_is_run_wide()
     ok &= test_store_config_is_read_once()
     ok &= test_output_contract()

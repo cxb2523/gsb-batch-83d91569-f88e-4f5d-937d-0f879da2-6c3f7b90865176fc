@@ -443,6 +443,153 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
     return 0 if rows else EXIT_NO_PRODUCTS
 
 
+# The per-grid conclusion written beside the rows. One file name, fixed, so
+# a consumer knows where to look without reading the sidecar first.
+GRIDS_REPORT_FILENAME = "grids_report.json"
+
+# Every status a grid in that report may carry. One word each, because these
+# are the five questions a reader has: was it read, was it genuinely empty,
+# did it fail, was the run refused, or was it never reached?
+#
+#   fetched        — the grid's payload was read and its products requested
+#   empty          — read, and it listed no product ids
+#   failed         — a request for it (grid or productsArray) failed
+#   refused        — robots.txt disallowed it, or the exit address was refused
+#   not_attempted  — selected but never reached (a mid-walk stop)
+#
+# `not_attempted` carries no failure reason on purpose: nothing was tried,
+# so there is nothing to blame.
+GRID_STATUSES = ("fetched", "empty", "failed", "refused", "not_attempted")
+
+
+def write_grids_report(out_prefix: str, scope: Optional[dict],
+                       grids: Sequence[dict], *, stop_reason: str,
+                       note: Optional[str] = None,
+                       failures: Optional[Sequence[dict]] = None,
+                       rows: int = 0,
+                       rows_written: Optional[bool] = None) -> str:
+    """Write `grids_report.json` beside the JSON/CSV/meta sidecar.
+
+    This is the answer to "can I use this run's result", grid by grid. It
+    exists because the run log named failed URLs and nothing else: a reader
+    could not tell an empty grid from a 500 from an exit the edge refused,
+    nor which grids a mid-walk refusal had left untried.
+
+    `scope` uses the same keys as the run sidecar (`store_id`, `locale`,
+    `category`); only those three are copied into this file, under the
+    shorter names the report contract names. `failures` is the run's own
+    failure list, kept whole so the report still holds evidence when the
+    grid list itself was never obtained and `grids` is consequently empty.
+
+    `rows` / `rows_written` describe the row files, so a reader of this
+    report alone can tell a partial run (grids failed, rows still written)
+    from a zero-row run where nothing was written — and a grid flagged
+    `failed` is never mistakable for one flagged `fetched`.
+
+    Written atomically in the OUTPUT directory (not next to whatever prefix
+    was passed): the file name is fixed, so two runs into one directory
+    overwrite it, which is what the fixed name means.
+    """
+    scope_in = scope or {}
+    entries = [dict(g) for g in grids]
+    counts = {status: 0 for status in GRID_STATUSES}
+    attempted = 0
+    sku_rows = 0
+    for entry in entries:
+        status = entry.get("status")
+        if status in counts:
+            counts[status] += 1
+        if entry.get("attempted"):
+            attempted += 1
+        sku_rows += int(entry.get("sku_rows") or 0)
+    summary = {"total": len(entries), "attempted": attempted,
+               "sku_rows": sku_rows, "rows": int(rows or 0),
+               "rows_written": (bool(rows) if rows_written is None
+                                else bool(rows_written))}
+    summary.update(counts)
+
+    report = {
+        "scope": {
+            "store": scope_in.get("store_id"),
+            "locale": scope_in.get("locale"),
+            "category": scope_in.get("category"),
+        },
+        "grids": entries,
+        "summary": summary,
+        "stop_reason": stop_reason,
+        "note": note,
+        # The run's own failure records, not a per-grid restatement: this
+        # is what is left to check when no grid could even be selected.
+        "failures": list(failures or []),
+    }
+    directory = os.path.dirname(os.path.abspath(out_prefix)) or "."
+    path = os.path.join(directory, GRIDS_REPORT_FILENAME)
+    with _atomic(path) as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    print(f"[+] Wrote per-grid report -> {path} "
+          f"({len(entries)} grid(s), {attempted} attempted, "
+          f"{counts['failed']} failed, {counts['refused']} refused, "
+          f"{counts['not_attempted']} not attempted)")
+    return path
+
+
+def _write_report_or_warn(write, *args, **kwargs) -> Optional[str]:
+    """Run a report write, never letting it change the run's exit code.
+
+    The report is written into the same directory as the row files, so an
+    unwritable or missing output directory is the same condition that would
+    have stopped the rows — and on a zero-row run the old contract was to
+    write nothing and return 3/5. A failure to write the report must not
+    turn that into an unhandled exception (exit 1): it is reported loudly
+    and the caller keeps its exit code.
+    """
+    try:
+        return write(*args, **kwargs)
+    except OSError as exc:
+        print(f"[!] Could not write {GRIDS_REPORT_FILENAME}: {exc} — the run's "
+              f"exit code is unchanged, but there is no per-grid conclusion "
+              f"in the output directory.")
+        return None
+
+
+def write_no_grids_report(out_prefix: str, *, store_id: Optional[int],
+                          locale: Optional[str], category: Optional[str],
+                          stop_reason: str, note: str,
+                          failures: Optional[Sequence[dict]] = None) -> Optional[str]:
+    """Write `grids_report.json` for a run that never obtained a grid list.
+
+    The store config or the menu was refused/never read, so there is no grid
+    to account for. The report says that in words rather than carrying a
+    fabricated entry, and keeps the request failures as the evidence.
+    """
+    return _write_report_or_warn(
+        write_grids_report,
+        out_prefix, {"store_id": store_id, "locale": locale,
+                     "category": category},
+        [], stop_reason=stop_reason, note=note, failures=failures)
+
+
+def write_pre_grid_failure(out_prefix: str, *, locale: Optional[str],
+                           category: Optional[str], stop_reason: str,
+                           exc: BaseException) -> Optional[str]:
+    """`grids_report.json` for an exception that stopped a run pre-grid.
+
+    Every engine's "we never got as far as a grid" path calls this, so they
+    cannot drift on what the report says. The exception is the evidence;
+    the note states plainly that no grid entry exists, and none is invented.
+    """
+    return _write_report_or_warn(
+        write_no_grids_report,
+        out_prefix, store_id=None, locale=locale, category=category,
+        stop_reason=stop_reason,
+        note=("no grids to account for: the run stopped before a grid list "
+              "was obtained, so no grid was selected or attempted."),
+        failures=[{"kind": type(exc).__name__,
+                   "url": getattr(exc, "url", "") or "",
+                   "detail": str(exc),
+                   "status": getattr(exc, "status", None)}])
+
+
 # Stop reasons that mean the run saw everything there was to see.
 COMPLETE_STOP_REASONS = ("completed", "pagination_exhausted", "no_new_products",
                          "single_page_mode")
@@ -467,7 +614,10 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
                pages_failed: Optional[List[Any]] = None,
                mode: str = "category", source: str = SOURCE_DEFAULT,
                scope: Optional[dict] = None,
-               extra: Optional[dict] = None) -> int:
+               extra: Optional[dict] = None,
+               grids: Optional[Sequence[dict]] = None,
+               grids_note: Optional[str] = None,
+               failures: Optional[Sequence[dict]] = None) -> int:
     """Write output + the run-metadata sidecar; return the exit code.
 
     Shared by every engine so the status/exit-code mapping cannot drift:
@@ -486,20 +636,39 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     writes nothing at all -- not even with `--allow-empty`, which exists for
     a genuinely empty answer -- so the previous good output is not left next
     to a "failed" sidecar that contradicts it.
+
+    `grids`, when the caller supplies it, is written as
+    `grids_report.json` in the same directory on EVERY path this function
+    returns from -- including a zero-row failure and a true zero-row empty
+    answer with no --allow-empty, where no product file is written at all.
+    That is deliberate: it holds no product rows, only the evidence of what
+    happened per grid, and "every grid was genuinely empty" is exactly the
+    answer a reader needs when no row file appears. Nothing is written to the
+    row files in those cases, exactly as before, and no exit code changes.
     """
     complete = stop_reason in COMPLETE_STOP_REASONS and not pages_failed
     row_cls = ROW_CLASS_BY_MODE.get(mode, Product)
+
+    def _write_grids(rows_written: bool) -> None:
+        if grids is not None:
+            _write_report_or_warn(
+                write_grids_report, out_prefix, scope, grids,
+                stop_reason=stop_reason, note=grids_note,
+                failures=failures, rows=len(rows),
+                rows_written=rows_written)
 
     if not rows:
         if blocked or stop_reason in BLOCKED_STOP_REASONS:
             print(f"[!] Refused before any rows were read ({stop_reason}) — "
                   f"exit {EXIT_BLOCKED}. Nothing was written.")
+            _write_grids(False)
             return EXIT_BLOCKED
         if stop_reason not in EMPTY_ANSWER_STOP_REASONS or pages_failed:
             print(f"[!] Nothing was gathered and the run did not finish "
                   f"({stop_reason}) — exit {EXIT_FETCH_FAILED}, NOT an empty "
                   f"result (exit {EXIT_NO_PRODUCTS}). Nothing can be concluded "
                   f"about the catalogue from this run, and nothing was written.")
+            _write_grids(False)
             return EXIT_FETCH_FAILED
 
     write_stats: dict = {}
@@ -525,6 +694,8 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
             pages_failed=pages_failed, mode=mode, source=source, scope=scope,
             start_url=start_url, final_url=final_url, products=len(rows),
             extra=extra))
+
+    _write_grids(wrote_output)
 
     if not rows:
         return rc

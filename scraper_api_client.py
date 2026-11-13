@@ -50,7 +50,8 @@ import env_config
 import product_parser as P
 from catalog_walk import Fetched
 from output_writer import (EXIT_BLOCKED, EXIT_REMOTE_API_ERROR, finish_run,
-                           scope_fingerprint)
+                           scope_fingerprint, write_no_grids_report,
+                           write_pre_grid_failure)
 
 logger = logging.getLogger("scraper_api_client")
 
@@ -165,6 +166,11 @@ def scrape(args) -> int:
             blob = P.store_id_from_page(got.text)
             if not blob or not blob.get("store_id"):
                 print(f"[!] no store id on the {args.site_locale!r} storefront")
+                write_no_grids_report(
+                    args.out, store_id=None, locale=args.site_locale,
+                    category=args.category, stop_reason="no_store_id",
+                    note=("no grids to account for: the storefront carried no "
+                          "store id, so no grid was selected or attempted."))
                 return EXIT_BLOCKED
             store_id = int(blob["store_id"])
 
@@ -179,12 +185,21 @@ def scrape(args) -> int:
                 delay=args.delay)
     except catalog_walk.RobotsRefusal as exc:
         print(f"[!] {exc}")
+        write_pre_grid_failure(args.out, locale=args.site_locale,
+                               category=args.category, stop_reason="robots_refusal",
+                               exc=exc)
         return EXIT_BLOCKED
     except (catalog_walk.EdgeRefusal, browser_bridge.BridgeError) as exc:
         print(f"[!] {exc}")
+        write_pre_grid_failure(args.out, locale=args.site_locale,
+                               category=args.category, stop_reason="edge_refusal",
+                               exc=exc)
         return EXIT_BLOCKED
     except Exception as exc:  # noqa: BLE001
         logger.error("%s: %s", type(exc).__name__, _mask_credentials(str(exc)))
+        write_pre_grid_failure(args.out, locale=args.site_locale,
+                               category=args.category, stop_reason=type(exc).__name__,
+                               exc=exc)
         return EXIT_REMOTE_API_ERROR
 
     from api_scraper import _report
@@ -200,7 +215,9 @@ def scrape(args) -> int:
             locale=args.site_locale, category=args.category,
             grid_ids=result.grid_ids, max_grids=args.max_grids,
             max_skus=args.max_skus),
-        start_url=start_url, final_url=P.BASE, mode=args.mode)
+        start_url=start_url, final_url=P.BASE, mode=args.mode,
+        grids=result.grid_entries, grids_note=result.grids_note,
+        failures=result.failures)
 
 
 def parse_args():

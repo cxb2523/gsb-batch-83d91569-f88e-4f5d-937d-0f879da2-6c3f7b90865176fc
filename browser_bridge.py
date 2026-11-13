@@ -375,13 +375,16 @@ def run(args, driver) -> int:
     """
     import catalog_walk
     from output_writer import (EXIT_BLOCKED, EXIT_REMOTE_API_ERROR, finish_run,
-                           scope_fingerprint)
+                           scope_fingerprint, write_pre_grid_failure)
 
     start_url = f"{P.BASE}/{args.site_locale}/"
     try:
         driver.start()
     except Exception as exc:  # noqa: BLE001 — mapped to an exit code, not swallowed
         logger.error("could not start %s: %s: %s", driver.name, type(exc).__name__, exc)
+        write_pre_grid_failure(args.out, locale=args.site_locale,
+                               category=args.category,
+                               stop_reason=type(exc).__name__, exc=exc)
         return EXIT_REMOTE_API_ERROR
 
     # ONE allowance for the whole run, shared by both places that can pay.
@@ -408,12 +411,21 @@ def run(args, driver) -> int:
                 max_skus=args.max_skus, delay=args.delay)
     except catalog_walk.RobotsRefusal as exc:
         print(f"[!] {exc}")
+        write_pre_grid_failure(args.out, locale=args.site_locale,
+                               category=args.category, stop_reason="robots_refusal",
+                               exc=exc)
         return EXIT_BLOCKED
     except (catalog_walk.EdgeRefusal, BridgeError) as exc:
         print(f"[!] {exc}")
+        write_pre_grid_failure(args.out, locale=args.site_locale,
+                               category=args.category, stop_reason="edge_refusal",
+                               exc=exc)
         return EXIT_BLOCKED
     except Exception as exc:  # noqa: BLE001
         logger.error("%s: %s", type(exc).__name__, exc)
+        write_pre_grid_failure(args.out, locale=args.site_locale,
+                               category=args.category, stop_reason=type(exc).__name__,
+                               exc=exc)
         return EXIT_REMOTE_API_ERROR
     finally:
         try:
@@ -438,7 +450,9 @@ def run(args, driver) -> int:
             locale=args.site_locale, category=args.category,
             grid_ids=result.grid_ids, max_grids=args.max_grids,
             max_skus=args.max_skus),
-        start_url=start_url, final_url=P.BASE, mode=args.mode, extra=extra)
+        start_url=start_url, final_url=P.BASE, mode=args.mode, extra=extra,
+        grids=result.grid_entries, grids_note=result.grids_note,
+        failures=result.failures)
 
 
 def positive_int(text: str) -> int:
