@@ -1,0 +1,310 @@
+"""OpenAI-compatible LLM API client."""
+
+import ipaddress
+import json
+import logging
+import os
+import re
+import time
+from urllib.parse import urlparse
+
+import httpx
+
+from fantoma.netutil import is_private_address, is_private_name
+
+log = logging.getLogger("fantoma.llm")
+
+
+def is_self_hosted(base_url: str) -> bool:
+    """True for an endpoint on this machine or a private network.
+
+    Checking for "localhost" in the URL missed a model served from another
+    machine on the LAN, a Docker service name or a Tailscale address, so a
+    thinking model there spent its whole token budget reasoning and a small
+    model timed out on every step. FANTOMA_LLM_SELF_HOSTED=1/0 overrides.
+    """
+    override = os.environ.get("FANTOMA_LLM_SELF_HOSTED", "").strip().lower()
+    if override in ("1", "true", "yes"):
+        return True
+    if override in ("0", "false", "no"):
+        return False
+    try:
+        host = (urlparse(base_url).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if is_private_name(host):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # A bare name with no dot is a local hostname or a container name.
+        return "." not in host
+    return is_private_address(ip)
+
+
+
+class LLMClient:
+    """Sends chat completion requests to any OpenAI-compatible endpoint."""
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str = "",
+        model: str = "auto",
+        timeout: float = None,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.model = model
+        # A 14B model on a CPU, or a small GPU under load, can take minutes
+        # per answer. FANTOMA_LLM_TIMEOUT raises the per-call limit (seconds).
+        if timeout is None:
+            try:
+                timeout = float(os.environ.get("FANTOMA_LLM_TIMEOUT", "180"))
+            except ValueError:
+                timeout = 180.0
+        self.timeout = timeout
+        self._resolved_model: str | None = None
+        self._temperature_override: float | None = None
+
+    def _resolve_model(self) -> str:
+        """Resolve 'auto' to the first available model on the server."""
+        if self.model != "auto":
+            return self.model
+
+        if self._resolved_model:
+            return self._resolved_model
+
+        headers = self._headers()
+        try:
+            resp = httpx.get(
+                f"{self.base_url}/models",
+                headers=headers,
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            models = data.get("data", [])
+            if models:
+                self._resolved_model = models[0].get("id", "auto")
+            else:
+                # No models loaded yet — don't cache, retry next call
+                return "auto"
+        except (httpx.HTTPError, KeyError, IndexError):
+            # Resolution failed — don't cache, retry next call
+            return "auto"
+
+        return self._resolved_model
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    @staticmethod
+    def _strip_code_fences(text: str) -> str:
+        """Remove markdown code fences from LLM response if present."""
+        stripped = text.strip()
+        # Match ```lang\n...\n``` or ```\n...\n```
+        match = re.match(r"^```(?:\w*)\n(.*?)```$", stripped, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        return stripped
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float = 0.3,
+        max_tokens: int = 2048,
+        response_format: dict | None = None,
+    ) -> str:
+        """Send a chat completion request and return the content string.
+
+        Args:
+            messages: List of {"role": ..., "content": ...} dicts.
+            temperature: Sampling temperature.
+            max_tokens: Maximum tokens in the response.
+
+        Returns:
+            The assistant's response content as a string.
+
+        Returns empty string on timeout, HTTP error, or unparseable response.
+        """
+        model = self._resolve_model()
+        if self._temperature_override is not None:
+            temperature = self._temperature_override
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        # DeepSeek V4 thinks by default and the reasoning silently eats the
+        # whole max_tokens budget: in the 2026-11-05 benchmark 294 of its
+        # 300-token action requests came back with empty content. Thinking
+        # is switched off through the API, as DeepSeek documents, not the prompt.
+        if "deepseek.com" in (self.base_url or ""):
+            payload["thinking"] = {"type": "disabled"}
+        # Any other provider-specific field, as JSON: FANTOMA_LLM_EXTRA_BODY='{"reasoning_effort":"low"}'
+        extra = os.environ.get("FANTOMA_LLM_EXTRA_BODY", "").strip()
+        if extra:
+            try:
+                payload.update(json.loads(extra))
+            except ValueError:
+                log.warning("FANTOMA_LLM_EXTRA_BODY is not valid JSON; ignored")
+        # Only add chat_template_kwargs for self-hosted endpoints (Qwen thinking
+        # mode). Cloud APIs (OpenAI, Anthropic, Moonshot) reject unknown
+        # parameters. response_format likewise: DeepSeek and others reject it.
+        if is_self_hosted(self.base_url):
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+            if response_format:
+                payload["response_format"] = response_format
+
+        # Opt-in prompt-cache pinning for llama.cpp servers with several slots:
+        # FANTOMA_LLM_SLOT_HINT=<slot number> sends id_slot with every request.
+        # Cloud APIs reject unknown fields, so self-hosted endpoints only.
+        hint = os.environ.get("FANTOMA_LLM_SLOT_HINT", "").strip()
+        if hint.isdigit() and is_self_hosted(self.base_url):
+            payload["id_slot"] = int(hint)
+
+        # Single retry on transient failures (timeout, connection error)
+        for attempt in range(2):
+            try:
+                resp = httpx.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=self._headers(),
+                    json=payload,
+                    timeout=self.timeout,
+                )
+                break
+            except httpx.ReadTimeout:
+                if attempt == 0:
+                    log.info("LLM request timed out, retrying...")
+                    time.sleep(1)
+                    continue
+                log.warning("LLM request timed out after %.0fs (2 attempts)", self.timeout)
+                return ""
+            except httpx.HTTPError as e:
+                if attempt == 0:
+                    log.info("LLM HTTP error: %s — retrying...", e)
+                    time.sleep(1)
+                    continue
+                log.warning("LLM HTTP error: %s", e)
+                return ""
+
+        if resp.status_code != 200:
+            log.warning("LLM returned %d: %s", resp.status_code, resp.text[:200])
+            if resp.status_code == 400:
+                body_text = resp.text or ""
+                # A stale model id behind a model-swapping proxy is a common
+                # cause of 400. Re-resolve before retrying so we don't resend
+                # the id the server just rejected.
+                self._resolved_model = None
+                payload["model"] = self._resolve_model()
+                # Some models (e.g. Kimi K2.5) only accept temperature=1. Only
+                # treat this as a temperature problem when the error body
+                # actually says so — otherwise a coincidental 400 would pin
+                # temperature=1 for the client's lifetime and silently degrade
+                # deterministic navigation on every later call.
+                temp_issue = temperature != 1 and "temperature" in body_text.lower()
+                if temp_issue:
+                    log.info("Retrying with temperature=1 (API requires it)")
+                    payload["temperature"] = 1
+                try:
+                    resp = httpx.post(
+                        f"{self.base_url}/chat/completions",
+                        headers=self._headers(),
+                        json=payload,
+                        timeout=self.timeout,
+                    )
+                except httpx.HTTPError:
+                    return ""
+                if resp.status_code != 200:
+                    return ""
+                if temp_issue:
+                    self._temperature_override = 1
+            else:
+                return ""
+
+        # Honour the documented contract: return "" on an unparseable response
+        # rather than raising. A malformed 200 body from a flaky local server
+        # would otherwise crash the whole run instead of feeding the
+        # navigator's empty-response recovery (replan / escalate).
+        try:
+            data = resp.json()
+            message = data["choices"][0]["message"]
+            content = message.get("content", "") or ""
+            # Some reasoning models (Qwen3.5) put the answer in reasoning_content
+            if not content.strip():
+                content = self._extract_from_reasoning(message)
+            usage = data.get("usage") or {}
+            if usage:
+                log.info("llm usage prompt=%s completion=%s",
+                         usage.get("prompt_tokens"), usage.get("completion_tokens"))
+        except (ValueError, KeyError, IndexError) as exc:
+            log.warning("Unparseable LLM response: %s", str(exc)[:200])
+            return ""
+
+        return self._strip_code_fences(content)
+
+    @staticmethod
+    def _extract_from_reasoning(message: dict) -> str:
+        """Extract actionable content from reasoning_content (Qwen3.5 thinking models).
+
+        These models put their answer in reasoning_content instead of content.
+        We extract only lines that look like browser actions (numbered steps with verbs).
+        """
+        reasoning = message.get("reasoning_content", "")
+        if not reasoning:
+            return ""
+
+        _BROWSER_VERBS = r'(?:navigate|go\s+to|click|type|scroll|search|open|fill|select|extract|read|enter|submit|find|visit|browse|wait|press)'
+        steps = []
+        for line in reasoning.strip().split("\n"):
+            line_s = line.strip()
+            is_numbered = re.match(r"^\s*\d+[\.\)]\s+", line_s) or re.match(r"^\s*Step\s+\d+", line_s, re.IGNORECASE)
+            has_verb = re.search(_BROWSER_VERBS, line_s, re.IGNORECASE)
+            if is_numbered and has_verb:
+                steps.append(re.sub(r"\*\*", "", line_s))
+        return "\n".join(steps) if steps else ""
+
+    def chat_with_image(
+        self,
+        messages: list[dict],
+        temperature: float = 0.3,
+        max_tokens: int = 2048,
+    ) -> str:
+        """Send a chat completion with image content (vision models).
+
+        Same as chat() but accepts messages with image_url content parts.
+        Returns the content string, or raises on error.
+        """
+        model = self._resolve_model()
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+
+        resp = httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers=self._headers(),
+            json=payload,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+
+        data = resp.json()
+
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError) as exc:
+            raise ValueError(
+                f"Unexpected response structure: {data}"
+            ) from exc
+
+        return self._strip_code_fences(content)

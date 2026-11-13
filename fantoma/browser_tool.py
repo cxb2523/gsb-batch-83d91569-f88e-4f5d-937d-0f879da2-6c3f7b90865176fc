@@ -1,0 +1,895 @@
+"""Fantoma — the browser tool. Drive a browser step by step.
+
+Accessibility-first: interacts through the ARIA tree, same channel as screen readers.
+No mouse movements, no pixel coordinates, no visual layer signals for anti-bot to detect.
+"""
+import logging
+import os
+import time
+from typing import Any
+
+from fantoma.browser.actions import (
+    click_element, type_into, scroll_page, native_option_target, select_dropdown_option,
+)
+from fantoma.browser.engine import BrowserEngine
+from fantoma.browser.consent import dismiss_consent
+from fantoma.browser.form_login import login as form_login, _looks_logged_in
+from fantoma.browser.form_memory import FormMemory
+from fantoma.browser.observer import inject_observer, collect_mutations, wait_for_dom_stable
+from fantoma.browser.page_state import verify_action, detect_errors
+from fantoma.dom.accessibility import AccessibilityExtractor
+from fantoma.dom.markdown import page_to_markdown, aria_text_fallback
+from fantoma.browser.blocks import detect_block_page
+from fantoma.browser.domains import DomainBlocked
+from fantoma.dom.page_reads import reset_stuck
+from fantoma.prompt_parts import today_line
+from fantoma.safety import UNTRUSTED_NOTE, wrap_untrusted, scan_for_injection
+from fantoma.config import FantomaConfig
+from fantoma.session import SessionManager
+
+log = logging.getLogger("fantoma")
+
+
+class Fantoma:
+    """The Fantoma browser tool.
+
+    Usage:
+        browser = Fantoma()
+        state = browser.start("https://example.com")
+        # state["aria_tree"] — feed this to your LLM
+        result = browser.click(3)
+        # result["state"]["aria_tree"] — updated page
+        browser.stop()
+    """
+
+    def __init__(
+        self,
+        llm_url: str = None,
+        api_key: str = "",
+        model: str = "auto",
+        headless: bool = True,
+        proxy: str = None,
+        browser: str = "camoufox",
+        captcha_api: str = None,
+        captcha_key: str = None,
+        email_imap: dict = None,
+        verification_callback: callable = None,
+        timeout: int = 300,
+        trace: bool = False,
+        profile_dir: str = None,
+        allowed_domains: list[str] | str = None,
+        blocked_domains: list[str] | str = None,
+        cdp_url: str = None,
+        allow_remote_cdp: bool = False,
+        webmcp: bool | str = None,
+        block_resources: bool = None,
+    ):
+        self.config = FantomaConfig()
+        # Hostnames the browser may / may not contact. None falls back to
+        # FANTOMA_ALLOWED_DOMAINS / FANTOMA_BLOCKED_DOMAINS. See browser.domains.
+        self._allowed_domains = allowed_domains
+        self._blocked_domains = blocked_domains
+        self._profile_dir = profile_dir
+        # Attach to a Chrome the user already runs. Env FANTOMA_CDP_URL is the
+        # fallback so the MCP server and CLI get it without code changes.
+        self._cdp_url = cdp_url or os.environ.get("FANTOMA_CDP_URL", "").strip() or None
+        self._allow_remote_cdp = allow_remote_cdp or os.environ.get(
+            "FANTOMA_ALLOW_REMOTE_CDP", "").lower() in ("1", "true", "yes")
+        if self._cdp_url and browser != "chromium":
+            raise ValueError(
+                "cdp_url needs browser='chromium': Camoufox (Firefox) cannot "
+                "attach to a running Chrome.")
+        if self._cdp_url and self._cdp_url.lower() != "auto":
+            from fantoma.browser.cdp import check_cdp_url
+            check_cdp_url(self._cdp_url, self._allow_remote_cdp)
+        # WebMCP (tools pages register for agents). Off by default; Chromium
+        # only. Env FANTOMA_WEBMCP=1 also turns it on.
+        from fantoma import webmcp as _webmcp
+        # True = tools the page does not mark consequential / not read-only;
+        # "all" (or FANTOMA_WEBMCP=all) also allows those.
+        if webmcp is None:
+            webmcp = _webmcp.env_mode()
+        if webmcp and browser != "chromium":
+            _webmcp.warn_unsupported_engine()
+            webmcp = False
+        self._webmcp_all = isinstance(webmcp, str) and webmcp.lower() == "all"
+        self._webmcp = bool(webmcp)
+        self._webmcp_last: dict | None = None
+        self._block_resources = block_resources  # None: FANTOMA_BLOCK_RESOURCES
+        self.config.browser.headless = headless
+        self.config.browser.browser_engine = browser
+        self.config.browser.timeout = timeout
+        self.config.browser.trace = trace
+        # Arguments win; otherwise the environment, so a key set once (in
+        # .env for Docker, or the shell for the library and MCP server)
+        # works everywhere. CAPTCHA_API / CAPTCHA_KEY are the names the HTTP
+        # server has always read.
+        captcha_api = (captcha_api or os.environ.get("FANTOMA_CAPTCHA_API")
+                       or os.environ.get("CAPTCHA_API") or "")
+        captcha_key = (captcha_key or os.environ.get("FANTOMA_CAPTCHA_KEY")
+                       or os.environ.get("CAPTCHA_KEY") or "")
+        if captcha_key and not captcha_api:
+            captcha_api = "capsolver"
+        if captcha_api:
+            from fantoma.captcha.api_solver import normalise_provider
+            self.config.captcha.api = normalise_provider(captcha_api)
+        if captcha_key:
+            self.config.captcha.key = captcha_key
+        if email_imap:
+            from fantoma.config import EmailConfig
+            self.config.email = EmailConfig(
+                host=email_imap.get("host", ""),
+                port=email_imap.get("port", 993),
+                user=email_imap.get("user", ""),
+                password=email_imap.get("password", ""),
+                security=email_imap.get("security", "ssl"),
+            )
+
+        self._proxy = proxy
+        self._llm = None
+        if llm_url:
+            from fantoma.llm.client import LLMClient
+            self._llm = LLMClient(base_url=llm_url, api_key=api_key, model=model)
+
+        self._verification_callback = verification_callback
+        self._task = ""
+        # Accessibility tree captured after the previous action, so the next
+        # one can tell whether it changed anything. None until the session
+        # starts; the first action then has no baseline and reports only a
+        # URL change, which is correct rather than a guess.
+        self._last_tree = None
+        self._engine = None
+        self._dom = AccessibilityExtractor(
+            max_elements=self.config.extraction.max_elements,
+            max_headings=self.config.extraction.max_headings,
+        )
+
+    # ── Lifecycle ────────────────────────────────────────────
+
+    def start(self, url: str = None) -> dict:
+        """Start the browser, optionally navigate to url. Returns initial state."""
+        self._engine = BrowserEngine(
+            headless=self.config.browser.headless,
+            proxy=self._proxy,
+            trace=self.config.browser.trace,
+            browser_engine=self.config.browser.browser_engine,
+            profile_dir=self._profile_dir,
+            cdp_url=self._cdp_url,
+            allow_remote_cdp=self._allow_remote_cdp,
+            allowed_domains=self._allowed_domains,
+            blocked_domains=self._blocked_domains,
+            webmcp=self._webmcp,
+            block_resources=self._block_resources,
+            # Was always on: the config flag never reached the engine, so
+            # every click carried a 1-3 s pause even with humanize=False.
+            humanize=self.config.browser.humanize,
+        )
+        self._engine.start()
+        if url:
+            self._engine.navigate(url)
+            wait_for_dom_stable(self._engine.get_page())
+            dismiss_consent(self._engine.get_page())
+        state = self.get_state(task=self._task)
+        # Baseline for the first action's `changed` comparison.
+        self._last_tree = state.get("aria_tree", "")
+        return state
+
+    def stop(self) -> None:
+        """Close the browser and clean up."""
+        if self._engine:
+            try:
+                self._engine.stop()
+            except Exception:
+                pass
+            self._engine = None
+
+    def restart(self) -> dict:
+        """Restart with a fresh fingerprint. Returns new state."""
+        url = None
+        if self._engine:
+            try:
+                url = self._engine.get_url()
+            except Exception:
+                pass
+            self.stop()
+        return self.start(url)
+
+    # ── State ────────────────────────────────────────────────
+
+    def _tab_count(self) -> int:
+        if getattr(self._engine, "attached", False) is True:
+            try:
+                return len(self._engine.tabs()) or 1
+            except Exception:
+                pass
+        ctx = getattr(self._engine, '_context', None)
+        return len(ctx.pages) if ctx else 1
+
+    def get_state(self, mode: str = "navigate", task: str = "") -> dict:
+        """Get current page state: URL, title, ARIA tree, errors, tab count."""
+        page = self._engine.get_page()
+        # A crashed or closed tab never answers a snapshot. Say so instead
+        # of hanging until the task deadline (measured: 85 s+ on chrome://crash).
+        crashed = getattr(self._engine, "page_crashed", None)
+        if callable(crashed) and crashed(page) is True:
+            ctx = getattr(self._engine, '_context', None)
+            return {
+                "url": getattr(page, "url", ""), "title": "",
+                "aria_tree": "Page crashed or was closed. Navigate again or switch_tab.",
+                "errors": ["Page crashed or closed — navigate again"],
+                "tab_count": self._tab_count(),
+            }
+        # Rank against the running task when none is given, so the state
+        # returned after an action numbers elements the way the model's own
+        # view did. Ranked without it, the same box was [0] in one view and
+        # [1] in the next.
+        task = task or getattr(self, "_task", "") or ""
+        aria_tree = self._dom.extract(page, task=task, mode=mode)
+        errors = detect_errors(page)
+        status = getattr(self._engine, "last_status", None)
+        if isinstance(status, int) and status >= 400 and getattr(self._engine, "_last_status_url", "") == page.url:
+            errors.append(f"HTTP {status} response for this page")
+        ctx = getattr(self._engine, '_context', None)
+        tab_count = self._tab_count()
+        try:
+            title = page.title()
+        except Exception:
+            time.sleep(1)
+            try:
+                title = page.title()
+            except Exception:
+                title = page.url
+        return {
+            "url": page.url,
+            "title": title,
+            "aria_tree": aria_tree,
+            "errors": errors,
+            "tab_count": tab_count,
+        }
+
+    # ── WebMCP (opt-in) ──────────────────────────────────────
+
+    def webmcp_tools(self) -> list[dict]:
+        """Tools the current page registered via WebMCP. [] when off or none."""
+        if not self._webmcp or not self._engine:
+            return []
+        from fantoma import webmcp
+        return webmcp.list_tools(self._engine.get_page(), allow_all=self._webmcp_all)
+
+    def webmcp_call(self, name: str, args: dict = None) -> dict:
+        """Call a page's WebMCP tool. Returns the usual action result plus
+        `webmcp` ({success, name, result, error, warnings}). Arguments holding a
+        <secret:...> placeholder are refused."""
+        from fantoma import webmcp
+        page = self._engine.get_page()
+        pre_url = page.url
+        if not self._webmcp:
+            out = {"success": False, "name": str(name)[:64], "result": "",
+                   "error": "WebMCP is off (pass webmcp=True, Chromium only)", "warnings": []}
+        else:
+            out = webmcp.call_tool(page, name, args, allow_all=self._webmcp_all)
+        self._webmcp_last = out
+        res = self._action_result(out["success"], pre_url)
+        res["webmcp"] = out
+        return res
+
+    def webmcp_prompt(self) -> str:
+        """Fenced prompt text listing the page's tools and the last call result.
+        """
+        if not self._webmcp or not self._engine:
+            return ""
+        from fantoma import webmcp
+        page = self._engine.get_page()
+        last, self._webmcp_last = self._webmcp_last, None
+        return webmcp.prompt_block(webmcp.list_tools(page, allow_all=self._webmcp_all), last, page.url)
+
+    def evaluate(self, script: str) -> Any:
+        """Execute JavaScript on the current page and return the result."""
+        page = self._engine.get_page()
+        return page.evaluate(script)
+
+    def fill_by_selector(self, selector: str, value: str) -> dict:
+        """Fill an input element by CSS selector (bypasses ARIA tree limit)."""
+        page = self._engine.get_page()
+        pre_url = page.url
+        try:
+            from .browser.observer import inject_observer, wait_for_dom_stable
+            inject_observer(page)
+            element = page.query_selector(selector)
+            if not element:
+                return {"success": False, "error": f"Selector not found: {selector}"}
+            element.fill(value)
+            wait_for_dom_stable(page)
+            return self._action_result(True, pre_url)
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def screenshot(self) -> bytes:
+        """Take a PNG screenshot of the current viewport."""
+        return self._engine.screenshot()
+
+    # ── Actions ──────────────────────────────────────────────
+
+    def _action_result(self, success: bool, pre_url: str = None) -> dict:
+        """Build a standard action result with fresh state.
+
+        `changed` used to be a copy of `url_changed`, which made every
+        in-page interaction report that nothing happened: clicking "Add to
+        cart" on a single-page shop leaves the URL alone, so a caller was
+        told the click did nothing while the DOM had plainly changed.
+
+        It now compares the accessibility tree against the one captured
+        after the previous action. That costs nothing extra — the previous
+        result already extracted it — and it is the signal a caller actually
+        wants: did this action do anything at all.
+        """
+        state = self.get_state(task=self._task)
+        tree = state.get("aria_tree", "")
+        url_changed = pre_url is not None and state["url"] != pre_url
+        dom_changed = self._last_tree is not None and tree != self._last_tree
+        self._last_tree = tree
+        # Things the page did that the tree does not show: a dialog that
+        # was answered for the model, a tab the site opened on its own.
+        notes: list[str] = []
+        engine = getattr(self, "_engine", None)
+        take_dialog = getattr(engine, "take_dialog", None)
+        dialog = take_dialog() if callable(take_dialog) else None
+        if isinstance(dialog, dict):
+            verb = "accepted" if dialog.get("answer") == "accepted" else "dismissed (Cancel)"
+            notes.append(f"A {dialog.get('type')} dialog was {verb}: \"{(dialog.get('message') or '')[:160]}\"")
+        take_popups = getattr(engine, "take_popup_count", None)
+        popups = take_popups() if callable(take_popups) else 0
+        if isinstance(popups, int) and popups > 0:
+            notes.append(f"The page opened {popups} new tab(s); now {state['tab_count']} open. "
+                         f"Use switch_tab to read it.")
+        return {
+            "success": success,
+            "changed": bool(url_changed or dom_changed or notes),
+            "url_changed": url_changed,
+            "errors": state["errors"],
+            "notes": notes,
+            "state": state,
+        }
+
+    def _element_missing(self, element_id, pre_url) -> dict:
+        """Failed action result that tells the model why [N] could not be used."""
+        msg = None
+        say = getattr(self._dom, "miss_message", None)
+        if callable(say):
+            msg = say(element_id)
+        if not isinstance(msg, str):
+            msg = f"element [{element_id}] is gone, re-read the page"
+        log.warning("Element [%s] not usable: %s", element_id, msg)
+        result = self._action_result(False, pre_url)
+        result["notes"] = list(result.get("notes") or []) + [msg]
+        return result
+
+    def click(self, element_id: int) -> dict:
+        """Click an element by its ARIA tree index."""
+        page = self._engine.get_page()
+        pre_url = page.url
+        element = self._dom.get_element_by_index(page, element_id)
+        if not element:
+            return self._element_missing(element_id, pre_url)
+        try:
+            inject_observer(page)
+            option = native_option_target(element)
+            if option is not None:
+                # A click on an option in a native dropdown is a no-op; the
+                # intent is plainly "choose this one", so do that instead.
+                if not select_dropdown_option(element, option["label"] or option["value"]):
+                    return self._action_result(False, pre_url)
+            else:
+                click_element(self._engine, element)
+            wait_for_dom_stable(page)
+        except Exception as e:
+            log.warning("Click [%d] failed: %s", element_id, e)
+            return self._action_result(False, pre_url)
+        return self._action_result(True, pre_url)
+
+    def type_text(self, element_id: int, text: str) -> dict:
+        """Type text into an element by its ARIA tree index."""
+        page = self._engine.get_page()
+        pre_url = page.url
+        element = self._dom.get_element_by_index(page, element_id)
+        if not element:
+            return self._element_missing(element_id, pre_url)
+        try:
+            inject_observer(page)
+            type_into(self._engine, element, text)
+            wait_for_dom_stable(page)
+        except Exception as e:
+            log.warning("Type [%d] failed: %s", element_id, e)
+            return self._action_result(False, pre_url)
+        return self._action_result(True, pre_url)
+
+    def select(self, element_id: int, value: str) -> dict:
+        """Select an option from a dropdown by its ARIA tree index."""
+        page = self._engine.get_page()
+        pre_url = page.url
+        element = self._dom.get_element_by_index(page, element_id)
+        if not element:
+            return self._element_missing(element_id, pre_url)
+        try:
+            inject_observer(page)
+            if not select_dropdown_option(element, value) \
+                    and not self._select_custom_dropdown(page, element, value):
+                log.warning("Select [%d]: no option matching %r", element_id, value)
+                return self._action_result(False, pre_url)
+            wait_for_dom_stable(page)
+        except Exception as e:
+            log.warning("Select [%d] failed: %s", element_id, e)
+            return self._action_result(False, pre_url)
+        return self._action_result(True, pre_url)
+
+    def _select_custom_dropdown(self, page, element, value: str) -> bool:
+        """Open a scripted (non-<select>) dropdown and pick an option by name.
+
+        Many sites build dropdowns from ARIA combobox/listbox markup, where
+        select_option() cannot work. Opening it and activating the matching
+        option is what a keyboard user does.
+
+        Options are looked for in the popup this control owns (aria-controls
+        / aria-owns), else in any visible listbox, and never inside a native
+        <select>: a page-wide search found a same-named <option> in an
+        unrelated native dropdown earlier on the page and clicked that.
+        Returns True only if the choice is visible afterwards.
+        """
+        try:
+            # Only something that opens a list of options. Clicking whatever
+            # was passed would follow a link the model mis-numbered.
+            info = element.evaluate("""el => {
+                const r = (el.getAttribute('role') || '').toLowerCase();
+                return {
+                    dropdown: r === 'combobox' || r === 'listbox'
+                        || el.hasAttribute('aria-haspopup') || el.hasAttribute('aria-expanded'),
+                    popup: (el.getAttribute('aria-controls') || el.getAttribute('aria-owns') || '')
+                        .split(/\\s+/)[0],
+                };
+            }""")
+            if not info or not info.get("dropdown"):
+                return False
+            if (element.evaluate("el => (el.getAttribute('role') || '').toLowerCase()") != "listbox"):
+                click_element(self._engine, element)
+                wait_for_dom_stable(page)
+
+            scope = (page.locator(f"[id={_css_string(info['popup'])}]")
+                     if info.get("popup") else page)
+            want = value.strip().lower()
+            options = scope.locator("[role=option]:visible")
+            target = None
+            for i in range(min(options.count(), 200)):
+                opt = options.nth(i)
+                label = (opt.get_attribute("aria-label") or opt.inner_text() or "").strip().lower()
+                if label == want:
+                    target = opt
+                    break
+                if target is None and want and want in label:
+                    target = opt
+            if target is None:
+                return False
+            chosen = target.element_handle()
+            click_element(self._engine, chosen)
+            wait_for_dom_stable(page)
+
+            # Confirm it took: the control now shows the value (its own text,
+            # not its label), or the option is marked selected.
+            shown = element.evaluate("el => (el.value || el.textContent || '')")
+            if want in (shown or "").lower():
+                return True
+            try:
+                return chosen.get_attribute("aria-selected") == "true"
+            except Exception:
+                return False
+        except Exception as e:
+            log.debug("custom dropdown select failed: %s", e)
+        return False
+
+    def scroll(self, direction: str = "down") -> dict:
+        """Scroll the page. Direction: 'up', 'down', 'left', 'right'."""
+        pre_url = self._engine.get_page().url
+        try:
+            scroll_page(self._engine, direction)
+        except Exception as e:
+            log.warning("Scroll failed: %s", e)
+            return self._action_result(False, pre_url)
+        return self._action_result(True, pre_url)
+
+    def press_key(self, key: str) -> dict:
+        """Press a keyboard key (Enter, Tab, Escape, etc.)."""
+        page = self._engine.get_page()
+        pre_url = page.url
+        try:
+            page.keyboard.press(key)
+            # Enter in a search box submits a form; give the navigation
+            # the same chance to land as a click gets before the state
+            # is read.
+            wait_for_dom_stable(page)
+        except Exception as e:
+            log.warning("Press %s failed: %s", key, e)
+            return self._action_result(False, pre_url)
+        return self._action_result(True, pre_url)
+
+    def go_back(self) -> dict:
+        """Go back to the previous page in browser history."""
+        page = self._engine.get_page()
+        pre_url = page.url
+        try:
+            page.go_back(timeout=10000)
+            wait_for_dom_stable(self._engine.get_page())
+        except Exception as e:
+            log.warning("Go back failed: %s", e)
+            return self._action_result(False, pre_url)
+        return self._action_result(True, pre_url)
+
+    def navigate(self, url: str) -> dict:
+        """Navigate to a URL."""
+        reset_stuck()
+        pre_url = self._engine.get_page().url
+        try:
+            self._engine.navigate(url)
+            # Settle first, then clear any banner that arrived with the page.
+            # The fixed 2 s sleep that sat here cost more than the wait does.
+            wait_for_dom_stable(self._engine.get_page())
+            dismiss_consent(self._engine.get_page())
+        except DomainBlocked as e:
+            log.warning("Navigate refused: %s", e)
+            result = self._action_result(False, pre_url)
+            result["error"] = str(e)
+            return result
+        except Exception as e:
+            log.warning("Navigate failed: %s", e)
+            result = self._action_result(False, pre_url)
+            result["error"] = str(e)
+            return result
+        return self._action_result(True, pre_url)
+
+    # ── Tabs ─────────────────────────────────────────────────
+
+    def new_tab(self, url: str) -> dict:
+        """Open a new tab and navigate to url."""
+        self._engine.new_tab(url)
+        wait_for_dom_stable(self._engine.get_page())
+        return {"state": self.get_state()}
+
+    def switch_tab(self, tab: int | str) -> dict:
+        """Switch to a tab by index."""
+        self._engine.switch_tab(tab)
+        return {"state": self.get_state()}
+
+    def close_tab(self, tab: int | str = None) -> dict:
+        """Close a tab. Defaults to current."""
+        if tab is not None:
+            self._engine.close_tab(tab)
+        else:
+            self._engine.close_tab()
+        return {"state": self.get_state()}
+
+    def list_tabs(self) -> list[dict]:
+        """List open tabs with index and URL."""
+        ctx = getattr(self._engine, '_context', None)
+        if not ctx:
+            page = self._engine.get_page()
+            return [{"index": 0, "url": page.url}]
+        pages = ctx.pages
+        if getattr(self._engine, "attached", False) is True:
+            pages = self._engine.tabs()  # attached: never list the user's tabs
+        return [{"index": i, "url": p.url} for i, p in enumerate(pages)]
+
+    # ── High-level operations ────────────────────────────────
+
+    def login(self, url: str, email: str = "", username: str = "",
+              password: str = "", first_name: str = "", last_name: str = "",
+              value_guard=None) -> dict:
+        """Log into a site. Navigates to url, fills form, handles CAPTCHA and verification.
+
+        Browser must be started first via start().
+        Does NOT stop the browser after -- caller may want to continue browsing.
+        """
+        reset_stuck()
+        from fantoma.captcha.orchestrator import CaptchaOrchestrator
+        from urllib.parse import urlparse
+        from uuid import uuid4
+
+        account = email or username or "default"
+        domain = urlparse(url).netloc
+        log.info("Login: %s (account=%s)", url, account[:20])
+
+        sessions = SessionManager()
+        memory = FormMemory()
+        visit_id = uuid4().hex
+
+        # Try saved session first
+        saved = sessions.load(domain, account)
+        if saved:
+            log.info("Found saved session for %s -- validating", domain)
+            try:
+                self._engine.load_storage_state(saved["storage_state"])
+                self._engine.navigate(saved.get("login_url", url))
+                time.sleep(3)
+                page = self._engine.get_page()
+                if _looks_logged_in(page, page.url, url):
+                    log.info("Saved session valid")
+                    memory.close()
+                    return {"success": True, "url": page.url, "from_session": True,
+                            "fields_filled": [], "steps": 0}
+                log.info("Saved session expired")
+                sessions.delete(domain, account)
+            except Exception as e:
+                log.warning("Session validation failed: %s", e)
+                sessions.delete(domain, account)
+
+        # Full login flow
+        self._engine.navigate(url)
+        time.sleep(3)
+        page = self._engine.get_page()
+
+        # Handle CAPTCHA
+        captcha = CaptchaOrchestrator(self.config)
+        captcha.handle(page, self._engine.screenshot)
+
+        result = form_login(
+            browser=self._engine,
+            dom_extractor=self._dom,
+            email=email, username=username, password=password,
+            first_name=first_name, last_name=last_name,
+            memory=memory, visit_id=visit_id,
+            config=self.config, llm=self._llm, value_guard=value_guard,
+        )
+
+        page = self._engine.get_page()
+
+        # Check if logged in
+        if result.get("success") and _looks_logged_in(page, page.url, url):
+            log.info("Login successful")
+            try:
+                state = self._engine.get_storage_state()
+                sessions.save(domain, account, state, url)
+            except Exception as e:
+                log.warning("Failed to save session: %s", e)
+            memory.record_visit(domain, True)
+            memory.close()
+            return result
+
+        # Handle verification if needed
+        if result.get("verification_needed"):
+            vtype = result["verification_needed"]
+            log.info("Verification needed: %s", vtype)
+            value = self._get_verification(vtype, domain)
+            if value and vtype == "code":
+                self._enter_verification_code(value)
+            elif value and vtype == "link":
+                self._engine.navigate(value)
+                time.sleep(5)
+
+            page = self._engine.get_page()
+            if _looks_logged_in(page, page.url, url):
+                log.info("Logged in after verification")
+                try:
+                    state = self._engine.get_storage_state()
+                    sessions.save(domain, account, state, url)
+                except Exception:
+                    pass
+                memory.record_visit(domain, True)
+                memory.close()
+                result["success"] = True
+                return result
+
+        memory.record_visit(domain, False)
+        memory.close()
+        return result
+
+    def read(self, url: str = None, main_only: bool = True, include_links: bool = True,
+             selector: str = "", max_chars: int = 0, scroll: bool = True) -> dict:
+        """Return the current page (or `url`) as clean Markdown. No LLM needed.
+
+        Result keys: title, url, description, markdown, links, hidden_removed,
+        truncated, blocked (a reason string when the page looks like a bot
+        wall, error page or login wall, else ""), injection_warnings (excerpts
+        of text that reads like instructions aimed at an AI).
+
+        scroll (default on) walks the page first so content that only renders
+        once scrolled into view is included. Raises RuntimeError when the page
+        cannot be opened or read (for example an invalid selector).
+        """
+        reset_stuck()
+        if url:
+            nav = self.navigate(url)
+            # Reading on after a failed navigation would describe whatever
+            # page was already open as if it were `url`.
+            if not nav.get("success"):
+                raise RuntimeError(nav.get("error") or f"Could not open {url}")
+        page = self._engine.get_page()
+        result = page_to_markdown(page, main_only=main_only, include_links=include_links,
+                                  selector=selector, max_chars=max_chars, scroll=scroll)
+        error = result.pop("error", "")
+        if error:
+            raise RuntimeError(f"Could not read {result.get('url') or 'the page'}: {error}")
+        result["blocked"] = detect_block_page(result["title"], result["markdown"])
+        result["injection_warnings"] = scan_for_injection(result["markdown"])
+        return result
+
+    def extract(self, query: str, schema: dict = None) -> dict | list | str:
+        """Extract data from the current page.
+
+        With LLM: sends the page (as Markdown, hidden text removed, fenced as
+        untrusted) plus the query to the LLM.
+        Without LLM: returns raw ARIA tree text.
+
+        `schema` may be a JSON Schema ({"type": "object", "properties": ...}
+        or {"type": "array", "items": ...}) or a flat {field: type} map where
+        type is a Python type or a type name. A JSON Schema of type object
+        returns a dict; anything else returns a list of items.
+        """
+        reset_stuck()
+        if not self._llm:
+            return self._dom.extract(self._engine.get_page())
+
+        page = self._engine.get_page()
+        rendered = page_to_markdown(page, main_only=False, include_links=True,
+                                    max_chars=self.config.extraction.max_page_text)
+        content = rendered["markdown"]
+        if not content.strip():
+            # The Markdown walk failed. The accessibility tree still drops
+            # display:none and aria-hidden text, unlike raw innerText.
+            content = aria_text_fallback(page)[: self.config.extraction.max_page_text]
+
+        shape = _schema_shape(schema) if schema else None
+        if shape:
+            system = (f"Extract data from the page as JSON matching this schema:\n{shape['text']}\n"
+                      f"Return ONLY valid JSON ({shape['kind']}). No explanation. No markdown. "
+                      "Use null for a field the page does not state; never invent values.\n"
+                      + UNTRUSTED_NOTE)
+        else:
+            system = ("Extract the requested information. Return only the data, no explanation. "
+                      "Only report what the page states.\n" + UNTRUSTED_NOTE)
+
+        response = self._llm.chat(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": f"Extract: {query}\n{today_line()}\n\nPage content:\n"
+                                         f"{wrap_untrusted(content, page.url if isinstance(page.url, str) else '')}"}],
+            max_tokens=2000,
+        )
+        if not response:
+            return ([] if shape["kind"] == "array" else {}) if shape else ""
+        response = response.strip()
+        if not shape:
+            return response
+        data = _parse_json_loose(response, shape["kind"])
+        if shape["kind"] == "object":
+            if isinstance(data, list):
+                return data[0] if data and isinstance(data[0], dict) else {}
+            return data if isinstance(data, dict) else {}
+        if data is None:
+            return []
+        return data if isinstance(data, list) else [data]
+
+    # ── Utilities ────────────────────────────────────────────
+
+    def get_cookies(self) -> list[dict]:
+        return self._engine.get_cookies()
+
+    def set_cookies(self, cookies: list[dict]) -> None:
+        self._engine.set_cookies(cookies)
+
+    def get_storage_state(self) -> dict:
+        return self._engine.get_storage_state()
+
+    def load_storage_state(self, state: dict) -> None:
+        self._engine.load_storage_state(state)
+
+    # ── Private helpers ──────────────────────────────────────
+
+    def _get_verification(self, vtype, domain):
+        """Get verification code/link. IMAP -> callback -> terminal."""
+        if self.config.email.host:
+            from fantoma.browser.email_verify import check_inbox
+            result = check_inbox(self.config.email, domain, prefer=vtype)
+            if result:
+                return result["value"]
+        if self._verification_callback:
+            try:
+                msg = f"Enter verification {vtype} from {domain}"
+                value = self._verification_callback(domain, msg)
+                if value:
+                    return value.strip()
+            except Exception as e:
+                log.warning("Verification callback failed: %s", e)
+        try:
+            value = input(f"\nVerification {vtype} from {domain}: ")
+            return value.strip() if value else None
+        except (EOFError, OSError):
+            return None
+
+    def _enter_verification_code(self, code):
+        """Find verification input and enter the code."""
+        page = self._engine.get_page()
+        self._dom.extract(page)
+        for el in self._dom._last_interactive:
+            if el.get("role") in ("textbox", "input"):
+                handle = self._dom.get_element_by_index(page, el["index"])
+                if handle:
+                    type_into(self._engine, handle, code)
+                    page.keyboard.press("Enter")
+                    return
+        selectors = ['input[name*="code"]', 'input[name*="otp"]', 'input[name*="verify"]',
+                     'input[placeholder*="code"]', 'input[type="text"]', 'input[type="number"]']
+        for sel in selectors:
+            try:
+                handle = page.query_selector(sel)
+                if handle and handle.is_visible():
+                    type_into(self._engine, handle, code)
+                    page.keyboard.press("Enter")
+                    return
+            except Exception:
+                continue
+
+
+# ── Schema helpers ────────────────────────────────────────────
+
+_TYPE_NAMES = {str: "string", int: "integer", float: "number", bool: "boolean",
+               list: "array", dict: "object"}
+
+
+def _css_string(value: str) -> str:
+    """Quote value as a CSS string literal (page-controlled text, e.g. aria-controls)."""
+    out = []
+    for ch in str(value):
+        if ch in "\\\"'":
+            out.append("\\" + ch)
+        elif ord(ch) < 0x20 or ord(ch) == 0x7f:
+            out.append("\\%x " % ord(ch))
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
+def _schema_shape(schema: dict) -> dict | None:
+    """Describe a schema for the prompt. Returns {"text", "kind"} or None.
+
+    Accepts a real JSON Schema, or the older flat {field: type} map, which
+    always meant "a list of items with these fields".
+    """
+    import json as _json
+    if not isinstance(schema, dict) or not schema:
+        return None
+    if "properties" in schema or schema.get("type") in ("object", "array"):
+        kind = "array" if schema.get("type") == "array" else "object"
+        return {"text": _json.dumps(schema, indent=1, default=str)[:4000], "kind": kind}
+    fields = {k: (_TYPE_NAMES.get(v, v) if not isinstance(v, str) else v)
+              for k, v in schema.items()}
+    item = {"type": "object",
+            "properties": {k: {"type": str(t)} for k, t in fields.items()}}
+    return {"text": _json.dumps({"type": "array", "items": item}, indent=1),
+            "kind": "array"}
+
+
+def _parse_json_loose(text: str, kind: str = ""):
+    """Parse JSON from a model reply that may wrap it in fences or prose.
+
+    Decodes the first complete JSON value, starting at the first "{" or
+    "[" (or at the bracket `kind` asks for, "object" or "array"). Searching
+    for "[" first returned the inner list of {"tags": ["a", "b"]}.
+    """
+    import json as _json
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[1] if "\n" in t else t[3:]
+        t = t.rsplit("```", 1)[0]
+    try:
+        return _json.loads(t)
+    except (ValueError, TypeError):
+        pass
+    decoder = _json.JSONDecoder()
+    order = {"object": "{[", "array": "[{"}.get(kind, "")
+    starts = sorted(i for i in (t.find("{"), t.find("[")) if i >= 0)
+    if order:
+        preferred = t.find(order[0])
+        starts = ([preferred] if preferred >= 0 else []) + [i for i in starts if i != preferred]
+    for i in starts:
+        try:
+            value, _ = decoder.raw_decode(t[i:])
+            return value
+        except ValueError:
+            continue
+    return None

@@ -1,0 +1,410 @@
+"""High-level browser actions used by the executor.
+
+type_into uses a unified fill approach inspired by Bitwarden's autofill engine:
+one sequence that covers React, Vue, vanilla HTML, and any other framework.
+No detection, no branching — just fires everything in one shot.
+
+Backup of previous version: actions.py.backup-20260326
+"""
+
+import logging
+import random
+import time
+
+log = logging.getLogger("fantoma.actions")
+
+
+def click_element(engine, element_or_selector):
+    """Activate an element via focus + keyboard — no mouse events.
+
+    Uses the accessibility interaction model: focus the element, then
+    press Enter (links, buttons) or Space (checkboxes, radios). This
+    produces zero mouse telemetry. Falls back to JS el.click() if
+    keyboard activation doesn't work.
+    """
+    page = engine.get_page()
+    if isinstance(element_or_selector, str):
+        element = page.query_selector(element_or_selector)
+    else:
+        element = element_or_selector
+
+    if not element:
+        return False
+
+    # Get element role/type to pick the right key
+    tag_and_type = element.evaluate("""el => ({
+        tag: el.tagName.toLowerCase(),
+        type: (el.getAttribute('type') || '').toLowerCase(),
+        role: (el.getAttribute('role') || '').toLowerCase(),
+    })""")
+    tag = tag_and_type["tag"]
+    el_type = tag_and_type["type"]
+    role = tag_and_type["role"]
+
+    # Focus the element
+    try:
+        element.focus()
+    except Exception:
+        # Some elements reject focus — try JS
+        try:
+            element.evaluate("el => el.focus()")
+        except Exception:
+            pass
+
+    is_checkbox = el_type in ("checkbox", "radio") or role in ("checkbox", "radio", "switch")
+
+    # Enter/Space only activate elements the browser itself wires up:
+    # links, buttons, inputs, <summary>. A <div role="button"> with an
+    # onclick handler and nothing listening for keys swallowed the key and
+    # the click was reported as a success that did nothing. Those get a
+    # synthetic el.click() instead, which still sends no mouse telemetry.
+    native = tag in ("a", "button", "input", "select", "textarea", "summary", "option", "label", "area")
+    key = "Space" if is_checkbox else "Enter"
+    # A key press goes to whatever has focus. If focus did not land on this
+    # element (an <a> with no href is not focusable, nor is a disabled
+    # control), Enter would activate something else and the click would be
+    # reported done. Measured 2026-11-05 on saucedemo: the cart link is
+    # <a role=button> with no href; every click on it, by the fast path and
+    # by all three models, "succeeded" and went nowhere.
+    try:
+        focused = element.evaluate("el => document.activeElement === el")
+    except Exception:
+        focused = False
+    try:
+        if not focused:
+            element.evaluate("el => el.click()")
+        elif native:
+            page.keyboard.press(key)
+        elif not _key_did_something(page, element, key):
+            element.evaluate("el => el.click()")
+    except Exception:
+        # Keyboard failed — fall back to JS click (no mouse events)
+        try:
+            element.evaluate("el => el.click()")
+        except Exception:
+            return False
+
+    if engine.humanizer:
+        engine.humanizer.action_pause()
+
+    return True
+
+
+_WATCH_JS = """() => {
+  const w = window.__fantoma_keywatch = {muts: 0, href: location.href, focus: document.activeElement};
+  w.obs = new MutationObserver(ms => { w.muts += ms.length; });
+  w.obs.observe(document, {subtree: true, childList: true, attributes: true, characterData: true});
+}"""
+_WATCH_RESULT_JS = """() => {
+  const w = window.__fantoma_keywatch; if (!w) return true;
+  w.obs.disconnect();
+  return w.muts > 0 || location.href !== w.href || document.activeElement !== w.focus;
+}"""
+
+
+def _key_did_something(page, element, key: str) -> bool:
+    """Press `key` on a custom widget and report whether the page reacted.
+
+    ARIA widgets that follow the authoring practices answer Enter/Space;
+    the common div-with-onclick does not. Watching for any DOM mutation,
+    focus move or URL change for a short while tells the two apart, so
+    the keyboard-first model is kept where it works and a synthetic
+    click is sent where it does not.
+    """
+    try:
+        page.evaluate(_WATCH_JS)
+    except Exception:
+        page.keyboard.press(key)
+        return True  # cannot tell; assume the key worked as before
+    page.keyboard.press(key)
+    try:
+        page.wait_for_timeout(150)
+        return bool(page.evaluate(_WATCH_RESULT_JS))
+    except Exception:
+        return True  # navigation tore the context down: the key did plenty
+
+
+def native_option_target(element) -> dict | None:
+    """If `element` is an <option> inside a native <select>, describe it.
+
+    Returns {"label": ..., "value": ...} for such an option, else None.
+    Clicking an option inside a closed native dropdown does nothing in
+    Firefox, and weak models almost always click the option they want rather
+    than issuing a select on the dropdown. Dropdown flows scored 0/3 because
+    of it, so callers use this to turn that click into the select it meant.
+    """
+    try:
+        return element.evaluate("""el => {
+            if (!el || el.tagName !== 'OPTION' || !el.closest('select')) return null;
+            return {label: (el.label || el.textContent || '').trim(), value: el.value};
+        }""")
+    except Exception:
+        return None
+
+
+def select_dropdown_option(element, value: str) -> bool:
+    """Choose `value` in a native <select>, given the select or one of its options.
+
+    Tries, in order: exact label, exact value, then a case-insensitive
+    label match. Models paraphrase ("option 2" for "Option 2"), and a strict
+    label match turned a correct intent into a failed action.
+    """
+    try:
+        select = element.evaluate_handle(
+            "el => el.tagName === 'SELECT' ? el : el.closest('select')"
+        ).as_element()
+    except Exception:
+        select = None
+    if select is None:
+        return False
+
+    for kwargs in ({"label": value}, {"value": value}):
+        try:
+            select.select_option(**kwargs, timeout=2000)
+            return True
+        except Exception:
+            pass
+
+    try:
+        match = select.evaluate("""(sel, want) => {
+            want = want.trim().toLowerCase();
+            const opts = Array.from(sel.options);
+            const hit = opts.find(o => (o.label || o.textContent).trim().toLowerCase() === want)
+                     || opts.find(o => (o.label || o.textContent).trim().toLowerCase().includes(want));
+            return hit ? hit.index : -1;
+        }""", value)
+        if match is not None and match >= 0:
+            select.select_option(index=match, timeout=2000)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _focus_element(page, element):
+    """Focus an input element — no mouse events."""
+    try:
+        element.focus()
+    except Exception:
+        try:
+            element.evaluate("el => el.focus()")
+        except Exception:
+            # Focus failed — try dismissing consent overlay first
+            from fantoma.browser.consent import dismiss_consent
+            dismiss_consent(page)
+            time.sleep(0.5)
+            try:
+                element.focus()
+            except Exception:
+                return False
+    time.sleep(0.2)
+    return True
+
+
+def type_into(engine, element_or_selector, text: str, clear_first: bool = True):
+    """Type text into any input element. One sequence that works everywhere.
+
+    Combines techniques from Bitwarden's autofill engine and React issue #11488:
+    1. Click + focus the element
+    2. Reset React's _valueTracker (if present — costs nothing if not)
+    3. Set value via nativeSetter (bypasses React's override, works on vanilla too)
+    4. Fire the full event sequence: keydown, keyup, input, change
+    5. Verify the value stuck
+    6. If it didn't — fall back to keyboard character-by-character
+
+    No framework detection needed. The same sequence handles React, Vue, Angular,
+    vanilla HTML, and every other framework because it covers all event paths.
+    """
+    page = engine.get_page()
+    if isinstance(element_or_selector, str):
+        element = page.query_selector(element_or_selector)
+    else:
+        element = element_or_selector
+
+    if not element:
+        return False
+
+    if not _focus_element(page, element):
+        return False
+
+    # Human-like path: type character by character with realistic key-pair delays.
+    # Sites like X detect instant DOM value injection as automation.
+    if engine.humanizer:
+        # Reset React's _valueTracker first — without this, React controlled
+        # inputs silently discard keystrokes during re-renders
+        try:
+            element.evaluate('''(el) => {
+                const tracker = el._valueTracker;
+                if (tracker) tracker.setValue('');
+            }''')
+        except Exception:
+            log.warning("Element context destroyed before typing (stale handle)")
+            return False
+
+        if clear_first:
+            page.keyboard.press("Control+a")
+            page.keyboard.press("Backspace")
+            time.sleep(0.1)
+
+        prev_char = ""
+        for char in text:
+            delay = engine.humanizer.type_char_delay(prev_char, char)
+            time.sleep(delay)
+            page.keyboard.type(char)
+            prev_char = char
+
+        # Verify
+        try:
+            actual = element.input_value()
+            if actual == text:
+                return True
+        except Exception:
+            pass
+
+        # If keyboard typing didn't stick (rare), fall through to DOM injection
+        log.info("Keyboard typing didn't stick — falling back to DOM injection")
+
+    # Fast path: instant DOM injection via nativeSetter.
+    # Used when humanizer is disabled (speed over stealth) or as fallback.
+    try:
+        element.evaluate('''(el, args) => {
+            const [text, clear] = args;
+
+            // Focus properly
+            el.blur();
+            el.focus();
+
+            // Reset React's _valueTracker (harmless on non-React)
+            const tracker = el._valueTracker;
+            if (tracker) {
+                tracker.setValue('');
+            }
+
+            // Clear if needed
+            if (clear) {
+                const proto = Object.getPrototypeOf(el);
+                const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                if (setter) setter.call(el, '');
+                else el.value = '';
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+
+            // Set value via native prototype setter (bypasses React override)
+            const proto = Object.getPrototypeOf(el);
+            const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+            if (setter) setter.call(el, text);
+            else el.value = text;
+
+            // Fire all events
+            el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
+            el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+        }''', [text, clear_first])
+    except Exception as e:
+        log.warning("DOM injection failed (stale context): %s", e)
+        return False
+
+    # Verify the value stuck
+    try:
+        actual = element.input_value()
+        if actual == text:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def scroll_page(engine, direction: str = "down", amount: int = None):
+    """Scroll via keyboard — no mouse wheel events.
+
+    Uses PageDown/PageUp like a screen reader user would.
+    """
+    page = engine.get_page()
+    key = "PageUp" if direction == "up" else "PageDown"
+    page.keyboard.press(key)
+
+    if engine.humanizer:
+        time.sleep(random.uniform(*engine.humanizer.scroll_delay))
+
+    return True
+
+
+def wait_for_navigation(engine, timeout: int = 10000):
+    """Wait for page to finish loading."""
+    try:
+        engine.get_page().wait_for_load_state("domcontentloaded", timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def wait_for_network_idle(engine, timeout: int = 15000):
+    """Wait for network activity to settle — catches SPA transitions (React, Vue, etc).
+
+    Use after actions that trigger navigation or heavy loading (login, form submit).
+    Falls back to domcontentloaded if networkidle times out.
+    """
+    try:
+        engine.get_page().wait_for_load_state("networkidle", timeout=timeout)
+        return True
+    except Exception:
+        try:
+            engine.get_page().wait_for_load_state("domcontentloaded", timeout=5000)
+        except Exception:
+            pass
+        return False
+
+
+def search_page(page, query: str) -> list[dict]:
+    """Find all visible text matches on the page. Like Ctrl+F. Free — no LLM cost."""
+    try:
+        results = page.evaluate("""(query) => {
+            const matches = [];
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+            let idx = 0;
+            const queryLower = query.toLowerCase();
+            while (walker.nextNode()) {
+                const text = walker.currentNode.textContent;
+                if (text.toLowerCase().includes(queryLower)) {
+                    const el = walker.currentNode.parentElement;
+                    if (el && el.offsetParent !== null) {
+                        const full = el.innerText || text;
+                        const pos = full.toLowerCase().indexOf(queryLower);
+                        const start = Math.max(0, pos - 30);
+                        const end = Math.min(full.length, pos + query.length + 30);
+                        matches.push({text: full.substring(start, end).trim(), index: idx});
+                        idx++;
+                    }
+                }
+            }
+            return matches.slice(0, 20);
+        }""", query)
+        return results or []
+    except Exception as e:
+        log.warning("search_page failed: %s", e)
+        return []
+
+
+def find_elements(page, selector: str) -> list[dict]:
+    """Query elements by CSS selector. Like browser DevTools. Free — no LLM cost."""
+    try:
+        results = page.evaluate("""(selector) => {
+            const els = document.querySelectorAll(selector);
+            return Array.from(els)
+                .filter(el => el.offsetParent !== null)
+                .slice(0, 20)
+                .map(el => ({
+                    tag: el.tagName.toLowerCase(),
+                    type: el.getAttribute('type') || '',
+                    name: el.getAttribute('name') || '',
+                    id: el.getAttribute('id') || '',
+                    text: (el.innerText || el.value || '').substring(0, 100).trim(),
+                    href: el.getAttribute('href') || '',
+                }));
+        }""", selector)
+        return results or []
+    except Exception as e:
+        log.warning("find_elements failed: %s", e)
+        return []

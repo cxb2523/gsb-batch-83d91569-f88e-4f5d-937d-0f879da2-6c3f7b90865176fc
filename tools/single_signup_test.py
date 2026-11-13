@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Single site signup test — full end-to-end with detailed logging."""
+
+import json
+import logging
+import os
+import random
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+)
+# Keep HTTP noise down
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+log = logging.getLogger("signup_test")
+
+# Config — use environment variables for secrets
+LLM_URL = os.environ.get("FANTOMA_LLM_URL", "http://localhost:8080/v1")
+CLOUD_LLM = os.environ.get("CLOUD_LLM_URL", "https://openrouter.ai/api/v1")
+CLOUD_LLM_KEY = os.environ.get("CLOUD_LLM_KEY", "")
+try:
+    CAPSOLVER_KEY = json.load(open(Path.home() / ".config/capsolver/config.json"))["api_key"]
+except Exception:
+    CAPSOLVER_KEY = os.environ.get("CAPSOLVER_KEY", "")
+
+EMAIL_TAG = f"test{random.randint(1000, 9999)}"
+BASE_EMAIL = os.environ.get("TEST_EMAIL", "")
+_bu, _sep, _bd = BASE_EMAIL.partition("@")
+EMAIL = f"{_bu}+{EMAIL_TAG}@{_bd}" if _sep else ""
+IMAP_HOST = os.environ.get("IMAP_HOST", "127.0.0.1")
+IMAP_PORT = int(os.environ.get("IMAP_PORT", "1143"))
+IMAP_PASS = os.environ.get("IMAP_PASS", "")
+USERNAME = f"fantoma_test_{random.randint(10000, 99999)}"
+PASSWORD = os.environ.get("TEST_PASSWORD", "")
+
+log.info("Email: %s", EMAIL)
+log.info("Username: %s", USERNAME)
+
+from fantoma import Agent
+
+agent = Agent(
+    llm_url=LLM_URL,
+    escalation=[LLM_URL, CLOUD_LLM],
+    escalation_keys=["", CLOUD_LLM_KEY],
+    headless=True,
+    timeout=120,
+    max_steps=30,
+    trace=True,
+    captcha_api="capsolver",
+    captcha_key=CAPSOLVER_KEY,
+    email_imap={
+        "host": IMAP_HOST,
+        "port": IMAP_PORT,
+        "user": os.environ.get("TEST_EMAIL", ""),
+        "password": IMAP_PASS,
+        "security": "starttls",
+    },
+)
+
+log.info("=" * 70)
+log.info("SITE: Render (render.com)")
+log.info("=" * 70)
+
+result = agent.login(
+    "https://dashboard.render.com/register",
+    email=EMAIL,
+    password=PASSWORD,
+)
+
+log.info("=" * 70)
+log.info("RESULT: success=%s", result.success)
+log.info("DATA: %s", result.data)
+log.info("ERROR: %s", result.error)
+log.info("STEPS: %s", result.steps_taken)
+log.info("ESCALATIONS: %s", result.escalations)
+log.info("=" * 70)

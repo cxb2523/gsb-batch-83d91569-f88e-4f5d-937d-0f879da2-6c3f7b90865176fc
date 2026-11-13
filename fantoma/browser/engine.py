@@ -1,0 +1,852 @@
+"""Camoufox browser engine wrapper with anti-detection and human-like behaviour."""
+
+import logging
+import os
+import time
+from datetime import datetime
+
+from camoufox.sync_api import Camoufox
+
+from fantoma.browser.humanize import Humanizer
+
+_log = logging.getLogger("fantoma.browser")
+
+# TLS validation is ON by default. Set FANTOMA_IGNORE_HTTPS_ERRORS=1 only when
+# you knowingly need to hit bad-cert sites — disabling it lets a malicious proxy
+# MITM any login Fantoma performs.
+_IGNORE_HTTPS_ERRORS = os.environ.get("FANTOMA_IGNORE_HTTPS_ERRORS", "").lower() in ("1", "true", "yes")
+
+
+from fantoma.browser.domains import DomainBlocked, DomainPolicy, settle_hops
+
+_ATTACH_WARNED = False
+
+
+class BrowserEngine:
+    """Manages a Camoufox browser session with anti-detection and human-like behaviour."""
+
+    _blocker = None
+    block_resources = False
+    _cdp_url = None  # class default: some tests build engines without __init__
+    DEFAULT_TRACE_DIR = os.path.join(os.path.expanduser("~"), ".local", "share", "fantoma", "traces")
+
+    def __init__(self, headless=True, profile_dir=None, humanize=True, accessibility=True, proxy=None,
+                 trace=False, trace_dir=None, browser_engine="camoufox",
+                 allowed_domains=None, blocked_domains=None, chromium_full_headless=None,
+                 cdp_url=None, allow_remote_cdp=False, webmcp=False, block_resources=None):
+        self.headless = headless
+        if block_resources is None:
+            from fantoma.browser.blocking import env_enabled
+            block_resources = env_enabled()
+        self.block_resources = bool(block_resources)
+        self._blocker = None
+        self.webmcp = webmcp  # Chromium only: full Chrome + --enable-features=WebMCP
+        # Attach to a Chrome the user already runs. Chromium only. Fantoma
+        # works in tabs it opens itself and never closes the browser.
+        self._cdp_url = None
+        self._owned: list = []
+        if cdp_url:
+            if browser_engine != "chromium":
+                raise ValueError(
+                    "cdp_url needs browser='chromium': Camoufox (Firefox) cannot "
+                    "attach to a running Chrome.")
+            from fantoma.browser.cdp import resolve_cdp_url
+            self._cdp_url = resolve_cdp_url(cdp_url, allow_remote_cdp)
+            self._warn_ignored(profile_dir, proxy, chromium_full_headless)
+        # Chromium only. Headless runs default to chrome-headless-shell, which
+        # lacks some features (WebMCP). True uses the full Chrome build with
+        # --headless instead. Env FANTOMA_CHROMIUM_FULL_HEADLESS=1 also turns it on.
+        if chromium_full_headless is None:
+            chromium_full_headless = os.environ.get(
+                "FANTOMA_CHROMIUM_FULL_HEADLESS", "").lower() in ("1", "true", "yes")
+        self.chromium_full_headless = bool(chromium_full_headless)
+        self.profile_dir = profile_dir
+        self.accessibility = accessibility
+        self.proxy = proxy  # {"server": "http://host:port"} or "http://host:port" string
+        self._humanize = humanize
+        self.humanizer = Humanizer() if humanize else None
+        self._trace = trace
+        self._trace_dir = trace_dir or self.DEFAULT_TRACE_DIR
+        self._trace_active = False
+        self._browser_engine = browser_engine
+        self.domain_policy = DomainPolicy.from_env(allowed_domains, blocked_domains)
+        self._browser = None
+        self._context = None
+        self._page = None
+        self._camoufox_cm = None
+        self._playwright = None
+        self._persistent = False
+        # Page events worth telling the model about. Playwright dismisses
+        # dialogs nobody handles, so a "Delete this? OK/Cancel" confirm was
+        # silently cancelled while the click reported success. Popups opened
+        # by the page (target=_blank, window.open) became tabs nobody
+        # mentioned. Crashed pages hung get_state until the task timeout.
+        self.last_dialog: dict | None = None
+        # Per-run override of FANTOMA_DIALOGS ("accept" or "dismiss"); the
+        # agent sets it from the task text ("accept the dialog").
+        self.dialog_policy: str | None = None
+        self.dialog_history: list[dict] = []
+        self._popup_count = 0
+        self._crashed: set = set()
+        self.last_status: int | None = None
+        self._last_status_url: str = ""
+
+    @staticmethod
+    def _warn_ignored(profile_dir, proxy, full_headless):
+        global _ATTACH_WARNED
+        if _ATTACH_WARNED:
+            return
+        ignored = []
+        if profile_dir:
+            ignored.append("profile_dir")
+        if proxy:
+            ignored.append("proxy")
+        if full_headless:
+            ignored.append("chromium_full_headless")
+        for var in ("FANTOMA_BLOCK_WEBRTC", "FANTOMA_DISABLE_WEBGL"):
+            if os.environ.get(var, "").lower() in ("1", "true", "yes"):
+                ignored.append(var)
+        if ignored:
+            _ATTACH_WARNED = True
+            _log.warning("Attached to a running Chrome: ignoring %s (launch-time "
+                         "settings do not apply to a browser that is already open)",
+                         ", ".join(ignored))
+
+    @property
+    def attached(self) -> bool:
+        return self._cdp_url is not None
+
+    def _own(self, page):
+        """Record a tab Fantoma opened, so stop() can close exactly these."""
+        if page not in self._owned:
+            self._owned.append(page)
+        if self.attached and self.domain_policy.active:
+            # Scope the policy to our tabs; the user's own tabs stay untouched.
+            self.domain_policy.install(page)
+
+    # Capability checks on the live page object, so callers can branch on
+    # what the engine under them offers (Playwright 1.58 on Camoufox has
+    # neither of these; Patchright 1.64+ on Chromium has aria refs).
+    @staticmethod
+    def _page_supports_refs(page) -> bool:
+        if page is None:
+            return False
+        if not callable(getattr(page, "aria_snapshot", None)):
+            return False
+        if not callable(getattr(page, "get_by_ref", None)):
+            return False
+        try:
+            import inspect
+            return "mode" in inspect.signature(page.aria_snapshot).parameters
+        except (TypeError, ValueError):
+            return True
+
+    def supports_aria_refs(self) -> bool:
+        """True if page.aria_snapshot(mode="ai") and page.get_by_ref exist."""
+        return self._page_supports_refs(self._page)
+
+    def supports_webmcp(self) -> bool:
+        """True if the live page object exposes a webmcp API."""
+        page = self._page
+        return page is not None and getattr(page, "webmcp", None) is not None
+
+    def _proxy_dict(self) -> dict | None:
+        """Convert any proxy config to Playwright format. Supports rotation."""
+        from fantoma.browser.proxy import resolve_proxy
+        return resolve_proxy(self.proxy)
+
+    def start(self):
+        """Launch browser. Dispatches to Camoufox (default) or Chromium (Patchright)."""
+        if self._browser_engine == "chromium":
+            self._start_chromium()
+        else:
+            self._start_camoufox()
+        if self.domain_policy.active and not self.attached:
+            self.domain_policy.install(self._context)
+            _log.info("Domain policy on: allowed=%s blocked=%s",
+                      self.domain_policy.allowed or "any", self.domain_policy.blocked or "none")
+        if self.block_resources:
+            if self.attached:
+                _log.warning("block_resources ignored: attached to your own Chrome, "
+                             "Fantoma does not change its network behaviour.")
+            else:
+                from fantoma.browser.blocking import ResourceBlocker
+                self._blocker = ResourceBlocker()
+                self._blocker.install(self._context)  # after domain policy: runs first, falls back
+                _log.info("Blocking fonts and media")
+        self._install_page_hooks()
+
+    @property
+    def blocked_requests(self) -> int:
+        return self._blocker.blocked if self._blocker else 0
+
+    # Dialogs: FANTOMA_DIALOGS=dismiss (default) cancels confirm/prompt and
+    # closes alerts, which is what Playwright did silently before; "accept"
+    # presses OK on everything. Either way the text is recorded so the
+    # action result can say what happened.
+    def _on_dialog(self, dialog):
+        if self.attached:
+            try:
+                if dialog.page not in self._owned:
+                    return  # the user's tab; not ours to answer
+            except Exception:
+                return
+        policy = (getattr(self, "dialog_policy", None) or os.environ.get("FANTOMA_DIALOGS", "dismiss")).strip().lower()
+        accept = dialog.type == "beforeunload" or policy == "accept"
+        self.last_dialog = {"type": dialog.type, "message": dialog.message,
+                            "answer": "accepted" if accept else "dismissed"}
+        if not hasattr(self, "dialog_history"):
+            self.dialog_history = []
+        self.dialog_history.append(self.last_dialog)
+        try:
+            if accept:
+                dialog.accept()
+            else:
+                dialog.dismiss()
+        except Exception:
+            pass
+
+    def _on_page(self, page):
+        if self.attached:
+            # The context is the user's. Only popups opened by our own tabs
+            # count; a tab the user opens meanwhile is theirs.
+            try:
+                opener = page.opener()
+            except Exception:
+                opener = None
+            if opener is None or opener not in self._owned:
+                return
+            self._own(page)
+        self._popup_count += 1
+        try:
+            page.on("crash", lambda p=page: self._crashed.add(p))
+        except Exception:
+            pass
+
+    def _install_page_hooks(self):
+        ctx = self._context
+        if ctx is None:
+            return
+        try:
+            ctx.on("dialog", self._on_dialog)
+            ctx.on("page", self._on_page)
+            for p in ctx.pages:
+                p.on("crash", lambda pg=p: self._crashed.add(pg))
+        except Exception as e:
+            _log.debug("page hooks not installed: %s", e)
+
+    def page_crashed(self, page=None) -> bool:
+        page = page or self._page
+        return page in self._crashed or (page is not None and page.is_closed())
+
+    def take_popup_count(self) -> int:
+        """Number of pages the site itself opened since the last call."""
+        n, self._popup_count = self._popup_count, 0
+        return n
+
+    def take_dialog(self) -> dict | None:
+        d, self.last_dialog = self.last_dialog, None
+        return d
+
+    def _start_camoufox(self):
+        """Launch Camoufox browser. Uses persistent profile if profile_dir is set."""
+        # glibc 2.42+ (Fedora 43 / Linux 6.7+): madvise(MADV_GUARD_INSTALL) is
+        # blocked by Camoufox's seccomp filter, causing SIGSEGV on browser start.
+        # An LD_PRELOAD shim fixes this by intercepting the seccomp install paths.
+        # Place the compiled shim at ~/.local/share/fantoma/madvise_shim.so —
+        # Fantoma will detect and load it automatically.
+        # LIBGL_ALWAYS_SOFTWARE: Mesa software renderer for glxtest child process.
+        # DISPLAY: required for glxtest on headless machines running Xvfb.
+        import pathlib
+        shim = pathlib.Path.home() / ".local/share/fantoma/madvise_shim.so"
+        if shim.exists():
+            existing = os.environ.get("LD_PRELOAD", "")
+            os.environ["LD_PRELOAD"] = f"{shim}:{existing}".rstrip(":")
+            os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+            os.environ.setdefault("DISPLAY", ":99")
+        proxy = self._proxy_dict()
+
+        # When using virtual display, sync Xvfb resolution with Camoufox's
+        # spoofed screen size to prevent layout mismatches (dialogs off-screen)
+        screen = None
+        if self.headless == "virtual":
+            from browserforge.fingerprints import Screen
+            screen = Screen(min_width=1920, max_width=1920, min_height=1080, max_height=1080)
+
+        # Native stealth patches (hardwareConcurrency, buildID, timer precision)
+        from fantoma.browser.stealth import get_camoufox_config
+        stealth_config = get_camoufox_config()
+
+        if self.profile_dir:
+            self._persistent = True
+            cm_kwargs = dict(
+                persistent_context=True,
+                user_data_dir=self.profile_dir,
+                service_workers="block",
+                headless=self.headless,
+                humanize=True,
+                os=["linux"],
+                proxy=proxy,
+                **stealth_config,
+            )
+            if screen:
+                cm_kwargs["screen"] = screen
+            self._camoufox_cm = Camoufox(**cm_kwargs)
+            # persistent_context returns a BrowserContext directly
+            self._context = self._camoufox_cm.__enter__()
+            self._browser = None
+            # Use existing page or create one
+            pages = self._context.pages
+            self._page = pages[0] if pages else self._context.new_page()
+        else:
+            self._persistent = False
+            cm_kwargs = dict(
+                headless=self.headless,
+                humanize=True,
+                os=["linux"],
+                proxy=proxy,
+                **stealth_config,
+            )
+            if screen:
+                cm_kwargs["screen"] = screen
+            self._camoufox_cm = Camoufox(**cm_kwargs)
+            self._browser = self._camoufox_cm.__enter__()
+            self._context = self._browser.new_context(ignore_https_errors=_IGNORE_HTTPS_ERRORS,
+                                                       service_workers="block")
+            self._page = self._context.new_page()
+
+        # Sync viewport with screen size for virtual display
+        if screen and self._page:
+            try:
+                self._page.set_viewport_size({"width": 1920, "height": 1080})
+            except Exception:
+                pass
+
+        # Apply stealth patches before any page JS runs
+        if self._context:
+            from fantoma.browser.stealth import apply_stealth, apply_sw_lock
+            apply_stealth(self._context)
+            apply_sw_lock(self._context)
+
+        # Set accessibility preferences — present as assistive technology user
+        if self.accessibility and self._page:
+            try:
+                self._page.emulate_media(reduced_motion="reduce")
+                # Set screen reader flags via JavaScript
+                self._page.evaluate("""() => {
+                    // Signal that assistive technology is active
+                    Object.defineProperty(navigator, 'userActivation', {
+                        get: () => ({ hasBeenActive: true, isActive: true })
+                    });
+                    // Prefer reduced motion (accessibility setting)
+                    if (window.matchMedia) {
+                        const mql = window.matchMedia('(prefers-reduced-motion: reduce)');
+                        Object.defineProperty(mql, 'matches', { get: () => true });
+                    }
+                }""")
+            except Exception:
+                pass  # Non-critical — works without these
+
+        # Start trace recording if enabled
+        if self._trace and self._context:
+            try:
+                self._context.tracing.start(screenshots=True, snapshots=True)
+                self._trace_active = True
+                _log.info("Trace recording started")
+            except Exception as e:
+                _log.warning("Tracing not available (Camoufox may not support it): %s", e)
+                self._trace_active = False
+
+    def _start_chromium(self):
+        """Start Patchright Chromium browser."""
+        try:
+            from patchright.sync_api import sync_playwright
+        except ImportError:
+            raise ImportError(
+                "Patchright not installed. Install with: pip install fantoma[chromium]"
+            )
+
+        self._playwright = sync_playwright().start()
+        if self.attached:
+            self._attach_chromium()
+            return
+        proxy = self._proxy_dict()
+        launch_args = {"headless": self.headless}
+        if self.headless and self.chromium_full_headless:
+            # Patchright picks chrome-headless-shell for headless unless a
+            # channel is named. channel="chromium" selects the full Chrome build.
+            launch_args["channel"] = "chromium"
+        if proxy:
+            launch_args["proxy"] = proxy
+        # Opt-in WebRTC/WebGL kill-switches for the Chromium fallback (Camoufox
+        # handles these on Firefox; the Patchright path needs explicit flags).
+        chromium_flags = []
+        if os.environ.get("FANTOMA_BLOCK_WEBRTC", "").lower() in ("1", "true", "yes"):
+            chromium_flags.append("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
+        if os.environ.get("FANTOMA_DISABLE_WEBGL", "").lower() in ("1", "true", "yes"):
+            chromium_flags.append("--disable-webgl")
+        if self.webmcp:
+            from fantoma.webmcp import CHROME_FLAG
+            chromium_flags.append(CHROME_FLAG)
+            if self.headless:
+                launch_args["channel"] = "chromium"  # chrome-headless-shell has no WebMCP
+        if chromium_flags:
+            launch_args["args"] = chromium_flags
+        if self.profile_dir:
+            self._context = self._playwright.chromium.launch_persistent_context(
+                self.profile_dir, service_workers="block", **launch_args
+            )
+            self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        else:
+            self._browser = self._playwright.chromium.launch(**launch_args)
+            ctx_args = {"proxy": proxy} if proxy else {}
+            ctx_args["ignore_https_errors"] = _IGNORE_HTTPS_ERRORS
+            ctx_args["service_workers"] = "block"
+            self._context = self._browser.new_context(**ctx_args)
+            self._page = self._context.new_page()
+
+        from fantoma.browser.stealth import apply_sw_lock
+        apply_sw_lock(self._context)
+
+        if self._trace:
+            try:
+                self._context.tracing.start(screenshots=True, snapshots=True)
+                self._trace_active = True
+            except Exception as e:
+                _log.warning("Tracing not available: %s", e)
+                self._trace_active = False
+
+        _log.info("Chromium (Patchright) started, headless=%s", self.headless)
+
+    def _attach_chromium(self):
+        """Connect to a running Chrome and open our own tab in its first context."""
+        try:
+            self._browser = self._playwright.chromium.connect_over_cdp(self._cdp_url)
+            ctxs = self._browser.contexts
+            self._context = ctxs[0] if ctxs else self._browser.new_context(service_workers="block")
+            self._page = self._context.new_page()
+        except Exception as e:
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = self._browser = self._context = self._page = None
+            raise RuntimeError(
+                f"Could not attach to Chrome at {self._cdp_url}: {e}. Start Chrome "
+                "with --remote-debugging-port=9222 (Chrome 144+ also asks you to "
+                "approve remote debugging once on a real profile).") from e
+        self._own(self._page)
+        self._persistent = True
+        _log.info("Attached to Chrome at %s (own tab opened)", self._cdp_url)
+
+    def _detach(self):
+        """Close only the tabs Fantoma opened, then drop the connection."""
+        for page in list(self._owned):
+            try:
+                if not page.is_closed():
+                    page.close()
+            except Exception:
+                pass
+        self._owned = []
+        # playwright.stop() ends the CDP session. browser.close() is not
+        # called: it would act on the user's browser, and the browser is not ours.
+        if self._playwright:
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
+        self._page = self._context = self._browser = self._playwright = None
+
+    def stop(self):
+        """Close browser gracefully."""
+        if self._blocker:
+            _log.info("Blocked %d font/media requests", self._blocker.blocked)
+        if self.attached:
+            if self._trace_active and self._context:
+                try:
+                    self._context.tracing.stop()
+                except Exception:
+                    pass
+                self._trace_active = False
+            self._detach()
+            return
+        # Save trace before closing browser
+        if self._trace_active and self._context:
+            try:
+                os.makedirs(self._trace_dir, mode=0o700, exist_ok=True)
+                # Build filename from current domain + timestamp
+                url = self._page.url if self._page else "unknown"
+                try:
+                    from urllib.parse import urlparse
+                    domain = urlparse(url).netloc or "unknown"
+                except Exception:
+                    domain = "unknown"
+                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+                trace_path = os.path.join(self._trace_dir, f"{domain}-{ts}.zip")
+                self._context.tracing.stop(path=trace_path)
+                self._trace_active = False
+                _log.info("Trace saved: %s", trace_path)
+            except Exception as e:
+                _log.warning("Failed to save trace: %s", e)
+
+        if self._browser_engine == "chromium":
+            if self._context:
+                try:
+                    self._context.close()
+                except Exception:
+                    pass
+            if self._browser:
+                try:
+                    self._browser.close()
+                except Exception:
+                    pass
+            if self._playwright:
+                try:
+                    self._playwright.stop()
+                except Exception:
+                    pass
+            self._page = None
+            self._context = None
+            self._browser = None
+            self._playwright = None
+        else:
+            # Close context first so Camoufox has a chance to flush cookies.
+            if self._context:
+                try:
+                    self._context.close()
+                except Exception:
+                    pass
+
+            if self._camoufox_cm is not None:
+                # Run __exit__ on the main thread with a background watchdog
+                # timer. The 2026-06-30 version ran __exit__ in a worker
+                # thread, but Playwright's sync API is thread-bound: the
+                # cross-thread call failed instantly and silently, the driver
+                # was never shut down (one leaked Camoufox per session), and
+                # the main thread's asyncio state stayed dirty, so the next
+                # start() failed with "Sync API inside the asyncio loop".
+                # The watchdog kills the driver processes if __exit__ blocks
+                # longer than 10 s (crashed/wedged driver); severing the
+                # connection unblocks the main thread.
+                import signal
+                import threading
+                from fantoma.browser import reap
+
+                def _kill_driver():
+                    _log.warning(
+                        "Camoufox __exit__ hung for 10 s — force-killing playwright driver"
+                    )
+                    reap.kill(reap.DRIVER, signal.SIGKILL)
+                    reap.kill(reap.CAMOUFOX, signal.SIGKILL)
+
+                # If the driver process is already dead (the 2026-06-30 crash
+                # case), __exit__ busy-waits forever trying to reach it and no
+                # amount of pkill unblocks the loop — skip the graceful path
+                # entirely and go straight to cleanup.
+                driver_alive = reap.any_alive(reap.DRIVER)
+
+                exit_ok = False
+                if driver_alive:
+                    watchdog = threading.Timer(10, _kill_driver)
+                    watchdog.daemon = True
+                    watchdog.start()
+                    try:
+                        self._camoufox_cm.__exit__(None, None, None)
+                        exit_ok = True
+                    except Exception as e:
+                        _log.warning("Camoufox __exit__ failed: %s", e)
+                    finally:
+                        watchdog.cancel()
+                else:
+                    _log.warning(
+                        "Playwright driver process already dead — skipping __exit__"
+                    )
+
+                if not exit_ok:
+                    # Graceful shutdown failed — make sure nothing leaks.
+                    reap.kill(reap.DRIVER, signal.SIGKILL)
+                    reap.kill(reap.CAMOUFOX, signal.SIGKILL)
+
+                # Playwright's sync wrapper can leave the thread's running-loop
+                # pointer set after an abnormal shutdown, which makes the next
+                # sync start() raise "Sync API inside the asyncio loop"
+                # (see Session 12, 2026-03-30). Reset both pointers.
+                try:
+                    import asyncio
+                    asyncio._set_running_loop(None)
+                    asyncio.set_event_loop(asyncio.new_event_loop())
+                except Exception:
+                    pass
+
+            # Clean up orphaned 1×1 Xvfb glxtest instances left by crashed sessions.
+            # The main supervisord-managed Xvfb runs on :99 with a 1920×1080 screen,
+            # so "-screen 0 1x1x24" is unique to the glxtest children.
+            try:
+                from fantoma.browser import reap
+                reap.kill(reap.GLXTEST_XVFB)
+            except Exception:
+                pass
+
+            self._page = None
+            self._context = None
+            self._browser = None
+            self._camoufox_cm = None
+
+    def navigate(self, url: str, wait_until: str = "domcontentloaded", timeout: int = 30000):
+        """Navigate to URL with human-like delay after."""
+        self.domain_policy.check(url)
+        self.last_status, self._last_status_url = None, ""
+        try:
+            response = self._page.goto(url, wait_until=wait_until, timeout=timeout)
+        except Exception as e:
+            response = None
+            if self._arrived_with_content(e):
+                # One slow script can hold DOMContentLoaded back for 30 s
+                # while the page itself is already on screen (measured on a
+                # host that throttles parallel requests). Reloading in a new
+                # tab doubled the wait and failed the same way, so read what
+                # arrived instead.
+                _log.warning("Navigation to %s timed out waiting for scripts; "
+                             "using the page as loaded so far", url)
+            else:
+                response = self._recover_navigation(url, wait_until, timeout, e)
+        self._after_navigation(url, response)
+
+    def _arrived_with_content(self, error) -> bool:
+        """True when a goto timed out but the document is there to read."""
+        if "Timeout" not in type(error).__name__ and "Timeout" not in str(error):
+            return False
+        try:
+            if self._page.url in ("", "about:blank") or self.page_crashed():
+                return False
+            return bool(self._page.evaluate(
+                "() => !!document.body && document.body.innerText.trim().length > 0"))
+        except Exception:
+            return False
+
+    def _recover_navigation(self, url, wait_until, timeout, e):
+        # If page crashed, try to recover with a new page
+        _log.warning("Navigation failed: %s — trying recovery", e)
+        if not self._context:
+            raise e
+        old_page = self._page
+        self._crashed.discard(old_page)
+        self._page = self._context.new_page()
+        if self.attached:
+            self._own(self._page)
+        self._popup_count = max(0, self._popup_count - 1)  # our own page, not a popup
+        try:
+            response = self._page.goto(url, wait_until=wait_until, timeout=timeout)
+        except Exception:
+            # Recovery also failed — close the new blank page, restore old
+            try:
+                self._page.close()
+            except Exception:
+                pass
+            self._page = old_page
+            raise
+        return response
+
+    def _after_navigation(self, url, response):
+        hopped = False
+        try:
+            hopped = response is not None and response.headers.get("x-fantoma-hop") == "1"
+        except Exception:
+            pass
+        if hopped:
+            # A redirect is answered with a hop page that navigates on (see
+            # domains.settle_hops); wait for the end of the chain, then read the
+            # real status from the policy, since the browser only saw the 200.
+            settle_hops(self._page)
+            if hopped:
+                status = self.domain_policy.status_for(self._page.url)
+                response = None
+                if status is not None:
+                    self.last_status, self._last_status_url = status, self._page.url
+        if response is not None:
+            try:
+                self.last_status, self._last_status_url = response.status, self._page.url
+            except Exception:
+                pass
+        # A redirect can land on a host the policy forbids (always possible
+        # with strict=False). Leave at once so the page is never read.
+        if self.domain_policy.active and not self.domain_policy.permits(self._page.url):
+            landed = self._page.url
+            try:
+                self._page.goto("about:blank")
+            except Exception:
+                pass
+            raise DomainBlocked(f"{url} redirected to {landed}, which the domain policy "
+                                "does not permit")
+        if self.humanizer:
+            self.humanizer.reading_pause()
+
+    def screenshot(self) -> bytes:
+        """Take a screenshot and return bytes."""
+        return self._page.screenshot()
+
+    def new_tab(self, url: str = None) -> int:
+        """Open a new tab in the same browser session. Returns the tab index.
+
+        The new tab shares cookies, sessions, and fingerprint with existing tabs.
+        Use switch_tab() to move between them.
+        """
+        if url:
+            self.domain_policy.check(url)
+        ctx = self._context if self._context else self._page.context
+        new_page = ctx.new_page()
+        if self.attached:
+            self._own(new_page)
+        self._popup_count = max(0, self._popup_count - 1)  # opened by us, not the site
+        if url:
+            new_page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            settle_hops(new_page)
+            if self.humanizer:
+                self.humanizer.reading_pause()
+        self._page = new_page
+        return len(self.tabs()) - 1
+
+    def tabs(self) -> list:
+        """Tabs Fantoma can see. When attached, only the ones it opened."""
+        ctx = self._context if self._context else self._page.context
+        pages = list(ctx.pages) if ctx else []
+        if self.attached:
+            pages = [p for p in pages if p in self._owned]
+        return pages
+
+    def switch_tab(self, index: int):
+        """Switch to a tab by index. Tab 0 is the first tab opened."""
+        pages = self.tabs()
+        if 0 <= index < len(pages):
+            self._page = pages[index]
+            self._page.bring_to_front()
+
+    def close_tab(self, index: int = None):
+        """Close a tab by index. Defaults to current tab. Switches to previous tab."""
+        ctx = self._context if self._context else self._page.context
+        pages = self.tabs()
+        if index is None:
+            target = self._page
+        elif 0 <= index < len(pages):
+            target = pages[index]
+        else:
+            return
+        if self.attached and target not in self._owned:
+            _log.warning("Not closing a tab Fantoma did not open")
+            return
+        target.close()
+        if target in self._owned:
+            self._owned.remove(target)
+        # Switch to last remaining tab
+        remaining = self.tabs()
+        if remaining:
+            self._page = remaining[-1]
+
+    def tab_count(self) -> int:
+        """Return the number of open tabs."""
+        return len(self.tabs()) or 1
+
+    def get_page(self):
+        """Return the Playwright page object (for DOM extractor)."""
+        return self._page
+
+    def get_url(self) -> str:
+        """Current page URL."""
+        return self._page.url if self._page else ""
+
+    def get_cookies(self) -> list:
+        """Get all cookies from the browser context."""
+        ctx = self._context if self._context else (
+            self._page.context if self._page else None
+        )
+        if ctx:
+            return ctx.cookies()
+        return []
+
+    def inject_cookies(self, cookies: list):
+        """Inject cookies into the browser context."""
+        ctx = self._context if self._context else (
+            self._page.context if self._page else None
+        )
+        if ctx:
+            ctx.add_cookies(cookies)
+
+    def get_storage_state(self) -> dict:
+        """Get full browser state — cookies + localStorage + sessionStorage.
+        Returns Playwright's storageState format:
+        {"cookies": [...], "origins": [{"origin": "https://...", "localStorage": [...]}]}
+        """
+        ctx = self._context if self._context else (
+            self._page.context if self._page else None
+        )
+        if not ctx:
+            return {"cookies": [], "origins": []}
+
+        cookies = ctx.cookies()
+
+        origins = []
+        if self._page:
+            try:
+                storage = self._page.evaluate("""() => {
+                    const items = [];
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const key = localStorage.key(i);
+                        items.push({name: key, value: localStorage.getItem(key)});
+                    }
+                    return {origin: window.location.origin, localStorage: items};
+                }""")
+                if storage and storage["localStorage"]:
+                    origins.append(storage)
+            except Exception:
+                pass
+
+        return {"cookies": cookies, "origins": origins}
+
+    def load_storage_state(self, state: dict):
+        """Load full browser state — cookies + localStorage.
+        Accepts Playwright's storageState format. Cookies injected via context API.
+        localStorage restored via page.evaluate, scoped per origin.
+        """
+        ctx = self._context if self._context else (
+            self._page.context if self._page else None
+        )
+        if not ctx:
+            return
+
+        cookies = state.get("cookies", [])
+        if cookies:
+            ctx.add_cookies(cookies)
+
+        origins = state.get("origins", [])
+        if origins and self._page:
+            for origin_data in origins:
+                items = origin_data.get("localStorage", [])
+                if not items:
+                    continue
+                try:
+                    current_origin = self._page.evaluate("window.location.origin")
+                    if current_origin == origin_data.get("origin"):
+                        for item in items:
+                            self._page.evaluate(
+                                "(args) => localStorage.setItem(args[0], args[1])",
+                                [item["name"], item["value"]]
+                            )
+                except Exception:
+                    pass
+
+    def clear_cookies(self):
+        """Clear all cookies from the browser context."""
+        if self._context:
+            self._context.clear_cookies()
+
+    def restart_with_new_fingerprint(self):
+        """Stop the browser and start a fresh session with a new fingerprint."""
+        self.stop()
+        self.start()
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *args):
+        self.stop()

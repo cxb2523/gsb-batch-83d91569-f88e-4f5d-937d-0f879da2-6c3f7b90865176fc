@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantoma"
+version = "0.13.1"
+description = "Accessibility-first browser automation for AI agents. MCP server included. Reads pages with small local LLMs."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    {name = "Petru", email = "support@steamvibe.com"},
+]
+keywords = [
+    "browser", "automation", "ai", "agent", "llm", "mcp",
+    "model-context-protocol", "accessibility", "aria", "playwright",
+    "anti-detect", "camoufox", "local-llm",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    # Pinned, not floating. `camoufox>=0.4` meant any rebuild silently changed
+    # the one dependency the whole anti-detection story rests on — a routine
+    # image rebuild moved 0.4.11 to 0.5.4 with nobody choosing it. Bump this
+    # deliberately, and re-run the protected-site checks when you do.
+    "camoufox==0.5.9",
+    "playwright>=1.40",
+    "httpx>=0.25",
+]
+
+[project.optional-dependencies]
+sessions = ["cryptography>=41.0"]
+captcha = ["capsolver"]
+chromium = ["patchright>=1.64.3,<1.65"]
+vision = ["pillow"]
+server = ["flask>=3.0", "werkzeug>=3.1.9"]
+mcp = ["mcp>=1.30.0,<2", "httpx>=0.27", "pydantic>=2.0"]
+dev = ["pytest", "pytest-asyncio"]
+all = [
+    "cryptography>=41.0", "capsolver", "pillow", "flask>=3.0", "werkzeug>=3.1.9",
+    "mcp>=1.30.0,<2", "httpx>=0.27", "pydantic>=2.0",
+]
+
+[project.scripts]
+fantoma = "fantoma.cli:main"
+fantoma-mcp = "fantoma.mcp_server:main"
+
+[project.urls]
+Homepage = "https://github.com/Huzy85/fantoma"
+Repository = "https://github.com/Huzy85/fantoma"
+Issues = "https://github.com/Huzy85/fantoma/issues"
+
+[tool.pytest.ini_options]
+# Unit suite only. The live/browser scripts (tests/*_test.py, tools/*_test.py,
+# tests/test_container_live.py) need a real browser/container and are run
+# separately, not as part of the unit suite.
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "--ignore=tests/test_container_live.py"

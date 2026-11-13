@@ -1,0 +1,135 @@
+# fantoma/dom/aria_diff.py
+"""ARIA-level snapshot diffing for the navigator change_line.
+
+Replaces the MutationObserver approach with semantic-level diffs the LLM
+already understands, since it reads the ARIA tree every step.
+
+Usage in navigator:
+    before = aria_snapshot(page)
+    # ... execute action ...
+    after  = aria_snapshot(page)
+    change_line = aria_diff(before, after) or "No visible changes"
+"""
+
+import re
+import logging
+
+from fantoma.dom.page_reads import read_aria
+
+log = logging.getLogger("fantoma.aria_diff")
+
+# Roles worth tracking — skip structural noise (text, generic, paragraph)
+_TRACKED = {
+    "button", "link", "textbox", "checkbox", "radio", "combobox",
+    "listbox", "option", "menuitem", "tab", "alert", "status",
+    "progressbar", "dialog", "img", "searchbox", "spinbutton",
+}
+
+
+def _parse_line(line: str) -> tuple[str, str, str] | None:
+    """
+    Parse one aria_snapshot() line into (role, name, value).
+    Returns None for non-tracked or unrecognised lines.
+
+    Playwright format examples:
+      - button "Submit"
+      - textbox "Email" [value="user@example.com"]
+      - checkbox "Remember me" [checked]
+      - alert "Error: required field"
+    """
+    stripped = re.sub(r'^\s*-\s*', '', line).strip()
+    if not stripped:
+        return None
+
+    m = re.match(r'^(\w+)(?:\s+"([^"]*)")?(.*)$', stripped)
+    if not m:
+        return None
+
+    role = m.group(1).lower()
+    if role not in _TRACKED:
+        return None
+
+    name = m.group(2) or ""
+    rest = m.group(3).strip()
+
+    # Value, then every state flag. Taking only the first flag meant an
+    # option going from "[disabled] [selected]" to "[disabled]" looked
+    # unchanged, and a selected option reported nothing at all, so a
+    # successful select was announced to the model as "No visible changes".
+    vm = re.search(r'value="([^"]*)"', rest) or re.match(r'^:\s*"(.*)"', rest)
+    flags = [f for f in ("checked", "selected", "pressed", "expanded", "disabled")
+             if f"[{f}]" in rest]
+    value = " ".join(([vm.group(1)] if vm else []) + flags)
+
+    return role, name, value
+
+
+def aria_snapshot(page, snapshot=None) -> dict[tuple[str, str], str]:
+    """
+    Return {(role, name): value} for all tracked interactive elements.
+    Empty dict on any error (safe fallback).
+
+    snapshot, a PageSnapshot, supplies the already-read ARIA text so no
+    second read is made.
+    """
+    try:
+        raw = snapshot.aria() if snapshot is not None else read_aria(page)
+    except Exception:
+        return {}
+    return parse_aria_text(raw)
+
+
+def parse_aria_text(raw: str) -> dict[tuple[str, str], str]:
+    """The {(role, name): value} map for ARIA snapshot text."""
+
+    result: dict[tuple[str, str], str] = {}
+    seen: dict[tuple[str, str], int] = {}
+    for line in raw.split("\n"):
+        parsed = _parse_line(line)
+        if parsed:
+            role, name, value = parsed
+            key = (role, name)
+            # Repeated controls (two unnamed checkboxes, six "Add to cart"
+            # buttons) are told apart by position. Keeping only the first
+            # made a change to any later one invisible. A counter per name
+            # keeps this linear: probing "#2", "#3", ... for each repeat
+            # took 1.2 s on a page with 4,000 same-name links.
+            count = seen.get(key, 0) + 1
+            seen[key] = count
+            if count > 1:
+                key = (role, f"{name} #{count}".strip())
+            result[key] = value
+    return result
+
+
+def aria_diff(before: dict, after: dict) -> str:
+    """
+    Compact diff between two aria_snapshot() dicts.
+    Returns empty string when there are no meaningful changes.
+    Capped at 8 lines to keep the navigator prompt tight.
+    """
+    lines: list[str] = []
+
+    added_keys   = set(after) - set(before)
+    removed_keys = set(before) - set(after)
+    common_keys  = set(before) & set(after)
+
+    for role, name in sorted(added_keys)[:4]:
+        label = f'"{name}"' if name else ""
+        val   = f' = "{after[(role, name)]}"' if after[(role, name)] else ""
+        lines.append(f"+ [{role}] {label}{val}".strip())
+
+    for role, name in sorted(removed_keys)[:4]:
+        label = f'"{name}"' if name else ""
+        lines.append(f"- [{role}] {label}".strip())
+
+    for role, name in sorted(common_keys):
+        bv = before[(role, name)]
+        av = after[(role, name)]
+        if bv != av:
+            label = f'"{name}"' if name else ""
+            lines.append(f'~ [{role}] {label}: "{bv}" → "{av}"')
+            if len(lines) >= 8:
+                break
+
+    return "\n".join(lines[:8])

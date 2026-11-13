@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Huzy85/fantoma",
+  "description": "Accessibility-tree browser for AI agents: read pages, log in, extract data, run tasks.",
+  "repository": {
+    "url": "https://github.com/Huzy85/fantoma",
+    "source": "github"
+  },
+  "version": "0.13.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "fantoma",
+      "version": "0.13.1",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
