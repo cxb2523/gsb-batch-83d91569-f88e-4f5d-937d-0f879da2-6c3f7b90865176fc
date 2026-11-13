@@ -9,6 +9,25 @@ rather than being a silent violation of that.
 
 ## [Unreleased]
 
+### Added
+
+- Playwright runs over a listing (`--pages`) now write a per-page ledger
+  beside the data output: the `--out` path with its extension removed plus
+  `.pages.json` (e.g. `stockx.json` → `stockx.pages.json`). Each entry
+  records the page number, its result category (`ok`, `blocked`,
+  `not_found`, `parser_failed`, `fetch_failed`, `skipped`), the page's
+  product count, how many SKUs were new, and a short failure reason. The
+  new `page_ledger.py` module (`PageLedger`) backs it; a repeated
+  page-number registration keeps the first result and is rejected rather
+  than overwriting it. Concurrent (`--concurrency > 1`) runs write the
+  record in ascending page-number order regardless of which worker
+  finished first. When page 1 fails, the pages that were never attempted
+  are recorded as `skipped` instead of fabricated successes; a page that
+  is served but adds no new SKUs stays `ok` with `new_sku_count` 0 before
+  the existing stop. The ledger is written only when at least one page
+  completed, never for single-product mode, and changes neither the
+  product output nor the exit codes (3 blocked, 5 all-failed, 6 partial).
+
 ### Changed
 
 - CI only: the scheduled canary now starts at 05:07 UTC (Mondays) instead of 06:17, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.

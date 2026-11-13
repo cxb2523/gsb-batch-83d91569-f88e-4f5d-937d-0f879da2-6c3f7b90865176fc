@@ -33,6 +33,7 @@ py-modules = [
     "env_config",
     "proxy_pool",
     "output_writer",
+    "page_ledger",
     "captcha_solver",
     "fingerprint_client",
     "scraper_api_client",

@@ -24,6 +24,7 @@ import asyncio
 import logging
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -41,6 +42,16 @@ import product_parser as pp
 from captcha_solver import SolveBudget, add_captcha_arguments, solve_when_blocked
 from fingerprint_client import refuse_if_cdp
 from output_writer import EXIT_BAD_USAGE, EXIT_CRASH, Product, RunFlags, finish_run, merge_pages, sku_key as _sku_key
+from page_ledger import (
+    PageLedger,
+    RESULT_BLOCKED,
+    RESULT_FETCH_FAILED,
+    RESULT_NOT_FOUND,
+    RESULT_OK,
+    RESULT_PARSER_FAILED,
+    RESULT_SKIPPED,
+    ledger_path_for,
+)
 from proxy_pool import Proxy, ProxyPool, is_proxy_dead_error, load_proxies, redact_credentials
 from scraper_api_client import TwoCaptchaClient
 
@@ -53,6 +64,22 @@ READINESS_WAIT_MS = 2_500
 MIN_CARD_MATCHES = pp.MIN_CARD_MATCHES
 
 log = logging.getLogger("playwright_scraper")
+
+
+@dataclass
+class _PageOutcome:
+    """What one fetch_page() call learned, carrying everything the
+    pagination loop and the page ledger need without the loop having to
+    re-derive any of it. `listing` is None on every non-ok result."""
+    page: int
+    result: str  # one of page_ledger.RESULT_*
+    reason: Optional[str]
+    listing: Optional[pp.ListingPage]
+    proxy: Optional[Proxy]
+
+    @property
+    def ok(self) -> bool:
+        return self.result == RESULT_OK
 
 
 def _positive_int(value: str) -> int:
@@ -248,15 +275,20 @@ async def _connect_over_cdp(pw, cdp_endpoint: str):
 async def scrape_listing(
     *, args: argparse.Namespace, start_url: str, browser: Browser,
     proxy_pool: Optional[ProxyPool], client: Optional[TwoCaptchaClient], autosolve: bool = False,
+    ledger: Optional[PageLedger] = None,
 ) -> Tuple[List[List[Product]], List[int], RunFlags]:
     """Returns (pages_products_in_order, failed_page_numbers, flags).
 
     A page counts as completed only when it was served AND parsed: a
     blocked, not-found or unreadable page goes into `failed_pages`, never
-    into the completed count."""
+    into the completed count. Every attempted page — including skipped
+    ones after a failed page 1 — is also recorded in `ledger` (a fresh
+    PageLedger is built when none is passed), in ascending page-number
+    order regardless of how concurrent workers finished."""
     pages_products: List[List[Product]] = []
     failed_pages: List[int] = []
     flags = RunFlags()
+    ledger = ledger if ledger is not None else PageLedger()
 
     proxy = proxy_pool.next() if proxy_pool else None
     log.info("Using proxy %s", proxy.masked() if proxy else "(no local proxy pool — direct connection, or a --cdp-endpoint session providing its own exit)")
@@ -265,9 +297,11 @@ async def scrape_listing(
     if autosolve:
         await _enable_scraping_browser_auto_solve(context, page)
 
-    async def fetch_page(n: int, ctx_page: Page, cur_proxy: Optional[Proxy]):
-        """Returns (listing or None, proxy). Records a failed page and its
-        cause in `failed_pages` / `flags` itself."""
+    async def fetch_page(n: int, ctx_page: Page, cur_proxy: Optional[Proxy]) -> _PageOutcome:
+        """Returns a _PageOutcome. Records a failed page and its cause in
+        `failed_pages` / `flags` itself; the caller owns the ledger entry
+        so concurrent results can be written in page order, not arrival
+        order."""
         url = pp.page_url(start_url, n)
         budget = SolveBudget()  # one per page, created before any retry
         html, used_proxy, status, error = await _fetch(
@@ -277,7 +311,7 @@ async def scrape_listing(
         if html is None:
             log.error("Page %d permanently failed: %s", n, error)
             failed_pages.append(n)
-            return None, used_proxy
+            return _PageOutcome(n, RESULT_FETCH_FAILED, error, None, used_proxy)
         if args.dump_html:
             Path(_dump_path(args.out, n)).write_text(html, encoding="utf-8")
         state = pp.classify_served_page(html, status)
@@ -289,17 +323,19 @@ async def scrape_listing(
             if _captcha_blocks(captcha_result, html):
                 state = "blocked"
         if state == "blocked":
+            reason = f"block page (HTTP {status})"
             log.warning("Page %d is a block page (HTTP %s) — recorded as failed, not empty.", n, status)
             flags.blocked = True
             failed_pages.append(n)
             if proxy_pool is not None and used_proxy is not None and status in (403, 429):
                 proxy_pool.report_failure(used_proxy, dead=True)
-            return None, used_proxy
+            return _PageOutcome(n, RESULT_BLOCKED, reason, None, used_proxy)
         if state == "not_found":
+            reason = f"address not found (HTTP {status})"
             log.warning("Page %d answered HTTP %s — the address does not exist.", n, status)
             flags.not_found = True
             failed_pages.append(n)
-            return None, used_proxy
+            return _PageOutcome(n, RESULT_NOT_FOUND, reason, None, used_proxy)
         try:
             listing = pp.parse_listing_page(html, requested_url=start_url)
         except Exception as exc:  # noqa: BLE001
@@ -308,32 +344,50 @@ async def scrape_listing(
             # the run and discard every page already collected — live-
             # reproduced 2026-09-14 on a worker page. One bad page degrades
             # the run to partial, like a page that failed to fetch.
+            reason = f"parser raised {type(exc).__name__}: {exc}"
             log.error("Page %d fetched OK but failed to parse — treating as failed, not crashing: %s", n, exc)
             flags.parser_failed = True
             failed_pages.append(n)
-            return None, used_proxy
+            return _PageOutcome(n, RESULT_PARSER_FAILED, reason, None, used_proxy)
         if listing.parser_failed:
             if pp.has_challenge_marker(html):
+                reason = "Cloudflare interstitial; no rows readable"
                 log.warning("Page %d is a Cloudflare interstitial — recorded as blocked.", n)
                 flags.blocked = True
+                ledger_result = RESULT_BLOCKED
             else:
+                reason = (f"served but no rows readable (data block found: {listing.data_found}, "
+                          f"rows the page reports: {listing.total})")
                 log.error("Page %d was served but no rows could be read (data block found: %s, "
                           "rows the page reports: %s) — a parser failure, not an empty listing.",
                           n, listing.data_found, listing.total)
                 flags.parser_failed = True
+                ledger_result = RESULT_PARSER_FAILED
             failed_pages.append(n)
-            return None, used_proxy
-        return listing, used_proxy
+            return _PageOutcome(n, ledger_result, reason, None, used_proxy)
+        return _PageOutcome(n, RESULT_OK, None, listing, used_proxy)
 
     # Page 1 is always fetched alone — its content decides whether later
     # pages can be addressed independently (their own ?page=N convention).
-    listing, proxy = await fetch_page(1, page, proxy)
     seen_skus: set = set()
-    reported_page_count: Optional[int] = None
-    if listing is not None:
-        pages_products.append(listing.products)
-        seen_skus.update(_sku_key(p) for p in listing.products)
-        reported_page_count = listing.page_count
+    outcome = await fetch_page(1, page, proxy)
+    proxy = outcome.proxy
+    if outcome.ok:
+        # The ledger entry is made here, before the merge loop below, so a
+        # page-1 entry always precedes every worker page's entry.
+        page1_new = {_sku_key(p) for p in outcome.listing.products}
+        ledger.add_page(
+            1, RESULT_OK,
+            product_count=len(outcome.listing.products),
+            new_sku_count=len(page1_new),
+        )
+        pages_products.append(outcome.listing.products)
+        seen_skus.update(page1_new)
+        listing = outcome.listing
+    else:
+        ledger.add_page(1, outcome.result, reason=outcome.reason)
+        listing = None
+    reported_page_count: Optional[int] = listing.page_count if listing is not None else None
 
     total_pages = args.pages
     if reported_page_count is not None and reported_page_count < total_pages:
@@ -342,9 +396,15 @@ async def scrape_listing(
     else:
         flags.stop_reason = "requested_pages_done"
 
-    # Nothing more to fetch when page 1 itself did not complete.
-    remaining = list(range(2, total_pages + 1)) if listing is not None else []
-    if remaining and args.concurrency <= 1:
+    # Nothing more to fetch when page 1 itself did not complete. The pages
+    # that would have come next are registered as SKIPPED — never as
+    # fabricated successes — so the ledger accounts for every page number
+    # the run was asked for.
+    remaining = list(range(2, total_pages + 1))
+    if listing is None:
+        for n in remaining:
+            ledger.add_page(n, RESULT_SKIPPED, reason="page 1 did not complete; not attempted")
+    elif remaining and args.concurrency <= 1:
         for n in remaining:
             if args.proxy_rotate and proxy_pool is not None:
                 await context.close()
@@ -352,18 +412,30 @@ async def scrape_listing(
                 context = await _new_context(browser, proxy)
                 page = await context.new_page()
             await asyncio.sleep(args.delay)
-            listing, proxy = await fetch_page(n, page, proxy)
-            if listing is None:
+            outcome = await fetch_page(n, page, proxy)
+            proxy = outcome.proxy
+            if not outcome.ok:
+                ledger.add_page(n, outcome.result, reason=outcome.reason)
                 continue
-            pages_products.append(listing.products)
-            page_skus = {_sku_key(p) for p in listing.products}
-            if page_skus <= seen_skus:
+            page_products = outcome.listing.products
+            page_skus = {_sku_key(p) for p in page_products}
+            new_skus = page_skus - seen_skus
+            # A page with no NEW sku is still a successfully served and
+            # parsed page: record it as ok with new_sku_count 0, then stop
+            # on the existing data-based termination rule.
+            ledger.add_page(
+                n, RESULT_OK,
+                product_count=len(page_products),
+                new_sku_count=len(new_skus),
+            )
+            pages_products.append(page_products)
+            if not new_skus:
                 flags.stop_reason = "no_new_rows"
                 break  # data-based termination: this page added no NEW sku
             seen_skus |= page_skus
     elif remaining:
         sem = asyncio.Semaphore(max(1, args.concurrency))
-        results: dict = {}
+        worker_outcomes: dict = {}
 
         async def worker(n: int, worker_index: int):
             async with sem:
@@ -371,14 +443,29 @@ async def scrape_listing(
                 worker_ctx = await _new_context(browser, worker_proxy)
                 worker_page = await worker_ctx.new_page()
                 await asyncio.sleep(args.delay * (worker_index % max(1, args.concurrency)))
-                worker_listing, _ = await fetch_page(n, worker_page, worker_proxy)
+                worker_outcome = await fetch_page(n, worker_page, worker_proxy)
                 await worker_ctx.close()
-                if worker_listing is not None:
-                    results[n] = worker_listing.products
+                worker_outcomes[n] = worker_outcome
 
         await asyncio.gather(*(worker(n, i) for i, n in enumerate(remaining)))
-        for n in sorted(results):  # merge in PAGE order, not arrival order
-            pages_products.append(results[n])
+        # Register ledger entries and merge products in PAGE order, not
+        # arrival order — workers finish at different times and the record
+        # must be checkable page by page.
+        for n in sorted(worker_outcomes):
+            worker_outcome = worker_outcomes[n]
+            if not worker_outcome.ok:
+                ledger.add_page(n, worker_outcome.result, reason=worker_outcome.reason)
+                continue
+            page_products = worker_outcome.listing.products
+            page_skus = {_sku_key(p) for p in page_products}
+            new_skus = page_skus - seen_skus
+            ledger.add_page(
+                n, RESULT_OK,
+                product_count=len(page_products),
+                new_sku_count=len(new_skus),
+            )
+            seen_skus |= page_skus
+            pages_products.append(page_products)
 
     await context.close()
     return pages_products, failed_pages, flags
@@ -478,6 +565,10 @@ async def run(args: argparse.Namespace) -> int:
     # is built: --twocaptcha-key is refused at parse time and TWOCAPTCHA_KEY
     # is not loaded (see captcha_solver.add_captcha_arguments).
     client = None
+    # Defined before the try so the post-run ledger guard can read it even
+    # if the setup above the assignment were ever to fail.
+    single_mode = False
+    pages_completed = 0
 
     cdp_refused_extras = refuse_if_cdp(args.cdp_endpoint)  # just logs; nothing to refuse here (no --fingerprint flag wired up)
     del cdp_refused_extras
@@ -494,6 +585,7 @@ async def run(args: argparse.Namespace) -> int:
 
             autosolve = bool(args.cdp_endpoint) and args.solve_captcha != "off"
             single_mode = pp.is_single_product_url(start_url) and not pp.is_listing_url(start_url)
+            ledger = PageLedger()
             if single_mode:
                 merged, failed_pages, flags = await scrape_single_product(
                     args=args, url=start_url, browser=browser, proxy_pool=proxy_pool, client=client,
@@ -503,7 +595,7 @@ async def run(args: argparse.Namespace) -> int:
             else:
                 pages_products, failed_pages, flags = await scrape_listing(
                     args=args, start_url=start_url, browser=browser, proxy_pool=proxy_pool, client=client,
-                    autosolve=autosolve,
+                    autosolve=autosolve, ledger=ledger,
                 )
                 merged = merge_pages(pages_products)
                 pages_completed = len(pages_products)
@@ -513,6 +605,14 @@ async def run(args: argparse.Namespace) -> int:
     except Exception:
         log.exception("Unhandled error — this is a crash, not a normal blocked/empty run")
         return EXIT_CRASH
+
+    # The ledger is supplementary: it never changes the product output or
+    # the exit code, and it is only written when at least one listing page
+    # actually completed (a run in which every page failed has nothing to
+    # account for, matching finish_run's no-output rule for such runs).
+    # Single-product mode has no pagination, so it writes no ledger either.
+    if not single_mode and pages_completed >= 1:
+        ledger.write_json(ledger_path_for(args.out))
 
     return finish_run(
         products=merged,

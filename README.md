@@ -176,6 +176,23 @@ for CSV, `csv_cells_escaped`. A run with no rows writes no sidecar and no
 output at all, so it can never overwrite a previous good run
 (`--allow-empty` opts out of that guard).
 
+A multi-page listing run also writes a **per-page ledger** at
+`<out-without-extension>.pages.json` (e.g. `stockx.json` →
+`stockx.pages.json`), produced by `page_ledger.PageLedger`. It lists every
+page number the run touched, in page order, with each page's result
+category — `ok`, `blocked`, `not_found`, `parser_failed`, `fetch_failed` or
+`skipped` — its product count, how many of those SKUs were new, and a short
+failure reason. This is what lets you tell a refused page, a non-existent
+address, an unreadable page and a genuinely empty next page apart; the
+`.meta.json` status only describes the run as a whole. A page that was
+served but added no new SKUs stays `ok` with `new_sku_count` 0 (the run
+then stops on `no_new_rows`); when page 1 fails, the pages never attempted
+are `skipped`, never fabricated successes. Concurrent runs
+(`--concurrency > 1`) write the ledger in ascending page-number order no
+matter which worker finished first. The ledger is written only when at
+least one listing page completed (never for an all-failed run or a
+single-product fetch) and never changes the data output or the exit code.
+
 Output files are written atomically (a temporary file in the same
 directory, renamed into place), so an interrupted run leaves the previous
 file intact. A new file gets the mode your umask gives it; an existing one
