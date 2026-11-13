@@ -6,6 +6,11 @@ print one clear line instead of a traceback.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .crawl import GalleryCrawlResult
+
 
 class CrawlerError(Exception):
     """Base class for errors the CLI reports as a single message."""
@@ -38,6 +43,9 @@ class BannedError(CrawlerError):
         super().__init__(message)
         #: Seconds until the ban ends, if the page said so.
         self.expires_in = expires_in
+        #: Filled in by ``crawl_galleries`` when a ban aborts a run: what had
+        #: been recorded up to the abort, including the control-stopped ids.
+        self.partial_result: GalleryCrawlResult | None = None
 
 
 class GalleryUnavailableError(CrawlerError):

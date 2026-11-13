@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from ehentai_crawler.crawl import (
     CrawlControl,
+    StopReason,
     crawl_galleries,
     crawl_gallery,
     crawl_list,
@@ -19,6 +22,7 @@ from ehentai_crawler.crawl import (
 )
 from ehentai_crawler.db import Database
 from ehentai_crawler.errors import BannedError, SettingsError
+from ehentai_crawler.fetch import Fetcher, HostRateLimiter, HttpTransport
 from ehentai_crawler.parse import GalleryInfo, ListEntry
 from ehentai_crawler.settings import Settings
 
@@ -169,6 +173,47 @@ def test_quota_placeholder_stops_downloads(fetcher, settings, site):
     )
     assert control.quota_exceeded.is_set()
     assert (result.download.saved, result.download.complete) == (1, False)
+    assert result.download.stop_reason is StopReason.QUOTA
+    assert result.download.quota_exhausted and result.download.interrupted
+    assert not (settings.image_folder_path / "1005" / "509.gif").exists()
+    # The one image saved before the placeholder is still on disk.
+    assert (settings.image_folder_path / "1005" / "page001.jpg").read_bytes() == image_bytes(1005, 1)
+
+
+def test_stop_flag_ends_a_gallery_without_counting_images_as_failed(fetcher, settings, site):
+    control = CrawlControl()
+    control.stop.set()  # e.g. a ban in another thread, before the first image is opened
+    result = crawl_gallery(
+        fetcher, 1005, site.gallery_url(1005), image_root=settings.image_folder_path, tag_only=False, control=control
+    )
+    download = result.download
+    assert download.stop_reason is StopReason.STOPPED
+    assert (download.saved, download.skipped, download.failed) == (0, 0, 0)
+    assert not download.complete and download.interrupted
+    assert not any(path.is_file() for path in settings.image_folder_path.rglob("*"))  # no image, no placeholder
+
+
+def test_quota_flag_set_mid_gallery_marks_the_next_image_quota_stopped(fetcher, settings, site):
+    """Another thread sets the shared quota flag while this gallery is between
+    images: its loop ends on the flag (without opening another page) and records QUOTA."""
+    site.quota_after = 1
+    control = CrawlControl()
+    # Flip the shared quota flag as soon as the first image page is fetched, so the
+    # loop's next iteration sees a flag another thread would have set in a real run.
+    original_page = fetcher.page
+
+    def page_then_flag(url: str) -> str:
+        html = original_page(url)
+        if url.startswith(site.base + "s/"):
+            control.quota_exceeded.set()
+        return html
+
+    fetcher.page = page_then_flag  # type: ignore[method-assign]
+    result = crawl_gallery(
+        fetcher, 1005, site.gallery_url(1005), image_root=settings.image_folder_path, tag_only=False, control=control
+    )
+    assert result.download.stop_reason is StopReason.QUOTA
+    assert result.download.saved == 1 and result.download.failed == 0  # image 1 landed, the rest did not fail
     assert not (settings.image_folder_path / "1005" / "509.gif").exists()
 
 
@@ -200,6 +245,113 @@ def test_quota_switches_the_rest_to_tags_only(db, fetcher, settings, site):
     assert result.crawled == 4 and result.complete == 0
     assert all(page.all_downloaded_check == 0 for page in db.page_rows().values())
     assert len(site.paths("/s/")) == 1  # only the image page that showed the placeholder
+
+
+def test_quota_on_the_first_image_page_stops_every_gallery_but_records_it(db, fetcher, settings, site):
+    """quota_after=0: the very first image page is the 509 placeholder, so no
+    gallery gets any image; one is the quota-interrupted gallery, all others tags only."""
+    listed(db, fetcher, site)
+    site.quota_after = 0
+    result = crawl_galleries(fetcher, db, replace(settings, number_of_thread=1), tag_only=False)
+
+    assert result.quota_exceeded
+    assert result.control_stopped == []
+    # Exactly one gallery opened an image page; it is the single quota-interrupted one.
+    quota_gids = {int(path.rsplit("/", 1)[-1].split("-")[0]) for path in site.paths("/s/")}
+    assert result.quota_stopped == sorted(quota_gids) and len(result.quota_stopped) == 1
+    quota_gid = result.quota_stopped[0]
+
+    page_rows = db.page_rows()
+    assert set(page_rows) == {1005, 1004, 1002, 1001}  # every live gallery still got its tags
+    assert all(page.all_downloaded_check == 0 for page in page_rows.values())
+    assert result.failed == 0  # an interrupted download is not a failure
+    # Nothing was saved anywhere, and the 509 placeholder never hit the disk.
+    assert not (settings.image_folder_path / str(quota_gid) / "509.gif").exists()
+    if settings.image_folder_path.exists():
+        assert not any(path.is_file() for path in settings.image_folder_path.rglob("*"))
+    # The other three galleries were tag-only and therefore have no DownloadResult of their own.
+    assert len(site.paths("/s/")) == 1
+
+
+def test_quota_halfway_through_a_gallery_marks_only_that_gallery(db, fetcher, settings, site):
+    """quota_after=3 with seed 0: three real images are served across the earlier
+    galleries, then the 509 placeholder appears at gallery 1005's third image;
+    1005 is the sole quota-interrupted gallery and everything before it completed."""
+    listed(db, fetcher, site)
+    site.quota_after = 3
+    result = crawl_galleries(fetcher, db, replace(settings, number_of_thread=1), tag_only=False, rng=random.Random(0))
+
+    assert result.quota_exceeded
+    assert result.control_stopped == [] and result.failed == 0
+    assert result.quota_stopped == [1005]
+    # Galleries visited before 1005 (1004) and the tag-only ones after it kept their rows.
+    assert db.page_rows()[1004].all_downloaded_check == 1
+    assert db.page_rows()[1001].all_downloaded_check == 0  # visited after the quota: tags only
+    assert db.page_rows()[1002].all_downloaded_check == 0
+    assert db.page_rows()[1005].all_downloaded_check == 0
+    # 1005 kept the two images saved before the placeholder; the placeholder itself was not saved.
+    folder = settings.image_folder_path / "1005"
+    assert sorted(p.name for p in folder.iterdir()) == ["page001.jpg", "page002.jpg"]
+    assert not (folder / "509.gif").exists()
+    assert not (settings.image_folder_path / "1001").exists()  # later galleries never opened image pages
+
+
+def test_ban_interrupts_inflight_galleries_and_lists_them_as_stopped(db, settings, site):
+    """A ban on one gallery stops the run; the other in-flight gallery ends on
+    CrawlControl.stop and must appear in control_stopped, never in failed."""
+    # Build the list through a separate fetcher since the gated one blocks on purpose.
+    http0 = HttpTransport(settings, HostRateLimiter(0))
+    setup_fetcher = Fetcher(http0, http0, max_retries=settings.max_retries, sleep=lambda _: None)
+    crawl_list(setup_fetcher, db, site.base, update_all=False)
+    setup_fetcher.close()
+
+    site.ban["/g/1004/5f6a7b8c9d/"] = "2 hours."
+
+    class GatedFetcher:
+        """Holds gallery 1005's first request until the ban in 1004 has been raised."""
+
+        def __init__(self) -> None:
+            self._inner_http = HttpTransport(settings, HostRateLimiter(0))
+            self.inner = Fetcher(
+                self._inner_http, self._inner_http, max_retries=settings.max_retries, sleep=lambda _: None
+            )
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def page(self, url: str) -> str:
+            if url.startswith(site.base + "g/1005/"):
+                self.entered.set()
+                self.release.wait(timeout=10)
+            return self.inner.page(url)
+
+        def download(self, url: str, dest: Path) -> int:
+            return self.inner.download(url, dest)
+
+        def close(self) -> None:
+            self.inner.close()
+
+    gated = GatedFetcher()
+    try:
+        with pytest.raises(BannedError, match="about 120 min") as exc_info:
+            crawl_galleries(gated, db, replace(settings, number_of_thread=2), tag_only=False, rng=random.Random(5))
+        assert gated.entered.wait(timeout=5)
+    finally:
+        gated.release.set()
+        gated.close()
+
+    partial = exc_info.value.partial_result
+    assert partial is not None
+    # Every gallery that was on the wire when the ban fired ends on CrawlControl.stop.
+    assert partial.control_stopped == sorted(partial.control_stopped)  # the list is id-sorted
+    assert 1005 in partial.control_stopped
+    assert partial.quota_stopped == []
+    assert partial.failed == 0  # neither the banned gallery nor a stopped one counts as failed
+    # The banned gallery has no page row, so the next run retries it; stopped galleries kept their tags.
+    assert 1004 not in db.page_rows()
+    for gid in partial.control_stopped:
+        assert gid in db.page_rows() and db.page_rows()[gid].all_downloaded_check == 0
+    # A stop is not a quota event.
+    assert not partial.quota_exceeded
 
 
 def test_ban_stops_the_gallery_crawl(db, fetcher, settings, site):

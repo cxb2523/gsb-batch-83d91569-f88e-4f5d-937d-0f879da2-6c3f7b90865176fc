@@ -195,13 +195,20 @@ def _run(args: argparse.Namespace, settings: Settings) -> None:
         if crawl_pages:
             assert db and fetcher
             crawled = crawl_galleries(fetcher, db, settings, tag_only=bool(args.crawl_tag_only))
+            suffix = ""
+            if crawled.quota_exceeded:
+                suffix = "; image quota used up, the rest got tags only"
+                if crawled.quota_stopped:
+                    suffix += "; quota stopped: " + ",".join(str(gid) for gid in crawled.quota_stopped)
+                if crawled.control_stopped:
+                    suffix += "; control stopped: " + ",".join(str(gid) for gid in crawled.control_stopped)
             log.info(
                 "galleries done: %d crawled (%d with every image), %d removed, %d failed%s",
                 crawled.crawled,
                 crawled.complete,
                 crawled.removed,
                 crawled.failed,
-                "; image quota used up, the rest got tags only" if crawled.quota_exceeded else "",
+                suffix,
             )
 
         if args.gallery_url:
@@ -209,15 +216,27 @@ def _run(args: argparse.Namespace, settings: Settings) -> None:
             single = crawl_single(fetcher, settings, args.gallery_url)
             if single.download is not None:
                 d = single.download
-                log.info(
-                    "gallery %s: %d of %d images saved, %d already there, %d failed -> %s",
-                    single.gallery_id,
-                    d.saved,
-                    d.total,
-                    d.skipped,
-                    d.failed,
-                    settings.image_folder_path / str(single.gallery_id),
-                )
+                if d.quota_exhausted:
+                    log.warning(
+                        "gallery %s: image quota used up after %d of %d images (%d already there, %d failed); "
+                        "download interrupted by quota, not finished -> %s",
+                        single.gallery_id,
+                        d.saved,
+                        d.total,
+                        d.skipped,
+                        d.failed,
+                        settings.image_folder_path / str(single.gallery_id),
+                    )
+                else:
+                    log.info(
+                        "gallery %s: %d of %d images saved, %d already there, %d failed -> %s",
+                        single.gallery_id,
+                        d.saved,
+                        d.total,
+                        d.skipped,
+                        d.failed,
+                        settings.image_folder_path / str(single.gallery_id),
+                    )
 
         if args.other_database_path:
             assert db

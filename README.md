@@ -154,9 +154,16 @@ When the site pushes back, the crawler reacts like this:
 | shows the "IP temporarily banned" page while you read the list | waits until the ban ends (the page says when; one hour if not) and carries on |
 | shows that page while you crawl galleries | stops, keeps everything finished so far, and exits with status 255 |
 | says a gallery was removed or not found | marks it `removed = 1` and stops visiting it |
-| serves its 509 "quota exceeded" image | stops downloading; the remaining galleries get tags only |
+| serves its 509 "quota exceeded" image | stops downloading; the remaining galleries get tags only; the gallery that hit it is listed as `quota stopped` |
 | shows the "Content Warning" page | sends the `nw=1` cookie, and follows the "View Gallery" link if the page shows anyway |
 | answers ExHentai requests with an empty page | stops and tells you to check the cookies |
+
+Each gallery's download carries a stop reason — normal, quota, or stopped — so a rerun can tell
+which galleries finished, which were interrupted by the quota (images already saved are kept), and
+which were cut off by a ban or Ctrl+C. When the quota runs out, the `-p` finish line appends the
+affected gallery ids, for example `quota stopped: 1005,1002` (and `control stopped: …` for galleries
+a ban or interrupt left in flight); empty lists are omitted. The `509.gif` placeholder is never
+written to disk, and images that were only never reached are not counted as failures.
 
 ## Example run
 

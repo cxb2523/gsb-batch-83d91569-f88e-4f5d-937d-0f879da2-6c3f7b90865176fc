@@ -148,6 +148,35 @@ def test_ban_during_gallery_crawl_exits_255(site_env, caplog):
     assert "run the same command again later" in caplog.text
 
 
+def test_p_run_with_quota_lists_the_interrupted_gallery_ids(site_env, caplog):
+    assert main(["-c"]) == 0
+    site_env.quota_after = 0  # the first image page of the first image gallery is the 509 placeholder
+    assert main(["-p", "--number-of-thread", "1"]) == 0
+
+    text = caplog.text
+    assert "image quota used up, the rest got tags only" in text
+    assert "quota stopped:" in text
+    quota_gid = next(iter({int(p.rsplit("/", 1)[-1].split("-")[0]) for p in site_env.paths("/s/")}))
+    assert f"quota stopped: {quota_gid}" in text
+    assert "control stopped:" not in text  # the empty list is omitted, not printed empty
+
+
+def test_p_run_without_quota_prints_no_stop_summary(site_env, caplog):
+    assert main(["-c", "-p"]) == 0
+    assert "quota stopped:" not in caplog.text
+    assert "control stopped:" not in caplog.text
+    assert "galleries done:" in caplog.text
+
+
+def test_cu_with_quota_placeholder_says_interrupted_not_finished(site_env, caplog):
+    site_env.quota_after = 0
+    assert main(["-cu", site_env.gallery_url(1002)]) == 0
+    text = caplog.text
+    assert "image quota used up" in text
+    assert "download interrupted by quota, not finished" in text
+    assert not Path("img/1002/509.gif").exists()
+
+
 def test_site_unreachable_is_a_clear_error(monkeypatch, caplog):
     monkeypatch.setenv("EHENTAI_EX_MODE", "false")
     monkeypatch.setenv("EHENTAI_EHENTAI_INDEX", "http://127.0.0.1:9/")
