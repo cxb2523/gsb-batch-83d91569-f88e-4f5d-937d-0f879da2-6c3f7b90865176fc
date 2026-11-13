@@ -1,0 +1,304 @@
+# Changelog
+
+All notable changes to this project are documented here.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and the versions follow [SemVer](https://semver.org/) as closely as a CLI
+toolkit can. A PATCH release means *fixes*, not that every flag is frozen: a
+default can change in one when leaving it alone would cost a reader money or
+data, and when that happens the release notes lead with it in a blockquote.
+
+A released section is HISTORY. If a later release contradicts something
+stated here, the correction goes in the new section — the old one stays as it
+was written, because anyone can read it with `git show v0.1.0:CHANGELOG.md`.
+
+## [Unreleased]
+
+### Changed
+
+- CI only: the canary now runs weekly (Mondays 06:20 UTC) and on a manual dispatch, with its optional secret `OPENSEA_PROXY` passed on every run; the daily schedule is removed.
+- Docs only: the README's comparison of networks names the 2Captcha Scraping Browser API path by its product name.
+
+## [0.2.0] - 2026-10-16
+
+> **Behaviour changes in this batch, read before upgrading a script:**
+> `OPENSEA_URL` no longer outranks `--collection`, `--category` or
+> `--mode collections` (it used to make `--collection pudgypenguins` scrape
+> the environment's collection instead), and `.env.example` now ships it
+> commented out. `--pages 0`, `--limit 0`, `--concurrency 0` and negative
+> `--delay`, `--retry-delay` and `--proxy-block-retries` are usage errors
+> (exit 2) instead of being accepted; `scraper_api_client.py --retries -1`
+> too. A typed `--url` that names a different collection from
+> `--collection` is refused. CSV cells that begin with `=`, `+`, `-`, `@`, a
+> tab or a line break now get a leading apostrophe (CSV only; the JSON is
+> unchanged) and the sidecar counts them in `csv_cells_escaped`. The
+> canary now fails, rather than warning, when OpenSea was not actually read.
+
+> **If you script this scraper: `--retries 0` is now a usage error (exit 2).**
+> It used to be accepted and to mean "never fetch the page" — the load loop
+> is `range(1, retries + 1)` — so a run passing it classified the empty
+> document as a refusal and exited 3. A third-party audit did exactly that
+> on 2026-10-13 and reported the site as unavailable while it was serving
+> 250 rows to the same machine a minute later.
+
+### Fixed
+
+- **A page that kept coming back as a challenge could buy up to five
+  captcha solves.** Each engine checks for a challenge before and after
+  classifying the page, and re-fetches up to three more times; only the
+  second check was counted, so the per-page limit of one did not hold
+  (5 solver calls against a limit of 1, reproduced with the solver stubbed,
+  in all three engines). Both checks now draw on one per-page allowance,
+  spent immediately before the purchase and never reset by a retry or a
+  rotation. A suite check drives each engine with its driver stubbed.
+- **`OPENSEA_URL` silently replaced `--collection`.** With the URL
+  `.env.example` used to ship, `--collection pudgypenguins` scraped Bored
+  Apes and `--mode collections` was refused as a mismatch. What was typed is
+  now captured before the environment is applied.
+- **Output files are written atomically.** `out.json`, `out.csv` and
+  `out.meta.json` are written to a temporary file beside the target and
+  renamed over it, so a crash, a full disk or a Ctrl-C mid-write leaves the
+  previous good file in place (before: an error injected inside `json.dump`
+  left 12 bytes of invalid JSON). A new file gets the mode `open()` would
+  have given it; an existing file keeps its own.
+- **`diff_runs.py` compared item columns in every mode**, so a collections
+  run whose volume went from 100 to 5,000, or an activity event whose type
+  changed, reported 0 changed. The compared columns are now per mode, the
+  mode comes from the sidecar (or the rows), and its help and docstring
+  describe OpenSea rather than another site.
+- **The credential scan read nothing when the clone sat under a directory
+  called `live`, `captures` or `venv-…`**, because its exclusions were
+  matched against the absolute path, and still printed "nothing
+  credential-shaped". Exclusions are now relative to the repository, and a
+  scan that read 0 files fails.
+- Numeric flags reject values below their floor with an error naming the
+  flag (see the blockquote above).
+- `.gitignore` covers `--dump-html NAME --pages N` dumps (`NAME.pageN`), the
+  usual scratch and output directory names and a root-level `*.html`;
+  `.dockerignore` excludes every `.env*`.
+- The docs no longer say Scraping Browser credentials "live about a day":
+  how long they last varies, and a 401 is the sign to refresh them.
+- Shipped files no longer cite section numbers of an internal document; the
+  rules are stated in this repository's own words, and a suite check keeps
+  it that way.
+- CI's sample-output step calls `.github/ci_checks.py --sample-check` instead
+  of a second inline copy of the same check.
+
+- **Two of the three modes had silently degraded, and the run still said
+  `complete`.** Between 2026-09-17 and 2026-10-13 OpenSea stopped inlining
+  its state on the ranking and on the activity feed; both now render
+  client-side, and only a collection page still ships its rows. The engines
+  kept page 1's rows anyway, got them from the DOM fallback — an address and
+  a name, every price null — and reported exit 0 with **23** and **24** rows
+  against the **160** and **200** the endpoint served the same minute.
+  `data_source` read `dom` on every row, which is that column working
+  exactly as designed; nothing acted on it.
+
+  Page 1's rows are now used only when the page actually inlined some, so a
+  mode that stops inlining is handled by the path that already existed for a
+  request the page does not answer: page 1 becomes proof-of-service and
+  totals, and the feed starts from the endpoint. Re-measured after the fix:
+  `items` 250, `collections` 161, `activity` 300.
+
+  And a run that is nonetheless built entirely out of the fallback now says
+  so, is no longer `complete`, and all three canary jobs assert the route
+  mix instead of only the first — which is the gap that let this reach a
+  release. The items job had the assertion and would have gone red; the
+  other two did not.
+
+- **`--retries 0` skipped navigation entirely** (see the note above). It is
+  refused at parse time by a shared guard, so all three engines answer the
+  same way, and the suite pins it per engine by reading the source rather
+  than through an import — a check gated behind importing the engine skips
+  for exactly the engines whose driver is absent.
+- **A throttle is no longer treated as a block.** 429 and 503 want the
+  opposite response to a 403: the exit is fine and the rate is not, so the
+  answer is the same exit and a longer wait. They now have their own budget,
+  separate from `--retries`, and honour a `Retry-After` the server sends —
+  the in-page fetch had to start returning that header for it to be
+  anything but dead code. *No throttle has ever been seen on this site*: the
+  endpoint's `x-ratelimit-remaining` reads 399 and, measured 2026-10-13, did
+  not move across a burst of 60 requests. This path is implemented and
+  unexercised here, and it is driven offline against a fake driver for that
+  reason.
+- **A browser that will not start is exit 2, not a traceback.** A missing
+  Chromium or a sandbox refusal is neither a bug here nor the site refusing
+  us; it now reports one actionable line, with `--verbose` to re-raise the
+  driver's own stack.
+- **The Scraper API path sent `waitFor` in a form the live API rejects,
+  and read the wrong field as the target's status.** Measured 2026-09-23
+  against `scraper.2captcha.com/tasks/sync`: `waitFor` sent as a
+  JSON-encoded string (what this client built for every `--wait-*` flag)
+  is answered HTTP 422 "params.waitFor must be an object" and is still
+  billed ($0.0005); the same request with an object gets HTTP 200. It is
+  now an object. And the response's `status` is the API's own verdict
+  ("success"), not the target site's HTTP code, which is `http_code` —
+  so a target 403 or 503 never reached the page classifier. The target
+  status is now read from `http_code` (falling back to `status` only if
+  that is an integer). Pinned by an offline check that drives the real
+  client with `requests.post` stubbed; verified by control (red with the
+  old client).
+
+### Changed
+
+- **The price-boundary stop now rests on the data, not on an error.** On
+  2026-09-17 passing a null-sort-key cursor back answered
+  `{"errors":[{"message":"Something went wrong"}]}`, and the stop was built
+  on that. On 2026-10-13 the same cursor pages normally — a walk went 1,000
+  rows deep, and pages 4 to 10 carried zero priced items. OpenSea fixed
+  their end. The behaviour is unchanged, because a floor scrape should still
+  stop where the prices stop, but it is now keyed on a page with no priced
+  row (a terminating condition is a property of the catalogue, not of
+  the transport). Every copy of the old claim in the code and the docs has
+  been corrected rather than quietly dropped.
+- `complete` under `--sort price` now says in the log what it is complete
+  FOR: the feed does not end at the boundary, and `--sort created` walks on.
+- The challenge-marker comment in `product_parser.py` and the README now
+  carry THIS site's measurement rather than a sibling's.
+- `page_flow.block_advice` names the four networks this site has actually
+  been measured serving, instead of "a plain datacentre address".
+- `SECURITY.md` said this project has no releases or version tags; it has
+  both. "Supported versions" now names the latest release and `main`.
+
+### Added
+
+- **Captured endpoint responses as fixtures** — an invalid cursor, the
+  null-key cursor, an unknown collection, a schema validation error. All
+  four come back **HTTP 200**, so a caller branching on the status alone
+  reads every one of them as success. Captured from the live endpoint rather
+  than assembled, which is what dates the null-key one and makes the
+  correction above checkable.
+- `last_cursor` in the run sidecar: where the walk stopped, so the one fact
+  a resume would need is not thrown away. Not a resume feature — that needs
+  atomic partial writes and a flag, and is a product decision.
+- `--verbose`, on all three engines.
+
+- **A Scraping Browser fixture, and the check that needed it.** The
+  `--cdp-endpoint` path was run for the first time: three modes over a
+  `country-us` profile, 250 rows identical to a local browser's on the same
+  pages, pyppeteer matching Playwright 150 of 150 over the same
+  authenticated endpoint, Selenium refusing it with the documented reason and
+  exit 2, and a second concurrent run exiting 5 with `profile_locked` and the
+  credential masked to `ws://***:***@cb.2captcha.com:9222`.
+
+  The capture from that run is now a fixture, because the auto-solve
+  extension injects a Turnstile hunter into every page it loads and this is
+  the only fixture that can spring that trap. Measured on one collection page
+  fetched two ways in the same hour: `cf-turnstile` 1 over CDP against 0
+  locally, `chrome-extension://…hbpbo` 16 against 0, and
+  `challenges.cloudflare.com` — the marker this repo actually uses — 0 on
+  both. Putting `cf-turnstile` back into the marker set now turns six checks
+  red, one of them on that fixture. A sibling repo shipped the same check and
+  it passed for the wrong reason, having only ever run against pages fetched
+  with a plain client.
+
+- **The proxy path, run for the first time**, which was the last credentialled
+  path left to verify and the one that had never been exercised. Through a
+  2Captcha residential exit (the global mix, which came out in RU rather than
+  the EU its hostname suggests): Playwright 250 rows over 3 pages with one
+  timeout retried and recovered; pyppeteer 50 rows through
+  `page.authenticate`; Selenium warning that it cannot send proxy
+  credentials, stripping them and failing — the documented limitation
+  verified rather than asserted; and pool rotation from a dead exit to a live
+  one, with `ERR_PROXY_CONNECTION_FAILED` recognised as a proxy fault rather
+  than a timeout.
+
+  The check worth having a real credential for: **the password appears in no
+  process command line**, verified with `ps` mid-run. The browser is given
+  `--proxy-server=http://eu.proxy.2captcha.com:2334` — host and port only.
+  That is the central promise (a secret never reaches argv), checked
+  against a live secret instead of a fixture.
+
+  The data did not move: 250 of 250 rows identical to the Finnish datacentre
+  and US Scraping Browser runs, on 12 stable columns each. Four unrelated
+  networks now return the same rows for the same URL.
+
+## [0.1.0] - 2026-09-17
+
+First release. Scrapes opensea.io into JSON or CSV from three views, with
+four ways to fetch a page.
+
+### Added
+
+- **Three modes, three row classes.** `--mode items` (the default) reads a
+  collection's NFTs — listing price, best offer, last sale, traits, rarity
+  rank, owner; `--mode collections` reads OpenSea's own ranking — floor,
+  volume, sales, owners, supply; `--mode activity` reads a collection's feed
+  — sales, listings, offers, transfers and mints. The three share the
+  family's row prefix (`source`, `scraped_at`, `url`, `sku`, `title`) and
+  nothing else, so `diff_runs.py` refuses to compare two of them.
+- **Four engines that produce the same rows.** Playwright (primary),
+  Selenium, pyppeteer, and a one-request 2Captcha Scraper API client. The
+  three browser engines were measured producing **150 of 150 identical rows**
+  on the same URL, across 15 stable columns including `page`, `position` and
+  `data_source`.
+- **Cursor pagination through the site's own endpoint.** Page 1 is a real
+  navigation and yields the fifty rows OpenSea inlines into the page; pages
+  2..N are the site's own GraphQL call, issued from inside the open document
+  so it carries the same cookies, connection and exit. One normaliser reads
+  both routes — measured 49 of 50 rows identical across 18 stable columns,
+  the one difference being a listing whose price moved between the capture
+  and the query.
+- **`--sort`, and the honesty around it.** The ordering decides *which* rows
+  end up in the file. Under the site's own price ordering the cursor carries
+  the last row's price and goes null where the listed items end, so the walk
+  stops there and reports COMPLETE: measured on `boredapeyachtclub`, 282
+  priced rows of 350, against OpenSea's own `listedItemCount` of **282** out
+  of a 9,998-item collection. `--sort created` walks the collection itself
+  and was measured going 800 items deep.
+- **`collection_totals` in the run sidecar** — what OpenSea says the
+  collection holds, beside what the run read, so `complete` cannot be
+  mistaken for `exhaustive`.
+- **Chain-aware addresses.** An EVM item is
+  `/item/{chain}/{contract}/{token_id}`; a Solana item is
+  `/item/solana/{mint}` with `token_id` null, because the mint is the token.
+- **Captcha, proxy and fingerprint support** carried from the family:
+  reCAPTCHA v2/v2-invisible/v3/enterprise and Cloudflare Turnstile including
+  the Challenge-page form, proxy pools with rotation and credential masking,
+  and 2Captcha fingerprints. `--fingerprint` was run end to end and verified
+  to apply a user agent, locale, timezone and viewport.
+- **An offline suite of over ten thousand assertions** that passes with no
+  engine library installed, over eight fixtures cut from real captures by
+  `make_fixtures.py` — which proves each one parses identically to its
+  untrimmed original, classifies the same way after trimming, and carries no
+  profile handle or credential-shaped string.
+- **A canary that needs no secrets.** A real three-mode scrape runs daily
+  from a bare GitHub runner and is expected green, because the listing path
+  needs no credentials — which is what keeps that claim in the README from
+  going stale unnoticed.
+
+### Measured, from one Hetzner datacentre address in Helsinki on 2026-09-17
+
+- Every page kind, every mode and every locale answered HTTP 200 with no key,
+  no proxy and no account. So did OpenSea's own GraphQL endpoint to an
+  anonymous POST.
+- **`Python-urllib/3.13` is refused with HTTP 403** on both the HTML route
+  and the endpoint, while `python-requests/2.32`, `curl/8.x`, no User-Agent
+  at all and a made-up `opensea-scraper/0.1` were all served. That is a
+  Cloudflare rule against one signature and it is named in the README,
+  because the failure it produces reads like a site that blocks scrapers.
+- Headless and headful were **identical** — 150 rows and the same 150 ids,
+  two runs each.
+- Zero vendor captcha markers across seven captures, so the solver path here
+  is implemented and unexercised. That is a statement about this repo's
+  testing and not a claim about what a solver can do.
+- The Scraper API path: three requests, one per mode, `$0.0005` each, HTTP
+  200, rows identical to the browser engines'.
+
+### Notes
+
+- `--concurrency` above 1 is **refused in every mode**, with the reason:
+  OpenSea has no address for page 2, so page 5's request does not exist until
+  page 4 has been read. Run several collections at once instead.
+- A collection page publishes **no product JSON-LD** — its three
+  `application/ld+json` blocks are `BreadcrumbList`, `Brand` and `WebSite`.
+  The site's own inlined state is the primary path and the URL pattern is the
+  fallback.
+- `cf-turnstile` is deliberately absent from the challenge markers: 2Captcha's
+  own Scraping Browser extension injects it into every page it loads.
+  `challenges.cloudflare.com` is used instead, measured 0 on every served
+  page.
+
+[Unreleased]: https://github.com/2scraper/opensea-scraper/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/2scraper/opensea-scraper/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/2scraper/opensea-scraper/releases/tag/v0.1.0

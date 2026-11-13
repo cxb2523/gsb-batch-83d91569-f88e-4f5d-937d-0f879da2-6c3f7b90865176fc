@@ -1,0 +1,541 @@
+# OpenSea Scraper — NFT Items, Rankings and Activity in Python
+
+[![release](https://img.shields.io/github/v/release/2scraper/opensea-scraper?sort=semver)](https://github.com/2scraper/opensea-scraper/releases)
+[![tests](https://github.com/2scraper/opensea-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/opensea-scraper/actions/workflows/tests.yml)
+[![canary](https://github.com/2scraper/opensea-scraper/actions/workflows/canary.yml/badge.svg)](https://github.com/2scraper/opensea-scraper/actions/workflows/canary.yml)
+[![python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
+[![licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+[![engines](https://img.shields.io/badge/engines-playwright%20%7C%20selenium%20%7C%20pyppeteer-lightgrey)](#engines)
+[![runs without an account](https://img.shields.io/badge/account-not%20required-brightgreen)](#you-do-not-need-an-account-a-key-or-a-proxy)
+
+**OpenSea scraper** — an open-source (MIT) Python tool that reads opensea.io collection pages, OpenSea's own collection ranking and a collection's activity feed, and writes NFT items with listing prices, best offers, last sales, traits, rarity ranks and owners, ranking rows with floors and volume, or sales, listings, offers, transfers and mints to JSON or CSV. On 2026-09-17 every page kind and every mode answered HTTP 200 to one datacentre address with no key, no proxy and no account. Use it to track a collection's floor and listed prices, or compare two runs of the same mode and sort with `diff_runs.py`.
+
+Scrapes [opensea.io](https://opensea.io) into JSON or CSV: **a collection's
+items** with their listing prices, best offers, last sales, traits, rarity
+ranks and owners; **OpenSea's own collection ranking** with floors, volume
+and supply; and **a collection's activity feed** — sales, listings, offers,
+transfers and mints.
+
+Playwright, Selenium and pyppeteer engines, a one-request
+[2Captcha Scraping Browser API](https://2captcha.com) path, proxy rotation,
+fingerprints and captcha solving. All four produce the same rows.
+
+---
+
+## You do not need an account, a key or a proxy
+
+Measured on **2026-09-17** from one Hetzner datacentre address in Helsinki
+(AS24940), with no key, no proxy and no account:
+
+| what was asked for | answer |
+|---|---|
+| every page kind and every mode | HTTP 200 |
+| a Japanese-locale collection page | HTTP 200 |
+| `curl/8.x`, no User-Agent at all, `HeadlessChrome/140`, a made-up `opensea-scraper/0.1` | HTTP 200 to all four |
+| OpenSea's own GraphQL endpoint, anonymous POST | HTTP 200, `x-ratelimit-remaining: 400` |
+| headless vs headful, 2 runs each | identical — 150 rows, the same 150 ids, 4 of 4 |
+| vendor captcha markers across 7 captures | 0 |
+
+**One User-Agent IS refused, and it is the one that will find you first.**
+`Python-urllib/3.13` gets HTTP **403** — on the HTML route and on the
+endpoint alike — while `python-requests/2.32` from the same address in the
+same minute is served normally. That is a Cloudflare rule against one
+signature, not a site that blocks scrapers, and it is named here because the
+failure it produces is the most misleading one OpenSea can give you.
+
+**Confirmed from a second network on the same day.** The canary's first
+dispatch ran the whole three-mode scrape from a bare GitHub runner, with no
+secrets, and came back green with the same numbers: 350 items over 4 pages
+stopping at `listed_items_exhausted`, 202 ranking rows with 201 floors, and a
+sales feed of only sales. Two unrelated datacentre networks, one afternoon.
+
+So the paid products here buy **volume from many addresses, a specific
+country, browser infrastructure you do not run, and a solver for the day
+Cloudflare does issue its managed challenge** — not access. The
+[canary](#the-canary) re-runs that scrape every Monday, precisely so that
+this claim is retested without anyone remembering to.
+
+---
+
+## Quick start
+
+```bash
+git clone https://github.com/2scraper/opensea-scraper
+cd opensea-scraper
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt -r requirements-playwright.txt
+playwright install chromium
+
+# a collection's cheapest items, three pages
+python3 playwright_scraper.py \
+    --collection boredapeyachtclub --pages 3
+```
+
+```
+[INFO] Page 1 shipped its rows in the page's own state — parsing it directly.
+[INFO] Parsed 50 row(s) from page 1.
+[INFO] Key/title coverage on page 1: 50 and 50 of 50 (100% at worst).
+[INFO] This run holds 250 of the 9998 item(s) OpenSea says this collection
+       has (2.5%). `complete` in the sidecar means the walk finished, not
+       that it read the whole collection.
+[INFO] Rows by route: graphql=200, ssr=50.
+[+] Saved 250 products -> opensea_items.json
+[+] Wrote run metadata -> opensea_items.meta.json (status=complete)
+```
+
+Twelve seconds, exit 0. [`sample_output.json`](sample_output.json) and
+[`sample_output.csv`](sample_output.csv) are cut from a real run of exactly
+that command.
+
+---
+
+## The three modes
+
+Each one reads a different page and yields a **different row class** — they
+share only the family prefix (`source`, `scraped_at`, `url`, `sku`, `title`),
+and `diff_runs.py` refuses to compare two of them.
+
+```bash
+# 1. items — one row per NFT (the default)
+python3 playwright_scraper.py --collection pudgypenguins --pages 5
+
+# 2. collections — OpenSea's own ranking, one row per collection
+python3 playwright_scraper.py --mode collections --timeframe 1d --pages 3
+
+# 3. activity — one row per event
+python3 playwright_scraper.py --collection pudgypenguins \
+    --mode activity --activity sales --pages 3
+```
+
+Re-measured **2026-10-13**, one run each, three pages each — the September
+figures are kept below the table because the difference between them is the
+site, not the scraper:
+
+| mode | pages | rows | routes | notes |
+|---|---|---|---|---|
+| `items` | 3 | 250 | `ssr` 50 + `graphql` 200 | every row priced |
+| `collections` | 3 | 161 | `graphql` 161 | 158 of 161 carried a floor price; the feed ended |
+| `activity` | 4 | 300 | `graphql` 300 | all `SALE`, all priced, all timestamped |
+
+**What changed between the two measurements, and it is worth knowing before
+you read any older number here.** On 2026-09-17 the ranking and the activity
+feed both inlined their rows into the page, and the `routes` column for them
+read `ssr` + `graphql`. On 2026-10-13 they no longer inline anything: both
+render client-side, and only a collection page still ships its state. The
+scraper now takes page 1 of those two modes from the endpoint like every
+other page, which is why their `routes` column is `graphql` alone.
+
+That transition is also the one bug this repo shipped with and has now
+fixed: until 2026-10-13 a page that stopped inlining its rows fell through
+to the DOM fallback, and the run reported `complete`, exit 0, with **23** and
+**24** rows against the 160 and 200 the endpoint served the same minute —
+every price null. `data_source` said `dom` on every row and nothing read it.
+A run that is all-fallback now says so and is no longer `complete`, and all
+three canary jobs assert the route mix rather than only the first.
+
+A single item URL works too and yields one row:
+
+```bash
+python3 playwright_scraper.py \
+    --url "https://opensea.io/item/ethereum/0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d/1"
+```
+
+---
+
+## What a row looks like
+
+```json
+{
+  "source": "opensea.io",
+  "scraped_at": "2026-09-17T08:22:50.208548+00:00",
+  "url": "https://opensea.io/item/ethereum/0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d/1774",
+  "sku": "ethereum/0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d/1774",
+  "title": "#1774",
+  "price": 6.8497666,
+  "currency": "ETH",
+  "price_usd": 16707.950690719998,
+  "best_offer": 6.51,
+  "best_offer_currency": "WETH",
+  "last_sale": 6.75,
+  "last_sale_currency": "WETH",
+  "last_sale_at": "2026-09-06T21:56:59.000Z",
+  "listing_marketplace": "blur",
+  "chain": "ethereum",
+  "token_id": "1774",
+  "rarity_rank": 2412,
+  "traits": [
+    "Background: Orange",
+    "Clothes: Toga",
+    "Earring: Silver Hoop"
+  ],
+  "owner_address": "0xff53e1da7b67ae676d7742f858aab5bd4bc937f6",
+  "data_source": "ssr",
+  "page": 1,
+  "position": 1
+}
+```
+
+That is the first row of [`sample_output.json`](sample_output.json), verbatim.
+
+`price` is a **token amount** and `currency` names the token; `price_usd` is
+OpenSea's own conversion, which moves with the market even when the listing
+does not. `listing_marketplace` is `blur` here and that is a real answer
+rather than a bad read: OpenSea aggregates other marketplaces' listings.
+
+`last_sale_currency` can be **null** on a perfectly good row — OpenSea does
+not always name the token a sale settled in, measured on **11 of 50 rows** of
+one capture against 25 in ETH and 14 in WETH. It is null rather than an empty
+string, because an empty string in a currency column reads as a currency.
+
+---
+
+## The one thing to know before you scrape a collection
+
+**`--sort` decides WHICH rows you get, not just their order.**
+
+OpenSea pages every feed with an opaque cursor, and under its own ordering —
+by price, which is what a collection page shows and what "scrape the floor"
+means — that cursor carries the last row's price. At the boundary between
+listed and unlisted items the key goes null, and the walk stops:
+
+```
+[INFO] Stopped at the end of the LISTED items: under --sort price the cursor
+       carries the last row's price, and it goes null where the listed items
+       end. The run holds 350 row(s) and is COMPLETE — every item that has a
+       price is in it, and the rest have none. OpenSea's own count for this
+       collection is 282 listed item(s) out of 9998.
+```
+
+That run is **complete and it is 3.5% of the collection**, and both are true.
+Three independent numbers agreed when this was measured on
+`boredapeyachtclub`: 282 rows carried a price, the priced rows were exactly a
+prefix of the file with their prices ascending, and OpenSea's own
+`listedItemCount` for the same collection in the same minute was **282**.
+
+To walk the collection itself rather than its order book:
+
+```bash
+python3 playwright_scraper.py --collection boredapeyachtclub \
+    --sort created --pages 20
+```
+
+`--sort created` was measured going **800 items deep** on the same collection
+without a stumble. Two runs under different sorts are two different
+**samples**, so `diff_runs.py` refuses to compare them — the same way it
+refuses two different modes.
+
+| `--sort` | what it walks |
+|---|---|
+| `price` (default) | cheapest first, ends at the last listed item — the floor and the order book |
+| `price-desc` | most expensive first |
+| `created` / `newest` | the whole collection, by mint date |
+| `rarity` | rarest first |
+| `last-sale` | most recently sold first |
+
+---
+
+## How pagination works here, and why `--concurrency` is refused
+
+Page 1 is a real navigation: the browser opens the human URL and the run
+reads the state OpenSea inlined into it — fifty complete rows, before a pixel
+paints. That is what proves the site served the request, and it is what
+carries the collection's own totals.
+
+Pages 2..N are **not** navigations, because OpenSea publishes no address for
+them. Every feed is cursor-paginated, so the engines call the site's own
+GraphQL endpoint **from inside the open page** — same origin, same cookies
+(including Cloudflare's `__cf_bm`), same TLS session, same exit — and parse
+the response with the same code that read page 1.
+
+Two consequences, both deliberate:
+
+* **`--concurrency` above 1 is refused, in every mode, with the reason.**
+  Page 5's request does not exist until page 4 has been read. For throughput,
+  run several collections at once, one process each.
+* **`--dump-html` writes `<path>.pageN.json` for the cursor pages**, because
+  what the parser saw there was a JSON body and not a document.
+
+The two routes are not assumed to agree — they were checked. Feeding the same
+page through both, **49 of 50 rows were identical across 18 stable columns**;
+the one difference was a listing whose price had changed in the forty minutes
+between the capture and the query.
+
+---
+
+## The traps that look like bugs
+
+* **A Solana item has no token id.** An EVM address is
+  `/item/ethereum/{contract}/{token_id}`; a Solana one is
+  `/item/solana/{mint}` — two segments, because the mint *is* the token.
+  `token_id` is null on those rows and `contract_address` carries the mint.
+  OpenSea's own payload sets `tokenId` to the mint address, so a parser that
+  writes it through produces an address the site does not serve, on every row,
+  at 100% coverage.
+
+* **Most of a collection has no price, and that is correct.** 282 of 9,998
+  Bored Apes were listed when this was written. Under `--sort created` you
+  will see mostly nulls in `price`; under `--sort price` you will see none
+  until the walk crosses the boundary.
+
+* **`page 1` of a `--sort created` run is dropped, on purpose.** The rows the
+  page renders are the ones the SITE chose, under the site's ordering — so a
+  run asking for another ordering takes page 1 as proof-of-service and totals
+  only, and starts the feed from the endpoint. Keeping them would put two
+  samples in one file, and page 1's cursor is not even valid for the other
+  ordering: the endpoint answers `Invalid cursor`. The run says so in the log
+  and records `rows_dropped_from_page_1` in the sidecar.
+
+* **`0` is a real number and `null` is a real absence.** A ranking's
+  `floorPriceChange: 0` means nothing moved in that window and is kept; a
+  collection with nothing listed has `floorPrice: null` and stays null.
+
+* **The ranking's `rank` belongs to the ranking, not the collection.** The
+  same collection has a different rank under a different `--timeframe`, which
+  is why the timeframe is in the sidecar and `volume_window` is on every row.
+
+* **`Python-urllib` gets a 403.** See the top of this file.
+
+---
+
+## When the paid products actually help
+
+Nothing above needed a key. These do:
+
+| you want | what to use |
+|---|---|
+| many addresses, or one specific country | `--proxy` / `--proxy-file`, a [2Captcha proxy](https://2captcha.com/proxy) — measured below |
+| no browser on your machine at all | `scraper_api_client.py` — one request, `$0.0005`, measured 200/50 rows in 5.0s |
+| a browser you do not run, with persistent cookies | `--cdp-endpoint`, the Scraping Browser API — measured below |
+| a consistent device identity | `--fingerprint` |
+| the day Cloudflare issues its managed challenge | `--solve-captcha` (the default already solves when blocked) |
+
+### The proxy path, measured
+
+Run through a 2Captcha residential exit on 2026-09-17 — the global mix, which
+came out in **RU** (`AS24955`) rather than the EU its hostname suggests:
+
+| | |
+|---|---|
+| Playwright, 3 pages | 250 rows, exit 0; one page-load timeout retried and succeeded |
+| pyppeteer | 50 rows — credentials go through `page.authenticate` |
+| Selenium | warns that it CANNOT send proxy credentials, strips them, and the run then fails — the documented limitation, verified rather than asserted |
+| pool rotation | a dead exit first, the live one second: `ERR_PROXY_CONNECTION_FAILED` recognised as a proxy fault rather than a timeout, rotated, fresh browser, 150 rows, exit 0 |
+| **the password in any process command line** | **absent** — checked with `ps` mid-run against a real secret; the browser was given `--proxy-server=http://eu.proxy.2captcha.com:2334`, host and port only |
+
+That last row is the one worth having a real credential for. This repo promises a
+secret never reaches `argv`, where anything that can run `ps` could read it;
+Playwright is handed the credentials through its own proxy fields instead.
+It is now checked with a live password rather than a fixture.
+
+**The data did not change.** 250 of 250 rows identical to the Finnish
+datacentre run and to the US Scraping Browser run, on 12 stable columns each.
+That makes four unrelated networks — a Finnish datacentre, a US Scraping
+Browser API profile, a GitHub runner and a Russian residential exit —
+returning the same rows for the same URL.
+
+### The Scraping Browser path, measured
+
+Run over a `country-us` Scraping Browser profile on 2026-09-17:
+
+| | |
+|---|---|
+| `--mode items`, 3 pages | 250 rows, exit 0 — cursor pages included, because the in-page `fetch()` works over the remote browser too |
+| `--mode collections`, 2 pages | 150 rows |
+| `--mode activity`, 2 pages | 132 rows |
+| vs the same pages from a local browser in Helsinki | **250 of 250 rows identical** across 13 stable columns |
+| pyppeteer over the same authenticated endpoint | 150 rows, and **150 of 150 identical** to Playwright's |
+| Selenium against it | refused with the reason, exit 2 — `debuggerAddress` is a bare `host:port` with nowhere to put a password |
+| two runs against one profile at once | the second exits **5**, `profile_locked`, with the credential masked to `ws://***:***@cb.2captcha.com:9222` |
+
+**The trap this path springs, and why this repo does not fall into it.** The
+Scraping Browser's auto-solve extension injects its own Turnstile hunter into
+every page it loads. The same collection page, fetched two ways within the
+hour:
+
+| marker | over `--cdp-endpoint` | local browser |
+|---|---|---|
+| `cf-turnstile` | **1** | 0 |
+| `cf-turnstile-response` | 1 | 0 |
+| `data-ts-input` | 1 | 0 |
+| `hunter.js` | 4 | 0 |
+| `chrome-extension://…hbpbo` | 16 | 0 |
+| `challenges.cloudflare.com` | **0** | 0 |
+
+So the obvious marker for a Turnstile fires on a perfectly good 1.26 MB page
+holding the full catalogue, and the marker that works is absent from it.
+`cf-turnstile` is therefore deliberately not in this repo's challenge set,
+and a test pins that against a **real Scraping Browser capture** — putting it
+back turns six checks red.
+
+Pass the endpoint through `.env` rather than the command line, and do not add
+`--proxy` to it: the remote browser has its own exit, and `--concurrency` is
+doubly pointless there because a profile allows one live connection.
+
+**Which `country-` to ask for: it does not matter, and that is measured.** A
+`country-us` profile returned 250 of 250 rows identical to a local browser in
+Helsinki. Prices here are denominated in chain tokens rather than fiat, the
+language is a URL path rather than a geo redirect, and `currencyDefault=usd`
+is what the site sets for a European exit anyway — so nothing in the output
+follows the exit country. `us` is the mild default because OpenSea's origin
+is US-East (`x-vercel-id: …::iad1::`) and the residential pool there is the
+largest; `de` or `gb` measured the same. What OpenSea does geo-restrict is
+TOKEN TRADING — `isGeoRestricted` is a property of a currency and its own
+copy reads "This **feature** of OpenSea is unavailable in your country" —
+which is 0 of 0 rows in all three of the feeds this scraper reads.
+
+```bash
+# the one-request path, no browser anywhere
+python3 scraper_api_client.py \
+    --url "https://opensea.io/collection/boredapeyachtclub"
+```
+
+**On captchas, what is and is not known here.** No challenge was met on
+opensea.io while this repo was built, and none is configured on the routes it
+reads. Three separate measurements: 18 vendor markers across 8 captures, all
+0; on a live page `window.grecaptcha`, `window.turnstile` and
+`window.hcaptcha` all undefined, with 0 iframes, 0 `data-sitekey` and 0
+third-party scripts; and in the site's own 7.8 MB JS bundle, 0 occurrences of
+recaptcha, turnstile or hcaptcha. (The five `siteKey` hits in that bundle are
+a substring of `createItemCompositeKey`, and the seventeen `ofac` hits are a
+substring of `clearCofactor`.) What the site DOES sit behind is Cloudflare —
+`server: cloudflare`, `cf-ray` and a `__cf_bm` bot-management cookie on every
+response — so the challenge that could appear is a managed one, which renders
+a Turnstile. So the solver path here is **implemented and unexercised** —
+which is a fact about this repo's testing, not a claim about what a solver
+can do. What this repo implements: reCAPTCHA v2, v2-invisible, v3 and
+enterprise, and Cloudflare Turnstile including the Challenge-page form, whose
+parameters are captured by an init script installed before any page script
+runs because a Challenge page publishes no sitekey in its markup. A page
+carrying no widget is reported unsolved rather than charged for.
+
+Credentials go in `.env`, never on a command line
+([`.env.example`](.env.example)):
+
+```bash
+cp .env.example .env
+python3 env_config.py     # prints what was picked up, without printing secrets
+```
+
+---
+
+## Engines
+
+| engine | notes |
+|---|---|
+| `playwright_scraper.py` | **primary.** The one the Dockerfile builds and the canary runs. |
+| `selenium_scraper.py` | Cannot use an authenticated `--cdp-endpoint` (chromedriver's `debuggerAddress` is a bare `host:port`), and `--proxy` credentials cannot be sent — they are stripped with a warning. |
+| `puppeteer_scraper.py` | pyppeteer is effectively unmaintained and its own README points at Playwright. Kept for parity, and an authenticated CDP endpoint does work from it. |
+| `scraper_api_client.py` | One HTTP request, no browser. One page only — it has no open document to issue a cursor request from. |
+
+All three browser engines produced **150 of 150 identical rows** on the same
+URL, across 15 stable columns including `page`, `position` and `data_source`.
+
+**Install exactly one.** The three pin mutually unsatisfiable versions
+(playwright wants `pyee>=13`, pyppeteer `pyee<12`; pyppeteer wants
+`urllib3<2`, selenium `>=2.6`). A virtualenv each is what CI does and what
+this README recommends.
+
+```bash
+pip install -r requirements.txt -r requirements-selenium.txt   # or -puppeteer
+```
+
+---
+
+## Output contract
+
+Same across this family of scrapers.
+
+* **A run that finds nothing writes nothing** — last night's good output
+  survives. `--allow-empty` is the opt-out.
+* **Blocked ≠ empty ≠ partial**: exit `0` ok · `1` crash · `2` bad usage ·
+  `3` blocked · `4` zero rows · `5` remote API error · `6` partial.
+* **`<out>.meta.json` beside every successful run**, with `status`,
+  `stop_reason`, which pages failed by number, the ordering the run used, and
+  `collection_totals` — what OpenSea says the collection holds, beside what
+  the run read.
+* **An empty CSV still carries its header**, of the mode that produced it.
+* Rows are merged in **page order**, never arrival order.
+
+`stop_reason` is worth reading. `cursor_exhausted` and
+`listed_items_exhausted` both mean COMPLETE; `endpoint_error` and
+`parser_found_nothing` do not.
+
+### Diffing two runs
+
+```bash
+python3 diff_runs.py --old monday.json --new tuesday.json --fail-on-change
+```
+
+It refuses to compare runs that are not both `complete`, that used different
+modes, or that used **different orderings** — on this site the ordering
+decides which rows are in the file, so two sorts are two samples and every
+row one of them lacks would read as `removed`.
+
+---
+
+## The canary
+
+`.github/workflows/canary.yml` runs a real three-mode scrape against
+opensea.io every Monday **with no secrets**, and is expected green. It
+asserts pagination reached at least three pages, that the price ladder
+ascends and its priced rows match OpenSea's own `listedItemCount`, that ranks
+are contiguous across pages, that `--activity sales` returns only sales, and
+that `page`+`position` is unique across the run. A block warns (and says in
+the step summary that nothing was tested today); zero rows from a served page
+fails.
+
+---
+
+## Testing
+
+```bash
+python3 smoke_test.py     # no network, no key, no engine library needed
+pytest -q                 # the same run, through the pytest entry point
+```
+
+The offline suite runs **over ten thousand assertions** — most of them one
+per row, marker or name across eight fixtures — with no engine library
+installed at all. The fixtures are cut from real captures by
+`make_fixtures.py`, which proves each one parses identically to its untrimmed
+original column for column, classifies the same way, and replaces every real
+profile handle with a placeholder before writing it.
+
+CI additionally installs each engine in its own venv and fails on an
+unexpected skip, builds the Docker image, runs its entrypoint, launches a
+browser inside it and checks the image carries no `.env`, no test suite and
+no fixtures.
+
+## Docker
+
+```bash
+docker build -t opensea-scraper .
+docker run --rm -v "$PWD/out:/out" opensea-scraper \
+    --collection boredapeyachtclub --pages 3 --out /out/bayc
+```
+
+---
+
+## Guides
+
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [Polymarket scraper](https://github.com/2scraper/polymarket-scraper) — Prediction-market prices, order books, volumes and on-chain…
+- [Screener.in scraper](https://github.com/2scraper/screener-scraper) — Any screener.in stock screen or sector listing
+- [TipRanks scraper](https://github.com/2scraper/tipranks-scraper) — Smart Score, analyst consensus and price targets for any…
+- [Binance scraper](https://github.com/2scraper/binance-scraper) — P2P adverts, copy-trading portfolios and announcements…
+- [Google Finance scraper](https://github.com/2scraper/google-finance-scraper) — Quotes, quarterly financials, analyst targets, OHLCV, market…
+- [Better Business Bureau scraper](https://github.com/2scraper/bbb-scraper) — BBB search and category listings with no key or proxy, plus…
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
+
+## Contributing, security, licence
+
+[CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) ·
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md) · [MIT](LICENSE)
+
+Scrape responsibly: this reads public pages at a polite rate, and `--delay`
+exists to keep it that way.
