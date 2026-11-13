@@ -67,6 +67,10 @@ python3 playwright_scraper.py --pages 3
 # every book J.R.R. Tolkien is credited on, 27 pages
 python3 playwright_scraper.py --url https://www.goodreads.com/author/list/656983.J_R_R_Tolkien --pages 30
 
+# the same list in both orderings, merged on sku (popularity repeats books;
+# the title ordering serves the ones popularity hides) — see section 3
+python3 playwright_scraper.py --merge-sorts --url https://www.goodreads.com/author/list/656983.J_R_R_Tolkien --pages 30
+
 # a search: run it headful (xvfb-run -a on a server)
 python3 playwright_scraper.py --url "https://www.goodreads.com/search?q=dune" --pages 5 --headful
 
@@ -125,8 +129,25 @@ site served 720 distinct books and showed 71 of them twice, identically on
 two runs. Sorted by title (`?sort=title` in the url), 739 and 52. **The two
 orderings together served all 791.** The repeats are dropped, the sidecar
 counts them (`repeated_across_pages`), and the log says that many books were
-never served under that ordering. For the whole list, run both orderings and
-merge on `sku`.
+never served under that ordering.
+
+`--merge-sorts` (Playwright engine, `--mode list` on an `/author/list/` url
+only) does the two runs for you: it fetches the url's own ordering and then
+the same list with `?sort=title`, `--pages` pages each, and merges them on
+`sku`. One sku keeps one row — the first ordering's fields win — books the
+title ordering alone served are appended after them, and a sku whose two
+rows disagree is named in the log. The sidecar's `merge_sorts` block records
+each round's raw and duplicate counts, the merged count, the books only the
+second round added, and `may_have_more_books` (true when both rounds ran the
+full `--pages`, so books beyond them may still exist). Without the switch the
+run is unchanged and the sidecar carries no `merge_sorts` block. On any other
+mode or url the switch is refused with exit 2.
+
+```bash
+# both orderings, 30 pages each, merged into one de-duplicated author list
+python3 playwright_scraper.py --merge-sorts \
+    --url https://www.goodreads.com/author/list/656983.J_R_R_Tolkien --pages 30
+```
 
 ### 4. Ratings belong to the work, not the edition
 

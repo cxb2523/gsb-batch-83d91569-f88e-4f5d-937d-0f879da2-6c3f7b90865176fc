@@ -463,11 +463,18 @@ def scrape(args) -> int:
         pool = None
     concurrency = page_flow.concurrency_for(args, pool)
     with sync_playwright() as pw:
+        run_concurrently = (lambda pages, q: _fetch_pages_concurrently(
+            args, pool, q, pages, concurrency))
+        if getattr(args, "merge_sorts", False):
+            return page_flow.run_pages_merged(
+                lambda: _Ops(pw, args, pool, remote=bool(args.cdp_endpoint)).open(),
+                lambda ops: ops.close(),
+                run_concurrently,
+                args, pool, args.query, concurrency, _mask_credentials)
         return page_flow.run_pages(
             lambda: _Ops(pw, args, pool, remote=bool(args.cdp_endpoint)).open(),
             lambda ops: ops.close(),
-            lambda pages, q: _fetch_pages_concurrently(args, pool, q,
-                                                    pages, concurrency),
+            run_concurrently,
             args, pool, args.query, concurrency, _mask_credentials)
 
 
@@ -517,6 +524,17 @@ def parse_args(argv=None):
                         "author's, 20 on a search, 30 reviews). Planned "
                         "against what page 1 states, so asking for more than "
                         "exist fetches all of them.")
+    p.add_argument("--merge-sorts", action="store_true",
+                   help="Only with --mode list and an /author/list/ url. Fetch "
+                        "the author's books twice, once in the url's own "
+                        "ordering and once with ?sort=title, --pages pages "
+                        "each, and merge the two on sku. An author list paged "
+                        "by popularity repeats some books on different pages "
+                        "and never serves as many others; the two orderings' "
+                        "union is the whole list. The merged run's "
+                        "<out>.meta.json carries a merge_sorts block with the "
+                        "per-round and union counts. Refused (exit 2) on any "
+                        "other mode or url.")
     p.add_argument("--delay", type=page_flow.bounded(float, 0, "--delay"), default=1.0,
                    help="Delay between pages, seconds (default %(default)s)")
     p.add_argument("--concurrency", type=page_flow.bounded(int, 1, "--concurrency"), default=1, metavar="N",
@@ -593,6 +611,18 @@ def parse_args(argv=None):
     env_config.apply(args)
     args.query = page_flow.build_query(args, p.error)
     args.mode = args.query.mode
+    if args.merge_sorts and not (args.query.mode == "list"
+                                 and args.query.kind == "author"):
+        # Refused at parse time, like every other usage error: argparse's
+        # p.error exits 2 with the usage line and names what the flag needs.
+        if args.query.mode != "list":
+            p.error("--merge-sorts only works with --mode list: it merges two "
+                    "orderings of an author's book list, not %s runs."
+                    % args.query.mode)
+        p.error("--merge-sorts only works with an /author/list/{id} url, where "
+                "the site's paging repeats and hides books and ?sort=title "
+                "serves a different set. %s is a %s listing."
+                % (args.query.url, args.query.kind))
     return args
 
 

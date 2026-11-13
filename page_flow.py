@@ -32,16 +32,17 @@ Each engine spells its fetch() in its own driver's dialect.
 import copy
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dc_fields
 from typing import Callable, List, Optional, Tuple
 
 from output_writer import dedupe_by_key, finish_run, SOURCE_DEFAULT
 from product_parser import (ADDRESSABLE_KINDS, MAX_PAGES, REVIEW_SORTS,  # noqa: F401
-                            Query, api_error, book_landing, book_url,
+                            ROWS_PER_PAGE, Query, api_error, book_landing, book_url,
                             check_review_language, detect_bot_challenge,
                             detect_page_state, landing_url, next_cursor,
                             page_totals, parse_page, query_from_url,
-                            request_for, requested_page, served_page)
+                            request_for, requested_page, served_page,
+                            url_with_params)
 
 log = logging.getLogger("page_flow")
 
@@ -985,6 +986,28 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
     exactly a list run), then every book they named (phase B, one "page"
     per book).
     """
+    result = _collect_pages(open_ops, close_ops, run_concurrently, args, pool,
+                            query, concurrency, mask)
+    if isinstance(result, int):
+        # The --review-language refusal: a usage answer before any page.
+        return result
+    outcomes, stop_reason, blocked, listing = result
+    return finish(args, query, outcomes, stop_reason, blocked, listing=listing)
+
+
+def _collect_pages(open_ops, close_ops, run_concurrently, args, pool,
+                   query: Query, concurrency: int,
+                   mask: Callable[[str], str] = lambda s: s):
+    """Fetch every page ONE run asks for, without writing anything.
+
+    Returns (outcomes, stop_reason, blocked, listing), or the int 2 when the
+    run was refused before its first request (a --review-language the book
+    has no reviews in). Split out of run_pages so a --merge-sorts run can
+    collect two orderings with the same machinery and merge them itself.
+
+    Opens the ops itself and ALWAYS closes what it opened; a merged run that
+    calls this twice therefore never leaks a browser between its rounds.
+    """
     ops_box = [open_ops()]
     listing: Optional[List[PageOutcome]] = None
     # The language check lands on the book page 1 is read from, so a solve
@@ -1002,8 +1025,8 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
             first = fetch_one_page(ops_box[0], args, pool, lq, 1, mask)
             listing = [first]
             if not first.ok:
-                return finish(args, query, [], stop_reason_for(first),
-                              first.blocked_by is not None, listing=listing)
+                return ([first], stop_reason_for(first),
+                        first.blocked_by is not None, listing)
             if ops_box[0] is None:
                 ops_box[0] = open_ops()
             more, stop_a, blocked_a = _run_sequence(
@@ -1014,7 +1037,7 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
             log.info("The listing named %d book(s); reading each one's page.",
                      len(query.book_urls))
             if not query.book_urls:
-                return finish(args, query, [], stop_a, blocked_a, listing=listing)
+                return ([], stop_a, blocked_a, listing)
             if ops_box[0] is None:
                 ops_box[0] = open_ops()
 
@@ -1023,12 +1046,11 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
                                budget=first_budget)
         outcomes = [first]
         if not first.ok and query.mode != "book":
-            return finish(args, query, outcomes, stop_reason_for(first),
-                          first.blocked_by is not None, listing=listing)
+            return (outcomes, stop_reason_for(first),
+                    first.blocked_by is not None, listing)
         if query.mode == "book" and not query.book_urls:
             stop_reason = "completed" if first.ok else stop_reason_for(first)
-            return finish(args, query, outcomes, stop_reason,
-                          first.blocked_by is not None)
+            return (outcomes, stop_reason, first.blocked_by is not None, listing)
         if query.mode == "book":
             first.pages_available = n
         more, stop_reason, blocked = _run_sequence(
@@ -1043,10 +1065,239 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
             stop_reason = "completed"
         elif first.last_page and query.mode == "reviews":
             stop_reason = "end_of_listing" if args.pages > 1 else "completed"
-        return finish(args, query, outcomes, stop_reason, blocked, listing=listing)
+        return outcomes, stop_reason, blocked, listing
     finally:
         if ops_box[0] is not None:
             close_ops(ops_box[0])
+
+
+# ---------------------------------------------------------------------------
+# --merge-sorts: two orderings of one author list, merged by sku
+# ---------------------------------------------------------------------------
+
+# Fields that describe the RUN rather than the book, so the same book parsed
+# from two orderings differing only in these is NOT reported as changed.
+# Mirrors diff_runs.UNTRACKED_FIELDS on purpose: the two comparisons ask the
+# same question — "is this the same book?" — and must give the same answer.
+_MERGE_IGNORED_FIELDS = frozenset({
+    "source", "scraped_at", "sku", "page", "position", "mode", "sort",
+    "data_source", "url",
+})
+
+
+@dataclass
+class MergeResult:
+    """The merged rows plus every count the sidecar's merge_sorts block needs."""
+    rows: List
+    # rows that occurred in both rounds but with a tracked field different
+    different: List[dict] = field(default_factory=list)
+    # skus only the second (title) ordering served
+    second_only_skus: List[str] = field(default_factory=list)
+
+
+def merge_sort_rounds(first_rows: List, second_rows: List,
+                      key: str = "sku") -> MergeResult:
+    """Merge the two orderings by `key` (sku).
+
+    The first occurrence of a key wins, field for field: the merged row is
+    literally the first round's object, so a key the rounds disagree on keeps
+    the first ordering's values rather than a half-merged hybrid. A key the
+    second round serves for the first time is appended in the second round's
+    own order, which gives "first-round order, second-round additions after".
+
+    Rows with no key cannot be compared to anything and are never dropped
+    (the same rule dedupe_by_key follows).
+    """
+    merged, by_key = [], {}
+    second_only, different = [], []
+    ignored = _MERGE_IGNORED_FIELDS
+
+    def take(row, round_index):
+        val = getattr(row, key, None)
+        if val is None:
+            merged.append(row)
+            return
+        if val not in by_key:
+            by_key[val] = row
+            merged.append(row)
+            if round_index == 1:
+                second_only.append(val)
+            return
+        changed = {f.name: (getattr(by_key[val], f.name), getattr(row, f.name))
+                   for f in dc_fields(row) if f.name not in ignored
+                   and getattr(by_key[val], f.name) != getattr(row, f.name)}
+        if changed:
+            different.append({"sku": val,
+                              "title": getattr(row, "title", None),
+                              "fields": sorted(changed)})
+
+    for r in first_rows:
+        take(r, 0)
+    for r in second_rows:
+        take(r, 1)
+    return MergeResult(rows=merged, different=different,
+                       second_only_skus=second_only)
+
+
+def title_sorted_query(query: Query) -> Query:
+    """A fresh Query for the SAME author list in title order (?sort=title).
+
+    Built through query_from_url rather than by mutating the running query,
+    so it starts at page 1 with no cursors or collected book urls, and is
+    re-validated exactly as a typed --url would be.
+    """
+    title_url = url_with_params(query.url, {"sort": "title"})
+    tq, why = query_from_url(title_url)
+    if tq is None:  # the input query was already validated; defensive only
+        raise ValueError(why)
+    tq.mode = "list"
+    return tq
+
+
+def _round_internal_dups(outcomes: List[PageOutcome]) -> int:
+    """Rows this one ordering served more than once, across its own pages."""
+    return sum(len(o.products) for o in outcomes) - len(merge_outcomes(outcomes))
+
+
+def _round_filled_cap(outcomes: List[PageOutcome], cap: int) -> bool:
+    """Whether this round actually fetched --pages pages.
+
+    False whenever the listing ended before the cap (a past-end page, an
+    empty page or a failed one), because then the ordering was walked to its
+    real end and no book of that ordering can still be unserved.
+    """
+    return len([o for o in outcomes if o.ok]) >= cap
+
+
+def _round_failed_pages(outcomes: List[PageOutcome], label: str) -> List:
+    """Page labels for the sidecar's pages_failed. The second round's pages
+    are namespaced with the label so the two rounds cannot be confused."""
+    nums = sorted(o.page_num for o in outcomes if not o.ok)
+    return nums if label == "" else ["%s%d" % (label, n) for n in nums]
+
+
+def run_pages_merged(open_ops, close_ops, run_concurrently, args, pool,
+                     query: Query, concurrency: int,
+                     mask: Callable[[str], str] = lambda s: s) -> int:
+    """A --merge-sorts run: the author list in its given ordering, then the
+    same list with ?sort=title, each for --pages pages, merged by sku.
+
+    Only valid for --mode list on an /author/list/ url; the Playwright entry
+    point refuses every other combination with exit 2 before this is reached.
+    Both rounds always run, even if the first ends early, so a block on one
+    ordering still leaves the other ordering's data in the output.
+    """
+    title_query = title_sorted_query(query)
+    log.info("--merge-sorts: round 1/2, the listing's own ordering: %s", query.url)
+    first = _collect_pages(open_ops, close_ops, run_concurrently, args, pool,
+                           query, concurrency, mask)
+    if isinstance(first, int):
+        return first
+    first_outcomes, _stop_a, _blocked_a, _listing = first
+    log.info("--merge-sorts: round 2/2, title order (?sort=title): %s",
+             title_query.url)
+    second = _collect_pages(open_ops, close_ops, run_concurrently, args, pool,
+                            title_query, concurrency, mask)
+    if isinstance(second, int):
+        return second
+    second_outcomes, _stop_b, _blocked_b, _listing = second
+    return finish_merged(args, query, title_query, first_outcomes,
+                         second_outcomes)
+
+
+def finish_merged(args, query: Query, title_query: Query,
+                  first_outcomes: List[PageOutcome],
+                  second_outcomes: List[PageOutcome]) -> int:
+    """Merge the two rounds, write one output + one sidecar, return the
+    exit code. Kept separate from finish() so a plain run's sidecar shape and
+    exit semantics cannot change."""
+    first_rows = merge_outcomes(first_outcomes)
+    second_rows = merge_outcomes(second_outcomes)
+    result = merge_sort_rounds(first_rows, second_rows)
+
+    first_dups = _round_internal_dups(first_outcomes)
+    second_dups = _round_internal_dups(second_outcomes)
+    first_raw = sum(len(o.products) for o in first_outcomes)
+    second_raw = sum(len(o.products) for o in second_outcomes)
+    second_only = len(result.second_only_skus)
+
+    for diff in result.different:
+        log.warning("--merge-sorts: sku %s (%s) appeared in both orderings but "
+                    "its fields differ (%s); keeping the first ordering's row.",
+                    diff["sku"], diff["title"], ", ".join(diff["fields"]))
+    log.info("--merge-sorts: round 1 served %d row(s) (%d repeated), round 2 "
+             "served %d (%d repeated); the union holds %d distinct book(s), "
+             "%d served only by the title ordering.",
+             first_raw, first_dups, second_raw, second_dups,
+             len(result.rows), second_only)
+
+    may_have_more = (_round_filled_cap(first_outcomes, args.pages)
+                     and _round_filled_cap(second_outcomes, args.pages))
+    if may_have_more:
+        log.warning("--merge-sorts: both orderings ran the full --pages %d, so "
+                    "books beyond those pages may still exist; rerun with a "
+                    "larger --pages to widen the union.", args.pages)
+
+    failed = ([(0, o) for o in first_outcomes if not o.ok]
+              + [(1, o) for o in second_outcomes if not o.ok])
+    if failed:
+        _, worst = min(failed, key=lambda item: item[1].page_num)
+        stop_reason = stop_reason_for(worst)
+        blocked = all(o.blocked_by for _, o in failed)
+    else:
+        stop_reason, blocked = "completed", False
+    pages_failed = (_round_failed_pages(first_outcomes, "")
+                    + _round_failed_pages(second_outcomes, "title-"))
+
+    first_page = next((o for o in first_outcomes if o.page_num == 1), None)
+    total = getattr(first_page, "total_available", None)
+    available = getattr(first_page, "pages_available", None)
+    per_page = ROWS_PER_PAGE["author"]
+    reachable = (available or 1) * per_page
+    extra = {
+        "total_results": total,
+        "pages_available": available,
+        "query": query_summary(query),
+        "reachable_max": reachable,
+        "capped_by_site": bool(total and total > reachable),
+        # A plain run's count of within-ordering repeats, now across both.
+        "repeated_across_pages": first_dups + second_dups,
+        "merge_sorts": {
+            "enabled": True,
+            "rounds": {
+                "default": {
+                    "url": query.url,
+                    "rows_fetched": first_raw,
+                    "internal_duplicate_rows": first_dups,
+                    "distinct_rows": len(first_rows),
+                    "pages_fetched": len([o for o in first_outcomes if o.ok]),
+                },
+                "title": {
+                    "url": title_query.url,
+                    "rows_fetched": second_raw,
+                    "internal_duplicate_rows": second_dups,
+                    "distinct_rows": len(second_rows),
+                    "pages_fetched": len([o for o in second_outcomes if o.ok]),
+                },
+            },
+            "merged_rows": len(result.rows),
+            "second_round_only_rows": second_only,
+            "second_round_only_skus": result.second_only_skus,
+            "conflicting_rows": len(result.different),
+            "conflicts": result.different,
+            "may_have_more_books": may_have_more,
+        },
+    }
+    ok_pages = [o for o in first_outcomes + second_outcomes if o.ok]
+    last_ok = max([o.page_num for o in ok_pages] or [1])
+    final = request_for(title_query, last_ok).url
+    return finish_run(
+        result.rows, args.out, args.format, args.allow_empty,
+        blocked=blocked, stop_reason=stop_reason,
+        pages_requested=args.pages * 2,
+        pages_completed=len(ok_pages),
+        pages_failed=pages_failed, mode="list", source=SOURCE_DEFAULT,
+        start_url=query.url, final_url=final, extra=extra)
 
 
 def worker_loop(ops, args, query: Query, work, results, results_lock,

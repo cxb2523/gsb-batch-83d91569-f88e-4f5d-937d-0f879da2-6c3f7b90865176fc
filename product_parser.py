@@ -333,6 +333,18 @@ def page_url(url: str, page: int) -> str:
     return urlunparse(u._replace(query=urlencode(params)))
 
 
+def url_with_params(url: str, extra: Dict[str, str]) -> str:
+    """`url` with the query parameters in `extra` set, replacing any value
+    the url already carries for the same key. The fragment and the rest of
+    the query are kept. Used to ask the SAME listing in another ordering:
+    an author list's ?sort=title is a different sort over the same books."""
+    u = urlparse(url)
+    params = [(k, v) for k, v in parse_qsl(u.query, keep_blank_values=True)
+              if k not in extra]
+    params.extend(extra.items())
+    return urlunparse(u._replace(query=urlencode(params)))
+
+
 def requested_page(url: str) -> int:
     for k, v in parse_qsl(urlparse(url).query):
         if k == "page" and v.isdigit():

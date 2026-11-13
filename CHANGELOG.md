@@ -9,6 +9,20 @@ said so at the top of its release notes.
 
 ## [Unreleased]
 
+### Added
+
+- **`--merge-sorts` for the Playwright engine** (`--mode list` on an
+  `/author/list/` url only; refused with exit 2 anywhere else). An author
+  list paged by popularity repeats some books across pages and never serves
+  as many others, while `?sort=title` serves a different set. The switch runs
+  the url's own ordering and then the title ordering, `--pages` pages each,
+  and merges them by `sku`: one row per sku (the first occurrence's fields
+  win), title-only books appended after them, and skus whose two rows differ
+  named in the log. The sidecar gains a `merge_sorts` block with each round's
+  fetched/duplicate counts, the merged count, the second-round-only count and
+  `may_have_more_books` (true when both rounds filled `--pages`). Runs without
+  the switch are unchanged and write no `merge_sorts` block.
+
 ### Changed
 
 - CI only: the canary now runs weekly (Mondays 05:40 UTC) and on a manual dispatch, with its optional secret `GOODREADS_PROXY` passed on every run; the daily schedule is removed.

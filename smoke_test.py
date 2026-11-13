@@ -1256,7 +1256,13 @@ def check_engine_flag_sets():
         missing = (CONTRACT_FLAGS | GOODREADS_FLAGS) - flags
         check("%s defines every contract flag" % module, not missing,
               "missing %s" % sorted(missing))
-    DOCUMENTED_DIFFERENCES = {"puppeteer_scraper": {"--chromium-path"}}
+    DOCUMENTED_DIFFERENCES = {"puppeteer_scraper": {"--chromium-path"},
+                              # --merge-sorts is Playwright-only on purpose:
+                              # it is implemented in the shared page_flow but
+                              # only the Playwright entry point exposes and
+                              # validates the switch, so the Selenium and
+                              # pyppeteer engines keep their exact flag set.
+                              "playwright_scraper": {"--merge-sorts"}}
     names = sorted(sets)
     for i in range(len(names) - 1):
         a, b = names[i], names[i + 1]
