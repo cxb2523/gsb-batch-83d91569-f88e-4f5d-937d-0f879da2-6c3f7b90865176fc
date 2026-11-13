@@ -42,6 +42,13 @@ What is different about Mercor
   independent URLs, not a convention guessed at — so the concurrency
   machinery and the sidecar's per-page failure list both mean what they say.
 
+* **A dead address ends that address, not the batch.** Every enumerated
+  address is attempted even when one answers 404, a 5xx or a refusal — the
+  enumeration outlives listings, so this is the ordinary case rather than
+  an edge one. The sidecar's `job_url_outcomes` records each address's own
+  outcome and attempt count, so a reader can see which one did not come
+  back instead of inferring it from a log line.
+
 * **No single route enumerates the catalogue.** sitemap 447, explore 390,
   shared 375, union 462. Neither contains the other, and the 72
   sitemap-only listings are live jobs. `--mode job` fetches the union.
@@ -157,6 +164,16 @@ class PageOutcome:
     # same outcome shape and so a site that starts paginating is detected
     # rather than assumed away.
     echoed_page: Optional[int] = None
+    # How many times this URL was actually navigated to, including the
+    # retries the load loop and the block-retry loop made. `--mode job` puts
+    # this in the sidecar's per-address list, because "not found" and "gave
+    # up after three attempts" are different stories about one address and a
+    # reader chasing a failed run needs to know which one happened.
+    #
+    # 0 on an outcome no fetch produced (a worker that died before it took
+    # the URL); the sidecar reports that as one attempt rather than as zero,
+    # since an address carrying an outcome was in fact tried once.
+    attempts: int = 0
 
     @property
     def ok(self) -> bool:
@@ -165,6 +182,146 @@ class PageOutcome:
 
 
 ITEM_LINK_SELECTOR = page_flow.READY_SELECTOR_LISTING
+
+# ---------------------------------------------------------------------------
+# Per-address outcomes, for --mode job's sidecar list
+# ---------------------------------------------------------------------------
+# In `--mode job` every page is one independent address from the enumeration,
+# so the run-level counters (`jobs_fetched`, `jobs_not_found`) are arithmetic
+# over a set, not a statement about which address ended how. The names below
+# are the vocabulary of the per-address list the sidecar carries beside them
+# (`job_url_outcomes`), so a reader can see exactly which address was tried,
+# what came back, and how many navigations it cost.
+#
+# The six required categories, and the two the classifier can also produce:
+#
+#   success            a row was parsed from this address
+#   not_found          the site says the address is gone (HTTP 404/410 or the
+#                      login bounce) — and a detail page whose own payload
+#                      carries all three listing props as null is the site
+#                      saying the listing was taken down, the same answer
+#   target_5xx         the TARGET answered with a 5xx on every attempt
+#   target_http_error  the target answered with another unexplained non-2xx
+#                      (400/401/451) — content not obtained, same as a 5xx
+#   refused            a refusal or a throttle (403, 429, a challenge page)
+#   unparseable        served, and this parser could not find the record
+#   load_failed        the navigation never completed (timeout, dead proxy)
+JOB_SUCCESS = "success"
+JOB_NOT_FOUND = "not_found"
+JOB_TARGET_5XX = "target_5xx"
+JOB_TARGET_HTTP_ERROR = "target_http_error"
+JOB_REFUSED = "refused"
+JOB_UNPARSEABLE = "unparseable"
+JOB_LOAD_FAILED = "load_failed"
+
+JOB_OUTCOME_KINDS = (JOB_SUCCESS, JOB_NOT_FOUND, JOB_TARGET_5XX,
+                     JOB_TARGET_HTTP_ERROR, JOB_REFUSED, JOB_UNPARSEABLE,
+                     JOB_LOAD_FAILED)
+
+
+def _job_outcome_kind(outcome) -> str:
+    """Which of the categories above one page's outcome belongs to.
+
+    Decided from the outcome FIELDS rather than re-parsing the HTML: the
+    classifier already made that judgement once, and a second opinion here
+    would be a second place to disagree with it.
+    """
+    if outcome.load_failed:
+        return JOB_LOAD_FAILED
+    if outcome.server_error is not None:
+        return (JOB_TARGET_5XX if outcome.server_error >= 500
+                else JOB_TARGET_HTTP_ERROR)
+    if outcome.blocked_by is not None:
+        # 403, 429 and a challenge page all ended here; the sidecar keeps the
+        # precise reason in `blocked_by` on the outcome, but the category is
+        # "refused or throttled" because that is the question one address's
+        # list entry answers.
+        return JOB_REFUSED
+    if outcome.state == "not_found":
+        return JOB_NOT_FOUND
+    if outcome.state == "empty":
+        # A job detail page whose payload holds `role`/`poolListing`/
+        # `closedListing` as null is the site saying the listing is gone
+        # (see product_parser.role_from_next_data). For a queue of job
+        # ADDRESSES that is the same answer as a 404: the job is not there.
+        return JOB_NOT_FOUND
+    if outcome.products:
+        return JOB_SUCCESS
+    # Served, `ok`, and no row came out. `parse_error` and `unknown` are the
+    # classifier's names for that; `content` with no row cannot happen on a
+    # detail page but is reported rather than assumed away.
+    return JOB_UNPARSEABLE
+
+
+def _job_queue_failure_reason(outcomes):
+    """(stop reason, blocked) one mixed job batch should carry, or (None, False).
+
+    A batch that lost ONE address is not a finished batch, and the reason
+    that names the worst thing that happened is the one a reader should look
+    for a cause in: the run never reached the site (a load failure), the site
+    answered with an error (a 5xx or another unexplained non-2xx), the site
+    refused us (403/429), or the site answered and this parser could not read
+    it. Ties go to the earliest page, so the report points at the first place
+    the run went wrong.
+
+    A 404/410 is not a failure here: it is the site's answer about one
+    address, and it neither stops the other addresses nor makes the run
+    partial (exit 0, `complete`). Returns (None, False) when every outcome is
+    a success or a not-found.
+    """
+    candidates = []
+    for outcome in outcomes:
+        # Keyed on the SAME category the sidecar records for the address, so
+        # the list and the run's status cannot disagree about whether an
+        # address failed.
+        kind = _job_outcome_kind(outcome)
+        if kind == JOB_LOAD_FAILED:
+            candidates.append((0, outcome.page_num, "page_load_timeout"))
+        elif kind == JOB_TARGET_5XX:
+            candidates.append((1, outcome.page_num,
+                               page_flow.http_error_stop_reason(
+                                   outcome.server_error)))
+        elif kind == JOB_TARGET_HTTP_ERROR:
+            candidates.append((1, outcome.page_num,
+                               page_flow.http_error_stop_reason(
+                                   outcome.server_error)))
+        elif kind == JOB_REFUSED:
+            candidates.append((2, outcome.page_num,
+                               page_flow.failure_stop_reason(outcome)))
+        elif kind == JOB_UNPARSEABLE:
+            candidates.append((3, outcome.page_num,
+                               page_flow.PARSER_FOUND_NOTHING))
+        # JOB_SUCCESS and JOB_NOT_FOUND are answers, not failures.
+    if not candidates:
+        return None, False
+    severity, _page_num, reason = min(candidates)
+    return reason, severity == 2
+
+
+def _job_url_outcomes(outcomes) -> List[dict]:
+    """The per-address list the sidecar carries for a `--mode job` run.
+
+    One entry per address the run attempted, in the order the enumeration
+    handed them to the run (page order). `attempts` is how many navigations
+    the address actually cost, so a 404 (one attempt) is distinguishable from
+    a page that took its full retry budget and still failed.
+    """
+    entries = []
+    for outcome in sorted(outcomes, key=lambda o: o.page_num):
+        entry = {
+            "url": outcome.url,
+            "outcome": _job_outcome_kind(outcome),
+            # An outcome that exists means at least one navigation was tried;
+            # only a page a dying worker never reached carries zero.
+            "attempts": max(1, int(outcome.attempts or 0)),
+        }
+        if outcome.server_error is not None:
+            entry["http_status"] = outcome.server_error
+        if outcome.blocked_by is not None:
+            entry["blocked_by"] = (outcome.blocked_by)
+        entries.append(entry)
+    return entries
+
 
 # The share of rows that must carry the columns Mercor fills on every
 # record, below which the read has broken rather than the data being
@@ -978,6 +1135,10 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         http_status = None
         for attempt in range(1, args.retries + 1):
             try:
+                # Counted BEFORE the navigation, so a timeout that raises on
+                # the way out is still counted as an attempt: an address that
+                # took three tries to time out was tried three times.
+                outcome.attempts += 1
                 response = session.page.goto(url, wait_until="domcontentloaded",
                                              timeout=60000)
                 if response is not None:
@@ -1573,44 +1734,54 @@ def scrape(args) -> int:
                 if not job_urls:
                     # Nothing to fetch, so nothing is written — `save`
                     # leaves the previous run's good output in place and
-                    # no sidecar contradicts it.
+                    # no sidecar contradicts it. If `--allow-empty` does
+                    # write a sidecar, it carries an EMPTY list rather than
+                    # no list: "no address was attempted" is the answer.
                     return finish_run(
                         [], args.out, args.format, args.allow_empty,
                         blocked=False, stop_reason="enumeration_empty",
                         pages_requested=args.pages, pages_completed=0,
                         mode=args.mode, source=SOURCE_DEFAULT,
-                        start_url=args.url or "", final_url="")
+                        start_url=args.url or "", final_url="",
+                        extra={"job_url_outcomes": []})
                 target = job_urls[0]
 
             if target != args.url:
                 logger.info("Fetching %s", target)
 
-            # Page 1 is always fetched on its own: its content is what decides
-            # how many pages 2..N there are to address at all.
-            first = _fetch_one_page(session, args, pool, 1, target)
-            outcomes.append(first)
-
-            if not first.ok:
-                stop_reason = page_flow.failure_stop_reason(first)
-                blocked = first.blocked_by is not None
-            elif args.mode == "job" and not job_urls:
-                pass  # `--url` named one job; one page is the whole run
-            else:
-                seen_keys.update(p.sku for p in first.products if p.sku is not None)
-                planned = _plan_page_urls(args, first.final_url,
-                                          first.pages_available,
-                                          job_urls=job_urls)
-                if len(planned) + 1 < args.pages:
+            if args.mode == "job" and job_urls:
+                # --mode job over an ENUMERATION is a queue of independent
+                # addresses, and that is the whole difference between it and
+                # a paginated listing: every address is attempted even when
+                # one of them fails. A withdrawn listing, a 503, a refusal or
+                # a page this parser cannot read is the answer about ONE
+                # address — never a signal that the next one will fail too.
+                # Before, the first failure set `stop_reason` and the rest of
+                # the queue was never fetched, so a single dead job could
+                # end a run that had hundreds of live addresses queued.
+                wanted = page_flow.pages_to_plan(args.pages, len(job_urls))
+                if wanted < args.pages:
                     # Capped by the length of the job enumeration, a complete
-                    # answer rather than an early stop — see COMPLETE_STOP_REASONS.
+                    # answer rather than an early stop — see
+                    # COMPLETE_STOP_REASONS.
                     stop_reason = "page_cap_reached"
+                    logger.info("The enumeration holds %d job(s) and %d "
+                                "page(s) were asked for; planning %d. There "
+                                "is no more catalogue to walk to — this is "
+                                "every job Mercor publishes on the sitemap "
+                                "and in the index.", len(job_urls),
+                                args.pages, wanted)
+                planned = list(job_urls[1:wanted])
 
-                if args.pages > 1 and concurrency > 1 and not page_flow.pagination_is_addressable(first.final_url):
-                    logger.warning("--concurrency %d requested, but this "
-                                   "listing's pages cannot be addressed "
-                                   "independently — falling back to one page "
-                                   "at a time.", concurrency)
-                    concurrency = 1
+                first = _fetch_one_page(session, args, pool, 1, target)
+                outcomes.append(first)
+                if not first.ok:
+                    logger.warning(
+                        "Address 1 of %d (%s) ended as %s — continuing with "
+                        "the remaining %d address(es). One address's failure "
+                        "does not end a queue of independent addresses.",
+                        wanted, target, page_flow.failure_stop_reason(first),
+                        len(planned))
 
                 if planned and concurrency > 1:
                     # Close the page-1 browser before starting workers: it has
@@ -1618,28 +1789,74 @@ def scrape(args) -> int:
                     # browser than asked for.
                     session.close()
                     specs = [(n, planned[n - 2]) for n in range(2, len(planned) + 2)]
-                    logger.info("Fetching pages 2-%d across %d workers%s.",
+                    logger.info("Fetching addresses 2-%d across %d workers%s.",
                                 len(planned) + 1, concurrency,
                                 f" over {len(pool)} exit(s)" if pool else "")
-                    rest, unattempted, exhausted = _fetch_pages_concurrently(
+                    rest, unattempted, _exhausted = _fetch_pages_concurrently(
                         args, pool, specs, concurrency)
                     outcomes.extend(rest)
-
-                    failed = [o for o in rest if not o.ok]
-                    if failed:
-                        worst = min(failed, key=lambda o: o.page_num)
-                        stop_reason = page_flow.failure_stop_reason(worst)
-                        blocked = any(o.blocked_by for o in rest)
-                    elif exhausted:
-                        stop_reason = "no_new_products"
-                    elif unattempted:
-                        # Should not happen without a failure or exhaustion,
-                        # but say so rather than reporting a complete run.
-                        stop_reason = "pages_unattempted"
                     session = None  # already closed
+                    # `unattempted` holds what was still QUEUED. A worker that
+                    # died may also have taken an address and never returned
+                    # it, and that page-number is in neither list — while the
+                    # queue's contract here is that every address is TRIED.
+                    # So the recovery set is "everything with no outcome".
+                    attempted = {o.page_num for o in rest}
+                    missing = [n for n, _ in specs
+                               if n not in attempted and n not in unattempted]
+                    missing += list(unattempted)
+                    if missing:
+                        logger.warning(
+                            "%d enumerated address(es) produced no outcome "
+                            "(%s) — fetching them on one sequential session so "
+                            "every address is tried.", len(missing),
+                            ", ".join(map(str, sorted(missing))))
+                        by_page = dict(specs)
+                        try:
+                            session = _BrowserSession(
+                                pw, args, pool,
+                                remote=bool(args.cdp_endpoint)).open()
+                        except Exception:  # noqa: BLE001
+                            # A browser that cannot open is the reason those
+                            # addresses were never taken. Record them as
+                            # load failures so the run reports them and
+                            # still writes everything it did gather.
+                            logger.exception(
+                                "Could not open a recovery session for %d "
+                                "unattempted address(es) — recording them "
+                                "as load failures.", len(missing))
+                            session = None
+                            for page_num in sorted(missing):
+                                outcomes.append(PageOutcome(
+                                    page_num=page_num,
+                                    url=by_page[page_num],
+                                    load_failed=True, attempts=1))
+                        if session is not None:
+                            for page_num in sorted(missing):
+                                try:
+                                    outcome = _fetch_one_page(
+                                        session, args, pool, page_num,
+                                        by_page[page_num])
+                                except Exception:  # noqa: BLE001
+                                    # The worker that should have taken this
+                                    # address died; if the fetch itself is
+                                    # what kills a session, record the
+                                    # address as a load failure rather than
+                                    # lose the run and the record of every
+                                    # address before it.
+                                    logger.exception(
+                                        "Address %d (%s) could not be fetched "
+                                        "on the recovery session either.",
+                                        page_num, by_page[page_num])
+                                    outcome = PageOutcome(
+                                        page_num=page_num,
+                                        url=by_page[page_num],
+                                        load_failed=True, attempts=1)
+                                outcomes.append(outcome)
+                                time.sleep(args.delay)
                 elif planned:
-                    url = planned[0]
                     for page_num in range(2, len(planned) + 2):
+                        url = planned[page_num - 2]
                         # A new exit per page is what actually spreads a run's
                         # volume, and it costs a browser relaunch: carrying the
                         # session across exits would defeat the point.
@@ -1650,45 +1867,131 @@ def scrape(args) -> int:
                         outcome = _fetch_one_page(session, args, pool, page_num, url)
                         outcomes.append(outcome)
                         if not outcome.ok:
-                            stop_reason = page_flow.failure_stop_reason(outcome)
-                            blocked = outcome.blocked_by is not None
-                            break
-
-                        # Whether this page contributed anything not already
-                        # seen. Kept as a running check because the condition is
-                        # inherently sequential — "new" only means anything
-                        # relative to the pages before it. The authoritative
-                        # dedupe happens once, after the loop, in page order.
-                        fresh_count = sum(1 for p in outcome.products
-                                          if p.sku is None or p.sku not in seen_keys)
-                        seen_keys.update(p.sku for p in outcome.products
-                                         if p.sku is not None)
-
-                        # A page past the first that contributes nothing new
-                        # means the end of the results — or that pagination is
-                        # looping back on itself. Either way there is nothing
-                        # further to fetch, and this is the honest terminating
-                        # condition: a property of the DATA, not of a CSS
-                        # selector that may have been renamed.
-                        if (not fresh_count
-                                and page_flow.a_page_without_rows_ends_the_run(args.mode)):
-                            logger.info("Page %d added no rows not already seen "
-                                        "— treating that as the end of the "
-                                        "listing.", page_num)
-                            stop_reason = "no_new_products"
-                            break
-                        if not fresh_count:
-                            # --mode job: every page is an independent address,
-                            # so one adding nothing (a withdrawn listing, a
-                            # duplicate) says nothing about the next.
-                            logger.info("Page %d (%s) added no rows (%s) — "
-                                        "continuing with the rest of the "
-                                        "queue.", page_num, outcome.url,
+                            logger.warning(
+                                "Address %d of %d (%s) ended as %s — "
+                                "continuing with the rest of the queue.",
+                                page_num, wanted, url,
+                                page_flow.failure_stop_reason(outcome))
+                        elif not outcome.products:
+                            # A withdrawn listing or a duplicate: this address
+                            # says nothing about the next one.
+                            logger.info("Address %d of %d (%s) added no rows "
+                                        "(%s) — continuing with the rest of "
+                                        "the queue.", page_num, wanted, url,
                                         outcome.state or "empty")
 
-                        if page_num - 1 < len(planned):
-                            url = planned[page_num - 1]
+                        if page_num < len(planned) + 1:
                             time.sleep(args.delay)
+            else:
+                # Page 1 is always fetched on its own: its content is what
+                # decides how many pages 2..N there are to address at all.
+                first = _fetch_one_page(session, args, pool, 1, target)
+                outcomes.append(first)
+
+                if not first.ok:
+                    stop_reason = page_flow.failure_stop_reason(first)
+                    blocked = first.blocked_by is not None
+                elif args.mode == "job":
+                    # `--url` named one job: one page is the whole run, so
+                    # there is no plan and no page cap to report. It falls
+                    # through to the common reporting below, which carries
+                    # that address's one-entry `job_url_outcomes`.
+                    pass
+                else:
+                    seen_keys.update(p.sku for p in first.products
+                                     if p.sku is not None)
+                    planned = _plan_page_urls(args, first.final_url,
+                                              first.pages_available,
+                                              job_urls=job_urls)
+                    if len(planned) + 1 < args.pages:
+                        # Capped by the length of the job enumeration, a
+                        # complete answer rather than an early stop — see
+                        # COMPLETE_STOP_REASONS.
+                        stop_reason = "page_cap_reached"
+
+                    if args.pages > 1 and concurrency > 1 and not page_flow.pagination_is_addressable(first.final_url):
+                        logger.warning("--concurrency %d requested, but this "
+                                       "listing's pages cannot be addressed "
+                                       "independently — falling back to one page "
+                                       "at a time.", concurrency)
+                        concurrency = 1
+
+                    if planned and concurrency > 1:
+                        # Close the page-1 browser before starting workers: it
+                        # has done its job, and holding it open would cost one
+                        # more browser than asked for.
+                        session.close()
+                        specs = [(n, planned[n - 2])
+                                 for n in range(2, len(planned) + 2)]
+                        logger.info("Fetching pages 2-%d across %d workers%s.",
+                                    len(planned) + 1, concurrency,
+                                    f" over {len(pool)} exit(s)" if pool else "")
+                        rest, unattempted, exhausted = _fetch_pages_concurrently(
+                            args, pool, specs, concurrency)
+                        outcomes.extend(rest)
+
+                        failed = [o for o in rest if not o.ok]
+                        if failed:
+                            worst = min(failed, key=lambda o: o.page_num)
+                            stop_reason = page_flow.failure_stop_reason(worst)
+                            blocked = any(o.blocked_by for o in rest)
+                        elif exhausted:
+                            stop_reason = "no_new_products"
+                        elif unattempted:
+                            # Should not happen without a failure or
+                            # exhaustion, but say so rather than reporting a
+                            # complete run.
+                            stop_reason = "pages_unattempted"
+                        session = None  # already closed
+                    elif planned:
+                        url = planned[0]
+                        for page_num in range(2, len(planned) + 2):
+                            # A new exit per page is what actually spreads a
+                            # run's volume, and it costs a browser relaunch:
+                            # carrying the session across exits would defeat
+                            # the point.
+                            if pool and pool.rotates_per_page():
+                                pool.advance(f"per-page rotation, page {page_num}")
+                                session.relaunch()
+
+                            outcome = _fetch_one_page(session, args, pool,
+                                                      page_num, url)
+                            outcomes.append(outcome)
+                            if not outcome.ok:
+                                stop_reason = page_flow.failure_stop_reason(outcome)
+                                blocked = outcome.blocked_by is not None
+                                break
+
+                            # Whether this page contributed anything not
+                            # already seen. Kept as a running check because the
+                            # condition is inherently sequential — "new" only
+                            # means anything relative to the pages before it.
+                            # The authoritative dedupe happens once, after the
+                            # loop, in page order.
+                            fresh_count = sum(1 for p in outcome.products
+                                              if p.sku is None
+                                              or p.sku not in seen_keys)
+                            seen_keys.update(p.sku for p in outcome.products
+                                             if p.sku is not None)
+
+                            # A page past the first that contributes nothing
+                            # new means the end of the results — or that
+                            # pagination is looping back on itself. Either way
+                            # there is nothing further to fetch, and this is
+                            # the honest terminating condition: a property of
+                            # the DATA, not of a CSS selector that may have
+                            # been renamed.
+                            if (not fresh_count
+                                    and page_flow.a_page_without_rows_ends_the_run(args.mode)):
+                                logger.info("Page %d added no rows not already "
+                                            "seen — treating that as the end "
+                                            "of the listing.", page_num)
+                                stop_reason = "no_new_products"
+                                break
+
+                            if page_num - 1 < len(planned):
+                                url = planned[page_num - 1]
+                                time.sleep(args.delay)
         finally:
             if session is not None:
                 session.close()
@@ -1746,9 +2049,14 @@ def scrape(args) -> int:
     #             genuinely complete. It is also a 390-of-462 SLICE of what
     #             Mercor publishes, because the index does not show every
     #             live listing. Both facts go in the log and the sidecar.
-    #   job       Complete when every page the run planned was fetched. The
+    #   job       Complete when every address the run planned was fetched. The
     #             plan comes from the sitemap ∪ index union, so this is the
-    #             only mode that can cover everything.
+    #             only mode that can cover everything. ONE address being gone
+    #             (a 404/410) does not stop that being complete — the site
+    #             answered about every address the run asked about — but an
+    #             address that produced no answer (a 5xx, a refusal, a load
+    #             failure, a page this parser could not read) makes it
+    #             partial, even though the rest of the queue was still tried.
     #   careers   One response. Ashby states no total to check against.
     total_available = next((o.total_available for o in outcomes
                             if o.total_available is not None), None)
@@ -1772,17 +2080,25 @@ def scrape(args) -> int:
         logger.info(page_flow.LISTINGS_NOT_EXHAUSTIVE_NOTE)
 
     if args.mode == "job" and total_enumerated:
-        done = len([o for o in outcomes if o.ok])
-        logger.info("Fetched %d of the %d job(s) this run enumerated (%.1f%%)."
-                    "%s", done, total_enumerated,
-                    100.0 * done / total_enumerated,
-                    "" if done >= total_enumerated
-                    else "  Pass --pages %d to cover the rest." % total_enumerated)
+        logger.info("Attempted %d of the %d job address(es) this run "
+                    "enumerated.%s", len(outcomes), total_enumerated,
+                    "" if len(outcomes) >= total_enumerated
+                    else "  Pass --pages %d to cover the rest."
+                         % total_enumerated)
 
     ok_pages, failed_pages, unreadable_pages = page_flow.account_for_pages(
         outcomes)
     final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
                  if ok_pages else args.url)
+    if args.mode == "job":
+        # ONE reason describes the batch: if any address ended without an
+        # answer, the run is partial and the reason names the worst thing
+        # that happened. A 404/410 leaves this None, so an ordinary withdrawn
+        # listing keeps `complete`.
+        queue_failure, queue_blocked = _job_queue_failure_reason(outcomes)
+        if queue_failure is not None:
+            stop_reason = queue_failure
+            blocked = queue_blocked
 
     # One-per-run context, in the sidecar rather than repeated down a column.
     #
@@ -1812,16 +2128,25 @@ def scrape(args) -> int:
         if enumeration is not None:
             extra.update(enumeration.as_sidecar())
         extra["jobs_fetched"] = len(ok_pages)
-        # Addresses the site answered "gone" for. A withdrawn listing is an
-        # ordinary event here (the enumeration is built before any address
-        # is fetched), so it does not make the run partial — but it is
-        # recorded BY ADDRESS, because "complete" with fewer rows than
-        # `jobs_fetched` would otherwise read as rows lost without a trace.
+        # Addresses the site answered "gone" for with a 404/410 (or a bounce
+        # to /login). A withdrawn listing is an ordinary event here (the
+        # enumeration is built before any address is fetched), so it does not
+        # make the run partial — but it is recorded BY ADDRESS, because
+        # "complete" with fewer rows than `jobs_fetched` would otherwise read
+        # as rows lost without a trace.
         gone = [o.url for o in sorted(outcomes, key=lambda o: o.page_num)
                 if o.ok and o.state == "not_found"]
         extra["jobs_not_found"] = len(gone)
         if gone:
             extra["urls_not_found"] = gone
+        # The per-address outcome list. In this mode every page is one
+        # independent address from the enumeration, so the counters above are
+        # totals over a set and say nothing about WHICH address ended how.
+        # This list does: one entry per address attempted, in enumeration
+        # order, with the category it ended in and how many navigations it
+        # cost. It is written even for a one-URL run (`--url` naming a job),
+        # where it holds exactly that address.
+        extra["job_url_outcomes"] = _job_url_outcomes(outcomes)
     if args.domain:
         extra["domain_filter"] = args.domain
 
@@ -1830,6 +2155,14 @@ def scrape(args) -> int:
     stop_reason = page_flow.reconcile_stop_reason(
         stop_reason, None if enumeration is None else enumeration.complete,
         unreadable_pages)
+    # One note about the exit code, because two clauses of the contract meet
+    # here. A batch where SOME addresses answered 404/410 and the rest
+    # produced rows is exit 0, `complete`. A batch where EVERY address
+    # answered 404/410 has no rows at all, and `finish_run` reports that as
+    # exit 4 (`empty`) — the same number a single `--url` 404 gets, because
+    # "the site says every address is gone" is an answer about the addresses
+    # rather than a failed run, and there is nothing to write. It is still
+    # `complete`, and `job_url_outcomes` names every address as `not_found`.
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       blocked=blocked, stop_reason=stop_reason,
                       pages_requested=args.pages, pages_completed=len(ok_pages),

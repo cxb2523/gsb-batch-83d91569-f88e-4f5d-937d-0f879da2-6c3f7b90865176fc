@@ -11,6 +11,29 @@ it from a bill or from a diff.
 
 ## [Unreleased]
 
+### Fixed
+
+- **One dead job no longer ends a `--mode job` batch.** Every enumerated
+  address is attempted: a 404/410, a refusal, a target 5xx or a load
+  failure is the answer about that one address, not a signal that the next
+  one will fail too. Previously the first failed address set the stop
+  reason and the rest of the queue was never fetched.
+- **Exit code and status are settled over the whole batch.**
+  - Every address succeeded, or answered 404/410: exit `0`, `complete`.
+  - An address produced no answer (a target 5xx, an unreadable page, a
+    refusal or a load failure) and other rows were gathered: exit `6`,
+    `partial`, rows kept.
+  - No address produced an answer: exit `5`. The previous good output at
+    `--out` and its sidecar are left untouched.
+  - A run that gathered nothing never overwrites earlier output.
+- **The sidecar carries a per-address outcome list** (`job_url_outcomes`):
+  `url`, `outcome` (`success` / `not_found` / `target_5xx` /
+  `target_http_error` / `refused` / `unparseable` / `load_failed`) and
+  `attempts` (navigations spent, so a 404 is distinguishable from a page
+  that used its whole retry budget). `jobs_enumerated`, `jobs_fetched`,
+  `jobs_not_found` and `urls_not_found` are unchanged. A `--url` run naming
+  one job still fetches exactly that job and carries a one-entry list.
+
 ## [0.1.2] — 2026-10-16
 
 > **Behaviour change: `--allow-empty` writes an empty file only for a genuine

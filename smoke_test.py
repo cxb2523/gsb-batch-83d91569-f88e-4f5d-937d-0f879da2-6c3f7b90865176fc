@@ -2026,6 +2026,293 @@ def check_a_withdrawn_listing_does_not_end_the_job_queue():
           not page_flow.a_page_without_rows_ends_the_run("job"))
 
 
+def check_every_enumerated_job_address_is_tried_and_recorded():
+    """Every enumerated address is ATTEMPTED, and the sidecar says how each
+    one ended.
+
+    The batch contract in `--mode job` is about the QUEUE, not about one
+    page: a dead address is an answer about that address and must neither
+    end the run nor disappear from the record. Three shapes are driven here,
+    offline, with only the browser primitives stubbed:
+
+      * a 404 between two live addresses — the rest of the queue is still
+        fetched, exit 0, `complete`, and the per-address list names all three
+        with the right category and attempt count;
+      * a mixed batch including a target 5xx — all addresses are still
+        tried, the run is `partial` (exit 6) with the rows it did get, and
+        the 5xx address carries its retry count;
+      * every address failing with a 5xx — exit 5, and earlier good output
+        at the same `--out` is left alone; every address gone (404) — exit
+        4 `empty`, every entry `not_found`;
+      * `--url` naming one job — one entry in the list, and no enumeration.
+    """
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        skip("job queue outcomes", "playwright_scraper not importable here")
+        return
+
+    # ---- a 404 between two live addresses --------------------------------
+    U = ["https://work.mercor.com/jobs/list_AAA/a",
+         "https://work.mercor.com/jobs/list_DEAD/gone",
+         "https://work.mercor.com/jobs/list_CCC/c"]
+    for concurrency in (1, 2):
+        tag = "concurrency %d" % concurrency
+        code, rows, meta = _drive_scrape_over_a_job_queue(
+            engine, U, {U[1]}, concurrency)
+        equal("%s: the live addresses on both sides are still fetched" % tag,
+              sorted(r["sku"] for r in rows), ["list_AAA", "list_CCC"])
+        equal("%s: exit 0 and complete" % tag,
+              (code, meta["status"]), (0, "complete"))
+        entries = meta.get("job_url_outcomes") or []
+        equal("%s: every address is in the list, in order" % tag,
+              [e.get("url") for e in entries], U)
+        equal("%s: each address's category is reported" % tag,
+              [e.get("outcome") for e in entries],
+              ["success", "not_found", "success"])
+        equal("%s: ...and how many attempts it took" % tag,
+              [e.get("attempts") for e in entries], [1, 1, 1])
+
+    # ---- a mixed batch: the 404 does not stop the queue, the 5xx does not
+    # ---- stop it either, and the run honestly says it is partial ----------
+    import page_flow
+
+    def detail_for(sku):
+        # A distinct row per live address, since the parser reads the
+        # listingId from the payload rather than from the URL — feeding the
+        # same capture to two addresses would make the second row a
+        # duplicate and hide whether it was fetched at all.
+        return (DETAIL_HTML
+                .replace("list_AAABoKHds2e4X1lxEltFyJa7", sku)
+                .replace("Forensic / Toxicological Chemist",
+                         "Role " + sku))
+
+    good = _GOOD_JOB
+    gone = _DEAD_JOB
+    five = "https://work.mercor.com/jobs/list_5XX/e"
+    after = "https://work.mercor.com/jobs/list_AFTER/f"
+    routes = {good: (200, DETAIL_HTML), gone: (404, NOT_FOUND_HTML),
+              five: (503, _UPSTREAM_ERROR_HTML),
+              after: (200, detail_for("list_AFTER"))}
+
+    def mixed(url):
+        return routes.get(url, (404, NOT_FOUND_HTML))
+
+    queue = [good, gone, five, after]
+    code, meta, navs, out = _drive_engine_over_routes(
+        "playwright_scraper", ["--mode", "job", "--pages", "4", "--retries", "1"],
+        mixed, job_queue=queue)
+    entries = (meta or {}).get("job_url_outcomes") or []
+    equal("mixed batch: the address after a 5xx is still fetched",
+          navs.get(after), 1)
+    equal("mixed batch: every address appears once, in enumeration order",
+          [e.get("url") for e in entries], queue)
+    equal("mixed batch: the categories are per address",
+          [e.get("outcome") for e in entries],
+          ["success", "not_found", "target_5xx", "success"])
+    check("mixed batch: the 5xx address carries its retry count",
+          entries[2].get("attempts", 0) > 1, str(entries[2]))
+    equal("mixed batch: a target 5xx makes the batch partial, exit 6",
+          (code, meta.get("status"), meta.get("stop_reason")),
+          (6, "partial", page_flow.TARGET_SERVER_ERROR))
+    rows_on_disk = json.load(open(out + ".json", encoding="utf-8"))
+    equal("mixed batch: the rows that were gathered are kept",
+          sorted(r["sku"] for r in rows_on_disk),
+          ["list_AAABoKHds2e4X1lxEltFyJa7", "list_AFTER"])
+
+    # ---- every address failing: exit 5 and no overwrite -------------------
+    d = tempfile.mkdtemp()
+    prior = os.path.join(d, "o")
+    open(prior + ".json", "w").write('[{"sku": "kept"}]')
+    open(prior + ".meta.json", "w").write('{"status": "complete"}')
+    dead = ["https://work.mercor.com/jobs/list_D1/a",
+            "https://work.mercor.com/jobs/list_D2/b"]
+    code, meta, navs, _ = _drive_engine_over_routes(
+        "playwright_scraper", ["--mode", "job", "--pages", "2", "--retries", "1",
+                 "--out", prior],
+        lambda url: (503, _UPSTREAM_ERROR_HTML), job_queue=dead)
+    equal("all failing: exit 5", code, 5)
+    check("all failing: the earlier rows and sidecar are untouched",
+          open(prior + ".json").read() == '[{"sku": "kept"}]'
+          and open(prior + ".meta.json").read() == '{"status": "complete"}')
+    equal("all failing: every address was still attempted",
+          sorted(n for n in (navs.get(u) for u in dead) if n), [2, 2])
+
+    # With --allow-empty a sidecar IS written, and it says failed while
+    # still listing every address it tried.
+    code, meta, navs, _ = _drive_engine_over_routes(
+        "playwright_scraper", ["--mode", "job", "--pages", "2", "--retries", "1",
+                 "--allow-empty"],
+        lambda url: (503, _UPSTREAM_ERROR_HTML), job_queue=dead)
+    equal("all failing + --allow-empty: exit 5, status failed",
+          (code, (meta or {}).get("status")), (5, "failed"))
+    equal("all failing + --allow-empty: both addresses are in the list",
+          [e.get("outcome") for e in (meta or {}).get("job_url_outcomes") or []],
+          ["target_5xx", "target_5xx"])
+
+    # ---- one --url: no enumeration, one entry ----------------------------
+    code, meta, navs, _ = _drive_engine_over_routes(
+        "playwright_scraper", ["--mode", "job", "--url", good, "--retries", "1"],
+        lambda url: (200, DETAIL_HTML), job_queue=[good, after])
+    equal("single URL: exit 0", code, 0)
+    entries = (meta or {}).get("job_url_outcomes") or []
+    equal("single URL: the list holds exactly that address",
+          [(e.get("url"), e.get("outcome")) for e in entries],
+          [(good, "success")])
+    equal("single URL: no enumeration happened",
+          (meta or {}).get("jobs_enumerated"), None)
+    check("single URL: the other enumerated address was never fetched",
+          after not in navs, str(navs))
+
+    # ---- a refusal is a refusal even when nothing else failed: rows first
+    # ---- makes it partial (6), nothing obtained makes it blocked (3) -----
+    refuse_gone = (lambda url: ((403, _FORBIDDEN_HTML) if url == gone
+                                else (200, DETAIL_HTML)))
+    code, meta, navs, _ = _drive_engine_over_routes(
+        "playwright_scraper",
+        ["--mode", "job", "--pages", "2", "--retries", "1"],
+        refuse_gone, job_queue=[good, gone])
+    equal("a refusal after rows makes the batch partial, exit 6",
+          (code, (meta or {}).get("status")),
+          (6, "partial"))
+    equal("...with the refusal as its reason", (meta or {}).get("stop_reason"),
+          "blocked_refused")
+    equal("...and the refused address is categorised as refused",
+          [(e.get("outcome")) for e in (meta or {}).get("job_url_outcomes") or []],
+          ["success", "refused"])
+
+    code, meta, navs, _ = _drive_engine_over_routes(
+        "playwright_scraper",
+        ["--mode", "job", "--pages", "2", "--retries", "1", "--allow-empty"],
+        lambda url: (403, _FORBIDDEN_HTML), job_queue=[gone, good])
+    check("refused on the first address, the second is still attempted",
+          navs.get(good, 0) >= 1, str(navs))
+    equal("every address refused and no rows: exit 3, blocked",
+          (code, (meta or {}).get("status")), (3, "blocked"))
+    equal("...with both addresses categorised as refused",
+          [e.get("outcome") for e in (meta or {}).get("job_url_outcomes") or []],
+          ["refused", "refused"])
+
+    # ---- the category mapping itself, including the paths the drivers
+    # ---- above cannot reach without a real browser ----------------------
+    def oc(**kw):
+        base = dict(page_num=1, url="u", attempts=1)
+        base.update(kw)
+        return engine.PageOutcome(**base)
+
+    cases = [
+        (oc(state="content", products=[object()]), "success"),
+        (oc(state="not_found"), "not_found"),
+        (oc(state="empty"), "not_found"),       # a taken-down detail page
+        (oc(server_error=503), "target_5xx"),
+        (oc(server_error=400), "target_http_error"),
+        (oc(blocked_by="refused"), "refused"),
+        (oc(blocked_by="throttled"), "refused"),
+        (oc(state="parse_error"), "unparseable"),
+        (oc(state="unknown"), "unparseable"),
+        (oc(load_failed=True), "load_failed"),
+    ]
+    equal("every outcome maps to a named category",
+          [engine._job_outcome_kind(o) for o, _ in cases],
+          [want for _, want in cases])
+    check("the categories are the documented vocabulary",
+          set(engine.JOB_OUTCOME_KINDS) >= {want for _, want in cases})
+    equal("a page no fetch produced still counts as one attempt",
+          engine._job_url_outcomes([oc(attempts=0)])[0]["attempts"], 1)
+    equal("a page that took three navigations says three",
+          engine._job_url_outcomes([oc(attempts=3)])[0]["attempts"], 3)
+
+    # ---- an unreadable page and a load failure are answers the queue's own
+    # ---- driver cannot produce, and both must still leave every other
+    # ---- address tried and the run's exit code honest --------------------
+    for label, kw in (
+            ("an unreadable page", dict(state="parse_error")),
+            ("a load failure", dict(load_failed=True))):
+        bad_pair = engine._job_queue_failure_reason(
+            [oc(**kw), oc(page_num=2, products=[object()], state="content")])
+        check("%s after a row makes the batch partial" % label,
+              bad_pair[0] is not None and not bad_pair[1], str(bad_pair))
+        alone = engine._job_queue_failure_reason([oc(**kw)])
+        check("%s with no row is a non-complete batch" % label,
+              alone[0] is not None, str(alone))
+
+    # The same through the real scrape(), with a fetch that reports a load
+    # failure for one address and a row for the other.
+    out = os.path.join(tempfile.mkdtemp(), "o")
+    U2 = ["https://work.mercor.com/jobs/list_OK/a",
+          "https://work.mercor.com/jobs/list_TIMEOUT/b"]
+
+    def flaky_fetch(session, a, pool, page_num, url):
+        import output_writer
+        row = output_writer.JobPosting(source="mercor.com", scraped_at="t",
+                                       url=url, sku="list_OK", title="t",
+                                       data_source="detail")
+        if url == U2[1]:
+            return engine.PageOutcome(page_num=page_num, url=url,
+                                      load_failed=True, attempts=1)
+        return engine.PageOutcome(page_num=page_num, url=url, state="content",
+                                  products=[row], attempts=1)
+
+    meta = _scrape_with_fetch(engine, U2, flaky_fetch)
+    equal("load failure beside a row: partial, exit 6",
+          (meta.get("status"), meta.get("stop_reason")),
+          ("partial", "page_load_timeout"))
+    equal("...and the failed address is labelled as a load failure",
+          [e.get("outcome") for e in meta.get("job_url_outcomes") or []],
+          ["success", "load_failed"])
+
+
+def _scrape_with_fetch(engine, urls, fetch, allow_empty=False):
+    """Run the real `scrape()` over `urls` with `fetch` supplying outcomes."""
+    import types
+    import product_parser as _pp
+    out = os.path.join(tempfile.mkdtemp(), "o")
+    saved_argv = list(sys.argv)
+    saved_apply = engine.env_config.apply
+    engine.env_config.apply = lambda a: None
+    sys.argv = ["playwright_scraper.py", "--mode", "job", "--pages",
+                str(len(urls)), "--delay", "0", "--retries", "1",
+                "--format", "json", "--out", out] + (
+                    ["--allow-empty"] if allow_empty else [])
+    try:
+        args = engine.parse_args()
+    finally:
+        sys.argv = saved_argv
+        engine.env_config.apply = saved_apply
+
+    class FakeSession:
+        def __init__(self, *a, **k):
+            self.pool = None
+            self.page = types.SimpleNamespace(url="x")
+        def open(self):
+            return self
+        def close(self):
+            pass
+        def relaunch(self):
+            pass
+
+    class FakePlaywright:
+        def __enter__(self):
+            return None
+        def __exit__(self, *a):
+            return False
+
+    real = (engine._fetch_one_page, engine._BrowserSession,
+            engine.sync_playwright, engine._enumerate_jobs)
+    engine._fetch_one_page = fetch
+    engine._BrowserSession = FakeSession
+    engine.sync_playwright = lambda: FakePlaywright()
+    engine._enumerate_jobs = lambda session, a: _pp.EnumerationResult(
+        urls=list(urls), sitemap_urls=len(urls), explore_records=len(urls),
+        failures=[])
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            engine.scrape(args)
+    finally:
+        (engine._fetch_one_page, engine._BrowserSession,
+         engine.sync_playwright, engine._enumerate_jobs) = real
+    return json.load(open(out + ".meta.json", encoding="utf-8"))
+
+
 def check_enumeration_says_which_source_failed():
     """The audit's second P1, on the shared function.
 

@@ -142,9 +142,21 @@ dropped connection does not cost a run its status.
 
 **A withdrawn listing is not the end of the queue.** In `--mode job` the
 addresses are enumerated before any of them is fetched, so a listing taken
-down in between answers 404 (or bounces to `/login`). That one address is
-recorded in `urls_not_found`; the rest are still fetched, and the run stays
-`complete`.
+down in between answers 404 (or bounces to `/login`). Every enumerated
+address is attempted regardless: that one address is recorded in
+`urls_not_found`, the rest are still fetched, and the run stays `complete`.
+The same holds for an address that answers with a 5xx or a refusal — the
+queue is walked to its end either way, and the run is then reported
+honestly (`partial`/exit 6 with rows, exit 5 with none).
+
+**Every address's outcome is in the sidecar.** `job_url_outcomes` is one
+entry per attempted address, in enumeration order, each with `url`,
+`outcome` (`success`, `not_found`, `target_5xx`, `target_http_error`,
+`refused`, `unparseable` or `load_failed`) and `attempts` (how many
+navigations it actually cost). `jobs_enumerated`, `jobs_fetched`,
+`jobs_not_found` and `urls_not_found` keep their existing meanings; the list
+is what says *which* address ended how, where those counters only say how
+many. A `--url` run naming one job carries a one-entry list.
 
 **The index has no second page.** `?page=2`, `?limit=10`, `?offset=100` and
 `?domain=Finance` each returned a byte-identical payload. `--pages` above 1

@@ -595,7 +595,10 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
     is the run's OWN coverage arithmetic: `records_in_payload` and
     `urls_in_itemlist` for a listings run (390 and 326 on 2026-09-18, and
     the gap is why the parser reads the React Query cache), and
-    `jobs_enumerated`/`jobs_fetched` for a job run.
+    `jobs_enumerated`/`jobs_fetched` plus the per-address
+    `job_url_outcomes` list for a job run. The list is the one that says
+    WHICH address came back empty-handed and why; the counters only say how
+    many did.
 
     That is the only honest way to say what a run holds here, because
     "complete" and "exhaustive" come apart on this site: a `--mode listings`
