@@ -1,0 +1,22 @@
+name: proxyclaw
+displayName: ProxyClaw
+description: Residential proxy CLI with explicit V2 and legacy modes
+url: https://proxyclaw.ai
+repository: https://github.com/Iploop/proxyclaw
+install:
+  source: git clone https://github.com/Iploop/proxyclaw.git
+  python: python -m pip install 'iploop-sdk>=1.8.3'
+env:
+  IPLOOP_API_KEY:
+    description: Account key from https://platform.iploop.io/; legacy-only when proxy credentials are absent
+    required: true
+  IPLOOP_PROXY_USERNAME:
+    description: V2 proxy username; must be paired with proxy password
+    required: false
+  IPLOOP_PROXY_PASSWORD:
+    description: V2 proxy password; must be paired with proxy username
+    required: false
+notes:
+  - Requires Python 3, bash and curl
+  - State and city are deployed V2 selectors; exact-city accuracy varies
+  - For MCP use https://github.com/Iploop/proxyclaw-mcp with the updated source setup
