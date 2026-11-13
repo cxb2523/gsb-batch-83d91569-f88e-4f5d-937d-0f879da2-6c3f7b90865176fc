@@ -1,0 +1,10 @@
+services:
+  web-mirror:
+    image: drumsergio/web-mirror:1.0.3
+    volumes:
+      - Z:\:/data:rw
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    privileged: true
+    
