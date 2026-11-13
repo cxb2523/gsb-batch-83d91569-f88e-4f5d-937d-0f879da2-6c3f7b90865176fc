@@ -1,0 +1,814 @@
+"""page_flow.py — what to do with the page Vrbo just gave us.
+
+Vrbo answers a request five ways, and four of them want a different response,
+which is why this module exists rather than the same triage being written
+three times inside three engines and drifting apart:
+
+    content    the grid is in the document
+    empty      a search that genuinely matched nothing. No grid, and — unlike
+               a sibling repo's site — no backfill of suggestions either, so
+               an empty answer here really is empty
+    shell      served, built out of the site's own assets, grid not there
+               yet. Wants a WAIT and a SCROLL, not a refetch
+    challenge  Expedia's Bot-or-Not handler rendered something this repo can
+               actually pay to have solved
+    blocked    HTTP 429 and that same handler, having picked a vendor this
+               repo cannot solve — which is the normal case here
+
+The policy lives in `STATE_POLICY` as DATA, so an engine cannot quietly
+disagree with its twins about whether a page is worth retrying or worth
+paying for.
+
+Everything here is pure or driven through small callables, so each engine
+passes its own driver's primitives and keeps its browser plumbing to itself:
+
+    count(selector) -> int              how many elements match
+    scroll_results() -> None            scroll the RESULTS container down
+    results_height() -> Optional[int]   that container's scroll height
+    press_next() -> bool                press the site's next-page button
+    first_card_href() -> Optional[str]  the first card's link
+    sleep(ms) -> None                   wait
+
+No JavaScript crosses that boundary in either direction: Selenium's
+`execute_script` takes a function BODY with an explicit `return` where
+Playwright and pyppeteer take `() => expr`, so this module names the
+OPERATION and each engine spells it in its own driver's dialect.
+
+This module DOES have a scroll loop, and that is the opposite of a sibling
+repo where the same measurement said not to
+------------------------------------------------------------------------
+On this site the scroll is the only way most of the grid is ever seen, and
+the shape of it is unusual enough to be worth stating twice:
+
+  * The page body NEVER scrolls. `document.body.scrollHeight ===
+    window.innerHeight === 900` on every capture. The usual advice to "scroll to
+    `document.body.scrollHeight`" moves nothing at all here — measured, 12
+    window scrolls, 18 cards before and 18 after.
+  * The results are in an INNER scroller, `.scrollable-result-section`.
+    Scrolling THAT reached 50 of 50 cards in two rounds and then held still.
+  * The first paint is small and varies with the split-view layout: 18 cards
+    on one load and 3 on another, same URL, same viewport.
+"""
+
+from __future__ import annotations
+
+import logging
+import random
+from typing import Callable, Dict, List, Optional, Tuple
+
+from product_parser import (SELECTORS, NEXT_PAGE_SELECTOR, PAGE_CAP,
+                            challenge_vendor, detect_block_marker,
+                            detect_bot_challenge, detect_page_state,
+                            is_challenge_page, listing_kind, paginates_by_url,
+                            results_range, served_by_vrbo, sku_from_url,
+                            strip_tracking)
+
+logger = logging.getLogger("page_flow")
+
+
+# ---------------------------------------------------------------------------
+# Readiness
+# ---------------------------------------------------------------------------
+READY_SELECTOR_LISTING = SELECTORS["item_card"]
+# A property page paints its title first and its price block last, so the
+# title alone would resolve on a page with no price on it. The price block is
+# the thing a row is built from.
+READY_SELECTOR_PROPERTY = SELECTORS["detail_price"]
+
+# Above 1: waiting for a single match resolves on an unrelated node
+# long before the grid paints. Two rather than the measured first-paint
+# minimum of three, so a genuine two-result listing is not made to spend the
+# whole timeout — and `min_matches` clamps it further when the site's own
+# counter says the page holds fewer.
+MIN_CARD_MATCHES = 2
+MIN_CARD_MATCHES_PROPERTY = 1
+
+# Generous against a measured first paint of 2-4s, because a residential
+# exit and a cold cache are both slower than a laptop on a home connection,
+# and the cost of waiting too long is latency where the cost of waiting too
+# little is a run holding three cards out of fifty.
+CONTENT_TIMEOUT_MS = 25_000
+CONTENT_TIMEOUT_MS_PROPERTY = 20_000
+
+_READY = {"listing": READY_SELECTOR_LISTING, "property": READY_SELECTOR_PROPERTY}
+_MIN = {"listing": MIN_CARD_MATCHES, "property": MIN_CARD_MATCHES_PROPERTY}
+
+
+def ready_selector(mode: str) -> str:
+    return _READY.get(mode, READY_SELECTOR_LISTING)
+
+
+def min_matches(mode: str, expected: Optional[int] = None) -> int:
+    """How many matches mean "painted".
+
+    `expected` is what the site's own counter says this page holds, and
+    passing it is what keeps a short last page from timing out: a listing
+    whose final page holds one property can never reach two.
+    """
+    floor = _MIN.get(mode, MIN_CARD_MATCHES)
+    if expected is None or expected <= 0:
+        return floor
+    return max(1, min(floor, expected))
+
+
+def content_timeout_ms(mode: str) -> int:
+    return CONTENT_TIMEOUT_MS_PROPERTY if mode == "property" else CONTENT_TIMEOUT_MS
+
+
+def expected_cards(html: Optional[str]) -> Optional[int]:
+    """How many cards this page's own counter says it holds."""
+    return results_range(html or "").expected_on_page
+
+
+def wait_for_count(count: Callable[[str], int], sleep: Callable[[int], None],
+                   selector: str, minimum: int, timeout_ms: int,
+                   poll_ms: int = 250) -> int:
+    """Poll `selector` until `minimum` elements match, or the budget runs out.
+
+    Polls a COUNT rather than waiting on an evaluated string. Playwright's
+    `wait_for_function` hands the browser a string to evaluate, which a site
+    whose CSP lacks `unsafe-eval` refuses outright — it took a sibling repo's
+    run down with `EvalError` and exit 1 on that site's most obvious URL
+   . Vrbo's own CSP was not audited page-kind by page-kind here, which
+    is exactly why the question is not being asked: a count poll is a CDP
+    call under every CSP and spells the same in all three drivers.
+
+    Returns the last count seen, so a caller can tell "painted" from "timed
+    out with three of them".
+    """
+    waited = 0
+    seen = count(selector)
+    while seen < minimum and waited < timeout_ms:
+        sleep(poll_ms)
+        waited += poll_ms
+        seen = count(selector)
+    if seen < minimum:
+        logger.info("readiness wait ended at %d/%d matches for %s after %dms",
+                    seen, minimum, selector, waited)
+    return seen
+
+
+# ---------------------------------------------------------------------------
+# The scroll, which on this site is where most of the data comes from
+# ---------------------------------------------------------------------------
+# Three stable rounds, not one. The family's rule, and the measurement behind it
+# here: scrolling the results container took the count 18 -> 50 in the first
+# round and the container's height 5,099 -> 10,232 in the second, then both
+# held still for twenty-three more rounds. A loop that stopped at the first
+# unchanged round would have stopped at 18.
+SCROLL_STABLE_ROUNDS = 3
+# Enough for a 50-card page at the measured two productive rounds, with a
+# wide margin for a slow exit, and a hard stop so a page that grows forever
+# cannot hang a run.
+SCROLL_MAX_ROUNDS = 20
+# How many stable rounds to tolerate while the page's own counter says there
+# are still cards to come. Earned on the first live run of this engine: page
+# 2 settled at 19 cards against a counter that said 50. That was read at the
+# time as a batch in flight behind a throttled `/graphql` POST. The 2026-10-22
+# measurement found the lazy tail instead (see PLACEHOLDER_SELECTOR): no
+# request is behind those cards. A pause is still not an ending when the site
+# has told us how many there are, so below a known target the loop is twice
+# as patient before giving up.
+SCROLL_STABLE_ROUNDS_BELOW_TARGET = 6
+# The next batch takes longer to arrive than a single pause.
+SCROLL_PAUSE_MS = 1_600
+
+# The grid's lazy tail. Below the last rendered card the site keeps a block
+# of placeholder cards and fills it only when it scrolls INTO view. Scrolling
+# the container to its bottom puts it in view once; after that every further
+# "scroll to bottom" sets the same scrollTop, nothing moves, and the grid
+# waits for good. Measured: the 2026-10-20 and 10-21 canaries stopped with 6
+# placeholders under 13 cards (page 1, no proxy) and 19 cards (pages 2 and 3,
+# residential exit) while count and height held still; on 2026-10-22, from a
+# plain connection, the same 13-card stall held for eight rounds and ONE
+# nudge (back to the top, then down a screen at a time) took it to 50 of 50.
+# No /graphql call is behind those cards, so waiting longer cannot help.
+PLACEHOLDER_SELECTOR = SELECTORS["grid_placeholder"]
+# Bounded: a nudge that does not help three times will not on the fourth.
+SCROLL_MAX_NUDGES = 3
+NUDGE_TOP_PAUSE_MS = 800
+NUDGE_STEP_PAUSE_MS = 300
+NUDGE_STEP_SHARE = 0.8        # of the container's visible height
+NUDGE_MAX_STEPS = 40          # a 12,000px grid in ~550px steps is ~22
+
+
+def nudge_grid(geometry: Callable[[], Optional[tuple]],
+               set_top: Callable[[int], None],
+               sleep: Callable[[int], None]) -> None:
+    """Move the lazy tail out of view and walk it back in, a screen at a time.
+
+    `geometry` returns the container's (scrollTop, scrollHeight,
+    clientHeight), or None when there is no container; `set_top` sets its
+    scrollTop. Both are named driver operations, so this reads the same in
+    every engine.
+    """
+    if not geometry():
+        return
+    set_top(0)
+    sleep(NUDGE_TOP_PAUSE_MS)
+    for _ in range(NUDGE_MAX_STEPS):
+        g = geometry()
+        if not g:
+            return
+        top, height, client = (int(v or 0) for v in g)
+        if top + client >= height - 2:
+            return
+        set_top(min(height, top + max(1, int(client * NUDGE_STEP_SHARE))))
+        sleep(NUDGE_STEP_PAUSE_MS)
+
+
+def scroll_until_settled(count: Callable[[str], int],
+                         scroll_results: Callable[[], None],
+                         results_height: Callable[[], Optional[int]],
+                         sleep: Callable[[int], None],
+                         selector: str = READY_SELECTOR_LISTING,
+                         target: Optional[int] = None,
+                         max_rounds: int = SCROLL_MAX_ROUNDS,
+                         nudge: Optional[Callable[[], None]] = None,
+                         trace: Optional[dict] = None) -> int:
+    """Scroll the results container until the grid stops growing.
+
+    Requires the card count AND the container height to hold still for
+    `SCROLL_STABLE_ROUNDS` consecutive rounds — the count alone is not
+    enough, because a batch can be in flight with the count unchanged and the
+    height already growing.
+
+    `target` is what the site's own counter says the page holds. Reaching it
+    ends the loop immediately, which saves four idle rounds on every page;
+    NOT reaching it does not end anything early, because the gap is reported
+    rather than chased (the rank-gap arithmetic).
+
+    `nudge`, when given, is called (at most `SCROLL_MAX_NUDGES` times) when
+    the grid has held still for `SCROLL_STABLE_ROUNDS` rounds with the site's
+    own placeholders still on the page. See PLACEHOLDER_SELECTOR. Its rounds
+    do not come out of the ordinary budget.
+
+    `trace`, when given, receives `nudges` and `placeholders_left`.
+
+    Returns the final card count.
+    """
+    seen = count(selector)
+    height = results_height()
+    stable = nudges = rounds = 0
+    budget = max_rounds + (SCROLL_MAX_NUDGES * SCROLL_STABLE_ROUNDS if nudge else 0)
+    while rounds < budget:
+        if target is not None and seen >= target:
+            break
+        scroll_results()
+        sleep(SCROLL_PAUSE_MS)
+        rounds += 1
+        now, now_height = count(selector), results_height()
+        if now == seen and now_height == height:
+            stable += 1
+            if (nudge is not None and nudges < SCROLL_MAX_NUDGES
+                    and stable >= SCROLL_STABLE_ROUNDS
+                    and count(PLACEHOLDER_SELECTOR) > 0):
+                nudges += 1
+                logger.info("The grid stopped at %d card(s) with the site's "
+                            "loading placeholders still showing; scrolling it "
+                            "back through (nudge %d/%d).", now, nudges,
+                            SCROLL_MAX_NUDGES)
+                nudge()
+                stable = 0
+                seen, height = count(selector), results_height()
+                continue
+            # More patience while the site's own counter says cards are
+            # still owed. See SCROLL_STABLE_ROUNDS_BELOW_TARGET.
+            allowed = (SCROLL_STABLE_ROUNDS_BELOW_TARGET
+                       if target is not None and now < target
+                       else SCROLL_STABLE_ROUNDS)
+            if stable >= allowed:
+                break
+        else:
+            stable = 0
+        seen, height = now, now_height
+    if trace is not None:
+        trace["nudges"] = nudges
+        trace["placeholders_left"] = count(PLACEHOLDER_SELECTOR)
+    return seen
+
+
+def unsettled_reason(trace: dict) -> str:
+    """Why a page stopped short of its counter, in words for the log."""
+    left = trace.get("placeholders_left")
+    if left:
+        return (f"the site's own loading placeholders ({left}) were still on "
+                f"the page after {trace.get('nudges', 0)} nudge(s), so the "
+                f"grid never filled in")
+    if left == 0:
+        return ("no loading placeholder was left on the page, so the site "
+                "served a short page or the grid was still filling")
+    return ("the grid was still filling when the scroll budget ran out, or "
+            "the site served a short page")
+
+
+# ---------------------------------------------------------------------------
+# Classification and the policy that follows from it
+# ---------------------------------------------------------------------------
+def classify(html: Optional[str], status: Optional[int] = None,
+             url: str = "") -> str:
+    """Which of the five states this response is.
+
+    `status` is positional and comes SECOND, matching `detect_page_state`.
+    Getting that wrong is not a style question: a sibling repo shipped two of
+    three engines calling this as `classify(html, url=...)`, both crashed on
+    their first fetch, and nothing short of a live run or a signature-binding
+    check saw it. This repo's smoke suite binds every shared-module
+    call in every engine for that reason.
+    """
+    if html is None:
+        return "blocked"
+    return detect_page_state(html, status, url)
+
+
+# The retry/solve/blocked decision as DATA rather than as three copies of an
+# if-chain in three engines.
+#
+#   parse    is there anything on this page worth writing down?
+#   retry    would fetching it again, later or from a different exit,
+#            plausibly help?
+#   solve    is there something to pay a solver for?
+#   blocked  does this count towards exit 3?
+STATE_POLICY: Dict[str, Dict[str, bool]] = {
+    "content":   {"parse": True,  "retry": False, "solve": False, "blocked": False},
+    # Nothing to parse and nothing to retry: the site was asked a question
+    # and answered it. Vrbo does NOT backfill an empty search with
+    # suggestions, so unlike one sibling repo this state is safe to treat as
+    # simply empty rather than as a trap.
+    "empty":     {"parse": False, "retry": False, "solve": False, "blocked": False},
+    # Served and still painting. Wants the readiness wait and the scroll,
+    # not another fetch: refetching a shell buys another shell. Parsed
+    # because by the time an engine asks, the wait has already run.
+    "shell":     {"parse": True,  "retry": False, "solve": False, "blocked": False},
+    # Retried and paid for while the page's attempts last; still a challenge
+    # when they run out means the content was never obtained, which is a
+    # block (exit 3) and not an empty catalogue. With `blocked: False` an
+    # unsolved challenge used to fall through to the parser, give 0 rows and
+    # exit 4 — "the search matched nothing" about a page nobody read.
+    "challenge": {"parse": False, "retry": True,  "solve": True,  "blocked": True},
+    "blocked":   {"parse": False, "retry": True,  "solve": False, "blocked": True},
+}
+
+
+def should_parse(state: str) -> bool:
+    return STATE_POLICY.get(state, STATE_POLICY["blocked"])["parse"]
+
+
+def should_retry(state: str) -> bool:
+    return STATE_POLICY.get(state, STATE_POLICY["blocked"])["retry"]
+
+
+def should_solve(state: str) -> bool:
+    return STATE_POLICY.get(state, STATE_POLICY["blocked"])["solve"]
+
+
+def counts_as_blocked(state: str) -> bool:
+    return STATE_POLICY.get(state, STATE_POLICY["blocked"])["blocked"]
+
+
+def unobtained_reason(state: str, rows: int) -> Optional[str]:
+    """Why a page that was served still did not yield its content, or None.
+
+    Decided AFTER the readiness wait, the scroll and the parse, on the final
+    state:
+
+      * rows were parsed, or the site printed its own no-results copy
+        (`empty`): the page answered, None.
+      * `content` (the grid is in the document) and 0 rows: the page states
+        rows and the parser lost them — `parser_found_nothing`.
+      * anything else with 0 rows, in practice a `shell` that never painted:
+        `served_without_results`. A Vrbo error page ("Sorry, we're having a
+        problem on our end") is built from the site's own assets and reads
+        as a shell; measured on a real canary capture, it used to end as
+        exit 4, an empty catalogue, when nothing had been read.
+
+    Neither is a statement about the catalogue, so a run holding no rows
+    exits 5 and one holding earlier pages exits 6.
+    """
+    if rows or state == "empty":
+        return None
+    if state == "content":
+        return "parser_found_nothing"
+    return "served_without_results"
+
+
+def failure_stop_reason(outcome) -> str:
+    """The run's stop_reason for a page outcome that is not ok."""
+    if outcome.load_failed:
+        return "page_load_timeout"
+    if outcome.blocked_by is not None:
+        return f"blocked_{outcome.blocked_by}"
+    return getattr(outcome, "unobtained", None) or "page_not_obtained"
+
+
+def is_unpainted(state: str, html: Optional[str]) -> bool:
+    """Whether this page is served but has not painted its grid yet."""
+    if state != "shell":
+        return False
+    return served_by_vrbo(html or "")
+
+
+# Retrying a block DOES help on this site, which is the opposite of a sibling
+# repo and is measured rather than assumed. The refusal here is a RATE
+# response — HTTP 429, `Provisioned request rate has been exceeded` on the
+# GraphQL side — and the same URL that answered 429 answered 200 with the
+# full grid a few minutes later from the same address and the same browser.
+#
+# So the budget is non-zero, and it is larger with a pool than without,
+# because a different exit carries a different rate bucket. The engines read
+# these constants rather than computing their own budget — a policy constant
+# nothing consults is the same defect as dead code.
+RETRY_ON_BLOCKED = True
+BLOCK_RETRIES_WITHOUT_POOL = 2
+
+
+def block_pause(retry_delay: float, block_attempt: int,
+                backoff_base: Optional[float] = None) -> float:
+    """Seconds to wait before re-fetching a page that came back refused.
+
+    `block_attempt` counts from 0. Without `--block-retry-delay` this is the
+    historical linear `retry_delay * (n + 1)` (2 s, 4 s at the defaults),
+    which is short for a RATE response that was measured clearing minutes
+    later. With it, the wait starts at `backoff_base` and DOUBLES each retry,
+    so a reader who wants to outwait the limit asks for 30 and gets 30, 60.
+    One implementation here so the three engines cannot disagree on it.
+    There is deliberately no jitter: one client has no herd to spread from.
+    """
+    if backoff_base is None:
+        return retry_delay * (block_attempt + 1)
+    return backoff_base * (2 ** block_attempt)
+
+
+def attempts_arg(value: str) -> int:
+    """argparse type for `--retries`: an ATTEMPT count, so at least 1.
+
+    Every engine loops `range(1, retries + 1)` around its navigation, so 0
+    meant zero navigations: the page stayed `about:blank` (39 bytes of empty
+    DOM), classified as `blocked`, and the run reported exit 3 having never
+    sent a request to the site. Refusing it at the parser is cheaper than
+    teaching that loop what zero means.
+    """
+    import argparse
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer")
+    if n < 1:
+        raise argparse.ArgumentTypeError(
+            f"{n} attempts would never load the page; use 1 for no retry")
+    return n
+
+
+def at_least(minimum, kind=int):
+    """argparse type: a number no smaller than `minimum`.
+
+    For the counts and waits besides `--retries`: a negative `--delay` makes
+    `time.sleep` raise mid-run after page 1 was already paid for, a negative
+    `--proxy-block-retries` silently turns the retry loop off, and `--pages
+    0` asks for nothing. argparse names the flag in its error, so the user
+    sees which value was refused before anything is fetched.
+    """
+    import argparse
+
+    def _parse(value: str):
+        try:
+            n = kind(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"{value!r} is not a{'n integer' if kind is int else ' number'}")
+        if n != n or n < minimum:  # n != n catches NaN
+            raise argparse.ArgumentTypeError(
+                f"{value} is below the minimum of {minimum}")
+        return n
+    _parse.__name__ = f"at_least_{minimum}"
+    return _parse
+BLOCK_RETRIES_WITH_POOL = 3
+
+# One solve per page. Detection is broad on purpose, but a second solve on
+# the same page has never been the answer to the first one failing.
+SOLVES_PER_PAGE = 1
+
+
+class SolveBudget:
+    """The per-page allowance of paid captcha solves.
+
+    Every engine calls its captcha handler twice per fetch attempt: once
+    before the page is classified (so a challenge is cleared before anything
+    is judged) and once after, for a state that says the page really is
+    gated. Counting only the second call left the first one unbounded, and it
+    runs again on every block retry and every rotation. Measured with a
+    stubbed solver before this class existed: 4 purchases per page in each
+    engine against a limit of 1.
+
+    So ONE object is created per page, before the retry loop, and handed to
+    every call site. `spend()` is asked immediately before the purchase and
+    answers False once the allowance is used. It is never reset by a retry or
+    a rotation: a fresh exit is a reason to fetch again, not a fresh
+    allowance.
+    """
+
+    def __init__(self, limit: Optional[int] = None):
+        self.limit = SOLVES_PER_PAGE if limit is None else int(limit)
+        self.spent = 0
+
+    def remaining(self) -> int:
+        return max(0, self.limit - self.spent)
+
+    def spend(self) -> bool:
+        """Claim one solve. False, and nothing claimed, once the limit is reached."""
+        if self.spent >= self.limit:
+            return False
+        self.spent += 1
+        return True
+
+
+def block_advice(html: Optional[str], headless: bool, has_pool: bool) -> str:
+    """What a reader should actually DO about this block.
+
+    Exists because the honest first answer on this site is almost never "get
+    a better proxy" — it is "slow down, the 429 is a rate response" — and a
+    message that says so saves an afternoon and a proxy bill. It used to say
+    "use a real Chrome" instead, on the strength of three single requests;
+    the interleaved re-measurement (12 of 12 served on both builds) found no
+    browser effect, so the browser is no longer named as the cause.
+    """
+    vendor = challenge_vendor(html or "")
+    marker = detect_block_marker(html or "") or "HTTP 429"
+    lead = f"blocked ({marker})"
+    if vendor and not detect_bot_challenge(html or ""):
+        lead = (f"blocked ({marker}) — Expedia's challenge handler picked "
+                f"{vendor!r} this time, which this repo has no solver for, so "
+                f"no solve was attempted and nothing was charged")
+    elif vendor and "datadome" in vendor:
+        lead = (f"blocked ({marker}) — Expedia's challenge handler picked "
+                f"DataDome and it was not cleared. The DataDome fallback buys "
+                f"a solve only with TWOCAPTCHA_KEY set, a proxy the browser "
+                f"itself exits through (not --cdp-endpoint, not Selenium with "
+                f"a proxy login), a slider on the page and an address to "
+                f"re-load; captcha_attempts in the sidecar says which of "
+                f"those stopped it, or whether an answer was bought and "
+                f"refused")
+    hints = [
+        "how this site scores the exit address is noisy: the same address "
+        "was served and challenged minutes apart, and bundled Chromium and "
+        "real Chrome were served 12 of 12 when interleaved on a clean one, "
+        "so changing the browser is not the first lever",
+    ]
+    if headless:
+        hints.append("a real window (--headful, the default here) is still "
+                     "a more faithful client, but it was not what decided "
+                     "access when measured")
+    if not has_pool:
+        hints.append("the 429 is a RATE response and it clears: the same URL "
+                     "was served minutes later from the same address. Slow "
+                     "down with --delay, or spread the load with --proxy-file")
+    else:
+        hints.append("with a pool in play, raise --delay before raising "
+                     "--concurrency: N workers from N addresses still means "
+                     "N times the request rate at the site")
+    return lead + ". " + "; ".join(hints) + "."
+
+
+# ---------------------------------------------------------------------------
+# Pagination — a button, not an address
+# ---------------------------------------------------------------------------
+# There is deliberately no `page_url()` and no `next_page_candidates()` in
+# this module, because on this site there is no page-2 address to build.
+# `&startIndex=50` and `&page=2` were both tried with a real browser and both
+# answered HTTP 200 with the counter still reading "1 - 50 of 300+" and the
+# same first cards — they do not fail, they silently return page 1. A
+# run built on either would add no new sku, call the listing exhausted and
+# report COMPLETE holding a sixth of the catalogue.
+#
+# What works is pressing the site's own button, which fires a GraphQL POST
+# and leaves `window.location` untouched. Measured: the counter moved from
+# "1 - 50 of 300+" to "51 - 100 of 300+" with zero title overlap against
+# page 1.
+
+# How long to wait for a next-press to take effect. Generous, and it has to
+# be: the press fires a `/graphql` POST that was observed answering 429
+# ("Provisioned request rate has been exceeded") on the first attempt, with
+# the site's own client retrying and succeeding on the second. A budget
+# tuned to the happy path would report the listing exhausted every time that
+# happened.
+NEXT_PAGE_TIMEOUT_MS = 60_000
+NEXT_PAGE_POLL_MS = 1_000
+
+
+def has_next_page(count: Callable[[str], int]) -> bool:
+    """Whether the site is offering a next page at all.
+
+    The weakest of the termination signals and therefore the second one
+    asked: a missing button is a property of the DOM, while "this page added
+    no sku we had not already seen" is a property of the catalogue.
+    """
+    return count(NEXT_PAGE_SELECTOR) > 0
+
+
+# The three ways a page turn can end, and keeping them apart is the whole
+# reason this returns a string rather than a bool.
+#
+# The first version of this function returned False for both of the last two,
+# and the engine mapped False to `pagination_exhausted` — which is in
+# COMPLETE_STOP_REASONS. So a run that was being RATE LIMITED reported status
+# "complete" holding page 1. That is precisely the silent-success failure
+# this family exists to prevent, and it was caught by running the thing
+# rather than by reading it.
+ADVANCED = "advanced"
+NO_BUTTON = "no_button"          # the listing genuinely ran out
+NO_TURNOVER = "no_turnover"      # pressed, and the grid never came back
+
+
+def advance_to_next_page(press_next: Callable[[], bool],
+                         first_card_href: Callable[[], Optional[str]],
+                         count: Callable[[str], int],
+                         sleep: Callable[[int], None],
+                         timeout_ms: int = NEXT_PAGE_TIMEOUT_MS) -> str:
+    """Press next and wait for the grid to actually turn over.
+
+    Returns ADVANCED, NO_BUTTON or NO_TURNOVER — see above for why the last
+    two must not be the same answer.
+
+    Readiness here is the FIRST CARD'S SKU CHANGING, and the two more obvious
+    signals were both tried and both are wrong:
+
+      * the URL — never changes, by design;
+      * the counter element — is destroyed and rebuilt during the
+        transition, so a poll on it reads `None` mid-flight and a loop
+        waiting for its text to change gives up on a page that was about to
+        arrive. Measured: a 45-second wait on the counter reported "never
+        changed" on a press that had in fact worked.
+
+    The card count going briefly to zero is NORMAL during the transition:
+    the results container is rebuilt, collapsing to its client height with
+    `scrollTop` back at 0 (measured). What is NOT normal is it staying that
+    way, and on this site the reason is almost always that the `/graphql`
+    POST behind the turn was answered 429.
+    """
+    before_sku = _first_sku(first_card_href)
+    if not press_next():
+        return NO_BUTTON
+    return _await_turnover(first_card_href, count, sleep, before_sku,
+                           timeout_ms)
+
+
+def _first_sku(first_card_href: Callable[[], Optional[str]]) -> Optional[str]:
+    href = first_card_href()
+    return sku_from_url(strip_tracking(href or "")) if href else None
+
+
+def _turned_over(first_card_href, count, before_sku) -> bool:
+    if count(READY_SELECTOR_LISTING) <= 0:
+        return False
+    now_sku = _first_sku(first_card_href)
+    return bool(now_sku and now_sku != before_sku)
+
+
+def _await_turnover(first_card_href, count, sleep, before_sku,
+                    timeout_ms: int) -> str:
+    waited = 0
+    while waited < timeout_ms:
+        sleep(NEXT_PAGE_POLL_MS)
+        waited += NEXT_PAGE_POLL_MS
+        if _turned_over(first_card_href, count, before_sku):
+            logger.info("next page arrived after %dms", waited)
+            return ADVANCED
+    logger.info("next page never turned over within %dms", timeout_ms)
+    return NO_TURNOVER
+
+
+# One bounded retry of a page turn that never came back.
+#
+# Measured on the 2026-10-22 canary walk through a sticky residential
+# session: pages 1 and 2 turned over in 2 s, then the press for page 3 got
+# one `/graphql` HTTP 429 ("Provisioned request rate has been exceeded",
+# no Retry-After header) and the grid stayed empty for the whole 60 s. The
+# answer carries no wait to honour, so the wait is ours: a random pause
+# between 2/3 and 4/3 of `--throttle-wait-seconds` (30-60 s at the default
+# 45), in the SAME browser, session and exit — the next page exists only
+# inside this session, so a relaunch or a new exit would restart the listing
+# at page 1. Then the turn is tried ONCE more. A second failure ends the run
+# as before (partial, next_page_throttled); there is no third press.
+#
+# The retry keys on the no-turnover STATE rather than on a counted 429: the
+# Playwright engine can count the /graphql 429s, Selenium has no response
+# listener and cannot. All three engines therefore retry the same state and
+# report the count only where it is known.
+THROTTLE_WAIT_DEFAULT_S = 45.0
+THROTTLE_RETRIES_PER_TURN = 1
+
+
+def throttle_pause_s(wait_seconds: float,
+                     uniform: Callable[[float, float], float] = random.uniform
+                     ) -> float:
+    """The randomised pause before retrying a throttled turn, in seconds."""
+    return uniform(wait_seconds * 2.0 / 3.0, wait_seconds * 4.0 / 3.0)
+
+
+def advance_with_throttle_retry(press_next: Callable[[], bool],
+                                first_card_href: Callable[[], Optional[str]],
+                                count: Callable[[str], int],
+                                sleep: Callable[[int], None],
+                                wait_seconds: float,
+                                before_retry: Callable[[], None],
+                                throttled: Callable[[], int] = lambda: 0,
+                                uniform: Callable[[float, float], float]
+                                = random.uniform,
+                                timeout_ms: int = NEXT_PAGE_TIMEOUT_MS
+                                ) -> Tuple[str, int]:
+    """`advance_to_next_page`, with one paced retry of a turn that failed.
+
+    Returns (outcome, retries made). `wait_seconds` 0 disables the retry.
+    `before_retry` is called before the pause and again before the second
+    press; the engines pass the proxy-budget check, which raises once the
+    run's budget is spent, so a spent budget never buys a retry.
+
+    The second attempt compares against the card that was first BEFORE the
+    original press: a grid that arrived late, during the pause, is a turn
+    and is not pressed again (a second press would skip a page). A next
+    button that is gone after the failed turn is NOT the end of the
+    listing here — it reads as another failed turn, never as NO_BUTTON.
+    """
+    before_sku = _first_sku(first_card_href)
+    if not press_next():
+        return NO_BUTTON, 0
+    turn = _await_turnover(first_card_href, count, sleep, before_sku,
+                           timeout_ms)
+    if turn == ADVANCED or not wait_seconds or wait_seconds <= 0:
+        return turn, 0
+    before_retry()
+    pause = throttle_pause_s(wait_seconds, uniform)
+    seen = throttled()
+    logger.warning(
+        "The page turn did not come back within %.0fs%s. Waiting %.0fs in "
+        "the same browser session and exit, then pressing next once more "
+        "(--throttle-wait-seconds %g; 0 disables this retry).",
+        timeout_ms / 1000,
+        f" ({seen} /graphql response(s) were HTTP 429)" if seen else "",
+        pause, wait_seconds)
+    sleep(int(pause * 1000))
+    before_retry()
+    if _turned_over(first_card_href, count, before_sku):
+        logger.info("The next page arrived during the pause; not pressing "
+                    "again.")
+        return ADVANCED, THROTTLE_RETRIES_PER_TURN
+    if not press_next():
+        logger.info("The next button is not on the page after the failed "
+                    "turn; the turn stays failed.")
+        return NO_TURNOVER, THROTTLE_RETRIES_PER_TURN
+    turn = _await_turnover(first_card_href, count, sleep, before_sku,
+                           timeout_ms)
+    return turn, THROTTLE_RETRIES_PER_TURN
+
+
+def page_cap_reached(page_num: int) -> bool:
+    return page_num >= PAGE_CAP
+
+
+# ---------------------------------------------------------------------------
+# Completeness
+# ---------------------------------------------------------------------------
+def page_gap(html: Optional[str], parsed: int) -> Optional[int]:
+    """How many cards the page's own counter says are missing, or None.
+
+    None rather than 0 when the counter is absent: an unknown gap is not a
+    gap of zero, and the two must not read the same in a sidecar. Where the
+    counter IS there this is arithmetic rather than a threshold — the page
+    states it holds items 1 to 50, so 40 rows means ten cards never loaded
+   . One measured page-2 run had exactly that.
+    """
+    expected = expected_cards(html)
+    if expected is None:
+        return None
+    return max(0, expected - parsed)
+
+
+# ---------------------------------------------------------------------------
+# Concurrency
+# ---------------------------------------------------------------------------
+def concurrency_limit(url: str) -> Optional[int]:
+    """The highest `--concurrency` this URL can honestly support.
+
+    Always 1. Page 5 of a listing that only exists behind four button presses
+    cannot be handed to a worker.
+    """
+    return 1
+
+
+def concurrency_refusal(url: str) -> Optional[str]:
+    """Why concurrency above 1 is refused for this URL.
+
+    Refused WITH the reason rather than silently running one worker, which
+    would look like the flag did something.
+    """
+    kind = listing_kind(url)
+    if kind == "property":
+        return ("a property page is a single page; --concurrency above 1 has "
+                "nothing to fetch")
+    if not paginates_by_url(url):
+        return ("a Vrbo listing has no per-page address — page N exists only "
+                "behind N-1 presses of the site's own next button, so pages "
+                "cannot be fetched independently and --concurrency above 1 "
+                "has nothing to hand a second worker. Run several searches "
+                "in parallel instead, one process each")
+    return None

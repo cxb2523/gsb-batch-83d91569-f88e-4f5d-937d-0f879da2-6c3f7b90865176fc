@@ -1,0 +1,72 @@
+name: Site changed / selectors broke
+description: Vrbo changed something and the parser no longer matches.
+labels: ["site-change"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most common way a scraper stops working, and it is worth
+        its own report because the fix is different from a code bug:
+        something on vrbo.com moved.
+
+        Useful to know before filing, because it narrows the fix a lot:
+        there is **no structured data on a listing page**, so every column
+        comes from the rendered card, anchored on Vrbo's own `data-stid`
+        attributes. The card is `[data-stid="lodging-card-responsive"]`,
+        and the price container has two spellings —
+        `data-stid="product-price-summary"` on vrbo.com and
+        `data-test-id="price-summary"` on the local storefronts — so say
+        which host you ran. `price_source` on the rows says which node was
+        read: `card` / `card-a11y` on a listing, `detail` / `detail-a11y`
+        on a property page.
+
+  - type: dropdown
+    id: what_broke
+    attributes:
+      label: What stopped matching
+      options:
+        - No rows at all on a page that visibly has properties (the card moved)
+        - Rows come out with no prices (the price container moved)
+        - Prices missing on one storefront only (a new spelling of the container)
+        - Fewer rows than the page's own counter says (cards_missing)
+        - Pagination stops early or repeats a page (the next button moved)
+        - A property page returns nothing (--mode property)
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: URL
+      description: >-
+        The exact URL, which storefront, how the browser was reached
+        (local headful, headless, or --cdp-endpoint) and from which exit.
+      placeholder: "https://www.vrbo.com/search?destination=... (storefront: vrbo.com, headful local Chrome, exit: BE residential)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence from the page
+      description: |
+        Whichever of these you can get. A capture beats a description, and
+        `--dump-html` writes one on success as well as on failure.
+
+        - For a price problem: one whole
+          `[data-stid="lodging-card-responsive"]` card from devtools, and
+          the amount the page shows for that property.
+        - For a missing-rows problem: the counter text
+          (`1 - 50 of 300+`) and `cards_missing` from the sidecar.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it reproduces on a second engine, whether it reproduces on a
+        second storefront, and when it last worked.

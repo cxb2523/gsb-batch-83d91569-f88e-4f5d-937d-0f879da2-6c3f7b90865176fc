@@ -1,0 +1,98 @@
+"""Canary helper: put one run's proxy traffic in the step summary.
+
+    python3 .github/proxy_traffic.py <label> <out-prefix>
+
+Reads `<out>.latest_attempt.meta.json` (written on every metered run, rows
+or not), else `<out>.meta.json`, and appends
+
+    **<label>**: proxy traffic X.X MB of N MB
+
+to $GITHUB_STEP_SUMMARY. N is the run's OWN budget, read from the sidecar's
+`proxy_budget_bytes` (written by the scraper from --proxy-budget-mb; `null`
+or absent reads as "no budget"), so a canary step that raises its budget is
+reported against that budget rather than a fixed figure. A missing or
+unreadable sidecar, or a run that did not go through a local proxy, is
+reported as such and is not a failure here (the exit-code steps judge the
+run itself). A run that went over its proxy budget prints
+`::error::stopped: proxy budget N MB exceeded` and exits 1.
+
+When the run met a captcha, a second line gives the captcha fields:
+tasks created, answers returned, answers accepted, and each attempt's
+outcome.
+"""
+
+import json
+import os
+import sys
+
+MB = 1_000_000
+
+
+def _load(out):
+    for suffix in (".latest_attempt.meta.json", ".meta.json"):
+        try:
+            with open(out + suffix, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _mb(n):
+    value = n / MB
+    return f"{value:g} MB" if value == int(value) else f"{value:.1f} MB"
+
+
+def _captcha_line(label, meta):
+    """One line on what the run met and bought, or None when it met no
+    captcha. Never a failure: the exit-code steps judge the run."""
+    if not isinstance(meta, dict) or not meta.get("captcha_attempts"):
+        return None
+    outcomes = ", ".join(
+        "p%s %s%s" % (a.get("page"), a.get("outcome"),
+                      "" if a.get("accepted") is None
+                      else (" accepted" if a["accepted"] else " refused"))
+        for a in meta["captcha_attempts"])
+    return (f"**{label}**: captcha {meta.get('captcha_kind')}: "
+            f"{meta.get('captcha_solves', 0)} task(s) created, "
+            f"{meta.get('captcha_solved', 0)} solved, "
+            f"{meta.get('captcha_accepted', 0)} accepted ({outcomes})")
+
+
+def main(argv):
+    if len(argv) != 3:
+        print("usage: proxy_traffic.py <label> <out-prefix>")
+        return 2
+    label, out = argv[1], argv[2]
+    meta = _load(out)
+    exceeded = False
+    if not isinstance(meta, dict):
+        line = f"**{label}**: proxy traffic unknown (no sidecar was written)"
+    elif "proxy_bytes" not in meta:
+        line = (f"**{label}**: proxy traffic not metered (no local proxy "
+                f"on this run)")
+    else:
+        used = (meta.get("proxy_bytes") or 0) / MB
+        cap = meta.get("proxy_budget_bytes")
+        cap_text = _mb(cap) if cap else "no budget"
+        line = f"**{label}**: proxy traffic {used:.1f} MB of {cap_text}"
+        exceeded = bool(meta.get("proxy_budget_exceeded"))
+    lines = [line]
+    captcha = _captcha_line(label, meta)
+    if captcha:
+        lines.append(captcha)
+    for each in lines:
+        print(each)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as f:
+            for each in lines:
+                f.write(each + "\n\n")
+    if exceeded:
+        print(f"::error::stopped: proxy budget {cap_text} exceeded")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

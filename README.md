@@ -1,0 +1,760 @@
+# Vrbo Scraper — Property Listings, Prices and Ratings in Python
+
+[![release](https://img.shields.io/github/v/release/2scraper/vrbo-scraper?sort=semver)](https://github.com/2scraper/vrbo-scraper/releases)
+[![tests](https://github.com/2scraper/vrbo-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/vrbo-scraper/actions/workflows/tests.yml)
+[![canary](https://github.com/2scraper/vrbo-scraper/actions/workflows/canary.yml/badge.svg)](https://github.com/2scraper/vrbo-scraper/actions/workflows/canary.yml)
+[![python](https://img.shields.io/badge/python-3.9%20%E2%80%93%203.12-blue)](pyproject.toml)
+[![licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+[![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20pyppeteer-lightgrey)](#engines)
+[![runs without an account](https://img.shields.io/badge/runs%20without-an%20account-brightgreen)](#do-you-need-any-of-the-paid-products)
+
+**Vrbo scraper** — an open-source (MIT) Python tool that reads search grids and property pages on Vrbo's five storefronts (vrbo.com, fewo-direkt.de, abritel.fr, bookabach.co.nz, stayz.com.au) and writes prices, ratings, bedrooms, amenities and stay dates to JSON or CSV. No paid product is needed: an ordinary local Chrome on a residential connection reads the site, and on 2026-09-14 a direct connection was served 12 of 12 requests, though the README warns the same address can be challenged minutes apart. Use it for a rental-listing dataset or, with stay dates pinned in the search URL, for price monitoring and comparing two runs with `diff_runs.py`.
+
+Scrapes **Vrbo** property listings — a search grid, or one property's own
+page — into JSON or CSV with a stable column schema, a run-metadata sidecar,
+and exit codes that tell "blocked" from "empty" from "partial".
+
+Works on Vrbo's five storefronts, which are five different catalogues:
+`vrbo.com`, `fewo-direkt.de`, `abritel.fr`, `bookabach.co.nz`,
+`stayz.com.au`.
+
+> **Read this first if you only read one thing.**
+> Whether Vrbo answers you is mostly about **how your exit address is
+> scored**, and it is noisy: the same address serves some requests and
+> challenges others minutes apart. Plan for a challenge you cannot always
+> avoid, rather than for a trick that prevents one.
+>
+> Measured 2026-09-14, direct connection, bundled Chromium and real Chrome
+> interleaved, six requests each: **12 of 12 served**. On a clean address the
+> browser build made no difference at all.
+>
+> An earlier reading of this said the opposite — that the browser binary was
+> the gate — on the strength of three single requests taken minutes apart
+> (`curl` 429, bundled Chromium 429, real Chrome 200). That is one sample per
+> arm on a process later measured serving roughly one request in three even
+> from an exit it was otherwise challenging, so it did not support the claim.
+> It is corrected here rather than quietly dropped.
+>
+> Real Chrome is still this repo's default (`--browser-channel chrome`) and
+> `playwright install chrome` is still worth doing — it is a more faithful
+> client and costs nothing. Just do not expect it to be the difference
+> between working and not.
+
+---
+
+## Install and run
+
+```bash
+git clone https://github.com/2scraper/vrbo-scraper && cd vrbo-scraper
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt -r requirements-playwright.txt
+playwright install chrome            # the default channel; see the box above
+
+python3 playwright_scraper.py \
+  --url "https://www.vrbo.com/search?destination=Orlando,%20Florida,%20United%20States%20of%20America" \
+  --pages 2 --out orlando
+```
+
+That writes `orlando.json`, `orlando.csv` and `orlando.meta.json`.
+
+`orlando.meta.json` carries `schema_version` (`output_writer.SCHEMA_VERSION`,
+MAJOR.MINOR.PATCH): MAJOR when a column is removed, renamed or changes
+meaning, MINOR when one is added at the end, PATCH for a clarification.
+It is the output contract's version, not the package's. `diff_runs.py`
+refuses to compare two runs whose MAJORs differ; sidecars written before it
+existed carry none and are not refused.
+
+**Install exactly one engine.** The three engines' pins are mutually
+unsatisfiable (`playwright` and `pyppeteer` disagree on `pyee`; `pyppeteer`
+and `selenium` on `urllib3`). Use a virtualenv per engine if you need more
+than one.
+
+---
+
+## The four things that will surprise you
+
+### 1. A dateless search prices every property on a different night
+
+With no dates in the URL, Vrbo quotes each property **its own cheapest
+one-night stay**. Three cards in one measured load:
+
+```
+Quiet Oasis in Lovely Neighborhood   $172   for 1 night   Sep 16 - Sep 17
+The Coach House                      $295   for 1 night   Sep 24 - Sep 25
+The Point Hotel & Suites Orlando      $81   for 1 night   Sep 28 - Sep 29
+```
+
+Those prices are **not comparable to each other**, and the same row will
+appear to change price between two runs when all that moved was the date.
+The `stay_dates` column carries the window verbatim so you can see it, and
+the run warns about it at startup.
+
+**For price monitoring, pin the stay:**
+
+```bash
+--url "https://www.vrbo.com/search?destination=...&startDate=2026-11-14&endDate=2026-11-16&adults=2"
+```
+
+Then `stay_dates` is **null on every row** — measured, 50 of 50 — because the
+card no longer needs to state a window you already asked for. A null there is
+the signal that your prices *are* comparable. `diff_runs.py` knows this: a
+price move that comes with a moved `stay_dates` is reported as
+`stay_changed`, not `changed`, and `--fail-on-change` ignores it.
+
+### 2. Pagination is a button, and the obvious URL tricks silently lie
+
+There is no `link[rel=next]`, no `a[rel=next]`, no `<link rel=canonical>` and
+no `hreflang` set anywhere on a listing page. Page 2 is
+`button[data-stid="next-button"]`, which fires a GraphQL POST and leaves the
+address bar untouched.
+
+Worse, the conventions you would reach for do not fail — they return page 1:
+
+| tried | result |
+|---|---|
+| `&startIndex=50` | HTTP 200, counter still `1 - 50 of 300+`, same cards |
+| `&page=2` | HTTP 200, counter still `1 - 50 of 300+`, same cards |
+
+A scraper built on either would find no new listings, conclude the catalogue
+was exhausted, and report a **complete** run holding a sixth of it. This one
+presses the site's own button instead, strictly sequentially, and **refuses
+`--concurrency` above 1** with that as the reason. Run several searches in
+parallel instead, one process each.
+
+### 3. The page turn is rate limited separately from the page
+
+The data behind a next-press comes over `POST /graphql`, and that endpoint
+has its own limiter. Measured: the search page kept answering **HTTP 200**
+while every `/graphql` POST behind a press came back **HTTP 429**
+(`{"error":"Too Many Requests","message":"Provisioned request rate has been
+exceeded"}`) and the site's own client gave up.
+
+The 429 carries no `Retry-After` header. So when a press gets no grid back,
+the run waits a random **30-60 s** (`--throttle-wait-seconds`, default **45**,
+`0` = off) in the same browser session and exit and presses next **once**
+more. The next page exists only inside that session, so it is never retried
+from a new browser or a new exit. The proxy budget is checked before the
+retry. The sidecar records `throttle_retries`.
+
+If the retry gets no grid either, the run reports **`partial`, exit 6** —
+never "the listing ended" — and says how many 429s it counted (Playwright
+only). `--delay` (default **5.0s**, higher than the family default) is the
+cheap lever; `--proxy-file` is the one that scales.
+
+### 4. The results list is an inner scroller, and the page body never scrolls
+
+`document.body.scrollHeight === window.innerHeight` on every capture. The
+grid lives in `.scrollable-result-section`. Measured: scrolling the *window*
+12 times changed nothing (18 cards before, 18 after); scrolling the
+*container* reached **50 of 50 in two rounds**. First paint varies with the
+split-view layout — 3 to 18 cards on the same URL and viewport — so almost
+every row on a page comes from the scroll.
+
+---
+
+## How you know you got everything
+
+The listing states its own size: `1 - 50 of 300+` in the pagination control.
+So completeness here is **arithmetic, not a threshold** — if the page says it
+holds items 1 to 50 and the run merged 40 rows, ten cards never loaded. That
+is reported per page, recorded in the sidecar as `cards_missing`, and
+**downgrades the run to `partial`**, because a consumer reading
+`status: complete` beside a 31-card hole would take it for a delisting.
+
+The German storefront writes the same counter as `1–50 von >300` — en dash,
+floor marker on the other side — which is why it is parsed as "the integers
+in that text".
+
+---
+
+## Output
+
+One row per property. 26 columns; the first 14 are this repo family's shared
+prefix, in the family's order, so a consumer written against a sibling repo
+reads them unchanged.
+
+| column | notes |
+|---|---|
+| `source` | which storefront — **not constant**, and not decorative |
+| `sku` | the property id from the URL path |
+| `expedia_property_id` | Expedia's own id. A **different number** from `sku` on a `/{id}` card (path `2430840` vs `expediaPropertyId=70477069`) |
+| `price`, `currency` | currency from the page's own ISO code, falling back to the host — never a defaulted `"USD"` |
+| `rating`, `rating_scale` | Vrbo rates out of **TEN**. The scale is its own column because the rest of this family publishes five-point ratings under the same name |
+| `review_count` | `1,299 reviews` and `1.614 bewertungen` are 1299 and 1614 |
+| `property_type`, `bedrooms`, `beds`, `property_summary` | the summary line split positionally; the raw line is kept beside it. On the newer card layout (seen 2026-11-05) the type is that card's headline, verbatim: `Apartment in Orlando`, not `Apartment` |
+| `location_note` | usually a neighbourhood, sometimes `Kissimmee, 16.3 mi from Orlando` or `10 Min. Fahrt zum Strand`; the street address in `--mode property` |
+| `badges` | `Premier Host` and whatever joins it |
+| `amenities` | see the caveats below |
+| `stay_dates`, `price_note` | verbatim; see surprise #1 |
+| `price_source` | `card` / `card-a11y` / `detail` / `detail-a11y` |
+| `page`, `position` | the pair; `position` restarts per page |
+
+**Two card layouts.** On 2026-11-05 a canary run from a GitHub runner was
+served a newer card layout. Both layouts are parsed, one rule per layout.
+The newer card shows no name as text. `title` is read as the words its
+gallery heading and image label share ("Photo gallery for X", "Image of X"),
+and it is null when the card carries no image label. On that run the grid
+stopped at 4 of its 50 cards, with that layout's own loading placeholders
+under them. The scroll loop now recognises those placeholders too; whether
+they fill on a given run is reported in `cards_missing`, as for the classic
+layout.
+
+`sample_output.json` and `sample_output.csv` are cut from a real run
+(Orlando, 2026-11-14 → 2026-11-16, 2026-09-14).
+
+**Four family columns are deliberately absent**, each with the measurement
+written down in `output_writer.py`: `original_price` and `discount_pct`
+(**0** strike nodes across 218 cards, 6 captures and 4 storefronts — this
+site has no discount chain on a card), `brand` (a property has no
+manufacturer) and `in_stock` (a search result is bookable for the dates
+quoted, so a `True` would be an inference dressed as a reading).
+
+### Exit codes
+
+`0` ok · `1` crash · `2` bad usage · `3` blocked · `4` zero results ·
+`5` content not obtained · `6` partial
+
+`3` covers the site's "Bot or Not?" refusal and a challenge still on the page
+after the allowed solve and retries. `4` is only the site's own "no results"
+answer. `5` means nothing can be said about the catalogue: a navigation
+timeout, a dead proxy, a proxy that refused the credential or the balance
+before the run began (`stop_reason: proxy_auth_failed` /
+`proxy_balance_exhausted`), the proxy budget spent before any row
+(`proxy_budget_exceeded`), a remote API error, a page the site served without
+its results (its own "Sorry, we're having a problem on our end" copy, for
+one), or a grid on the page that the parser read as 0 rows. `6` means rows
+were written but a later page failed in one of those ways, or the run
+stopped at `--proxy-budget-mb` (`stop_reason: proxy_budget_exceeded`).
+
+A run that finds nothing **writes nothing**, so a failure cannot overwrite
+last night's good output. `--allow-empty` is the opt-out.
+The proxy pre-check below is the one failure that writes a file:
+`<out>.latest_attempt.meta.json`, a separate record that leaves the output
+and its `<out>.meta.json` untouched. A run through a local proxy also writes
+that file, with its proxy traffic, whether it got rows or not.
+
+---
+
+## Traps that look like bugs
+
+* **`image_url` is null on most rows.** 41 of 50 cards carry no `<img>`
+  element at all — the gallery is not mounted below the fold. A null here is
+  an unmounted gallery, not a property without photos.
+* **`amenities` is empty on whole runs.** Present on 18 of 18 cards in one
+  capture and 0 of 50 in another of the same URL minutes later. It is an A/B
+  variant of the card, not a parsing failure.
+* **Vrbo search returns hotels and aparthotels**, not only whole-home
+  rentals — "The Point Hotel & Suites Orlando", `Aparthotel · 1 bedroom ·
+  2 beds`. That is the site's inventory, not a wrong URL.
+* **A card's `latLong` query parameter is the SEARCH centre**, identical on
+  every card, not the property's own position. It is stripped and not
+  recorded; the property page has the real address.
+* **Vrbo silently ignores filter parameters it does not recognise.** A search
+  with `price_max=1&minBedrooms=10` came back with 18 normal cards and
+  `1 - 50 of 300+`. Use the site's own filter UI and copy the resulting URL.
+* **`homeaway.com` redirects to `vrbo.com`** and serves nothing of its own.
+  The scraper refuses it *with that reason* rather than claiming it is not a
+  Vrbo site.
+
+---
+
+## Engines
+
+| engine | notes |
+|---|---|
+| `playwright_scraper.py` | **Recommended.** Needs `--browser-channel chrome` (the default) — `playwright install chrome` |
+| `selenium_scraper.py` | Drives the Chrome you already have, so it gets the right browser for free. **Cannot authenticate a proxy** (`--proxy-server` has nowhere to put a password) and **cannot use an authenticated CDP endpoint** (`debuggerAddress` is a bare `host:port`) |
+| `puppeteer_scraper.py` | pyppeteer is effectively unmaintained. It downloads its **own, old Chromium**; an installed Chrome is the more faithful client, so `--chromium-path /path/to/chrome` is recommended (browser build was not measured to decide access, see the note at the top). It warns before the run rather than after a blocked page |
+| `scraper_api_client.py` | One HTTP request per page via the 2Captcha Scraper API, no local browser. **Measured on this site**: HTTP 200, 3.2 MB, and **3 of 50 cards** at $0.0005 — see below |
+
+All three browser engines produce the same rows. Measured on three live runs
+of the same Orlando search on 2026-09-14: 50 rows each, and on the 38
+properties all three runs happened to share, **every substantive column
+agreed** — title, price, currency, rating, rating_scale, review_count,
+property_type, bedrooms, beds, location_note, stay_dates,
+expedia_property_id, price_note, sku, url, source. The only differences were
+`scraped_at`, `position` (a live personalised search reorders between runs),
+`image_url` and `badges` (both viewport- and A/B-dependent, as above).
+
+Engine flag differences are asserted in both directions by the test suite, so
+closing one needs a README edit rather than a quiet patch:
+
+* `--throttle-wait-seconds SECONDS` — all three engines, but not part of the
+  family flag contract. The pause before the one retry of a page turn that
+  got no grid back: a random 2/3 to 4/3 of it (30-60 s at the default 45).
+  `0` turns the retry off.
+* `--block-retry-delay SECONDS` — all three engines, but not part of the
+  family flag contract. Wait before re-fetching a page that came back
+  refused, doubling per retry (30 waits 30 s, then 60 s). Unset keeps the
+  short linear wait. The retry COUNT is unchanged (2 without a pool).
+* `--browser-channel` — Playwright only
+* `--chromium-path` — pyppeteer only
+* `--cdp-connect-timeout` — Playwright and pyppeteer only (Selenium cannot
+  use an authenticated CDP endpoint at all)
+* `--locale`, `--fingerprint`, `--fp-tags`, `--fp-country` — Playwright and
+  Selenium only
+
+### Proxy traffic savers
+
+A proxy is billed by traffic. With `--proxy` / `--proxy-file` / `VRBO_PROXY`:
+
+- **One pre-check before any browser starts.** All three engines send a
+  CONNECT through the proxy, then a `HEAD /robots.txt` to www.vrbo.com.
+  Chromium reports a proxy's HTTP 407 as a navigation timeout, so a wrong or
+  exhausted credential used to spend every retry before failing. Now the run
+  stops in seconds with **exit 5** on either answer:
+  - **407**: the gateway refused the credential (or the traffic balance is
+    exhausted).
+  - **402**: proxy traffic/balance exhausted.
+
+  It writes `<out>.latest_attempt.meta.json` with `status: failed` and
+  `stop_reason: proxy_auth_failed` (or `proxy_balance_exhausted`). The
+  message names the variable and never prints the credential. If the proxy
+  does not answer at all, the run goes on as before. No pre-check runs
+  without a proxy or with `--cdp-endpoint`.
+- **Media blocking is available but OFF by default on this site.**
+  `--block-media` aborts image, video/audio and font requests:
+  - Playwright blocks by resource type, and pyppeteer through CDP's Fetch
+    domain.
+  - Selenium blocks by file extension, with CDP `Network.setBlockedURLs`.
+
+  It is not the default because it changes the output. Measured on
+  2026-10-20 on the Orlando search, with no proxy and one page per run:
+  - With images blocked, `image_url` was null on 4 of the 14 rows that a
+    media-loaded run also returned.
+  - Card images mount only as they load.
+  - DataDome also scores what a browser loads, and of the four runs, the
+    second of each back-to-back pair was challenged.
+
+  `--load-media` (or `VRBO_LOAD_MEDIA=1`) states the default explicitly.
+- **Every run through a local proxy is metered and capped.**
+  `--proxy-budget-mb` (default **10**, `0` = no cap, also
+  `VRBO_PROXY_BUDGET_MB`). Once more than that has gone through the proxy:
+  - further requests are refused;
+  - the run stops before its next navigation or page turn;
+  - it keeps the rows it has and exits **6** (or **5** with no rows), with
+    `stop_reason: proxy_budget_exceeded`. It never carries on past the cap.
+
+  Media is loaded by default here, and images are most of a search page's
+  bytes, so a long walk through a proxy reaches 10 MB sooner than on a site
+  that blocks them. Raise the budget, or pass `--block-media` if `image_url`
+  is not needed. Measured on the canary's walk through a residential exit
+  (2026-10-22, run 39858684619): with `--block-media`, pages 1 and 2 at 50 of
+  50 cards each used **8.7 MB**, so that walk runs at `--proxy-budget-mb 15`
+  to leave room for its third page and a paced retry. The sidecars record `proxy_bytes`, `proxy_budget_bytes`
+  (`null` with no cap) and `proxy_budget_exceeded`: in `<out>.meta.json`,
+  and in `<out>.latest_attempt.meta.json`, which every metered run writes.
+  The log ends with `Proxy traffic: X.X MB of Y MB budget`.
+
+How the bytes are counted, per engine:
+- **Playwright** sums `request.sizes()` of every finished or failed request:
+  request headers + body, response headers + body.
+- **pyppeteer** reads CDP `Network.loadingFinished.encodedDataLength`
+  (bytes received, headers included), plus each request's line, headers and
+  body from `Network.requestWillBeSent`.
+- **Selenium** reads the same CDP events from chromedriver's performance
+  log, after each page and page turn. Only `http(s)` requests and responses that came over the network are counted: Chrome's own `chrome://`, `data:` and `blob:` loads, cache hits and Chrome's error page count nothing.
+
+The figure is an **estimate of the payload through the tunnel**. TLS, the
+CONNECT exchange and connections the browser opens for itself are not
+visible to any engine, and add a few percent. Measured 2026-10-21 against a
+local stub proxy that counted every byte it carried (a 60 kB page, a 30 kB
+stylesheet and a 90 kB script):
+- Playwright was within 0.2%.
+- pyppeteer was within 0.6%.
+- Selenium was within 0.7%.
+
+A megabyte here is 10^6 bytes. Nothing is metered without a proxy or over
+`--cdp-endpoint`.
+
+### One exit for the whole run
+
+A results walk is one browser session that turns pages with a button. On a
+2Captcha residential gateway (a host under `.proxy.2captcha.com` or
+`.proxy.rucaptcha.com`), a login with no session segment, such as
+`ACCOUNT-zone-custom-region-US`, may be answered from a different address on
+each connection. Page 3 could then replay page 1's cookies from another
+exit. So when the login names no `-session-`, the run appends one random
+`-session-<id>-sessTime-<minutes>` to it, once, before the pre-check and the
+browser. Every request of the run then goes out on that login:
+
+- `--proxy-session-minutes N` (also `VRBO_PROXY_SESSION_MINUTES`): how long
+  the gateway holds the exit, default **30**, at most 120. `0` turns the pin
+  off and sends the login as given.
+- A login that already carries `-session-` is used exactly as given. A login
+  with only `-sessTime-` keeps that duration and gains an id.
+- With `--proxy-file`, each gateway line gets its own session id, so a
+  rotation is a new browser on a different exit. The proxy is never changed
+  under a live browser.
+- Other proxies and IP-whitelisted gateway URLs (no login) are not touched.
+- The sidecar records `proxy_session_pinned: true/false`, never the id, and
+  the log masks the whole login. Selenium cannot send a proxy login at all,
+  so it always records `false`.
+
+---
+
+## Do you need any of the paid products?
+
+**No.** An ordinary local Chrome on an ordinary residential connection reads
+this site fine: every measurement in this README was taken that way, with no
+key and no proxy.
+
+What the 2Captcha products buy here, behind one key
+([2captcha.com](https://2captcha.com)):
+
+* **Proxies** — **the one that works here**, measured 2026-09-14: a 2Captcha
+  residential exit (`region-be`) driving a real local Chrome returned
+  **50/50 cards at 100% price coverage, `status: complete`, and no challenge
+  of any kind**. Note what it is and is not for: a proxy does **not** get the
+  wrong browser past the front door, it spreads the `/graphql` rate limit
+  that stops a deep multi-page run.
+* **The Scraping Browser API** (`--cdp-endpoint`) — a remote browser, so you
+  do not run one. **Measured refused by Vrbo on 2026-09-14** — see below
+  before spending anything on it. Selenium cannot reach it at all (see
+  above).
+* **Fingerprints** (`--fingerprint`) — a consistent device identity.
+* **Captcha solving** — the DataDome fallback and its limits are below.
+
+### The Scraper API gets the top of the page, not the page
+
+Measured 2026-09-14 against a live Orlando search, one request, **$0.0005**:
+
+```
+HTTP 200, 3,219,172 bytes of HTML
+3 of 50 cards parsed — every column the card publishes, fully populated
+```
+
+Three is not a failure, it is the **first paint**. This path renders but
+cannot scroll, and on this site almost every row comes from scrolling an
+inner container. It also comes back **without the pagination counter**, so
+the completeness oracle the browser engines rely on is not available: the
+client cannot tell you how much it missed.
+
+So use it to see what is at the top of a search cheaply — a work list, an
+availability spot-check, "is this property still listed" — and use a browser
+engine when you want the page. Pass the card selector or you will get a shell
+with nothing in it:
+
+```bash
+python3 scraper_api_client.py --url "https://www.vrbo.com/search?destination=..." \
+  --wait-element '[data-stid="lodging-card-responsive"]'
+```
+
+### The exit does not change the storefront
+
+Measured on the same run: a **Belgian** residential exit fetching
+`vrbo.com` still got `vrbo.com`, still priced in **USD**, and produced rows
+identical in shape to a local run. Vrbo does not geo-redirect by exit
+address — the storefront is the hostname, which is why there is no
+`--country` flag anywhere in this repo.
+
+### `--fingerprint` is verified end to end
+
+Measured 2026-09-14: a fresh fetch from the Fingerprint API, and the
+fingerprint actually applied — user agent, `locale`, `timezone_id`
+(`America/New_York` for a US fingerprint), viewport and screen all set on the
+browser context, plus the patch script. A live run with it returned 50/50
+cards at 100% price coverage.
+
+Pass **one** OS-family tag (`--fp-tags Windows`). A list is rejected by the
+API with HTTP 400 — `Windows,Chrome,Desktop` was this repo family's default
+for months and made `--fingerprint` fail on every invocation in four repos at
+once.
+
+### The Scraping Browser API connects — and Vrbo refuses it
+
+Measured 2026-09-14 with a live `country-us` endpoint. The client side is
+fine; the site is not:
+
+```
+connected over CDP in ~3s
+Captcha.setAutoSolve enabled
+page 1  -> HTTP 429, "Bot or Not?", 116,035 bytes
+        retried twice through the same path — 429 again, both times
+        whichChallenge: datadome-challenge
+exit 3
+```
+
+Tried on **five exit countries** with the same profile — `us`, `de`, `gb`,
+`nl`, `ca` — and all five answered HTTP 429 with a ~116 KB `Bot or Not?`
+page. So it is the exit POOL that Expedia has scored, not any one country.
+
+So **this path does not currently get you into Vrbo.** The remote browser is
+a real Chrome, which is the thing this site cares about most — but its exit
+address is refused, and the endpoint's own auto-solve did not clear it.
+
+Note what this is *not* evidence of. It does not show that DataDome here
+cannot be solved (see below). A solve cannot rescue THIS path because of the
+exit address, not the challenge: a DataDome cookie is bound to the exit that
+earned it, and the Scraping Browser leaves from 2Captcha's own address
+rather than from a proxy you could pass to a solver. So the DataDome
+fallback below never buys a solve over `--cdp-endpoint`.
+
+The engine behaved correctly throughout: it named the vendor, spent nothing,
+and exited 3 rather than writing an empty file over good data.
+
+That may change — an exit pool is not a constant — so the path is kept and
+documented rather than removed. But do not buy it expecting it to solve
+access to this site today. **A residential `--proxy` is the paid product
+that addresses the actual constraint here** (the `/graphql` rate limit on
+page turns).
+
+### DataDome: the fallback this repo now runs, and what it has to prove
+
+When Expedia's handler picks DataDome, all three engines now try to clear it
+through 2Captcha before reporting the block. A purchase is made only when
+every one of these holds:
+
+1. **The page did not clear by itself.** The handler page loads DataDome's
+   own tag; when the tag is not refused, the page validates and leaves for
+   the search by itself. Each challenge gets up to 15 s for that, or for the
+   slider to mount. A page that clears costs nothing.
+2. **A slider is on the page**, and its iframe address is not `t=bv`.
+   2Captcha's docs say `t=bv` means the exit itself is banned, and a solve
+   will not help from there.
+3. **`TWOCAPTCHA_KEY` is set**, and `--solve-captcha` is `when-blocked` (the
+   default) or `always`.
+4. **The browser's own proxy can be handed to the solver.** 2Captcha solves
+   DataDome through the caller's proxy, and the cookie is bound to the exit
+   that earned it. So the task gets the browser's current `--proxy` exit,
+   including the sticky `-session-` login that the gateway pinning adds, and
+   the browser's own `navigator.userAgent`. This rules out:
+   - `--cdp-endpoint`, whose exit is not ours to hand on;
+   - no proxy at all;
+   - Selenium with a proxy login, because Selenium strips the login, so
+     that proxy is not the exit the browser uses. Selenium with an
+     allow-listed proxy (no login) does qualify.
+5. **There is an address to re-load.** Page 1 has one. A page reached by
+   pressing next does not, so a challenge there is reported, not bought.
+6. **The page's solve allowance is unused.** It is one per page, shared by
+   every call site, and never reset by a retry or a rotation.
+
+Then the engine runs these steps:
+
+1. It sends a `DataDomeSliderTask` (websiteURL, captchaUrl read off the live
+   iframe, userAgent, proxyType/Address/Port/Login/Password, per
+   [2Captcha's current docs](https://2captcha.com/api-docs/datadome-slider-captcha)),
+   polled for up to 180 s.
+2. **Through the widget.** It reports the answer the way the slider itself
+   does on a pass: a message posted from inside the slider's iframe,
+   `{"eventType": "passed", "responseType": "captcha", "cookie": <answer>}`.
+   This is what the site's own page then does with it:
+   - The site's DataDome tag (`/dd/tags.js`) accepts only a trusted message
+     from a captcha-delivery origin, which is why the message is posted from
+     the iframe and not dispatched by the page's script.
+   - The tag installs the cookie, and the session it sends as
+     `x-datadome-clientid` (the page runs it with `sessionByHeader`).
+   - The tag fires `dd_response_passed`. On that event the handler page
+     makes its own validate call (`POST /botOrNot/validate` with its
+     handshake) and leaves for the search.
+
+   The engine gives this 20 s. Playwright and Selenium can post from the
+   iframe. pyppeteer cannot reach a cross-origin iframe, so it skips this
+   step.
+3. **Cookie and re-load.** If the page is still the challenge, the engine
+   installs the `datadome` cookie itself. The domain, path, `Secure` and
+   `SameSite` come from the challenge page's own cookie, so the answer
+   replaces it rather than landing beside it. The cookie is read back, and
+   page 1 is re-loaded. A handler page that comes back gets the same settle,
+   because with an accepted cookie its own tag is not refused.
+4. **Validate again.** If the handler page is still there, the engine makes
+   the handler's validate call itself, in the page: `POST
+   /botOrNot/validate` with the `X-Exchange-Handshake` header and the
+   `destination` / `exchangeHandshake` from the page's config. On
+   `{"success": true}` it re-loads once more.
+
+Steps 2 and 4 are reproduced from the site's own served code: the tag
+(`tags.js` 5.11.1) and the challenge bundle (`captcha-pwa`
+`root-challenge.*.js`), both read 2026-10-23. They are not taken from a
+captured exchange. The `responseType` / `ddChallengeType` value `captcha` is
+the slider's type, and that value is an inference.
+
+The sidecar says what happened, in `<out>.meta.json` and in
+`<out>.latest_attempt.meta.json`, which is written whenever a captcha was
+met:
+- `captcha_kind`.
+- `captcha_solves`: tasks created.
+- `captcha_solved`: answers returned, which is what 2Captcha bills.
+- `captcha_accepted`: answers after which the page classified as served.
+- `captcha_attempts`: one record per decision. It holds the outcome
+  (`self_cleared`, `no_widget`, `exit_banned`, `no_key`, `no_proxy`,
+  `no_address`, `budget_spent`, `unsolvable`, `solve_failed`, `solved`).
+  It also holds whether the widget step ran and cleared the page (with the
+  statuses of the page's own validate calls), whether the cookie was applied
+  and kept, the re-load and validate statuses, and `accepted`.
+
+**An accepted solve is not by itself proof that the solve did it.** In the
+2026-09-14 measurements, the same exit was served without any solve about
+one time in three (the control table below). A `self_cleared` record is the
+free control: it is the same page clearing with nothing bought.
+
+#### Live result
+
+Measured 2026-10-23 through the canary's walk: seven dispatches, a
+residential `VRBO_PROXY` exit pinned to one sticky session per run,
+headful real Chrome on a GitHub runner, and `--block-media`.
+
+| run | DataDome on page 1 | solved in | widget step | our cookie + re-load + validate | result |
+|---|---|---|---|---|---|
+| 1 | yes | 26.8 s | not in that build | 429, validate 403 | blocked, 3.4 MB |
+| 2 | no (page 1 served, grid never painted) | — | — | — | exit 5, 7.0 MB |
+| 3 | yes | 37.1 s | page's own validate **200**, page left | not needed | **3 pages, 150 rows, complete**, 10.0 MB |
+| 4 | yes | 31.5 s | page's own validate 403 | 429, validate 403 | blocked, 3.4 MB |
+| 5 | yes | 26.8 s | page's own validate 403 | 429, validate 403 | blocked, 3.7 MB |
+| 6 | yes | 26.6 s | page's own validate 403 | 429, validate 403 | blocked, 4.2 MB |
+| 7 | yes | 42.5 s | page's own validate **200**, page left | not needed | **3 pages, 150 rows, complete**, 9.3 MB |
+
+The totals:
+- **6 solves bought**, all returned, at $0.00145 each.
+- **2 accepted**, both through the widget step.
+- **The cookie + re-load path and our own validate call: 0 of 4.** After
+  each re-load the site replaced the cookie and mounted a new slider.
+- **The no-solve control:** the `first-page` job, from the runner's own
+  address with no key and no proxy, met DataDome on all seven runs. None
+  cleared by itself in either of its two tries per run.
+
+So the fallback does work, but not reliably. Two of five answers reported
+through the widget were accepted. Both times the page's own validate call
+answered 200 just after the answer was posted, and the walk went on to
+complete. None of the no-solve fetches cleared. Seven runs are too few for
+a rate: read "about 2 in 5" as an observation, not a promise. Answers the
+handler refused were refused at its validate step (HTTP 403). Nothing in
+the records shows why some are accepted and others not.
+
+#### What was measured before this path existed (2026-09-14)
+
+Those runs used a standalone script against the 2Captcha API, not this repo.
+
+**Solving succeeded.** Across nine `DataDomeSliderTask` attempts, five came
+back solved, at **$0.00145** and 38-68 s each. The other four were
+`ERROR_CAPTCHA_UNSOLVABLE`. The `captchaUrl` is readable off the live widget
+about 3 s after it mounts. It is NOT in a server-side dump, where the mount
+point is empty.
+
+**Applying the bare cookie did not demonstrably grant access.** It got
+HTTP 200 once and 429 twice:
+
+```
+no solve, no cookie, wait 55s          -> 429
+solve, deliberately DO NOT set cookie  -> 429
+solve, set cookie (bare name=value)    -> 200 once, 429 once
+solve, set cookie with all attributes,
+  read back and verified present       -> 429
+NOTHING AT ALL, same exit, minutes
+  later                                -> 200, no challenge even raised
+```
+
+That last line is why the first 200 proves nothing: the same exit was served
+with no solve and no cookie in play. In that script, the solver's cookie
+string carried only `expires` and `domain`, while the page's own cookie was
+`Secure; SameSite=Lax`. Those runs also never went through the widget or the
+handler's validate call. The path above differs in three ways: it reports
+the answer through the widget, mirrors the page's cookie attributes, and
+makes the validate call.
+
+The recommended path still does not need any of this. A real local Chrome
+on a residential exit returned 50/50 cards with no challenge at all
+(2026-09-14). The browserless clients get no DataDome path: there is no
+browser to carry the cookie.
+
+### Captchas: what this repo can and cannot solve
+
+Vrbo's refusal is Expedia's own **"Bot or Not?"** handler (HTTP 429, app
+`captcha-pwa`, page id `wildcard-challenge-handler`). It is a
+**multiplexer**: its page config names which vendor it picked *this time*,
+as data rather than markup —
+
+```
+"whichChallenge": "datadome-challenge"
+"siteKey": …            (reCAPTCHA v2)
+"recaptchaV3Key": …
+"turnstileSiteKey": …
+"arkoseClientApiUrl": …
+"powComplexity": 20     (a proof-of-work variant)
+```
+
+This repo solves **DataDome's slider** (above) and **reCAPTCHA v2/v3**.
+A challenge is offered to a solver only when `whichChallenge` names one of
+those two. Every other pick (Arkose, Turnstile, the proof-of-work) is
+reported as **blocked**: no solve is attempted and nothing is charged. This
+repo does not implement those three; that is not a claim that they cannot be
+solved.
+
+Note also that `akamai` is *not* usable as a block marker here. Vrbo is
+fronted by Akamai Bot Manager and every good page loads its sensor script, so
+that string matches an 899 KB page holding the full grid.
+
+---
+
+## Configuration
+
+Credentials go in `.env` beside the scripts, never on a command line — a
+secret in `argv` is readable by anything that can run `ps` and lands in shell
+history.
+
+```bash
+cp .env.example .env
+python3 env_config.py     # prints what was picked up, WITHOUT secrets
+```
+
+Precedence, highest first: an explicit flag → an exported environment
+variable → `.env` → the default. Anything still carrying `{...}` braces is
+treated as unset, so a copied example is never sent to an API as if it were a
+key.
+
+Variables: `TWOCAPTCHA_KEY`, `VRBO_CDP_ENDPOINT`, `VRBO_PROXY`, `VRBO_URL`,
+`VRBO_LOAD_MEDIA`, `VRBO_PROXY_BUDGET_MB`, `VRBO_PROXY_SESSION_MINUTES`.
+
+---
+
+## Comparing two runs
+
+```bash
+python3 diff_runs.py --old monday.json --new tuesday.json
+```
+
+It refuses a pair it cannot honestly compare: a `partial` run, two different
+`--mode`s, or **two different storefronts** — they are different catalogues
+in different currencies, so the diff would be all noise.
+
+---
+
+## Tests
+
+```bash
+python3 smoke_test.py     # or: pytest
+```
+
+Over 450 checks (473 on 2026-09-14). Offline, no network, and it passes with
+no engine library installed — the skips are reported, and CI fails on an
+unexpected one. Fixtures are cut from
+real captures by `make_fixtures.py`, which proves each one parses
+*identically* to its untrimmed original, column for column.
+
+`TROUBLESHOOTING.md` covers what to do when a column comes back empty.
+
+---
+
+## Guides
+
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [Webmotors scraper](https://github.com/2scraper/webmotors-scraper) — Car and motorcycle listings from Brazil's webmotors.com.br…
+- [Zimmo scraper](https://github.com/2scraper/zimmo-scraper) — Zimmo.be sale and rent listings
+- [Autotrader scraper](https://github.com/2scraper/autotrader-scraper) — US car listings with VIN, fee-inclusive price, KBB fair…
+- [Avito scraper](https://github.com/2scraper/avito-scraper) — Category and search listings, item pages and seller profiles…
+- [Craigslist scraper](https://github.com/2scraper/craigslist-scraper) — Result lists and adverts from all 714 areas
+- [dubizzle scraper](https://github.com/2scraper/dubizzle-scraper) — UAE classifieds — motors, property, electronics, jobs…
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
+
+## Licence and scope
+
+MIT. This reads pages Vrbo serves to an anonymous visitor. It does not log
+in, does not touch a booking flow, and does not attempt to defeat a challenge
+it cannot legitimately solve. Check Vrbo's terms and your own jurisdiction
+before pointing it at anything at volume, and use `--delay`.
