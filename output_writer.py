@@ -591,6 +591,19 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
                   f"concluded about the catalogue from this run.")
             return EXIT_FETCH_FAILED
         return rc
+    # Blocked outranks "partial" even when rows WERE gathered. A run over
+    # several products can hold good rows from some of them while another was
+    # met with a challenge: the output keeps the rows, but the process must
+    # still say EXIT_BLOCKED, because a pipeline branching on the code has to
+    # learn that something stood between the run and part of the catalogue.
+    # Returning EXIT_PARTIAL here would let a blocked multi-product run read
+    # as an ordinary truncated one. Non-blocked failures fall through to the
+    # partial branch below, keeping their 5/6 semantics.
+    if blocked:
+        print(f"[!] Blocked run: a challenge stopped part of the fetch "
+              f"({stop_reason}); the output holds only what was gathered "
+              f"before it — see {out_prefix}.meta.json.")
+        return EXIT_BLOCKED
     if not complete:
         print(f"[!] Partial run: stopped after {pages_completed} of "
               f"{pages_requested} page(s) ({stop_reason}). The output holds "

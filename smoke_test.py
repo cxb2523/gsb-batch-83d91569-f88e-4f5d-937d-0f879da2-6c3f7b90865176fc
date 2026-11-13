@@ -2727,6 +2727,247 @@ def check_a_served_page_that_parses_to_nothing_is_a_parser_failure():
         equal("%s: a run holding only that page exits 5, not 4" % name, rc, 5)
 
 
+def _unavailable_product_page():
+    """A locally built shop page carrying the site's OWN "no such product"
+    code (23002002), the only shape that may be named product_not_found."""
+    return ('<script type="application/json" id="__MODERN_ROUTER_DATA__">'
+            '{"loaderData":{"x":{"basic_info":{"risk_level":"low"},'
+            '"page_config":{"components_map":[{"component_data":'
+            '{"error_code":23002002,"error_message":'
+            '"get product detail not exist"}}]}}}}'
+            "</script>")
+
+
+def check_playwright_product_outcomes_name_every_ending_per_product():
+    """The product-mode sidecar carries a per-product conclusion list.
+
+    Fully offline: the pages are local HTML built from the served fixture or
+    hand-shaped JSON, and the session is a stub. Nothing here opens a
+    browser, opens a socket or reads a 2Captcha credential — the engine's
+    transport, warming and policy layers are replaced before the runner is
+    entered, so the same check runs in the no-engine CI job (it skips only
+    if playwright itself cannot be imported) and in a venv that holds it.
+
+    Pinned together rather than separately, because that is the contract:
+    each conclusion's category must agree with pages_completed /
+    pages_failed / products_challenged / products_unavailable, the list
+    must stay in request order, and the process exit code must still follow
+    finish_run's blocked-vs-failed-vs-empty mapping.
+    """
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        skip("playwright_scraper", "engine library absent")
+        return
+
+    # One id per ending. Every one is a 19-digit snowflake-shaped id, so
+    # parse_target accepts it without any URL handling.
+    PID_OK = "1732432759321694958"
+    PID_CHALLENGE = "1729419516045003001"
+    PID_GONE = "1731025509333569752"
+    PID_BAD_PARSE = "1730000000000000003"
+    PID_GONE_TWO = "1730000000000000004"
+    # A WAF "Please wait..." interstitial: blocked at the transport layer
+    # but NOT the shop's slide puzzle, so it lands in other_failure rather
+    # than challenged.
+    PID_WAF = "1730000000000000005"
+
+    pages = {
+        PID_OK: page("product"),
+        PID_CHALLENGE: challenge_page("challenge_raw"),
+        PID_GONE: _unavailable_product_page(),
+        # Classifies as CONTENT (the product frame is present) but parses
+        # to zero rows once its product id is removed — the exact shape that
+        # must stay a parser failure and never become "product not found".
+        PID_BAD_PARSE: _product_page_without_its_id(),
+        PID_GONE_TWO: _unavailable_product_page(),
+        PID_WAF: WAF_FIXTURE,
+    }
+
+    def fetch(box, pw, args, pool, url, label):
+        # The label is "product <id>"; map by id so the stub never has to
+        # build the shop URL itself.
+        pid = label.rsplit(" ", 1)[-1]
+        html = pages[pid]
+        return 200, html, product_parser.detect_page_state(html, 200, url), False
+
+    def run(product_ids):
+        def body(FakeSession):
+            args = _fault_args(engine, url=",".join(product_ids))
+            box = {"session": FakeSession(), "prime_url": "u"}
+            return engine._run_product(box, None, args, None)
+
+        return _with_stubs(engine, fetch, body)
+
+    def exit_code_for(rows, meta, tmp, label):
+        out = os.path.join(tmp, label)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            return output_writer.finish_run(
+                rows, out, "json", False,
+                blocked=bool(meta.get("blocked")),
+                stop_reason=meta["stop_reason"],
+                pages_requested=meta["products_requested"],
+                pages_completed=int(meta.get("pages_completed") or 0),
+                pages_failed=meta.get("pages_failed"),
+                start_url="u", final_url="u", mode="product")
+
+    def assert_conclusion(name, entry, want_number, want_pid, want_outcome,
+                          expect_rows=None):
+        equal("%s: request number" % name, entry.get("number"), want_number)
+        equal("%s: product id" % name, entry.get("product_id"), want_pid)
+        equal("%s: outcome category" % name, entry.get("outcome"),
+              want_outcome)
+        check("%s: carries a short reason" % name,
+              isinstance(entry.get("reason"), str) and entry["reason"])
+        check("%s: records the page state constant it was classified from"
+              % name, isinstance(entry.get("state"), str) and entry["state"])
+        if expect_rows is None:
+            check("%s: rows_read only belongs to a success" % name,
+                  "rows_read" not in entry)
+        else:
+            equal("%s: rows_read" % name, entry.get("rows_read"), expect_rows)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # --- the four single-page paths, each with its exit code ----------
+        rows, meta = run([PID_OK])
+        equal("success: one row read", len(rows), 1)
+        equal("success: pages_completed", meta["pages_completed"], 1)
+        equal("success: no failed pages", meta.get("pages_failed"), None)
+        assert_conclusion("success", meta["product_outcomes"][0], 1, PID_OK,
+                          "success", expect_rows=1)
+        equal("success: exit 0", exit_code_for(rows, meta, tmp, "ok"), 0)
+
+        rows, meta = run([PID_CHALLENGE])
+        equal("challenge: no rows", rows, [])
+        equal("challenge: stop_reason", meta["stop_reason"], "blocked")
+        equal("challenge: blocked flag", meta["blocked"], True)
+        equal("challenge: products_challenged",
+              meta["products_challenged"], [PID_CHALLENGE])
+        equal("challenge: pages_failed", meta["pages_failed"], [1])
+        assert_conclusion("challenge", meta["product_outcomes"][0], 1,
+                          PID_CHALLENGE, "challenged")
+        equal("challenge: state is the slide-puzzle constant",
+              meta["product_outcomes"][0]["state"],
+              product_parser.STATE_CHALLENGE)
+        equal("challenge: blocked run exits 3",
+              exit_code_for(rows, meta, tmp, "blocked"), 3)
+
+        rows, meta = run([PID_GONE])
+        equal("unavailable: no rows", rows, [])
+        equal("unavailable: products_unavailable",
+              meta["products_unavailable"], [PID_GONE])
+        equal("unavailable: not counted as failed",
+              meta.get("pages_failed"), None)
+        equal("unavailable: pages_completed still counts the answered page",
+              meta["pages_completed"], 1)
+        assert_conclusion("unavailable", meta["product_outcomes"][0], 1,
+                          PID_GONE, "product_not_found")
+        equal("unavailable: state is the shop's own constant",
+              meta["product_outcomes"][0]["state"],
+              product_parser.STATE_PRODUCT_UNAVAILABLE)
+        equal("unavailable: a complete empty answer exits 4",
+              exit_code_for(rows, meta, tmp, "gone"), 4)
+
+        rows, meta = run([PID_BAD_PARSE])
+        equal("parse failure: no rows", rows, [])
+        equal("parse failure: stop_reason", meta["stop_reason"],
+              "page_failed")
+        equal("parse failure: pages_failed", meta["pages_failed"], [1])
+        equal("parse failure: NOT named unavailable",
+              meta.get("products_unavailable"), None)
+        entry = meta["product_outcomes"][0]
+        assert_conclusion("parse failure", entry, 1, PID_BAD_PARSE,
+                          "parse_failed")
+        equal("parse failure: the zero-row reason is preserved",
+              entry["state"], product_parser.STATE_PARSE_ERROR)
+        equal("parse failure: a non-challenge failure with no rows exits 5",
+              exit_code_for(rows, meta, tmp, "badparse"), 5)
+
+        # A WAF interstitial is blocked at the transport layer but is not
+        # the shop's slide puzzle, so it must be other_failure — never
+        # "challenged" — and must not reach products_challenged.
+        rows, meta = run([PID_WAF])
+        equal("waf: no rows", rows, [])
+        equal("waf: not counted as a slide-puzzle challenge",
+              meta.get("products_challenged"), None)
+        equal("waf: counted among the failed pages",
+              meta["pages_failed"], [1])
+        assert_conclusion("waf", meta["product_outcomes"][0], 1, PID_WAF,
+                          "other_failure")
+        equal("waf: keeps its own state constant for the rerun log",
+              meta["product_outcomes"][0]["state"],
+              product_parser.STATE_WAF_CHALLENGE)
+        equal("waf: a non-challenge failure with no rows still exits 5",
+              exit_code_for(rows, meta, tmp, "waf"), 5)
+
+        # Two unavailable products and nothing else: still a complete,
+        # empty answer — exit 4, never 5.
+        rows, meta = run([PID_GONE, PID_GONE_TWO])
+        equal("two unavailable: ordered unavailable list",
+              meta["products_unavailable"], [PID_GONE, PID_GONE_TWO])
+        equal("two unavailable: exit 4",
+              exit_code_for(rows, meta, tmp, "twogone"), 4)
+        equal("two unavailable: both conclusions present and ordered",
+              [c["outcome"] for c in meta["product_outcomes"]],
+              ["product_not_found", "product_not_found"])
+
+        # --- one run over every ending at once -----------------------------
+        order = [PID_CHALLENGE, PID_GONE, PID_OK, PID_BAD_PARSE, PID_WAF]
+        rows, meta = run(order)
+
+        # Request order, not completion order: numbering follows the input.
+        equal("mixed: one conclusion per requested product",
+              len(meta["product_outcomes"]), len(order))
+        equal("mixed: numbers are 1..N in request order",
+              [c["number"] for c in meta["product_outcomes"]],
+              [1, 2, 3, 4, 5])
+        equal("mixed: ids keep request order",
+              [c["product_id"] for c in meta["product_outcomes"]], order)
+        equal("mixed: categories follow the same order",
+              [c["outcome"] for c in meta["product_outcomes"]],
+              ["challenged", "product_not_found", "success",
+               "parse_failed", "other_failure"])
+
+        # The list must tally exactly with the pre-existing counters.
+        by_outcome = {}
+        for c in meta["product_outcomes"]:
+            by_outcome[c["outcome"]] = by_outcome.get(c["outcome"], 0) + 1
+        equal("mixed: all five categories are represented once",
+              by_outcome, {"challenged": 1, "product_not_found": 1,
+                           "success": 1, "parse_failed": 1,
+                           "other_failure": 1})
+        equal("mixed: challenged tally matches products_challenged",
+              by_outcome.get("challenged", 0),
+              len(meta["products_challenged"]))
+        equal("mixed: unavailable tally matches products_unavailable",
+              by_outcome.get("product_not_found", 0),
+              len(meta["products_unavailable"]))
+        equal("mixed: success tally matches rows gathered",
+              by_outcome.get("success", 0), len(rows))
+        failed_numbers = sorted(
+            c["number"] for c in meta["product_outcomes"]
+            if c["outcome"] in ("challenged", "parse_failed",
+                                "other_failure"))
+        equal("mixed: failed categories reproduce pages_failed",
+              failed_numbers, sorted(meta["pages_failed"] or []))
+        completed_numbers = sorted(
+            c["number"] for c in meta["product_outcomes"]
+            if c["outcome"] in ("success", "product_not_found"))
+        equal("mixed: answered pages reproduce pages_completed",
+              len(completed_numbers), meta["pages_completed"])
+        equal("mixed: the success entry carries the rows it read",
+              [c.get("rows_read") for c in meta["product_outcomes"]
+               if c["outcome"] == "success"],
+              [1])
+        # A blocked page outranks everything: exit 3 even though one row was
+        # gathered.
+        equal("mixed: any challenge makes the run blocked",
+              meta["blocked"], True)
+        equal("mixed: blocked stop_reason", meta["stop_reason"], "blocked")
+        equal("mixed: blocked run exits 3 despite the gathered row",
+              exit_code_for(rows, meta, tmp, "mixed"), 3)
+
+
 def _parse_exit(parse, argv):
     """Run an argparse entry point; return (exit code, stderr)."""
     err = io.StringIO()

@@ -1019,15 +1019,86 @@ def _run_product(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]
         outcomes.append(_fetch_one_product(session_box, pw, args, pool,
                                            product_id, scraped_at, index))
 
+    # Per-product conclusion categories, emitted in the run sidecar's
+    # `product_outcomes` list in request order. They NAME the five ways one
+    # product request can end without inventing any new page classification:
+    # the mapping in `product_conclusion` is decided entirely by the existing
+    # product_parser STATE_* constants and the same branches the counters
+    # below take. A served page that parses to zero rows stays a parse
+    # failure, never "the product does not exist" — the shop's own error
+    # code (STATE_PRODUCT_UNAVAILABLE) is the only thing that may name that.
+    # Kept local to this engine's runner so the three engines' top-level
+    # names stay identical (the smoke suite pins that surface).
+    OUTCOME_SUCCESS = "success"
+    OUTCOME_CHALLENGED = "challenged"
+    OUTCOME_UNAVAILABLE = "product_not_found"
+    OUTCOME_PARSE_ERROR = "parse_failed"
+    OUTCOME_OTHER_FAILURE = "other_failure"
+
+    def product_conclusion(product_id: str, outcome: PageOutcome
+                           ) -> Dict[str, Any]:
+        """One per-product conclusion, classified with the SAME state
+        constants and branches the counters below use.
+
+        The order of the tests is the order the existing loop takes them:
+        the slide-puzzle state names its own category first, the shop's own
+        "no such product" code second, and only then a served-but-unreadable
+        page. A served page that parsed to zero rows therefore stays a
+        parser failure — it can never be relabelled a missing product,
+        because STATE_PRODUCT_UNAVAILABLE was already handled above it.
+        """
+        state = outcome.state
+        base: Dict[str, Any] = {
+            "number": outcome.number,
+            "product_id": product_id,
+            "state": state,
+        }
+        if state == STATE_CHALLENGE:
+            base["outcome"] = OUTCOME_CHALLENGED
+            base["reason"] = ("slide-puzzle captcha served; the page ended "
+                              "refused")
+        elif state == STATE_PRODUCT_UNAVAILABLE:
+            base["outcome"] = OUTCOME_UNAVAILABLE
+            base["reason"] = ("the shop served its product-unavailable page "
+                              "(its own error code); not a refusal")
+        elif state == parser.STATE_PARSE_ERROR:
+            base["outcome"] = OUTCOME_PARSE_ERROR
+            base["reason"] = (outcome.error
+                              or "served page could not be parsed into a "
+                                 "product")
+        elif outcome.rows:
+            # STATE_CONTENT (and only a state `should_parse` lets through
+            # reaches here) with at least one row read.
+            base["outcome"] = OUTCOME_SUCCESS
+            base["reason"] = "product page served and parsed"
+            base["rows_read"] = len(outcome.rows)
+        else:
+            # Every other non-serving state — WAF/risk interstitials, the
+            # zero-byte 200, HTTP/transport errors, unknown pages. Some are
+            # blocked at the transport level, but the slide-puzzle
+            # STATE_CHALLENGE above is the one category this run calls
+            # "challenged"; these keep their state name in `reason` so the
+            # caller can still tell them apart on a rerun.
+            base["outcome"] = OUTCOME_OTHER_FAILURE
+            base["reason"] = (outcome.error
+                              or f"request ended in state {state!r}")
+        return base
+
     rows: List[Any] = []
     seen: set = set()
     failed: List[int] = []
     unavailable: List[str] = []
     challenged: List[str] = []
+    conclusions: List[Dict[str, Any]] = []
     blocked = False
     verdicts: Dict[str, Any] = {}
 
+    # `zip(outcomes, products)` keeps this in REQUEST order: each product's
+    # conclusion is appended as its outcome is accounted for, regardless of
+    # how long any one fetch took, so the list's order cannot depend on
+    # completion timing.
     for outcome, product_id in zip(outcomes, products):
+        conclusions.append(product_conclusion(product_id, outcome))
         blocked = blocked or outcome.blocked
         if outcome.state == STATE_CHALLENGE:
             challenged.append(product_id)
@@ -1070,6 +1141,10 @@ def _run_product(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]
         "products_requested": len(products),
         "products_unavailable": unavailable or None,
         "products_challenged": challenged or None,
+        # One conclusion per requested product, in request order. It is
+        # derived from the exact same `outcomes` the counters above consume,
+        # so its tallies cannot disagree with them.
+        "product_outcomes": conclusions,
         "site_verdicts": verdicts or None,
         "used_scraping_browser": bool(args.cdp_endpoint),
         "discount_disagreements": [
