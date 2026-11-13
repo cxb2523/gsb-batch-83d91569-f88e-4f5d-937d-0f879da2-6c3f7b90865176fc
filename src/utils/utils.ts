@@ -23,6 +23,7 @@ export type RequestErrorKind =
     | 'timeout'
     | 'stopped'
     | 'bounds'
+    | 'cursor'
     | 'network'
     | 'http'
     | 'invalid_response';

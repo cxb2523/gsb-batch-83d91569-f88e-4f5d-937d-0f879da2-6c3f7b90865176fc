@@ -3,7 +3,7 @@ import { render } from 'react-dom';
 import './styles/styles.scss';
 
 import { State } from './model/state';
-import { LikerUserNode, UserListScope } from './model/user';
+import { UserListScope } from './model/user';
 import { ScanModes } from './model/scan-modes';
 import { ResultsView } from './model/results-view';
 import { DEFAULT_AUDIENCE_FILTERS } from './model/audience-filters';
@@ -16,7 +16,8 @@ import {
     createIgRequester,
     isRequestError,
 } from './utils/utils';
-import { fetchAllPosts, fetchAllLikers, fetchFollowing, fetchFollowers } from './utils/scanner';
+import { runScan } from './utils/scanner';
+import { StopReason } from './model/scan-stop';
 import {
     SavedScan,
     clearRateLimit,
@@ -32,6 +33,7 @@ import {
 import { Toolbar } from './components/Toolbar';
 import { ModeSelector } from './components/ModeSelector';
 import { Scanning } from './components/Scanning';
+import { ScanStopped } from './components/ScanStopped';
 import { Leaderboard } from './components/Leaderboard';
 import { Dashboard } from './components/Dashboard';
 import { FollowerAnalysis } from './components/FollowerAnalysis';
@@ -114,32 +116,34 @@ function buildResultsState(saved: SavedScan): ResultsState {
     };
 }
 
-function scanErrorMessage(error: RequestError): string {
-    switch (error.kind) {
+function scanToastMessage(reason: StopReason, retryAt: number | null): string {
+    switch (reason) {
         case 'auth':
             return 'Instagram login is missing or expired. Sign in again before retrying.';
         case 'challenge':
             return 'Instagram stopped the scan with a challenge or checkpoint. No further requests were made.';
-        case 'rate_limit': {
-            const retryText = error.retryAt
-                ? ` Do not retry before ${new Date(error.retryAt).toLocaleTimeString()}.`
-                : '';
-            return `Instagram asked this account to slow down. No further requests were made.${retryText}`;
-        }
+        case 'rate_limit':
+            return retryAt
+                ? `Instagram asked this account to slow down. No further requests were made. Do not retry before ${new Date(retryAt).toLocaleTimeString()}.`
+                : 'Instagram asked this account to slow down. No further requests were made.';
         case 'timeout':
             return 'An Instagram request timed out. The scan stopped without saving partial results.';
         case 'bounds':
-            return `${error.message} The scan stopped without saving partial results.`;
+            return 'The scan reached one of its fixed limits. The scan stopped without saving partial results.';
+        case 'cursor':
+            return 'Instagram returned inconsistent pagination. The scan stopped without saving partial results.';
         case 'network':
             return 'The Instagram request failed after one retry. Check your connection before starting again.';
         case 'http':
-            return `${error.message} The scan stopped without saving partial results.`;
+            return 'Instagram returned an unexpected HTTP status. The scan stopped without saving partial results.';
         case 'invalid_response':
-            return `${error.message} The scan stopped because the response could not be verified.`;
+            return 'The scan stopped because an Instagram response could not be verified.';
         case 'stopped':
             return 'Scan stopped.';
+        case 'unknown':
+            return 'The scan failed unexpectedly. The scan stopped without saving partial results.';
         default:
-            return assertUnreachable(error.kind);
+            return assertUnreachable(reason);
     }
 }
 
@@ -265,81 +269,83 @@ const App = ({ ownerId, postsQuery, demo }: AppProps) => {
 
         void (async () => {
             try {
-                const { posts, postScope } = await fetchAllPosts(requester, postsQuery, postsList => {
-                    updateScanning(runId, current => ({
-                        ...current,
-                        posts: postsList,
-                        totalPostCount: postsList.length,
-                        percentage: null,
-                    }));
-                });
-                if (posts.length === 0) {
-                    throw new RequestError('invalid_response', 'Instagram returned no posts for this account.');
-                }
-
-                updateScanning(runId, current => ({
-                    ...current,
-                    phase: 'fetching_likes',
-                    percentage: 0,
-                    posts,
-                    totalPostCount: posts.length,
-                    currentPostIndex: 0,
-                }));
-                const likerMap = await fetchAllLikers(
-                    posts,
+                const outcome = await runScan(
                     requester,
-                    (currentPostIndex, identifiedLikerCount, percentage) => {
-                        updateScanning(runId, current => ({
-                            ...current,
-                            currentPostIndex,
-                            identifiedLikerCount,
-                            percentage,
-                        }));
+                    postsQuery,
+                    scanModes.followerAnalysis,
+                    {
+                        onPostsProgress: postsList => {
+                            updateScanning(runId, current => ({
+                                ...current,
+                                posts: postsList,
+                                totalPostCount: postsList.length,
+                                percentage: null,
+                            }));
+                        },
+                        onLikersProgress: (currentPostIndex, identifiedLikerCount, percentage) => {
+                            updateScanning(runId, current => ({
+                                ...current,
+                                phase: 'fetching_likes',
+                                currentPostIndex,
+                                identifiedLikerCount,
+                                percentage,
+                            }));
+                        },
+                        onFollowingProgress: followingCount => {
+                            updateScanning(runId, current => ({
+                                ...current,
+                                phase: 'fetching_following',
+                                percentage: null,
+                                followingCount,
+                            }));
+                        },
+                        onFollowersProgress: followerCount => {
+                            updateScanning(runId, current => ({
+                                ...current,
+                                phase: 'fetching_followers',
+                                percentage: null,
+                                followerCount,
+                            }));
+                        },
                     },
                 );
-
-                updateScanning(runId, current => ({
-                    ...current,
-                    phase: 'fetching_following',
-                    percentage: null,
-                    followingCount: 0,
-                }));
-                const following = await fetchFollowing(requester, followingCount => {
-                    updateScanning(runId, current => ({ ...current, followingCount }));
-                });
-
-                let followerIds: string[] = [];
-                let followerUsers: Record<string, LikerUserNode> = {};
-                let followerScope: UserListScope | null = null;
-                if (scanModes.followerAnalysis) {
-                    updateScanning(runId, current => ({
-                        ...current,
-                        phase: 'fetching_followers',
-                        percentage: null,
-                        followerCount: 0,
-                    }));
-                    const followers = await fetchFollowers(requester, followerCount => {
-                        updateScanning(runId, current => ({ ...current, followerCount }));
-                    });
-                    followerIds = [...followers.ids];
-                    followerUsers = followers.users;
-                    followerScope = followers.scope;
-                }
-
                 if (runId !== runIdRef.current || controller.signal.aborted) {
                     return;
                 }
+
+                if (outcome.status === 'stopped') {
+                    const { conclusion } = outcome;
+                    if (conclusion.reason === 'rate_limit' && conclusion.retryAt !== null) {
+                        setRetryAt(conclusion.retryAt);
+                        saveRateLimit(conclusion.retryAt);
+                    }
+                    // Diagnostic terminal state only: partial counts are never
+                    // saved and no leaderboard view is offered.
+                    setState({ status: 'stopped', scanModes, conclusion });
+                    setToast({
+                        show: true,
+                        text: scanToastMessage(conclusion.reason, conclusion.retryAt),
+                        style: 'error',
+                    });
+                    return;
+                }
+
+                const { scan } = outcome;
+                const following = scan.following;
+                const followerIds = scan.followers ? [...scan.followers.ids] : [];
+                const followerUsers = scan.followers ? scan.followers.users : {};
+                const followerScope: UserListScope | null = scan.followers ? scan.followers.scope : null;
 
                 const completedScan: SavedScan = {
                     schemaVersion: 3,
                     timestamp: Date.now(),
                     ownerId,
                     scanModes,
-                    postScope,
+                    postScope: scan.postScope,
                     followingScope: following.scope,
                     followerScope,
-                    posts,
-                    likerMap,
+                    posts: scan.posts,
+                    likerMap: scan.likerMap,
                     followerIds,
                     followingIds: [...following.ids],
                     followerUsers,
@@ -366,6 +372,8 @@ const App = ({ ownerId, postsQuery, demo }: AppProps) => {
                 if (runId !== runIdRef.current || controller.signal.aborted) {
                     return;
                 }
+                // runScan maps request failures to stop conclusions itself;
+                // anything escaping here is an orchestration-level defect.
                 const requestError = isRequestError(error)
                     ? error
                     : new RequestError('invalid_response', 'The scan failed unexpectedly.', { originalError: error });
@@ -374,7 +382,7 @@ const App = ({ ownerId, postsQuery, demo }: AppProps) => {
                     saveRateLimit(requestError.retryAt);
                 }
                 setState({ status: 'initial' });
-                setToast({ show: true, text: scanErrorMessage(requestError), style: 'error' });
+                setToast({ show: true, text: scanToastMessage(requestError.kind, requestError.retryAt ?? null), style: 'error' });
             } finally {
                 if (runId === runIdRef.current) {
                     controllerRef.current = null;
@@ -420,7 +428,7 @@ const App = ({ ownerId, postsQuery, demo }: AppProps) => {
             location.reload();
             return;
         }
-        if (state.status === 'results') {
+        if (state.status === 'results' || state.status === 'stopped') {
             setState({ status: 'initial' });
         }
     };
@@ -445,6 +453,15 @@ const App = ({ ownerId, postsQuery, demo }: AppProps) => {
                     scanningPaused={scanningPaused}
                     pauseScan={pauseScan}
                     stopScan={stopScan}
+                />
+            );
+            break;
+        case 'stopped':
+            markup = (
+                <ScanStopped
+                    conclusion={state.conclusion}
+                    scanModes={state.scanModes}
+                    onRestart={onScan}
                 />
             );
             break;

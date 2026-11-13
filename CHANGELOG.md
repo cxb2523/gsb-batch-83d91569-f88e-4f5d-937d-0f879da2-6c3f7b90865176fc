@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- A stopped scan now shows a diagnostic conclusion instead of only an error message: the failed phase (posts, likers with the post index, following, or followers), a reason category (pagination cursor, rate limit, login, challenge, network, timeout, stop, scan limit, HTTP, invalid response, or unexpected failure), and the unique posts, likers, following and follower counts collected before the stop. Rate-limit stops show the earliest retry time.
+- The conclusion is diagnostic only: partial data is never saved or offered as a leaderboard, no "resume" entry exists, and starting a new scan clears the previous conclusion.
+
+### Changed
+
+- Pagination faults (repeated or missing cursors, malformed cursors, repeated pages) now use a dedicated `cursor` error category, separate from request/run bound errors.
+
 ## [2.4.0] - 2026-10-18
 
 ### Added

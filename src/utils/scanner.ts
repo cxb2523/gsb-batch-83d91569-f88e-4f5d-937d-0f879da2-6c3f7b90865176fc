@@ -1,4 +1,5 @@
 import { PostNode, PostScope } from '../model/post';
+import { ScanStage, ScanStopConclusion, StopReason } from '../model/scan-stop';
 import { LikerAccumulator, LikerUserNode, UserListScope } from '../model/user';
 import {
     IgRequester,
@@ -81,7 +82,7 @@ function parseCursor(value: unknown, context: string): string | null {
         return null;
     }
     if ((typeof value !== 'string' && typeof value !== 'number') || String(value).trim() === '') {
-        throw new RequestError('bounds', `Instagram returned a malformed ${context} cursor.`);
+        throw new RequestError('cursor', `Instagram returned a malformed ${context} cursor.`);
     }
     return String(value);
 }
@@ -157,15 +158,15 @@ export async function fetchAllPosts(
             return { posts, postScope: 'all_posts' };
         }
         if (uniqueOnPage === 0) {
-            throw new RequestError('bounds', 'Instagram repeated a post page before the scan completed.');
+            throw new RequestError('cursor', 'Instagram repeated a post page before the scan completed.');
         }
 
         const nextCursor = parseCursor(pageInfo.end_cursor, 'post');
         if (nextCursor === null) {
-            throw new RequestError('bounds', 'Instagram declared more posts without a continuation cursor.');
+            throw new RequestError('cursor', 'Instagram declared more posts without a continuation cursor.');
         }
         if (cursors.has(nextCursor)) {
-            throw new RequestError('bounds', 'Instagram repeated a post cursor before the scan completed.');
+            throw new RequestError('cursor', 'Instagram repeated a post cursor before the scan completed.');
         }
         cursors.add(nextCursor);
         cursor = nextCursor;
@@ -180,11 +181,13 @@ export async function fetchAllLikers(
         identifiedLikerCount: number,
         percentage: number,
     ) => void,
+    onPostStart?: (postIndex: number) => void,
 ): Promise<Record<string, LikerAccumulator>> {
     const likerMap: Record<string, LikerAccumulator> = {};
     let identifiedLikerCount = 0;
 
     for (const [index, post] of posts.entries()) {
+        onPostStart?.(index + 1);
         const data = asRecord(
             await requester.request<unknown>(postLikersUrlGenerator(post.id), `Likers ${index + 1}/${posts.length}`),
             'liker list',
@@ -247,7 +250,7 @@ async function fetchUserList(
             return { ids, users, scope: 'endpoint_complete' };
         }
         if (cursors.has(nextCursor)) {
-            throw new RequestError('bounds', `Instagram repeated the ${label.toLowerCase()} cursor.`);
+            throw new RequestError('cursor', `Instagram repeated the ${label.toLowerCase()} cursor.`);
         }
         cursors.add(nextCursor);
         cursor = nextCursor;
@@ -266,4 +269,126 @@ export function fetchFollowers(
     onProgress: (count: number) => void,
 ): Promise<FetchUsersResult> {
     return fetchUserList(requester, followersUrlGenerator, 'Followers', onProgress);
+}
+
+export interface ScanProgress {
+    readonly onPostsProgress?: (posts: readonly PostNode[]) => void;
+    readonly onLikersProgress?: (
+        currentIndex: number,
+        identifiedLikerCount: number,
+        percentage: number,
+    ) => void;
+    readonly onFollowingProgress?: (count: number) => void;
+    readonly onFollowersProgress?: (count: number) => void;
+}
+
+export interface CompletedScan {
+    readonly posts: readonly PostNode[];
+    readonly postScope: PostScope;
+    readonly likerMap: Record<string, LikerAccumulator>;
+    readonly following: FetchUsersResult;
+    readonly followers: FetchUsersResult | null;
+}
+
+export type ScanOutcome =
+    | { readonly status: 'complete'; readonly scan: CompletedScan }
+    | { readonly status: 'stopped'; readonly conclusion: ScanStopConclusion };
+
+// Runs every phase in order and records a verifiable stop conclusion on the
+// first failure. A failure aborts the run: no later phase is requested, and
+// the caller must never save or display the partial data as results.
+export async function runScan(
+    requester: IgRequester,
+    query: PostsQuery,
+    includeFollowers: boolean,
+    progress: ScanProgress = {},
+): Promise<ScanOutcome> {
+    // Counts track the unique identities already collected. They stay local to
+    // the run and are surfaced only through the diagnostic stop conclusion.
+    let uniquePostCount = 0;
+    let uniqueLikerCount = 0;
+    let followingCount = 0;
+    let followerCount = 0;
+    let stage: ScanStage = 'posts';
+    let likerPostIndex: number | null = null;
+
+    const conclusion = (
+        reason: StopReason,
+        message: string,
+        retryAt: number | null,
+    ): ScanStopConclusion => ({
+        stage,
+        reason,
+        likerPostIndex,
+        errorMessage: message,
+        uniquePostCount,
+        uniqueLikerCount,
+        followingCount,
+        followerCount,
+        retryAt,
+    });
+
+    try {
+        const postsResult = await fetchAllPosts(requester, query, postsList => {
+            uniquePostCount = postsList.length;
+            progress.onPostsProgress?.(postsList);
+        });
+        uniquePostCount = postsResult.posts.length;
+        if (postsResult.posts.length === 0) {
+            throw new RequestError('invalid_response', 'Instagram returned no posts for this account.');
+        }
+
+        stage = 'likers';
+        likerPostIndex = 1;
+        progress.onLikersProgress?.(0, 0, 0);
+        const likerMap = await fetchAllLikers(
+            postsResult.posts,
+            requester,
+            (currentIndex, identifiedLikerCount, percentage) => {
+                uniqueLikerCount = identifiedLikerCount;
+                progress.onLikersProgress?.(currentIndex, identifiedLikerCount, percentage);
+            },
+            postIndex => {
+                likerPostIndex = postIndex;
+            },
+        );
+
+        stage = 'following';
+        const following = await fetchFollowing(requester, count => {
+            followingCount = count;
+            progress.onFollowingProgress?.(count);
+        });
+
+        let followers: FetchUsersResult | null = null;
+        if (includeFollowers) {
+            stage = 'followers';
+            followers = await fetchFollowers(requester, count => {
+                followerCount = count;
+                progress.onFollowersProgress?.(count);
+            });
+        }
+
+        return {
+            status: 'complete',
+            scan: {
+                posts: postsResult.posts,
+                postScope: postsResult.postScope,
+                likerMap,
+                following,
+                followers,
+            },
+        };
+    } catch (error) {
+        if (error instanceof RequestError) {
+            return {
+                status: 'stopped',
+                conclusion: conclusion(error.kind, error.message, error.retryAt ?? null),
+            };
+        }
+        const message = error instanceof Error ? error.message : 'The scan failed unexpectedly.';
+        return {
+            status: 'stopped',
+            conclusion: conclusion('unknown', message, null),
+        };
+    }
 }

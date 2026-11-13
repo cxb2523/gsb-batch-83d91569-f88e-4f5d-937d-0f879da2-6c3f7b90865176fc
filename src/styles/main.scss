@@ -450,6 +450,106 @@
     }
 
     // ============================================================
+    // Stopped-scan diagnostic screen
+    // ============================================================
+    .scan-stopped-container {
+        display: flex;
+        justify-content: center;
+        align-items: flex-start;
+        min-height: calc(100vh - #{v.$header-height});
+        padding: v.$size-xlarge;
+    }
+
+    .scan-stopped {
+        max-width: 560px;
+        width: 100%;
+        background: v.$bg-surface-1;
+        border: 1px solid v.$border-soft;
+        border-radius: v.$radius-lg;
+        padding: v.$size-xlarge;
+
+        h1 {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: v.$clr-danger;
+            margin: 0 0 v.$size-small;
+        }
+
+        h2 {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: v.$text-primary;
+            margin: v.$size-large 0 v.$size-small;
+        }
+    }
+
+    .scan-stopped-subtitle {
+        font-size: 0.85rem;
+        line-height: 1.5;
+        color: v.$text-muted;
+        margin: 0 0 v.$size-large;
+    }
+
+    .stop-summary {
+        margin: 0;
+
+        .stop-summary-row {
+            display: flex;
+            justify-content: space-between;
+            gap: v.$size-medium;
+            padding: v.$size-small 0;
+            border-bottom: 1px solid v.$border-subtle;
+
+            dt {
+                color: v.$text-muted;
+                font-size: 0.85rem;
+            }
+
+            dd {
+                margin: 0;
+                color: v.$text-primary;
+                font-size: 0.85rem;
+                font-weight: 600;
+                text-align: right;
+            }
+        }
+    }
+
+    .stop-detail {
+        font-size: 0.82rem;
+        line-height: 1.5;
+        color: v.$text-subtle;
+        margin: v.$size-medium 0 0;
+    }
+
+    .stop-retry {
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: v.$clr-warning;
+        margin: v.$size-small 0 0;
+    }
+
+    .stop-counts {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+
+        .stop-count-row {
+            display: flex;
+            justify-content: space-between;
+            padding: v.$size-small 0;
+            border-bottom: 1px solid v.$border-subtle;
+            font-size: 0.85rem;
+            color: v.$text-body;
+
+            strong {
+                color: v.$text-primary;
+                font-variant-numeric: tabular-nums;
+            }
+        }
+    }
+
+    // ============================================================
     // Buttons
     // ============================================================
     .controls {

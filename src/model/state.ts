@@ -7,6 +7,7 @@ import { ResultsView } from './results-view';
 import { FollowerTab } from './follower-tab';
 import { ScanModes } from './scan-modes';
 import { AudienceFilters } from './audience-filters';
+import { ScanStopConclusion } from './scan-stop';
 
 export type ScanningPhase = 'fetching_posts' | 'fetching_likes' | 'fetching_following' | 'fetching_followers';
 
@@ -61,7 +62,16 @@ interface ResultsState {
     readonly dashboardTopCount: number;
 }
 
+// Diagnostic-only terminal state. The counts inside the conclusion are never
+// shown as a leaderboard and can never be written to the scan cache.
+interface StoppedState {
+    readonly status: 'stopped';
+    readonly scanModes: ScanModes;
+    readonly conclusion: ScanStopConclusion;
+}
+
 export type State =
     | { readonly status: 'initial' }
     | ScanningState
+    | StoppedState
     | ResultsState;
