@@ -59,8 +59,19 @@ def _token():
 # X-RateLimit-Remaining 0, Retry-After oder «rate limit»), wartet holen bis zum Reset und fragt erneut, solange das mit RESERVE_S Luft in die
 # Frist passt; sonst endet der Lauf mit dem globalen Fehler, das Geholte ist festgeschrieben, und der nächste Lauf setzt fort. Ohne Frist
 # (Tests) wird nicht gewartet. Vorher endete jeder Lauf am Limit, und ein Konto mit rund 5000 Anfragen wurde nie fertig.
+# GEWARTET_S (13.11.2026): die Summe der Wartezeiten dieses Laufs, damit die Buchführung (laeufe.gewartet, lauf.json) zeigt, ob und wie
+# lange der Lauf am Limit stand; der Sammler stellt sie zu Beginn jedes Laufs auf 0.
 FRIST_ENDE = None
 RESERVE_S = 30
+GEWARTET_S = 0.0
+
+
+def ratenlimit(code, kopf, meldung):
+    """Die eine Stelle, die eine Antwort als Ratenlimit erkennt (13.11.2026): 403 oder 429 mit X-RateLimit-Remaining: 0,
+    Retry-After oder «rate limit» in der Meldung. Jeder andere Fehler betrifft nur das Repo der Anfrage."""
+    kopf = kopf or {}
+    return code in (403, 429) and (str(kopf.get("X-RateLimit-Remaining") or "") == "0" or bool(kopf.get("Retry-After"))
+                                   or "rate limit" in (meldung or "").lower())
 
 
 def wartezeit(kopf):
@@ -86,6 +97,7 @@ def holen(pfad, params=None, leer_bei_409=False):
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "gitpuls",
     })
+    global GEWARTET_S
     while True:
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
@@ -98,11 +110,12 @@ def holen(pfad, params=None, leer_bei_409=False):
             except (ValueError, AttributeError):
                 meldung = ""
             kopf = e.headers or {}
-            limit = e.code in (403, 429) and (kopf.get("X-RateLimit-Remaining") == "0" or kopf.get("Retry-After") or "rate limit" in meldung.lower())
+            limit = ratenlimit(e.code, kopf, meldung)
             warten = wartezeit(kopf) if limit else None
             if warten is not None and FRIST_ENDE is not None and time.monotonic() + warten < FRIST_ENDE - RESERVE_S:
                 print(f"Ratenlimit erreicht, warte {warten:.0f} s bis zum Reset", flush=True)
                 time.sleep(warten)
+                GEWARTET_S += warten
                 continue
             fehler = GitHubFehler(f"GitHub {e.code} auf {pfad}: {e.reason}")
             fehler.status, fehler.meldung = e.code, meldung

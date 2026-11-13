@@ -236,7 +236,7 @@ def lauf_status(eigener=True):
     sperre = max(0, int(SPERRE_S - a_fertig)) if a_fertig is not None else 0
     return {"zustand": "laeuft" if laeuft else "bereit", "phase": l.get("phase") if laeuft else None, "start": l.get("start"),
             "fertig": l.get("fertig"), "exit": l.get("exit"), "fehler": unlesbar or l.get("fehler"), "neu": l.get("neu"), "teilweise": l.get("teilweise"),
-            "sperre_s": sperre}
+            "gewartet": l.get("gewartet"), "sperre_s": sperre}
 
 
 def sekunden_seit(iso_s, jetzt):
@@ -2750,7 +2750,7 @@ WAHL_KOPF = ("<script>try{var w=document.documentElement,g=" + json.dumps(WAHL, 
 
 def stand_block(c):
     """Der Knopf holt nur GitHub; der Serverstand trägt seine eigene Alterszeile in server_html."""
-    lauf = c.execute("SELECT gestartet_utc, beendet_utc, neu, teilweise FROM laeufe ORDER BY beendet_utc DESC LIMIT 1").fetchone()
+    lauf = c.execute("SELECT gestartet_utc, beendet_utc, neu, teilweise, gewartet FROM laeufe ORDER BY beendet_utc DESC LIMIT 1").fetchone()
     if not lauf:
         return f"<span>{t('stand.keiner')}</span>"
     beendet = datetime.fromisoformat(lauf["beendet_utc"].replace("Z", "+00:00"))
@@ -2765,6 +2765,10 @@ def stand_block(c):
         abruf = c.execute("SELECT COUNT(*) FROM repos WHERE gesehen = ? AND fehler IS NOT NULL", (start,)).fetchone()[0]
         pruef = c.execute("SELECT COALESCE(SUM((ci_fehler IS NOT NULL) + (sicher_fehler IS NOT NULL)), 0) FROM pruefungen WHERE gesehen = ?", (start,)).fetchone()[0]
         teil = t("stand.teil", abruf, pruef) if abruf or pruef else t("stand.teil", lauf["teilweise"], 0)
+    # Warten am Ratenlimit (13.11.2026): stand der Lauf am Limit, sagt die Alterszeile auch das, sonst sähe ein verspäteter Stand wie ein
+    # gewöhnlicher aus. NULL (Altbestand) und 0 bleiben ohne Vermerk.
+    if lauf["gewartet"]:
+        teil += t("stand.warte", lauf["gewartet"])
     return f'<span>{html.escape(t("stand.github", zeit, int((db.jetzt(timezone.utc) - beendet).total_seconds() // 60)) + teil)}</span>'
 
 

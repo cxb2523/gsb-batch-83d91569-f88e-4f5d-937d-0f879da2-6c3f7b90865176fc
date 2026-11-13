@@ -31,7 +31,7 @@ def jetzt():
     return db.jetzt(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def laufzeile(c, start, neu, teilweise=0):
+def laufzeile(c, start, neu, teilweise=0, gewartet=0):
     """Buchführung, vom Werk getrennt: die Commits sind schon festgeschrieben, ein Fehler hier wird
     protokolliert und reisst den Lauf nicht mit (Exit 0). Spaltenliste ausdrücklich: bestehende
     Datenbanken haben aus 4b3d201 (03.09.2026) zwei weitere Spalten zustand und token_bis, die der
@@ -39,7 +39,8 @@ def laufzeile(c, start, neu, teilweise=0):
     mit "table laeufe has 5 columns but 3 values were supplied" und riss alles Geholte mit."""
     try:
         # teilweise (26.09.2026): Zahl der Repos, die GitHub in diesem Lauf abwies; 0 ist ein voller Erfolg, mehr ein Teilerfolg.
-        c.execute("INSERT INTO laeufe (gestartet_utc, beendet_utc, neu, teilweise) VALUES (?,?,?,?)", (start, jetzt(), neu, teilweise))
+        # gewartet (13.11.2026): Sekunden am Ratenlimit in diesem Lauf; 0 heisst kein Warten.
+        c.execute("INSERT INTO laeufe (gestartet_utc, beendet_utc, neu, teilweise, gewartet) VALUES (?,?,?,?,?)", (start, jetzt(), neu, teilweise, gewartet))
         c.commit()
     except sqlite3.Error as e:
         c.rollback()
@@ -278,6 +279,7 @@ def main(alles=False, ende=None):
     with db.schreibsperre(ende):
         c = db.verbinden(schreibend=True)
         github.FRIST_ENDE = ende   # holen wartet am Ratenlimit, solange es in die Frist passt
+        github.GEWARTET_S = 0.0    # die Wartezeit dieses Laufs, geht in laeufe.gewartet und lauf.json (13.11.2026)
         try:
             werk(c, alles, ende)
         except github.GitHubFehler:
@@ -286,6 +288,11 @@ def main(alles=False, ende=None):
         finally:
             github.FRIST_ENDE = None
             c.close()
+
+
+def gewartet():
+    """Sekunden, die dieser Lauf bisher am Ratenlimit wartete (github.GEWARTET_S), gerundet für laeufe und lauf.json."""
+    return round(github.GEWARTET_S)
 
 
 def gesperrte_zahl(c, start):
@@ -335,7 +342,7 @@ def werk(c, alles, ende=None):
             c.commit()
             db.frist_pruefen(ende, wo)
     start = jetzt()
-    merken(start=start, phase="holt Repos", fertig=None, exit=None, fehler=None, neu=None)
+    merken(start=start, phase="holt Repos", fertig=None, exit=None, fehler=None, neu=None, gewartet=0)
     token_messen()
     gelesen = list(github.alle_seiten("user/repos", {"affiliation": "owner", "per_page": 100}))
     # Typprüfung der Repo-Liste (Codex-Audit 11.10.2026): ein Eintrag ohne Name, ID oder Default-Branch ist eine gescheiterte Abfrage des Laufs,
@@ -534,7 +541,7 @@ def werk(c, alles, ende=None):
         pruefen(c, r, start)
     c.executemany("UPDATE repos SET fehler = NULL, fehler_utc = NULL WHERE repo = ?", [(r["full_name"],) for r in alle if r["full_name"] not in gesperrt])
     c.commit()   # das Werk zuerst festschreiben, die Buchführung danach
-    laufzeile(c, start, neu, gesperrte_zahl(c, start))
+    laufzeile(c, start, neu, gesperrte_zahl(c, start), gewartet())
     # Codezeilen nach der Laufzeile: das Nachladen des Altbestands verlängert den Lauf, darf aber weder die Karenz noch das Alter
     # der Daten verschieben, und ein Fehler darin reisst nichts mit.
     merken(phase="lädt Codezeilen")
@@ -543,15 +550,16 @@ def werk(c, alles, ende=None):
         # Das Nachladen bekommt höchstens die Restzeit der Frist abzüglich 20 s für den Abschluss.
         geladen, rest, fehler = zeilen_nachladen(c, frist_s=min(ZEILEN_FRIST_S, ende - time.monotonic() - 20))
         print(f"Codezeilen: {geladen} geladen, {rest} offen")
-        # Ein Repo, das erst beim Nachladen abgewiesen wurde, macht den Lauf nachträglich zum Teilerfolg.
-        c.execute("UPDATE laeufe SET teilweise = ? WHERE gestartet_utc = ?", (gesperrte_zahl(c, start), start))
+        # Ein Repo, das erst beim Nachladen abgewiesen wurde, macht den Lauf nachträglich zum Teilerfolg; auch Warten am
+        # Ratenlimit beim Nachladen gehört in die Zeile dieses Laufs (13.11.2026).
+        c.execute("UPDATE laeufe SET teilweise = ?, gewartet = ? WHERE gestartet_utc = ?", (gesperrte_zahl(c, start), gewartet(), start))
         c.commit()
     except Exception as e:   # noqa: BLE001
         c.rollback()
         traceback.print_exc()
         fehler = f"Codezeilen: {type(e).__name__}: {e}"
     # Ein Abbruch beim Nachladen steht im Laufstatus (Audit O1), der Lauf bleibt ein Erfolg: Commits, Zweige und Prüfungen sind geschrieben.
-    merken(phase=None, fertig=jetzt(), exit=0, neu=neu, teilweise=gesperrte_zahl(c, start), fehler=fehler)
+    merken(phase=None, fertig=jetzt(), exit=0, neu=neu, teilweise=gesperrte_zahl(c, start), fehler=fehler, gewartet=gewartet())
     gesamt = c.execute("SELECT COUNT(*) FROM commits").fetchone()[0]
     zweige = c.execute("SELECT COUNT(*) FROM zweige").fetchone()[0]
     print(f"{len(repos)} Repos geholt, {len(alle)} Repos gesamt, {neu} neu, {gesamt} Zeilen gesamt, {zweige} Nebenzweige")
@@ -562,9 +570,9 @@ if __name__ == "__main__":
     try:
         main(alles="--alles" in sys.argv)
     except db.FristAbgelaufen as e:   # Warten oder Werk über der Frist: lesbar enden, Exit 1, ohne Traceback
-        merken(start=_lauf.get("start") or beginn, phase=None, fertig=jetzt(), exit=1, fehler=str(e))
+        merken(start=_lauf.get("start") or beginn, phase=None, fertig=jetzt(), exit=1, fehler=str(e), gewartet=gewartet())
         print(f"gitpuls: {e}", flush=True)
         sys.exit(1)
     except BaseException as e:   # GitHubFehler ist SystemExit; auch ein Abbruch hinterlässt Ende und Exit
-        merken(start=_lauf.get("start") or beginn, phase=None, fertig=jetzt(), exit=1, fehler=str(e) or type(e).__name__)
+        merken(start=_lauf.get("start") or beginn, phase=None, fertig=jetzt(), exit=1, fehler=str(e) or type(e).__name__, gewartet=gewartet())
         raise

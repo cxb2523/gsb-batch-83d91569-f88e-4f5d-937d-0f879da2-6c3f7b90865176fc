@@ -88,6 +88,7 @@ T = {
     "kurz.abruf": lambda code: f"nicht abrufbar, {code}",
     "stand.teil": lambda abruf, pruef: ", Teilerfolg: " + ", ".join(([f"{ez(abruf, 'Repo', 'Repos')} nicht abrufbar"] if abruf else [])
                                                                + ([f"{ez(pruef, 'Prüfabfrage', 'Prüfabfragen')} gescheitert (CI, Sicherheit)"] if pruef else [])),
+    "stand.warte": lambda s: f", davon {s} s am Ratenlimit gewartet",
     "bf.zweige": lambda n, branch: f"Zweig wartet auf {branch}" if n == 1 else f"Zweige warten auf {branch}",
     "bf.ci": lambda n: "Actions-Lauf fehlgeschlagen" if n == 1 else "Actions-Läufe fehlgeschlagen",
     "bf.warn": lambda n: "Repo mit Sicherheitswarnungen" if n == 1 else "Repos mit Sicherheitswarnungen",

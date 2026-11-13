@@ -96,6 +96,7 @@ T = {
     "kurz.abruf": lambda code: f"not fetched, {code}",
     "stand.teil": lambda abruf, pruef: ", partial: " + ", ".join(([f"{ez(abruf, 'repo', 'repos')} could not be fetched"] if abruf else [])
                                                              + ([f"{ez(pruef, 'check', 'checks')} failed (CI, security)"] if pruef else [])),
+    "stand.warte": lambda s: f", including {s} s waiting at the rate limit",
     "bf.zweige": lambda n, branch: f"branch waiting on {branch}" if n == 1 else f"branches waiting on {branch}",
     "bf.ci": lambda n: "failed Actions run" if n == 1 else "failed Actions runs",
     "bf.warn": lambda n: "repo with security alerts" if n == 1 else "repos with security alerts",

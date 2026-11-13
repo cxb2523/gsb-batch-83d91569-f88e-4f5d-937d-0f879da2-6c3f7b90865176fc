@@ -48,7 +48,9 @@ NACHTRAEGE = {
     # Einzelheiten je Dependabot-Warnung (25.09.2026) für das Aufklappdetail im Block Handlungsbedarf: Titel (security_advisory.summary),
     # Geltungsbereich (dependency.scope: development oder runtime), geöffnet am (created_at), betroffener Versionsbereich, GHSA und CVE.
     # teilweise: Zahl der Repos, die GitHub im Lauf abwies (26.09.2026); 0 voller Erfolg, mehr ein Teilerfolg. NULL im Altbestand.
-    "laeufe": [("teilweise", "INTEGER")],
+    # gewartet: Sekunden, die der Lauf am Ratenlimit wartete (13.11.2026); 0 heisst kein Warten, NULL im Altbestand. Ein Lauf, der am
+    # Limit endet statt zu warten, schreibt keine Zeile — sein Warten (oder Nichtwarten) steht in lauf.json.
+    "laeufe": [("teilweise", "INTEGER"), ("gewartet", "INTEGER")],
     "warnungen": [("summary", "TEXT"), ("scope", "TEXT"), ("geoeffnet", "TEXT"), ("bereich", "TEXT"), ("ghsa", "TEXT"), ("cve", "TEXT")],
 }
 
