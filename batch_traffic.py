@@ -28,6 +28,71 @@ HISTORY_SCHEMA_VERSION = 1
 HISTORY_LIMIT = 500
 HEADER_LIMIT = 64 * 1024
 
+# Failure reason categories for rejected upstream tunnels. Only these opaque
+# category names are ever persisted; upstream addresses and credentials are not.
+FAILURE_UPSTREAM_CONNECT = "upstream_connect_failed"
+FAILURE_PROXY_AUTH = "proxy_auth_failed"
+FAILURE_HEADER_TOO_LARGE = "header_too_large"
+FAILURE_CONNECT_REJECTED = "connect_rejected"
+FAILURE_TRANSPORT = "transport_error"
+FAILURE_REASONS = (
+    FAILURE_UPSTREAM_CONNECT,
+    FAILURE_PROXY_AUTH,
+    FAILURE_HEADER_TOO_LARGE,
+    FAILURE_CONNECT_REJECTED,
+    FAILURE_TRANSPORT,
+)
+# Only these keys may appear in a sanitized failure summary entry.
+_SUMMARY_ENTRY_KEYS = frozenset(("reason", "count", "last_seen"))
+
+
+def _empty_failure_counts() -> dict:
+    return {reason: 0 for reason in FAILURE_REASONS}
+
+
+def _coerce_non_negative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _sanitize_failure_counts(raw: object) -> dict:
+    counts = _empty_failure_counts()
+    if isinstance(raw, dict):
+        for reason in FAILURE_REASONS:
+            if reason in raw:
+                counts[reason] = _coerce_non_negative_int(raw[reason])
+    return counts
+
+
+def _sanitize_failure_summary(raw: object) -> list:
+    entries: list[dict] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            reason = item.get("reason")
+            if reason not in FAILURE_REASONS:
+                continue
+            count = _coerce_non_negative_int(item.get("count"))
+            if count <= 0:
+                continue
+            last_seen = item.get("last_seen")
+            if not isinstance(last_seen, (int, float)) or isinstance(
+                last_seen, bool
+            ):
+                last_seen = None
+            entries.append(
+                {
+                    "reason": reason,
+                    "count": count,
+                    "last_seen": last_seen,
+                }
+            )
+    entries.sort(key=lambda entry: FAILURE_REASONS.index(entry["reason"]))
+    return entries
+
 
 def _empty_metrics() -> dict:
     return {
@@ -48,6 +113,8 @@ def _empty_metrics() -> dict:
         "workers": 0,
         "successful_accounts": 0,
         "exit_code": None,
+        "failure_counts": _empty_failure_counts(),
+        "failure_summary": [],
     }
 
 
@@ -73,13 +140,14 @@ def read_metrics(path: str | os.PathLike[str]) -> dict:
         "workers",
         "successful_accounts",
     ):
-        try:
-            metrics[key] = max(0, int(metrics.get(key, 0) or 0))
-        except (TypeError, ValueError):
-            metrics[key] = 0
+        metrics[key] = _coerce_non_negative_int(metrics.get(key, 0))
     metrics["bytes_total"] = metrics["bytes_up"] + metrics["bytes_down"]
     metrics["batch_id"] = str(metrics.get("batch_id") or "")[:96]
     metrics["running"] = bool(metrics.get("running"))
+    # Older files predate failure attribution; missing fields degrade to
+    # zeroed counters and an empty summary, and malformed values are cleaned.
+    metrics["failure_counts"] = _sanitize_failure_counts(raw.get("failure_counts"))
+    metrics["failure_summary"] = _sanitize_failure_summary(raw.get("failure_summary"))
     return metrics
 
 
@@ -278,6 +346,35 @@ class _TrafficState:
             )
             self.metrics["updated_at"] = time.time()
 
+    def record_failure(self, reason: str) -> None:
+        """Attribute one failed connection to ``reason``.
+
+        Called at most once per connection; successfully established tunnels
+        are never recorded. Only the opaque reason category, a counter and the
+        most recent timestamp are persisted, never proxy addresses or secrets.
+        """
+        if reason not in FAILURE_REASONS:
+            reason = FAILURE_TRANSPORT
+        now = time.time()
+        with self.lock:
+            counts = _sanitize_failure_counts(self.metrics.get("failure_counts"))
+            counts[reason] += 1
+            self.metrics["failure_counts"] = counts
+            summary = _sanitize_failure_summary(self.metrics.get("failure_summary"))
+            entry = next(
+                (item for item in summary if item["reason"] == reason), None
+            )
+            if entry is None:
+                summary.append(
+                    {"reason": reason, "count": counts[reason], "last_seen": now}
+                )
+            else:
+                entry["count"] = counts[reason]
+                entry["last_seen"] = now
+            summary.sort(key=lambda item: FAILURE_REASONS.index(item["reason"]))
+            self.metrics["failure_summary"] = summary
+            self.metrics["updated_at"] = now
+
     def flush(self) -> None:
         with self.lock:
             payload = dict(self.metrics)
@@ -423,38 +520,76 @@ class _ProxyMeter:
         self.state.update(connections=1, active_connections=1)
         upstream = None
         tunnel_established = False
+        failure_recorded = False
         try:
             client.settimeout(30)
-            head, rest = _read_headers(client)
+            try:
+                head, rest = _read_headers(client)
+            except ValueError:
+                # Request line plus headers exceeded HEADER_LIMIT.
+                self.state.record_failure(FAILURE_HEADER_TOO_LARGE)
+                failure_recorded = True
+                self._send_error(client)
+                return
+            except (OSError, ConnectionError, ssl.SSLError):
+                # Client vanished or broke the transport before any tunnel.
+                self.state.record_failure(FAILURE_TRANSPORT)
+                failure_recorded = True
+                return
             if _header_value(head, b"Proxy-Authorization") != self.local_authorization:
+                # Rejected by the local forwarder itself: not an upstream
+                # failure, so it is not counted in the failure attribution.
                 self._send_proxy_auth_required(client)
                 return
             first_line = head.split(b"\r\n", 1)[0]
             method = first_line.split(b" ", 1)[0].upper()
-            upstream = self._connect_upstream()
+            try:
+                upstream = self._connect_upstream()
+            except (OSError, ConnectionError, ssl.SSLError):
+                # Upstream proxy unreachable or its TLS handshake was refused.
+                self.state.record_failure(FAILURE_UPSTREAM_CONNECT)
+                failure_recorded = True
+                self._send_error(client)
+                return
             upstream.settimeout(30)
             outbound = _rewrite_headers(head, self.authorization)
             if method != b"CONNECT":
                 outbound += rest
-            upstream.sendall(outbound)
-            self.state.update(bytes_up=len(outbound))
-            if method == b"CONNECT":
-                response_head, response_rest = _read_headers(upstream)
-                response = response_head + b"\r\n\r\n" + response_rest
-                client.sendall(response)
-                self.state.update(bytes_down=len(response))
-                status_line = response_head.split(b"\r\n", 1)[0]
-                if b" 200 " not in status_line:
-                    return
-                tunnel_established = True
-                if rest:
-                    upstream.sendall(rest)
-                    self.state.update(bytes_up=len(rest))
-            client.settimeout(None)
-            upstream.settimeout(None)
-            self._relay(client, upstream)
+            try:
+                upstream.sendall(outbound)
+                self.state.update(bytes_up=len(outbound))
+                if method == b"CONNECT":
+                    response_head, response_rest = _read_headers(upstream)
+                    response = response_head + b"\r\n\r\n" + response_rest
+                    client.sendall(response)
+                    self.state.update(bytes_down=len(response))
+                    status_line = response_head.split(b"\r\n", 1)[0]
+                    if b" 200 " not in status_line:
+                        if b" 407 " in status_line:
+                            # Upstream proxy rejected the forwarded credentials.
+                            self.state.record_failure(FAILURE_PROXY_AUTH)
+                        else:
+                            # Any other non-200 CONNECT reply (e.g. 403, 503).
+                            self.state.record_failure(FAILURE_CONNECT_REJECTED)
+                        failure_recorded = True
+                        return
+                    tunnel_established = True
+                    if rest:
+                        upstream.sendall(rest)
+                        self.state.update(bytes_up=len(rest))
+                client.settimeout(None)
+                upstream.settimeout(None)
+                self._relay(client, upstream)
+            except (OSError, ValueError, ConnectionError, ssl.SSLError):
+                if not tunnel_established:
+                    # Broken transport while forwarding the request or reading
+                    # the upstream CONNECT reply.
+                    self.state.record_failure(FAILURE_TRANSPORT)
+                    failure_recorded = True
+                    self._send_error(client)
         except (OSError, ValueError, ConnectionError, ssl.SSLError):
-            if not tunnel_established:
+            if not tunnel_established and not failure_recorded:
+                self.state.record_failure(FAILURE_TRANSPORT)
                 self._send_error(client)
         finally:
             if upstream is not None:

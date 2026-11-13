@@ -24,6 +24,7 @@ tests=(
   tests/test_static_asset_cache.py
   tests/test_signup_page_decision.py
   tests/test_batch_traffic.py
+  tests/test_batch_traffic_failures.py
   tests/test_retry_policy.py
   tests/test_monitor_http.py
   tests/test_proxy_store.py
