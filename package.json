@@ -1,0 +1,54 @@
+{
+  "name": "ha-linux-companion",
+  "version": "4.3.4",
+  "description": "Home Assistant Companion for Linux — Professional desktop application",
+  "main": "src/main.js",
+  "author": "Simone Bonizzardi <simone.bonizzardi5@gmail.com>",
+  "homepage": "https://github.com/SimoneB79/ha-linux-companion",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --linux",
+    "build:arm64": "electron-builder --linux --arm64",
+    "build:deb": "electron-builder --linux deb",
+    "build:appimage": "electron-builder --linux AppImage"
+  },
+  "build": {
+    "appId": "com.ha-linux-companion.app",
+    "productName": "HA Companion",
+    "directories": {
+      "output": "dist"
+    },
+    "linux": {
+      "icon": "assets/icon.png",
+      "category": "Utility",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*"
+    ]
+  },
+  "devDependencies": {
+    "electron": "42.2.0",
+    "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "axios": "^1.9.0",
+    "home-assistant-js-websocket": "^9.6.0",
+    "systeminformation": "^5.25.0",
+    "ws": "^8.21.0"
+  }
+}

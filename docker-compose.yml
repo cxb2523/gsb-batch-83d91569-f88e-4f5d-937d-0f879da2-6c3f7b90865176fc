@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  ha-companion:
+    build: .
+    image: ha-linux-companion:latest
+    container_name: ha-companion
+    restart: unless-stopped
+    ports:
+      - "8080:8080"   # noVNC web interface
+    environment:
+      - HA_URL=https://homeassistant.local:8123  # Your HA URL
+      - HA_TOKEN=                    # Long-lived access token
+      - DEVICE_NAME=Docker Panel     # Device name in HA
+      - RESOLUTION=1280x720          # Virtual display resolution
+      - NOVNC_PORT=8080              # noVNC port inside container
+    volumes:
+      - ./config:/config             # Persistent config
+    shm_size: "1gb"                  # Prevent Electron crashes

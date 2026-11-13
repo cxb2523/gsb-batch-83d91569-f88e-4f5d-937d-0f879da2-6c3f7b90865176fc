@@ -1,0 +1,208 @@
+/* ═══════════════════════════════════════════
+   HA Companion — Toast Notification Styles
+   ═══════════════════════════════════════════ */
+
+#ha-toast-container {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 99999;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 380px;
+  width: 380px;
+  pointer-events: none;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* ── Single Toast ── */
+.ha-toast {
+  pointer-events: all;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: rgba(30, 30, 30, 0.95);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  color: #fff;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.2);
+  border: 1px solid rgba(255,255,255,0.08);
+  transform: translateX(120%);
+  opacity: 0;
+  transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+              opacity 0.3s ease;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+.ha-toast.show {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+.ha-toast.dismiss {
+  transform: translateX(120%);
+  opacity: 0;
+}
+
+/* ── Priority accent bar ── */
+.ha-toast::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  border-radius: 12px 0 0 12px;
+}
+
+.ha-toast[data-priority="urgent"]::before { background: #FF3B30; }
+.ha-toast[data-priority="high"]::before    { background: #FF9500; }
+.ha-toast[data-priority="default"]::before { background: #0A84FF; }
+.ha-toast[data-priority="low"]::before     { background: #8E8E93; }
+.ha-toast[data-priority="min"]::before     { background: #48484A; }
+
+/* Urgent pulse */
+.ha-toast[data-priority="urgent"] {
+  animation: toast-pulse 1.5s ease-in-out infinite;
+  border-color: rgba(255, 59, 48, 0.3);
+}
+
+@keyframes toast-pulse {
+  0%, 100% { box-shadow: 0 8px 32px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.2); }
+  50% { box-shadow: 0 8px 32px rgba(255,59,48,0.3), 0 2px 8px rgba(255,59,48,0.2); }
+}
+
+/* ── Icon ── */
+.ha-toast-icon {
+  font-size: 24px;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.08);
+}
+
+.ha-toast[data-priority="urgent"] .ha-toast-icon { background: rgba(255,59,48,0.2); }
+.ha-toast[data-priority="high"] .ha-toast-icon    { background: rgba(255,149,0,0.2); }
+
+/* ── Content ── */
+.ha-toast-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.ha-toast-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ha-toast-message {
+  font-size: 13px;
+  color: rgba(255,255,255,0.7);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ── Timestamp ── */
+.ha-toast-time {
+  font-size: 11px;
+  color: rgba(255,255,255,0.4);
+  margin-top: 4px;
+}
+
+/* ── Close button ── */
+.ha-toast-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: rgba(255,255,255,0.1);
+  color: rgba(255,255,255,0.5);
+  border-radius: 50%;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.2s, background 0.2s;
+}
+
+.ha-toast:hover .ha-toast-close {
+  opacity: 1;
+}
+
+.ha-toast-close:hover {
+  background: rgba(255,255,255,0.2);
+  color: #fff;
+}
+
+/* ── Actions ── */
+.ha-toast-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ha-toast-action {
+  padding: 6px 14px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.85);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.ha-toast-action:hover {
+  background: rgba(255,255,255,0.12);
+  border-color: rgba(255,255,255,0.25);
+}
+
+.ha-toast-action.primary {
+  background: rgba(10, 132, 255, 0.3);
+  border-color: rgba(10, 132, 255, 0.5);
+  color: #64D2FF;
+}
+
+.ha-toast-action.primary:hover {
+  background: rgba(10, 132, 255, 0.45);
+}
+
+/* ── Progress bar (auto-dismiss timer) ── */
+.ha-toast-progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  background: rgba(255,255,255,0.2);
+  border-radius: 0 0 12px 12px;
+  transition: width linear;
+}
+
+.ha-toast[data-priority="urgent"] .ha-toast-progress { background: rgba(255,59,48,0.5); }
+
+/* ── Max toasts visible ── */
+#ha-toast-container .ha-toast:nth-child(n+4) {
+  display: none;
+}
