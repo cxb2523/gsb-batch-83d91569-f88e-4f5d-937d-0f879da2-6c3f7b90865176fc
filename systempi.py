@@ -17,6 +17,7 @@ import os
 import platform
 import pty
 import re
+import secrets
 import select
 import signal
 import shutil
@@ -514,8 +515,17 @@ def format_repo_age(success_utc, now=None):
     return f"{seconds // 3600}h"
 
 
-def repo_cached_status(count, success_utc):
-    return f"{count} cached, {format_repo_age(success_utc)} old"
+def repo_cached_status(count, success_utc, note=None):
+    label = f"{count} cached"
+    if note:
+        # Keep the outcome marker next to the count so truncation on narrow
+        # terminals drops the age before it drops the reason.
+        label += f" [{note}]"
+    return f"{label}, {format_repo_age(success_utc)} old"
+
+
+REPO_STATUS_FAILED = "Check failed"
+REPO_STATUS_BUSY = "Check busy"
 
 
 def atomic_write_json(path, payload):
@@ -732,13 +742,22 @@ class RepoCheckMonitor:
         interval=REPO_CHECK_INTERVAL,
         retry_interval=REPO_CHECK_RETRY_INTERVAL,
         timeout=REPO_CHECK_TIMEOUT,
-        command_runner=run_repo_process,
+        command_runner=None,
+        architecture_provider=None,
+        signature_provider=None,
+        command_probe=None,
     ):
         self.cache_root = cache_root or repo_check_cache_root()
         self.interval = interval
         self.retry_interval = retry_interval
         self.timeout = timeout
-        self.command_runner = command_runner
+        self.command_runner = command_runner or run_repo_process
+        # Tests inject a fake command runner; the real default still verifies
+        # that apt/apt-get exist before spawning anything.
+        real_runner = self.command_runner is run_repo_process
+        self._command_probe = command_probe or (shutil.which if real_runner else (lambda _name: "fake"))
+        self._architecture_provider = architecture_provider or determine_relevant_apt_architectures
+        self._signature_provider = signature_provider or source_configuration_signature
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -746,6 +765,7 @@ class RepoCheckMonitor:
         self._count = None
         self._success_utc = None
         self._had_failure = False
+        self._last_outcome = None
         self._status = "Checking..."
         self._refreshing = False
         self._local_recount_requested = False
@@ -755,8 +775,8 @@ class RepoCheckMonitor:
 
     def _load_initial_state(self):
         try:
-            self._architectures = determine_relevant_apt_architectures()
-            self._source_signature = source_configuration_signature(self._architectures)
+            self._architectures = self._architecture_provider()
+            self._source_signature = self._signature_provider(self._architectures)
             result = self._load_current_result()
         except Exception:
             result = None
@@ -791,15 +811,53 @@ class RepoCheckMonitor:
             if self._refreshing:
                 return "Checking..."
             if self._count is None:
+                if self._last_outcome == REPO_REFRESH_FAILURE:
+                    return REPO_STATUS_FAILED
+                if self._last_outcome == REPO_REFRESH_BUSY:
+                    return REPO_STATUS_BUSY
                 return self._status
-            if self._had_failure:
-                return repo_cached_status(self._count, self._success_utc)
+            if self._last_outcome == REPO_REFRESH_NEEDED:
+                # The count came from a configuration we no longer trust.
+                return "Checking..."
+            note = None
+            if self._last_outcome == REPO_REFRESH_BUSY:
+                # Another process held repo-check.lock, so the number on screen
+                # is still the previous successful collection.
+                note = "busy"
+            elif self._had_failure:
+                note = "failed"
+            if note:
+                return repo_cached_status(self._count, self._success_utc, note=note)
             parsed = parse_utc_timestamp(self._success_utc)
             if parsed is not None:
                 age = (datetime.now(timezone.utc) - parsed).total_seconds()
                 if age > self.interval:
                     return repo_cached_status(self._count, self._success_utc)
             return repo_status_from_count(self._count)
+
+    def get_last_outcome(self):
+        with self._lock:
+            return self._last_outcome
+
+    def _finish_attempt(self, result):
+        """Record the outcome of one refresh attempt and hand it back.
+
+        Every attempt ends in exactly one of REPO_REFRESH_SUCCESS,
+        REPO_REFRESH_FAILURE, REPO_REFRESH_BUSY or REPO_REFRESH_NEEDED so the
+        caller can explain what happened instead of guessing from timing.
+        """
+        with self._lock:
+            self._last_outcome = result
+            if result == REPO_REFRESH_SUCCESS:
+                self._had_failure = False
+            elif result == REPO_REFRESH_FAILURE:
+                self._had_failure = True
+                if self._count is None:
+                    self._status = REPO_STATUS_FAILED
+            elif result == REPO_REFRESH_BUSY:
+                if self._count is None:
+                    self._status = REPO_STATUS_BUSY
+        return result
 
     def stop(self):
         self._stop.set()
@@ -839,14 +897,10 @@ class RepoCheckMonitor:
                 with self._lock:
                     self._refreshing = False
                     if result == REPO_REFRESH_SUCCESS:
-                        self._had_failure = False
                         next_refresh_at = time.monotonic() + self.interval
                     elif result == REPO_REFRESH_BUSY:
                         next_refresh_at = time.monotonic() + min(REPO_CHECK_BUSY_RETRY_INTERVAL, self.retry_interval)
                     else:
-                        self._had_failure = True
-                        if self._count is None:
-                            self._status = "Check failed"
                         next_refresh_at = time.monotonic() + self.retry_interval
                 next_recount_at = None
                 continue
@@ -867,6 +921,8 @@ class RepoCheckMonitor:
                 if result == REPO_REFRESH_BUSY:
                     next_recount_at = time.monotonic() + min(REPO_CHECK_BUSY_RETRY_INTERVAL, self.retry_interval)
                 elif result == REPO_REFRESH_NEEDED:
+                    # The cached generation no longer matches the live APT
+                    # configuration; run a full refresh rather than reusing it.
                     next_refresh_at = time.monotonic()
                     next_recount_at = None
                     self._wake.set()
@@ -884,31 +940,34 @@ class RepoCheckMonitor:
         return lock_file
 
     def _recount_current_generation(self):
-        if shutil.which("apt") is None:
-            return REPO_REFRESH_FAILURE
+        if self._command_probe("apt") is None:
+            return self._finish_attempt(REPO_REFRESH_FAILURE)
 
         lock_file = self._acquire_refresh_lock()
         if lock_file is None:
-            return REPO_REFRESH_BUSY
+            return self._finish_attempt(REPO_REFRESH_BUSY)
 
         try:
             generation_path = current_generation_path(self.cache_root)
             if generation_path is None:
-                return REPO_REFRESH_FAILURE
+                return self._finish_attempt(REPO_REFRESH_FAILURE)
 
             result = load_repo_result(generation_path)
             if not result:
-                return REPO_REFRESH_FAILURE
+                return self._finish_attempt(REPO_REFRESH_FAILURE)
 
-            architectures = determine_relevant_apt_architectures()
-            source_signature = source_configuration_signature(architectures)
+            architectures = self._architecture_provider()
+            source_signature = self._signature_provider(architectures)
             if not source_signature:
-                return REPO_REFRESH_FAILURE
+                return self._finish_attempt(REPO_REFRESH_FAILURE)
 
             if (
                 result["source_signature"] != source_signature
                 or result["architectures"] != architectures
             ):
+                # Local package state changed, but the repository
+                # configuration moved under us. Drop the stale count so it
+                # cannot pose as the current result, and force a full refresh.
                 with self._lock:
                     self._count = None
                     self._success_utc = None
@@ -916,7 +975,7 @@ class RepoCheckMonitor:
                     self._status = "Checking..."
                     self._architectures = architectures
                     self._source_signature = source_signature
-                return REPO_REFRESH_NEEDED
+                return self._finish_attempt(REPO_REFRESH_NEEDED)
 
             list_rc, stdout, _, timed_out, cancelled = self.command_runner(
                 repo_apt_list_command(generation_path),
@@ -924,7 +983,7 @@ class RepoCheckMonitor:
                 self.timeout,
             )
             if list_rc != 0 or timed_out or cancelled:
-                return REPO_REFRESH_FAILURE
+                return self._finish_attempt(REPO_REFRESH_FAILURE)
 
             upgradable = [
                 line for line in stdout.splitlines()
@@ -940,9 +999,9 @@ class RepoCheckMonitor:
                 self._count = updated_result["update_count"]
                 self._success_utc = updated_result["success_utc"]
                 self._status = repo_status_from_count(self._count)
-            return REPO_REFRESH_SUCCESS
+            return self._finish_attempt(REPO_REFRESH_SUCCESS)
         except Exception:
-            return REPO_REFRESH_FAILURE
+            return self._finish_attempt(REPO_REFRESH_FAILURE)
         finally:
             try:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -950,31 +1009,30 @@ class RepoCheckMonitor:
                 lock_file.close()
 
     def _refresh_once(self):
-        if shutil.which("apt-get") is None or shutil.which("apt") is None:
-            return REPO_REFRESH_FAILURE
+        if self._command_probe("apt-get") is None or self._command_probe("apt") is None:
+            return self._finish_attempt(REPO_REFRESH_FAILURE)
 
         lock_file = self._acquire_refresh_lock()
         if lock_file is None:
-            return REPO_REFRESH_BUSY
+            return self._finish_attempt(REPO_REFRESH_BUSY)
 
         generation_path = None
         generation_finalized = False
         previous_path = current_generation_path(self.cache_root)
         try:
-            architectures = determine_relevant_apt_architectures()
-            source_signature = source_configuration_signature(architectures)
+            architectures = self._architecture_provider()
+            source_signature = self._signature_provider(architectures)
             if not source_signature:
-                return REPO_REFRESH_FAILURE
+                return self._finish_attempt(REPO_REFRESH_FAILURE)
 
             with self._lock:
                 config_changed = (
-                    self._count is not None
-                    and (
-                        self._source_signature != source_signature
-                        or self._architectures != architectures
-                    )
+                    self._source_signature != source_signature
+                    or self._architectures != architectures
                 )
                 if config_changed:
+                    # Never let the previous configuration's count stand in
+                    # for the new one while the fresh data is being collected.
                     self._count = None
                     self._success_utc = None
                     self._had_failure = False
@@ -982,16 +1040,19 @@ class RepoCheckMonitor:
                 self._architectures = architectures
                 self._source_signature = source_signature
 
-            seed_from_previous = (
-                previous_path is not None
-                and repo_generation_matches(previous_path, source_signature, architectures)
-            )
+            if previous_path is not None and not repo_generation_matches(
+                previous_path, source_signature, architectures
+            ):
+                # A cached generation from another source configuration must
+                # never be reused or seeded from; it is pruned on success.
+                previous_path = None
+            seed_from_previous = previous_path is not None
 
             generations = self.cache_root / "generations"
             generations.mkdir(parents=True, exist_ok=True)
             generation_id = (
                 datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                + f"-{os.getpid()}-{time.monotonic_ns()}"
+                + f"-{os.getpid()}-{time.monotonic_ns()}-{secrets.token_hex(4)}"
             )
             generation_path = generations / generation_id
             ensure_generation_layout(generation_path)
@@ -1005,7 +1066,7 @@ class RepoCheckMonitor:
                 self.timeout,
             )
             if update_rc != 0 or timed_out or cancelled:
-                return REPO_REFRESH_FAILURE
+                return self._finish_attempt(REPO_REFRESH_FAILURE)
 
             list_rc, stdout, _, timed_out, cancelled = self.command_runner(
                 repo_apt_list_command(generation_path),
@@ -1013,7 +1074,7 @@ class RepoCheckMonitor:
                 self.timeout,
             )
             if list_rc != 0 or timed_out or cancelled:
-                return REPO_REFRESH_FAILURE
+                return self._finish_attempt(REPO_REFRESH_FAILURE)
 
             upgradable = [
                 line for line in stdout.splitlines()
@@ -1037,9 +1098,9 @@ class RepoCheckMonitor:
                 self._count = result["update_count"]
                 self._success_utc = success_utc
                 self._status = repo_status_from_count(self._count)
-            return REPO_REFRESH_SUCCESS
+            return self._finish_attempt(REPO_REFRESH_SUCCESS)
         except Exception:
-            return REPO_REFRESH_FAILURE
+            return self._finish_attempt(REPO_REFRESH_FAILURE)
         finally:
             try:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -1050,9 +1111,21 @@ class RepoCheckMonitor:
 
     def _switch_current_generation(self, generation_path):
         relative_target = Path("generations") / generation_path.name
-        tmp_link = self.cache_root / f"current.tmp.{os.getpid()}.{time.monotonic_ns()}"
+        tmp_link = (
+            self.cache_root
+            / f"current.tmp.{os.getpid()}.{time.monotonic_ns()}.{secrets.token_hex(4)}"
+        )
+        marker = self.cache_root / "current"
         os.symlink(relative_target, tmp_link)
-        os.replace(tmp_link, self.cache_root / "current")
+        if os.name == "nt":
+            # Linux swaps the symlink atomically in one rename. Windows
+            # refuses to replace an existing symlink, so remove the old marker
+            # first; it never points at a partial tree either way.
+            try:
+                marker.unlink()
+            except FileNotFoundError:
+                pass
+        os.replace(tmp_link, marker)
 
     def _prune_generations(self, current=None, previous=None):
         keep = {path.name for path in (current, previous) if path is not None}

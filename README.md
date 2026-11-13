@@ -232,6 +232,23 @@ Doctor mode refreshes its normal `Updates` count when local package state change
 
 `Updates` means updates currently known to the machine's normal APT metadata. `Repo` means the result from SystemPi's optional private repository freshness check. For example, `Updates 8 available` and `Repo 9 available` means the system currently knows about 8 available updates, while the isolated repository check sees 9 total available packages.
 
+Every refresh attempt ends in one of four outcomes, and the `Repo` line says which one applied:
+
+| Outcome | `Repo` shows | Meaning |
+| --- | --- | --- |
+| Success | `9 available` / `Up to date` | Freshly collected from the repositories just now. |
+| Failure | `9 cached [failed], 2h old` | The last successful count is still shown, with its age. |
+| Busy | `9 cached [busy], 2h old` | Another process holds `repo-check.lock`; retried shortly. |
+| Config changed | `Checking...` | The source configuration or architecture list changed; the old count is dropped and a full refresh runs immediately. |
+
+If no collection has ever succeeded, a failed attempt shows `Check failed` and a contended attempt shows `Check busy` instead of a count. A successful refresh writes `result.json` (schema, success time, update count, source configuration signature, architecture list) and atomically swaps the `current` symlink to the new generation, pruning older ones. Counts from a configuration that changed are discarded rather than reused, and a failed or cancelled collection removes its unfinished generation directory.
+
+Offline tests for this path run without apt or network access:
+
+```bash
+python -m pytest tests/test_repo_check_monitor.py
+```
+
 Once + export snapshot:
 
 ```bash
