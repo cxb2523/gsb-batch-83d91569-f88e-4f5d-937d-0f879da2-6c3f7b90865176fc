@@ -26,6 +26,29 @@ final class TopologyController extends AbstractController
     }
 
     /**
+     * Troubleshooting view of the last Cloud services collection: one entry per page request with
+     * success/failure, error, HTTP status, request id, and whether another page was advertised.
+     * Always 200 — when cloud mode is off it simply reports that nothing was collected.
+     */
+    #[Route('/api/topology/services-collection', name: 'api_topology_services_collection', methods: ['GET'])]
+    public function servicesCollection(): JsonResponse
+    {
+        $topology = $this->topologyProvider->getTopology();
+        if ($this->cloudApiClient === null || $topology->mode !== TopologyMode::Cloud) {
+            return new JsonResponse([
+                'mode' => $topology->mode->value,
+                'organizationId' => $topology->organizationId,
+                'complete' => true,
+                'stoppedReason' => null,
+                'totalServices' => 0,
+                'pages' => [],
+            ]);
+        }
+
+        return new JsonResponse($this->cloudApiClient->servicesCollectionReport($topology->organizationId)->toArray());
+    }
+
+    /**
      * User-initiated wake of an idle/stopped Cloud service.
      *
      * For `stopped` — PATCH /state {"command": "start"} on control plane.

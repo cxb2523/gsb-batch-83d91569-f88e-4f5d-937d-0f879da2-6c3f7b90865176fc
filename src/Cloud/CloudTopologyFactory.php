@@ -65,6 +65,7 @@ final class CloudTopologyFactory
             organizationId: $orgId,
             organizationName: $orgName,
             warehouseId: $warehouseId,
+            servicesCollection: $this->apiClient->servicesCollectionReport($orgId),
         );
     }
 

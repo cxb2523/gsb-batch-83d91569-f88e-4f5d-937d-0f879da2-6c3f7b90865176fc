@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Topology;
 
+use App\Cloud\ServicesCollectionReport;
+
 final readonly class Topology
 {
     /**
@@ -16,6 +18,7 @@ final readonly class Topology
         public ?string $organizationId = null,
         public ?string $organizationName = null,
         public ?string $warehouseId = null,
+        public ?ServicesCollectionReport $servicesCollection = null,
     ) {}
 
     public function findTargetById(string $id): ?Target
@@ -61,6 +64,10 @@ final readonly class Topology
             'warehouseId' => $this->warehouseId,
             'targets' => array_map(static fn (Target $t) => $t->toJson(), $this->targets),
             'fetchedAt' => $this->fetchedAt->format(\DateTimeInterface::ATOM),
+            // Per-page collection outcome — present in cloud mode only. When `complete` is false
+            // the target list is a prefix of the organization's services; `stoppedReason` and the
+            // failing page's error explain why. Intended for troubleshooting, not rendering.
+            'servicesCollection' => $this->servicesCollection?->toArray(),
         ];
     }
 }
