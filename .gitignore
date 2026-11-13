@@ -1,0 +1,18 @@
+__pycache__/
+output/
+.scrapy/
+.pytest_cache/
+.venv/
+
+# Claude Code
+CLAUDE.local.md
+# Local settings stay out; project skills are shared
+.claude/*
+!.claude/skills/
+
+# Coverage
+.coverage
+
+# Nix build output
+result
+result-*
