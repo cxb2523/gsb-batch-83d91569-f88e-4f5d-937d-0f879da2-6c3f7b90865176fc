@@ -57,6 +57,8 @@ On a game's page:
 ### Sync
 **Sync now** asks IGDB for every upcoming game by your tracked publishers and updates what's already there. It adds new games, updates changed dates and artwork, and skips games you blocked. If a few games fail to save, the rest are kept and the result says **partial**.
 
+If the connection to IGDB drops partway through, the result says **interrupted**: the pages already fetched are saved on your computer, and clicking **Sync now** again picks up from the page that failed instead of starting over. The games appear in your library once the whole fetch has finished; a fully completed sync starts the next one from the beginning, as it always did.
+
 ---
 
 ## Calendar

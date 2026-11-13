@@ -27,7 +27,9 @@ export interface ReleaseDateChange {
   toText: string;
   changedAt: string;
 }
-export type SyncRunStatus = "idle" | "running" | "success" | "partial" | "failed";
+// `interrupted` means IGDB paging failed mid-run; fetched pages were kept and the next sync resumes at the
+// failed page instead of starting over.
+export type SyncRunStatus = "idle" | "running" | "success" | "partial" | "interrupted" | "failed";
 export type OverrideSourceType = "igdb" | "seeded" | "user";
 
 export interface IgdbCompanyRef {

@@ -1,10 +1,17 @@
 import { ACCEPTED_GAME_TYPES } from "../../../../shared/constants";
 import type { IgdbGameLike, TrackedPublisher } from "../../../../shared/types";
 import { escapeIgdbSearch } from "../igdb/gateway";
+import type { TrackerDatabase } from "../database/db";
+import { runWrite } from "../database/writeQueue";
+import { createIgdbSyncProgressStore, type IgdbSyncProgress } from "./igdbSyncProgressStore";
 
 interface IgdbQueryClient {
   query<T>(endpoint: string, body: string): Promise<T[]>;
 }
+
+export const PUBLISHER_BATCH_SIZE = 25;
+export const PAGE_SIZE = 500;
+export const MAX_GAMES_PER_COMPANY_BATCH = 2500;
 
 const igdbGameFields = [
   "id",
@@ -43,17 +50,89 @@ const igdbGameFields = [
 ].join(",");
 
 // Every game by a tracked company (as publisher or developer on IGDB) from the track-from year on.
+// The in-memory crawl used by tests and by syncs handed an explicit candidate list: every company batch is
+// walked from the first page and duplicate IGDB ids collapse into one game.
 export async function discoverIgdbCandidates(client: IgdbQueryClient, { publisherIds, trackFrom }: { publisherIds: readonly number[]; trackFrom: string }): Promise<IgdbGameLike[]> {
   if (publisherIds.length === 0) throw new Error("No publishers are tracked yet. Add some in Settings → Sync, then sync again.");
   const seen = new Map<number, IgdbGameLike>();
-  for (const ids of chunk([...publisherIds], 25)) {
-    for (let offset = 0; offset < 2500; offset += 500) {
+  for (const ids of chunk([...publisherIds], PUBLISHER_BATCH_SIZE)) {
+    for (let offset = 0; offset < MAX_GAMES_PER_COMPANY_BATCH; offset += PAGE_SIZE) {
       const batch = await client.query<IgdbGameLike>("games", buildPublisherGameQuery(ids, trackFrom, offset));
       for (const game of batch) seen.set(game.id, game);
-      if (batch.length < 500) break;
+      if (batch.length < PAGE_SIZE) break;
     }
   }
   return [...seen.values()];
+}
+
+export interface ResumableCollectionResult {
+  ok: boolean;
+  interrupted: boolean;
+  games: IgdbGameLike[];
+  progress: IgdbSyncProgress | null;
+  error: string | null;
+}
+
+// The resumable crawl. Each fetched page and the resume cursor land in one transaction; a request that
+// throws after retries are exhausted ends the round with status `interrupted` and every earlier page kept.
+// The next call resumes at the failed page (same company batch, same offset), unless the previous round
+// finished, the settings changed, or nothing is parked yet — then a fresh round starts on page one.
+export async function collectIgdbCandidatesWithProgress(
+  db: TrackerDatabase,
+  client: IgdbQueryClient,
+  { publisherIds, trackFrom }: { publisherIds: readonly number[]; trackFrom: string }
+): Promise<ResumableCollectionResult> {
+  if (publisherIds.length === 0) throw new Error("No publishers are tracked yet. Add some in Settings → Sync, then sync again.");
+
+  const batches = chunk([...publisherIds], PUBLISHER_BATCH_SIZE);
+  const store = createIgdbSyncProgressStore(db);
+  const stored = await runWrite(db, () => prepareRound(store, batches, trackFrom));
+
+  let batchIndex = stored.companyBatchIndex;
+  let offset = stored.nextOffset;
+  try {
+    while (batchIndex < batches.length) {
+      const page = await client.query<IgdbGameLike>("games", buildPublisherGameQuery(batches[batchIndex], trackFrom, offset));
+      // A short page ends the batch. A full page keeps paging until the 2500-game cap, where the next
+      // request would start at the cap itself and must never be sent.
+      const atCap = offset + PAGE_SIZE >= MAX_GAMES_PER_COMPANY_BATCH;
+      const batchFinished = page.length < PAGE_SIZE || atCap;
+      const nextBatchIndex = batchFinished ? batchIndex + 1 : batchIndex;
+      const nextOffset = batchFinished ? 0 : offset + PAGE_SIZE;
+      // Games and cursor in one transaction: the page is never stored without the cursor moving past it.
+      await runWrite(db, () => store.savePage(page, { companyBatchIndex: nextBatchIndex, nextOffset, batchFinished }));
+      batchIndex = nextBatchIndex;
+      offset = nextOffset;
+    }
+    const progress = await runWrite(db, () => {
+      store.markComplete();
+      return store.read();
+    });
+    return { ok: true, interrupted: false, games: store.stagedGames(), progress, error: null };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const progress = await runWrite(db, () => {
+      store.markInterrupted(message);
+      return store.read();
+    });
+    return { ok: false, interrupted: true, games: store.stagedGames(), progress, error: message };
+  }
+}
+
+// Decide whether the parked cursor still describes this round. A completed round, changed publishers or
+// track-from date, or a cursor that points past the current batches all start the crawl over from page one.
+function prepareRound(store: ReturnType<typeof createIgdbSyncProgressStore>, batches: number[][], trackFrom: string): IgdbSyncProgress {
+  const stored = store.read();
+  const sameRules = stored
+    && stored.companyIdsJson === JSON.stringify(batches.flat())
+    && stored.trackFrom === trackFrom;
+  const cursorInRange = stored && stored.companyBatchIndex < batches.length && stored.nextOffset < MAX_GAMES_PER_COMPANY_BATCH;
+  if (stored && stored.status !== "complete" && sameRules && cursorInRange) {
+    store.markRunning();
+    return store.read()!;
+  }
+  store.reset(batches.flat(), trackFrom);
+  return store.read()!;
 }
 
 export function buildPublisherGameQuery(companyIds: number[], trackFrom: string, offset: number) {
@@ -65,7 +144,7 @@ export function buildPublisherGameQuery(companyIds: number[], trackFrom: string,
       & involved_companies.company = (${companyIds.join(",")})
       & (first_release_date >= ${fromUnix} | release_dates.y >= ${fromYear});
     sort first_release_date asc;
-    limit 500;
+    limit ${PAGE_SIZE};
     offset ${offset};
   `;
 }

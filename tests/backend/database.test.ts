@@ -7,6 +7,7 @@ import { runMigrations } from "../../apps/backend/src/database/migrations";
 import { enqueueWrite, resetWriteQueueForTests } from "../../apps/backend/src/database/writeQueue";
 import { createReleaseStore } from "../../apps/backend/src/database/releaseStore";
 import { getRelease, listReleases } from "../../apps/backend/src/database/releaseReadModel";
+import { createIgdbSyncProgressStore } from "../../apps/backend/src/sync/igdbSyncProgressStore";
 
 let dirs: string[] = [];
 let dbs: Array<{ close(): void }> = [];
@@ -32,7 +33,7 @@ describe("database migrations and FTS", () => {
   test("enables WAL, tracks schema version, and preserves user state", () => {
     const db = tempDb();
     expect(db.pragma("journal_mode", { simple: true })).toBe("wal");
-    expect(db.prepare("select version from schema_version").get()).toEqual({ version: 21 });
+    expect(db.prepare("select version from schema_version").get()).toEqual({ version: 22 });
     expect(db.prepare("select name from sqlite_master where type = 'table' and name = 'release_trailers'").get()).toEqual({ name: "release_trailers" });
 
     db.prepare("insert into releases (id, title, normalized_title, date_text, date_precision, category) values (?, ?, ?, ?, ?, ?)").run("r1", "Exodus", "exodus", "2027", "Year", "Main");
@@ -59,7 +60,7 @@ describe("database migrations and FTS", () => {
 
   test("v15 creates the randomizer pick history table", () => {
     const db = tempDb();
-    expect(db.prepare("select version from schema_version").get()).toEqual({ version: 21 });
+    expect(db.prepare("select version from schema_version").get()).toEqual({ version: 22 });
     expect(db.prepare("select name from sqlite_master where type = 'table' and name = 'randomizer_picks'").get()).toEqual({ name: "randomizer_picks" });
     db.prepare("insert into randomizer_picks (igdb_id, title) values (?, ?)").run(1942, "The Witcher 3");
     expect(db.prepare("select igdb_id igdbId, filters_json filtersJson from randomizer_picks").get()).toEqual({ igdbId: 1942, filtersJson: "{}" });
@@ -133,10 +134,30 @@ describe("database migrations and FTS", () => {
 
     runMigrations(db);
 
-    expect(db.prepare("select version from schema_version").get()).toEqual({ version: 21 });
+    // Migrating from v20 lands on the latest schema, but the v21 tables it added are what this test pins.
+    expect(db.prepare("select version from schema_version").get()).toEqual({ version: 22 });
     expect(db.prepare("select name from sqlite_master where type = 'table' and name in ('release_date_changes', 'release_alerts_sent') order by name").all())
       .toEqual([{ name: "release_alerts_sent" }, { name: "release_date_changes" }]);
     expect(db.prepare("select releases.title, state.watched from releases join user_release_state state on state.release_id = releases.id").all()).toEqual([{ title: "Kept", watched: 1 }]);
+  });
+
+  test("v22 adds the resumable-sync staging and progress cursor to a v21 library", () => {
+    const db = tempDb();
+    db.exec("drop table igdb_sync_candidates; drop table igdb_sync_progress; update schema_version set version = 21;");
+
+    runMigrations(db);
+
+    expect(db.prepare("select version from schema_version").get()).toEqual({ version: 22 });
+    expect(db.prepare("select name from sqlite_master where type = 'table' and name in ('igdb_sync_candidates', 'igdb_sync_progress') order by name").all())
+      .toEqual([{ name: "igdb_sync_candidates" }, { name: "igdb_sync_progress" }]);
+
+    // Re-fetching the same page overwrites by IGDB id instead of duplicating, through the store's upsert.
+    const store = createIgdbSyncProgressStore(db);
+    store.reset([7, 8], "2026-01-01");
+    store.savePage([{ id: 11, name: "Kept Game" }], { companyBatchIndex: 0, nextOffset: 500, batchFinished: false });
+    store.savePage([{ id: 11, name: "Kept Game v2" }, { id: 12, name: "Second Game" }], { companyBatchIndex: 0, nextOffset: 1000, batchFinished: false });
+    expect(db.prepare("select count(*) n from igdb_sync_candidates").get()).toEqual({ n: 2 });
+    expect(db.prepare("select game_json from igdb_sync_candidates where igdb_id = 11").get()).toEqual({ game_json: JSON.stringify({ id: 11, name: "Kept Game v2" }) });
   });
 
   test("v20 replaces the built-in publisher list with the user's tracked publishers", () => {

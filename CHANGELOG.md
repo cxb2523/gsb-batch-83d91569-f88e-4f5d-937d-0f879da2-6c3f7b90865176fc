@@ -2,6 +2,15 @@
 
 What changed in each version, in plain language.
 
+## Unreleased
+
+**Syncs can resume after a failure**
+- Syncing your publishers' games now saves each fetched page to your library database as it arrives, along with a bookmark of where the crawl got to (which publisher batch and page offset).
+- If an IGDB request fails after its retries are exhausted — a timeout, a rate limit that never clears, a lost connection — the sync stops with an **interrupted** status instead of failing outright. Every game already fetched is kept; nothing is rolled back.
+- The next time you sync, it continues from exactly the page that failed instead of re-requesting all the earlier pages. Once the whole crawl finishes, your releases are saved as before, with no duplicate games.
+- A sync that completed in full still starts a fresh round from the first page next time, and changing your tracked publishers or track-from date restarts the crawl, since the old bookmark no longer applies.
+- Your library is upgraded to schema v22 for the sync staging tables; a backup is made first, as with every upgrade.
+
 ## 0.7.0
 
 **Watchlist**

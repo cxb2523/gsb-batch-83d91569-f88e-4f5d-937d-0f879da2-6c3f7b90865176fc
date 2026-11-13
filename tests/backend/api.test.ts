@@ -130,14 +130,18 @@ describe("release API", () => {
   });
 
   test("sync endpoint returns status instead of throwing when credentials are missing", async () => {
-    const { app } = setup();
+    const { app, db } = setup();
     const first = await app.inject({ method: "POST", url: "/api/sync/igdb" });
     const second = await app.inject({ method: "POST", url: "/api/sync/igdb" });
 
     expect(first.statusCode).toBe(200);
     expect(second.statusCode).toBe(200);
-    expect(second.json().status).toBe("failed");
+    // A failed first page is an interruptible crawl: nothing was fetched, but the cursor stays parked at
+    // page zero so adding credentials later resumes instead of starting a different code path.
+    expect(second.json().status).toBe("interrupted");
     expect(second.json().message.length).toBeGreaterThan(0);
+    expect(db.prepare("select status, company_batch_index, next_offset from igdb_sync_progress where id = 1").get())
+      .toEqual({ status: "interrupted", company_batch_index: 0, next_offset: 0 });
   });
 
   test("a sync interrupted by closing the app is reported as failed on the next start", async () => {

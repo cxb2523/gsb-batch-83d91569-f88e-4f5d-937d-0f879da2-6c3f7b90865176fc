@@ -26,9 +26,11 @@ export function trimSyncLog(db: TrackerDatabase) {
   `).run();
 }
 
-// A run still marked running when the backend starts was cut off by the app closing mid-sync.
+// A run still marked running when the backend starts was cut off by the app closing mid-sync. The crawl
+// cursor is parked at the last committed page, so it is marked interrupted too; the next sync resumes it.
 export function failInterruptedSyncRuns(db: TrackerDatabase) {
   db.prepare("update sync_runs set status = 'failed', message = 'interrupted', finished_at = current_timestamp where status = 'running'").run();
+  db.prepare("update igdb_sync_progress set status = 'interrupted' where id = 1 and status = 'running'").run();
 }
 
 export function shouldAutoSync(db: TrackerDatabase, staleHours = 12) {

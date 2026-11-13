@@ -81,6 +81,8 @@ SQLite via `better-sqlite3`. Migrations in `apps/backend/src/database/migrations
 | `blocked_releases` | Deleted+blocked games | `id`, `igdb_id`, `normalized_title`, `title`, `reason` |
 | `sync_runs` | Sync execution log | `id`, `status`, `added`, `repaired`, `skipped`, `failed`, `message` |
 | `sync_log` | Per-game sync decisions | `sync_run_id`, `title`, `action` (accept/reject), `reason` |
+| `igdb_sync_candidates` | Fetched IGDB pages parked during a crawl (v22); keyed by `igdb_id` so re-fetched pages upsert instead of duplicating; cleared when a new round starts | `igdb_id`, `game_json`, `fetched_at` |
+| `igdb_sync_progress` | The single resume cursor for the crawl (v22) | `status` (running/interrupted/complete), `company_batch_index`, `next_offset`, `company_ids_json`, `track_from`, `pages_fetched`, `last_error` |
 | `releases_fts` | FTS5 virtual table | `title`, `normalized_title`, `publishers`, `developers`, `sources` (refreshed by the Release Store; delete trigger removes deleted releases) |
 
 ### Completed library tables
@@ -90,7 +92,7 @@ SQLite via `better-sqlite3`. Migrations in `apps/backend/src/database/migrations
 | `completed_games` | Completed games | `id`, `title`, `normalized_title`, `identity_key`, `source_identity_key`, `user_platform`, `rating_raw`, `rating_score`, `hours_played`, `completion_date`, `completion_month`, `completion_year`, `completion_precision`, `notes`, `developer`, `publisher`, `igdb_id`, `cover_image_id`, `match_status`, `screenshots_json`, `source_type`, `missing_from_latest_import` |
 | `completed_match_overrides` | Manual IGDB match overrides | `identity_key`, `normalized_title`, `user_platform`, `igdb_id` |
 
-Schema v10 added IGDB theme, game-mode and rating columns plus `hours_played` to `completed_games`; v11 added `release_genres`; v12 added `completed_games.source_identity_key`; v13 made `releases.igdb_id` unique; v14 dropped the unused backlog, game-length and pick-history tables v10 had also created; v15 created the new `randomizer_picks` table; v16 runs the eligibility and completion-date repairs once; v17 adds `year_in_review_settings`; v18 retires Excel import state and fills missing `rating_score` values from `rating_raw`; v19 indexes `sources(release_id)` and removes duplicate FTS insert/update triggers; v20 adds `tracked_publishers` and drops `publisher_sync_state`.
+Schema v10 added IGDB theme, game-mode and rating columns plus `hours_played` to `completed_games`; v11 added `release_genres`; v12 added `completed_games.source_identity_key`; v13 made `releases.igdb_id` unique; v14 dropped the unused backlog, game-length and pick-history tables v10 had also created; v15 created the new `randomizer_picks` table; v16 runs the eligibility and completion-date repairs once; v17 adds `year_in_review_settings`; v18 retires Excel import state and fills missing `rating_score` values from `rating_raw`; v19 indexes `sources(release_id)` and removes duplicate FTS insert/update triggers; v20 adds `tracked_publishers` and drops `publisher_sync_state`; v21 adds `release_date_changes` and `release_alerts_sent`; v22 adds the resumable-crawl staging table `igdb_sync_candidates` and its `igdb_sync_progress` cursor.
 
 ### Randomizer table
 
@@ -211,7 +213,7 @@ Unexpected 5xx errors are logged with their stack and return only `{"error":"Som
 The IGDB sync flow:
 1. `syncRun.startSync()` — singleton mutex, prevents concurrent syncs (owns the run lifecycle)
 2. `syncRun.execute()` — creates a `sync_runs` record, discovers candidates, fetches SteamGridDB artwork, persists
-3. `igdbCandidateSource.discoverIgdbCandidates()` — queries IGDB for every game a tracked publisher (by IGDB company id, from Settings → Sync) is credited on, from the track-from year on. With no tracked publishers the run fails with a message telling the user to add some
+3. `igdbCandidateSource.collectIgdbCandidatesWithProgress()` — the resumable crawl: company batches of 25 publisher ids, pages of 500, at most 2500 games per batch. Each fetched page is upserted into `igdb_sync_candidates` (keyed by IGDB id) and the `igdb_sync_progress` cursor (batch index + next offset) is advanced in the same transaction. A page request that throws ends the round as `interrupted` with all earlier pages kept; the next run resumes at that offset, while a completed or stale (changed settings) cursor starts a fresh round. With no tracked publishers the run fails with a message telling the user to add some
 4. `releasePolicy.chooseBestReleaseDate()` picks the earliest date on a tracked platform. IGDB dates vague releases at the end of their period (Dec 31 for "2027"), so the date's `human` text sets the precision: a bare year is Year, "Mmm YYYY" is Month, a quarter, half, season or early/mid/late phrase is Window, anything else is Exact. Only Exact dates get countdowns and calendar cells
 5. `releaseSyncPlanner.prepareSyncCandidate()` — applies the Release Policy built from the sync settings (`createReleasePolicy`: game type, excluded edition names, tracked platform families, tracked publisher or developer, track-from date) and normalizes each game once per run; both later steps use the result
 6. SteamGridDB enrichment (`syncArtworkEnrichment.ts`) — outside the write queue, looks up artwork only for accepted, unblocked games that still lack provider artwork, four lookups at a time
@@ -507,7 +509,8 @@ apps/
     steamgriddb/client.ts        SteamGridDB API client
     sync/
       autoSyncSchedule.ts        When auto-sync runs: at startup, then every 30 min while the app is open
-      igdbCandidateSource.ts     Discover games from IGDB by publisher
+      igdbCandidateSource.ts     Resumable publisher-game crawl (25-company batches, 500-per-page, 2500 cap) and IGDB company search
+      igdbSyncProgressStore.ts   Staging table + resume cursor for the crawl; page games and cursor commit in one transaction
       overrides.ts               Override loading
       releaseMerge.ts            Merge state loading
       releaseSyncPlanner.ts      Add/repair/skip decision logic

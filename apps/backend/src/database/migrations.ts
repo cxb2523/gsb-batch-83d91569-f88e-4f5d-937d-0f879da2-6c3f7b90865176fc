@@ -26,7 +26,8 @@ const migrations: Array<(db: TrackerDatabase) => void> = [
   migrateToV18,
   migrateToV19,
   migrateToV20,
-  migrateToV21
+  migrateToV21,
+  migrateToV22
 ];
 
 const LATEST_SCHEMA_VERSION = migrations.length;
@@ -617,6 +618,32 @@ function migrateToV21(db: TrackerDatabase) {
       alert_key text not null,
       sent_at text not null default current_timestamp,
       primary key (release_id, alert_key)
+    );
+  `);
+}
+
+// v22 makes the IGDB publisher-game crawl resumable. Every fetched page is parked in
+// igdb_sync_candidates keyed by IGDB id (duplicate pages never duplicate rows) while
+// igdb_sync_progress remembers the company batch and page offset the crawl reached. The two are only
+// ever written together, so a failed page never loses the pages already fetched.
+function migrateToV22(db: TrackerDatabase) {
+  db.exec(`
+    create table if not exists igdb_sync_candidates (
+      igdb_id integer primary key,
+      game_json text not null,
+      fetched_at text not null default current_timestamp
+    );
+
+    create table if not exists igdb_sync_progress (
+      id integer primary key check (id = 1),
+      status text not null,
+      company_batch_index integer not null,
+      next_offset integer not null,
+      company_ids_json text not null,
+      track_from text not null,
+      pages_fetched integer not null default 0,
+      last_error text,
+      updated_at text not null default current_timestamp
     );
   `);
 }

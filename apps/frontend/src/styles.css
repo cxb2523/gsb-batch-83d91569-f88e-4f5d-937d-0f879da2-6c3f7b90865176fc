@@ -126,7 +126,7 @@ textarea { height: auto; min-height: 80px; padding: 10px; resize: vertical; }
 .bulk-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; font-size: var(--fs-small); }
 .sync-strip { font-size: var(--fs-tiny); color: var(--c-muted); margin-top: 10px; }
 .sync-strip.failed, .state.error { color: var(--c-danger); }
-.sync-strip.partial, .state.warning { color: var(--c-warning); }
+.sync-strip.partial, .sync-strip.interrupted, .state.warning { color: var(--c-warning); }
 .state { padding: 18px 0; color: var(--c-muted); font-size: var(--fs-small); }
 .upcoming-list__scroll { flex: 1; min-height: 0; overflow-y: auto; margin: 16px -10px 0; padding: 0 10px; scrollbar-width: thin; scrollbar-color: var(--c-border) transparent; }
 .upcoming-month { font-size: var(--fs-h3); color: var(--c-accent); margin: 18px 0 8px; }

@@ -3,7 +3,7 @@ import { runWrite } from "../database/writeQueue";
 import { createIgdbGateway, type IgdbGateway } from "../igdb/gateway";
 import { createSettingsStore } from "../settings/settingsStore";
 import type { IgdbGameLike, ReleaseArtwork, SyncStatus } from "../../../../shared/types";
-import { discoverIgdbCandidates } from "./igdbCandidateSource";
+import { collectIgdbCandidatesWithProgress } from "./igdbCandidateSource";
 import { createReleasePolicy } from "./releasePolicy";
 import { createSyncSettingsStore } from "./syncSettingsStore";
 import { planReleaseSync, prepareSyncCandidate, type SyncCandidate } from "./releaseSyncPlanner";
@@ -71,7 +71,13 @@ class SyncRun {
 
   private async discoverCandidates(syncRunId: number, rules: { publisherIds: number[]; trackFrom: string }): Promise<{ ok: true; items: IgdbGameLike[] } | { ok: false; status: SyncStatus }> {
     try {
-      return { ok: true, items: this.candidates ?? await this.fetchIgdbCandidates(rules) };
+      if (this.candidates) return { ok: true, items: this.candidates };
+      const collected = await collectIgdbCandidatesWithProgress(this.db, this.igdbGateway(), rules);
+      if (collected.interrupted) {
+        const status = await runWrite(this.db, () => this.interruptRun(syncRunId, collected.error ?? "IGDB request failed"));
+        return { ok: false, status };
+      }
+      return { ok: true, items: collected.games };
     } catch (error) {
       const status = await runWrite(this.db, () => {
         this.db.prepare(`
@@ -85,9 +91,8 @@ class SyncRun {
     }
   }
 
-  private fetchIgdbCandidates(rules: { publisherIds: number[]; trackFrom: string }): Promise<IgdbGameLike[]> {
-    const igdb = this.igdb ?? createIgdbGateway({ readConfig: () => createSettingsStore(this.db).igdbTokenConfig() });
-    return discoverIgdbCandidates(igdb, rules);
+  private igdbGateway(): IgdbGateway {
+    return this.igdb ?? createIgdbGateway({ readConfig: () => createSettingsStore(this.db).igdbTokenConfig() });
   }
 
   private fetchSteamGridEnrichment(candidates: SyncCandidate[]) {
@@ -156,6 +161,15 @@ class SyncRun {
 
   private failRun(syncRunId: number, counters: SyncCounters, error: unknown) {
     this.db.prepare("update sync_runs set status = 'failed', finished_at = current_timestamp, added = ?, repaired = ?, skipped = ?, failed = ?, message = ? where id = ?").run(counters.added, counters.repaired, counters.skipped, counters.failed, error instanceof Error ? error.message : String(error), syncRunId);
+    trimSyncLog(this.db);
+    return getSyncStatus(this.db);
+  }
+
+  // The IGDB crawl failed on a page after its retries were exhausted. The pages already fetched stay
+  // parked in the database; finishing this run as `interrupted` leaves the cursor for the next sync to
+  // resume from instead of refetching anything.
+  private interruptRun(syncRunId: number, error: string) {
+    this.db.prepare("update sync_runs set status = 'interrupted', finished_at = current_timestamp, message = ? where id = ?").run(`Interrupted: ${error}. Already fetched games were kept; the next sync resumes where this one stopped.`, syncRunId);
     trimSyncLog(this.db);
     return getSyncStatus(this.db);
   }
