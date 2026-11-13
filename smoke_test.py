@@ -1180,6 +1180,36 @@ def _():
     assert len(solves) == 1 and rc == output_writer.EXIT_BLOCKED, (len(solves), rc)
 
 
+@check("--discover pagination: a repeated page is `pagination_stalled` (partial, exit 6, rows kept, NOT blocked/complete); a mid-run 429 is `rate_limited` (NOT blocked); both record per-page counts and the stop reason in the sidecar")
+def _():
+    art = _fixture_json("perplexity_article_discover_live_20260930.json")
+    slugs = ["article-" + str(n).zfill(22) for n in (1, 2)]
+    page = {"status": "success", "items": [{"slug": s} for s in slugs], "next_token": "more"}
+
+    # Page 2 repeats page 1 verbatim while still claiming more: a stuck cursor.
+    rc, meta, rows, eng = _pflow(
+        [{"api": [(200, page, None), (200, page, None)]}, {"api": [(200, art, None)]}],
+        ["--discover", "top", "--max-results", "3"])
+    assert meta is not None, "a stall with rows must write its sidecar"
+    assert rc == output_writer.EXIT_PARTIAL and meta["stop_reason"] == "pagination_stalled", meta
+    assert meta["status"] == "partial", "a stall must never be a complete run"
+    d = meta["discovery"]
+    assert d["stall"]["kind"] == "duplicate_cursor" and d["pages_fetched"] == 2, d
+    assert d["page_items"] == [2, 2], d
+    assert d["written_rows"] == len(rows) == 2 and d["unfetched_urls"] == [], d
+
+    # A 429 on the SECOND feed page, after one page of items was read.
+    rc, meta, rows, eng = _pflow(
+        [{"api": [(200, page, None), (429, None, "rate limited")]}, {"api": [(200, art, None)]}],
+        ["--discover", "top", "--max-results", "3"])
+    assert meta is not None and rc == output_writer.EXIT_PARTIAL, meta
+    assert meta["status"] == "partial" and meta["stop_reason"] == "rate_limited", meta
+    assert meta["status"] != "blocked", "a throttle after a page was read is not a block"
+    d = meta["discovery"]
+    assert d["pages_fetched"] == 1 and d["pages"][-1]["status"] == 429, d
+    assert d["written_rows"] == len(rows) == 2, d
+
+
 class _FakeScrapeClient:
     """scraper_api_client.TwoCaptchaClient.scrape_url, scripted: each call
     takes the next answer — a (target status, body) pair or an exception."""

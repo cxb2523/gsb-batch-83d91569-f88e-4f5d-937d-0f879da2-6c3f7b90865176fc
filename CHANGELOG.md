@@ -11,6 +11,21 @@ rather than being a silent violation of that.
 
 ### Changed
 
+- `--discover` pagination now ends with an auditable reason instead of a
+  vague "it stopped somewhere". A page repeating the previous page verbatim
+  (a stuck cursor) or consecutive empty pages stop pagination with
+  `stop_reason: "pagination_stalled"`; a refusal/throttle after at least one
+  feed page was read stops it with `stop_reason: "rate_limited"`. A refusal
+  on the very first page stays `blocked`. In every case the articles already
+  read are still fetched and written, with status `partial` (exit 6) — the
+  same "rows, but not a clean finish" contract. Stalls and throttles are
+  never reported as `blocked`, nor as a complete run (exit 0).
+- The `.meta.json` sidecar's `discovery` block now records `pages_fetched`,
+  per-page `page_items` (item count for each returned page), a `pages` log
+  (offset, items, new URLs, `has_more`, HTTP status and error per attempt),
+  the `stall` kind and where the cursor stuck, `written_rows`, and
+  `unfetched_urls` with each URL's own reason. A zero-row stall still writes
+  neither file nor sidecar, so a previous good output is left untouched.
 - CI only: the scheduled canary now starts at 08:47 UTC (Mondays) instead of 06:41, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.
 - CI only: the canary bills a Scraping Browser session (`PERPLEXITY_CDP_ENDPOINT`),
   so it now runs weekly (Mondays 06:41 UTC) instead of daily; a manual dispatch

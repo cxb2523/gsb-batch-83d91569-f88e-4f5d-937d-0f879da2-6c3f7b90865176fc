@@ -173,6 +173,26 @@ completeness, article count, whether
 A run that collects nothing writes neither, so it never replaces your
 previous good file.
 
+`--discover` runs also carry a `discovery` block in the sidecar that makes
+a multi-page feed read auditable page by page:
+
+| `discovery` key | What it records |
+|---|---|
+| `pages_fetched`, `offset` | how many feed pages the site actually answered, and the offset pagination reached |
+| `page_items` | how many items EACH returned page carried, in page order (e.g. `[20, 20, 5]`) |
+| `pages` | one entry per page attempted — `offset`, `items`, `new_urls`, `has_more`, HTTP `status`, `error` — including the request that failed |
+| `stop_reason`, `stall` | why pagination ended; `stall` names the kind (`duplicate_cursor`, `empty_pages`, `no_new_items`) and the page/offset where the cursor got stuck |
+| `written_rows` | how many rows reached the output file this run |
+| `unfetched_urls` | feed URLs that were not turned into a row, each with its own `reason` |
+| `blocked`, `rate_limited` | whether the FEED read hit a bot wall or a throttle — a stall sets neither |
+| `complete`, `capped`, `urls_collected` | whether the feed ended cleanly, whether `--max-results` cut it short, how many URLs it offered |
+
+A feed that repeats a page or keeps returning empty pages stops with
+`stop_reason: "pagination_stalled"`; a refusal or throttle after at least
+one page was read stops with `stop_reason: "rate_limited"`. Both are
+`partial` (exit 6) and still write the articles that were read — never
+`blocked`, and never a clean `complete`.
+
 | Exit | Meaning |
 |---|---|
 | `0` | complete |

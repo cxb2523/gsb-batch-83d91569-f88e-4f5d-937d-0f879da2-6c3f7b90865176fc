@@ -76,6 +76,28 @@ class DiscoveryResult:
     rate_limited: bool = False
     offset: int = 0
     capped: bool = False
+    # One record per feed page ATTEMPTED, in order:
+    #   {"page", "offset", "items", "new_urls", "has_more", "status", "error"}
+    # `items` is None only when the request itself failed; a page the site
+    # returned always carries the count it returned, even when it was
+    # rejected as unparseable. This is what makes a stopped run auditable
+    # page by page instead of just "it stopped somewhere".
+    pages: List[dict] = field(default_factory=list)
+    # Why pagination stopped when it did not stop for a normal reason
+    # (a stuck cursor or empty pages): {"kind", "page", ...}.
+    stall: Optional[dict] = None
+
+    @property
+    def pages_fetched(self) -> int:
+        """Pages the site actually returned (HTTP 200), failed requests
+        excluded — the number of pages this run really read."""
+        return sum(1 for page in self.pages if page.get("status") == 200)
+
+    @property
+    def page_item_counts(self) -> List[int]:
+        """How many items each returned page carried, in page order."""
+        return [page["items"] for page in self.pages
+                if page.get("status") == 200 and page.get("items") is not None]
 
 
 def decide(
@@ -308,9 +330,48 @@ async def _close_session(session):
         _log.warning("Session cleanup failed: %s", _redact(str(exc)))
 
 
+# A feed page that answers with nothing but `next_token` set is a stall
+# signal only once it repeats: one empty page can be a transient gap, two
+# consecutive ones mean the cursor cannot advance (its offset moves by the
+# item count, which is 0). Stopping then is the difference between an
+# auditable `pagination_stalled` and an endless loop.
+MAX_CONSECUTIVE_EMPTY_PAGES = 2
+
+# `pagination_stalled` kinds, reported in the sidecar so a reader can tell
+# a stuck cursor from a page that merely offered nothing new:
+#   - "duplicate_cursor": this page's items are IDENTICAL to the previous
+#     page's (the site ignored the offset and served the same page again);
+#   - "empty_pages": N consecutive pages carried 0 items while claiming
+#     there was more;
+#   - "no_new_items": the page had items, but every one was already seen.
+STALL_DUPLICATE_CURSOR = "duplicate_cursor"
+STALL_EMPTY_PAGES = "empty_pages"
+STALL_NO_NEW_ITEMS = "no_new_items"
+
+
 async def collect_discover(engine: Engine, args, topic: str, limit: int, proxy_pool) -> DiscoveryResult:
+    """Read the Discover feed page by page and stop with a REASON.
+
+    Every attempted page is recorded in `result.pages` — offset, item count
+    and outcome — so a stopped run can be audited page by page instead of
+    just saying "it stopped". The three ways pagination ends early are kept
+    apart on purpose:
+
+      - a repeating page or consecutive empty pages → `pagination_stalled`
+        (the cursor is stuck; nothing is blocked, nothing more is coming);
+      - a throttle (429) or a refusal after pages were already read →
+        `rate_limited` (slow down; a first-page challenge stays `blocked`,
+        because that is a bot wall, not a rate limit);
+      - a request/parse failure → `fetch_error` / `remote_api_error` /
+        `parse_error`.
+
+    In every early-stop case the URLs already collected are returned, so
+    `run()` still fetches and writes the articles that DID arrive.
+    """
     result = DiscoveryResult()
     session = None
+    previous_page_urls: Optional[List[str]] = None
+    consecutive_empty = 0
     try:
         session = await engine.open(proxy_pool.next() if proxy_pool else None)
         await session.goto(pp.DISCOVER_URL)
@@ -327,38 +388,106 @@ async def collect_discover(engine: Engine, args, topic: str, limit: int, proxy_p
             result.failure, result.blocked = "blocked", True
             return result
         while len(result.urls) < limit:
-            target = pp.discover_feed_api_url(topic, offset=result.offset)
+            page_number = len(result.pages) + 1
+            offset = result.offset
+            target = pp.discover_feed_api_url(topic, offset=offset)
             status, data, error = await session.fetch_json(target)
             for delay in API_RETRY_DELAYS_S:
                 if not should_retry_api(status, error) or getattr(engine, "fatal", None):
                     break
                 await engine.sleep(delay)
                 status, data, error = await session.fetch_json(target)
+
+            def record(items=None, new_urls=0, has_more=None, page_status=status, page_error=error):
+                result.pages.append({
+                    "page": page_number, "offset": offset, "items": items,
+                    "new_urls": new_urls, "has_more": has_more,
+                    "status": page_status, "error": page_error,
+                })
+
             if error or status != 200:
-                result.blocked = status in BLOCKING_API_STATUSES
-                result.rate_limited = status == 429
-                result.failure = ("remote_api_error" if getattr(engine, "last_remote_error", False)
-                                  else "rate_limited" if result.rate_limited
-                                  else "blocked" if result.blocked else "fetch_error")
+                record(page_status=status, page_error=error)
+                if status in BLOCKING_API_STATUSES and result.pages_fetched:
+                    # Refused/throttled AFTER at least one feed page was
+                    # read: the feed worked a moment ago, so this is a
+                    # rate limit — the caller's answer is "slow down", not
+                    # "buy a proxy". Explicitly NOT `blocked`: a stall or
+                    # a throttle must never be reported as a bot wall.
+                    result.rate_limited = True
+                    result.failure = "rate_limited"
+                elif status in BLOCKING_API_STATUSES:
+                    # Nothing was read yet: a bot challenge walled the feed
+                    # before pagination began. That IS a block (exit 3, no
+                    # rows), with its own stop_reason kept for a 429.
+                    result.blocked = True
+                    result.rate_limited = status == 429
+                    result.failure = "rate_limited" if result.rate_limited else "blocked"
+                else:
+                    result.failure = ("remote_api_error" if getattr(engine, "last_remote_error", False)
+                                      else "fetch_error")
                 break
             if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+                record()
                 result.failure = "parse_error"
                 break
+            items = data["items"]
             page_urls, has_more = pp.parse_discover_feed(data, topic=topic)
-            if len(page_urls) != len(data["items"]) or any(not pp.is_page_url(u) for u in page_urls):
+            if len(page_urls) != len(items) or any(not pp.is_page_url(u) for u in page_urls):
+                record(items=len(items))
                 result.failure = "parse_error"
                 break
+
             new = list(dict.fromkeys(u for u in page_urls if u not in result.urls))
+            record(items=len(items), new_urls=len(new), has_more=has_more)
+
+            # The page's URLs are collected whatever happens next: a final
+            # page still contributes its items even though it ENDS pagination.
             result.urls.extend(new)
             result.capped = len(result.urls) > limit or (len(result.urls) == limit and has_more)
-            if not has_more:
-                break
-            if not new:
+
+            # An EXACT repeat of the previous page is checked before
+            # `has_more`: "the cursor did not advance" is a stall whether
+            # or not the repeat claims more is coming. A page that repeats
+            # and says "no more" must not read as a clean end.
+            if page_urls and page_urls == previous_page_urls:
+                result.stall = {
+                    "kind": STALL_DUPLICATE_CURSOR, "page": page_number, "offset": offset,
+                    "previous_offset": result.pages[-2]["offset"] if len(result.pages) > 1 else None,
+                }
                 result.failure = "pagination_stalled"
                 break
-            result.offset += len(data["items"])
-            if len(result.urls) < limit:
+
+            if not has_more:
+                break  # the feed said this was the last page: a clean end.
+
+            if not page_urls:
+                consecutive_empty += 1
+                if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_PAGES:
+                    result.stall = {
+                        "kind": STALL_EMPTY_PAGES, "page": page_number, "offset": offset,
+                        "consecutive_empty": consecutive_empty,
+                    }
+                    result.failure = "pagination_stalled"
+                    break
+                # A single empty page may be a gap; ask the same offset
+                # again, politely. (`offset` moves by the item count, 0 here.)
                 await engine.sleep(args.delay_between_pages)
+            else:
+                consecutive_empty = 0
+                if not new:
+                    # Items arrived but every one was already seen: the
+                    # cursor is moving over nothing. Also a stall (this is
+                    # the case the old `if not new` guard covered).
+                    result.stall = {
+                        "kind": STALL_NO_NEW_ITEMS, "page": page_number, "offset": offset,
+                        "items": len(items),
+                    }
+                    result.failure = "pagination_stalled"
+                    break
+                result.offset += len(items)
+                if len(result.urls) < limit:
+                    await engine.sleep(args.delay_between_pages)
+            previous_page_urls = page_urls
         result.urls = result.urls[:limit]
         return result
     except Exception as exc:
@@ -377,7 +506,13 @@ async def run(engine: Engine, args, *, urls: List[str], discover_topic: Optional
         discovery = await collect_discover(engine, args, discover_topic, args.max_results, proxy_pool)
         urls = discovery.urls
         if discovery.failure:
-            _log.warning("Discover incomplete at offset %s: %s", discovery.offset, discovery.failure)
+            if discovery.stall:
+                _log.warning("Discover stopped after %d page(s) at offset %s: %s (%s). %d URL(s) already collected.",
+                             discovery.pages_fetched, discovery.offset, discovery.failure,
+                             discovery.stall.get("kind"), len(discovery.urls))
+            else:
+                _log.warning("Discover incomplete after %d page(s) at offset %s: %s",
+                             discovery.pages_fetched, discovery.offset, discovery.failure)
     products: List[Product] = []
     failed_pages: List[int] = []
     failures = []
@@ -411,6 +546,42 @@ async def run(engine: Engine, args, *, urls: List[str], discover_topic: Optional
                   discovery=discovery, rate_limited=rate_limited)
 
 
+def discovery_meta(discovery: DiscoveryResult) -> dict:
+    """The sidecar's `discovery` block — everything needed to audit HOW the
+    feed read ended without re-running it:
+
+      - `complete` / `stop_reason`: whether it ended cleanly, and the
+        machine-readable reason it did not (`pagination_stalled`,
+        `rate_limited`, ...);
+      - `pages_fetched`: pages the site actually returned;
+      - `page_items`: how many items EACH returned page carried, in order —
+        a page's count that contradicts its offset is how a stuck cursor
+        shows up on inspection;
+      - `pages`: the per-page log (offset, items, new URLs, outcome), which
+        also records the request that failed, so "why did it stop" is not
+        just the last page's word;
+      - `stall`: the stall kind and the page/offset where the cursor got
+        stuck (None unless `stop_reason == "pagination_stalled"`).
+
+    `urls_collected` counts URLs the feed offered; `written_rows` /
+    `unfetched_urls` (what became of each of them) are added by `finish()`,
+    which is where those facts exist.
+    """
+    return {
+        "complete": discovery.failure is None,
+        "stop_reason": discovery.failure,
+        "offset": discovery.offset,
+        "urls_collected": len(discovery.urls),
+        "pages_fetched": discovery.pages_fetched,
+        "page_items": discovery.page_item_counts,
+        "pages": list(discovery.pages),
+        "stall": discovery.stall,
+        "blocked": discovery.blocked,
+        "rate_limited": discovery.rate_limited,
+        "capped": discovery.capped,
+    }
+
+
 def finish(args, *, products: List[Product], blocked: bool, remote_api_error: bool, engine_name: str,
            urls: List[str], discover_topic: Optional[str], started_at: float, pages_completed: int,
            failed_pages: List[int], failures=None, discovery=None, rate_limited=False) -> int:
@@ -421,8 +592,14 @@ def finish(args, *, products: List[Product], blocked: bool, remote_api_error: bo
     extra = {"solves_spent": budget.spent if budget is not None else 0, "discover_topic": discover_topic,
              "selection": selection, "failed_urls": failures or []}
     if discovery is not None:
-        extra["discovery"] = {"complete": discovery.failure is None, "stop_reason": discovery.failure,
-                              "offset": discovery.offset, "urls_collected": len(discovery.urls)}
+        block = discovery_meta(discovery)
+        # The two facts that only exist here, after the articles were tried:
+        # what actually made it into the file, and which feed URLs did not,
+        # each with its own reason. A stalled or throttled feed is auditable
+        # without cross-referencing `failed_urls` by hand.
+        block["written_rows"] = len(products)
+        block["unfetched_urls"] = [dict(item) for item in (failures or [])]
+        extra["discovery"] = block
     return _finish_run(
         products=products, out_path=args.out, fmt=args.format, engine=engine_name, url=label,
         pages_requested=len(urls[: args.max_results]), pages_completed=pages_completed,
