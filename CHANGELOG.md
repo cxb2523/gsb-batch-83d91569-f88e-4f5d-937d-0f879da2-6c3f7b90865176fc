@@ -28,6 +28,18 @@ that changes a default is called out at the top of its entry.
 
 ### Added
 
+- Pagination-ending samples and coverage. Three locally constructed GraphQL
+  answer samples in `tests/fixtures/` reproduce, without the network, a
+  "Rate limit exceeded" answer, three well-formed answers that bring nothing
+  new (`stalled`), and the case where the page never sends its pagination
+  request (`no_request`). A new `tests/test_pagination_accounting.py` and a
+  matching `smoke_test.py` check pin the sidecar conclusion for each: the
+  search's `pages` entry shows how many rows were written (`rows`), how many
+  pagination answers were read (`pagination_answers`) and why it stopped
+  (`pagination` / `result`), with every row already read kept in the output.
+  They also pin the honest endings — a natural `end` still reports `result:
+  ok` with exit 0, only an actual unfinished reason yields exit 6, and a run
+  that reads nothing leaves the previous good output and sidecar untouched.
 - Proxy pre-check in all three browser engines. Any other answer, or a
   transport error, lets the run go on as before. Selenium checks the
   proxy without its password, as Chrome uses it there, and a `407` then

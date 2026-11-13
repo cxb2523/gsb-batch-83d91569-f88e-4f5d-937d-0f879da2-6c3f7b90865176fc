@@ -351,6 +351,26 @@ pre-check, or a proxied run that collects nothing, writes only
 | `2` | bad usage, including input where every line was skipped |
 | `1` | crash (a bug; please report it) |
 
+**Where each search stopped.** The sidecar's `pages` list carries one
+entry per input address. For a search it always shows `rows` (how many
+listings that address contributed and wrote), `pagination_answers` (how
+many of the page's own next-page answers were read; `0` means only the
+listings the page embedded) and `pagination`, so "only this many results
+exist" is distinguishable from "the run was cut off here":
+
+- `end` — the results were read to their natural end; the entry's `result`
+  is `ok` and the run exits 0.
+- `rate_limited` — Facebook answered "Rate limit exceeded"; every row read
+  before it is kept and the run exits 6 (`stop_reason: rate_limited`).
+- `stalled` — three pagination answers in a row brought nothing new; exit 6.
+- `no_request` — the page never sent its pagination request (so
+  `pagination_answers` is 0); only the embedded rows were read, exit 6.
+- `error` / `unsupported` / `limit` — a malformed answer, an engine that
+  cannot paginate, or the `--max-results` cap.
+
+A run that collects nothing at all writes neither the output nor this
+sidecar, so it never replaces your previous good file.
+
 **CSV and safe writes.** In a CSV export, text that a spreadsheet would
 run as a formula (starting with `=`, `+`, `-` or `@`, or with a literal
 leading apostrophe) gets a leading `'`; the sidecar records this

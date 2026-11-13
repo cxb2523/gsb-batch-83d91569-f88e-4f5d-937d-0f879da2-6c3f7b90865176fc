@@ -647,7 +647,7 @@ def _():
     seller = re.compile(r'"marketplace_listing_seller":\{(?!"__typename":"User","name":"REDACTED-not-verbatim")')
     shim = re.compile(r"[?&]h=(?!REDACTED)[A-Za-z0-9_-]{8,}")
     files = sorted(_FIX.glob("*"))
-    assert len(files) == 9, [f.name for f in files]
+    assert len(files) == 12, [f.name for f in files]
     for path in files:
         text = path.read_text(encoding="utf-8")
         for name, pattern in (("token", token), ("seller", seller), ("link-shim signature", shim)):
@@ -1104,6 +1104,54 @@ def _():
     rc, meta, rows, eng = _pflow({_BIKE_URL: _paged(answers=[(500, ""), (200, _answer(1, has_next=False))])},
                                  ["--url", _BIKE_URL, "--max-results", "500"], paginate=True)
     assert rc == output_writer.EXIT_OK and len(rows) == 18 and meta["pages"][0]["pagination"] == "end", "one failure, then an answer: read on"
+
+
+# Locally constructed GraphQL answer samples for the three early endings,
+# kept in tests/fixtures/ alongside the real captures (see each file's header).
+_RL_SAMPLE = (_FIX / "fb_mp_pagination_rate_limited_20261113.txt").read_text(encoding="utf-8")
+_STALL_SAMPLE = (_FIX / "fb_mp_pagination_stall_20261113.txt").read_text(encoding="utf-8")
+_NO_REQUEST_SAMPLE = json.loads((_FIX / "fb_mp_pagination_no_request_20261113.json").read_text(encoding="utf-8"))
+
+
+@check("page_flow sidecar accounting on the LOCALLY CONSTRUCTED GraphQL samples: a rate limit, three answers with nothing new, and a page that never sends its request each leave rows / pagination_answers / pagination / result that say exactly where the search stopped, with every row read so far kept; the no-request sample documents why that ending has no answer body")
+def _():
+    assert lp.is_rate_limited(_RL_SAMPLE)
+    stall_payloads = lp.graphql_payloads(_STALL_SAMPLE)
+    assert lp.page_info(stall_payloads)[0] is True, "the stall answer still announces a next page"
+    assert lp.listings(stall_payloads)[0]["id"] in _BIKE_IDS, "it repeats an already-embedded listing: nothing new"
+    assert _NO_REQUEST_SAMPLE["pagination"] == "no_request" and _NO_REQUEST_SAMPLE["pagination_answers"] == 0
+
+    # Rate limited after one good answer: rows kept, exit 6, the sidecar entry
+    # shows how many rows, how many answers, and why.
+    rc, meta, rows, eng = _pflow({_BIKE_URL: _paged(answers=[(200, _RL_SAMPLE)])},
+                                 ["--url", _BIKE_URL, "--max-results", "500"], paginate=True)
+    page = meta["pages"][0]
+    assert rc == output_writer.EXIT_PARTIAL and meta["stop_reason"] == "rate_limited"
+    assert (page["pagination"], page["result"], page["pagination_answers"], page["rows"]) == \
+        ("rate_limited", "rate_limited", 2, 12), page
+    assert len(rows) == 12 and len(eng.sessions[0].posted) == 1, "the throttle ends the search, it is not hammered"
+
+    # Three answers with nothing new (the page's own first answer already repeats
+    # an embedded listing): stalled, only the embedded rows, every one kept.
+    paged_stall = {"html": _fx("search_bike_nyc"), "first_request": (
+        (_FIX / "fb_mp_pagination_form_20261006.txt").read_text(encoding="utf-8").splitlines()[-1], _STALL_SAMPLE),
+        "answers": [(200, _STALL_SAMPLE)] * page_flow.PAGINATION_STALL_ROUNDS}
+    rc, meta, rows, eng = _pflow({_BIKE_URL: paged_stall}, ["--url", _BIKE_URL, "--max-results", "500"], paginate=True)
+    page = meta["pages"][0]
+    assert rc == output_writer.EXIT_PARTIAL and meta["stop_reason"] == "stalled"
+    assert (page["pagination"], page["result"], page["pagination_answers"], page["rows"]) == \
+        ("stalled", "stalled", 1 + page_flow.PAGINATION_STALL_ROUNDS, 6), page
+    assert len(rows) == 6
+
+    # The page never asks for more: no_request, zero pagination answers, the
+    # embedded rows still written, exit 6.
+    rc, meta, rows, eng = _pflow({_BIKE_URL: {"html": _fx("search_bike_nyc")}},
+                                 ["--url", _BIKE_URL, "--max-results", "500"], paginate=True)
+    page = meta["pages"][0]
+    assert rc == output_writer.EXIT_PARTIAL and meta["stop_reason"] == "stalled"
+    assert (page["pagination"], page["result"], page["pagination_answers"], page["rows"]) == \
+        ("no_request", "stalled", 0, 6), page
+    assert len(rows) == 6 and eng.sessions[0].posted == []
 
 
 @check("page_flow END TO END on the REAL captures: a search's listings in the site's order, every address opened with locale=en_US; --max-results caps the rows and marks the run capped; two searches finding one listing write it once, the first search's")

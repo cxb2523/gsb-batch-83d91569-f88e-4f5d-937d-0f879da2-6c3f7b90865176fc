@@ -62,6 +62,26 @@ scroll sent no request at all; 1366×900 with a wheel scroll did.
 Found on the way: Selenium's `--window-size=1366,900` left a 1366×757
 page, too short — the page size is now set over CDP.
 
+### Offline pagination-ending samples
+
+The offline suite reproduces the three ways a search ends *early* without
+the network, from locally constructed GraphQL answer samples kept in
+`tests/fixtures/` (alongside the real captures; each file's header says it
+is synthetic). `tests/test_pagination_accounting.py` and the matching
+`smoke_test.py` check drive `page_flow.run()` with a fake browser session:
+
+| Sample | Scenario | Sidecar `pages[0]` conclusion |
+|---|---|---|
+| `fb_mp_pagination_rate_limited_20261113.txt` | a "Rate limit exceeded" GraphQL error answer after one good answer | `pagination: rate_limited`, exit 6; `rows`/`pagination_answers` show exactly how far it got, every row read kept |
+| `fb_mp_pagination_stall_20261113.txt` | a well-formed answer that still announces a next cursor but repeats an already-embedded listing (nothing new); three in a row | `pagination: stalled`, `result: stalled`, exit 6 |
+| `fb_mp_pagination_no_request_20261113.json` | marker for the case where the page never sends its pagination request — there is no GraphQL body for it | `pagination: no_request`, `pagination_answers: 0`, exit 6, the embedded rows kept |
+
+The same test module also pins the honest endings: a search whose last
+answer says `has_next_page: false` reports `result: ok` with exit 0, and a
+run that reads nothing at all leaves the previous good output and its
+`.meta.json` untouched (no new sidecar).
+
+
 **After the pre-release security review, 2026-10-06:** the pyppeteer
 engine through the password-protected residential proxy still read
 normally (the proxy's own auth challenge answered, nothing else), with no

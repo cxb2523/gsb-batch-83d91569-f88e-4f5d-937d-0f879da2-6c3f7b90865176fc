@@ -1,0 +1,9 @@
+# SYNTHETIC, not a capture: a locally constructed answer to the page's own
+# CometMarketplaceSearchContentPaginationQuery (the shape of
+# fb_mp_pagination_answer_20261006.txt is mirrored, with every field the
+# parser does not read dropped). It still announces has_next_page with a
+# cursor, but its only listing is 1655081135947682 — an id the embedded
+# bike search already carried — so page_flow._collect_payloads adds ZERO
+# new rows. Three such answers in a row end the search's pagination with
+# pagination="stalled" (failure "stalled"), the rows read before them kept.
+{"data":{"marketplace_search":{"feed_units":{"edges":[{"node":{"listing":{"__typename":"GroupCommerceProductItem","id":"1655081135947682","marketplace_listing_title":"Kugoo Pink Kids Bike with Training Wheels","listing_price":{"formatted_amount":"$50","amount":"50.00"},"location":{"reverse_geocode":{"city":"New York","state":"NY","city_page":{"display_name":"New York, New York"}}},"creation_time":1790973044,"is_sold":false,"is_pending":false,"marketplace_listing_category_id":"1658310421102081","custom_sub_titles_with_rendering_flags":[],"delivery_types":["IN_PERSON"]}}}],"page_info":{"end_cursor":"SYNTHETIC-CURSOR-STALL","has_next_page":true}}}}}

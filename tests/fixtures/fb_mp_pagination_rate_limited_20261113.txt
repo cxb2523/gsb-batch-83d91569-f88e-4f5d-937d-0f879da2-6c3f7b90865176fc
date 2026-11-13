@@ -1,0 +1,9 @@
+# SYNTHETIC, not a capture: a locally constructed answer to the page's own
+# CometMarketplaceSearchContentPaginationQuery (the shape of
+# fb_mp_pagination_answer_20261006.txt is mirrored, with every field the
+# parser does not read dropped). Used to make the "Rate limit exceeded"
+# ending reproducible without the network: lp.is_rate_limited() matches on
+# the message text, and page_flow._paginate ends the search's pagination
+# with pagination="rate_limited" while keeping every row already read.
+# One GraphQL document per line, the way Facebook's /api/graphql answers.
+{"errors":[{"message":"Rate limit exceeded","severity":"CRITICAL","code":1675004}],"data":{"marketplace_search":null}}

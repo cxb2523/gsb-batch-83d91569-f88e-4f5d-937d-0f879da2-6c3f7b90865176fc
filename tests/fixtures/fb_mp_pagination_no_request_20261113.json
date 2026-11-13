@@ -1,0 +1,7 @@
+{
+  "_comment": "SYNTHETIC marker, not a capture: there is no GraphQL body for the no_request ending because the page never sends a CometMarketplaceSearchContentPaginationQuery (a wheel scroll at too small a window, or the 'Log in or sign up' banner, measured 2026-10-06). page_flow._paginate then sets pagination='no_request' and failure='stalled' without any pagination answer, so pagination_answers stays 0 and only the listings the search page embedded are kept. The end-to-end test feeds this scenario by returning zero captured requests from the fake session; this file documents why the sample set has no answer body for it.",
+  "pagination": "no_request",
+  "pagination_answers": 0,
+  "failure": "stalled",
+  "expected_rows": "only the rows the search page embedded"
+}
