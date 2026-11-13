@@ -8,8 +8,10 @@ import ssl
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
+from pydantic import ValidationError
 from app.domains.ingestion.schemas import (
     InstrumentType,
     MutualFundNavResponse,
@@ -107,6 +109,95 @@ GLOBAL_API_RATE_LIMITER = APIRateLimiter(
     API_RATE_LIMITS_PER_MINUTE,
     enabled=API_RATE_LIMITING_ENABLED,
 )
+
+
+class IngestionStatus:
+    """Per-scheme ingestion outcome."""
+    SUCCESS = "success"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class IngestionFailureReason:
+    """Machine-readable reason categories for failed/skipped schemes."""
+    BOTH_SOURCES_FAILED = "both_nav_sources_failed"   # MFAPI and captnemo both returned nothing
+    RETRIES_EXHAUSTED = "retries_exhausted"           # repeated unexpected errors until retry cap
+    VALIDATION_FAILED = "validation_failed"           # meta/schema validation did not pass
+    NON_OPEN_ENDED = "non_open_ended"                 # scheme is not an Open Ended scheme
+    MISSING_IDENTIFIERS = "missing_scheme_identifiers"  # no usable scheme_code or ISIN
+    INVALID_SCHEME_CATEGORY = "invalid_scheme_category"  # sub-category/class outside allowed enums
+
+
+@dataclass
+class SchemeIngestionRecord:
+    """Auditable per-scheme outcome of one ingestion run."""
+    scheme_code: Optional[int]
+    scheme_name: Optional[str] = None
+    isin_code: Optional[str] = None
+    status: str = IngestionStatus.FAILED
+    reason: Optional[str] = None
+    retry_count: int = 0
+    detail: Optional[str] = None
+    result: Optional[Dict[str, Any]] = field(default=None, repr=False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "scheme_code": self.scheme_code,
+            "scheme_name": self.scheme_name,
+            "isin_code": self.isin_code,
+            "status": self.status,
+            "reason": self.reason,
+            "retry_count": self.retry_count,
+            "detail": self.detail,
+        }
+
+
+class IngestionBatchResult:
+    """
+    Batch outcome of one NAV ingestion run.
+
+    - successful: validated MutualFundNavResponse-compatible dicts (downstream contract).
+    - failed: per-scheme records for every failed/skipped scheme (never silently dropped).
+    - records: per-scheme records for every scheme considered, including successes.
+
+    Iterating or len()-ing this object yields the successful results only, so existing
+    consumers (pipeline/metrics) keep working unchanged.
+    """
+
+    def __init__(
+        self,
+        successful: List[Dict[str, Any]],
+        records: List[SchemeIngestionRecord],
+    ):
+        self.successful: List[Dict[str, Any]] = successful
+        self.records: List[SchemeIngestionRecord] = records
+
+    @property
+    def failed(self) -> List[SchemeIngestionRecord]:
+        return [r for r in self.records if r.status != IngestionStatus.SUCCESS]
+
+    @property
+    def skipped(self) -> List[SchemeIngestionRecord]:
+        return [r for r in self.records if r.status == IngestionStatus.SKIPPED]
+
+    def summary(self) -> Dict[str, Any]:
+        reason_counts: Dict[str, int] = {}
+        for record in self.failed:
+            key = record.reason or "unknown"
+            reason_counts[key] = reason_counts.get(key, 0) + 1
+        return {
+            "total": len(self.records),
+            "success": len(self.successful),
+            "failed": sum(1 for r in self.records if r.status == IngestionStatus.FAILED),
+            "skipped": sum(1 for r in self.records if r.status == IngestionStatus.SKIPPED),
+            "failure_reasons": reason_counts,
+        }
+
+    def __len__(self) -> int:
+        return len(self.successful)
+
+    def __iter__(self):
+        return iter(self.successful)
 
 
 class MFAPIFetcher:
@@ -1148,6 +1239,12 @@ class MFAPIFetcher:
         validated = MutualFundNavResponse.model_validate(raw)
         result = validated.model_dump(mode="json")
 
+        # Per-scheme weekend-removal accounting, consistent with final data by construction:
+        # kept_nav_count == len(result["data"]) and
+        # removed_weekend_count == len(result["removed_weekend_dates"]).
+        result["removed_weekend_count"] = len(removed_dates)
+        result["kept_nav_count"] = len(filtered_nav)
+
         # When mfdata enrichment is disabled, hide those keys from final output entirely.
         if not MFDATA_ENRICHMENT_ENABLED:
             meta = result.get("meta")
@@ -1157,12 +1254,21 @@ class MFAPIFetcher:
 
         return result
 
-    async def fetch_scheme(self, session, semaphore, scheme_item):
-        """Fetch NAV data with MFAPI primary and captnemo(ISIN) fallback, then validate."""
+    async def fetch_scheme(self, session, semaphore, scheme_item) -> SchemeIngestionRecord:
+        """Fetch NAV data with MFAPI primary and captnemo(ISIN) fallback, then validate.
+
+        Always returns a SchemeIngestionRecord describing the outcome; the validated
+        result payload is attached to record.result on success.
+        """
         async with semaphore:
             max_retries = 4
             scheme_code = scheme_item.get("scheme_code")
             isin_code = scheme_item.get("isin_code")
+            record = SchemeIngestionRecord(
+                scheme_code=scheme_code if isinstance(scheme_code, int) else None,
+                scheme_name=scheme_item.get("scheme_name"),
+                isin_code=isin_code if isinstance(isin_code, str) else None,
+            )
             scheme_type = self._normalize_scheme_type(
                 scheme_item.get("scheme_type"),
                 default=SchemeType.CLOSE_ENDED.value,
@@ -1170,14 +1276,23 @@ class MFAPIFetcher:
 
             if scheme_type != SchemeType.OPEN_ENDED.value:
                 logger.info(f"Skipping non-open-ended scheme_code={scheme_code} | scheme_type={scheme_type}")
-                return None
+                record.status = IngestionStatus.SKIPPED
+                record.reason = IngestionFailureReason.NON_OPEN_ENDED
+                record.detail = f"scheme_type={scheme_type}"
+                return record
 
             for attempt in range(1, max_retries + 1):
+                record.retry_count = attempt - 1
                 try:
                     raw = await self._fetch_scheme_raw_from_mfapi(session, scheme_code)
                     if raw is None:
                         raw = await self._fetch_scheme_raw_from_captnemo(session, isin_code, scheme_item)
                         if raw is None:
+                            record.reason = IngestionFailureReason.BOTH_SOURCES_FAILED
+                            record.detail = (
+                                f"MFAPI and captnemo both returned no data "
+                                f"(isin={isin_code}) on attempt {attempt}/{max_retries}"
+                            )
                             logger.warning(
                                 f"Both NAV sources failed for scheme_code={scheme_code}, isin={isin_code} "
                                 f"on attempt {attempt}/{max_retries}"
@@ -1185,7 +1300,8 @@ class MFAPIFetcher:
                             if attempt < max_retries:
                                 await asyncio.sleep(min(0.5 * attempt, 3))
                                 continue
-                            return None
+                            record.status = IngestionStatus.FAILED
+                            return record
 
                     # Ensure key meta fields are present for fallback-built raws too.
                     meta = raw.get("meta", {}) if isinstance(raw, dict) else {}
@@ -1213,9 +1329,35 @@ class MFAPIFetcher:
                                 meta.update(enrichment)
                         raw["meta"] = meta
 
-                    return self._finalize_raw_scheme_response(raw)
+                    result = self._finalize_raw_scheme_response(raw)
+                    if result is None:
+                        record.status = IngestionStatus.FAILED
+                        record.reason = IngestionFailureReason.VALIDATION_FAILED
+                        record.detail = "Required meta fields missing after NAV fetch"
+                        return record
+
+                    record.status = IngestionStatus.SUCCESS
+                    record.reason = None
+                    record.detail = None
+                    record.result = result
+                    return record
+
+                except ValidationError as e:
+                    record.reason = IngestionFailureReason.VALIDATION_FAILED
+                    record.detail = f"Schema validation error: {e.errors()[:3]}"
+                    logger.warning(
+                        f"Validation failed for scheme_code={scheme_code} on attempt "
+                        f"{attempt}/{max_retries} | {e}"
+                    )
+                    if attempt < max_retries:
+                        await asyncio.sleep(min(0.5 * attempt, 3))
+                        continue
+                    record.status = IngestionStatus.FAILED
+                    return record
 
                 except Exception as e:
+                    record.reason = IngestionFailureReason.RETRIES_EXHAUSTED
+                    record.detail = f"{type(e).__name__}: {e}"
                     logger.warning(
                         f"Error fetching scheme_code={scheme_code} on attempt "
                         f"{attempt}/{max_retries} | type={type(e).__name__} | repr={repr(e)}"
@@ -1223,26 +1365,50 @@ class MFAPIFetcher:
                     if attempt < max_retries:
                         await asyncio.sleep(min(0.5 * attempt, 3))
                         continue
-                    return None
+                    record.status = IngestionStatus.FAILED
+                    return record
 
-    async def fetch_schemes_from_list(self, schemes_list):
-        """Fetch NAV data for schemes list with MFAPI primary and captnemo fallback."""
+    async def fetch_schemes_from_list(self, schemes_list) -> IngestionBatchResult:
+        """Fetch NAV data for schemes list with MFAPI primary and captnemo fallback.
+
+        Returns an IngestionBatchResult: every input scheme gets a SchemeIngestionRecord
+        (success/failed/skipped with reason and retry count); validated payloads are in
+        batch.successful, failures/skips in batch.failed.
+        """
         ssl_context = ssl.create_default_context(cafile=certifi.where())
         connector = aiohttp.TCPConnector(limit=100, ssl=ssl_context)
         timeout = aiohttp.ClientTimeout(total=30)
 
-        scheme_items = [
-            item
-            for item in schemes_list
-            if (
+        scheme_items = []
+        records: List[SchemeIngestionRecord] = []
+        for item in schemes_list:
+            has_identifier = (
                 (isinstance(item.get("scheme_code"), int) and item["scheme_code"] > 0)
                 or (isinstance(item.get("isin_code"), str) and item["isin_code"].strip())
             )
-            and self._normalize_scheme_type(
+            is_open_ended = self._normalize_scheme_type(
                 item.get("scheme_type"),
                 default=SchemeType.CLOSE_ENDED.value,
             ) == SchemeType.OPEN_ENDED.value
-        ]
+
+            if has_identifier and is_open_ended:
+                scheme_items.append(item)
+                continue
+
+            # Keep an auditable record for schemes excluded before fetching.
+            record = SchemeIngestionRecord(
+                scheme_code=item.get("scheme_code") if isinstance(item.get("scheme_code"), int) else None,
+                scheme_name=item.get("scheme_name"),
+                isin_code=item.get("isin_code") if isinstance(item.get("isin_code"), str) else None,
+                status=IngestionStatus.SKIPPED,
+                reason=(
+                    IngestionFailureReason.NON_OPEN_ENDED
+                    if not is_open_ended
+                    else IngestionFailureReason.MISSING_IDENTIFIERS
+                ),
+                detail=f"scheme_type={item.get('scheme_type')!r}",
+            )
+            records.append(record)
         logger.info(f"Starting NAV fetch for {len(scheme_items)} schemes")
 
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
@@ -1253,30 +1419,25 @@ class MFAPIFetcher:
                 for item in scheme_items
             ]
 
-            final_results = []
-            failed_count = 0
             processed_count = 0
 
             try:
                 for done_task in asyncio.as_completed(tasks):
-                    result = await done_task
+                    record = await done_task
+                    records.append(record)
                     processed_count += 1
 
                     if processed_count % 500 == 0:
                         logger.info(
                             f"NAV fetch progress: completed processing for {processed_count} schemes"
                         )
-
-                    if result is not None:
-                        final_results.append(result)
-                    else:
-                        failed_count += 1
             except Exception as e:
                 logger.error(f"Unexpected async execution error: {e}")
-                return []
 
+            success_count = sum(1 for r in records if r.status == IngestionStatus.SUCCESS)
             logger.info(
-                f"NAV fetch completed | Success: {len(final_results)} | Failed/Skipped: {failed_count}"
+                f"NAV fetch completed | Success: {success_count} | "
+                f"Failed/Skipped: {len(records) - success_count}"
             )
 
             # Post-filter for allowed SchemeSubCategory and SchemeClass enums
@@ -1287,7 +1448,9 @@ class MFAPIFetcher:
             removed_scheme_codes = []
 
             filtered_results = []
-            for item in final_results:
+            success_records = [r for r in records if r.status == IngestionStatus.SUCCESS]
+            for record in success_records:
+                item = record.result
                 meta = item.get("meta", {})
                 sub_category = meta.get("scheme_sub_category")
                 scheme_class = meta.get("scheme_class")
@@ -1304,11 +1467,18 @@ class MFAPIFetcher:
                     scheme_code = meta.get("scheme_code")
                     if scheme_code is not None:
                         removed_scheme_codes.append(scheme_code)
+                    # Do not silently drop: convert the success record into a failure record.
+                    record.status = IngestionStatus.FAILED
+                    record.reason = IngestionFailureReason.INVALID_SCHEME_CATEGORY
+                    record.detail = (
+                        f"scheme_sub_category={sub_category!r} | scheme_class={scheme_class!r}"
+                    )
+                    record.result = None
                     continue
 
                 filtered_results.append(item)
 
-            removed_count = len(final_results) - len(filtered_results)
+            removed_count = success_count - len(filtered_results)
             if removed_count:
                 logger.warning(
                     f"Removed {removed_count} schemes due to invalid SchemeSubCategory/SchemeClass"
@@ -1326,18 +1496,34 @@ class MFAPIFetcher:
                         f"Invalid SchemeClass counts: {invalid_scheme_class_counts}"
                     )
 
+            batch = IngestionBatchResult(successful=filtered_results, records=records)
+            logger.info(f"Ingestion batch summary: {batch.summary()}")
             logger.success(f"Final schemes ready: {len(filtered_results)}")
-            return filtered_results
+            return batch
 
 def run_ingestion():
-    """Run mutual fund ingestion pipeline"""
+    """Run mutual fund ingestion pipeline.
+
+    Returns an IngestionBatchResult. It behaves like the list of successful scheme
+    payloads for len()/iteration, and additionally exposes per-scheme status records
+    via .records / .failed / .summary().
+    """
     try:
         fetcher = MFAPIFetcher()
         days = 7
         schemes_list = fetcher.fetch_recent_active_schemes(days)
-        data = asyncio.run(fetcher.fetch_schemes_from_list(schemes_list))
-        logger.info("NAV fetch | Execution completed successfully")
-        return data
+        batch = asyncio.run(fetcher.fetch_schemes_from_list(schemes_list))
+        summary = batch.summary()
+        logger.info(f"NAV fetch | Execution completed successfully | summary={summary}")
+        if batch.failed:
+            logger.warning(
+                "NAV fetch | schemes not ingested: "
+                + ", ".join(
+                    f"scheme_code={r.scheme_code} status={r.status} reason={r.reason}"
+                    for r in batch.failed
+                )
+            )
+        return batch
     except Exception as e:
         logger.error(f"Fatal error in ingestion execution: {e}")
         raise
