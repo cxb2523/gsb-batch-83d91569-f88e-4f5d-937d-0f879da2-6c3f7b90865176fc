@@ -192,6 +192,39 @@ def load_checkpoint(checkpoint_file: str) -> Optional[Dict]:
             logger.warning(f"Could not load checkpoint: {e}")
     return None
 
+# Skip record categories
+SKIP_DETAIL_NOT_LOADED = "detail_not_loaded"   # 详情未加载
+SKIP_EMPTY_NAME = "empty_name"                 # 名称为空
+SKIP_EXTRACTION_ERROR = "extraction_error"     # 抽取异常
+
+def make_skip_record(index: int, href: str, category: str, reason: str) -> Dict:
+    """Create a skip record for a business that could not be collected.
+
+    index is the 1-based position in the result list.
+    """
+    return {
+        "index": index,
+        "href": href,
+        "category": category,
+        "reason": reason,
+    }
+
+def save_skipped_records(skipped: List[Dict], keyword: str, city: str) -> str:
+    """Write skip records to a per-keyword/city JSON file in the output dir."""
+    skipped_file = os.path.join(
+        OUTPUT_DIR, f"{safe_filename(keyword)}_{safe_filename(city)}_skipped.json"
+    )
+    payload = {
+        "keyword": keyword,
+        "city": city,
+        "generated_at": datetime.now().isoformat(),
+        "skipped_count": len(skipped),
+        "skipped": skipped,
+    }
+    with open(skipped_file, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    return skipped_file
+
 def deduplicate_businesses(businesses: List[Dict]) -> List[Dict]:
     """Deduplicate businesses with better matching"""
     seen = {}
@@ -442,6 +475,121 @@ def extract_emails_from_website(page, website: str, business_name: str) -> Set[s
 # MAIN SCRAPER
 # ============================================
 
+def process_single_business(page, href: str, index: int, total: int, skip_emails: bool):
+    """Process one business detail page.
+
+    Returns (business_dict, None) on success, or (None, skip_record) when the
+    business has to be skipped. Never raises for per-business failures.
+    """
+    logger.info(f"\nProcessing {index + 1}/{total}...")
+    time.sleep(DELAY_BETWEEN_BUSINESS)
+
+    try:
+        # Navigate to business detail page
+        page.goto(href, timeout=BUSINESS_LOAD_TIMEOUT)
+
+        # Wait for details to load
+        if not wait_for_selector(page, BUSINESS_NAME_SELECTORS, BUSINESS_LOAD_TIMEOUT):
+            return None, make_skip_record(
+                index + 1, href, SKIP_DETAIL_NOT_LOADED,
+                f"详情页在 {BUSINESS_LOAD_TIMEOUT}ms 内未加载出名称元素"
+            )
+
+        time.sleep(1.5)
+
+        # Extract business data
+        business = extract_business_data(page)
+
+        if not business:
+            return None, make_skip_record(
+                index + 1, href, SKIP_EMPTY_NAME,
+                "详情页名称为空或无效"
+            )
+
+        # Extract emails if needed
+        emails = set()
+        if not skip_emails and business["website"] != "N/A":
+            if not should_skip_email_extraction(business["website"]):
+                emails = extract_emails_from_website(page, business["website"], business["name"])
+                time.sleep(DELAY_AFTER_EMAIL_EXTRACTION)
+
+        business["emails"] = ", ".join(sorted(emails)) if emails else "N/A"
+        return business, None
+
+    except Exception as e:
+        return None, make_skip_record(
+            index + 1, href, SKIP_EXTRACTION_ERROR,
+            f"抽取异常: {str(e)[:200]}"
+        )
+
+def finalize_results(businesses: List[Dict], skipped: List[Dict],
+                     keyword: str, city: str, checkpoint_file: str):
+    """Deduplicate, save normal results (CSV/JSON) and skip records, log summary."""
+    # Deduplication
+    logger.info("Deduplicating businesses...")
+    original_count = len(businesses)
+    businesses = deduplicate_businesses(businesses)
+    logger.info(f"[CLEANUP] Removed {original_count - len(businesses)} duplicates. Final count: {len(businesses)}")
+
+    # Display sample
+    if businesses:
+        logger.info("\n[SAMPLE] Sample output (first 3):")
+        for b in businesses[:3]:
+            logger.info(f"  - {b['name']}")
+            logger.info(f"    Address: {b['address']}")
+            logger.info(f"    Phone: {b['phone']}")
+            logger.info(f"    Website: {b['website']}")
+            logger.info(f"    Emails: {b['emails']}")
+
+    # Save CSV / JSON (only when there are results)
+    if businesses:
+        csv_file = os.path.join(OUTPUT_DIR, f"{safe_filename(keyword)}_{safe_filename(city)}_businesses.csv")
+        with open(csv_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=["name", "address", "phone", "website", "emails"]
+            )
+            writer.writeheader()
+            writer.writerows(businesses)
+
+        logger.info(f"\n[SAVED] CSV saved -> {csv_file}")
+
+        # Save JSON
+        json_file = os.path.join(OUTPUT_DIR, f"{safe_filename(keyword)}_{safe_filename(city)}_businesses.json")
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump(businesses, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"[SAVED] JSON saved -> {json_file}")
+
+        # Statistics summary
+        with_phone = sum(1 for b in businesses if b["phone"] != "N/A")
+        with_website = sum(1 for b in businesses if b["website"] != "N/A")
+        with_email = sum(1 for b in businesses if b["emails"] != "N/A")
+
+        logger.info("\n" + "="*50)
+        logger.info("[SUMMARY] FINAL SUMMARY")
+        logger.info("="*50)
+        logger.info(f"Total businesses: {len(businesses)}")
+        logger.info(f"With phone number: {with_phone} ({100*with_phone//len(businesses)}%)")
+        logger.info(f"With website: {with_website} ({100*with_website//len(businesses)}%)")
+        logger.info(f"With email: {with_email} ({100*with_email//len(businesses)}%)")
+        logger.info("="*50)
+
+        # Cleanup checkpoint on success
+        if os.path.exists(checkpoint_file):
+            os.remove(checkpoint_file)
+            logger.info("Checkpoint cleaned up")
+    else:
+        logger.warning("No businesses were collected!")
+
+    # Always write skip records (even when empty) so the run is auditable
+    skipped_file = save_skipped_records(skipped, keyword, city)
+    logger.info(f"[SKIPPED] {len(skipped)} businesses skipped -> {skipped_file}")
+    for record in skipped:
+        logger.info(f"   #{record['index']} [{record['category']}] {record['reason']} | {record['href']}")
+
+    logger.info(f"\n[DONE] 成功 {len(businesses)} 条、跳过 {len(skipped)} 条")
+
 def main():
     # CLI Arguments
     parser = argparse.ArgumentParser(description="Google Maps Business Scraper (Fixed)")
@@ -475,6 +623,7 @@ def main():
     
     start_time = time.time()
     businesses = []
+    skipped = []
     start_index = 0
     
     # Check for checkpoint
@@ -585,115 +734,39 @@ def main():
                     if time.time() - start_time > TIMEOUT:
                         logger.warning("Global timeout reached, saving progress...")
                         break
-                    
+
                     if start_index > 0 and index < start_index:
                         continue
-                    
-                    try:
-                        logger.info(f"\nProcessing {index + 1}/{total_businesses}...")
-                        time.sleep(DELAY_BETWEEN_BUSINESS)
-                        
-                        # Navigate to business detail page
-                        page.goto(href, timeout=BUSINESS_LOAD_TIMEOUT)
-                        
-                        # Wait for details to load
-                        if not wait_for_selector(page, BUSINESS_NAME_SELECTORS, BUSINESS_LOAD_TIMEOUT):
-                            logger.warning(f"Skipping business {index + 1}: details didn't load")
-                            continue
-                        
-                        time.sleep(1.5)
-                        
-                        # Extract business data
-                        business = extract_business_data(page)
-                        
-                        if not business:
-                            logger.warning(f"Skipping invalid business at index {index + 1}")
-                            continue
-                        
-                        # Extract emails if needed
-                        emails = set()
-                        if not SKIP_EMAILS and business["website"] != "N/A":
-                            if not should_skip_email_extraction(business["website"]):
-                                emails = extract_emails_from_website(page, business["website"], business["name"])
-                                time.sleep(DELAY_AFTER_EMAIL_EXTRACTION)
-                        
-                        business["emails"] = ", ".join(sorted(emails)) if emails else "N/A"
-                        
-                        businesses.append(business)
-                        logger.info(f"[OK] {index + 1}. {business['name']}")
-                        logger.info(f"   Phone: {business['phone']}, Website: {business['website'][:50] if business['website'] != 'N/A' else 'N/A'}")
-                        
-                        # Save checkpoint every 10 businesses
-                        if (index + 1) % 10 == 0:
-                            save_checkpoint(checkpoint_file, businesses, index + 1)
-                    
-                    except Exception as e:
-                        logger.error(f"❌ Failed at business {index + 1}: {e}")
+
+                    business, skip_record = process_single_business(
+                        page, href, index, total_businesses, SKIP_EMAILS
+                    )
+
+                    if skip_record:
+                        skipped.append(skip_record)
+                        logger.warning(
+                            f"Skipping business {index + 1} "
+                            f"[{skip_record['category']}]: {skip_record['reason']}"
+                        )
                         continue
-                
-                logger.info(f"\nProcessing complete. Total collected: {len(businesses)}")
+
+                    businesses.append(business)
+                    logger.info(f"[OK] {index + 1}. {business['name']}")
+                    logger.info(f"   Phone: {business['phone']}, Website: {business['website'][:50] if business['website'] != 'N/A' else 'N/A'}")
+
+                    # Save checkpoint every 10 businesses
+                    if (index + 1) % 10 == 0:
+                        save_checkpoint(checkpoint_file, businesses, index + 1)
+
+                logger.info(f"\nProcessing complete. Total collected: {len(businesses)}, skipped: {len(skipped)}")
             
             finally:
                 if browser:
                     browser.close()
         
-        # Deduplication
-        logger.info("Deduplicating businesses...")
-        original_count = len(businesses)
-        businesses = deduplicate_businesses(businesses)
-        logger.info(f"[CLEANUP] Removed {original_count - len(businesses)} duplicates. Final count: {len(businesses)}")
-        
-        # Display sample
-        if businesses:
-            logger.info("\n[SAMPLE] Sample output (first 3):")
-            for b in businesses[:3]:
-                logger.info(f"  - {b['name']}")
-                logger.info(f"    Address: {b['address']}")
-                logger.info(f"    Phone: {b['phone']}")
-                logger.info(f"    Website: {b['website']}")
-                logger.info(f"    Emails: {b['emails']}")
-        
-        # Save CSV
-        if businesses:
-            csv_file = os.path.join(OUTPUT_DIR, f"{safe_filename(KEYWORD)}_{safe_filename(CITY)}_businesses.csv")
-            with open(csv_file, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(
-                    f,
-                    fieldnames=["name", "address", "phone", "website", "emails"]
-                )
-                writer.writeheader()
-                writer.writerows(businesses)
-            
-            logger.info(f"\n[SAVED] CSV saved -> {csv_file}")
-            
-            # Save JSON
-            json_file = os.path.join(OUTPUT_DIR, f"{safe_filename(KEYWORD)}_{safe_filename(CITY)}_businesses.json")
-            with open(json_file, "w", encoding="utf-8") as f:
-                json.dump(businesses, f, indent=2, ensure_ascii=False)
-            
-            logger.info(f"[SAVED] JSON saved -> {json_file}")
-            
-            # Statistics summary
-            with_phone = sum(1 for b in businesses if b["phone"] != "N/A")
-            with_website = sum(1 for b in businesses if b["website"] != "N/A")
-            with_email = sum(1 for b in businesses if b["emails"] != "N/A")
-            
-            logger.info("\n" + "="*50)
-            logger.info("[SUMMARY] FINAL SUMMARY")
-            logger.info("="*50)
-            logger.info(f"Total businesses: {len(businesses)}")
-            logger.info(f"With phone number: {with_phone} ({100*with_phone//len(businesses)}%)")
-            logger.info(f"With website: {with_website} ({100*with_website//len(businesses)}%)")
-            logger.info(f"With email: {with_email} ({100*with_email//len(businesses)}%)")
-            logger.info("="*50)
-        
-            # Cleanup checkpoint on success
-            if os.path.exists(checkpoint_file):
-                os.remove(checkpoint_file)
-                logger.info("Checkpoint cleaned up")
-        else:
-            logger.warning("No businesses were collected!")
-        
+        # Deduplicate, save results and skip records
+        finalize_results(businesses, skipped, KEYWORD, CITY, checkpoint_file)
+
         elapsed = time.time() - start_time
         logger.info(f"\n[TIME] Total time: {elapsed:.1f}s")
         logger.info(f"[LOG] Log file: {log_file}")

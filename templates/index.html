@@ -364,6 +364,72 @@
             display: none;
         }
 
+        .results-summary {
+            font-size: 15px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 15px;
+            padding: 12px 16px;
+            background: #f0f4ff;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+
+        .skipped-toggle {
+            margin: 15px 0 10px;
+            background: #fff3e0;
+            color: #e65100;
+            border: 1px solid #ffcc80;
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+            text-align: left;
+        }
+
+        .skipped-toggle:hover {
+            background: #ffe0b2;
+        }
+
+        .skipped-details {
+            margin-bottom: 15px;
+        }
+
+        .skipped-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        .skipped-table th {
+            background: #fff8f0;
+            padding: 10px;
+            text-align: left;
+            font-weight: 600;
+            color: #333;
+            border-bottom: 2px solid #ffcc80;
+        }
+
+        .skipped-table td {
+            padding: 10px;
+            border-bottom: 1px solid #f0f0f0;
+            color: #555;
+            word-break: break-all;
+        }
+
+        .skip-category {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+            font-weight: 600;
+            background: #ffebee;
+            color: #c62828;
+            white-space: nowrap;
+        }
+
         .results-header {
             font-size: 18px;
             font-weight: 700;
@@ -674,6 +740,25 @@
                     <div class="results-header">
                         <i class="fas fa-table"></i> Preview Results (First 10)
                     </div>
+                    <div class="results-summary" id="resultsSummary">成功 0 条、跳过 0 条</div>
+                    <button class="skipped-toggle" id="skippedToggle" style="display: none;" onclick="toggleSkippedDetails()">
+                        <i class="fas fa-exclamation-triangle"></i> 查看跳过明细 (<span id="skippedToggleCount">0</span> 条) <i class="fas fa-chevron-down" id="skippedChevron"></i>
+                    </button>
+                    <div class="skipped-details" id="skippedDetails" style="display: none;">
+                        <div style="overflow-x: auto;">
+                            <table class="skipped-table">
+                                <thead>
+                                    <tr>
+                                        <th>序号</th>
+                                        <th>失败类别</th>
+                                        <th>原因</th>
+                                        <th>详情链接</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="skippedTableBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
                     <div style="overflow-x: auto;">
                         <table class="results-table" id="resultsTable">
                             <thead>
@@ -804,7 +889,7 @@
                                 document.getElementById('infoPanel').style.display = 'block';
                             }, 2000);
                         } else if (status.results) {
-                            displayResults(status.results);
+                            displayResults(status.results, status.skipped || []);
                             showStatus('✅ Scraping complete! Ready to download.', 'success');
                             document.getElementById('statsContainer').style.display = 'grid';
                             document.getElementById('downloadButtons').style.display = 'flex';
@@ -828,7 +913,48 @@
             alert(message);
         }
 
-        function displayResults(results) {
+        const SKIP_CATEGORY_LABELS = {
+            'detail_not_loaded': '详情未加载',
+            'empty_name': '名称为空',
+            'extraction_error': '抽取异常'
+        };
+
+        function displayResults(results, skipped) {
+            skipped = skipped || [];
+
+            // Summary line: 成功 N 条、跳过 M 条
+            document.getElementById('resultsSummary').textContent =
+                `成功 ${results.length} 条、跳过 ${skipped.length} 条`;
+
+            // Skipped details (only when there are any)
+            const toggle = document.getElementById('skippedToggle');
+            const details = document.getElementById('skippedDetails');
+            if (skipped.length > 0) {
+                document.getElementById('skippedToggleCount').textContent = skipped.length;
+                toggle.style.display = 'block';
+                const tbody = document.getElementById('skippedTableBody');
+                tbody.innerHTML = '';
+                skipped.forEach(record => {
+                    const row = document.createElement('tr');
+                    const category = SKIP_CATEGORY_LABELS[record.category] || record.category || '未知';
+                    row.innerHTML = `
+                        <td>${record.index}</td>
+                        <td><span class="skip-category">${category}</span></td>
+                        <td>${record.reason || '—'}</td>
+                        <td class="cell-truncate">
+                            ${record.href
+                                ? `<a href="${record.href}" target="_blank" class="cell-link">链接</a>`
+                                : '—'}
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            } else {
+                toggle.style.display = 'none';
+                details.style.display = 'none';
+                document.getElementById('skippedTableBody').innerHTML = '';
+            }
+
             // Stats
             const withPhone = results.filter(r => r.phone && r.phone !== 'N/A').length;
             const withWebsite = results.filter(r => r.website && r.website !== 'N/A').length;
@@ -862,6 +988,14 @@
                 row.innerHTML = `<td colspan="3" style="text-align:center;color:#999;padding:15px;">... and ${results.length - 10} more businesses</td>`;
                 tbody.appendChild(row);
             }
+        }
+
+        function toggleSkippedDetails() {
+            const details = document.getElementById('skippedDetails');
+            const chevron = document.getElementById('skippedChevron');
+            const isHidden = details.style.display === 'none';
+            details.style.display = isHidden ? 'block' : 'none';
+            chevron.className = isHidden ? 'fas fa-chevron-up' : 'fas fa-chevron-down';
         }
 
         function downloadCSV() {
