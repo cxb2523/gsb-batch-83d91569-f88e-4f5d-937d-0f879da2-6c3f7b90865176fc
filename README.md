@@ -256,6 +256,40 @@ Each round file (`data/{season}/round_{id}.json`) follows a standardized JSON sc
 
 ---
 
+## 🧪 Data collection audit
+
+`scripts/get_round_data.py` prints a verifiable summary for every round it processes:
+
+- How many records were actually written to `Drivers` and `Teams`.
+- Which driver codes were merged from duplicate records, which record was kept
+  (first "scored in this round", then highest `Value`), and how the merged
+  `Selected_Percentage` was computed (sum of all records, capped at `1.0`,
+  4 decimals).
+- Team code normalization (`RBS → VRB`, `RBR → RED`) with the resulting code.
+  Teams that collapse onto the same normalized code are merged using the same rule
+  and reported separately.
+- The cumulative starting point: when `race_id > 1` and no in-memory totals exist,
+  the previous round's JSON is read. If it is missing, unreadable or malformed,
+  the output states explicitly that the season total "starts from zero".
+- Per-entity cumulative details (`round points → season points`) matching the
+  `Season_Fantasy_Points` values actually written to the JSON.
+- On failure (network error, empty response, unexpected structure), the reason is
+  classified and the output states that no JSON was written and cumulative values
+  were left unchanged. JSON writes are atomic, so a failed write never truncates
+  an existing round file.
+
+The local scenario suite (normal round, duplicate driver, missing previous round,
+empty response) runs without credentials or network access:
+
+```
+python -I tests/verify_get_round_data.py
+```
+
+`F1_FANTASY_DATA_DIR` (or the `data_dir` argument of `process_single_round`) redirects
+output away from `data/`, so the suite and any local dry runs never touch real data.
+
+---
+
 ## ⚡ Quick start
 
 ```
