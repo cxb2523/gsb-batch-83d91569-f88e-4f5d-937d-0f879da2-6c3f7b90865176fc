@@ -226,13 +226,21 @@ paying for bytes it does not use:
   **10**, `0` = no cap, also `TIPRANKS_PROXY_BUDGET_MB`). Once more than
   that has gone through the proxy, further requests are refused and the
   run stops before its next ticker. It keeps the ratings it has and exits
-  **6** (or **5** with none), `stop_reason: proxy_budget_exceeded`; the
-  tickers it did not reach are listed in `failed_tickers`. It never
+  **6** (or **5** with none), `stop_reason: proxy_budget_exceeded`. It never
   carries on past the cap. The sidecars (`<out>.meta.json`, and
   `<out>.latest_attempt.meta.json`, which every metered run writes) carry
   `proxy_bytes`, `proxy_budget_bytes` (`null` with no cap) and
   `proxy_budget_exceeded`, and the log ends with
   `Proxy traffic: X.X MB of Y MB budget`.
+
+  A budget stop also records, in `<out>.latest_attempt.meta.json`, exactly
+  which tickers got what: `tickers_completed`, `failed_tickers` (a request
+  was sent and failed) and `unattempted_tickers` (the stop cut them off
+  before any request — never mixed into `failed_tickers`). A follow-up run
+  re-collects just the gap with `--resume-from
+  <out>.latest_attempt.meta.json`: completed tickers are not requested
+  again, and if nothing is left to fetch the run makes no request, exits
+  **0** and leaves the previous output untouched.
 
   How the bytes are counted: Playwright sums `request.sizes()` (request
   headers + body, response headers + body) of every finished or failed

@@ -2276,7 +2276,8 @@ def _():
 
 
 @check("proxy meter, every engine: budget crossed on the first of three tickers -> the real run() loop "
-       "stops before the second, keeps the first rating, and marks the rest failed")
+       "stops before the second, keeps the first rating, and leaves the rest UNATTEMPTED (not failed: "
+       "no request was ever sent for them)")
 def _():
     for mod in ENGINE_MODULES:
         meter = proxy_meter.ProxyMeter(0.01)
@@ -2284,7 +2285,7 @@ def _():
         assert calls == ["AAPL"], f"{mod.__name__}: fetched {calls} (result {result})"
         ratings, completed, failed, blocked, parser_failed = result
         assert len(ratings) == 1 and completed == ["AAPL"], (mod.__name__, completed)
-        assert failed == ["MSFT", "GOOGL"], (mod.__name__, failed)
+        assert failed == [], (mod.__name__, failed)
 
 
 @check("proxy meter, every engine: over budget -> exit 6 with the rows kept (5 with none), stop_reason "
@@ -2315,6 +2316,159 @@ def _():
         rc, _, meta, attempt, _ = _meter_main(
             mod, [], lambda k: ([rating], ["AAPL", "MSFT"], [], [], []))
         assert rc == 0 and "proxy_bytes" not in meta and not attempt, f"{name}: an unmetered run changed"
+
+
+@check("budget stop, every engine: the attempt sidecar gives every requested ticker one status — "
+       "completed / failed / unattempted as THREE separate lists, the unattempted never in "
+       "failed_tickers — and a metered run the budget never tripped writes no unattempted column")
+def _():
+    rating = _meter_rating()
+
+    def partial_effect(k):
+        k["meter"].add(20_000_000)
+        return [rating], ["AAPL"], [], [], []  # MSFT never reached, never requested
+
+    def first_ticker_effect(k):
+        k["meter"].add(20_000_000)
+        return [], [], [], [], []  # the budget tripped before ANY ticker was fetched
+
+    for mod in ENGINE_MODULES:
+        name = mod.__name__
+        # Partial success, then over budget: exit 6, MSFT is unattempted.
+        rc, _, meta, attempt, _ = _meter_main(mod, ["--proxy", "http://127.0.0.1:1"], partial_effect)
+        assert rc == 6, f"{name}: rc={rc}"
+        for side in (meta, attempt):
+            assert side.get("stop_reason") == "proxy_budget_exceeded", (name, side)
+            assert side.get("tickers_completed") == ["AAPL"], (name, side)
+            assert side.get("failed_tickers") == [], (name, side)
+            assert side.get("unattempted_tickers") == ["MSFT"], (name, side)
+            assert side.get("proxy_budget_exceeded") is True and side.get("proxy_bytes") == 20_000_000, (name, side)
+        # Over budget before the first ticker: exit 5, everything unattempted.
+        rc, _, meta, attempt, _ = _meter_main(mod, ["--proxy", "http://127.0.0.1:1"], first_ticker_effect)
+        assert rc == 5 and not meta, f"{name}: rc={rc}, meta={meta}"
+        assert attempt.get("status") == "failed" and attempt.get("stop_reason") == "proxy_budget_exceeded", (name, attempt)
+        assert attempt.get("tickers_completed") == [] and attempt.get("failed_tickers") == [], (name, attempt)
+        assert attempt.get("unattempted_tickers") == ["AAPL", "MSFT"], (name, attempt)
+        assert attempt.get("proxy_budget_exceeded") is True and attempt.get("proxy_budget_bytes") == 10_000_000, (name, attempt)
+        # Budget never tripped: the sidecars keep exactly their old fields.
+        ok_run = lambda k: ([rating], ["AAPL", "MSFT"], [], [], [])  # noqa: E731
+        rc, _, meta, attempt, _ = _meter_main(mod, ["--proxy", "http://127.0.0.1:1"], ok_run)
+        assert rc == 0, f"{name}: rc={rc}"
+        assert "unattempted_tickers" not in meta and "unattempted_tickers" not in attempt, name
+        assert attempt.get("proxy_budget_exceeded") is False, (name, attempt)
+
+
+def _write_sidecar(path, **fields):
+    meta = {"status": "partial", "stop_reason": "proxy_budget_exceeded",
+            "engine": "playwright", "tickers_requested": ["AAPL", "MSFT", "GOOGL"],
+            "tickers_completed": ["AAPL"], "failed_tickers": ["MSFT"],
+            "unattempted_tickers": ["GOOGL"], "rating_count": 1,
+            "started_at": 0.0, "finished_at": 0.0}
+    meta.update(fields)
+    Path(path).write_text(json.dumps(meta), encoding="utf-8")
+    return meta
+
+
+def _resume_main(mod, argv, run_effect):
+    """main() with run() faked; returns (rc, tickers run got, out dir)."""
+    seen = {}
+
+    def fake_run(tickers, **kwargs):
+        seen["tickers"] = list(tickers)
+        return run_effect(tickers)
+    tmp = tempfile.TemporaryDirectory()
+    out = os.path.join(tmp.name, "o.json")
+    with _mock.patch.object(mod, "run", side_effect=fake_run), \
+            _mock.patch.object(proxy_check, "gate", return_value=None), \
+            _captured():
+        rc = mod.main([*argv, "--out", out])
+    return rc, seen.get("tickers"), tmp, out
+
+
+@check("--resume-from, every engine: only the sidecar's failed + unattempted tickers are fetched "
+       "(completed ones are not requested), --ticker narrows the gap, and a sidecar without the "
+       "new column still resumes its unfinished tickers")
+def _():
+    import output_writer as ow
+
+    good = lambda tickers: ([_meter_rating()], list(tickers), [], [], [])  # noqa: E731
+    for mod in ENGINE_MODULES:
+        name = mod.__name__
+        with tempfile.TemporaryDirectory() as td:
+            sidecar = os.path.join(td, "prev.latest_attempt.meta.json")
+            _write_sidecar(sidecar)
+            rc, got, tmp, _out = _resume_main(mod, ["--resume-from", sidecar], good)
+            assert rc == 0, f"{name}: rc={rc}"
+            assert got == ["MSFT", "GOOGL"], f"{name}: fetched {got}"
+            tmp.cleanup()
+            # --ticker narrows the gap further.
+            rc, got, tmp, _out = _resume_main(
+                mod, ["--resume-from", sidecar, "--ticker", "GOOGL"], good)
+            assert rc == 0 and got == ["GOOGL"], f"{name}: narrowed to {got}"
+            tmp.cleanup()
+            # A sidecar from before unattempted_tickers existed: the
+            # unfinished ticker is derived (requested - completed - failed).
+            _write_sidecar(sidecar, unattempted_tickers=None,
+                           failed_tickers=[], tickers_requested=["AAPL", "MSFT"],
+                           tickers_completed=["AAPL"])
+            legacy = json.loads(Path(sidecar).read_text(encoding="utf-8"))
+            del legacy["unattempted_tickers"]
+            Path(sidecar).write_text(json.dumps(legacy), encoding="utf-8")
+            rc, got, tmp, _out = _resume_main(mod, ["--resume-from", sidecar], good)
+            assert rc == 0 and got == ["MSFT"], f"{name}: legacy sidecar gave {got}"
+            tmp.cleanup()
+        # resume_gap itself: request order is kept, failures included.
+        with tempfile.TemporaryDirectory() as td:
+            sidecar = os.path.join(td, "m.json")
+            _write_sidecar(sidecar)
+            assert ow.resume_gap(sidecar) == ["MSFT", "GOOGL"]
+
+
+@check("--resume-from, every engine: an empty gap makes no request, exits 0 and leaves the previous "
+       "output untouched; a missing or non-sidecar file is bad usage (exit 2)")
+def _():
+    for mod in ENGINE_MODULES:
+        name = mod.__name__
+        with tempfile.TemporaryDirectory() as td:
+            sidecar = os.path.join(td, "prev.latest_attempt.meta.json")
+            _write_sidecar(sidecar, status="complete", stop_reason="complete",
+                           failed_tickers=[], unattempted_tickers=[],
+                           tickers_completed=["AAPL", "MSFT", "GOOGL"])
+            rc, got, tmp, out = _resume_main(mod, ["--resume-from", sidecar], None)
+            assert rc == 0 and got is None, f"{name}: rc={rc}, fetched {got}"
+            assert not os.path.exists(out), f"{name}: wrote output for an empty gap"
+            assert json.loads(Path(sidecar).read_text(encoding="utf-8"))["status"] == "complete", name
+            tmp.cleanup()
+            # A pre-existing output beside the resumed run is not touched.
+            out_path = os.path.join(td, "prev.json")
+            Path(out_path).write_text("[1]", encoding="utf-8")
+            rc, got, tmp, _o = _resume_main(mod, ["--resume-from", sidecar], None)
+            assert rc == 0 and got is None, f"{name}: rc={rc}"
+            assert Path(out_path).read_text(encoding="utf-8") == "[1]", name
+            tmp.cleanup()
+            # Missing / malformed sidecar: exit 2, before any request.
+            rc, got, tmp, _o = _resume_main(mod, ["--resume-from", os.path.join(td, "nope.json")], None)
+            assert rc == 2 and got is None, f"{name}: rc={rc}"
+            tmp.cleanup()
+            bad = os.path.join(td, "bad.json")
+            Path(bad).write_text('{"hello": 1}', encoding="utf-8")
+            rc, got, tmp, _o = _resume_main(mod, ["--resume-from", bad], None)
+            assert rc == 2 and got is None, f"{name}: rc={rc}"
+            tmp.cleanup()
+
+
+@check("--resume-from is in every engine's --help")
+def _():
+    for mod in ENGINE_MODULES:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            try:
+                mod.parse_args(["--help"])
+            except SystemExit:
+                pass
+        assert "--resume-from" in buf.getvalue(), mod.__name__
+        args = mod.parse_args(["--ticker", "AAPL"])
+        assert args.resume_from is None, mod.__name__
 
 
 @check("proxy meter, every engine: installed where the browser starts (Playwright context events + "

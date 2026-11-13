@@ -29,7 +29,11 @@ proxy provider's invoice. So every run that goes out through a LOCAL proxy
   its next navigation. The rows already gathered are kept and written; the
   run ends with `stop_reason: proxy_budget_exceeded` and exits 6 (partial)
   when it holds rows, 5 (content not obtained) when it holds none. It never
-  continues quietly past the cap;
+  continues quietly past the cap. Tickers the stop cut off before any
+  request was sent for them are recorded as `unattempted_tickers` in
+  `<out>.latest_attempt.meta.json` — NOT in `failed_tickers`, so a caller
+  can tell "the request failed" from "never sent" — and a later run can
+  re-collect exactly failed + unattempted with `--resume-from <sidecar>`;
 
 * **records** it in the run sidecar (`<out>.meta.json`, and
   `<out>.latest_attempt.meta.json`, which is written on every metered run

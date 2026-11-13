@@ -188,6 +188,45 @@ def write_meta(
 ATTEMPT_META_SUFFIX = ".latest_attempt.meta.json"
 
 
+def resume_gap(meta_path: str) -> List[str]:
+    """The tickers a previous run's sidecar records as FAILED or NEVER
+    ATTEMPTED, in the sidecar's own request order — the gap `--resume-from`
+    re-collects. Completed tickers are not returned (they are not
+    re-requested).
+
+    Reads both sidecar shapes (`<out>.meta.json` and
+    `<out>.latest_attempt.meta.json`): the failed list is `failed_tickers`;
+    the unattempted list is `unattempted_tickers` when the sidecar carries
+    it (a budget-stopped run does), and is otherwise derived as
+    `tickers_requested` minus completed minus failed — empty for any run
+    that was not cut short, so resuming from a finished run's sidecar
+    re-fetches exactly its failures.
+    """
+    try:
+        meta = json.loads(Path(meta_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            f"could not read --resume-from sidecar {meta_path!r}: {exc}") from None
+    if not isinstance(meta, dict) or not isinstance(
+            meta.get("tickers_requested"), list):
+        raise ValueError(
+            f"--resume-from {meta_path!r} is not a run sidecar "
+            f"(no tickers_requested list)")
+    requested = list(meta["tickers_requested"])
+    completed = set(meta.get("tickers_completed") or [])
+    failed = list(meta.get("failed_tickers") or [])
+    unattempted = meta.get("unattempted_tickers")
+    if unattempted is None:
+        failed_set = set(failed)
+        unattempted = [t for t in requested
+                       if t not in completed and t not in failed_set]
+    gap_set = set(failed) | set(unattempted)
+    gap = [t for t in requested if t in gap_set]
+    seen = set(gap)
+    gap += [t for t in failed + list(unattempted) if t not in seen]
+    return gap
+
+
 def finish_without_fetch(
     out_path: str,
     *,
@@ -242,6 +281,7 @@ def finish_run(
     extra_meta: Optional[dict] = None,
     parser_failed_tickers: Optional[List[str]] = None,
     budget_exceeded: bool = False,
+    unattempted_tickers: Optional[List[str]] = None,
 ) -> int:
     """Same outcome precedence as the rest of the family:
     remote_api_error > blocked > zero_products > partial > complete,
@@ -287,8 +327,19 @@ def finish_run(
     no other reading of the ticker lists applies. A metered run (its
     `extra_meta` carries `proxy_bytes`) also writes
     `<out>.latest_attempt.meta.json` every time, so a run that wrote no
-    file still records what it spent through the proxy."""
+    file still records what it spent through the proxy.
+
+    `unattempted_tickers` are the tickers the budget stop cut off BEFORE
+    any request was sent for them. They are recorded as their own sidecar
+    list (only on the budget-stopped path — a run the budget never
+    tripped writes exactly the fields it always did), NOT folded into
+    `failed_tickers`: a caller must be able to tell "the request failed"
+    from "no request was ever sent", and `--resume-from` re-collects
+    exactly failed + unattempted. Together `tickers_completed`,
+    `failed_tickers` and `unattempted_tickers` then give every requested
+    ticker one unambiguous status in `<out>.latest_attempt.meta.json`."""
     failed_tickers = failed_tickers or []
+    unattempted_tickers = list(unattempted_tickers or [])
     parser_failed_tickers = [t for t in (parser_failed_tickers or []) if t in failed_tickers]
     partial = bool(failed_tickers) and bool(tickers_completed)
     zero_products = len(ratings) == 0
@@ -314,6 +365,10 @@ def finish_run(
         status, exit_code = "complete", EXIT_OK
 
     metered = bool(extra_meta) and "proxy_bytes" in extra_meta
+    # The unattempted list exists only on the budget-stopped path: a run
+    # the budget never tripped writes exactly the fields it always did.
+    budget_meta = ({"unattempted_tickers": unattempted_tickers}
+                   if budget_exceeded else {})
     if zero_products and not allow_empty:
         if metered:
             write_meta(
@@ -323,6 +378,7 @@ def finish_run(
                 failed_tickers=failed_tickers, rating_count=0,
                 started_at=started_at,
                 extra={"parser_failed_tickers": parser_failed_tickers,
+                       **budget_meta,
                        **extra_meta},
                 path=out_path + ATTEMPT_META_SUFFIX)
         return exit_code
@@ -334,6 +390,7 @@ def finish_run(
         "csv_cells_escaped": csv_cells_escaped,
         "parser_failed_tickers": parser_failed_tickers,
     }
+    meta_extra.update(budget_meta)
     meta_extra.update(extra_meta or {})
     if metered:
         write_meta(

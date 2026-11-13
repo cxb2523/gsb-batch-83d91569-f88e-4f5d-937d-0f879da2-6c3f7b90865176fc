@@ -60,7 +60,7 @@ except ImportError:  # pragma: no cover - exercised by smoke_test.py with no eng
 from captcha_solver import CaptchaType, SolveBudget, build_injection_script, solve_when_blocked
 from env_config import apply_env, int_between, non_negative_int
 from fingerprint_client import fetch_fingerprint, refuse_if_cdp, user_agent_from
-from output_writer import EXIT_BAD_USAGE, EXIT_CRASH, finish_run, finish_without_fetch
+from output_writer import EXIT_BAD_USAGE, EXIT_CRASH, EXIT_OK, finish_run, finish_without_fetch, resume_gap
 import proxy_check
 import proxy_meter
 from proxy_pool import Proxy, ProxyParseError, ProxyPool, is_proxy_dead_error, load_proxies, redact_credentials
@@ -387,11 +387,13 @@ def run(
                 if rating is not None:
                     ratings.append(rating)
         except proxy_meter.ProxyBudgetExceeded as exc:
-            # Every ticker not yet done is unattempted: its data was not
-            # obtained, so it counts as failed, and main() reports the run
-            # as stopped by the proxy budget.
+            # Every ticker not yet done is UNATTEMPTED, not failed: no
+            # request was ever sent for it. main() derives the
+            # unattempted list (requested - completed - failed) and
+            # records it as its own sidecar column, so a caller can
+            # tell "the request failed" from "never sent" and
+            # re-collect just the gap with --resume-from.
             log.error("Stopping: %s. The ratings already gathered are kept.", exc)
-            failed.extend(t for t in tickers if t not in completed and t not in failed)
     finally:
         # The last ticker's traffic is still in the performance log.
         proxy_meter.drain_selenium(driver)
@@ -464,6 +466,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--proxy", default=None, help="A single proxy, e.g. http://login:pass@host:port (or set TIPRANKS_PROXY). Selenium's --proxy-server cannot authenticate — credentials are stripped, with a warning.")
     parser.add_argument("--proxy-file", default=None, help="One proxy per line, same formats as --proxy")
     parser.add_argument("--proxy-shuffle", action="store_true")
+    parser.add_argument(
+        "--resume-from", default=None, metavar="SIDECAR",
+        help="Resume an interrupted run from its sidecar (<out>.latest_attempt.meta.json or "
+             "<out>.meta.json): only the tickers it records as failed or never attempted "
+             "(unattempted_tickers, e.g. after stop_reason proxy_budget_exceeded) are fetched; "
+             "completed tickers are not requested again. --ticker/--tickers-file, if also given, "
+             "narrow the gap further. If the gap is empty no request is made, the run exits 0 and "
+             "any previous output is left untouched.",
+    )
     proxy_check.add_media_flags(parser)
     proxy_meter.add_budget_flag(parser)
     parser.add_argument("--twocaptcha-key", default=None, help="(or set TWOCAPTCHA_KEY)")
@@ -528,9 +539,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_BAD_USAGE
-    if not tickers:
+    if not tickers and not args.resume_from:
         print("error: no tickers given (use --ticker or --tickers-file)", file=sys.stderr)
         return EXIT_BAD_USAGE
+
+    if args.resume_from:
+        try:
+            gap = resume_gap(args.resume_from)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_BAD_USAGE
+        if tickers:  # --ticker/--tickers-file narrow the gap further
+            wanted = set(tickers)
+            gap = [t for t in gap if t in wanted]
+        if not gap:
+            print(f"[+] Nothing to re-collect: {args.resume_from} records no failed or "
+                  f"unattempted tickers. No request was made; any previous output is untouched.")
+            return EXIT_OK
+        tickers = gap
 
     for ticker in tickers:
         path = f"/stocks/{ticker.lower()}/stock-analysis"
@@ -665,6 +691,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"crash: {exc}", file=sys.stderr)
             return EXIT_CRASH
 
+    budget_exceeded = bool(meter is not None and meter.exceeded)
+    unattempted = ([t for t in tickers
+                    if t not in set(completed) and t not in set(failed)]
+                   if budget_exceeded else [])
     return finish_run(
         ratings=ratings,
         out_path=args.out,
@@ -681,7 +711,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         allow_empty=args.allow_empty,
         started_at=started_at,
         extra_meta=proxy_meter.finish(args, None),
-        budget_exceeded=bool(meter is not None and meter.exceeded),
+        budget_exceeded=budget_exceeded,
+        unattempted_tickers=unattempted,
     )
 
 

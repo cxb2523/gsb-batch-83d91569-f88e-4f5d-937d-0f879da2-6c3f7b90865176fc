@@ -6,7 +6,22 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
-> **Behaviour changes.** (1) A run through a local proxy now makes one
+> **Behaviour changes.** (1) A budget stop (`--proxy-budget-mb` spent) no
+> longer lists the tickers it cut off in `failed_tickers`: they were never
+> requested, so `<out>.latest_attempt.meta.json` now records them as their
+> own `unattempted_tickers` list, and every requested ticker has exactly
+> one status there — `tickers_completed`, `failed_tickers` or
+> `unattempted_tickers`. Exit codes (6 with rows, 5 without), `stop_reason:
+> proxy_budget_exceeded` and the `proxy_*` sidecar fields are unchanged, as
+> is everything about a run the budget never tripped. (2) New
+> `--resume-from <sidecar>` re-collects only the tickers a previous run's
+> sidecar records as failed or unattempted; completed tickers are not
+> requested again, and an empty gap makes no request, exits 0 and leaves
+> the previous output untouched. Runs without a proxy, with
+> `--proxy-budget-mb 0` or with `--scraper-api` are unchanged.
+>
+> **Earlier unreleased changes.** (1) A run through a local proxy now
+> makes one
 > pre-check request before starting a browser. A proxy that answers
 > **HTTP 407** or **402** ends the run with **exit 5** and
 > `<out>.latest_attempt.meta.json` (`status: failed`, `stop_reason:
@@ -21,6 +36,14 @@ All notable changes to this project are documented here. Format follows
 
 ### Added
 
+- `--resume-from <sidecar>` (all three engines): resumes an interrupted
+  run from `<out>.latest_attempt.meta.json` or `<out>.meta.json`, fetching
+  only the tickers it records as failed or `unattempted_tickers`.
+  `--ticker`/`--tickers-file` narrow the gap further. A budget-stopped
+  run's sidecar now carries `unattempted_tickers` alongside
+  `tickers_completed` and `failed_tickers`; `output_writer.resume_gap()`
+  reads both sidecar shapes and derives the unfinished tickers for
+  sidecars written before the new column existed.
 - `tools/browser_endpoint.py`: writes a 2Captcha browser account's current
   `connectionUri` into `.env` as `TIPRANKS_CDP_ENDPOINT` (mode 0600).
   - It reads it from `GET /browser/accounts`, and prefers the profile's URI
