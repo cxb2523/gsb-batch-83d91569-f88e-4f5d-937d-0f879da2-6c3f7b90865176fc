@@ -1,0 +1,93 @@
+name: Refresh data + publish to PyPI
+
+on:
+  schedule:
+    - cron: "0 3 */10 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.10" }
+
+      - name: Install build + fetch deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir build twine aiohttp beautifulsoup4
+
+      - name: Seed static JSONs from previous release
+        run: |
+          mkdir -p uaforge/data
+          URL="https://github.com/sarperavci/UAForge/releases/latest/download/browser-data.tar.gz"
+          if wget -q "$URL" -O /tmp/browser-data.tar.gz; then
+            tar -xzf /tmp/browser-data.tar.gz -C uaforge/data/
+            echo "seeded from previous release"
+          else
+            echo "no previous release tarball found - scripts will start empty"
+          fi
+          ls -la uaforge/data/
+
+      - name: Regenerate dynamic JSON data
+        run: |
+          python scripts/update_browser_versions.py
+          python scripts/parse_caniuse.py
+          python scripts/update_readme.py
+          ls -la uaforge/data/
+
+      - name: Publish updated bundle as GitHub Release
+        run: |
+          cd uaforge/data
+          tar -czf /tmp/browser-data.tar.gz *.json
+          cd ../..
+          TAG="data-$(date +'%Y%m%d-%H%M%S')"
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          gh release create "$TAG" --title "Browser data $TAG" \
+            --notes "Auto-regenerated bundle." \
+            /tmp/browser-data.tar.gz
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump patch version
+        id: bump
+        run: |
+          CURRENT=$(grep -E '^version' pyproject.toml | head -1 | cut -d'"' -f2)
+          IFS='.' read -r MAJ MIN PATCH <<< "$CURRENT"
+          NEW="$MAJ.$MIN.$((PATCH + 1))"
+          sed -i "s/^version = \"$CURRENT\"/version = \"$NEW\"/" pyproject.toml
+          echo "version=$NEW" >> "$GITHUB_OUTPUT"
+          echo "Bumped $CURRENT -> $NEW"
+
+      - name: Build wheel + sdist
+        run: python -m build
+
+      - name: Sanity-check wheel contains data
+        run: |
+          python -m zipfile -l dist/*.whl | grep -E 'uaforge/data/.*\.json' || {
+            echo "::error::JSON data missing from wheel"; exit 1; }
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: twine upload --skip-existing dist/*
+
+      - name: Commit version bump + README
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add pyproject.toml README.md
+          git diff --cached --quiet || git commit -m "release: v${{ steps.bump.outputs.version }} [skip ci]"
+          git push
+
+      - name: Tag release
+        run: |
+          git tag -a "v${{ steps.bump.outputs.version }}" -m "v${{ steps.bump.outputs.version }}"
+          git push origin "v${{ steps.bump.outputs.version }}"

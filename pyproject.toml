@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uaforger"
+version = "0.1.27"
+description = "Statistically-weighted User-Agent + Sec-CH-UA Client-Hint generator backed by real-world market-share data."
+readme = "README.md"
+requires-python = ">=3.7"
+authors = [{ name = "Sarper AVCI", email = "sarperavci20@gmail.com" }]
+license = { text = "MIT" }
+keywords = ["user-agent", "client-hints", "fingerprint", "browser", "scraping", "automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/sarperavci/UAForge"
+Source = "https://github.com/sarperavci/UAForge"
+Issues = "https://github.com/sarperavci/UAForge/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["uaforge*"]
+exclude = ["scripts*", "bench*", "tests*"]
+
+[tool.setuptools.package-data]
+"uaforge" = ["data/*.json", "data/*.txt"]
