@@ -3,7 +3,8 @@ from typing import Callable, Literal
 from lxml import html
 
 from mineru_html.base import MinerUHTMLCase, MinerUHTMLOutput
-from mineru_html.constants import ITEM_ID_ATTR, TAIL_BLOCK_TAG, TagType
+from mineru_html.constants import (ITEM_ID_ATTR, TAIL_BLOCK_TAG, TagType,
+                                   normalize_tag_label)
 from mineru_html.exceptions import (MinerUHTMLError, MinerUHTMLFallbackError,
                                     MinerUHTMLMapToMainError)
 from mineru_html.process.html_utils import (decode_http_urls_only,
@@ -12,6 +13,8 @@ from mineru_html.process.html_utils import (decode_http_urls_only,
 
 class BaseFallbackHandler:
     """Base class for fallback handlers."""
+
+    name: str = 'base'
 
     def fallback_func(self, input_html: str) -> str:
         """Extract content using fallback method."""
@@ -22,6 +25,8 @@ class BaseFallbackHandler:
 class BypassFallbackHandler(BaseFallbackHandler):
     """Fallback handler that returns the input HTML unchanged."""
 
+    name = 'bypass'
+
     def fallback_func(self, input_html: str) -> str:
         """Return input HTML unchanged."""
         return input_html
@@ -30,12 +35,17 @@ class BypassFallbackHandler(BaseFallbackHandler):
 class EmptyFallbackHandler(BaseFallbackHandler):
     """Fallback handler that returns empty string."""
 
+    name = 'empty'
+
     def fallback_func(self, input_html: str) -> str:
         return ''
 
 
 class TrafilaturaFallbackHandler(BaseFallbackHandler):
     """Fallback handler using trafilatura library for content extraction."""
+
+    name = 'trafilatura'
+
     def __init__(self):
         """Initialize trafilatura extractor."""
         try:
@@ -110,6 +120,9 @@ def extract_main_html(map_html: str, response: dict) -> str:
     content, then extracts those elements and their ancestors/descendants from
     the mapped HTML.
 
+    Item ids that do not exist in ``map_html`` are ignored here; they are
+    reported separately by the per-case audit.
+
     Args:
         map_html: Preprocessed HTML with item IDs (mapped HTML)
         response: LLM response dictionary mapping item IDs to tag types
@@ -121,17 +134,18 @@ def extract_main_html(map_html: str, response: dict) -> str:
     root = html_to_element(map_html)
 
     elements_to_remained = set()
-    for remained_id in response:
-        if response[remained_id] == TagType.Main.value:
-            elem_list = root.xpath(f'//*[@{ITEM_ID_ATTR}="{remained_id}"]')
-            if len(elem_list) > 0:
-                elem = elem_list[0]
-            else:
-                continue
-            for child in elem.iter():
-                elements_to_remained.add(child)
-            for ancestor in elem.iterancestors():
-                elements_to_remained.add(ancestor)
+    for remained_id, raw_label in response.items():
+        if normalize_tag_label(raw_label) != TagType.Main.value:
+            continue
+        elem_list = root.xpath(f'//*[@{ITEM_ID_ATTR}="{remained_id}"]')
+        if len(elem_list) > 0:
+            elem = elem_list[0]
+        else:
+            continue
+        for child in elem.iter():
+            elements_to_remained.add(child)
+        for ancestor in elem.iterancestors():
+            elements_to_remained.add(ancestor)
 
     # Recall not selected br tags that are adjacent to main content
     last_element: html.HtmlElement | None = None
@@ -158,9 +172,13 @@ def extract_main_html(map_html: str, response: dict) -> str:
 def extract_main_html_single(input_case: MinerUHTMLCase) -> MinerUHTMLCase:
     """
     Extract main content HTML using LLM response labels.
-    Uses the LLM's response to identify which elements should be kept as main
-    content, then extracts those elements and their ancestors/descendants from
-    the mapped HTML.
+
+    Only segments with a usable label participate in the extraction:
+    segments labeled "main" are kept, segments labeled "other" are removed,
+    and segments the model never labeled are treated as missing and dropped
+    by the same clipping rules. The pipeline attaches the per-segment account
+    (``MinerUHTMLCase.audit``) afterwards, so callers can tell these cases
+    apart.
 
     Args:
         input_case: Case containing process_data and parse_result.
@@ -196,6 +214,7 @@ def extract_main_html_fallback(
     try:
         main_html = fallback_handler.fallback_func(input_case.input_data.raw_html)
         input_case.output_data = MinerUHTMLOutput(main_html=main_html)
+        input_case.fallback_used = fallback_handler.name
         return input_case
     except Exception as e:
         if isinstance(e, MinerUHTMLError):

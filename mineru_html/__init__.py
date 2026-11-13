@@ -1,5 +1,7 @@
 # mineru_html/__init__.py
 from .api import MinerUHTMLConfig, MinerUHTMLGeneric
+from .base import MinerUHTMLAudit, MinerUHTMLItemRecord, MinerUHTMLProcessData
+from .constants import ItemDisposition
 from .implementations import (MinerUHTML, MinerUHTML_OpenAI,
                               MinerUHTML_Transformers)
 from .inference.factory import (create_openai_backend,
@@ -12,6 +14,10 @@ __all__ = [
     'MinerUHTML',  # VLLM implementation
     'MinerUHTML_OpenAI',
     'MinerUHTML_Transformers',
+    'MinerUHTMLAudit',
+    'MinerUHTMLItemRecord',
+    'MinerUHTMLProcessData',
+    'ItemDisposition',
     'create_vllm_backend',
     'create_transformers_backend',
     'create_openai_backend',

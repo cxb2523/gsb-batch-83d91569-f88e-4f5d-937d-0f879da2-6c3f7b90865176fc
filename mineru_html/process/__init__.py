@@ -1,3 +1,4 @@
+from .audit import attach_audit, build_audit
 from .build_prompt import build_prompt
 from .convert2content import convert2content
 from .map_to_main import (extract_main_html_fallback, extract_main_html_single,
@@ -13,4 +14,6 @@ __all__ = [
     'extract_main_html_single',
     'extract_main_html_fallback',
     'get_fallback_handler',
+    'build_audit',
+    'attach_audit',
 ]

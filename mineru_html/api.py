@@ -6,7 +6,7 @@ from typing import Callable, Dict, List, Literal, Tuple, TypeVar, Union
 from mineru_html.base import MinerUHTMLBase, MinerUHTMLCase, MinerUHTMLInput
 from mineru_html.exceptions import MinerUHTMLConfigError, MinerUHTMLTypeError
 from mineru_html.inference.base_backend import InferenceBackend
-from mineru_html.process import (build_prompt, convert2content,
+from mineru_html.process import (attach_audit, build_prompt, convert2content,
                                  extract_main_html_fallback,
                                  extract_main_html_single,
                                  get_fallback_handler, parse_result,
@@ -179,6 +179,12 @@ class MinerUHTMLGeneric:
             extract_main_html_fallback, fallback_handler=self.fallback_handler
         )
         case_map = map_function(case_map, fallback_func, apply_on_error=True)
+
+        # Attach the per-segment account to every case, including those that
+        # were handled by the fallback, so callers can always tell what was
+        # kept, what was explicitly dropped, and what the model never labeled.
+        for case in case_map.values():
+            attach_audit(case)
 
         convert_func = partial(convert2content, output_format=self.config.output_format)
         case_map = map_function(case_map, convert_func)

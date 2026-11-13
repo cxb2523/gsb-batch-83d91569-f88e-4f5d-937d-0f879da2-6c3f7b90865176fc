@@ -208,6 +208,39 @@ The MinerU-HTML processing pipeline includes the following steps:
 6. **Format Conversion** (`convert2content`): Transform extracted HTML into Markdown, JSON and Txt.
 7. **Fallback Processing**: If the above process fails, uses fallback mechanism (trafilatura, bypass or empty) for content extraction
 
+Every returned `MinerUHTMLCase` also carries `case.audit` (`MinerUHTMLAudit`), a
+per-segment account of the extraction. It explains, for each `_item_id` in the
+simplified HTML, whether the model labeled it and what finally happened to it:
+
+```python
+result = extractor.process(html_content)[0]
+audit = result.audit
+
+for item in audit.items:            # one record per simplified-HTML segment
+    print(item.item_id, item.label, item.disposition)
+
+audit.invalid_item_ids              # ids the model returned that do not exist
+audit.parse_failed                  # no usable label at all -> fallback ran
+audit.fallback_used                 # 'trafilatura' | 'bypass' | 'empty' | None
+```
+
+`item.label` is `'main'`, `'other'` or `None` when the model gave no usable
+label. `item.disposition` is one of:
+
+| disposition     | meaning                                                        |
+| --------------- | -------------------------------------------------------------- |
+| `kept`          | labeled `main` and kept in `output_data.main_html`              |
+| `removed_other` | explicitly labeled `other` and removed                          |
+| `missing`       | the model gave no usable label for this id (content dropped)    |
+
+`missing` is kept distinct from `removed_other` on purpose: the former means
+information was lost because the model response was incomplete, the latter is
+a normal removal. A partial response only marks the omitted segments as
+`missing` and still extracts the page; only a response that yields no usable
+label for any segment is reported as `parse_failed` and handed to the
+configured fallback. Ids invented by the model are listed in
+`audit.invalid_item_ids` instead of being silently ignored.
+
 ### Configuration Options
 
 `MinerUHTMLConfig` supports the following configurations:

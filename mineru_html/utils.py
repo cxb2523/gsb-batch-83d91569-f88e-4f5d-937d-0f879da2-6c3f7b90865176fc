@@ -23,6 +23,25 @@ def get_all_item_ids(input_str: str) -> List[int]:
         raise ValueError(f'Failed to convert item_id to int: {e}') from e
 
 
+def get_segment_ids(input_str: str) -> List[str]:
+    """Extract the distinct item IDs of a simplified HTML document.
+
+    Args:
+        input_str: Simplified HTML string containing _item_id attributes.
+
+    Returns:
+        Distinct item IDs as strings, in ascending numeric order.
+    """
+    seen = set()
+    ordered = []
+    for item_id in sorted(get_all_item_ids(input_str)):
+        key = str(item_id)
+        if key not in seen:
+            seen.add(key)
+            ordered.append(key)
+    return ordered
+
+
 def build_dummy_response(item_ids: List[int], response_format: str) -> str:
     """Build a dummy response string for length estimation.
 

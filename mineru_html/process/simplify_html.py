@@ -6,7 +6,13 @@ from urllib.parse import quote
 
 from bs4 import BeautifulSoup
 from lxml import etree, html  # pyright: ignore[reportAttributeAccessIssue]
-from selectolax.parser import HTMLParser
+
+try:
+    # selectolax >= 1.0 removed the old "modest" backend and raises at import
+    # time for selectolax.parser; lexbor is the supported replacement.
+    from selectolax.lexbor import LexborHTMLParser as HTMLParser
+except ImportError:
+    from selectolax.parser import HTMLParser
 
 from mineru_html.base import MinerUHTMLCase, MinerUHTMLProcessData
 from mineru_html.exceptions import MinerUHTMLError, MinerUHTMLPreprocessError
