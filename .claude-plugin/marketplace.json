@@ -1,0 +1,66 @@
+{
+  "name": "runesleo",
+  "owner": {
+    "name": "Leo",
+    "url": "https://github.com/runesleo"
+  },
+  "description": "Leo's agent tools: source-first reading, Polymarket research, signal digests, writing voice, multi-agent sync, explainer video.",
+  "plugins": [
+    {
+      "name": "x-reader",
+      "source": "./",
+      "description": "Read the original source behind a URL (X/Twitter, articles, YouTube, Bilibili, podcasts, WeChat, Xiaohongshu, Telegram, RSS) and report what was actually read versus missing.",
+      "version": "0.5.0"
+    },
+    {
+      "name": "polymarket-toolkit",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/runesleo/polymarket-toolkit.git",
+        "sha": "bc7feb32429bed3174c2d10fdc17c5d6fddac316"
+      },
+      "description": "Read-only Polymarket research for AI agents: wallet profiles, precise PnL, Brier scores and market scans from public APIs. No keys, no orders.",
+      "version": "0.7.2"
+    },
+    {
+      "name": "x-signal-digest",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/runesleo/x-signal-digest.git",
+        "sha": "1ec53641abfda29657ac845f47a3fa8856962c8d"
+      },
+      "description": "Stop scrolling X: turn a feed into up to three things worth knowing and at most one accountable decision, with receipts.",
+      "version": "0.1.0"
+    },
+    {
+      "name": "video-explainer-kit",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/runesleo/claude-video-kit.git",
+        "sha": "401e56184384d3098ab51bcbd67e77daec669178"
+      },
+      "description": "Turn a brief, script or MP4 into a reviewed, verified vertical explainer video, with review receipts before publishing.",
+      "version": "0.3.0-rc.1"
+    },
+    {
+      "name": "talk-human",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/runesleo/talk-human.git",
+        "sha": "1429780d0a770117eb12c5d0af0d654be6e37cb8"
+      },
+      "description": "Make AI-assisted writing sound like you: build a voice layer from your own speech samples, then run a three-pass de-slop edit.",
+      "version": "0.1.0"
+    },
+    {
+      "name": "multi-ai-sync",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/runesleo/multi-ai-sync.git",
+        "sha": "daacd77b85fd2d37312a612b92dfd6da273cd852"
+      },
+      "description": "For people running several AI agents: check which agents' results and memory never reached your machine, and fix it.",
+      "version": "0.1.0"
+    }
+  ]
+}

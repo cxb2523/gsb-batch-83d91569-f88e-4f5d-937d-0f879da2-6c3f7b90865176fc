@@ -1,0 +1,405 @@
+# x-reader
+
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+[English](./README.md)
+
+**给 Agent 一个 URL，剩下的来源读取交给 x-reader。**
+
+x-reader 是给 AI Agent 用的通用内容读取层（Universal Content Reader）。它负责读取 X/Twitter、网页文章、YouTube、Bilibili、播客、微信公众号、小红书、Telegram、RSS 和开放网页，再把结果统一整理成 Agent 可以继续研究、总结和自动化处理的结构化来源内容。
+
+它的差异化不是“再做一个摘要器”，而是 evidence-aware reading：
+
+**搜索摘要不等于原文，推文正文不等于附件视频，视频简介也不等于视频里的口头内容。**
+
+如果关键来源层还没读到，x-reader 会把缺口保留下来，而不是假装这次读取已经完成。
+
+## Evidence Receipt 网页工具
+
+公开 Beta 已上线：**[中文介绍](https://xreader.leolabs.me/zh) · [English](https://xreader.leolabs.me/en) · [打开工具](https://xreader.leolabs.me/app)**，面向公开 X、YouTube 和普通网页 URL。粘贴链接后，它直接返回与 x-reader 相同的四种证据状态：`PASS`、`PARTIAL`、`FAIL`、`UNKNOWN`。结果可以复制为可读收据或 JSON，也可以分享；任何分享都不会把缺失证据包装成成功。
+
+本地运行使用 `x-reader-web`，也可以直接使用上面的 Hosted Beta。详见 [Evidence Receipt](./docs/EVIDENCE_RECEIPT.md)、[分发方案](./docs/DISTRIBUTION.md) 和 [公开 Beta 发布门](./docs/PUBLIC_BETA_GATE.md)。
+
+## 一步装好
+
+把下面这句话粘给你的 AI（Claude Code、Codex、Cursor 等）：
+
+> 按照 https://github.com/runesleo/x-reader/blob/main/install.md 的官方说明，在这台电脑上安装 x-reader。
+
+它会自己装好 skill 和命令行工具，跑一遍只读的 `x-reader doctor` 自检，再陪你读第一个链接。它照着做的步骤写在 [install.md](./install.md)；想手动装，看下面。产品页：[xreader.leolabs.me](https://xreader.leolabs.me/zh) · [网页版试用](https://xreader.leolabs.me/app)
+
+## 作为插件安装
+
+插件里打包了 [`skills/`](./skills) 下的 skill 和 x-reader 的 MCP 服务（用 `uvx` 启动，需要先装 [uv](https://docs.astral.sh/uv/)）。
+
+- **Claude Code**（2.1.275 及以上）：`/plugin install x-reader --marketplace runesleo/x-reader`
+- **Codex**：先 `codex plugin marketplace add runesleo/x-reader`，再 `codex plugin add x-reader@runesleo`
+- **Cursor**：仓库根目录带 `.cursor-plugin/plugin.json`；Cursor Marketplace 还没上架。
+
+登录态网页、Telegram、转写等可选来源，仍按 [install.md](./install.md) 配置。
+
+同一个 `runesleo` 插件市场里还有 Leo 的其他工具，加过市场后按名字安装即可：
+
+| 插件 | 做什么 | Claude Code | Codex |
+|---|---|---|---|
+| [polymarket-toolkit](https://github.com/runesleo/polymarket-toolkit) | 只读的 Polymarket 钱包画像、盈亏、Brier 分 | ✓ | ✓ |
+| [x-signal-digest](https://github.com/runesleo/x-signal-digest) | 把 X 信息流压成 0–3 条有用信号 | ✓ | ✓ |
+| [video-explainer-kit](https://github.com/runesleo/claude-video-kit) | 选题 → 审过的竖屏讲解视频 | ✓ | ✓ |
+| [talk-human](https://github.com/runesleo/talk-human) | 让稿子读起来像你自己说话 | ✓ | ✓ |
+| [multi-ai-sync](https://github.com/runesleo/multi-ai-sync) | 查各个 AI 的结果有没有回到你电脑 | ✓ | ✓ |
+
+## 一行安装
+
+```bash
+npx skills add runesleo/x-reader --skill x-reader
+```
+
+然后把链接发给 Agent，例如：
+
+> 读取原始来源。如果里面有和结论相关的视频或音频，也必须实际读取。告诉我你真正读到了什么，还有什么没读到。
+
+canonical skill 使用四种状态：
+
+```text
+PASS     原始来源以及回答所需的关键媒体都已读取
+PARTIAL  只读到了部分来源，仍缺关键层
+FAIL     无法可靠获取原始来源
+UNKNOWN  当前材料不足以确认是否就是用户要求的来源
+```
+
+## Evidence Receipt 网页预览（实验性）
+
+现在可以把同一套 evidence contract 通过一个很小的本地网页界面跑起来：
+
+```bash
+pip install -e .
+x-reader-web --host 127.0.0.1 --port 8787
+```
+
+当前 hosted MVP 只接受公开的 X/Twitter、YouTube 和普通网页 URL。每次请求都使用独立的临时 HOME / inbox，不继承浏览器登录态、Telegram 凭证、Groq key、Obsidian/output 路径，也不会向外部服务转发 X cookie。
+
+网页层**没有再造第二套 reader 或 evidence 状态机**：它仍然调用现有的 `x-reader URL --json`，只是在隔离环境中运行，再把结果投影为 `PASS / PARTIAL / FAIL / UNKNOWN`。
+
+API 示例、隔离边界和 mixed-media receipt 细节见 [Evidence Receipt](./docs/EVIDENCE_RECEIPT.md)。
+
+## v0.3.1：真实 before / after
+
+这次 source-fetch hardening 有可复现的真实差异，不只是功能列表：
+
+- `https://example.com`：v0.3.0 遇到 Jina HTTP 401 后直接失败；v0.3.1 会安全 fallback 到 `direct_html_pinned`，最终返回 `READ`。
+- 带附件视频的 X：v0.3.0 只返回推文文字，没有结构化媒体状态；v0.3.1 返回 `media_status=present`，因此可以明确区分“正文已读”和“附件媒体仍是 `PARTIAL`”。
+
+![x-reader v0.3.0 vs v0.3.1 实测](https://github.com/runesleo/x-reader/releases/download/v0.3.1/x-reader-v030-vs-hardening.gif)
+
+[查看 12 秒 MP4 实测](https://github.com/runesleo/x-reader/releases/download/v0.3.1/x-reader-v030-vs-hardening.mp4) · [v0.3.1 Release Notes](https://github.com/runesleo/x-reader/releases/tag/v0.3.1)
+
+## 已验证的 first success
+
+合并到 `main` 后，我们对一个公开 X 链接做了完整实测：
+
+```text
+来源：
+https://x.com/dontbesilent/status/2103875422522077377
+
+推文正文       PASS     通过原始 status 的 oEmbed 读取
+附件视频       PASS     解析并下载公开 MP4
+视频时长                约 178.3 秒
+视频内容       PASS     获取并完整读取原生中文字幕
+错误链接       FAIL     非零退出码 + 机器可读 JSON error
+```
+
+公开安装路径也在全新目录中重新验证：
+
+```bash
+npx skills add runesleo/x-reader --skill x-reader
+# Repository cloned
+# Found 3 skills
+# Selected 1 skill: x-reader
+# Installation complete
+```
+
+完整的日期化验收证据见 [First-success receipt](./docs/FIRST_SUCCESS.md)。
+
+## 为什么需要 source-first
+
+很多 Agent “能找到点东西”，但这不代表它真的读了你给的来源。
+
+| Agent 实际拿到的东西 | 最多可以声称什么 |
+|---|---|
+| 搜索结果 / preview card | 只能用于发现，不能当原文证据 |
+| X 推文正文 | 只能支持正文里的内容 |
+| 推文正文 + 未读取的附件视频 | 正文可通过；视频必须保持 `PARTIAL` |
+| 线程首帖、引用帖或 X Article 没读到 | 在确认该层不存在之前保持 `PARTIAL`（引用帖也可以被读到；X Article 正文不会被读取） |
+| 视频标题 / 简介 | 只是 metadata，不是视频内容 |
+| 覆盖整段视频的字幕 | 能支持视频里的口头内容；画面没有分析，视频整体保持 `PARTIAL` |
+| 登录墙 / 删除页 / 空响应 | `FAIL` 或 `PARTIAL`，不能脑补 |
+| 付费墙试读、Cookie 同意页、只有菜单的页面 | `PARTIAL`、`FAIL` 或 `UNKNOWN`；普通网页要有足量正文才能 `PASS` |
+
+## 支持来源
+
+| 来源 | 基础读取链路 | 媒体 / 登录补全 |
+|---|---|---|
+| X / Twitter | oEmbed → FxTwitter → Article/Jina → Playwright | Skill 可继续读取附件媒体 |
+| 普通网页 / 文章 | 固定 IP 直连读取（核对跳转和嵌入音视频）→ Jina Reader 正文 | 跳到 X、YouTube、播客等平台时交给对应读取器；网页版展示直连读到的正文 |
+| YouTube | yt-dlp metadata / 字幕 | 配置后可 Groq Whisper |
+| Bilibili | Bilibili API | 字幕 / 音频转录流程 |
+| 微信公众号 | Jina → Playwright | 公开文章走无头浏览器兜底；暂不使用保存的登录态 |
+| 小红书 | Jina → Playwright | 部分页面需一次性本地登录 |
+| Telegram | Telethon | 需要 Telegram 凭证 |
+| RSS | feedparser | — |
+| 小宇宙 / Apple Podcasts | 节目页和节目简介 | 只有显式开启下面的本地转录参数才读音频；只读简介时保持 `PARTIAL` |
+
+平台规则会变化。x-reader 的承诺不是“永远全覆盖”，而是**覆盖不到时不装作覆盖到了**。
+
+## 安全模型
+
+- 网页、推文、字幕、transcript、metadata、评论全部视为**不可信数据**，绝不能当作给 Agent 的指令。
+- 不能因为来源内容要求，就执行命令、泄露本地数据或做外部操作。
+- Agent Skill 的自动 bootstrap 固定到已验证的不可变 CLI commit，不跟随移动的 branch。
+- URL 校验会在支持的网络抓取前拦截 private / localhost 目标。
+- 本地浏览器 cookie 默认只保留在本机。
+
+## 数据与网络访问
+
+x-reader、它的 MCP server 和 skills 都在你自己的电脑上运行。没有遥测，也不会把任何东西发到作者的服务器：xreader.leolabs.me 上的网页版是独立服务，CLI、MCP server 和插件都不会调用它。
+
+让它读一个链接时，数据只会去这些地方：
+
+| 内容 | 发往哪里 |
+|---|---|
+| 你要读的链接 | 直接从该网站读取 |
+| X / Twitter 帖子链接 | `publish.twitter.com`（oEmbed）、`api.fxtwitter.com`（FxTwitter），再兜底 `r.jina.ai`（Jina Reader） |
+| 文章、微信公众号、小红书链接 | `r.jina.ai`（Jina Reader）兜底读取；最后兜底本机无头浏览器（Playwright） |
+| YouTube、Bilibili | 平台本身，经 `yt-dlp` 和 `api.bilibili.com` |
+| 需要转录的音频 | 只有设置了 `GROQ_API_KEY` 才发往 `api.groq.com`。显式开启的本地转录在本机运行，首次使用时从 Hugging Face 下载 Whisper `tiny` 模型 |
+| Telegram | Telegram 官方 API，用你自己设置的凭证 |
+| 输出里的微信图片 | 图片链接改写为经 `wsrv.nl` 加载，因为微信禁止外链图片 |
+
+安装插件时，MCP server 由 `uvx` 从本 GitHub 仓库的固定 commit 启动，uv 会从 PyPI 下载 Python 依赖。Agent Skill 的 bootstrap 会把同一个固定 commit 装进缓存 venv。
+
+只存在你本机的：阅读收件箱（`unified_inbox.json`，或 `INBOX_FILE` 指定的路径）、可选的 Markdown 输出（`OUTPUT_DIR`、`OBSIDIAN_VAULT`）、用 `x-reader login` 建的登录会话（`~/.x-reader/sessions/`），以及本地转录模型缓存（`~/.cache/x-reader/asr`）。
+
+## CLI
+
+从 GitHub 安装：
+
+```bash
+pip install "x-reader @ git+https://github.com/runesleo/x-reader.git"
+```
+
+读取 URL：
+
+```bash
+x-reader https://x.com/elonmusk/status/123456
+```
+
+检查哪些已就绪、还缺什么（只读；给 Agent 用加 `--json`）：
+
+```bash
+x-reader doctor
+```
+
+完整 JSON：
+
+```bash
+x-reader https://x.com/elonmusk/status/123456 --json
+```
+
+批量读取：
+
+```bash
+x-reader https://url1.com https://url2.com --json
+```
+
+浏览器 fallback：
+
+```bash
+pip install "x-reader[browser] @ git+https://github.com/runesleo/x-reader.git"
+playwright install chromium
+x-reader login twitter
+x-reader login xhs
+```
+
+默认本地 cookie 只留在本机。
+
+## 仓库内的 Agent Skills
+
+```text
+skills/
+├── x-reader/      # 拉原文 + CLI bootstrap + PASS/PARTIAL/FAIL 证据契约
+├── link-reader/   # 丢链接就读：先原文、再解读、再判断（与 x-reader 配套）
+├── video/         # 视频 / 播客转录
+└── analyzer/      # 基于证据的内容分析
+```
+
+查看全部 Skill：
+
+```bash
+npx skills add runesleo/x-reader --list
+```
+
+**推荐组合**
+
+| 场景 | 安装 |
+|------|------|
+| 只要可靠抓取 URL 与证据状态 | 仅 `x-reader` |
+| 用户只丢链接、要问「这条说了什么」 | `x-reader` + `link-reader` |
+
+```bash
+# 读取 + 解读工作流（Claude Code / Cursor / Codex 等）
+npx skills add runesleo/x-reader --skill x-reader --skill link-reader -g -y
+```
+
+`link-reader` 不替代 `x-reader`：所有正文仍走 x-reader CLI 或 MCP；本 skill 规定默认阅读范围、证据等级、线程/媒体收口，并提供离线校验脚本 `skills/link-reader/scripts/check_reading_coverage.py`。首次使用请按 [install.md](./install.md) 跑通 `x-reader doctor`。
+
+任何支持 [Agent Skills](https://agentskills.io) 的宿主（Claude Code、Cursor、Codex 等）均可安装到全局或项目 skills 目录，然后直接贴链接要求读原文。
+
+### 演示：丢链接 → 读原文 → 解读 → 判断
+
+```bash
+npx skills add runesleo/x-reader --skill x-reader --skill link-reader -g -y
+```
+
+之后直接贴一个链接，不用加别的说明。预期行为：
+
+1. 用 `x-reader` 拉原文，不拿搜索摘要充数。
+2. 标明证据等级：`PASS` / `PARTIAL` / `FAIL` / `UNKNOWN`。例如帖子正文读到了、附带视频没读 → `PARTIAL`。
+3. 讲清原文到底说了什么，把作者观点和可核对的事实分开，有必要时再给判断。
+
+可选：对结构化的线程回执做离线校验：
+
+```bash
+python3 skills/link-reader/scripts/check_reading_coverage.py --target-id "POST_ID" < receipt.json
+```
+
+## MCP Server
+
+```bash
+git clone https://github.com/runesleo/x-reader.git
+cd x-reader
+pip install -e ".[mcp]"
+python mcp_server.py
+```
+
+也可以直接从 GitHub 用 `uvx` 启动打包后的 MCP 入口：
+
+```bash
+uvx --with "mcp[cli]>=1.0,<2" --from git+https://github.com/runesleo/x-reader.git x-reader-mcp
+```
+
+`x-reader-mcp` 是打包在 `x_reader` 内的 console entrypoint；根目录的 `mcp_server.py` 继续保留，兼容原来的源码 checkout 用法。
+
+暴露四个工具：
+
+- `read_url(url)`
+- `read_batch(urls)`
+- `list_inbox()`
+- `detect_platform(url)`
+
+Claude Code 推荐直接用 CLI 添加，不要把配置写进 Claude Desktop 的配置文件：
+
+```bash
+claude mcp add x-reader -- python /absolute/path/to/x-reader/mcp_server.py
+```
+
+需要全局可用时再加 `--scope user`。
+
+## 播客：节目简介不等于音频内容
+
+x-reader 现将播客 URL 作为 `source_type=podcast` 处理。只读到节目简介时明确标记 `PARTIAL`，不能宣称听完了整期音频。
+
+本地可显式开启**前 12 秒音频预览转录**，不使用付费 API；仍然属于 `PARTIAL`，不是完整 transcript：
+
+```bash
+# 仅本地命令行可用（网页版没有），实验功能。
+python -m pip install "x-reader[media] @ git+https://github.com/runesleo/x-reader.git"
+# 还需在 PATH 中安装 ffmpeg 和 yt-dlp
+x-reader 'https://www.xiaoyuzhoufm.com/episode/6abb9b69195d838e2aeb9c2b' --media-preview-seconds 12 --json
+```
+
+对于真实的**公开短播客**，可显式开启整期短音频转录：源文件**≤2 MiB、音频时长≤120 秒**，所有完整性证据成立才给 `PASS`：
+
+```bash
+x-reader 'https://www.xiaoyuzhoufm.com/episode/6a14e9dd3209346094186445' --media-full-short --json
+```
+
+短音频模式要求严格 HTTP 206、完整源文件字节、SHA-256、音频解码与转录处理时长一致。超过短音频限额时，这个模式继续标记 `PARTIAL`。
+
+**实验性长音频断点续传**（本地命令行）：仅对**单条公开小宇宙播客**显式启用，源文件限 **64 MiB**、时长限 **90 分钟**。通过 1 MiB 的 HTTP 206 字节块、强 ETag 来源版本、SHA-256、60 秒 PCM/ASR 时间段和本地私有检查点核验完整来源：
+
+```bash
+# 仅本地命令行；网页版没有这个功能。
+x-reader 'https://www.xiaoyuzhoufm.com/episode/6aab4896051af796b9e966c5' --media-full-long --json
+```
+
+一条真实 **277.9 秒**节目已通过完整收据，再次运行时复用 **5/5 音频块和 5/5 转录段**。无法完整读取、超过限制或证据缺失时保持 `PARTIAL`。本地缓存会保留音频分块及机器转录，请为需要隔离的数据使用单独的 `X_READER_LONG_CACHE_DIR`。**音频处理覆盖率不等于逐字转录准确率。** 详见 [播客契约](./docs/PODCAST_MEDIA_PREVIEW.md)、[短音频证明](./docs/FULL_SHORT_AUDIO_PROOF.md) 和 [2026-10-10 长音频续传验收](./docs/LONG_AUDIO_RESUME_2026-10-10.md)。
+
+## 视频 / 音频依赖
+
+```bash
+# macOS
+brew install yt-dlp ffmpeg
+
+# Linux
+pip install yt-dlp
+sudo apt install ffmpeg
+```
+
+Whisper 转录需要：
+
+```bash
+export GROQ_API_KEY=your_key_here
+```
+
+当前 YouTube Groq 转录代码使用 `whisper-large-v3`。
+
+## Python 库
+
+```python
+import asyncio
+from x_reader.reader import UniversalReader
+
+async def main():
+    reader = UniversalReader()
+    content = await reader.read("https://example.com")
+    print(content.title)
+    print(content.content[:200])
+
+asyncio.run(main())
+```
+
+## 配置
+
+复制 `.env.example` → `.env`。
+
+主要变量：
+
+- `TG_API_ID` / `TG_API_HASH`
+- `GROQ_API_KEY`
+- `INBOX_FILE`
+- `OUTPUT_DIR`
+- `OBSIDIAN_VAULT`
+
+## 架构
+
+```text
+用户给 URL
+    │
+    ├─ 文本来源
+    │   └─ 平台 fetcher → UnifiedContent → CLI JSON / inbox
+    │
+    ├─ 视频 / 音频对答案很关键
+    │   └─ 优先字幕 → 转录 fallback → evidence receipt
+    │
+    └─ 用户要求分析
+        └─ 先确认 source coverage，再分析
+```
+
+## Author / License
+
+作者：Leo ([@runes_leo](https://x.com/runes_leo))
+
+[leolabs.me](https://leolabs.me)
+
+MIT License

@@ -1,0 +1,105 @@
+name: Publish requested release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/release-request"
+      - ".github/workflows/publish-requested-release.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read release request
+        id: request
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^VERSION=//p' .github/release-request)"
+          target="$(sed -n 's/^TARGET_SHA=//p' .github/release-request)"
+          title="$(sed -n 's/^TITLE=//p' .github/release-request)"
+
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid VERSION: $version" >&2
+            exit 1
+          fi
+          if [[ ! "$target" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid TARGET_SHA: $target" >&2
+            exit 1
+          fi
+          if [[ -z "$title" ]]; then
+            echo "TITLE is required" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+
+      - name: Verify skill bootstrap is pinned to this release
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          request = dict(
+              row.split("=", 1)
+              for row in Path(".github/release-request").read_text().splitlines()
+              if "=" in row
+          )
+          skill = Path("skills/x-reader/SKILL.md").read_text()
+          match = re.search(r'XR_CLI_COMMIT="([0-9a-f]{40})"', skill)
+          if match is None or match.group(1) != request.get("TARGET_SHA"):
+              raise SystemExit("Release blocked: Skill bootstrap commit differs from TARGET_SHA")
+          print("Verified immutable Skill commit:", match.group(1))
+          PY
+
+      - name: Publish GitHub release if missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.request.outputs.version }}
+          TARGET_SHA: ${{ steps.request.outputs.target }}
+          TITLE: ${{ steps.request.outputs.title }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $VERSION already exists; nothing to do."
+          else
+            changelog_version="${VERSION#v}"
+            notes_file="$RUNNER_TEMP/release-notes.md"
+            awk -v version="$changelog_version" '
+              BEGIN { prefix="## [" version "]" }
+              index($0, prefix) == 1 { capture=1; next }
+              capture && index($0, "## ") == 1 { exit }
+              capture { print }
+            ' CHANGELOG.md > "$notes_file"
+
+            if ! grep -q '[^[:space:]]' "$notes_file"; then
+              echo "No CHANGELOG section found for $VERSION" >&2
+              exit 1
+            fi
+
+            gh release create "$VERSION" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$TARGET_SHA" \
+              --title "$TITLE" \
+              --notes-file "$notes_file"
+          fi
+
+      - name: Verify public owner/repo skill install
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_dir="$(mktemp -d)"
+          cd "$smoke_dir"
+          npx -y skills add runesleo/x-reader --skill x-reader -a codex -y --copy
+          test -f .agents/skills/x-reader/SKILL.md
+          grep -q '^name: x-reader$' .agents/skills/x-reader/SKILL.md

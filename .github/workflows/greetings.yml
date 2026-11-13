@@ -1,0 +1,20 @@
+name: Greetings
+
+on:
+  pull_request_target:
+    types: [opened]
+  issues:
+    types: [opened]
+
+jobs:
+  greeting:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+    - uses: actions/first-interaction@v1
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+        issue-message: "👋 Welcome! Thank you for opening your first issue in X-Reader. The maintainers will look into it as soon as possible."
+        pr-message: "🎉 Thank you for opening your first pull request! We appreciate your contribution to X-Reader."
