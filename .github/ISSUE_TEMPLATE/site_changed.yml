@@ -1,0 +1,63 @@
+name: Site changed / selectors broke
+description: BBB changed something and the parser no longer matches.
+labels: ["site-change"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most common way a scraper stops working, and it is worth its
+        own report because the fix is different from a code bug: something on
+        bbb.org moved.
+
+        Useful to know before filing: the parser does not read the DOM. It
+        reads the state BBB embeds in every page
+        (`window.__PRELOADED_STATE__`, whose `searchResult` is the site's own
+        `/api/search` response). CONTRIBUTING.md lists the four things that
+        can break; saying which one narrows the fix a lot.
+
+  - type: dropdown
+    id: what_broke
+    attributes:
+      label: What stopped matching
+      options:
+        - Businesses (0 rows on a page that visibly has businesses)
+        - A specific field is null or wrong (rating, address, phone, sku, URL)
+        - The `__PRELOADED_STATE__` payload is missing or renamed
+        - The /api/search endpoint now needs a key or is behind Cloudflare
+        - Pagination stops early or repeats a page
+        - A block or challenge is misclassified (exit 3 on a good page, or rows from a challenge)
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: URL
+      description: The exact listing URL, and the country your exit IP was in.
+      placeholder: "https://www.bbb.org/search?find_country=USA&find_text=restaurants&find_loc=New%20York%2C%20NY (exit IP: US residential, Scraping Browser pid: bbb1)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence from the page
+      description: |
+        Whichever of these you can get. A capture beats a description.
+
+        - The `--dump-html` snapshot of the page, or the relevant part of
+          `window.__PRELOADED_STATE__` from it (one `searchResult` record, or
+          the `businessProfile` object on a profile page).
+        - For a field problem: the value you got, and the value on the page.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it reproduces on a second engine, whether it reproduces from a
+        different country, and when it last worked.
