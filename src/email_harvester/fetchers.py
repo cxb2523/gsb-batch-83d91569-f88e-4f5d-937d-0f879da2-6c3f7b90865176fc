@@ -14,6 +14,7 @@ from requests.exceptions import RequestException
 from urllib3.util.retry import Retry
 
 from .errors import FetchError
+from .models import FetchOutcome, FetchStatus
 from .validation import is_supported_url
 
 
@@ -83,20 +84,44 @@ class RequestsFetcher:
         self._timeout = timeout
         self._logger = logger
 
-    def fetch(self, url: str) -> str:
+    def fetch_detailed(self, url: str) -> FetchOutcome:
+        """Fetch a URL and return a structured outcome instead of an empty string."""
         if not is_supported_url(url):
             self._logger.debug("Skipping unsupported URL: %s", url)
-            return ""
+            return FetchOutcome(
+                url=url,
+                status=FetchStatus.UNSUPPORTED_URL,
+                detail=f"Unsupported URL scheme (only http/https are supported): {url}",
+            )
         if not self._robots_policy.allowed(url):
             self._logger.info("Skipping due to robots.txt: %s", url)
-            return ""
+            return FetchOutcome(
+                url=url,
+                status=FetchStatus.ROBOTS_BLOCKED,
+                detail="Blocked by robots.txt policy.",
+            )
         try:
             response = self._session.get(url, timeout=self._timeout)
             response.raise_for_status()
-            return str(response.text)
         except RequestException as exc:
             self._logger.debug("Requests fetch failed for %s: %s", url, exc)
-            return ""
+            return FetchOutcome(
+                url=url,
+                status=FetchStatus.FETCH_FAILED,
+                detail=f"Request failed: {exc}",
+            )
+        content = str(response.text)
+        if not content:
+            return FetchOutcome(
+                url=url,
+                status=FetchStatus.FETCH_FAILED,
+                detail="Empty response body.",
+            )
+        return FetchOutcome(url=url, status=FetchStatus.SUCCESS, content=content)
+
+    def fetch(self, url: str) -> str:
+        """Return HTML content for a URL, or an empty string on any non-success."""
+        return self.fetch_detailed(url).content
 
 
 class SeleniumFetcher:
@@ -126,15 +151,35 @@ class SeleniumFetcher:
         except Exception as exc:  # pragma: no cover - integration behavior
             raise FetchError(f"Failed to start Selenium driver: {exc}") from exc
 
-    def fetch(self, url: str) -> str:
+    def fetch_detailed(self, url: str) -> FetchOutcome:
+        """Fetch a URL with the browser and return a structured outcome."""
         if not is_supported_url(url):
-            return ""
+            return FetchOutcome(
+                url=url,
+                status=FetchStatus.UNSUPPORTED_URL,
+                detail=f"Unsupported URL scheme (only http/https are supported): {url}",
+            )
         try:
             self._driver.get(url)
-            return str(self._driver.page_source)
+            content = str(self._driver.page_source)
         except Exception as exc:  # pragma: no cover - integration behavior
             self._logger.debug("Selenium fetch failed for %s: %s", url, exc)
-            return ""
+            return FetchOutcome(
+                url=url,
+                status=FetchStatus.FETCH_FAILED,
+                detail=f"Browser fetch failed: {exc}",
+            )
+        if not content:
+            return FetchOutcome(
+                url=url,
+                status=FetchStatus.FETCH_FAILED,
+                detail="Empty response body.",
+            )
+        return FetchOutcome(url=url, status=FetchStatus.SUCCESS, content=content)
+
+    def fetch(self, url: str) -> str:
+        """Return page source for a URL, or an empty string on any non-success."""
+        return self.fetch_detailed(url).content
 
     def close(self) -> None:
         try:

@@ -62,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output", default="emails_output.csv", help="Output CSV path.")
     parser.add_argument(
+        "--fetch-report",
+        default=None,
+        help="Optional CSV path for the per-URL fetch outcome report.",
+    )
+    parser.add_argument(
         "--workers", type=int, default=DEFAULT_WORKERS, help="Number of worker threads."
     )
     parser.add_argument(
@@ -153,6 +158,7 @@ def namespace_to_config(args: argparse.Namespace) -> HarvestConfig:
         max_results_per_query=args.max_results_per_query,
         max_hunter_verifications=args.max_hunter_verifications,
         show_progress=not args.no_progress,
+        fetch_report=args.fetch_report,
     )
 
 

@@ -2,8 +2,28 @@
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+
+class FetchStatus(enum.Enum):
+    """Per-URL fetch outcome categories written to the fetch report."""
+
+    SUCCESS = "success"
+    ROBOTS_BLOCKED = "robots_blocked"
+    FETCH_FAILED = "fetch_failed"
+    UNSUPPORTED_URL = "unsupported_url"
+
+
+@dataclass(frozen=True)
+class FetchOutcome:
+    """The fetch ending of a single candidate URL."""
+
+    url: str
+    status: FetchStatus
+    detail: str = ""
+    content: str = ""
 
 
 class SearchBackend(Protocol):
@@ -18,6 +38,13 @@ class Fetcher(Protocol):
 
     def fetch(self, url: str) -> str:
         """Return HTML content for a URL or an empty string."""
+
+
+class DetailedFetcher(Fetcher, Protocol):
+    """Fetcher contract that also explains why a fetch did not yield content."""
+
+    def fetch_detailed(self, url: str) -> FetchOutcome:
+        """Return a structured outcome, distinguishing blocks, failures, and empties."""
 
 
 class Closable(Protocol):

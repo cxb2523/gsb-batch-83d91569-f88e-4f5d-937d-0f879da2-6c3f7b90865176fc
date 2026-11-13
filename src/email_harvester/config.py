@@ -37,6 +37,7 @@ class HarvestConfig:
     user_agent: str = DEFAULT_USER_AGENT
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
     show_progress: bool = True
+    fetch_report: str | None = None
 
     def __post_init__(self) -> None:
         validate_runtime_constraints(

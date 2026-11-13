@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `--fetch-report` CLI option writing a per-URL fetch outcome CSV (`url`, `status`,
+  `detail`). Each candidate URL gets exactly one row in deduped candidate order.
+- `FetchStatus`/`FetchOutcome` model types and `fetch_detailed` on `RequestsFetcher`
+  and `SeleniumFetcher` to distinguish success, robots.txt blocks, request
+  failures/empty responses, and unsupported URLs. The string-returning `fetch`
+  contract is preserved.
+- Per-URL failure isolation in both threaded Requests mode and single-threaded
+  Selenium mode; one failing URL no longer affects the remaining candidates.
+
 ## [1.0.0] - 2026-02-23
 
 ### Added

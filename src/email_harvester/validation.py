@@ -40,6 +40,32 @@ def normalize_urls(urls: list[str]) -> list[str]:
     return output
 
 
+def normalize_candidate_urls(urls: list[str]) -> list[str]:
+    """Dedupe candidate URLs while retaining unsupported ones for outcome reporting.
+
+    Supported HTTP(S) URLs are normalized/deduped exactly like :func:`normalize_urls`.
+    Unsupported or blank entries are kept as-is (deduped on the stripped value) so the
+    fetch report can record an ``unsupported_url`` ending for every candidate.
+    """
+    output: list[str] = []
+    seen_supported: set[str] = set()
+    seen_other: set[str] = set()
+    for raw in urls:
+        value = raw.strip()
+        if not value:
+            continue
+        if is_supported_url(value):
+            key = value.split("?", maxsplit=1)[0].rstrip("/")
+            if key in seen_supported:
+                continue
+            seen_supported.add(key)
+            output.append(value)
+        elif value not in seen_other:
+            seen_other.add(value)
+            output.append(value)
+    return output
+
+
 def load_lines_from_file(path: str) -> list[str]:
     """Load non-empty lines from a UTF-8 text file."""
     content = Path(path).read_text(encoding="utf-8")

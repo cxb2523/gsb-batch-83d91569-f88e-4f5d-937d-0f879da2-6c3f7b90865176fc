@@ -11,6 +11,7 @@ from email_harvester.fetchers import (
     SeleniumFetcher,
     make_retry_session,
 )
+from email_harvester.models import FetchStatus
 
 
 class FakeRobotsPolicy:
@@ -75,6 +76,58 @@ def test_requests_fetcher_returns_html_for_success() -> None:
     )
     assert fetcher.fetch("https://example.com") == "<p>Hello</p>"
     assert session.calls == ["https://example.com"]
+
+
+def _make_fetcher(session: FakeSession, *, allowed: bool = True) -> RequestsFetcher:
+    return RequestsFetcher(
+        session=session,  # type: ignore[arg-type]
+        robots_policy=FakeRobotsPolicy(allowed=allowed),  # type: ignore[arg-type]
+        timeout=5.0,
+        logger=logging.getLogger("test"),
+    )
+
+
+def test_fetch_detailed_classifies_success() -> None:
+    outcome = _make_fetcher(FakeSession(FakeResponse(text="<p>Hello</p>"))).fetch_detailed(
+        "https://example.com"
+    )
+    assert outcome.status is FetchStatus.SUCCESS
+    assert outcome.content == "<p>Hello</p>"
+    assert outcome.detail == ""
+
+
+def test_fetch_detailed_classifies_robots_block() -> None:
+    outcome = _make_fetcher(
+        FakeSession(FakeResponse(text="<html/>")), allowed=False
+    ).fetch_detailed("https://example.com")
+    assert outcome.status is FetchStatus.ROBOTS_BLOCKED
+    assert outcome.content == ""
+    assert "robots" in outcome.detail.lower()
+
+
+def test_fetch_detailed_classifies_request_exception() -> None:
+    outcome = _make_fetcher(FakeSession(FakeResponse(status_code=500))).fetch_detailed(
+        "https://example.com"
+    )
+    assert outcome.status is FetchStatus.FETCH_FAILED
+    assert outcome.content == ""
+    assert outcome.detail
+
+
+def test_fetch_detailed_classifies_empty_response() -> None:
+    outcome = _make_fetcher(FakeSession(FakeResponse(text=""))).fetch_detailed(
+        "https://example.com"
+    )
+    assert outcome.status is FetchStatus.FETCH_FAILED
+    assert "empty" in outcome.detail.lower()
+
+
+def test_fetch_detailed_classifies_unsupported_url() -> None:
+    session = FakeSession(FakeResponse(text="<html/>"))
+    outcome = _make_fetcher(session).fetch_detailed("file:///tmp/test")
+    assert outcome.status is FetchStatus.UNSUPPORTED_URL
+    assert outcome.detail
+    assert session.calls == []
 
 
 def test_make_retry_session_sets_user_agent() -> None:
@@ -143,3 +196,27 @@ def test_selenium_fetcher_fetch_and_close_on_stub_driver() -> None:
     assert fetcher.fetch("file:///tmp/nope") == ""
     fetcher.close()
     assert fetcher._driver.closed is True  # type: ignore[attr-defined]
+
+
+def test_selenium_fetcher_fetch_detailed_on_stub_driver() -> None:
+    class Driver:
+        def __init__(self) -> None:
+            self.page_source = "<html/>"
+
+        def get(self, _url: str) -> None:
+            return None
+
+        def quit(self) -> None:
+            return None
+
+    fetcher = SeleniumFetcher.__new__(SeleniumFetcher)
+    fetcher._driver = Driver()  # type: ignore[attr-defined]
+    fetcher._logger = logging.getLogger("test")  # type: ignore[attr-defined]
+
+    success = fetcher.fetch_detailed("https://example.com")
+    assert success.status is FetchStatus.SUCCESS
+    assert success.content == "<html/>"
+
+    unsupported = fetcher.fetch_detailed("file:///tmp/nope")
+    assert unsupported.status is FetchStatus.UNSUPPORTED_URL
+    assert unsupported.detail

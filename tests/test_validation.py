@@ -8,6 +8,7 @@ from email_harvester.validation import (
     is_supported_url,
     load_lines_from_file,
     mx_check,
+    normalize_candidate_urls,
     normalize_urls,
     validate_runtime_constraints,
 )
@@ -18,6 +19,21 @@ def test_is_supported_url_and_normalize() -> None:
     assert is_supported_url(urls[0]) is True
     assert is_supported_url(urls[1]) is False
     assert normalize_urls(urls) == ["https://example.com/a"]
+
+
+def test_normalize_candidate_urls_retains_unsupported_entries() -> None:
+    urls = [
+        "https://example.com/a",
+        "https://example.com/a?x=1",
+        "ftp://example.com/file",
+        "ftp://example.com/file",
+        "",
+        "  ",
+    ]
+    assert normalize_candidate_urls(urls) == [
+        "https://example.com/a",
+        "ftp://example.com/file",
+    ]
 
 
 def test_validate_runtime_constraints_rejects_invalid_workers() -> None:

@@ -13,14 +13,50 @@ from .config import HarvestConfig
 from .extraction import domain_from_url, extract_emails, find_contact_links
 from .fetchers import RequestsFetcher, RobotsPolicy, SeleniumFetcher, make_retry_session
 from .hunter import HunterClient
-from .io_csv import write_rows
-from .models import EmailObservation, Fetcher, HunterClientProtocol, SearchBackend
+from .io_csv import write_fetch_report, write_rows
+from .models import (
+    EmailObservation,
+    Fetcher,
+    FetchOutcome,
+    FetchStatus,
+    HunterClientProtocol,
+    SearchBackend,
+)
 from .scoring import compute_quality
 from .search_backends import FallbackSearchBackend, build_queries
-from .validation import mx_check, normalize_urls, polite_sleep
+from .validation import (
+    is_supported_url,
+    mx_check,
+    normalize_candidate_urls,
+    polite_sleep,
+)
 
 SleepFn = Callable[[float, float], None]
 MxCheckFn = Callable[[str], bool]
+
+
+def _fetch_detailed(fetcher: Fetcher, url: str) -> FetchOutcome:
+    """Return a structured fetch outcome, falling back for plain string fetchers."""
+    if not is_supported_url(url):
+        return FetchOutcome(
+            url=url,
+            status=FetchStatus.UNSUPPORTED_URL,
+            detail=f"Unsupported URL scheme (only http/https are supported): {url}",
+        )
+    detailed = getattr(fetcher, "fetch_detailed", None)
+    if callable(detailed):
+        outcome = detailed(url)
+        if isinstance(outcome, FetchOutcome):
+            return outcome
+    # Compatibility path for fetchers implementing only the string contract.
+    content = fetcher.fetch(url)
+    if content:
+        return FetchOutcome(url=url, status=FetchStatus.SUCCESS, content=content)
+    return FetchOutcome(
+        url=url,
+        status=FetchStatus.FETCH_FAILED,
+        detail="Fetch returned no content (reason not reported by this fetcher).",
+    )
 
 
 def collect_candidate_urls(
@@ -32,7 +68,7 @@ def collect_candidate_urls(
 ) -> list[str]:
     """Collect and dedupe candidate URLs from seeds or search."""
     if config.seeds:
-        return normalize_urls(list(config.seeds))
+        return normalize_candidate_urls(list(config.seeds))
 
     candidate_urls: list[str] = []
     for query in build_queries(config.categories):
@@ -46,7 +82,7 @@ def collect_candidate_urls(
         logger.info(" --> found %d candidate URLs", len(urls))
         candidate_urls.extend(urls)
         sleep_fn(config.min_delay, config.max_delay)
-    return normalize_urls(candidate_urls)
+    return normalize_candidate_urls(candidate_urls)
 
 
 def process_page(
@@ -56,12 +92,13 @@ def process_page(
     config: HarvestConfig,
     hunter_client: HunterClientProtocol | None,
     sleep_fn: SleepFn,
-) -> list[EmailObservation]:
+) -> tuple[list[EmailObservation], FetchOutcome]:
     """Extract emails from a page, discovered contact pages, and Hunter domain search."""
     observations: list[EmailObservation] = []
-    html = fetcher.fetch(url)
+    outcome = _fetch_detailed(fetcher, url)
+    html = outcome.content
     if not html:
-        return observations
+        return observations, outcome
 
     for email in extract_emails(html):
         observations.append(EmailObservation(email=email, source=url, note="page"))
@@ -95,7 +132,7 @@ def process_page(
                         email=value.lower(), source=url, note=f"hunter_domain:{confidence}"
                     )
                 )
-    return observations
+    return observations, outcome
 
 
 def _aggregate_observations(observations: list[EmailObservation]) -> dict[str, dict[str, object]]:
@@ -192,9 +229,15 @@ def harvest_records(
     hunter_client: HunterClientProtocol | None = None,
     mx_checker: MxCheckFn = mx_check,
     sleep_fn: SleepFn = polite_sleep,
+    fetch_outcomes: list[FetchOutcome] | None = None,
     logger: logging.Logger,
 ) -> list[dict[str, str]]:
-    """Run harvesting and return CSV rows."""
+    """Run harvesting and return CSV rows.
+
+    When ``fetch_outcomes`` is provided, one :class:`FetchOutcome` per candidate URL is
+    appended to it in candidate order. A failure for a single URL never prevents the
+    remaining candidate URLs from being processed.
+    """
     candidate_urls = collect_candidate_urls(
         config,
         search_backend=search_backend,
@@ -204,6 +247,14 @@ def harvest_records(
     logger.info("Total candidate URLs to scan: %d", len(candidate_urls))
 
     observations: list[EmailObservation] = []
+    # Indexed by candidate URL so the report keeps the deduped candidate order even
+    # though worker threads finish in arbitrary order.
+    outcomes_by_url: dict[str, FetchOutcome] = {}
+
+    def _record(url: str, page_observations: list[EmailObservation], outcome: FetchOutcome) -> None:
+        observations.extend(page_observations)
+        outcomes_by_url[url] = outcome
+
     if config.use_selenium:
         if selenium_fetcher_factory is None:
             raise ValueError("selenium_fetcher_factory is required when use_selenium is enabled.")
@@ -211,15 +262,23 @@ def harvest_records(
         selenium_fetcher = selenium_fetcher_factory()
         try:
             for url in candidate_urls:
-                observations.extend(
-                    process_page(
+                try:
+                    page_observations, outcome = process_page(
                         url,
                         fetcher=selenium_fetcher,
                         config=config,
                         hunter_client=hunter_client,
                         sleep_fn=sleep_fn,
                     )
-                )
+                except Exception as exc:
+                    logger.debug("Selenium worker failed for %s: %s", url, exc)
+                    page_observations = []
+                    outcome = FetchOutcome(
+                        url=url,
+                        status=FetchStatus.FETCH_FAILED,
+                        detail=f"Unexpected worker failure: {exc}",
+                    )
+                _record(url, page_observations, outcome)
         finally:
             close_fn = getattr(selenium_fetcher, "close", None)
             if callable(close_fn):
@@ -241,10 +300,22 @@ def harvest_records(
             if config.show_progress:
                 iterator = tqdm(iterator, total=len(futures), desc="scanning pages")
             for future in iterator:
+                url = futures[future]
                 try:
-                    observations.extend(future.result())
-                except Exception as exc:  # pragma: no cover - defensive guard
-                    logger.debug("Worker failed: %s", exc)
+                    page_observations, outcome = future.result()
+                except Exception as exc:
+                    logger.debug("Worker failed for %s: %s", url, exc)
+                    page_observations = []
+                    outcome = FetchOutcome(
+                        url=url,
+                        status=FetchStatus.FETCH_FAILED,
+                        detail=f"Unexpected worker failure: {exc}",
+                    )
+                _record(url, page_observations, outcome)
+
+    ordered_outcomes = [outcomes_by_url[url] for url in candidate_urls]
+    if fetch_outcomes is not None:
+        fetch_outcomes.extend(ordered_outcomes)
 
     email_map = _aggregate_observations(observations)
     logger.info("Unique emails found on pages: %d", len(email_map))
@@ -299,13 +370,22 @@ def run_pipeline(config: HarvestConfig, *, logger: logging.Logger) -> str:
         if config.use_selenium
         else None
     )
+    fetch_outcomes: list[FetchOutcome] = []
     rows = harvest_records(
         config=config,
         search_backend=search_backend,
         requests_fetcher=requests_fetcher,
         selenium_fetcher_factory=selenium_factory,
         hunter_client=hunter_client,
+        fetch_outcomes=fetch_outcomes,
         logger=logger,
     )
     write_rows(config.output, rows)
+    if config.fetch_report:
+        write_fetch_report(config.fetch_report, fetch_outcomes)
+        logger.info(
+            "Wrote fetch report for %d candidate URLs to %s",
+            len(fetch_outcomes),
+            config.fetch_report,
+        )
     return config.output

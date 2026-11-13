@@ -185,6 +185,24 @@ email-harvester --seeds-file seeds.txt --output seeded.csv
 
 This bypasses search providers and crawls only your supplied URLs.
 
+### 6) Per-URL Fetch Outcome Report
+
+Pass `--fetch-report` to record how the fetch of every candidate URL ended:
+
+```bash
+email-harvester --categories-file categories.txt --output results.csv --fetch-report report.csv
+```
+
+The report contains one row per candidate URL, in deduped candidate order, with columns:
+
+- `url` — the candidate URL.
+- `status` — one of `success` (page body fetched and non-empty), `robots_blocked`,
+  `fetch_failed` (request exception or empty response), or `unsupported_url`.
+- `detail` — readable reason for blocks and failures; empty on success.
+
+When `--fetch-report` is omitted, only the results CSV is written, exactly as before.
+A failure on a single URL is isolated and never stops the remaining URLs.
+
 ## Project Structure
 
 ```text
