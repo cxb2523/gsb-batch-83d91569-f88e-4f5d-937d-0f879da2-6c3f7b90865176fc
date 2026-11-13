@@ -72,6 +72,53 @@ export interface RedirectEntry {
   method: HttpMethod;
 }
 
+/** Lifecycle stage recorded by a request trace entry. */
+export type RequestTraceStage = 'redirect' | 'retry';
+
+/** Fields shared by every request trace entry. */
+export interface BaseRequestTraceEntry {
+  /** 1-based position of the entry in the trace. */
+  sequence: number;
+  /** Pipeline stage that produced the entry. */
+  stage: RequestTraceStage;
+  /** URL of the attempt described by the entry. */
+  url: string;
+  /** HTTP method of the attempt described by the entry. */
+  method: HttpMethod;
+  /** Human-readable reason why the next attempt (or the terminal failure) happened. */
+  reason: string;
+  /** Response status observed on the attempt, when a response was received. */
+  status?: number;
+  /** Error name observed on the attempt, when the attempt failed before a response. */
+  errorName?: string;
+  /** Machine-readable error code observed on the attempt, when it failed. */
+  errorCode?: string;
+}
+
+/** Trace entry describing a followed redirect hop. */
+export interface RedirectTraceEntry extends BaseRequestTraceEntry {
+  /** Redirect stages always use the `redirect` stage. */
+  stage: 'redirect';
+  /** Raw `Location` header value returned by the redirect response. */
+  location: string;
+  /** Target URL after resolving `Location` against the request URL. */
+  toUrl: string;
+}
+
+/** Trace entry describing an attempt that triggered a retry or terminated the request. */
+export interface RetryTraceEntry extends BaseRequestTraceEntry {
+  /** Retry stages always use the `retry` stage. */
+  stage: 'retry';
+  /** 1-based number of the attempt described by the entry. */
+  attempt: number;
+}
+
+/** A single entry in the request trace. */
+export type RequestTraceEntry = RedirectTraceEntry | RetryTraceEntry;
+
+/** Ordered record of the redirect hops and retry attempts of one request. */
+export type RequestTrace = RequestTraceEntry[];
+
 /** Request statistics delivered through the `onStats` callback. */
 export interface RequestStats {
   /** Request instance associated with this attempt. */
@@ -179,6 +226,8 @@ export interface WreqInit extends Omit<
   context?: Record<string, unknown>;
   /** Lifecycle hooks executed around the request. */
   hooks?: Hooks;
+  /** Enables collection of the redirect/retry request trace under `response.wreq.trace`. */
+  trace?: boolean;
 }
 
 /** Retry policy after numeric shorthands and defaults are resolved. */
@@ -234,6 +283,8 @@ export interface WreqResponseMeta {
   readonly timings?: RequestTimings;
   /** Redirect chain leading to the final response. */
   readonly redirectChain: RedirectEntry[];
+  /** Ordered redirect/retry trace collected when the request was created with `trace: true`. */
+  readonly trace?: RequestTrace;
   /** Parsed `content-length` header value when present. */
   readonly contentLength?: number;
   /** TLS peer certificate information when requested. */

@@ -3,6 +3,7 @@ import type {
   NativeResponse,
   RedirectEntry,
   RequestTimings,
+  RequestTrace,
   TlsPeerInfo,
   WreqResponseMeta,
 } from '../types';
@@ -115,6 +116,8 @@ export class Response {
   _timings?: RequestTimings;
   /** Internal redirect chain used to build `response.wreq.redirectChain`. */
   _redirectChain: RedirectEntry[];
+  /** Internal request trace used to build `response.wreq.trace`. */
+  _trace?: RequestTrace;
   /** Internal TLS metadata used to build `response.wreq.tls`. */
   _tls?: TlsPeerInfo;
   /** Whether the response was produced after at least one redirect hop. */
@@ -195,6 +198,13 @@ export class Response {
     return this;
   }
 
+  /** Attaches the collected request trace and returns the same response instance. */
+  setTrace(trace: RequestTrace): this {
+    this._trace = trace.map((entry) => ({ ...entry })) as RequestTrace;
+
+    return this;
+  }
+
   /** Attaches timing metadata and returns the same response instance. */
   setTimings(timings: RequestTimings): this {
     this._timings = { ...timings };
@@ -267,6 +277,10 @@ export class Response {
     cloned._setCookies = [...this._setCookies];
     cloned._timings = this._timings ? { ...this._timings } : undefined;
     cloned._redirectChain = [...this._redirectChain];
+    cloned._trace = this._trace
+      ? (this._trace.map((entry) => ({ ...entry })) as RequestTrace)
+      : undefined;
+
     cloned._tls = cloneTlsInfo(this._tls);
     cloned.redirected = this.redirected;
 

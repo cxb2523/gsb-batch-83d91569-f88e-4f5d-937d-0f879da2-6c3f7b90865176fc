@@ -25,6 +25,14 @@ import {
   toRedirectEntry,
 } from './pipeline/redirects';
 import { runRetryDelay, shouldRetryRequest } from './pipeline/retries';
+import {
+  attachTraceToError,
+  isRedirectPolicyError,
+  readTraceFromError,
+  RequestTraceCollector,
+  retryExhaustedReason,
+  retryTriggerReason,
+} from './pipeline/trace';
 import { cancelResponseBody, Response } from './response';
 
 /** Performs an HTTP request using the native transport pipeline. */
@@ -63,6 +71,7 @@ export async function fetchWithNativeClient(
   const visitedRedirectTargets = new Set<string>([request.url]);
   let referrerPolicy = DEFAULT_REDIRECT_REFERRER_POLICY;
   let attempt = 1;
+  const traceCollector = options.trace ? new RequestTraceCollector() : undefined;
 
   while (true) {
     const startTime = Date.now();
@@ -124,6 +133,10 @@ export async function fetchWithNativeClient(
 
       if (isRedirectResponse(response)) {
         if (options.redirect === 'manual') {
+          if (traceCollector) {
+            response.setTrace(traceCollector.snapshot());
+          }
+
           return finalizeResponse(response, redirectChain);
         }
 
@@ -216,6 +229,14 @@ export async function fetchWithNativeClient(
           method: normalizeMethod(nextRequest.method),
         });
 
+        traceCollector?.recordRedirect({
+          url: request.url,
+          method: request.method,
+          status: response.status,
+          location: redirectEntry.location,
+          toUrl: nextRequest.url,
+        });
+
         visitedRedirectTargets.add(nextRequest.url);
         request = nextRequest;
         continue;
@@ -241,6 +262,14 @@ export async function fetchWithNativeClient(
           }
         );
 
+        traceCollector?.recordRetry({
+          attempt,
+          url: request.url,
+          method: request.method,
+          reason: retryTriggerReason({ attempt, response }),
+          response,
+        });
+
         await runBeforeRetryHooks(options.hooks, {
           request,
           options,
@@ -262,6 +291,10 @@ export async function fetchWithNativeClient(
           response,
           attempt,
         });
+      }
+
+      if (traceCollector) {
+        response.setTrace(traceCollector.snapshot());
       }
 
       return finalizeResponse(response, redirectChain);
@@ -294,6 +327,19 @@ export async function fetchWithNativeClient(
       };
 
       if (await shouldRetryRequest(retryContext, options.retry)) {
+        traceCollector?.recordRetry({
+          attempt,
+          url: request.url,
+          method: request.method,
+          reason: retryTriggerReason({
+            attempt,
+            response: normalizedError.response,
+            error: normalizedError,
+          }),
+          response: normalizedError.response,
+          error: normalizedError,
+        });
+
         await runBeforeRetryHooks(options.hooks, {
           request,
           options,
@@ -309,6 +355,21 @@ export async function fetchWithNativeClient(
         continue;
       }
 
+      if (traceCollector && !isRedirectPolicyError(normalizedError)) {
+        traceCollector.recordRetry({
+          attempt,
+          url: request.url,
+          method: request.method,
+          reason: retryExhaustedReason({
+            attempt,
+            response: normalizedError.response,
+            error: normalizedError,
+          }),
+          response: normalizedError.response,
+          error: normalizedError,
+        });
+      }
+
       const finalError = await runBeforeErrorHooks(options.hooks, {
         request,
         options,
@@ -316,6 +377,13 @@ export async function fetchWithNativeClient(
         state,
         error: normalizedError,
       });
+
+      if (traceCollector) {
+        const trace = traceCollector.snapshot();
+
+        attachTraceToError(normalizedError, trace);
+        attachTraceToError(finalError, readTraceFromError(finalError) ?? trace);
+      }
 
       throw finalError;
     }

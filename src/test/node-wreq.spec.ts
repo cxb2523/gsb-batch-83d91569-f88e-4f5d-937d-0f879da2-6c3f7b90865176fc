@@ -4,5 +4,6 @@ import './http-client.spec';
 import './mtls.spec';
 import './package-exports.spec';
 import './response.spec';
+import './trace.spec';
 import './transport-features.spec';
 import './websocket.spec';

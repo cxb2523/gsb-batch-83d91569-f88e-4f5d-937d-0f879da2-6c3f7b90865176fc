@@ -651,6 +651,46 @@ Current timings are wrapper-level timings that are still useful in practice:
 - response available
 - total time when body consumption is known
 
+### request trace
+
+Pass `trace: true` to collect an ordered record of every redirect hop and retry attempt.
+Without it, no trace is allocated and `response.wreq.trace` stays `undefined`.
+
+```ts
+const response = await fetch('https://example.com/redirect-chain', {
+  trace: true,
+  retry: { limit: 2, statusCodes: [503] },
+});
+
+console.log(response.wreq.trace);
+// [
+//   { sequence: 1, stage: 'redirect', url: '...', method: 'GET', status: 302,
+//     location: '/next', toUrl: 'https://example.com/next', reason: '...' },
+//   { sequence: 2, stage: 'retry', attempt: 1, url: '...', method: 'GET',
+//     status: 503, reason: '...' },
+// ]
+```
+
+Each entry carries the 1-based `sequence`, the `stage` (`redirect` or `retry`), the
+attempt `url` and `method`, the response `status` (or `errorName` / `errorCode` when the
+attempt failed), and a human-readable `reason`. Redirect entries also include the raw
+`location` and the resolved `toUrl`; retry entries include the 1-based `attempt` number.
+
+When the request ultimately fails, the same trace — including the final failed attempt —
+is attached to the thrown error:
+
+```ts
+try {
+  await fetch('https://example.com/flaky', { trace: true, retry: 2 });
+} catch (error) {
+  console.log(error.wreq?.trace);
+}
+```
+
+Manual redirect interception and `redirect: 'error'` only expose the hops that already
+happened; redirect limit and loop errors likewise keep the trace up to the point the
+condition was detected.
+
 ## 🚨 <a id="errors"></a>error handling   ·   [↑](#contents)
 
 Main error classes:

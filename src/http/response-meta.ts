@@ -1,4 +1,10 @@
-import type { RequestTimings, RedirectEntry, TlsPeerInfo, WreqResponseMeta } from '../types';
+import type {
+  RequestTimings,
+  RedirectEntry,
+  RequestTrace,
+  TlsPeerInfo,
+  WreqResponseMeta,
+} from '../types';
 import type { Response } from './response';
 import { Readable } from 'node:stream';
 
@@ -24,6 +30,13 @@ export class ResponseMeta implements WreqResponseMeta {
   /** Redirect chain leading to the final response. */
   get redirectChain(): RedirectEntry[] {
     return [...this.response._redirectChain];
+  }
+
+  /** Ordered redirect/retry trace, available only when the request used `trace: true`. */
+  get trace(): RequestTrace | undefined {
+    return this.response._trace
+      ? (this.response._trace.map((entry) => ({ ...entry })) as RequestTrace)
+      : undefined;
   }
 
   /** Parsed `content-length` header value when present. */

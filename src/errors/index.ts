@@ -1,5 +1,6 @@
 import type { Request } from '../http/request';
 import type { Response } from '../http/response';
+import type { RequestTrace } from '../types';
 
 type RequestErrorOptions = {
   code?: string;
@@ -7,6 +8,11 @@ type RequestErrorOptions = {
   request?: Request;
   response?: Response;
   attempt?: number;
+};
+
+/** Extra node-wreq metadata exposed on thrown errors. */
+export type RequestErrorWreqMeta = {
+  trace?: RequestTrace;
 };
 
 /** Base error type used by HTTP and WebSocket operations. */
@@ -21,6 +27,8 @@ export class RequestError extends Error {
   response?: Response;
   /** Attempt number associated with the failure, when available. */
   attempt?: number;
+  /** node-wreq metadata, including the request trace when `trace: true` was used. */
+  wreq?: RequestErrorWreqMeta;
 
   constructor(message: string, options?: RequestErrorOptions) {
     super(message);
