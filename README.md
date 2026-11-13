@@ -263,6 +263,38 @@ that *was* fetched · `5` the content was never obtained · `6` partial.
 `4` and `5` are deliberately different: an empty market and a dead proxy must
 not be one value to a pipeline.
 
+### What happened to each symbol
+
+`--mode quote --symbols A,B,C` asks three questions, and the row file only
+answers one of them. A misspelt symbol, a blocked fetch and a symbol that was
+never attempted all leave the **same** trace in the output — nothing — so the
+`.meta.json` sidecar records one outcome per requested symbol:
+
+```json
+"symbols_requested": 3, "symbols_ok": 2,
+"symbols_not_found": 1, "symbols_failed": 0,
+"symbol_outcomes": [
+  {"page": 1, "symbol": "GOOGL:NASDAQ", "outcome": "ok", "rows": 1, "state": "content", "reason": null},
+  {"page": 2, "symbol": "ZZZZQQ:NASDAQ", "outcome": "not_found", "rows": 0, "state": "not_found", "reason": "not_found"},
+  {"page": 3, "symbol": "BMW:ETR", "outcome": "ok", "rows": 1, "state": "content", "reason": null}
+]
+```
+
+* **`outcome` is one of `ok` | `not_found` | `failed`**, and
+  `ok + not_found + failed == symbols_requested` always holds — the counts are
+  derived from the records, not tallied separately.
+* **`not_found` is an answer, not a failure.** Google said there is no such
+  instrument, so that symbol does not make the run `partial`, is never
+  retried and never rotates an exit. A run whose only shortfall is misspelt
+  symbols is `complete`, exit 0.
+* **`failed` means the data was not obtained** — a load timeout, a block, a
+  regional refusal, a page that parsed to nothing, or `reason:
+  "not_attempted"` for a symbol the run stopped before reaching. Any `failed`
+  symbol makes the run `partial` (exit 6).
+* Records are in **request order**, so a `--concurrency` run and a sequential
+  one of the same command write the same sidecar and the same rows. A symbol
+  repeated in `--symbols` is read once and has one record.
+
 ---
 
 ## How it reads the page

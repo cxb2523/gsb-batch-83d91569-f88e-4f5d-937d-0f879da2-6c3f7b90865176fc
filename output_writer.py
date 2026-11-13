@@ -857,7 +857,8 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
                start_url: str, final_url: str,
                pages_failed: Optional[List[int]] = None,
                mode: str = "quote", source: str = SOURCE_DEFAULT,
-               extra: Optional[dict] = None) -> int:
+               extra: Optional[dict] = None,
+               definite_answers: bool = False) -> int:
     """Write output + the run-metadata sidecar; return the exit code.
 
     Shared by all three browser engines so the status/exit-code mapping
@@ -868,6 +869,14 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     the previous run's still-intact good output (which `save` deliberately
     does not overwrite) — the two files would contradict each other, and
     diff_runs.py would refuse to compare data that is in fact fine.
+
+    `definite_answers` says the run's ZERO rows are the site's own answer
+    rather than a failure: every requested symbol came back as `not_found`,
+    so there is nothing to gather and nothing missing. Without it an
+    all-misspelt `--symbols` run written with `--allow-empty` would record
+    `status: failed` beside `symbols_failed: 0` — a sidecar that
+    contradicts itself. It cannot turn rows into a complete run: with rows
+    present the normal rule already applies.
     """
     # Completeness is decided by the reason AND by the evidence. A named
     # list of stop reasons cannot cover a failure recorded somewhere else,
@@ -890,8 +899,14 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     wrote_output = bool(rows) or allow_empty
 
     if wrote_output:
-        status = "complete" if (rows and complete) else (
-            "partial" if rows else "failed")
+        if rows:
+            status = "complete" if complete else "partial"
+        else:
+            # Zero rows is `failed` unless the site answered every request
+            # with its own "no such instrument". `not_found` is an answer,
+            # not a failure — see page_flow.STATE_POLICY — and the sidecar's
+            # `symbols_failed: 0` beside it is what says so.
+            status = "complete" if (complete and definite_answers) else "failed"
         write_run_meta(out_prefix, run_meta(
             status=status, stop_reason=stop_reason,
             pages_requested=pages_requested, pages_completed=pages_completed,
@@ -924,6 +939,12 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
                   f"result (exit {EXIT_NO_PRODUCTS}). Nothing can be "
                   f"concluded about the catalogue from this run.")
             return EXIT_FETCH_FAILED
+        # Zero rows from a finished run keeps the existing empty-result rule
+        # (`rc` is EXIT_NO_PRODUCTS unless --allow-empty was passed). When
+        # `definite_answers` is set the site answered every symbol with its
+        # own "no such instrument", so `symbol_outcomes` says WHICH — but the
+        # exit code is deliberately unchanged: 4 already means "we asked and
+        # the answer was nothing", which is exactly this run.
         return rc
     if not complete:
         print(f"[!] Partial run: stopped after {pages_completed} of "

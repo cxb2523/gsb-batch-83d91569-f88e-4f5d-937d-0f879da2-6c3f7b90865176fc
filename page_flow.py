@@ -83,8 +83,8 @@ from product_parser import (canonical_url, detect_block_marker, detect_page_stat
                             is_region_unavailable,
                             is_unsupported_client, listing_kind,
                             market_metadata,
-                            no_pagination_reason, paginates_by_url, total_results,
-                            unsupported_reason)
+                            no_pagination_reason, paginates_by_url, symbol_from_url,
+                            total_results, unsupported_reason)
 
 logger = logging.getLogger(__name__)
 
@@ -608,6 +608,116 @@ def empty_unit_ends_the_run(url: str = "") -> bool:
     it arrived by inheritance rather than by authorship.
     """
     return False
+
+
+# ---------------------------------------------------------------------------
+# Per-symbol outcomes
+# ---------------------------------------------------------------------------
+# `--mode quote --symbols A,B,C` asks three questions and the row file only
+# answers one of them ("here are the rows"). A symbol Google says does not
+# exist, a symbol whose fetch was blocked, and a symbol never attempted at
+# all all leave the SAME trace in the output — nothing — so a reader cannot
+# tell a typo from a refusal from a run that stopped early. These three
+# constants are the vocabulary the sidecar records, and they are defined
+# once here so all three engines classify identically.
+#
+# `not_found` is deliberately its own outcome rather than a failure: Google
+# answered, and the answer was "there is no such instrument". It must not
+# turn a run `partial`, must not be retried and must not rotate an exit —
+# `STATE_POLICY` already says that, and this module is where both facts come
+# from.
+SYMBOL_OK = "ok"
+SYMBOL_NOT_FOUND = "not_found"
+SYMBOL_FAILED = "failed"
+
+
+def symbol_outcome(symbol_url: str, outcome,
+                   page_num: Optional[int] = None) -> Dict[str, Optional[object]]:
+    """One requested symbol's ending, in a shape the sidecar records.
+
+    `outcome` is an engine's PageOutcome, or None when the unit was never
+    attempted (the run stopped on an earlier failure, or a worker died with
+    it still queued).
+
+    Never attempted is reported as `failed` with reason `not_attempted`
+    rather than omitted: the sidecar's four counts have to add up to what
+    the caller asked for, and a symbol with no entry would silently vanish
+    from the arithmetic — which is the same "did less than it said" failure
+    as a row-less symbol ending the queue.
+
+    `page_num` is the 1-based index of the symbol within the run, the same
+    number a row's `page` column carries and the same one `pages_failed`
+    lists. It is passed in rather than read off `outcome` so a symbol that
+    was never fetched still has its place in the run.
+    """
+    state = getattr(outcome, "state", None) if outcome is not None else None
+    products = list(getattr(outcome, "products", []) or []) if outcome is not None else []
+    if outcome is None:
+        verdict, reason = SYMBOL_FAILED, "not_attempted"
+    elif not outcome.ok:
+        verdict = SYMBOL_FAILED
+        reason = ("page_load_timeout" if getattr(outcome, "load_failed", False)
+                  else "blocked_%s" % (getattr(outcome, "blocked_by", None),))
+    elif state == "not_found":
+        verdict, reason = SYMBOL_NOT_FOUND, "not_found"
+    elif products:
+        verdict, reason = SYMBOL_OK, None
+    else:
+        # Served, but nothing came out of it: an `empty` page, a client the
+        # site redirected to `unsupported`, or any state the policy declined
+        # to parse. It produced no rows, so for the caller it is a failure —
+        # they asked for an instrument and got no data — and the `state`
+        # beside it says which kind. It does NOT by itself make the run
+        # `partial`: that is still decided by `pages_failed` alone, exactly
+        # as before this field existed.
+        verdict, reason = SYMBOL_FAILED, (state or "no_rows")
+    return {
+        "page": page_num,
+        "symbol": symbol_from_url(symbol_url),
+        "url": symbol_url,
+        "outcome": verdict,
+        "rows": len(products),
+        "state": state,
+        "reason": reason,
+    }
+
+
+def symbol_outcomes(symbol_urls: Optional[Iterable[str]],
+                    outcomes: Iterable) -> List[Dict[str, Optional[object]]]:
+    """One record per REQUESTED symbol, in the order they were requested.
+
+    Ordering comes from `symbol_urls`, never from `outcomes`: under
+    `--concurrency` the worker that finishes first appends first, so a
+    sidecar built from arrival order would differ between a sequential run
+    and a parallel one of the same command. Building it from the request
+    list makes both byte-identical.
+
+    Matched on `page_num`, which the engines assign as the 1-based index of
+    the symbol in that same list — the same key the row merge sorts on, so
+    the sidecar and the rows describe the run in the same order.
+    """
+    urls = list(symbol_urls or [])
+    by_page = {getattr(o, "page_num", None): o for o in outcomes}
+    return [symbol_outcome(url, by_page.get(index), page_num=index)
+            for index, url in enumerate(urls, 1)]
+
+
+def symbol_counts(records: Iterable[Dict[str, Optional[object]]]) -> Dict[str, int]:
+    """The four sidecar counters, derived from the records themselves.
+
+    Derived rather than counted independently on purpose: two sources for
+    one number is how the sidecar ends up saying `requested: 10, ok: 7,
+    not_found: 2, failed: 0` — a file that contradicts itself, and a
+    consumer that adds the three up finds a missing symbol.
+    """
+    rows = list(records)
+    return {
+        "symbols_requested": len(rows),
+        "symbols_ok": sum(1 for r in rows if r["outcome"] == SYMBOL_OK),
+        "symbols_not_found": sum(1 for r in rows
+                                 if r["outcome"] == SYMBOL_NOT_FOUND),
+        "symbols_failed": sum(1 for r in rows if r["outcome"] == SYMBOL_FAILED),
+    }
 
 
 def next_page_candidates(current_url: str,

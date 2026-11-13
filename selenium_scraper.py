@@ -1139,29 +1139,34 @@ def scrape(args) -> int:
     if headers:
         extra["page_language"] = headers
 
-    # What happened to each unit of work, recorded rather than left in the
-    # log. A run of ten symbols with three typos returns seven rows, and
-    # without these three numbers the only way to notice is to count the
-    # rows yourself and know what you asked for.
+    # What happened to each requested symbol, recorded rather than left in
+    # the log. A run of ten symbols with three typos returns seven rows, and
+    # without these numbers the only way to notice is to count the rows
+    # yourself and know what you asked for.
+    #
+    # `symbol_outcomes` is one record per REQUESTED symbol, in request order
+    # — built from `_symbol_urls`, never from `outcomes`, so this engine's
+    # sidecar is byte-identical to the other two for the same command. The
+    # four counts are derived from the records, so
+    # `ok + not_found + failed == requested` holds by construction.
     #
     # `not_found` is deliberately NOT a failure: Google answered, and the
     # answer was "there is no such instrument". A run whose only shortfall
     # is misspelt symbols is `complete` and exits 0 — the symbols that
-    # FAILED (a load error, a block, a regional refusal) are the ones that
-    # make it partial, and those already land in `pages_failed`.
-    _states = [getattr(o, "state", None) for o in outcomes]
-    extra.update({
-        "symbols_requested": len(getattr(args, "_symbol_urls", []) or []),
-        "symbols_ok": sum(1 for o in outcomes if o.ok and o.products),
-        "symbols_not_found": sum(1 for s in _states if s == "not_found"),
-        "symbols_failed": sum(1 for o in outcomes if not o.ok),
-    })
+    # FAILED (a load error, a block, a regional refusal, a symbol never
+    # attempted) are the ones that make it partial, and the ones that
+    # reached the site already land in `pages_failed`.
+    symbol_records = page_flow.symbol_outcomes(
+        getattr(args, "_symbol_urls", []) or [], outcomes)
+    extra.update(page_flow.symbol_counts(symbol_records))
+    extra["symbol_outcomes"] = symbol_records
     _missing = extra["symbols_not_found"]
     if _missing:
         logger.warning(
             "%d of %d symbol(s) do not exist on Google Finance; the run is "
             "complete and those rows are simply absent. The sidecar records "
-            "the counts.", _missing, extra["symbols_requested"])
+            "the counts and each symbol's outcome.",
+            _missing, extra["symbols_requested"])
 
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       blocked=blocked, stop_reason=stop_reason,
@@ -1174,6 +1179,12 @@ def scrape(args) -> int:
                       # landing page onto the search host.
                       source=SOURCE_DEFAULT,
                       start_url=args.url, final_url=final_url,
+                      # Zero rows because EVERY symbol was a Page
+                      # Not Found is the site's own answer, not a
+                      # failed run. See finish_run.
+                      definite_answers=(
+                          bool(symbol_records)
+                          and extra["symbols_not_found"] == len(symbol_records)),
                       extra=extra)
 
 

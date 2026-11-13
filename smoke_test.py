@@ -38,6 +38,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import types
 from contextlib import redirect_stdout, redirect_stderr
 
 import page_flow
@@ -2630,6 +2631,180 @@ def test_engine_paths_with_stubbed_drivers():
     return ok
 
 
+def test_symbol_outcomes_are_recorded():
+    group("every requested symbol has an outcome, in request order")
+    ok = True
+    # THE question a multi-symbol `--mode quote` run leaves open in the row
+    # file: "what happened to each one I named?" A misspelt symbol, a blocked
+    # fetch and a symbol never attempted all leave NOTHING in the output, so
+    # a reader could not tell a typo from a refusal from an early stop. The
+    # sidecar now carries one record per requested symbol plus four counts
+    # that must add up.
+    #
+    # Behaviour, not text: `tests/outcome_probe.py` drives each engine's REAL
+    # `parse_args` and `scrape` in a subprocess, with only the browser faked
+    # and every html from fixtures. No network, no proxy, no 2captcha key.
+    proc = subprocess.run(
+        [sys.executable, os.path.join(REPO_ROOT, "tests", "outcome_probe.py")],
+        capture_output=True, text=True, timeout=300)
+    try:
+        res = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        print(proc.stdout[-2000:], proc.stderr[-2000:])
+        return check("the per-symbol outcome probe ran and reported", False)
+
+    ok &= check("the probe covered every scenario (%d)" % len(res),
+                len(res) == 8)
+
+    def outcomes(name):
+        return res[name]["outcomes"] or []
+
+    def counts_add_up(name):
+        r = res[name]
+        if r["requested"] is None:
+            return False
+        return (r["ok"] + r["not_found"] + r["failed"] == r["requested"]
+                == len(outcomes(name)))
+
+    # 1. Normal path: every symbol has rows.
+    r = res["all_ok"]
+    ok &= check("all-rows run: complete, exit 0 (%s/%s)"
+                % (r["status"], r["exit"]),
+                r["status"] == "complete" and r["exit"] == 0)
+    ok &= check("all-rows run: one outcome per symbol, all ok",
+                [o["outcome"] for o in outcomes("all_ok")] == ["ok", "ok"])
+    ok &= check("all-rows run: the counts add up", counts_add_up("all_ok"))
+
+    # 2. Negative path: one misspelt symbol. It must NOT make the run partial,
+    #    must not be retried or rotate an exit, and must be named.
+    r = res["one_not_found"]
+    ok &= check("one not_found: still complete, exit 0 (%s/%s)"
+                % (r["status"], r["exit"]),
+                r["status"] == "complete" and r["exit"] == 0
+                and r["pages_failed"] == [])
+    ok &= check("one not_found: the sidecar names the symbol that missed",
+                [(o["symbol"], o["outcome"]) for o in outcomes("one_not_found")]
+                == [("GOOGL:NASDAQ", "ok"), ("ZZZZQQ:NASDAQ", "not_found"),
+                    ("BMW:ETR", "ok")])
+    ok &= check("one not_found: counts add up and not_found is not failed",
+                counts_add_up("one_not_found")
+                and r["not_found"] == 1 and r["failed"] == 0)
+    # Three symbols fetched, once each: a not_found cost no second attempt.
+    ok &= check("one not_found: it was fetched exactly once (%d)"
+                % r["navigations"], r["navigations"] == 3)
+    ok &= check("one not_found: NO exit was rotated for it (%d)"
+                % r["rotations"], r["rotations"] == 0)
+
+    # 3. Boundary: every symbol misspelt, no --allow-empty. Zero rows, and the
+    #    existing empty-result rule (exit 4) with no file and no sidecar.
+    r = res["all_not_found"]
+    ok &= check("all not_found: exit 4, and nothing written (%s/%s/%s)"
+                % (r["exit"], r["rows"], r["status"]),
+                r["exit"] == 4 and r["rows"] is None and r["status"] is None)
+
+    # 4. The same with --allow-empty: the file and sidecar exist, exit is
+    #    STILL 4 (the empty-result rule), and `complete` — the site answered
+    #    every request, so this is not a failed run.
+    r = res["all_not_found_allow_empty"]
+    ok &= check("all not_found --allow-empty: exit 4, complete, 0 rows"
+                " (%s/%s/%s)" % (r["exit"], r["status"], r["products"]),
+                r["exit"] == 4 and r["status"] == "complete"
+                and r["products"] == 0)
+    ok &= check("all not_found --allow-empty: counts add up",
+                counts_add_up("all_not_found_allow_empty")
+                and r["not_found"] == r["requested"] and r["failed"] == 0)
+
+    # 5. A blocked page (HTTP 403) and a load timeout: both `failed`, and BOTH
+    #    make the run partial (exit 6) — a symbol that could not be read is a
+    #    different thing from one the site says does not exist.
+    for name, reason in (("one_failed", "blocked_not-served"),
+                         ("load_timeout", "page_load_timeout")):
+        r = res[name]
+        ok &= check("%s: partial, exit 6 (%s/%s)"
+                    % (name, r["status"], r["exit"]),
+                    r["status"] == "partial" and r["exit"] == 6)
+        got = [(o["symbol"], o["outcome"], o["reason"])
+               for o in outcomes(name)]
+        ok &= check("%s: the failing symbol is named with its reason (%s)"
+                    % (name, got),
+                    got[:2] == [("GOOGL:NASDAQ", "ok", None),
+                                (got[1][0] if got else None, "failed", reason)])
+        ok &= check("%s: the LATE symbol is recorded as not_attempted rather "
+                    "than omitted (%s)" % (name, got),
+                    got and got[-1][1] == "failed"
+                    and got[-1][2] == "not_attempted")
+        ok &= check("%s: counts still add up" % name, counts_add_up(name))
+
+    # 6. Concurrency: 2 workers that complete in REVERSE request order.
+    seq, par = res["seq"], res["par"]
+    ok &= check("the parallel run really did finish out of order (%s vs %s)"
+                % (seq["completions"], par["completions"]),
+                seq["completions"] == sorted(seq["completions"])
+                and par["completions"] != sorted(par["completions"]))
+    ok &= check("--concurrency 2 writes the SAME row bytes as --concurrency 1",
+                seq["rows"] is not None and seq["rows"] == par["rows"])
+    ok &= check("--concurrency 2 records the SAME outcome order",
+                seq["outcomes"] is not None
+                and seq["outcomes"] == par["outcomes"])
+    ok &= check("--concurrency 2 reaches the same status/exit (%s/%s)"
+                % (par["status"], par["exit"]),
+                (seq["status"], seq["exit"]) == (par["status"], par["exit"]))
+    ok &= check("a repeated symbol was read once and has ONE outcome "
+                "(%d outcomes for 5 typed symbols)"
+                % len(outcomes("par")),
+                len(outcomes("par")) == 4
+                and [o["symbol"] for o in outcomes("par")]
+                == ["GOOGL:NASDAQ", "ZZZZQQ:NASDAQ", "BMW:ETR",
+                    "QQQQQQ:NASDAQ"])
+
+    # 7. The classification itself, so a sidecar that agrees with a broken
+    #    policy cannot pass: `not_found` is not a failure, and no state the
+    #    policy calls definite is ever retried.
+    ok &= check("not_found is not classified as a failure",
+                page_flow.symbol_outcome(
+                    pp.quote_url("ZZZZQQ:NASDAQ"),
+                    types.SimpleNamespace(state="not_found", ok=True,
+                                          products=[], load_failed=False,
+                                          blocked_by=None))["outcome"]
+                == page_flow.SYMBOL_NOT_FOUND)
+    ok &= check("the policy never retries a not_found page",
+                page_flow.should_retry("not_found") is False)
+    ok &= check("the three outcomes are the only ones recorded",
+                {page_flow.SYMBOL_OK, page_flow.SYMBOL_NOT_FOUND,
+                 page_flow.SYMBOL_FAILED} == {"ok", "not_found", "failed"})
+
+    # 8. Every engine builds the records the SAME way, from the REQUEST list.
+    #    A twin that counted `outcomes` by hand would agree with itself while
+    #    disagreeing with the other two, and under --concurrency it would
+    #    record arrival order. Asserted on the shared calls, not on the text.
+    for eng in ENGINES:
+        path = os.path.join(REPO_ROOT, eng + ".py")
+        if not os.path.exists(path):
+            ok &= check("%s exists" % eng, False)
+            continue
+        src = open(path, encoding="utf-8").read()
+        tree = ast.parse(src, eng)
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+        builders = [n for n in calls
+                    if getattr(n.func, "attr", "") in ("symbol_outcomes",
+                                                       "symbol_counts")
+                    and isinstance(n.func.value, ast.Name)
+                    and n.func.value.id == "page_flow"]
+        ok &= check("%s builds its symbol records with the shared module (%d)"
+                    % (eng, len(builders)), len(builders) == 2)
+        ok &= check("%s reads the request list, not the arrival list"
+                    % eng,
+                    any("_symbol_urls" in ast.unparse(n) for n in builders))
+        ok &= check("%s sends definite_answers so an all-not_found run is not "
+                    "'failed'" % eng, "definite_answers" in src)
+        # No engine re-counts the symbols beside the shared records: two
+        # sources for one number is how the sidecar contradicts itself.
+        ok &= check("%s has no independent symbols_ok tally" % eng,
+                    'sum(1 for o in outcomes if o.ok and o.products)'
+                    not in src)
+    return ok
+
+
 def test_writes_are_atomic_and_csv_is_neutralised():
     group("atomic writes, file modes, CSV formula guard")
     ok = True
@@ -2811,6 +2986,7 @@ def main() -> int:
     ok &= test_canary_is_coherent()
     ok &= test_scraper_api_waitfor_object_and_http_code()
     ok &= test_engine_paths_with_stubbed_drivers()
+    ok &= test_symbol_outcomes_are_recorded()
     ok &= test_engines(skips)
     ok &= test_concurrency_machinery(skips)
 

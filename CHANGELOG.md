@@ -10,8 +10,26 @@ release notes lead with it.
 
 ## [Unreleased]
 
+### Added
+
+- The `.meta.json` sidecar now records **what happened to each requested
+  symbol**: `symbol_outcomes` holds one record per `--symbols` entry, in
+  request order, with `outcome` one of `ok` / `not_found` / `failed`, a
+  `rows` count, the page's classified `state` and a `reason`. The existing
+  `symbols_requested` / `symbols_ok` / `symbols_not_found` / `symbols_failed`
+  counts are now derived from those records, so `ok + not_found + failed ==
+  requested` holds by construction. A `not_found` symbol stays a `complete`
+  run with exit 0 — it is Google's answer, not a failure, and it is neither
+  retried nor rotated.
+
 ### Changed
 
+- A `--concurrency` run writes the same rows and the same sidecar outcome
+  order as a sequential one of the same command: outcomes are built from the
+  request list rather than from worker completion order.
+- A run in which **every** requested symbol is `not_found` is recorded as
+  `complete` when `--allow-empty` writes a file for it, rather than
+  `failed`. The exit code is unchanged (4, the existing empty-result rule).
 - CI only: the canary now runs weekly (Mondays 14:41 UTC) instead of daily, and on a manual dispatch.
 
 ## [0.3.0] — 2026-10-15
