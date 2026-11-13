@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ehentai-crawler"
+dynamic = ["version"]
+description = "Crawl the gallery list, tags and images of E-Hentai or ExHentai into SQLite and folders."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "NatLee" }]
+requires-python = ">=3.10"
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "requests>=2.32",
+    "tqdm>=4.66",
+]
+keywords = ["crawler", "downloader", "ehentai", "exhentai", "sqlite"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Internet :: WWW/HTTP",
+]
+
+[project.optional-dependencies]
+# Load pages in Chrome instead of plain HTTP (FETCHER = browser).
+browser = ["selenium>=4.11"]
+dev = [
+    "mypy>=1.11",
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    "selenium>=4.11",
+    "types-requests",
+    "types-tqdm",
+]
+
+[project.scripts]
+ehentai-crawler = "ehentai_crawler.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/NatLee/ehentai-crawler"
+Issues = "https://github.com/NatLee/ehentai-crawler/issues"
+
+[tool.setuptools]
+packages = ["ehentai_crawler"]
+
+[tool.setuptools.dynamic]
+version = { attr = "ehentai_crawler.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["ehentai_crawler"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Holds the 2019 CREATE TABLE statements verbatim, tabs included, to prove the schema did not change.
+"tests/test_db.py" = ["E101", "W191"]
+
+[tool.mypy]
+python_version = "3.10"
+packages = ["ehentai_crawler"]
+strict = true
