@@ -1,3 +1,19 @@
+## Unreleased
+
+- feat: a `download_file` failure through the CDP fallback now says which
+  failure it was, not just "download failed". The error keeps its
+  `DOWNLOAD_FAILED` code and adds a stable reason — redirect refused, size cap
+  (declared or discovered while streaming), policy denial, a non-2xx status, or
+  the request itself failing — plus the numbers behind it, and the reason
+  travels in the text a client sees. Redirects are still never followed and an
+  oversize body is still cancelled.
+- feat: when the page or browser dies under an operation, the `DETACHED`
+  error now reports whether the executor was attached to a Chrome it did not
+  launch (`connect`) or driving its own Chromium (`launch`), and whether the
+  cached context was dropped. Launch mode relaunches on the next call and
+  leaves no extra Chromium behind; connect mode never closes the person's
+  browser.
+
 ## 0.9.40 - 2026-11-05
 
 Ships the 0.9.39 server changes, which were tagged but not published, and

@@ -62,6 +62,28 @@ const NON_CONTENT = /^(file|data|devtools|chrome|about):/i;
 const CLOSED_TARGET = /Target closed|Browser has been closed|Target page, context or browser has been closed|Execution context was destroyed/i;
 const MAX_CDP_DOWNLOAD_BYTES = 50 * 1024 * 1024;
 
+/** One line of the underlying error, for the `details.cause` field. */
+function describeCause(err: unknown): string {
+  return (err as Error)?.message ?? String(err);
+}
+
+/**
+ * The statuses that actually mean "go somewhere else" (RFC 9110 §15.4). Other
+ * 3xx codes (304 Not Modified, say) are not redirects to follow, so they stay
+ * an ordinary non-2xx answer rather than being mislabelled.
+ */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Whether the response is a redirect we refuse to follow. Normally that is a
+ * status in {@link REDIRECT_STATUSES}; a `manual` fetch can also hand back an
+ * `opaqueredirect` filtered response whose status is hidden, which is equally a
+ * redirect and must not be misread as an ordinary non-2xx answer.
+ */
+function isRefusedRedirect(response: Response): boolean {
+  return response.type === 'opaqueredirect' || REDIRECT_STATUSES.has(response.status);
+}
+
 /** Minimal CSS attribute-value escape for ref selectors (refs are `e\d+`, but be safe). */
 function cssEscape(s: string): string {
   return s.replace(/["\\]/g, '\\$&');
@@ -308,6 +330,12 @@ export class CdpExecutor implements Executor {
    * error from Playwright into a clean DETACHED. On such a failure we also drop
    * the cached context/tabs so the next call relaunches or reconnects cleanly.
    * Any other error is rethrown unchanged.
+   *
+   * The replacement error keeps the DETACHED code but carries a checkable
+   * reason (`DETACHED_CONNECT` / `DETACHED_LAUNCH`) plus the facts a caller
+   * needs to decide what to do next: which acquisition mode we are in, whether
+   * the cached context was dropped, and (launch mode) whether the browser we
+   * owned was closed so a fresh one is launched on the next call.
    */
   private async guard<T>(fn: () => Promise<T>): Promise<T> {
     try {
@@ -316,15 +344,31 @@ export class CdpExecutor implements Executor {
       const msg = (err as Error).message ?? '';
       if (CLOSED_TARGET.test(msg)) {
         const stale = this.context;
+        const hadContext = stale !== null;
+        const owned = this.opts.mode !== 'connect' && this.launched;
         this.context = null;
         this.tabs.clear();
         // A browser we launched is ours to close; otherwise the relaunch on the
         // next call leaves this one running. Never close the user's Chrome.
-        if (this.opts.mode !== 'connect' && this.launched) {
+        if (owned) {
           this.launched = false;
           void stale?.close().catch(() => undefined);
         }
-        throw new ExecutorError('DETACHED', 'browser target closed or crashed; reconnect and retry');
+        const mode = this.opts.mode;
+        throw new ExecutorError(
+          'DETACHED',
+          `browser target closed or crashed; reconnect and retry ` +
+            `(mode: ${mode}, cached context dropped${owned ? ', launched browser closed' : ''})`,
+          mode === 'connect' ? 'DETACHED_CONNECT' : 'DETACHED_LAUNCH',
+          {
+            mode,
+            contextDropped: true,
+            hadContext,
+            // Launch mode: the next call starts a fresh Chromium; connect mode:
+            // we only detach, the user's Chrome keeps running untouched.
+            relaunchOnNextCall: owned,
+          },
+        );
       }
       throw err;
     }
@@ -616,34 +660,68 @@ export class CdpExecutor implements Executor {
     if (!url) {
       const p = await this.resolveTab(args.tabId);
       const target = args.target;
-      if (!target) throw new ExecutorError('DOWNLOAD_FAILED', 'provide a url or a target');
+      if (!target) throw new ExecutorError('DOWNLOAD_FAILED', 'provide a url or a target', 'DOWNLOAD_TARGET_INVALID');
       const locator = this.locator(p, target);
       const href = await locator.getAttribute('href');
-      if (!href) throw new ExecutorError('DOWNLOAD_FAILED', 'the target must be a link with an href');
+      if (!href) throw new ExecutorError('DOWNLOAD_FAILED', 'the target must be a link with an href', 'DOWNLOAD_TARGET_INVALID');
       const baseUrl = await locator.evaluate((el) => (el as HTMLAnchorElement).ownerDocument.baseURI);
       try { url = new URL(href, baseUrl).href; }
-      catch { throw new ExecutorError('DOWNLOAD_FAILED', 'the target has an invalid download URL'); }
+      catch { throw new ExecutorError('DOWNLOAD_FAILED', 'the target has an invalid download URL', 'DOWNLOAD_TARGET_INVALID'); }
       suggestedName = (await locator.getAttribute('download')) || suggestedName;
     }
     const policy = this.opts.policy ?? { allowDomains: [], allowEval: false, allowDownloads: false, allowUploads: false, allowAllTabs: false, enableMutations: false, allowObservers: false };
     const verdict = evaluatePolicy(url, 'download_file', policy);
-    if (!verdict.ok) throw new ExecutorError('POLICY_DENIED', verdict.reason);
+    if (!verdict.ok) throw new ExecutorError('POLICY_DENIED', verdict.reason, 'DOWNLOAD_POLICY_DENIED');
+
+    // Every failure below carries the same DOWNLOAD_FAILED code as before plus a
+    // stable `reason`, so a caller can tell a refused redirect from a size cap,
+    // an HTTP status or a transport failure without matching English.
     let response: Response;
     try {
-      // Node fetch has no browser cookie jar; error mode refuses every redirect
-      // before any intermediate destination is contacted.
-      response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(120_000) });
-    } catch {
-      throw new ExecutorError('DOWNLOAD_FAILED', 'download request failed or redirects are not supported');
+      // Node fetch has no browser cookie jar. `manual` returns a redirect as a
+      // response instead of following it, so no intermediate destination is
+      // ever contacted — and unlike `error` we can still tell a refusal from
+      // a transport failure by looking at what came back.
+      response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(120_000) });
+    } catch (err) {
+      // Reached only when no HTTP response exists at all: DNS/connect failure,
+      // TLS error, timeout, or a refused/aborted request.
+      throw new ExecutorError(
+        'DOWNLOAD_FAILED',
+        `download request failed: ${describeCause(err)}`,
+        'DOWNLOAD_REQUEST_FAILED',
+        { cause: describeCause(err) },
+      );
+    }
+    if (isRefusedRedirect(response)) {
+      await response.body?.cancel().catch(() => undefined);
+      // An opaqueredirect hides the status; report it as null rather than inventing one.
+      const status = response.status > 0 ? response.status : null;
+      throw new ExecutorError(
+        'DOWNLOAD_FAILED',
+        `download was redirected (HTTP ${status ?? 'unknown'}); redirects are not supported`,
+        'DOWNLOAD_REDIRECT_REFUSED',
+        { status: status ?? 'unknown' },
+      );
     }
     if (!response.ok) {
       await response.body?.cancel().catch(() => undefined);
-      throw new ExecutorError('DOWNLOAD_FAILED', `download returned HTTP ${response.status}`);
+      throw new ExecutorError(
+        'DOWNLOAD_FAILED',
+        `download returned HTTP ${response.status}`,
+        'DOWNLOAD_HTTP_STATUS',
+        { status: response.status },
+      );
     }
     const declaredLength = Number(response.headers.get('content-length'));
     if (Number.isFinite(declaredLength) && declaredLength > MAX_CDP_DOWNLOAD_BYTES) {
       await response.body?.cancel().catch(() => undefined);
-      throw new ExecutorError('DOWNLOAD_FAILED', 'download exceeds the 50 MiB limit');
+      throw new ExecutorError(
+        'DOWNLOAD_FAILED',
+        'download exceeds the 50 MiB limit',
+        'DOWNLOAD_TOO_LARGE',
+        { limitBytes: MAX_CDP_DOWNLOAD_BYTES, declaredBytes: declaredLength, source: 'declared' },
+      );
     }
     const chunks: Uint8Array[] = [];
     let totalBytes = 0;
@@ -655,14 +733,27 @@ export class CdpExecutor implements Executor {
           if (done) break;
           totalBytes += value.byteLength;
           if (totalBytes > MAX_CDP_DOWNLOAD_BYTES) {
-            await reader.cancel();
-            throw new ExecutorError('DOWNLOAD_FAILED', 'download exceeds the 50 MiB limit');
+            await reader.cancel().catch(() => undefined);
+            throw new ExecutorError(
+              'DOWNLOAD_FAILED',
+              'download exceeds the 50 MiB limit',
+              'DOWNLOAD_TOO_LARGE',
+              { limitBytes: MAX_CDP_DOWNLOAD_BYTES, actualBytes: totalBytes, source: 'streamed' },
+            );
           }
           chunks.push(value);
         }
       } catch (err) {
         await reader.cancel().catch(() => undefined);
-        throw err;
+        // Our own size refusal already carries its attribution; anything else is
+        // the transport breaking mid-body (reset, timeout, truncated stream).
+        if (err instanceof ExecutorError) throw err;
+        throw new ExecutorError(
+          'DOWNLOAD_FAILED',
+          `download request failed while reading the body: ${describeCause(err)}`,
+          'DOWNLOAD_REQUEST_FAILED',
+          { cause: describeCause(err), bytesRead: totalBytes },
+        );
       }
     }
     const body = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), totalBytes);
@@ -671,7 +762,12 @@ export class CdpExecutor implements Executor {
     try {
       writeFileSync(dest, body);
     } catch (err) {
-      throw new ExecutorError('DOWNLOAD_FAILED', `failed to save download: ${(err as Error).message}`);
+      throw new ExecutorError(
+        'DOWNLOAD_FAILED',
+        `failed to save download: ${describeCause(err)}`,
+        'DOWNLOAD_SAVE_FAILED',
+        { cause: describeCause(err), bytes: body.length },
+      );
     }
     return { path: dest, backend: this.backend, bytes: body.length, mimeType: response.headers.get('content-type') ?? undefined, suggestedName: safeName };
   }

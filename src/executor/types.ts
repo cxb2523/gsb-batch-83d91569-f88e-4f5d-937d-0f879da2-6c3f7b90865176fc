@@ -422,10 +422,49 @@ export type ExecutorErrorCodeLocal =
   /** The page is a sign-in wall (session expired mid-run). Raised only when the caller opts in via `failOnAuthWall`. */
   | 'AUTH_REQUIRED';
 
+/**
+ * A stable, machine-checkable failure REASON that rides alongside `code`.
+ *
+ * `code` answers "which class of failure" (and existing callers branch on it);
+ * `reason` answers "which specific cause inside that class", so a download can
+ * be told apart as a redirect refusal, a size cap, a policy veto, an HTTP
+ * status or a transport failure without parsing English. Values are part of the
+ * contract: callers may compare them literally, so never rename one.
+ */
+export type ExecutorFailureReason =
+  /** The download URL answered with a redirect; the hop is refused and never followed. */
+  | 'DOWNLOAD_REDIRECT_REFUSED'
+  /** The body is over the 50 MiB cap — caught from a declared Content-Length or while streaming. */
+  | 'DOWNLOAD_TOO_LARGE'
+  /** The URL/method policy denied the download (same verdict the tool gate uses). */
+  | 'DOWNLOAD_POLICY_DENIED'
+  /** The server answered with a non-2xx status (and it was not a redirect). */
+  | 'DOWNLOAD_HTTP_STATUS'
+  /** The request itself failed: DNS/connect failure, timeout, aborted or broken body. */
+  | 'DOWNLOAD_REQUEST_FAILED'
+  /** A url/target argument was missing, not a link, or did not resolve to a URL. */
+  | 'DOWNLOAD_TARGET_INVALID'
+  /** The bytes arrived but could not be written to the download directory. */
+  | 'DOWNLOAD_SAVE_FAILED'
+  /** The page/browser died under an operation while the executor is in connect mode. */
+  | 'DETACHED_CONNECT'
+  /** The page/browser died under an operation while the executor is in launch mode. */
+  | 'DETACHED_LAUNCH';
+
+/** Supporting facts for a failure reason (HTTP status, byte counts, mode, …). */
+export type ExecutorErrorDetails = Readonly<Record<string, string | number | boolean | undefined>>;
+
 export class ExecutorError extends Error {
   constructor(
     public readonly code: ExecutorErrorCodeLocal,
     message: string,
+    /**
+     * Specific cause within `code`. Optional: most failures are fully described
+     * by their code, and callers that only understand codes keep working.
+     */
+    public readonly reason?: ExecutorFailureReason,
+    /** Extra facts about the failure, for logs and callers that want the numbers. */
+    public readonly details?: ExecutorErrorDetails,
   ) {
     super(message);
     this.name = 'ExecutorError';

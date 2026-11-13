@@ -241,8 +241,22 @@ export class ExecutorError extends Error {
       | 'EVAL_FAILED' | 'LAUNCH_FAILED' | 'DETACHED' | 'TARGET_GONE'
       | 'POLICY_DENIED' | 'DEVTOOLS_OPEN' | 'DOWNLOAD_FAILED' | 'BACKPRESSURE',
     message: string,
+    /** Optional checkable cause within `code` (see ExecutorFailureReason). */
+    public reason?: ExecutorFailureReason,
+    /** Optional numbers behind it (HTTP status, byte counts, mode, …). */
+    public details?: Record<string, string | number | boolean | undefined>,
   ) { super(message); this.name = 'ExecutorError'; }
 }
+```
+
+`reason` narrows a broad `code` without changing it, so existing callers that
+branch on `code` are unaffected. The CDP fallback uses it to distinguish the
+download failures (`DOWNLOAD_REDIRECT_REFUSED`, `DOWNLOAD_TOO_LARGE`,
+`DOWNLOAD_POLICY_DENIED`, `DOWNLOAD_HTTP_STATUS`, `DOWNLOAD_REQUEST_FAILED`,
+plus `DOWNLOAD_TARGET_INVALID` / `DOWNLOAD_SAVE_FAILED`) and the two detach
+modes (`DETACHED_CONNECT` / `DETACHED_LAUNCH`). Since only text crosses the MCP
+boundary, the reason is also appended to the rendered error message (after the
+message, keeping the `[CODE]` prefix every caller parses).
 ```
 
 **`ExecutorManager`** (the `withReadyDriver` analog, `linkedin-mcp/src/driver/linkedin.ts:208`

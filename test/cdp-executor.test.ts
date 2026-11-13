@@ -14,13 +14,14 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
 
 import { CdpExecutor } from '../src/executor/cdp-executor';
 import { ExecutorError } from '../src/executor/types';
+import { sanitizeDownloadName } from '../shared/download';
 
 let hasChromium = false;
 try {
@@ -64,6 +65,19 @@ const PAGES: Record<string, { type: string; body: string; headers?: Record<strin
   '/file.txt': { type: 'text/plain', body: 'hello download', headers: { 'content-disposition': 'attachment; filename="saved.txt"' } },
 };
 
+/**
+ * Download-response fixtures that need server-side behaviour the plain PAGES map
+ * cannot express: an oversize body declared by Content-Length, a chunked body
+ * that only exceeds the cap while streaming, and a body that breaks mid-read.
+ * `cancelled` records each fixture whose server socket saw the client hang up,
+ * so a test can prove the response body was really cancelled rather than just
+ * dropped on the floor.
+ */
+const downloadFixtures = {
+  /** A client-visible cancellation per fixture (declared / streamed). */
+  cancelled: new Set<string>(),
+};
+
 let server: Server;
 let base = '';
 let requestLog: Array<{ host: string; path: string }> = [];
@@ -76,8 +90,44 @@ before(async () => {
       res.writeHead(302, { location: `http://localhost:${(server.address() as AddressInfo).port}/redirect-target` }).end();
       return;
     }
+    if (path === '/redirect-permanent') {
+      res.writeHead(301, { location: `http://localhost:${(server.address() as AddressInfo).port}/redirect-target` }).end();
+      return;
+    }
     if (path === '/redirect-target') {
       res.writeHead(200, { 'content-type': 'text/plain' }).end('must not be requested');
+      return;
+    }
+    if (path === '/oversize-declared') {
+      res.on('close', () => downloadFixtures.cancelled.add('declared'));
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(60 * 1024 * 1024) });
+      res.end('x');
+      return;
+    }
+    if (path === '/oversize-streamed') {
+      res.on('close', () => downloadFixtures.cancelled.add('streamed'));
+      res.writeHead(200, { 'content-type': 'application/octet-stream' }); // chunked: no content-length
+      const chunk = Buffer.alloc(1024 * 1024, 0x61);
+      let sent = 0;
+      const pump = (): void => {
+        while (sent < 80 * 1024 * 1024) {
+          sent += chunk.length;
+          if (!res.write(chunk)) { res.once('drain', pump); return; }
+        }
+        res.end();
+      };
+      pump();
+      return;
+    }
+    if (path === '/broken-body') {
+      res.writeHead(200, { 'content-type': 'application/octet-stream' });
+      res.write('partial');
+      setTimeout(() => res.socket?.destroy(), 50);
+      return;
+    }
+    if (path === '/not-modified') {
+      // A 3xx that is NOT a redirect: no Location, nothing to follow.
+      res.writeHead(304).end();
       return;
     }
     if (path === '/base-link') {
@@ -106,6 +156,18 @@ function errCode(code: string): (err: unknown) => boolean {
   return (err: unknown) => {
     assert.ok(err instanceof ExecutorError, `expected ExecutorError, got ${String(err)}`);
     assert.equal(err.code, code);
+    return true;
+  };
+}
+
+/** Assert a failure carries the given code AND its checkable reason (and, optionally, details). */
+function errReason(code: string, reason: string, details?: Record<string, unknown>): (err: unknown) => boolean {
+  return (err: unknown) => {
+    errCode(code)(err);
+    assert.equal((err as ExecutorError).reason, reason, `expected reason ${reason}, got ${(err as ExecutorError).reason}`);
+    for (const [key, value] of Object.entries(details ?? {})) {
+      assert.equal((err as ExecutorError).details?.[key], value, `details.${key}`);
+    }
     return true;
   };
 }
@@ -285,20 +347,89 @@ test('CdpExecutor: downloads and uploads', { skip: !hasChromium }, async () => {
     assert.equal(byClick.bytes, 14);
     assert.equal(readFileSync(byClick.path, 'utf8'), 'hello download');
 
-    await assert.rejects(ex.download({ url: `${base}/redirect-file` }), errCode('DOWNLOAD_FAILED'));
+    // Redirect (URL and link): refused, attributed, and the target never contacted.
+    await assert.rejects(
+      ex.download({ url: `${base}/redirect-file` }),
+      errReason('DOWNLOAD_FAILED', 'DOWNLOAD_REDIRECT_REFUSED', { status: 302 }),
+    );
     assert.ok(!requestLog.some((request) => request.host.startsWith('localhost:') && request.path === '/redirect-target'),
       'redirect target is not contacted');
-    await assert.rejects(ex.download({ target: { selector: '#redirect-dl' } }), errCode('DOWNLOAD_FAILED'));
+    await assert.rejects(
+      ex.download({ target: { selector: '#redirect-dl' } }),
+      errReason('DOWNLOAD_FAILED', 'DOWNLOAD_REDIRECT_REFUSED', { status: 302 }),
+    );
     assert.ok(!requestLog.some((request) => request.host.startsWith('localhost:') && request.path === '/redirect-target'),
       'link-triggered redirect target is not contacted');
+    // Any redirect status is refused the same way (301 as well as 302).
+    await assert.rejects(
+      ex.download({ url: `${base}/redirect-permanent` }),
+      errReason('DOWNLOAD_FAILED', 'DOWNLOAD_REDIRECT_REFUSED', { status: 301 }),
+    );
+    assert.ok(!requestLog.some((request) => request.host.startsWith('localhost:') && request.path === '/redirect-target'),
+      'a 301 destination is not contacted either');
 
+    // Over the cap as declared by Content-Length, and as discovered while streaming:
+    // both say DOWNLOAD_TOO_LARGE with the numbers, and both cancel the body.
+    downloadFixtures.cancelled.clear();
+    await assert.rejects(
+      ex.download({ url: `${base}/oversize-declared` }),
+      errReason('DOWNLOAD_FAILED', 'DOWNLOAD_TOO_LARGE', { source: 'declared', declaredBytes: 60 * 1024 * 1024 }),
+    );
+    await assert.rejects(
+      ex.download({ url: `${base}/oversize-streamed` }),
+      errReason('DOWNLOAD_FAILED', 'DOWNLOAD_TOO_LARGE', { source: 'streamed' }),
+    );
+    const cancelledBy = Date.now() + 2_000;
+    while (downloadFixtures.cancelled.size < 2 && Date.now() < cancelledBy) await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual([...downloadFixtures.cancelled].sort(), ['declared', 'streamed'], 'the server saw both response bodies cancelled');
+
+    // A body that dies mid-read is a request failure, not a size or HTTP verdict.
+    await assert.rejects(
+      ex.download({ url: `${base}/broken-body` }),
+      errReason('DOWNLOAD_FAILED', 'DOWNLOAD_REQUEST_FAILED'),
+    );
+
+    // Policy veto keeps POLICY_DENIED but explains itself as a download-policy refusal.
     await ex.navigate({ url: `${base}/base-link` });
-    await assert.rejects(ex.download({ target: { selector: '#base-dl' } }), errCode('POLICY_DENIED'));
+    await assert.rejects(ex.download({ target: { selector: '#base-dl' } }), errReason('POLICY_DENIED', 'DOWNLOAD_POLICY_DENIED'));
     assert.ok(!requestLog.some((request) => request.host.startsWith('localhost:') && request.path === '/redirect-target'),
       'link URL is resolved against its base element before policy evaluation');
     await ex.navigate({ url: `${base}/` });
 
-    await assert.rejects(ex.download({}), errCode('DOWNLOAD_FAILED'));
+    // A non-2xx answer is its own class: the status travels in the error.
+    await assert.rejects(
+      ex.download({ url: `${base}/nope` }),
+      errReason('DOWNLOAD_FAILED', 'DOWNLOAD_HTTP_STATUS', { status: 404 }),
+    );
+    // A 3xx that is not a redirect (304 Not Modified) is not mislabelled as one.
+    await assert.rejects(
+      ex.download({ url: `${base}/not-modified` }),
+      errReason('DOWNLOAD_FAILED', 'DOWNLOAD_HTTP_STATUS', { status: 304 }),
+    );
+
+    // Nothing listening at all is a transport failure, not an HTTP verdict.
+    const deadPort = await new Promise<number>((r) => {
+      const s = createServer();
+      s.listen(0, '127.0.0.1', () => {
+        const p = (s.address() as AddressInfo).port;
+        s.close(() => r(p));
+      });
+    });
+    await assert.rejects(
+      ex.download({ url: `http://127.0.0.1:${deadPort}/gone` }),
+      errReason('DOWNLOAD_FAILED', 'DOWNLOAD_REQUEST_FAILED'),
+    );
+
+    // The bytes arrived but could not be written (a directory already owns the
+    // name): attributable to the save step, not to the request.
+    mkdirSync(join(dir, 'downloads', sanitizeDownloadName('file.txt')));
+    await assert.rejects(
+      ex.download({ url: `${base}/file.txt`, suggestedName: 'file.txt' }),
+      errReason('DOWNLOAD_FAILED', 'DOWNLOAD_SAVE_FAILED'),
+    );
+
+    // A missing url/target is a bad argument, distinguishable from a fetch failure.
+    await assert.rejects(ex.download({}), errReason('DOWNLOAD_FAILED', 'DOWNLOAD_TARGET_INVALID'));
 
     const f1 = join(dir, 'up1.txt');
     const f2 = join(dir, 'up2.txt');
@@ -322,8 +453,30 @@ test('CdpExecutor: downloads and uploads', { skip: !hasChromium }, async () => {
   }
 });
 
-/** Top-level Chromium processes whose command line names `dir` (POSIX `ps`). */
+/**
+ * Top-level browser processes whose command line names `dir`. POSIX uses `ps`;
+ * Windows has no `ps`, so it asks CIM (which also shows the command line). The
+ * PowerShell that runs the query itself mentions `dir`, and its own child
+ * processes carry `--type=`, so both are filtered out by name/arg.
+ */
 function browsersFor(dir: string): number[] {
+  if (process.platform === 'win32') {
+    const out = execFileSync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-Command',
+        `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('${dir}') } | ForEach-Object { "$($_.Name)|$($_.ProcessId)|$($_.CommandLine)" }`,
+      ],
+      { encoding: 'utf8' },
+    );
+    return out
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => /^chrome(-headless-shell)?\.exe\|/i.test(l) && !l.includes('--type='))
+      .map((l) => Number.parseInt(l.split('|')[1], 10))
+      .filter((n) => Number.isInteger(n));
+  }
   const out = execFileSync('ps', ['-eo', 'pid=,command='], { encoding: 'utf8' });
   return out
     .split('\n')
@@ -344,14 +497,22 @@ function killBrowsersFor(dir: string): void {
 }
 
 /** Close a page while an operation on it is in flight: the op must fail DETACHED. */
-async function detachMidOperation(ex: CdpExecutor): Promise<void> {
+async function detachMidOperation(ex: CdpExecutor, expectedMode: 'connect' | 'launch'): Promise<ExecutorError> {
   const tab = await ex.tabNew(`${base}/second`);
   const pending = ex.waitFor({ tabId: tab.tabId, selector: '#never', timeoutMs: 10_000 });
   setTimeout(() => void ex.tabClose(tab.tabId).catch(() => undefined), 100);
-  await assert.rejects(pending, errCode('DETACHED'));
+  const err = await pending.then(
+    () => assert.fail('the in-flight operation should have failed'),
+    (e: unknown) => e,
+  );
+  errReason('DETACHED', expectedMode === 'connect' ? 'DETACHED_CONNECT' : 'DETACHED_LAUNCH', {
+    mode: expectedMode,
+    contextDropped: true,
+  })(err);
+  return err as ExecutorError;
 }
 
-test('CdpExecutor: a target closed mid-operation surfaces as DETACHED and the next call relaunches', { skip: !hasChromium || process.platform === 'win32' }, async () => {
+test('CdpExecutor: a target closed mid-operation surfaces as DETACHED and the next call relaunches', { skip: !hasChromium }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'cmcp-cdpx-'));
   const ex = new CdpExecutor({ mode: 'launch', userDataDir: dir, headless: true });
   try {
@@ -360,7 +521,12 @@ test('CdpExecutor: a target closed mid-operation surfaces as DETACHED and the ne
     await ex.tabClose(tab.tabId);
     await assert.rejects(ex.getText(undefined, { tabId: tab.tabId }), errCode('TAB_NOT_FOUND'), 'a closed handle is gone');
 
-    await detachMidOperation(ex);
+    const detachErr = await detachMidOperation(ex, 'launch');
+    // The message itself names the mode and the dropped cache, so a caller reading
+    // only the text can still tell what happened.
+    assert.match(detachErr.message, /mode: launch/);
+    assert.match(detachErr.message, /cached context dropped/);
+    assert.equal(detachErr.details?.relaunchOnNextCall, true, 'launch mode: a fresh Chromium is started next call');
     assert.equal(ex.status().ready, false, 'the cached context was dropped');
     const nav = await ex.navigate({ url: `${base}/second` });
     assert.equal(nav.title, 'Second', 'the next call relaunched');
@@ -373,7 +539,7 @@ test('CdpExecutor: a target closed mid-operation surfaces as DETACHED and the ne
 test(
   'CdpExecutor: dropping a context after DETACHED does not orphan the Chromium it launched',
   {
-    skip: !hasChromium || process.platform === 'win32',
+    skip: !hasChromium,
   },
   async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cmcp-cdpx-'));
@@ -381,11 +547,12 @@ test(
     try {
       await ex.ensureReady();
       assert.equal(browsersFor(dir).length, 1);
-      await detachMidOperation(ex);
+      await detachMidOperation(ex, 'launch');
       await ex.navigate({ url: `${base}/second` });
+      await new Promise((r) => setTimeout(r, 500));
       assert.equal(browsersFor(dir).length, 1, 'still exactly one launched Chromium after the relaunch');
       await ex.dispose();
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 500));
       assert.deepEqual(browsersFor(dir), [], 'dispose leaves no Chromium behind');
     } finally {
       await ex.dispose();
@@ -415,6 +582,16 @@ test('CdpExecutor: connect mode attaches to a running Chrome and never closes it
     await ex.ensureReady();
     const tab = await ex.tabNew(`${base}/second`);
     assert.equal(tab.title, 'Second');
+
+    // A page dying mid-operation in connect mode is still DETACHED, but says the
+    // mode and that we only dropped the cache — we must never close their browser.
+    const detachErr = await detachMidOperation(ex, 'connect');
+    assert.match(detachErr.message, /mode: connect/);
+    assert.equal(detachErr.details?.relaunchOnNextCall, false, 'connect mode: no browser of ours to close');
+    assert.equal(browser.isConnected(), true, 'a mid-operation detach leaves the user\'s Chrome running');
+    assert.equal(ex.status().ready, false, 'the cached context was dropped so the next call reconnects');
+    assert.ok((await ex.tabsList()).some((t) => t.url === `${base}/second`), 'the next call reconnects to the same browser');
+
     await ex.dispose();
     assert.equal(browser.isConnected(), true, 'dispose in connect mode leaves the browser running');
     // A second executor reconnects to the same browser.

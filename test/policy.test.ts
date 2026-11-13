@@ -191,6 +191,37 @@ test('a tab that reports no URL is named as such, not blocked as an origin', asy
   assert.doesNotMatch(textOf(r), /Please allow access to/i);
 });
 
+test('an attributed failure carries its reason across the MCP text boundary', async () => {
+  // Only text crosses the boundary, and every caller parses the leading [CODE].
+  // A download failure must therefore ALSO say WHICH download failure it was —
+  // a policy veto, a redirect, a size cap, an HTTP status or a transport fault —
+  // or the client can only see one undifferentiated DOWNLOAD_FAILED.
+  resetManagerForTesting();
+  resetRateLimiter();
+  class FailingDownload extends StubExecutor {
+    constructor(private readonly fail: ExecutorError) { super({ activeUrl: 'https://example.com/page' }); }
+    override async download(): Promise<never> { throw this.fail; }
+  }
+  for (const [reason, code] of [
+    ['DOWNLOAD_TOO_LARGE', 'DOWNLOAD_FAILED'],
+    ['DOWNLOAD_REDIRECT_REFUSED', 'DOWNLOAD_FAILED'],
+    ['DOWNLOAD_HTTP_STATUS', 'DOWNLOAD_FAILED'],
+    ['DOWNLOAD_REQUEST_FAILED', 'DOWNLOAD_FAILED'],
+    ['DOWNLOAD_POLICY_DENIED', 'POLICY_DENIED'],
+    ['DETACHED_LAUNCH', 'DETACHED'],
+  ] as const) {
+    const ex = new FailingDownload(new ExecutorError(code, 'download failed', reason, { status: 302 }));
+    configureManager({
+      policy: resolvePolicy({ allowDomains: ['example.com'], allowDownloads: true, enableMutations: true }),
+      makeExecutor: () => ex,
+    });
+    const r = await dispatchToolCall('download_file', { url: 'https://example.com/file' });
+    assert.equal(r.isError, true, `${reason}: expected an error`);
+    assert.match(textOf(r), new RegExp(`^\\[${code}\\]`), `${reason}: the code prefix must stay first`);
+    assert.match(textOf(r), new RegExp(`reason: ${reason}`), `${reason}: the reason must travel in the text`);
+  }
+});
+
 // --- the gate costs no round-trip when the backend already knows the URL ------
 
 test('a reported URL is gated against without asking for the tab list', async () => {

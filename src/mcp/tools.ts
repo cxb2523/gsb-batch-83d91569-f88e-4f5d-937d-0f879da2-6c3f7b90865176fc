@@ -537,7 +537,9 @@ async function gatedUrl(ex: Executor, tabId?: string): Promise<string> {
     // Keep the underlying code (TIMEOUT / EXTENSION_DISCONNECTED / …) so the
     // caller can tell a transient bridge failure from a policy decision — the
     // rendered message is prefixed with it, since only the text crosses MCP.
-    if (err instanceof ExecutorError) throw new ExecutorError(err.code, `${GATE_CONTEXT}: ${err.message}`);
+    // The attributed reason/details (when the failure has them) travel too,
+    // so a gate-context rewrap never erases a checkable cause.
+    if (err instanceof ExecutorError) throw new ExecutorError(err.code, `${GATE_CONTEXT}: ${err.message}`, err.reason, err.details);
     throw err; // an internal fault, not a browser one — don't relabel it
   }
 
@@ -1467,8 +1469,15 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
 function errMessage(err: unknown): string {
   // Only the text crosses the MCP boundary, so the code has to travel inside it —
   // otherwise a caller cannot tell EXTENSION_DISCONNECTED (retry in a moment)
-  // from POLICY_DENIED (retrying will never help).
-  if (err instanceof ExecutorError) return `[${err.code}] ${err.message}`;
+  // from POLICY_DENIED (retrying will never help). The specific `reason`, when
+  // there is one, rides along in the same text (after the message, so the
+  // `[CODE]` prefix every caller parses stays intact): that is how a download
+  // failure tells the client whether it hit a redirect, a size cap, a policy
+  // veto, an HTTP status or a transport fault.
+  if (err instanceof ExecutorError) {
+    const reason = err.reason ? ` (reason: ${err.reason})` : '';
+    return `[${err.code}] ${err.message}${reason}`;
+  }
   if (err instanceof McpToolError) return err.message;
   if (err instanceof Error) return `internal error: ${err.message}`;
   return `internal error: ${String(err)}`;
