@@ -1,0 +1,119 @@
+name: Examples
+
+on:
+  workflow_dispatch:
+
+jobs:
+  examples-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      - name: Init venv
+        run: uv venv --python ${{ matrix.python-version }}
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libev-dev
+
+      - name: Install dependencies
+        run: |
+          uv sync --group dev \
+            --extra taskiq \
+            --extra msgpack \
+            --extra uvloop \
+            --extra trio \
+            --extra s3
+
+      - name: Prepare example inputs
+        run: |
+          mkdir -p data
+          cat > data/urls.jsonl <<'EOF'
+          {"url": "https://example.com/"}
+          {"url": "https://quotes.toscrape.com/"}
+          EOF
+
+      - name: Run examples
+        env:
+          SILKWORM_LOG_LEVEL: INFO
+        run: |
+          set -euo pipefail
+
+          failures=0
+
+          run_example() {
+            name="$1"
+            shift
+            echo "Running ${name}..."
+            if ! uv run --group dev "$@"; then
+              echo "Example failed: ${name}"
+              failures=1
+            fi
+            echo
+          }
+
+          run_example "logger_configuration_demo" python examples/logger_configuration_demo.py
+          run_example "hybrid_logger_demo" python examples/hybrid_logger_demo.py --run
+          run_example "callback_pipeline_demo" python examples/callback_pipeline_demo.py
+          run_example "export_formats_demo" python examples/export_formats_demo.py --pages 1
+          run_example "quotes_spider" python examples/quotes_spider.py
+          run_example "quotes_spider_xpath" python examples/quotes_spider_xpath.py
+          run_example "production_quotes_spider" python examples/production_quotes_spider.py --pages 2 --job-dir data/jobs/ci
+          run_example "silkworm_cli_crawl" silkworm crawl examples/production_quotes_spider.py -o data/cli-quotes.jl -s max_items=15
+          if [ "${{ matrix.python-version }}" != "3.13" ]; then
+            # trio-asyncio 0.16 uses asyncio policy APIs removed in Python 3.14.
+            echo "Skipping quotes_spider_trio on Python ${{ matrix.python-version }}"
+          else
+            run_example "quotes_spider_trio" python examples/quotes_spider_trio.py
+          fi
+          run_example "hackernews_spider" python examples/hackernews_spider.py --pages 1
+          run_example "lobsters_spider" python examples/lobsters_spider.py --pages 1
+          run_example "sitemap_spider" python examples/sitemap_spider.py --sitemap-url https://azure.microsoft.com/en-us/blog/post-sitemap.xml --pages 1 --concurrency 4
+          run_example "taskiq_quotes_spider" python examples/taskiq_quotes_spider.py --pages 1
+          run_example "url_titles_spider" python examples/url_titles_spider.py --urls-file data/urls.jsonl --output data/url_titles.jl
+
+          if [ "$failures" -ne 0 ]; then
+            echo "One or more examples failed."
+            exit 1
+          fi
+
+  examples-windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # winloop has no Python 3.15 wheels yet and cannot be built in CI.
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      - name: Init venv
+        run: uv venv --python ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          uv sync --group dev --extra winloop
+
+      - name: Run winloop example
+        shell: bash
+        env:
+          SILKWORM_LOG_LEVEL: INFO
+        run: |
+          uv run --group dev python examples/quotes_spider_winloop.py

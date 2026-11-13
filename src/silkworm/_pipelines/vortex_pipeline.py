@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+try:
+    import vortex  # type: ignore[import-not-found]
+    import vortex.io  # type: ignore[import-not-found]
+
+    VORTEX_AVAILABLE = True
+except ImportError:
+    VORTEX_AVAILABLE = False
+
+from ..logging import Logger, get_logger
+from .base import _BatchPipelineMixin, log_pipeline_item
+
+if TYPE_CHECKING:
+    from .._types import JSONValue
+    from ..spiders import Spider
+
+
+class VortexPipeline(_BatchPipelineMixin):
+    native_batch = True
+    """
+    Pipeline that writes items to a Vortex file using the vortex-data library.
+
+    Vortex is a next-generation columnar file format optimized for high-performance
+    data processing with 100x faster random access reads compared to Parquet, 10-20x
+    faster scans, and similar compression ratios. It provides zero-copy compatibility
+    with Apache Arrow.
+
+    Items are buffered in memory and converted to an Arrow table during
+    :meth:`close`.
+
+    Args:
+        path: Destination Vortex file.
+
+    Example::
+
+        from silkworm.pipelines import VortexPipeline
+
+        pipeline = VortexPipeline("data/items.vortex")
+
+    Reading Vortex files::
+
+        import vortex
+
+        # Open and read a Vortex file
+        vortex_file = vortex.file.open("data/items.vortex")
+        arrow_table = vortex_file.to_arrow().read_all()
+
+        # Or convert to other formats
+        df = vortex_file.to_polars()  # Polars DataFrame
+        df = vortex_file.to_dataset().to_table()  # PyArrow Table
+    """
+
+    def __init__(
+        self,
+        path: str | Path = "items.vortex",
+    ) -> None:
+        """
+        Initialize VortexPipeline.
+
+        Args:
+            path: Path to the output file (default: "items.vortex")
+        """
+        if not VORTEX_AVAILABLE:
+            raise ImportError(
+                "vortex is required for VortexPipeline. Install it with: pip install silkworm-rs[vortex]",
+            )
+
+        self.path: Path = Path(path)
+        self._items: list[JSONValue] = []
+        self.logger: Logger = get_logger(component="VortexPipeline")
+
+    async def open(self, spider: Spider) -> None:
+        """Create parent directories and reset the Vortex item buffer."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._items = []
+        self.logger.info("Opened Vortex pipeline", path=str(self.path))
+
+    async def close(self, spider: Spider) -> None:
+        """Convert buffered mappings to Arrow and write the Vortex file."""
+        if self._items:
+            # Convert items list to PyArrow Table
+            # Vortex can directly accept PyArrow tables for efficient writing
+            import pyarrow as pa  # type: ignore[import-not-found, import-untyped]
+
+            table = pa.Table.from_pylist(self._items)
+
+            # Write the table to a Vortex file
+            vortex.io.write(table, str(self.path))  # pyright: ignore[reportPossiblyUnboundVariable]
+
+            self.logger.info(
+                "Closed Vortex pipeline",
+                path=str(self.path),
+                items_written=len(self._items),
+            )
+        else:
+            self.logger.info("Closed Vortex pipeline (no items)", path=str(self.path))
+
+    async def process_item(self, item: JSONValue, spider: Spider) -> JSONValue:
+        """Buffer one item for Vortex serialization during :meth:`close`."""
+        self._items.append(item)
+        log_pipeline_item(
+            self,
+            "Buffered item for Vortex",
+            path=str(self.path),
+            spider=spider.name,
+        )
+        return item
+
+    async def process_items(
+        self, items: list[JSONValue], spider: Spider
+    ) -> list[JSONValue]:
+        self._items.extend(items)
+        if items:
+            log_pipeline_item(
+                self,
+                "Buffered item batch for Vortex",
+                path=str(self.path),
+                spider=spider.name,
+                item_count=len(items),
+            )
+        return items

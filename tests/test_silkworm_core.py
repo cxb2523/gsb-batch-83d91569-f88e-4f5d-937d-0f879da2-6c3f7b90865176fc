@@ -1,0 +1,2153 @@
+import asyncio
+import json
+import sys
+import types
+from collections.abc import AsyncIterator
+from datetime import timedelta
+from typing import Any, ClassVar, Self, cast
+from unittest.mock import AsyncMock, Mock
+from urllib.parse import parse_qsl, urlsplit
+
+import pytest
+
+import silkworm.api as api_module
+import silkworm.response as response_module
+from silkworm.engine import Engine
+from silkworm.http import HttpClient
+from silkworm.middlewares import (
+    CloudflareCrawlMiddleware,
+    CookiesMiddleware,
+    DelayMiddleware,
+    ProxyMiddleware,
+    RequestResponseStreamMiddleware,
+    RetryMiddleware,
+    RobotsTxtDelayMiddleware,
+)
+from silkworm.onionlink import OnionLinkClient
+from silkworm.request import Request
+from silkworm.response import HTMLResponse, Response
+from silkworm.servo import (
+    SERVO_FULL_PAGE_META_KEY,
+    SERVO_JAVASCRIPT_META_KEY,
+    SERVO_SCREENSHOT_META_KEY,
+    SERVO_SETTLE_MS_META_KEY,
+    SERVO_USER_AGENT_META_KEY,
+    ServoFetchClient,
+)
+from silkworm.spiders import Spider
+
+
+class _StubResponse:
+    def __init__(
+        self, *, status: Any = 200, headers: Any = None, body: bytes | str = b""
+    ) -> None:
+        self.status = status
+        self.headers = headers or {}
+        self._body = body
+
+    async def read(self) -> bytes:
+        if isinstance(self._body, bytes):
+            return self._body
+        return str(self._body).encode("utf-8")
+
+    async def text(self) -> str:
+        if isinstance(self._body, bytes):
+            return self._body.decode("utf-8", errors="replace")
+        return str(self._body)
+
+
+async def test_httpclient_streams_wreq_views_and_releases_context() -> None:
+    class Stream:
+        exited = False
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            self.exited = True
+
+        async def __aiter__(self) -> AsyncIterator[object]:
+            yield memoryview(b"body")
+            yield object()  # wreq streams may also yield trailer headers.
+
+    class WreqResponse:
+        exited = False
+        closed = False
+
+        def __init__(self) -> None:
+            self.body_stream = Stream()
+
+        def stream(self) -> Stream:
+            return self.body_stream
+
+        async def __aexit__(self, *args: object) -> None:
+            self.exited = True
+
+        async def close(self) -> None:
+            self.closed = True
+
+    client = HttpClient()
+    response = WreqResponse()
+    assert await client._read_body(response, {}, None, "https://example.com") == b"body"
+    await client._close_response(response)
+    assert response.body_stream.exited
+    assert response.exited
+    assert not response.closed
+
+
+class _RecordingClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, str, dict[str, Any]]] = []
+
+    async def request(self, method: Any, url: str, **kwargs: Any) -> _StubResponse:
+        self.calls.append((method, url, kwargs))
+        return _StubResponse()
+
+
+class _MethodStub:
+    POST = "POST"
+
+
+class _OnionHeader:
+    def __init__(self, name: str, value: str) -> None:
+        self.name = name
+        self.value = value
+
+
+class _OnionResponse:
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        headers: tuple[_OnionHeader, ...] = (),
+        body: bytes = b"",
+    ) -> None:
+        self.status_code = status_code
+        self.headers = headers
+        self.body = body
+
+
+class _RecordingOnionSession:
+    def __init__(self, **kwargs: Any) -> None:
+        self.options = kwargs
+        self.calls: list[dict[str, Any]] = []
+        self.responses: list[_OnionResponse] = [
+            _OnionResponse(
+                headers=(_OnionHeader("Content-Type", "text/html; charset=utf-8"),),
+                body=b"<html><title>ok</title></html>",
+            )
+        ]
+
+    async def request(self, method: str, onion: str, **kwargs: Any) -> _OnionResponse:
+        self.calls.append({"method": method, "onion": onion, **kwargs})
+        if len(self.responses) > 1:
+            return self.responses.pop(0)
+        return self.responses[0]
+
+
+@pytest.fixture
+def onionlink_session(monkeypatch: pytest.MonkeyPatch) -> type[_RecordingOnionSession]:
+    module: Any = types.ModuleType("onionlink")
+    module.AsyncSession = _RecordingOnionSession
+    monkeypatch.setitem(sys.modules, "onionlink", module)
+    return _RecordingOnionSession
+
+
+class _FakeServoPage:
+    def __init__(
+        self,
+        *,
+        url: str = "https://example.com/rendered",
+        html: str = "<html><title>Servo</title></html>",
+        title: str | None = "Servo\nTitle",
+        screenshot_len: int = 42,
+    ) -> None:
+        self.url = url
+        self.html = html
+        self.title = title
+        self.screenshot_len = screenshot_len
+
+
+class _FakeServoAsyncBrowser:
+    instances: ClassVar[list["_FakeServoAsyncBrowser"]] = []
+    active = 0
+    max_active = 0
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.options = kwargs
+        self.calls: list[dict[str, Any]] = []
+        self.closed = False
+        _FakeServoAsyncBrowser.instances.append(self)
+
+    async def fetch(self, url: str, **kwargs: Any) -> _FakeServoPage:
+        _FakeServoAsyncBrowser.active += 1
+        _FakeServoAsyncBrowser.max_active = max(
+            _FakeServoAsyncBrowser.max_active,
+            _FakeServoAsyncBrowser.active,
+        )
+        self.calls.append({"mode": "fetch", "url": url, **kwargs})
+        await asyncio.sleep(0.01)
+        _FakeServoAsyncBrowser.active -= 1
+        return _FakeServoPage(url=f"{url}/rendered")
+
+    async def screenshot(self, url: str, **kwargs: Any) -> _FakeServoPage:
+        self.calls.append({"mode": "screenshot", "url": url, **kwargs})
+        return _FakeServoPage(url=f"{url}/screenshot")
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture
+def servofetch_module(monkeypatch: pytest.MonkeyPatch) -> type[_FakeServoAsyncBrowser]:
+    _FakeServoAsyncBrowser.instances = []
+    _FakeServoAsyncBrowser.active = 0
+    _FakeServoAsyncBrowser.max_active = 0
+    module: Any = types.ModuleType("servofetch")
+    module.AsyncBrowser = _FakeServoAsyncBrowser
+    monkeypatch.setitem(sys.modules, "servofetch", module)
+    return _FakeServoAsyncBrowser
+
+
+def test_request_replace_creates_new_request_with_updates():
+    original = Request(
+        url="https://example.com",
+        method="GET",
+        headers={"X-Token": "abc"},
+        meta={"foo": 1},
+    )
+
+    updated = original.replace(method="POST", meta={"foo": 2})
+
+    assert updated is not original
+    assert updated.method == "POST"
+    assert updated.meta["foo"] == 2
+    assert original.method == "GET"
+    assert original.meta["foo"] == 1
+
+
+def test_servo_fetch_client_requires_servofetch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import silkworm.servo as servo_module
+
+    def fake_import_module(name: str) -> types.ModuleType:
+        if name == "servofetch":
+            raise ImportError("missing")
+        raise AssertionError(name)
+
+    monkeypatch.setattr(servo_module, "import_module", fake_import_module)
+
+    with pytest.raises(ImportError, match=r"silkworm-rs\[servo\]"):
+        ServoFetchClient()
+
+
+async def test_servo_fetch_client_passes_render_options_and_returns_html(
+    servofetch_module: type[_FakeServoAsyncBrowser],
+):
+    client = ServoFetchClient(
+        concurrency=2,
+        timeout=30.0,
+        settle_ms=100,
+        user_agent="client-agent",
+        allow_private_addresses=True,
+    )
+    req = Request(
+        url="https://example.com",
+        timeout=timedelta(seconds=5),
+        meta={
+            SERVO_JAVASCRIPT_META_KEY: "document.title",
+            SERVO_SETTLE_MS_META_KEY: 250,
+            SERVO_USER_AGENT_META_KEY: "request-agent",
+        },
+    )
+
+    response = await client.fetch(req)
+
+    browser = servofetch_module.instances[0]
+    assert browser.options["timeout"] == 30.0
+    assert browser.options["settle_ms"] == 100
+    assert browser.options["user_agent"] == "client-agent"
+    assert browser.options["allow_private_addresses"] is True
+    assert browser.calls == [
+        {
+            "mode": "fetch",
+            "url": "https://example.com",
+            "timeout": 5.0,
+            "settle_ms": 250,
+            "user_agent": "request-agent",
+            "javascript": "document.title",
+        }
+    ]
+    assert isinstance(response, HTMLResponse)
+    assert response.url == "https://example.com/rendered"
+    assert response.body == b"<html><title>Servo</title></html>"
+    assert response.request is req
+    assert response.headers["content-type"] == "text/html; charset=utf-8"
+    assert response.headers["x-silkworm-render-engine"] == "servofetch"
+    assert response.headers["x-silkworm-servo-title"] == "Servo Title"
+
+    await client.close()
+    assert browser.closed is True
+
+
+async def test_servo_fetch_client_supports_screenshot_mode(
+    servofetch_module: type[_FakeServoAsyncBrowser],
+):
+    client = ServoFetchClient()
+    request = Request(
+        url="https://example.com",
+        meta={
+            SERVO_SCREENSHOT_META_KEY: True,
+            SERVO_FULL_PAGE_META_KEY: False,
+        },
+    )
+
+    response = await client.fetch(request)
+
+    browser = servofetch_module.instances[0]
+    assert browser.calls == [
+        {
+            "mode": "screenshot",
+            "url": "https://example.com",
+            "full_page": False,
+            "timeout": None,
+            "settle_ms": 0,
+            "user_agent": None,
+        }
+    ]
+    assert response.url == "https://example.com/screenshot"
+    assert response.headers["x-silkworm-servo-screenshot"] == "true"
+    assert response.headers["x-silkworm-servo-screenshot-len"] == "42"
+
+
+async def test_servo_fetch_client_enforces_concurrency(
+    servofetch_module: type[_FakeServoAsyncBrowser],
+):
+    client = ServoFetchClient(concurrency=1)
+
+    await asyncio.gather(
+        client.fetch(Request(url="https://example.com/1")),
+        client.fetch(Request(url="https://example.com/2")),
+    )
+
+    assert servofetch_module.max_active == 1
+
+
+async def test_engine_uses_servo_fetch_client(
+    servofetch_module: type[_FakeServoAsyncBrowser],
+):
+    class RenderedSpider(Spider):
+        name = "rendered"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen_html = False
+
+        async def start_requests(self):
+            await self.follow(Request(url="https://example.com", callback=self.parse))
+
+        async def parse(self, response: Response):
+            self.seen_html = isinstance(response, HTMLResponse)
+
+    spider = RenderedSpider()
+    client = ServoFetchClient()
+    engine = Engine(spider, http_client=client)  # type: ignore[arg-type]
+
+    await engine.run()
+
+    assert spider.seen_html is True
+    assert servofetch_module.instances[0].closed is True
+
+
+async def test_fetch_html_servo_helper(
+    monkeypatch: pytest.MonkeyPatch,
+    servofetch_module: type[_FakeServoAsyncBrowser],
+):
+    parsed: dict[str, str] = {}
+
+    async def fake_parse(html: str):
+        parsed["html"] = html
+        return "document"
+
+    monkeypatch.setattr(api_module, "parse", fake_parse)
+
+    text, doc = await api_module.fetch_html_servo(
+        "https://example.com",
+        timeout=7,
+        settle_ms=300,
+        user_agent="helper-agent",
+        javascript="document.body.innerHTML",
+    )
+
+    browser = servofetch_module.instances[0]
+    assert browser.calls == [
+        {
+            "mode": "fetch",
+            "url": "https://example.com",
+            "timeout": 7.0,
+            "settle_ms": 300,
+            "user_agent": "helper-agent",
+            "javascript": "document.body.innerHTML",
+        }
+    ]
+    assert text == "<html><title>Servo</title></html>"
+    assert parsed["html"] == text
+    assert doc == "document"
+    assert browser.closed is True
+
+
+async def test_htmlresponse_css_aliases_select(monkeypatch: pytest.MonkeyPatch):
+    req = Request(url="http://example.com")
+    resp = HTMLResponse(
+        url=req.url,
+        status=200,
+        headers={},
+        body=b"<html></html>",
+        request=req,
+    )
+
+    document = types.SimpleNamespace()
+    document.select = AsyncMock(return_value=["first", "second"])
+    first_link = object()
+    document.select_first = AsyncMock(return_value=first_link)
+    parse_mock = AsyncMock(return_value=document)
+    monkeypatch.setattr(response_module, "parse_async", parse_mock)
+
+    links = await resp.css("a")
+    first = await resp.css_first("a")
+
+    assert len(links) == 2
+    assert first is first_link
+    parse_mock.assert_awaited_once_with(
+        resp.text,
+        max_size_bytes=resp.doc_max_size_bytes,
+    )
+    document.select.assert_awaited_once_with("a")
+    document.select_first.assert_awaited_once_with("a")
+
+
+async def test_htmlresponse_find_aliases_select_first(monkeypatch: pytest.MonkeyPatch):
+    req = Request(url="http://example.com")
+    resp = HTMLResponse(
+        url=req.url,
+        status=200,
+        headers={},
+        body=b"<html></html>",
+        request=req,
+    )
+
+    document = types.SimpleNamespace()
+    found_link = object()
+    document.select_first = AsyncMock(return_value=found_link)
+    parse_mock = AsyncMock(return_value=document)
+    monkeypatch.setattr(response_module, "parse_async", parse_mock)
+
+    found = await resp.find("a")
+
+    assert found is found_link
+    parse_mock.assert_awaited_once_with(
+        resp.text,
+        max_size_bytes=resp.doc_max_size_bytes,
+    )
+    document.select_first.assert_awaited_once_with("a")
+
+
+async def test_htmlresponse_prettify_uses_scraper_rs(monkeypatch: pytest.MonkeyPatch):
+    req = Request(url="http://example.com")
+    resp = HTMLResponse(
+        url=req.url,
+        status=200,
+        headers={},
+        body=b"<html></html>",
+        request=req,
+    )
+
+    document = types.SimpleNamespace()
+    prettify_mock = AsyncMock(return_value="<html>\n  <body></body>\n</html>")
+    document.prettify = prettify_mock
+    parse_mock = AsyncMock(return_value=document)
+    monkeypatch.setattr(response_module, "parse_async", parse_mock)
+
+    pretty = await resp.prettify()
+
+    assert pretty == "<html>\n  <body></body>\n</html>"
+    parse_mock.assert_awaited_once_with(
+        resp.text,
+        max_size_bytes=resp.doc_max_size_bytes,
+    )
+    prettify_mock.assert_awaited_once_with()
+
+
+async def test_htmlresponse_close_releases_cached_document(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    req = Request(url="http://example.com")
+    resp = HTMLResponse(
+        url=req.url,
+        status=200,
+        headers={},
+        body=b"<html></html>",
+        request=req,
+    )
+
+    document = types.SimpleNamespace()
+    document.select = AsyncMock(return_value=[])
+    document.close = Mock()
+    parse_mock = AsyncMock(return_value=document)
+    monkeypatch.setattr(response_module, "parse_async", parse_mock)
+
+    await resp.select("a")
+    resp.close()
+
+    document.close.assert_called_once_with()
+
+
+def test_htmlresponse_url_join_resolves_relative_url():
+    req = Request(url="http://example.com/dir/page")
+    resp = HTMLResponse(url=req.url, status=200, headers={}, body=b"", request=req)
+
+    resolved = resp.url_join("../other")
+
+    assert resolved == "http://example.com/other"
+
+
+def test_response_close_releases_payload():
+    req = Request(url="http://example.com")
+    resp = Response(
+        url=req.url,
+        status=200,
+        headers={"Content-Type": "text/html"},
+        body=b"abc",
+        request=req,
+    )
+
+    resp.close()
+    resp.close()  # idempotent
+
+    assert resp.body == b""
+    assert resp.headers == {}
+
+
+def test_httpclient_build_url_merges_params_with_existing_query():
+    client = HttpClient()
+    req = Request(
+        url="https://example.com/search?q=foo&lang=en",
+        params={"page": 2, "q": "bar"},
+    )
+
+    built = client._build_url(req)
+    parsed = dict(parse_qsl(urlsplit(built).query))
+
+    assert parsed == {"q": "bar", "lang": "en", "page": "2"}
+
+
+def test_httpclient_normalize_headers_handles_multiple_shapes():
+    client = HttpClient()
+    raw_headers = [
+        b"Content-Type: text/html; charset=utf-8",
+        ("X-Test", " value "),
+        "X-RateLimit: 10",
+        "InvalidHeaderWithoutColon",
+    ]
+
+    normalized = client._normalize_headers(raw_headers)
+
+    assert normalized["content-type"] == "text/html; charset=utf-8"
+    assert normalized["x-test"] == "value"
+    assert normalized["x-ratelimit"] == "10"
+
+
+def test_httpclient_normalize_headers_handles_wreq_header_map_shape():
+    class HeaderMapLike:
+        def __init__(self) -> None:
+            self._headers = {
+                b"set-cookie": [b"sid=abc; Path=/"],
+                b"x-test": [b"yes"],
+            }
+
+        def keys(self) -> list[bytes]:
+            return list(self._headers)
+
+        def get_all(self, key: bytes) -> list[bytes]:
+            return self._headers[key]
+
+    client = HttpClient()
+
+    normalized = client._normalize_headers(HeaderMapLike())
+
+    assert normalized["set-cookie"] == "sid=abc; Path=/"
+    assert normalized["x-test"] == "yes"
+
+
+async def test_httpclient_follows_redirects():
+    class RedirectClient(_RecordingClient):
+        async def request(self, method: Any, url: str, **kwargs: Any) -> _StubResponse:
+            self.calls.append((method, url, kwargs))
+            if url.startswith("http://example.com/start"):
+                return _StubResponse(
+                    status=302,
+                    headers={"Location": "/next", "Content-Type": "text/plain"},
+                )
+            return _StubResponse(
+                status=200, headers={"Content-Type": "text/plain"}, body=b"ok"
+            )
+
+    client = HttpClient()
+    client._client = RedirectClient()
+
+    resp = await client.fetch(
+        Request(url="http://example.com/start", params={"foo": "1"})
+    )
+
+    assert resp.status == 200
+    assert resp.url == "http://example.com/next"
+    assert resp.body == b"ok"
+    assert resp.request.url == "http://example.com/next"
+    assert client._client.calls[0][1] == "http://example.com/start?foo=1"
+    assert client._client.calls[1][1] == "http://example.com/next"
+
+
+async def test_httpclient_redirect_does_not_mutate_original_request_meta():
+    class RedirectClient(_RecordingClient):
+        async def request(self, method: Any, url: str, **kwargs: Any) -> _StubResponse:
+            self.calls.append((method, url, kwargs))
+            if len(self.calls) == 1:
+                return _StubResponse(
+                    status=302,
+                    headers={"Location": "/next", "Content-Type": "text/plain"},
+                )
+            return _StubResponse(
+                status=200,
+                headers={"Content-Type": "text/plain"},
+                body=b"ok",
+            )
+
+    client = HttpClient()
+    client._client = RedirectClient()
+    request = Request(url="http://example.com/start", meta={"trace": "root"})
+
+    resp = await client.fetch(request)
+
+    assert "redirect_times" not in request.meta
+    assert resp.request.meta["trace"] == "root"
+    assert resp.request.meta["redirect_times"] == 1
+
+
+async def test_httpclient_converts_string_proxy_to_wreq_proxy():
+    client = HttpClient()
+    client._client = _RecordingClient()
+
+    await client.fetch(
+        Request(
+            url="http://example.com",
+            meta={"proxy": "http://proxy.example:8080"},
+        )
+    )
+
+    proxy = client._client.calls[0][2]["proxy"]
+
+    assert proxy.__class__.__name__ in {"_DummyProxy", "Proxy"}
+    assert not isinstance(proxy, str)
+    assert "proxy.example:8080" in str(proxy)
+
+
+async def test_httpclient_detects_redirect_loops():
+    from silkworm.exceptions import HttpError
+
+    class LoopingClient(_RecordingClient):
+        async def request(self, method: Any, url: str, **kwargs: Any) -> _StubResponse:
+            self.calls.append((method, url, kwargs))
+            return _StubResponse(
+                status=302, headers={"Location": "/loop", "Content-Type": "text/plain"}
+            )
+
+    client = HttpClient(max_redirects=2)
+    client._client = LoopingClient()
+
+    with pytest.raises(HttpError):
+        await client.fetch(Request(url="http://example.com/loop"))
+
+
+async def test_httpclient_handles_unhashable_status_codes():
+    class UnhashableStatus:
+        __hash__ = None  # pyright: ignore[reportAssignmentType]
+
+        def __int__(self) -> int:
+            return 302
+
+    class RedirectClient(_RecordingClient):
+        async def request(self, method: Any, url: str, **kwargs: Any) -> _StubResponse:
+            self.calls.append((method, url, kwargs))
+            if len(self.calls) == 1:
+                return _StubResponse(
+                    status=UnhashableStatus(),
+                    headers={"Location": "/next", "Content-Type": "text/plain"},
+                )
+            return _StubResponse(
+                status=200, headers={"Content-Type": "text/plain"}, body=b"done"
+            )
+
+    client = HttpClient()
+    redirect_client = RedirectClient()
+    client._client = redirect_client
+
+    resp = await client.fetch(Request(url="http://example.com/start"))
+
+    assert resp.status == 200
+    assert resp.url == "http://example.com/next"
+    assert redirect_client.calls[0][1] == "http://example.com/start"
+    assert redirect_client.calls[1][1] == "http://example.com/next"
+
+
+async def test_httpclient_sets_keep_alive():
+    client = HttpClient(keep_alive=True)
+    recording = _RecordingClient()
+    client._client = recording
+
+    await client.fetch(Request(url="http://example.com/keep-alive"))
+
+    assert recording.calls
+    kwargs = recording.calls[0][2]
+    assert kwargs.get("keep_alive") is True
+    assert kwargs["headers"].get("Connection") == "keep-alive"
+
+
+async def test_httpclient_keep_alive_when_kwarg_not_supported():
+    class StrictClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def request(
+            self,
+            method: Any,
+            url: str,
+            *,
+            headers: dict[str, str],
+            data: Any = None,
+            json: Any = None,
+            proxy: Any = None,
+            timeout: Any = None,
+        ) -> _StubResponse:
+            self.calls.append(
+                {
+                    "method": method,
+                    "url": url,
+                    "headers": headers,
+                    "data": data,
+                    "json": json,
+                    "proxy": proxy,
+                    "timeout": timeout,
+                }
+            )
+            return _StubResponse(headers={"Content-Type": "text/plain"})
+
+    client = HttpClient(keep_alive=True)
+    strict = StrictClient()
+    client._client = strict
+
+    resp = await client.fetch(Request(url="http://example.com/no-kw"))
+
+    assert resp.status == 200
+    assert strict.calls
+    first_call = strict.calls[0]
+    assert first_call["headers"].get("Connection") == "keep-alive"
+
+
+async def test_httpclient_uses_timedelta_timeout():
+    client = HttpClient()
+    recording = _RecordingClient()
+    client._client = recording
+
+    resp = await client.fetch(Request(url="http://example.com", timeout=5))
+
+    assert resp.status == 200
+    assert len(recording.calls) == 1
+    assert isinstance(recording.calls[0][2]["timeout"], timedelta)
+
+
+async def test_httpclient_and_engine_default_to_60_second_timeout():
+    from silkworm.http import DEFAULT_REQUEST_TIMEOUT
+
+    assert DEFAULT_REQUEST_TIMEOUT == 60.0
+    client = HttpClient()
+    recording = _RecordingClient()
+    client._client = recording
+
+    await client.fetch(Request(url="http://example.com/default"))
+    await client.fetch(Request(url="http://example.com/override", timeout=5))
+
+    sent = [call[2]["timeout"] for call in recording.calls]
+    assert sent == [timedelta(seconds=60), timedelta(seconds=5)]
+
+    engine = Engine(Spider())
+    assert cast("HttpClient", engine.http)._timeout == DEFAULT_REQUEST_TIMEOUT
+    await engine.http.close()
+
+
+async def test_fetch_html_defaults_to_60_second_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class Page:
+        async def text(self) -> str:
+            return "<html></html>"
+
+    class Client:
+        def __init__(self, **options: Any) -> None:
+            return None
+
+        async def get(self, url: str, **kwargs: Any) -> Page:
+            calls.append(kwargs)
+            return Page()
+
+    async def fake_parse(html: str) -> str:
+        return "document"
+
+    monkeypatch.setattr(api_module, "Client", Client)
+    monkeypatch.setattr(api_module, "parse", fake_parse)
+
+    await api_module.fetch_html("https://example.com")
+    await api_module.fetch_html("https://example.com", timeout=None)
+
+    assert calls == [{"timeout": timedelta(seconds=60)}, {}]
+
+
+async def test_request_timeout_none_disables_the_default():
+    client = HttpClient(timeout=None)
+    recording = _RecordingClient()
+    client._client = recording
+
+    await client.fetch(Request(url="http://example.com/unlimited"))
+
+    assert "timeout" not in recording.calls[0][2]
+    engine = Engine(Spider(), request_timeout=None)
+    assert cast("HttpClient", engine.http)._timeout is None
+    await engine.http.close()
+
+
+async def test_httpclient_returns_synthetic_response_from_meta():
+    client = HttpClient()
+    request = Request(
+        url="https://example.com/original",
+        meta={
+            "_silkworm_mock_response": {
+                "url": "https://example.com/synthetic",
+                "status": 202,
+                "headers": {"Content-Type": "application/json"},
+                "body": '{"ok": true}',
+            }
+        },
+    )
+
+    response = await client.fetch(request)
+
+    assert response.url == "https://example.com/synthetic"
+    assert response.status == 202
+    assert response.text == '{"ok": true}'
+
+
+async def test_onionlink_client_fetches_onion_html(
+    onionlink_session: type[_RecordingOnionSession],
+):
+    client = OnionLinkClient(default_headers={"Accept": "text/html"}, timeout=7)
+    request = Request(
+        url="http://exampleexampleexampleexampleexampleexampleexampleexampleexampleexample.onion/search?q=old",
+        params={"q": "new", "page": 2},
+        meta={"onionlink_response_limit": 8 * 1024 * 1024},
+    )
+
+    response = await client.fetch(request)
+    session = client._client
+
+    assert isinstance(session, onionlink_session)
+    assert isinstance(response, HTMLResponse)
+    assert response.status == 200
+    assert response.url.endswith("/search?q=new&page=2")
+    assert session.options["timeout_ms"] == 7000
+    assert session.calls == [
+        {
+            "method": "GET",
+            "onion": "exampleexampleexampleexampleexampleexampleexampleexampleexampleexample.onion",
+            "port": 80,
+            "path": "/search?q=new&page=2",
+            "headers": {"Accept": "text/html"},
+            "data": None,
+            "json": None,
+            "form": None,
+            "response_limit": 8 * 1024 * 1024,
+        }
+    ]
+
+
+async def test_onionlink_client_follows_redirects(onionlink_session):
+    client = OnionLinkClient()
+    session = client._client
+    session.responses = [
+        _OnionResponse(
+            status_code=302,
+            headers=(_OnionHeader("Location", "/next"),),
+        ),
+        _OnionResponse(
+            status_code=200,
+            headers=(_OnionHeader("Content-Type", "text/plain"),),
+            body=b"done",
+        ),
+    ]
+
+    response = await client.fetch(
+        Request(
+            url="http://exampleexampleexampleexampleexampleexampleexampleexampleexampleexample.onion/start",
+        )
+    )
+
+    assert response.status == 200
+    assert response.url.endswith("/next")
+    assert response.body == b"done"
+    assert [call["path"] for call in session.calls] == ["/start", "/next"]
+
+
+async def test_onionlink_client_rejects_non_onion_hosts(onionlink_session):
+    client = OnionLinkClient()
+
+    with pytest.raises(Exception, match="only supports .onion"):
+        await client.fetch(Request(url="https://example.com"))
+
+
+def test_http_client_rejects_non_positive_concurrency() -> None:
+    with pytest.raises(ValueError, match="concurrency must be positive"):
+        HttpClient(concurrency=0)
+
+
+def test_onionlink_client_requires_async_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module: Any = types.ModuleType("onionlink")
+    module.Session = _RecordingOnionSession
+    monkeypatch.setitem(sys.modules, "onionlink", module)
+
+    with pytest.raises(ImportError, match=r"onionlink>=0\.1\.2"):
+        OnionLinkClient()
+
+
+def _record_client_options(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    created: list[dict[str, Any]] = []
+
+    def fake_client(**options: Any) -> object:
+        created.append(options)
+        return object()
+
+    monkeypatch.setattr("silkworm.http.Client", fake_client)
+    return created
+
+
+def test_engine_http_client_uses_default_browser_emulation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from silkworm.http import DEFAULT_EMULATION
+
+    created = _record_client_options(monkeypatch)
+    HttpClient()
+    Engine(Spider())
+
+    assert [options["emulation"] for options in created] == [
+        DEFAULT_EMULATION,
+        DEFAULT_EMULATION,
+    ]
+
+
+def test_engine_emulation_can_be_disabled(monkeypatch: pytest.MonkeyPatch):
+    created = _record_client_options(monkeypatch)
+    Engine(Spider(), emulation=None)
+
+    assert created[0]["emulation"] is None
+
+
+async def test_engine_uses_supplied_http_client():
+    class OneShotSpider(Spider):
+        start_urls = ("http://example.com",)
+
+        async def parse(self, response: Response):
+            await self.emit({"url": response.url})
+
+    class DummyHttp:
+        concurrency = 1
+        html_max_size_bytes = 5_000_000
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def fetch(self, request: Request) -> Response:
+            return Response(
+                url=request.url,
+                status=200,
+                headers={"content-type": "text/plain"},
+                body=b"ok",
+                request=request,
+            )
+
+        async def close(self) -> None:
+            self.closed = True
+
+    http = DummyHttp()
+    spider = OneShotSpider()
+    engine = Engine(spider, http_client=http)  # type: ignore[arg-type]
+
+    await engine.run()
+
+    assert http.closed is True
+
+
+async def test_retry_middleware_returns_retry_request(monkeypatch: pytest.MonkeyPatch):
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr("silkworm._middlewares.retry.asyncio.sleep", fake_sleep)
+
+    middleware = RetryMiddleware(max_times=2, backoff_base=0.1)
+    request = Request(url="http://example.com")
+    response = Response(
+        url=request.url, status=500, headers={}, body=b"", request=request
+    )
+
+    result = await middleware.process_response(response, Spider())
+
+    assert isinstance(result, Request)
+    assert result is not request
+    assert result.meta["retry_times"] == 1
+    assert result.dont_filter is True
+    assert sleep_calls == [0.1]
+
+
+async def test_retry_middleware_does_not_mutate_original_request_meta(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("silkworm._middlewares.retry.asyncio.sleep", fake_sleep)
+
+    middleware = RetryMiddleware(max_times=2, backoff_base=0.0)
+    request = Request(url="http://example.com", meta={"trace": "root"})
+    response = Response(
+        url=request.url, status=500, headers={}, body=b"", request=request
+    )
+
+    result = await middleware.process_response(response, Spider())
+
+    assert isinstance(result, Request)
+    assert "retry_times" not in request.meta
+    assert result.meta["trace"] == "root"
+    assert result.meta["retry_times"] == 1
+
+
+async def test_retry_middleware_sleep_codes_extend_retry(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr("silkworm._middlewares.retry.asyncio.sleep", fake_sleep)
+
+    middleware = RetryMiddleware(max_times=1, sleep_http_codes=[403], backoff_base=0.2)
+    request = Request(url="http://example.com")
+    response = Response(
+        url=request.url, status=403, headers={}, body=b"", request=request
+    )
+
+    result = await middleware.process_response(response, Spider())
+
+    assert isinstance(result, Request)
+    assert result.meta["retry_times"] == 1
+    assert sleep_calls == [0.2]
+
+
+async def test_retry_middleware_retry_without_sleep(monkeypatch: pytest.MonkeyPatch):
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr("silkworm._middlewares.retry.asyncio.sleep", fake_sleep)
+
+    middleware = RetryMiddleware(
+        max_times=1, retry_http_codes=[500], sleep_http_codes=[]
+    )
+    request = Request(url="http://example.com")
+    response = Response(
+        url=request.url, status=500, headers={}, body=b"", request=request
+    )
+
+    result = await middleware.process_response(response, Spider())
+
+    assert isinstance(result, Request)
+    assert result.meta["retry_times"] == 1
+    assert sleep_calls == []
+
+
+async def test_retry_middleware_empty_retry_codes_disable_retry(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("silkworm._middlewares.retry.asyncio.sleep", fake_sleep)
+
+    middleware = RetryMiddleware(
+        max_times=1,
+        retry_http_codes=[],
+        sleep_http_codes=[],
+    )
+    request = Request(url="http://example.com")
+    response = Response(
+        url=request.url, status=500, headers={}, body=b"", request=request
+    )
+
+    result = await middleware.process_response(response, Spider())
+
+    assert result is response
+
+
+async def test_engine_closes_responses(monkeypatch: pytest.MonkeyPatch):
+    class DummySpider(Spider):
+        name = "closer"
+
+        async def start_requests(self):
+            await self.follow(Request(url="http://example.com", callback=self.parse))
+
+        async def parse(self, response: Response):
+            return None
+
+    class ClosableResponse(Response):
+        __slots__ = ("closed",)
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    spider = DummySpider()
+    engine = Engine(spider, concurrency=1)
+    seen: list[ClosableResponse] = []
+
+    async def fake_fetch(req: Request) -> Response:
+        resp = ClosableResponse(
+            url=req.url, status=200, headers={}, body=b"", request=req
+        )
+        seen.append(resp)
+        return resp
+
+    engine.http.fetch = fake_fetch
+
+    await engine.run()
+
+    assert seen and all(r.closed for r in seen)
+
+
+async def test_retry_middleware_stops_after_max_times(monkeypatch: pytest.MonkeyPatch):
+    async def fake_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("silkworm._middlewares.retry.asyncio.sleep", fake_sleep)
+    middleware = RetryMiddleware(max_times=1)
+    request = Request(url="http://example.com", meta={"retry_times": 1})
+    response = Response(
+        url=request.url, status=500, headers={}, body=b"", request=request
+    )
+
+    result = await middleware.process_response(response, Spider())
+
+    assert result is response
+
+
+async def test_engine_retries_requests_even_if_url_seen(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("silkworm._middlewares.retry.asyncio.sleep", fake_sleep)
+
+    class DummySpider(Spider):
+        name = "retryer"
+
+        async def start_requests(self):
+            await self.follow(Request(url="http://example.com", callback=self.parse))
+
+        async def parse(self, response: Response):
+            return None
+
+    statuses = [429, 200]
+    seen_requests: list[tuple[int, int]] = []
+
+    engine = Engine(
+        DummySpider(),
+        concurrency=1,
+        response_middlewares=[RetryMiddleware(max_times=1, backoff_base=0.0)],
+    )
+
+    async def fake_fetch(req: Request) -> Response:
+        status = statuses.pop(0)
+        retry_raw = req.meta.get("retry_times", 0)
+        retry_times = int(retry_raw) if isinstance(retry_raw, (int, float, str)) else 0
+        seen_requests.append((status, retry_times))
+        return Response(url=req.url, status=status, headers={}, body=b"", request=req)
+
+    engine.http.fetch = fake_fetch
+
+    await engine.run()
+
+    assert seen_requests == [(429, 0), (200, 1)]
+
+
+async def test_delay_middleware_fixed_delay(monkeypatch: pytest.MonkeyPatch):
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr("silkworm._middlewares.delay.asyncio.sleep", fake_sleep)
+
+    middleware = DelayMiddleware(delay=1.5)
+    request = Request(url="http://example.com")
+
+    result = await middleware.process_request(request, Spider())
+
+    assert result is request
+    assert sleep_calls == [1.5]
+
+
+async def test_delay_middleware_random_delay(monkeypatch: pytest.MonkeyPatch):
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr("silkworm._middlewares.delay.asyncio.sleep", fake_sleep)
+
+    middleware = DelayMiddleware(min_delay=0.5, max_delay=2.0)
+    request = Request(url="http://example.com")
+
+    result = await middleware.process_request(request, Spider())
+
+    assert result is request
+    assert len(sleep_calls) == 1
+    assert 0.5 <= sleep_calls[0] <= 2.0
+
+
+async def test_delay_middleware_custom_function(monkeypatch: pytest.MonkeyPatch):
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr("silkworm._middlewares.delay.asyncio.sleep", fake_sleep)
+
+    def custom_delay(request: Request, spider: Spider) -> float:
+        return 3.0 if "slow" in request.url else 0.5
+
+    middleware = DelayMiddleware(delay_func=custom_delay)
+
+    slow_request = Request(url="http://slow.example.com")
+    result1 = await middleware.process_request(slow_request, Spider())
+    assert result1 is slow_request
+    assert sleep_calls[-1] == 3.0
+
+    fast_request = Request(url="http://fast.example.com")
+    result2 = await middleware.process_request(fast_request, Spider())
+    assert result2 is fast_request
+    assert sleep_calls[-1] == 0.5
+
+
+def test_delay_middleware_validation_errors():
+    # Must provide at least one configuration
+    with pytest.raises(ValueError, match="Must provide one of"):
+        DelayMiddleware()
+
+    # Cannot mix delay strategies
+    with pytest.raises(ValueError, match="Cannot use both"):
+        DelayMiddleware(delay=1.0, min_delay=0.5)
+
+    with pytest.raises(ValueError, match="cannot be used with"):
+        DelayMiddleware(delay=1.0, delay_func=lambda r, s: 1.0)
+
+    # min_delay and max_delay must both be provided
+    with pytest.raises(ValueError, match="Both min_delay and max_delay"):
+        DelayMiddleware(min_delay=0.5)
+
+    with pytest.raises(ValueError, match="Both min_delay and max_delay"):
+        DelayMiddleware(max_delay=2.0)
+
+    # Negative values not allowed
+    with pytest.raises(ValueError, match="must be non-negative"):
+        DelayMiddleware(delay=-1.0)
+
+    with pytest.raises(ValueError, match="must be non-negative"):
+        DelayMiddleware(min_delay=-0.5, max_delay=2.0)
+
+    with pytest.raises(ValueError, match="must be non-negative"):
+        DelayMiddleware(min_delay=0.5, max_delay=-2.0)
+
+    # min_delay must be <= max_delay
+    with pytest.raises(ValueError, match="must be less than or equal to"):
+        DelayMiddleware(min_delay=2.0, max_delay=0.5)
+
+
+def test_retry_middleware_validation_errors():
+    with pytest.raises(ValueError, match="max_times must be non-negative"):
+        RetryMiddleware(max_times=-1)
+
+    with pytest.raises(ValueError, match="backoff_base must be non-negative"):
+        RetryMiddleware(backoff_base=-0.1)
+
+
+async def test_delay_middleware_zero_delay(monkeypatch: pytest.MonkeyPatch):
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr("silkworm._middlewares.delay.asyncio.sleep", fake_sleep)
+
+    middleware = DelayMiddleware(delay=0.0)
+    request = Request(url="http://example.com")
+
+    result = await middleware.process_request(request, Spider())
+
+    assert result is request
+    # Zero delay should not call sleep
+    assert sleep_calls == []
+
+
+async def test_robots_txt_delay_middleware_uses_crawl_delay(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sleep_calls: list[float] = []
+    fetch_calls: list[str] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    async def fetcher(url: str) -> str:
+        fetch_calls.append(url)
+        return """
+User-agent: *
+Crawl-delay: 2
+"""
+
+    monkeypatch.setattr("silkworm._middlewares.robots.asyncio.sleep", fake_sleep)
+
+    middleware = RobotsTxtDelayMiddleware(
+        "https://example.com/articles",
+        fetcher=fetcher,
+    )
+    spider = Spider()
+    await middleware.open(spider)
+
+    first = Request(url="https://example.com/one")
+    second = Request(url="https://example.com/two")
+
+    assert await middleware.process_request(first, spider) is first
+    assert await middleware.process_request(second, spider) is second
+    assert fetch_calls == ["https://example.com/robots.txt"]
+    assert sleep_calls == [pytest.approx(2.0, abs=0.01)]
+
+
+async def test_robots_txt_delay_middleware_uses_request_rate(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    async def fetcher(url: str) -> str:
+        assert url == "http://example.com/robots.txt"
+        return """
+User-agent: silkworm
+Request-rate: 3/12
+"""
+
+    monkeypatch.setattr("silkworm._middlewares.robots.asyncio.sleep", fake_sleep)
+
+    middleware = RobotsTxtDelayMiddleware(
+        "http://example.com",
+        user_agent="silkworm",
+        fetcher=fetcher,
+    )
+    spider = Spider()
+
+    await middleware.process_request(Request(url="http://example.com/one"), spider)
+    await middleware.process_request(Request(url="http://example.com/two"), spider)
+
+    assert sleep_calls == [pytest.approx(4.0, abs=0.01)]
+
+
+async def test_robots_txt_delay_middleware_scopes_delay_to_origin(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    async def fetcher(url: str) -> str:
+        assert url == "https://example.com/robots.txt"
+        return """
+User-agent: *
+Crawl-delay: 1
+"""
+
+    monkeypatch.setattr("silkworm._middlewares.robots.asyncio.sleep", fake_sleep)
+
+    middleware = RobotsTxtDelayMiddleware("https://example.com", fetcher=fetcher)
+    spider = Spider()
+
+    await middleware.process_request(Request(url="https://other.example/one"), spider)
+    await middleware.process_request(Request(url="https://other.example/two"), spider)
+
+    assert sleep_calls == []
+
+
+async def test_robots_txt_delay_middleware_uses_fallback_after_fetch_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    async def fetcher(url: str) -> str:
+        raise RuntimeError(f"failed: {url}")
+
+    monkeypatch.setattr("silkworm._middlewares.robots.asyncio.sleep", fake_sleep)
+
+    middleware = RobotsTxtDelayMiddleware(
+        "https://example.com",
+        fallback_delay=0.5,
+        fetcher=fetcher,
+    )
+    spider = Spider()
+
+    await middleware.process_request(Request(url="https://example.com/one"), spider)
+    await middleware.process_request(Request(url="https://example.com/two"), spider)
+
+    assert sleep_calls == [pytest.approx(0.5, abs=0.01)]
+
+
+def test_robots_txt_delay_middleware_validation_errors():
+    with pytest.raises(ValueError, match="website_url must not be empty"):
+        RobotsTxtDelayMiddleware("")
+
+    with pytest.raises(ValueError, match="absolute http or https"):
+        RobotsTxtDelayMiddleware("example.com")
+
+    with pytest.raises(ValueError, match="user_agent must not be empty"):
+        RobotsTxtDelayMiddleware("https://example.com", user_agent="")
+
+    with pytest.raises(ValueError, match="fallback_delay must be non-negative"):
+        RobotsTxtDelayMiddleware("https://example.com", fallback_delay=-1)
+
+    with pytest.raises(ValueError, match="timeout must be non-negative"):
+        RobotsTxtDelayMiddleware("https://example.com", timeout=-1)
+
+
+# ProxyMiddleware tests
+async def test_proxy_middleware_round_robin_selection():
+    from silkworm.middlewares import ProxyMiddleware
+
+    proxies = ["http://proxy1:8080", "http://proxy2:8080", "http://proxy3:8080"]
+    middleware = ProxyMiddleware(proxies=proxies)
+
+    requests = [Request(url=f"http://example.com/{i}") for i in range(5)]
+    results = [await middleware.process_request(req, Spider()) for req in requests]
+
+    # Should cycle through proxies in order
+    assert results[0].meta["proxy"] == "http://proxy1:8080"
+    assert results[1].meta["proxy"] == "http://proxy2:8080"
+    assert results[2].meta["proxy"] == "http://proxy3:8080"
+    assert results[3].meta["proxy"] == "http://proxy1:8080"  # cycle back
+    assert results[4].meta["proxy"] == "http://proxy2:8080"
+
+
+async def test_proxy_middleware_random_selection():
+    from silkworm.middlewares import ProxyMiddleware
+
+    proxies = ["http://proxy1:8080", "http://proxy2:8080", "http://proxy3:8080"]
+    middleware = ProxyMiddleware(proxies=proxies, random_selection=True)
+
+    # Generate multiple requests to test random selection
+    requests = [Request(url=f"http://example.com/{i}") for i in range(30)]
+    results = [await middleware.process_request(req, Spider()) for req in requests]
+
+    # All assigned proxies should be from our list
+    assigned_proxies = [r.meta["proxy"] for r in results]
+    assert all(p in proxies for p in assigned_proxies)
+
+    # With random selection, we should see some variation
+    # (statistically unlikely to get all the same proxy with 30 requests and 3 proxies)
+    unique_proxies = set(assigned_proxies)
+    assert len(unique_proxies) > 1
+
+
+async def test_proxy_middleware_from_file(tmp_path):
+    from silkworm.middlewares import ProxyMiddleware
+
+    # Create a temporary proxy file
+    proxy_file = tmp_path / "proxies.txt"
+    proxy_file.write_text(
+        "http://proxy1:8080\nhttp://proxy2:8080\n\nhttp://proxy3:8080\n"
+    )
+
+    middleware = ProxyMiddleware(proxy_file=proxy_file)
+
+    assert len(middleware.proxies) == 3
+    assert "http://proxy1:8080" in middleware.proxies
+    assert "http://proxy2:8080" in middleware.proxies
+    assert "http://proxy3:8080" in middleware.proxies
+
+    # Test that it works
+    request = Request(url="http://example.com")
+    result = await middleware.process_request(request, Spider())
+    assert result.meta["proxy"] in middleware.proxies
+
+
+async def test_proxy_middleware_from_file_with_random_selection(tmp_path):
+    # Create a temporary proxy file
+    proxy_file = tmp_path / "proxies.txt"
+    proxy_file.write_text(
+        "http://proxy1:8080\nhttp://proxy2:8080\nhttp://proxy3:8080\n"
+    )
+
+    middleware = ProxyMiddleware(proxy_file=proxy_file, random_selection=True)
+
+    # Generate multiple requests to test random selection
+    requests = [Request(url=f"http://example.com/{i}") for i in range(30)]
+    results = [await middleware.process_request(req, Spider()) for req in requests]
+
+    # All assigned proxies should be from our list
+    assigned_proxies = [r.meta["proxy"] for r in results]
+    assert all(p in middleware.proxies for p in assigned_proxies)
+
+    # With random selection, we should see some variation
+    unique_proxies = set(assigned_proxies)
+    assert len(unique_proxies) > 1
+
+
+def test_proxy_middleware_validation_errors(tmp_path):
+    # Must provide either proxies or proxy_file
+    with pytest.raises(ValueError, match="Must provide either"):
+        ProxyMiddleware()
+
+    # Cannot provide both proxies and proxy_file
+    proxy_file = tmp_path / "proxies.txt"
+    proxy_file.write_text("http://proxy1:8080\n")
+
+    with pytest.raises(ValueError, match="Cannot specify both"):
+        ProxyMiddleware(proxies=["http://proxy1:8080"], proxy_file=proxy_file)
+
+    # File must exist
+    with pytest.raises(FileNotFoundError):
+        ProxyMiddleware(proxy_file="nonexistent.txt")
+
+    # File must contain at least one proxy
+    empty_file = tmp_path / "empty.txt"
+    empty_file.write_text("")
+
+    with pytest.raises(ValueError, match="requires at least one proxy"):
+        ProxyMiddleware(proxy_file=empty_file)
+
+    # Empty proxies list should raise error
+    with pytest.raises(ValueError, match="requires at least one proxy"):
+        ProxyMiddleware(proxies=[])
+
+
+async def test_cookies_middleware_stores_and_applies_response_cookies():
+    middleware = CookiesMiddleware()
+    spider = Spider()
+    request = Request(url="https://example.com/login")
+    response = Response(
+        url=request.url,
+        status=200,
+        headers={"set-cookie": "sid=abc; Path=/; HttpOnly"},
+        body=b"",
+        request=request,
+    )
+
+    result = await middleware.process_response(response, spider)
+    next_request = await middleware.process_request(
+        Request(url="https://example.com/account"),
+        spider,
+    )
+
+    assert result is response
+    assert next_request.headers["Cookie"] == "sid=abc"
+
+
+async def test_cookies_middleware_respects_domain_path_and_secure_flags():
+    middleware = CookiesMiddleware()
+    spider = Spider()
+    request = Request(url="https://example.com/login")
+    response = Response(
+        url=request.url,
+        status=200,
+        headers={
+            "set-cookie": (
+                "sid=abc; Domain=example.com; Path=/account; Secure, "
+                "wide=ok; Domain=example.com; Path=/"
+            ),
+        },
+        body=b"",
+        request=request,
+    )
+
+    await middleware.process_response(response, spider)
+    secure_account = await middleware.process_request(
+        Request(url="https://example.com/account/settings"),
+        spider,
+    )
+    insecure_account = await middleware.process_request(
+        Request(url="http://example.com/account/settings"),
+        spider,
+    )
+    secure_other_path = await middleware.process_request(
+        Request(url="https://example.com/help"),
+        spider,
+    )
+
+    assert secure_account.headers["Cookie"] == "sid=abc; wide=ok"
+    assert insecure_account.headers["Cookie"] == "wide=ok"
+    assert secure_other_path.headers["Cookie"] == "wide=ok"
+
+
+async def test_cookies_middleware_supports_named_cookie_jars():
+    middleware = CookiesMiddleware()
+    spider = Spider()
+
+    await middleware.process_response(
+        Response(
+            url="https://example.com/",
+            status=200,
+            headers={"set-cookie": "sid=one; Path=/"},
+            body=b"",
+            request=Request(url="https://example.com/", meta={"cookiejar": "one"}),
+        ),
+        spider,
+    )
+    await middleware.process_response(
+        Response(
+            url="https://example.com/",
+            status=200,
+            headers={"set-cookie": "sid=two; Path=/"},
+            body=b"",
+            request=Request(url="https://example.com/", meta={"cookiejar": "two"}),
+        ),
+        spider,
+    )
+
+    jar_one_request = await middleware.process_request(
+        Request(url="https://example.com/", meta={"cookiejar": "one"}),
+        spider,
+    )
+    jar_two_request = await middleware.process_request(
+        Request(url="https://example.com/", meta={"cookiejar": "two"}),
+        spider,
+    )
+
+    assert jar_one_request.headers["Cookie"] == "sid=one"
+    assert jar_two_request.headers["Cookie"] == "sid=two"
+
+
+async def test_cookies_middleware_honors_dont_merge_cookies():
+    middleware = CookiesMiddleware(cookies={"global": "1"})
+    spider = Spider()
+    request = Request(
+        url="https://example.com/",
+        meta={"dont_merge_cookies": True, "cookies": {"local": "2"}},
+    )
+
+    processed = await middleware.process_request(request, spider)
+    await middleware.process_response(
+        Response(
+            url=request.url,
+            status=200,
+            headers={"set-cookie": "sid=abc; Path=/"},
+            body=b"",
+            request=request,
+        ),
+        spider,
+    )
+    followup = await middleware.process_request(
+        Request(url="https://example.com/"),
+        spider,
+    )
+
+    assert processed.headers == {}
+    assert followup.headers["Cookie"] == "global=1"
+
+
+async def test_cookies_middleware_adds_per_request_cookies():
+    middleware = CookiesMiddleware()
+    request = Request(
+        url="https://example.com/account/profile",
+        meta={"cookies": {"token": "abc", "enabled": True}},
+    )
+
+    processed = await middleware.process_request(request, Spider())
+
+    assert processed.headers["Cookie"] == "token=abc; enabled=True"
+
+
+async def test_cookies_middleware_can_preserve_existing_cookie_header():
+    spider = Spider()
+    replacing = CookiesMiddleware(cookies={"managed": "1"})
+    preserving = CookiesMiddleware(cookies={"managed": "1"}, hide_cookie_header=False)
+
+    replaced = await replacing.process_request(
+        Request(url="https://example.com/", headers={"cookie": "manual=1"}),
+        spider,
+    )
+    preserved = await preserving.process_request(
+        Request(url="https://example.com/", headers={"cookie": "manual=1"}),
+        spider,
+    )
+
+    assert replaced.headers["Cookie"] == "managed=1"
+    assert preserved.headers["Cookie"] == "manual=1"
+
+
+async def test_cookies_middleware_saves_and_loads_cookie_file(tmp_path):
+    cookie_file = tmp_path / "cookies.txt"
+    source = CookiesMiddleware()
+    source.set_cookie("sid", "abc", domain="example.com")
+    source.save(cookie_file)
+
+    target = CookiesMiddleware()
+    target.load(cookie_file)
+    request = await target.process_request(
+        Request(url="https://example.com/"), Spider()
+    )
+
+    assert cookie_file.exists()
+    assert request.headers["Cookie"] == "sid=abc"
+
+
+async def test_proxy_middleware_rotates_proxy_after_exception():
+    middleware = ProxyMiddleware(
+        proxies=["http://proxy1:8080", "http://proxy2:8080", "http://proxy3:8080"]
+    )
+    request = await middleware.process_request(
+        Request(url="http://example.com"), Spider()
+    )
+
+    retry_request = await middleware.process_exception(
+        request,
+        RuntimeError("proxy connection failed"),
+        Spider(),
+    )
+
+    assert isinstance(retry_request, Request)
+    assert retry_request.dont_filter is True
+    assert retry_request.meta["proxy"] == "http://proxy2:8080"
+    assert retry_request.meta["_proxy_failed_proxies"] == ["http://proxy1:8080"]
+    assert retry_request.meta["_proxy_retry_times"] == 1
+
+
+async def test_engine_retries_failed_request_with_another_proxy():
+    class DummySpider(Spider):
+        name = "proxy-retry"
+
+        async def start_requests(self):
+            await self.follow(Request(url="http://example.com", callback=self.parse))
+
+        async def parse(self, response: Response):
+            await self.emit({"status": response.status})
+
+    proxy_middleware = ProxyMiddleware(
+        proxies=["http://proxy1:8080", "http://proxy2:8080", "http://proxy3:8080"]
+    )
+    engine = Engine(
+        DummySpider(),
+        concurrency=1,
+        request_middlewares=[proxy_middleware],
+    )
+
+    seen_proxies: list[str] = []
+    scraped_items: list[dict[str, int]] = []
+
+    async def fake_process_item(item: Any) -> bool:
+        assert isinstance(item, dict)
+        scraped_items.append(item)
+        return True
+
+    async def fake_fetch(req: Request) -> Response:
+        proxy = req.meta.get("proxy")
+        assert isinstance(proxy, str)
+        seen_proxies.append(proxy)
+        if len(seen_proxies) < 3:
+            raise RuntimeError(f"Proxy failed for {req.url}")
+        return Response(url=req.url, status=200, headers={}, body=b"ok", request=req)
+
+    engine.http.fetch = fake_fetch
+    engine._process_item = fake_process_item
+
+    await engine.run()
+
+    assert seen_proxies == [
+        "http://proxy1:8080",
+        "http://proxy2:8080",
+        "http://proxy3:8080",
+    ]
+    assert scraped_items == [{"status": 200}]
+
+
+async def test_cloudflare_crawl_middleware_passthrough_without_meta():
+    middleware = CloudflareCrawlMiddleware(account_id="acct", api_token="token")
+    request = Request(url="https://example.com")
+
+    result = await middleware.process_request(request, Spider())
+
+    assert result is request
+
+
+async def test_cloudflare_crawl_middleware_builds_synthetic_response(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    middleware = CloudflareCrawlMiddleware(
+        account_id="acct",
+        api_token="token",
+        crawl_options={"limit": 5},
+    )
+    request = Request(
+        url="https://example.com",
+        meta={"cloudflare_crawl": {"depth": 2}},
+    )
+
+    async def fake_run_crawl(
+        url: str,
+        crawl_settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        assert url == "https://example.com"
+        assert crawl_settings == {"limit": 5, "depth": 2}
+        return {
+            "success": True,
+            "result": {
+                "status": "completed",
+                "records": [{"url": "https://example.com", "markdown": "# Home"}],
+            },
+        }
+
+    monkeypatch.setattr(middleware, "_run_crawl", fake_run_crawl)
+
+    processed = await middleware.process_request(request, Spider())
+
+    mock_response = processed.meta["_silkworm_mock_response"]
+    assert isinstance(mock_response, dict)
+    assert processed.meta["_cloudflare_crawl_applied"] is True
+    assert mock_response["status"] == 200
+    mock_headers = mock_response["headers"]
+    assert isinstance(mock_headers, dict)
+    assert mock_headers["x-silkworm-source"] == "cloudflare-crawl"
+
+    payload = json.loads(str(mock_response["body"]))
+    assert payload["result"]["records"][0]["url"] == "https://example.com"
+
+
+async def test_cloudflare_crawl_middleware_polls_until_completion(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    middleware = CloudflareCrawlMiddleware(
+        account_id="acct",
+        api_token="token",
+        poll_interval=0.1,
+        timeout=1.0,
+    )
+    sleep_calls: list[float] = []
+    responses = iter(
+        [
+            {"success": True, "result": {"job_id": "job-1"}},
+            {"success": True, "result": {"status": "running"}},
+            {"success": True, "result": {"status": "completed"}},
+            {
+                "success": True,
+                "result": {"status": "completed", "records": [{"url": "https://a"}]},
+            },
+        ]
+    )
+
+    api_paths: list[str] = []
+
+    async def fake_api_request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        api_paths.append(path)
+        return next(responses)
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(middleware, "_api_request", fake_api_request)
+    monkeypatch.setattr("silkworm._middlewares.cloudflare.asyncio.sleep", fake_sleep)
+
+    payload = await middleware._run_crawl("https://example.com", {})
+
+    result = payload["result"]
+    assert isinstance(result, dict)
+    assert result["status"] == "completed"
+    records = result["records"]
+    assert isinstance(records, list)
+    first_record = records[0]
+    assert isinstance(first_record, dict)
+    assert first_record["url"] == "https://a"
+    assert sleep_calls == [0.1]
+    assert api_paths == [
+        "/accounts/acct/browser-rendering/crawl",
+        "/accounts/acct/browser-rendering/crawl/job-1?limit=1",
+        "/accounts/acct/browser-rendering/crawl/job-1?limit=1",
+        "/accounts/acct/browser-rendering/crawl/job-1",
+    ]
+
+
+async def test_cloudflare_crawl_middleware_runs_inside_engine(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class CrawlSpider(Spider):
+        name = "cloudflare-crawl"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.payload: dict[str, Any] | None = None
+
+        async def start_requests(self):
+            await self.follow(
+                Request(
+                    url="https://example.com",
+                    callback=self.parse,
+                    meta={"cloudflare_crawl": True},
+                )
+            )
+
+        async def parse(self, response: Response):
+            self.payload = json.loads(response.text)
+
+    spider = CrawlSpider()
+    middleware = CloudflareCrawlMiddleware(account_id="acct", api_token="token")
+
+    async def fake_run_crawl(
+        url: str,
+        crawl_settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        assert url == "https://example.com"
+        assert crawl_settings == {}
+        return {
+            "success": True,
+            "result": {
+                "status": "completed",
+                "records": [{"url": "https://example.com/about"}],
+            },
+        }
+
+    monkeypatch.setattr(middleware, "_run_crawl", fake_run_crawl)
+
+    engine = Engine(spider, concurrency=1, request_middlewares=[middleware])
+    await engine.run()
+
+    assert spider.payload is not None
+    assert spider.payload["result"]["records"][0]["url"] == "https://example.com/about"
+
+
+async def test_request_response_stream_middleware_connects_events(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = _RecordingClient()
+    monkeypatch.setattr("silkworm._middlewares.stream.Client", lambda: client)
+    monkeypatch.setattr("silkworm._middlewares.stream.Method", _MethodStub)
+
+    middleware = RequestResponseStreamMiddleware(
+        "https://collector.example.com/events",
+    )
+    spider = Spider(name="stream-test")
+    request = Request(
+        url="https://example.com/api",
+        method="POST",
+        headers={"content-type": "application/json"},
+        json={"hello": "world"},
+        callback=spider.parse,
+    )
+
+    await middleware.open(spider)
+    processed_request = await middleware.process_request(request, spider)
+    response = Response(
+        url=processed_request.url,
+        status=201,
+        headers={"content-type": "application/json"},
+        body=b'{"ok": true}',
+        request=processed_request,
+    )
+    await middleware.process_response(response, spider)
+    await middleware.close(spider)
+
+    assert len(client.calls) == 2
+
+    request_event = client.calls[0][2]["json"]
+    response_event = client.calls[1][2]["json"]
+
+    assert request_event["event"] == "request"
+    assert response_event["event"] == "response"
+    assert request_event["exchange_id"] == response_event["exchange_id"]
+    assert request_event["request"]["url"] == "https://example.com/api"
+    assert request_event["request"]["body"]["kind"] == "json"
+    assert request_event["request"]["body"]["value"] == {"hello": "world"}
+    assert response_event["response"]["status"] == 201
+    assert response_event["response"]["encoding"] == "ascii"
+    assert isinstance(response_event["duration_ms"], float)
+
+
+async def test_request_response_stream_middleware_batches_and_adds_auth_header(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = _RecordingClient()
+    monkeypatch.setattr("silkworm._middlewares.stream.Client", lambda: client)
+    monkeypatch.setattr("silkworm._middlewares.stream.Method", _MethodStub)
+
+    middleware = RequestResponseStreamMiddleware(
+        "https://collector.example.com/events",
+        auth_token="secret-token",
+        batch_size=2,
+    )
+    spider = Spider(name="stream-test")
+    request = Request(url="https://example.com")
+
+    await middleware.open(spider)
+    processed_request = await middleware.process_request(request, spider)
+    response = Response(
+        url=processed_request.url,
+        status=200,
+        headers={"content-type": "text/plain"},
+        body=b"ok",
+        request=processed_request,
+    )
+    await middleware.process_response(response, spider)
+    await middleware.close(spider)
+
+    assert len(client.calls) == 1
+
+    _, _, kwargs = client.calls[0]
+    assert kwargs["headers"]["Authorization"] == "Bearer secret-token"
+    payload = kwargs["json"]
+    assert payload["count"] == 2
+    assert len(payload["events"]) == 2
+    assert payload["events"][0]["event"] == "request"
+    assert payload["events"][1]["event"] == "response"
+
+
+async def test_engine_runs_middleware_lifecycle_hooks():
+    events: list[str] = []
+
+    class LifecycleMiddleware:
+        async def open(self, spider: Spider) -> None:
+            events.append(f"open:{spider.name}")
+
+        async def close(self, spider: Spider) -> None:
+            events.append(f"close:{spider.name}")
+
+        async def process_request(self, request: Request, spider: Spider) -> Request:
+            events.append(f"request:{spider.name}")
+            return request
+
+    class LifecycleSpider(Spider):
+        name = "lifecycle-spider"
+        start_urls = ("https://example.com",)
+
+        async def parse(self, response: Response):
+            return None
+
+    spider = LifecycleSpider()
+    engine = Engine(
+        spider,
+        concurrency=1,
+        request_middlewares=[LifecycleMiddleware()],
+    )
+
+    async def fake_fetch(request: Request) -> Response:
+        return Response(
+            url=request.url,
+            status=200,
+            headers={"content-type": "text/plain"},
+            body=b"ok",
+            request=request,
+        )
+
+    engine.http.fetch = fake_fetch  # type: ignore[assignment]
+    await engine.run()
+
+    assert events == [
+        "open:lifecycle-spider",
+        "request:lifecycle-spider",
+        "close:lifecycle-spider",
+    ]
+
+
+async def test_engine_shared_stream_middleware_only_opens_once(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[str] = []
+
+    class SharedStreamMiddleware:
+        async def open(self, spider: Spider) -> None:
+            events.append(f"open:{spider.name}")
+
+        async def close(self, spider: Spider) -> None:
+            events.append(f"close:{spider.name}")
+
+        async def process_request(self, request: Request, spider: Spider) -> Request:
+            events.append("request")
+            return request
+
+        async def process_response(
+            self,
+            response: Response,
+            spider: Spider,
+        ) -> Response:
+            events.append("response")
+            return response
+
+    class SharedSpider(Spider):
+        name = "shared-stream-spider"
+        start_urls = ("https://example.com",)
+
+        async def parse(self, response: Response):
+            return None
+
+    spider = SharedSpider()
+    middleware = SharedStreamMiddleware()
+    engine = Engine(
+        spider,
+        concurrency=1,
+        request_middlewares=[middleware],
+        response_middlewares=[middleware],
+    )
+
+    async def fake_fetch(request: Request) -> Response:
+        return Response(
+            url=request.url,
+            status=200,
+            headers={"content-type": "text/plain"},
+            body=b"ok",
+            request=request,
+        )
+
+    engine.http.fetch = fake_fetch  # type: ignore[assignment]
+    await engine.run()
+
+    assert events == [
+        "open:shared-stream-spider",
+        "request",
+        "response",
+        "close:shared-stream-spider",
+    ]

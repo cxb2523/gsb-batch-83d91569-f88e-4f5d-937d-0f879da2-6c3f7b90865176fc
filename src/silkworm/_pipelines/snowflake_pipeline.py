@@ -1,0 +1,204 @@
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING, Any
+
+try:
+    import snowflake.connector  # type: ignore[import-not-found]
+
+    SNOWFLAKE_AVAILABLE = True
+except ImportError:
+    SNOWFLAKE_AVAILABLE = False
+
+from .._resources import raise_cleanup_errors
+from ..logging import Logger, get_logger
+from .base import _BatchPipelineMixin, log_pipeline_item, validate_table_name
+
+if TYPE_CHECKING:
+    from .._types import JSONValue
+    from ..spiders import Spider
+
+
+class SnowflakePipeline(_BatchPipelineMixin):
+    native_batch = True
+    """
+    Pipeline that sends items to a Snowflake data warehouse.
+
+    Args:
+        account: Snowflake account identifier.
+        user: Login user.
+        password: Login password.
+        database: Database name.
+        schema: Schema name.
+        warehouse: Compute warehouse name.
+        table: Valid unquoted destination table.
+        role: Optional active role.
+
+    Example::
+
+        from silkworm.pipelines import SnowflakePipeline
+
+        pipeline = SnowflakePipeline(
+            account="myaccount",
+            user="myuser",
+            password="mypassword",
+            database="mydatabase",
+            schema="myschema",
+            warehouse="mywarehouse",
+            table="items",
+        )
+    """
+
+    def __init__(
+        self,
+        account: str,
+        user: str,
+        password: str,
+        database: str,
+        schema: str,
+        warehouse: str,
+        *,
+        table: str = "items",
+        role: str | None = None,
+    ) -> None:
+        """
+        Initialize SnowflakePipeline.
+
+        Args:
+            account: Snowflake account identifier
+            user: Snowflake username
+            password: Snowflake password
+            database: Database name
+            schema: Schema name
+            warehouse: Warehouse name
+            table: Table name (default: "items")
+            role: Optional role name
+        """
+        if not SNOWFLAKE_AVAILABLE:
+            raise ImportError(
+                "snowflake-connector-python is required for SnowflakePipeline. "
+                "Install it with: pip install silkworm-rs[snowflake]",
+            )
+
+        self.account = account
+        self.user = user
+        self.password = password
+        self.database = database
+        self.schema = schema
+        self.warehouse = warehouse
+        self.table: str = validate_table_name(table)
+        self.role = role
+        self._conn: Any = None
+        self._cursor: Any = None
+        self.logger: Logger = get_logger(component="SnowflakePipeline")
+
+    async def open(self, spider: Spider) -> None:
+        """Connect and create the VARIANT-backed table if absent."""
+        # Connect to Snowflake
+        conn_params = {
+            "account": self.account,
+            "user": self.user,
+            "password": self.password,
+            "database": self.database,
+            "schema": self.schema,
+            "warehouse": self.warehouse,
+        }
+        if self.role:
+            conn_params["role"] = self.role
+
+        conn = snowflake.connector.connect(**conn_params)  # type: ignore[attr-defined]
+        self._conn = conn
+        try:
+            cursor = conn.cursor()
+            self._cursor = cursor
+            cursor.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {self.table} (
+                    id NUMBER AUTOINCREMENT PRIMARY KEY,
+                    spider VARCHAR(255) NOT NULL,
+                    data VARIANT NOT NULL,
+                    created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+                )
+                """,
+            )
+        except BaseException as exc:
+            try:
+                await self.close(spider)
+            except BaseException as cleanup_exc:  # noqa: BLE001
+                exc.add_note(f"Snowflake rollback failed: {cleanup_exc}")
+            raise
+
+        self.logger.info(
+            "Opened Snowflake pipeline",
+            account=self.account,
+            database=self.database,
+            schema=self.schema,
+            table=self.table,
+        )
+
+    async def close(self, spider: Spider) -> None:
+        """Close the Snowflake cursor and connection."""
+        cursor = self._cursor
+        conn = self._conn
+        self._cursor = None
+        self._conn = None
+        errors: list[BaseException] = []
+        if cursor:
+            try:
+                cursor.close()
+            except BaseException as exc:  # noqa: BLE001 - attempt connection close
+                errors.append(exc)
+
+        if conn:
+            try:
+                conn.close()
+            except BaseException as exc:  # noqa: BLE001 - report all cleanup failures
+                errors.append(exc)
+
+        self.logger.info("Closed Snowflake pipeline", table=self.table)
+        raise_cleanup_errors("Snowflake pipeline cleanup failed", errors)
+
+    async def process_item(self, item: JSONValue, spider: Spider) -> JSONValue:
+        """Insert and commit one JSON item with its spider name."""
+        if not self._cursor or not self._conn:
+            raise RuntimeError("SnowflakePipeline not opened")
+
+        # Insert item into Snowflake
+        self._cursor.execute(
+            f"INSERT INTO {self.table} (spider, data) VALUES (%s, %s)",
+            (spider.name, json.dumps(item, ensure_ascii=False)),
+        )
+        self._conn.commit()
+
+        log_pipeline_item(
+            self,
+            "Inserted item in Snowflake",
+            table=self.table,
+            spider=spider.name,
+        )
+        return item
+
+    async def process_items(
+        self, items: list[JSONValue], spider: Spider
+    ) -> list[JSONValue]:
+        if not items:
+            return items
+        if not self._cursor or not self._conn:
+            raise RuntimeError("SnowflakePipeline not opened")
+        try:
+            self._cursor.executemany(
+                f"INSERT INTO {self.table} (spider, data) VALUES (%s, %s)",
+                [(spider.name, json.dumps(item, ensure_ascii=False)) for item in items],
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        log_pipeline_item(
+            self,
+            "Inserted item batch in Snowflake",
+            table=self.table,
+            spider=spider.name,
+            item_count=len(items),
+        )
+        return items

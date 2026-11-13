@@ -1,0 +1,602 @@
+"""HTTP response containers, decoding, selectors, and link-following helpers."""
+
+from __future__ import annotations
+
+import asyncio
+import codecs
+import re
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Self, TypeVar
+from urllib.parse import urljoin
+
+from scraper_rs.asyncio import (
+    parse as parse_async,
+)
+from typing_extensions import override
+
+from .exceptions import SelectorError
+
+T = TypeVar("T")
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterable
+
+    from scraper_rs.asyncio import AsyncDocument, AsyncElement
+
+    from .markdown import MarkdownMode, MarkdownOptions, MarkdownResult
+    from .request import Callback, Request
+
+
+_CHARSET_RE = re.compile(r"charset=([^\s;\"'>]+)", re.IGNORECASE)
+_META_CHARSET_RE = re.compile(
+    rb"<meta\s+charset\s*=\s*['\"]?([a-zA-Z0-9._:-]+)", re.IGNORECASE
+)
+_META_CONTENT_TYPE_RE = re.compile(
+    rb"<meta\s+http-equiv\s*=\s*['\"]?content-type['\"]?[^>]*charset\s*=\s*['\"]?([a-zA-Z0-9._:-]+)",
+    re.IGNORECASE,
+)
+_XML_DECLARATION_RE = re.compile(
+    rb"<\?xml[^>]+encoding\s*=\s*['\"]([a-zA-Z0-9._:-]+)['\"]",
+    re.IGNORECASE,
+)
+_CHARSET_DETECTION_SAMPLE_BYTES = 128 * 1024
+_BOM_SEQUENCE = (
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+    (codecs.BOM_UTF8, "utf-8-sig"),
+)
+_PREFERRED_WEB_ENCODINGS = {
+    "utf-8",
+    "utf-8-sig",
+    "utf-16",
+    "utf-16-be",
+    "utf-16-le",
+    "utf-32",
+    "utf-32-be",
+    "utf-32-le",
+    "big5",
+    "cp1250",
+    "cp1251",
+    "cp1252",
+    "cp1253",
+    "cp1254",
+    "cp1255",
+    "cp1256",
+    "cp1257",
+    "cp1258",
+    "euc-jp",
+    "euc-kr",
+    "gb18030",
+    "gb2312",
+    "gbk",
+    "ibm866",
+    "iso-8859-1",
+    "iso-8859-2",
+    "iso-8859-3",
+    "iso-8859-4",
+    "iso-8859-5",
+    "iso-8859-6",
+    "iso-8859-7",
+    "iso-8859-8",
+    "iso-8859-10",
+    "iso-8859-13",
+    "iso-8859-14",
+    "iso-8859-15",
+    "iso-8859-16",
+    "koi8-r",
+    "koi8-u",
+    "mac_cyrillic",
+    "macintosh",
+    "shift_jis",
+    "windows-1250",
+    "windows-1251",
+    "windows-1252",
+    "windows-1253",
+    "windows-1254",
+    "windows-1255",
+    "windows-1256",
+    "windows-1257",
+    "windows-1258",
+    "windows-874",
+}
+
+
+@dataclass(slots=True)
+class Response:
+    """Represent a completed HTTP response and its originating request.
+
+    Args:
+        url: Final URL after redirects.
+        status: Integer HTTP status code.
+        headers: Normalized response headers with lowercase names.
+        body: Raw response payload.
+        request: Request that produced this response.
+
+    The decoded :attr:`text` and detected :attr:`encoding` are computed lazily
+    and cached. Call :meth:`close` when retaining response objects to release
+    their payload memory early.
+    """
+
+    url: str
+    status: int
+    headers: dict[str, str]
+    body: bytes
+    request: Request
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
+    _decoded_text: str | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _detected_encoding: str | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    @property
+    def text(self) -> str:
+        """Return the response body decoded with the detected character set."""
+        if self._decoded_text is None:
+            self._decoded_text, self._detected_encoding = self._decode_text()
+        return self._decoded_text
+
+    @property
+    def encoding(self) -> str:
+        """Return the normalized encoding used by :attr:`text`.
+
+        Detection checks byte-order marks, HTTP headers, HTML/XML declarations,
+        and finally ``charset-norm`` before falling back to UTF-8 with
+        replacement characters.
+        """
+        if self._decoded_text is None:
+            self._decoded_text, self._detected_encoding = self._decode_text()
+        return self._detected_encoding or "utf-8"
+
+    def url_join(self, href: str) -> str:
+        """Resolve ``href`` relative to the final response URL."""
+        return urljoin(self.url, href)
+
+    def __enter__(self) -> Self:
+        """Return this response for deterministic synchronous cleanup."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object,
+    ) -> None:
+        """Release response resources on context exit."""
+        try:
+            self.close()
+        except BaseException as cleanup_exc:
+            if exc is None:
+                raise
+            exc.add_note(f"Response cleanup failed: {cleanup_exc}")
+
+    def _decode_text(self) -> tuple[str, str]:
+        body = self.body or b""
+        if not body:
+            return "", self._detected_encoding or "utf-8"
+
+        candidates = [
+            self._encoding_from_bom(body),
+            self._encoding_from_headers(),
+            self._encoding_from_meta(body),
+        ]
+        for encoding in self._unique_encodings(candidates):
+            decoded = self._try_decode(body, encoding)
+            if decoded is not None:
+                return decoded
+
+        normalized = self._decode_with_charset_norm(body)
+        if normalized is not None:
+            return normalized
+
+        fallback = "utf-8"
+        return body.decode(fallback, errors="replace"), fallback
+
+    def _unique_encodings(self, candidates: list[str | None]) -> list[str]:
+        seen: set[str] = set()
+        unique: list[str] = []
+        for enc in candidates:
+            normalized = self._normalize_encoding(enc)
+            if normalized is None or normalized in seen:
+                continue
+            seen.add(normalized)
+            unique.append(normalized)
+        return unique
+
+    def _normalize_encoding(self, encoding: str | bytes | None) -> str | None:
+        if encoding is None:
+            return None
+        if isinstance(encoding, bytes):
+            encoding = encoding.decode("ascii", errors="ignore")
+        normalized = encoding.strip().strip("\"'").lower()
+        normalized = normalized.replace("_", "-")
+        if not normalized:
+            return None
+        try:
+            codecs.lookup(normalized)
+        except LookupError:
+            return None
+        return normalized
+
+    def _try_decode(self, body: bytes, encoding: str | None) -> tuple[str, str] | None:
+        normalized = self._normalize_encoding(encoding)
+        if normalized is None:
+            return None
+        try:
+            return body.decode(normalized), normalized
+        except (LookupError, ValueError):
+            # ValueError covers UnicodeError from codecs such as idna.
+            return None
+
+    def _encoding_from_headers(self) -> str | None:
+        content_type = self.headers.get("content-type")
+        if not content_type:
+            return None
+        match = _CHARSET_RE.search(content_type)
+        if not match:
+            return None
+        return self._normalize_encoding(match.group(1))
+
+    def _encoding_from_bom(self, body: bytes) -> str | None:
+        for bom, encoding in _BOM_SEQUENCE:
+            if body.startswith(bom):
+                return encoding
+        return None
+
+    def _encoding_from_meta(self, body: bytes) -> str | None:
+        # Peek at the first few KB to find common charset declarations without
+        # decoding the full document.
+        head = body[:4096]
+        for regex in (_XML_DECLARATION_RE, _META_CHARSET_RE, _META_CONTENT_TYPE_RE):
+            match = regex.search(head)
+            if match:
+                return self._normalize_encoding(match.group(1))
+        return None
+
+    def _decode_with_charset_norm(self, body: bytes) -> tuple[str, str] | None:
+        try:
+            from charset_norm import from_bytes
+        except ImportError:
+            return None
+
+        # Charset detection is heuristic; a bounded prefix is typically enough and
+        # avoids building large analyzer state for multi-megabyte payloads.
+        sample = (
+            body[:_CHARSET_DETECTION_SAMPLE_BYTES]
+            if len(body) > _CHARSET_DETECTION_SAMPLE_BYTES
+            else body
+        )
+
+        try:
+            matches = from_bytes(sample)
+        except (LookupError, ValueError):
+            return None
+
+        best_scores: dict[str, float] = {}
+
+        for match in matches:
+            encoding = self._normalize_encoding(getattr(match, "encoding", None))
+            if encoding is None:
+                continue
+
+            alphabets = getattr(match, "alphabets", None) or ()
+            language = str(getattr(match, "language", "") or "").lower()
+
+            score = 0.0
+            # Bias toward common web charsets and away from console-focused code pages.
+            if encoding.startswith("utf-"):
+                score += 5.0
+            if encoding in _PREFERRED_WEB_ENCODINGS:
+                score += 2.0
+            if language and language != "unknown":
+                score += 0.5
+            if any(
+                isinstance(alphabet, str) and "cyrillic" in alphabet.lower()
+                for alphabet in alphabets
+            ):
+                score += 0.5
+            if any(
+                isinstance(alphabet, str) and "box drawing" in alphabet.lower()
+                for alphabet in alphabets
+            ):
+                score -= 1.5
+
+            previous = best_scores.get(encoding)
+            if previous is None or score > previous:
+                best_scores[encoding] = score
+
+        for encoding, _score in sorted(
+            best_scores.items(),
+            key=lambda entry: entry[1],
+            reverse=True,
+        ):
+            decoded = self._try_decode(body, encoding)
+            if decoded is not None:
+                return decoded
+
+        return None
+
+    def _follow_request(
+        self,
+        href: str,
+        callback: Callback | None,
+        kwargs: dict[str, object],
+    ) -> Request:
+        from .request import Request  # local import to avoid cycle
+
+        return Request(
+            url=self.url_join(href),
+            callback=callback or self.request.callback,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    async def follow(
+        self,
+        href: str,
+        callback: Callback | None = None,
+        **kwargs: object,
+    ) -> None:
+        """Schedule a request for a link relative to this response.
+
+        Must be awaited inside a spider callback, errback, or
+        :meth:`~silkworm.Spider.start_requests`. The request passes through
+        engine deduplication and waits for queue capacity (backpressure).
+
+        Args:
+            href: Absolute or relative target URL.
+            callback: Response callback. The originating request's callback is
+                inherited when this is omitted.
+            **kwargs: Additional :class:`~silkworm.Request` fields.
+
+        Raises:
+            SpiderError: If awaited outside an engine-run callback.
+        """
+        from ._scope import current_scope  # local import to avoid cycle
+
+        await current_scope("follow").follow(
+            self._follow_request(href, callback, kwargs)
+        )
+
+    async def follow_all(
+        self,
+        hrefs: Iterable[str | None],
+        callback: Callback | None = None,
+        **kwargs: object,
+    ) -> None:
+        """Schedule requests for every non-``None`` link in ``hrefs``.
+
+        The callback and extra request fields are applied to every request,
+        which are scheduled in input order.
+        """
+        for href in hrefs:
+            if href is not None:
+                await self.follow(href, callback=callback, **kwargs)
+
+    def close(self) -> None:
+        """Release payload references so a retained response does not pin memory.
+
+        Closing is idempotent. It clears the body, headers, and cached decoded
+        text; callers should finish reading the response first.
+        """
+        if self._closed:
+            return
+
+        self._closed = True
+        self._decoded_text = None
+        self._detected_encoding = None
+        self.body = b""
+        self.headers.clear()
+
+
+@dataclass(slots=True)
+class HTMLResponse(Response):
+    """HTTP response with lazy asynchronous HTML selector helpers.
+
+    Args:
+        doc_max_size_bytes: Maximum source size accepted by ``scraper-rs`` when
+            the document is first parsed.
+
+    The parsed document is created once and shared by selector calls. Selector
+    and parsing failures are normalized to :class:`~silkworm.SelectorError`.
+    """
+
+    doc_max_size_bytes: int = 5_000_000
+    _document: AsyncDocument | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _document_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    async def _get_document(self) -> AsyncDocument:
+        if self._document is not None:
+            return self._document
+
+        async with self._document_lock:
+            if self._document is None:
+                self._document = await self._run_parse(
+                    self.text,
+                )
+        return self._document
+
+    async def _run_parse(self, html: str) -> AsyncDocument:
+        return await self._run_document_op(
+            parse_async,
+            html,
+            kind="HTML parse",
+            include_max_size=True,
+        )
+
+    async def _run_document_op(
+        self,
+        func: Callable[..., Awaitable[T]],
+        *args: object,
+        kind: str,
+        label: str | None = None,
+        include_max_size: bool = False,
+    ) -> T:
+        try:
+            kwargs = (
+                {"max_size_bytes": self.doc_max_size_bytes} if include_max_size else {}
+            )
+            return await func(*args, **kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            detail = str(exc)
+            suffix = f": {detail}" if detail else ""
+            if label is None:
+                raise SelectorError(
+                    f"{kind} failed for {self.url}{suffix}",
+                ) from exc
+            raise SelectorError(
+                f"{kind} '{label}' failed for {self.url}{suffix}",
+            ) from exc
+
+    async def _run_selector(
+        self,
+        func: Callable[..., Awaitable[T]],
+        query: str,
+        *,
+        kind: str,
+    ) -> T:
+        label = query if len(query) <= 120 else f"{query[:120]}...(truncated)"
+        return await self._run_document_op(
+            func,
+            query,
+            kind=f"{kind} selector",
+            label=label,
+        )
+
+    async def select(self, selector: str) -> list[AsyncElement]:
+        """Return every element matching a CSS selector.
+
+        Raises:
+            SelectorError: If the document cannot be parsed or the selector is
+                invalid.
+        """
+        document = await self._get_document()
+        return await self._run_selector(document.select, selector, kind="CSS")
+
+    async def select_first(self, selector: str) -> AsyncElement | None:
+        """Return the first CSS match, or ``None`` when no element matches.
+
+        Raises:
+            SelectorError: If parsing or selector evaluation fails.
+        """
+        document = await self._get_document()
+        return await self._run_selector(document.select_first, selector, kind="CSS")
+
+    async def find(self, selector: str) -> AsyncElement | None:
+        """Return the first CSS match as an alias for :meth:`select_first`."""
+        return await self.select_first(selector)
+
+    async def css(self, selector: str) -> list[AsyncElement]:
+        """Return all CSS matches as an alias for :meth:`select`."""
+        return await self.select(selector)
+
+    async def css_first(self, selector: str) -> AsyncElement | None:
+        """Return the first CSS match as an alias for :meth:`select_first`."""
+        return await self.select_first(selector)
+
+    async def xpath(self, xpath: str) -> list[AsyncElement]:
+        """Return every element matching an XPath expression.
+
+        Raises:
+            SelectorError: If parsing or XPath evaluation fails.
+        """
+        document = await self._get_document()
+        return await self._run_selector(document.xpath, xpath, kind="XPath")
+
+    async def xpath_first(self, xpath: str) -> AsyncElement | None:
+        """Return the first XPath match, or ``None`` when no element matches.
+
+        Raises:
+            SelectorError: If parsing or XPath evaluation fails.
+        """
+        document = await self._get_document()
+        return await self._run_selector(document.xpath_first, xpath, kind="XPath")
+
+    async def prettify(self) -> str:
+        """Return the parsed document formatted as readable HTML.
+
+        Raises:
+            SelectorError: If parsing or serialization fails.
+        """
+        document = await self._get_document()
+        return await self._run_document_op(document.prettify, kind="HTML prettify")
+
+    async def to_markdown(
+        self,
+        *,
+        mode: MarkdownMode = "full",
+        options: MarkdownOptions | None = None,
+    ) -> str:
+        """Convert the decoded HTML body to Markdown off the event-loop thread.
+
+        Args:
+            mode: ``fast-h2m`` conversion strategy.
+            options: Additional converter options.
+
+        Returns:
+            Converted Markdown text.
+        """
+        from .markdown import html_to_markdown
+
+        return await asyncio.to_thread(
+            html_to_markdown,
+            self.text,
+            mode=mode,
+            options=options,
+        )
+
+    async def to_markdown_result(
+        self,
+        *,
+        mode: MarkdownMode = "full",
+        options: MarkdownOptions | None = None,
+    ) -> MarkdownResult:
+        """Return the structured ``fast-h2m`` conversion result.
+
+        Args:
+            mode: ``fast-h2m`` conversion strategy.
+            options: Additional converter options.
+        """
+        from .markdown import convert_html_to_markdown
+
+        return await asyncio.to_thread(
+            convert_html_to_markdown,
+            self.text,
+            mode=mode,
+            options=options,
+        )
+
+    @override
+    def close(self) -> None:
+        """Close the parsed document and release response payload references."""
+        if self._closed:
+            return
+
+        document = self._document
+        self._document = None
+        try:
+            if document is not None:
+                document.close()
+        finally:
+            # Explicit base call avoids zero-arg super issues with slotted dataclasses.
+            Response.close(self)

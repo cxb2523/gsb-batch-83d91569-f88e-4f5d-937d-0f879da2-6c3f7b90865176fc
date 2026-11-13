@@ -1,0 +1,168 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+try:
+    import aiocouch  # type: ignore[import-not-found]
+
+    AIOCOUCH_AVAILABLE = True
+except ImportError:
+    AIOCOUCH_AVAILABLE = False
+
+from ..exceptions import BatchPipelineError
+from ..logging import Logger, get_logger
+from .base import _BatchPipelineMixin, log_pipeline_item
+
+if TYPE_CHECKING:
+    from .._types import JSONValue
+    from ..spiders import Spider
+
+
+class CouchDBPipeline(_BatchPipelineMixin):
+    native_batch = True
+    """
+    Pipeline that sends items to a CouchDB database.
+
+    Args:
+        url: CouchDB server URL.
+        database: Database opened or created during startup.
+        username: Optional authentication username.
+        password: Optional authentication password.
+
+    Example::
+
+        from silkworm.pipelines import CouchDBPipeline
+
+        pipeline = CouchDBPipeline(
+            url="http://localhost:5984",
+            database="scraping",
+            username="admin",
+            password="password",
+        )
+    """
+
+    def __init__(
+        self,
+        url: str = "http://localhost:5984",
+        database: str = "scraping",
+        *,
+        username: str | None = None,
+        password: str | None = None,
+    ) -> None:
+        """
+        Initialize CouchDBPipeline.
+
+        Args:
+            url: CouchDB server URL (default: "http://localhost:5984")
+            database: Database name (default: "scraping")
+            username: Optional username for authentication
+            password: Optional password for authentication
+        """
+        if not AIOCOUCH_AVAILABLE:
+            raise ImportError(
+                "aiocouch is required for CouchDBPipeline. "
+                "Install it with: pip install silkworm-rs[couchdb]",
+            )
+
+        self.url = url
+        self.database = database
+        self.username = username
+        self.password = password
+        self._context: Any = None
+        self._client: Any = None
+        self._db: Any = None
+        self.logger: Logger = get_logger(component="CouchDBPipeline")
+
+    async def open(self, spider: Spider) -> None:
+        """Connect and open or create the configured CouchDB database."""
+        # Connect to CouchDB
+        if self.username and self.password:
+            context = aiocouch.CouchDB(  # type: ignore[attr-defined]
+                self.url,
+                user=self.username,
+                password=self.password,
+            )
+        else:
+            context = aiocouch.CouchDB(self.url)  # type: ignore[attr-defined]
+
+        self._context = context
+        try:
+            self._client = await context.__aenter__()
+            client = self._client
+            if client is None:
+                raise RuntimeError("Failed to initialize CouchDB client")
+
+            try:
+                self._db = await client[self.database]
+            except KeyError:
+                self._db = await client.create(self.database)
+        except BaseException as exc:
+            try:
+                await self.close(spider)
+            except BaseException as cleanup_exc:  # noqa: BLE001
+                exc.add_note(f"CouchDB rollback failed: {cleanup_exc}")
+            raise
+
+        self.logger.info(
+            "Opened CouchDB pipeline",
+            url=self.url,
+            database=self.database,
+        )
+
+    async def close(self, spider: Spider) -> None:
+        """Exit the CouchDB client context and release database references."""
+        context = self._context
+        self._context = None
+        self._client = None
+        self._db = None
+        if context:
+            await context.__aexit__(None, None, None)
+            self.logger.info("Closed CouchDB pipeline", database=self.database)
+
+    async def process_item(self, item: JSONValue, spider: Spider) -> JSONValue:
+        """Create a document containing the spider name and original item."""
+        if not self._db:
+            raise RuntimeError("CouchDBPipeline not opened")
+
+        # Add spider name to item metadata
+        doc_data = {"spider": spider.name, "data": item}
+
+        # Create document in CouchDB
+        await self._db.create(doc_data)
+
+        log_pipeline_item(
+            self,
+            "Inserted item in CouchDB",
+            database=self.database,
+            spider=spider.name,
+        )
+        return item
+
+    async def process_items(
+        self, items: list[JSONValue], spider: Spider
+    ) -> list[JSONValue]:
+        if not items:
+            return items
+        if not self._db:
+            raise RuntimeError("CouchDBPipeline not opened")
+        import uuid
+
+        bulk = self._db.create_docs([str(uuid.uuid4()) for _ in items])
+        async with bulk:
+            index = 0
+            async for document in bulk:
+                document["spider"] = spider.name
+                document["data"] = items[index]
+                index += 1
+        if bulk.error:
+            raise BatchPipelineError(
+                "CouchDBPipeline", total=len(items), failed=len(bulk.error)
+            )
+        log_pipeline_item(
+            self,
+            "Inserted item batch in CouchDB",
+            database=self.database,
+            spider=spider.name,
+            item_count=len(items),
+        )
+        return items

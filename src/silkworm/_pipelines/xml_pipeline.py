@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+import io
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import turboxml
+
+from ..logging import Logger, get_logger
+from .base import _BatchPipelineMixin, log_pipeline_item
+
+if TYPE_CHECKING:
+    from .._types import JSONValue
+    from ..spiders import Spider
+
+
+class XMLPipeline(_BatchPipelineMixin):
+    native_batch = True
+    """Stream mapping items into one XML document.
+
+    Args:
+        path: Destination XML file.
+        root_element: Document root tag.
+        item_element: Tag wrapping each item.
+    """
+
+    def __init__(
+        self,
+        path: str | Path = "items.xml",
+        *,
+        root_element: str = "items",
+        item_element: str = "item",
+    ) -> None:
+        self.path: Path = Path(path)
+        self.root_element = root_element
+        self.item_element = item_element
+        self._fp: io.TextIOWrapper | None = None
+        self.logger: Logger = get_logger(component="XMLPipeline")
+
+    async def open(self, spider: Spider) -> None:
+        """Open the destination and write the XML declaration and root tag."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fp = self.path.open("w", encoding="utf-8")
+        self._fp = fp
+        try:
+            fp.write(
+                f'<?xml version="1.0" encoding="UTF-8"?>\n<{self.root_element}>\n',
+            )
+            fp.flush()
+        except BaseException as exc:
+            self._fp = None
+            try:
+                fp.close()
+            except BaseException as cleanup_exc:  # noqa: BLE001
+                exc.add_note(f"XML pipeline rollback failed: {cleanup_exc}")
+            raise
+        self.logger.info("Opened XML pipeline", path=str(self.path))
+
+    async def close(self, spider: Spider) -> None:
+        """Write the closing root tag and close the XML file."""
+        fp = self._fp
+        self._fp = None
+        if fp:
+            try:
+                fp.write(f"</{self.root_element}>\n")
+            finally:
+                primary = sys.exception()
+                try:
+                    fp.close()
+                except BaseException as cleanup_exc:
+                    if primary is None:
+                        raise
+                    primary.add_note(f"XML file cleanup failed: {cleanup_exc}")
+            self.logger.info("Closed XML pipeline", path=str(self.path))
+
+    async def process_item(self, item: JSONValue, spider: Spider) -> JSONValue:
+        """Append one mapping as an XML element and return it unchanged."""
+        if not self._fp:
+            raise RuntimeError("XMLPipeline not opened")
+
+        node = self._to_node(self.item_element, item)
+        xml_str = turboxml.write_string(node, indent=2, default_xml_def=False)
+        indented_xml = "\n".join(f"  {line}" for line in xml_str.splitlines())
+
+        self._fp.write(indented_xml + "\n")
+        self._fp.flush()
+        log_pipeline_item(
+            self, "Wrote item to XML", path=str(self.path), spider=spider.name
+        )
+        return item
+
+    async def process_items(
+        self, items: list[JSONValue], spider: Spider
+    ) -> list[JSONValue]:
+        if not items:
+            return items
+        if not self._fp:
+            raise RuntimeError("XMLPipeline not opened")
+        chunks = []
+        for item in items:
+            node = self._to_node(self.item_element, item)
+            xml_str = turboxml.write_string(node, indent=2, default_xml_def=False)
+            chunks.append("\n".join(f"  {line}" for line in xml_str.splitlines()))
+        self._fp.write("\n".join(chunks) + "\n")
+        self._fp.flush()
+        log_pipeline_item(
+            self,
+            "Wrote item batch to XML",
+            path=str(self.path),
+            spider=spider.name,
+            item_count=len(items),
+        )
+        return items
+
+    def _to_node(self, key: str, data: JSONValue) -> turboxml.Node:
+        """Convert a Python structure to a turboxml Node tree."""
+        tag = self._sanitize_tag(key)
+
+        if isinstance(data, dict):
+            children = [self._to_node(k, v) for k, v in data.items()]
+            return turboxml.Node(tag, children=children)
+
+        if isinstance(data, list):
+            children = [self._to_node("item", item) for item in data]
+            return turboxml.Node(tag, children=children)
+
+        text = "" if data is None else str(data)
+        return turboxml.Node(tag, text=text)
+
+    @staticmethod
+    def _sanitize_tag(tag: object) -> str:
+        """Make sure the tag name is XML-safe."""
+        return str(tag).replace(" ", "_").replace("-", "_")

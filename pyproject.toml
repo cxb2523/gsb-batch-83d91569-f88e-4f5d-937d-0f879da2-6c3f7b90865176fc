@@ -1,0 +1,210 @@
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "silkworm-rs"
+version = "0.16.1"
+description = "Async-first web scraping framework built on wreq and scraper-rs"
+authors = [
+  { name = "Yehor Smoliakov", email = "egorsmkv@gmail.com" }
+]
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.11,<3.16"
+license = { file = "LICENSE" }
+keywords = [
+  "web-scraping",
+  "crawler",
+  "asyncio",
+  "http",
+  "html",
+  "spider",
+]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Framework :: AsyncIO",
+  "Framework :: Trio",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Natural Language :: English",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+  "Topic :: Internet",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Software Development :: Libraries :: Application Frameworks",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: Text Processing :: Markup :: HTML",
+  "Topic :: Text Processing :: Markup :: Markdown",
+  "Topic :: Text Processing :: Markup :: XML",
+  "Typing :: Typed",
+]
+
+dependencies = [
+  "charset-norm>=4.0.0",
+  "scraper-rust>=0.11.0",
+  "wreq>=0.13.0",
+  "fast-h2m>=0.4.5",
+  "turboxml>=1.0.0",
+  "typing-extensions>=4.15.0",
+]
+
+[project.scripts]
+silkworm = "silkworm.cli:main"
+
+[project.optional-dependencies]
+rsloop = [
+  "rsloop>=0.1.53",
+]
+taskiq = [
+  "taskiq==0.12.6",
+]
+zenoh = [
+  "eclipse-zenoh==1.10.1",
+]
+iggy = [
+  # Apache Iggy publishes wheels through Python 3.13 only.
+  "apache-iggy==0.9.0; python_version < '3.14'",
+]
+uvloop = [
+  "uvloop==0.22.1",
+]
+winloop = [
+  "winloop==0.6.4",
+]
+trio = [
+  "trio==0.34.0",
+  # trio-asyncio 0.16 uses asyncio policy classes removed in Python 3.14.
+  "trio-asyncio==0.16.0; python_version < '3.14'",
+]
+msgpack = [
+  # No Python 3.15 wheels yet (PyO3 build fails); drop the marker once published.
+  "ormsgpack==1.12.2; python_version < '3.15'",
+]
+polars = [
+  "polars==1.44.2",
+]
+excel = [
+  "openpyxl==3.1.5",
+]
+yaml = [
+  "pyyaml==6.0.3",
+]
+avro = [
+  "fastavro==1.12.2",
+]
+elasticsearch = [
+  "elasticsearch[async]==9.5.1",
+]
+mongodb = [
+  "motor==3.7.1",
+]
+s3 = [
+  "opendal==0.47.10",
+]
+vortex = [
+  # Its pyarrow dependency has no Python 3.15 wheels yet.
+  "vortex-data==0.86.1; python_version < '3.15'",
+]
+mysql = [
+  "aiomysql==0.3.2",
+]
+postgresql = [
+  "asyncpg==0.31.0",
+]
+gsheets = [
+  "google-api-python-client==2.200.0",
+  "google-auth==2.58.1",
+]
+snowflake = [
+  "snowflake-connector-python==4.7.5",
+]
+ftp = [
+  "aioftp==0.28.3",
+]
+sftp = [
+  "asyncssh==2.24.0",
+]
+cassandra = [
+  "cassandra-driver==3.30.1; sys_platform != 'win32' and python_version < '3.14'",
+]
+couchdb = [
+  "aiocouch==4.0.1",
+]
+dynamodb = [
+  "aioboto3==15.5.0",
+]
+duckdb = [
+  "duckdb==1.5.5",
+]
+memray = [
+  "memray==1.20.0",
+]
+cdp = [
+  "websockets==17.1",
+]
+onionlink = [
+  # No Python 3.15 wheels or sdist yet.
+  "onionlink==0.1.2; python_version < '3.15'",
+]
+
+[project.urls]
+Homepage = "https://github.com/BitingSnakes/silkworm"
+Repository = "https://github.com/BitingSnakes/silkworm"
+Documentation = "https://bitingsnakes.github.io/silkworm/"
+Issues = "https://github.com/BitingSnakes/silkworm/issues"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/silkworm"]
+force-include = {"src/silkworm/py.typed" = "silkworm/py.typed"}
+
+[dependency-groups]
+dev = [
+    "build==1.6.1",
+    "py-spy==0.4.2",
+    "pydantic==2.13.5",
+    "pyright==1.1.414",
+    "pytest==9.1.1",
+    "anyio==4.15.1",
+    "ruff==0.16.9",
+    "twine==7.0.0",
+    "testcontainers==4.15.0",
+]
+docs = [
+    "furo==2025.12.19",
+    "myst-parser==5.1.0",
+    "sphinx==8.2.3; python_version < '3.12'",
+    "sphinx==9.1.0; python_version >= '3.12'",
+    "sphinx-copybutton==0.5.2",
+]
+
+[tool.pyright]
+include = ["src", "tests", "examples"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+executionEnvironments = [
+  # Tests import optional dependencies inside try/except guarded by skipif, and
+  # assert on parsed results directly; don't flag those idioms.
+  { root = "tests", extraPaths = ["src"], reportPossiblyUnboundVariable = "none", reportOptionalMemberAccess = "none", reportOptionalSubscript = "none" },
+  { root = "examples", extraPaths = ["src"] },
+  { root = "src" },
+]
+
+[tool.pytest.ini_options]
+anyio_mode = "auto"

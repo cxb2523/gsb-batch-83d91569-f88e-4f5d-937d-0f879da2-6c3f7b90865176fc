@@ -1,0 +1,155 @@
+from __future__ import annotations
+
+import sys
+from collections.abc import Mapping
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
+
+try:
+    import openpyxl  # type: ignore[import-not-found, import-untyped]
+
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+
+from ..logging import Logger, get_logger
+from .base import _BatchPipelineMixin, log_pipeline_item
+
+if TYPE_CHECKING:
+    from openpyxl.worksheet.worksheet import Worksheet  # type: ignore[import-untyped]
+
+    from .._types import JSONValue
+    from ..spiders import Spider
+
+
+class ExcelPipeline(_BatchPipelineMixin):
+    native_batch = True
+    """
+    Pipeline that writes items to an Excel file (.xlsx).
+
+    Items are buffered, flattened, and written when the pipeline closes.
+
+    Args:
+        path: Output workbook path.
+        sheet_name: Worksheet title.
+
+    Example::
+
+        from silkworm.pipelines import ExcelPipeline
+
+        pipeline = ExcelPipeline("data/items.xlsx", sheet_name="quotes")
+    """
+
+    def __init__(
+        self,
+        path: str | Path = "items.xlsx",
+        *,
+        sheet_name: str = "Sheet1",
+    ) -> None:
+        """
+        Initialize ExcelPipeline.
+
+        Args:
+            path: Path to the output file (default: "items.xlsx")
+            sheet_name: Name of the Excel sheet (default: "Sheet1")
+        """
+        if not OPENPYXL_AVAILABLE:
+            raise ImportError(
+                "openpyxl is required for ExcelPipeline. Install it with: pip install silkworm-rs[excel]",
+            )
+
+        self.path: Path = Path(path)
+        self.sheet_name = sheet_name
+        self._items: list[JSONValue] = []
+        self.logger: Logger = get_logger(component="ExcelPipeline")
+
+    async def open(self, spider: Spider) -> None:
+        """Create parent directories and reset the workbook item buffer."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._items = []
+        self.logger.info("Opened Excel pipeline", path=str(self.path))
+
+    async def close(self, spider: Spider) -> None:
+        """Flatten buffered items and write the XLSX workbook."""
+        if self._items:
+            wb = openpyxl.Workbook()  # pyright: ignore[reportPossiblyUnboundVariable]
+            try:
+                ws = cast("Worksheet", wb.active)
+                ws.title = self.sheet_name
+
+                # Get fieldnames from first item
+                if isinstance(self._items[0], Mapping):
+                    flat_items: list[dict[str, JSONValue | str]] = []
+                    for item in self._items:
+                        if isinstance(item, Mapping):
+                            flat_items.append(self._flatten_dict(item))
+                        else:
+                            flat_items.append({"value": str(item)})
+                    fieldnames = list(flat_items[0].keys())
+
+                    # Write header
+                    ws.append(fieldnames)
+
+                    # Write data
+                    for item in flat_items:
+                        ws.append([item.get(field) for field in fieldnames])
+                else:
+                    # Simple values
+                    ws.append(["value"])
+                    for item in self._items:
+                        ws.append([str(item)])
+
+                wb.save(self.path)
+            finally:
+                primary = sys.exception()
+                try:
+                    wb.close()
+                except BaseException as cleanup_exc:
+                    if primary is None:
+                        raise
+                    primary.add_note(f"Excel workbook cleanup failed: {cleanup_exc}")
+        self.logger.info("Closed Excel pipeline", path=str(self.path))
+
+    async def process_item(self, item: JSONValue, spider: Spider) -> JSONValue:
+        """Buffer one item for workbook creation during :meth:`close`."""
+        self._items.append(item)
+        log_pipeline_item(
+            self,
+            "Buffered item for Excel",
+            path=str(self.path),
+            spider=spider.name,
+        )
+        return item
+
+    async def process_items(
+        self, items: list[JSONValue], spider: Spider
+    ) -> list[JSONValue]:
+        self._items.extend(items)
+        if items:
+            log_pipeline_item(
+                self,
+                "Buffered item batch for Excel",
+                path=str(self.path),
+                spider=spider.name,
+                item_count=len(items),
+            )
+        return items
+
+    def _flatten_dict(
+        self,
+        data: Mapping[str, JSONValue],
+        parent_key: str = "",
+        sep: str = "_",
+    ) -> dict[str, JSONValue | str]:
+        """Flatten a nested dictionary structure."""
+        items: list[tuple[str, JSONValue | str]] = []
+        for key, value in data.items():
+            new_key = f"{parent_key}{sep}{key}" if parent_key else key
+            if isinstance(value, Mapping):
+                items.extend(self._flatten_dict(value, new_key, sep=sep).items())
+            elif isinstance(value, list):
+                # Convert list to comma-separated string
+                items.append((new_key, ", ".join(str(v) for v in value)))
+            else:
+                items.append((new_key, value))
+        return dict(items)
