@@ -1,0 +1,199 @@
+# Testing with real credentials and the live site
+
+**Update, 2026-09-20**: the primary Playwright engine has now been exercised
+live several times. The decisive pagination run used `--query milk
+--max-results 60`: it crossed Lidl's first lazy batch, returned 60 unique
+SKUs in 11 rounds, and wrote `status=complete` with price coverage 1.0.
+The live page reports 142 products and virtualizes its grid, which exposed
+and fixed two real defects: jumping straight to the bottom skipped transient
+tiles, and an unclicked `View More Products` control allowed an incomplete
+run to report success. The engines now walk viewport-sized steps, click the
+control after a batch stabilizes, and compare collected rows with Lidl's own
+product counter.
+
+**Update, 2026-10-18**: Selenium and pyppeteer passed the same live runs
+(`whole milk` ×10 and `milk` ×60, identical 60-row results), and a real
+weekly-deals listing confirmed discounted tiles and images — see
+CHANGELOG. On Apple Silicon, pyppeteer needs `PYPPETEER_EXECUTABLE_PATH`
+pointing at an installed Chrome; its own downloaded Chromium is x86_64.
+
+Later the same day, `--store-id`/`--zip` were confirmed to change prices
+in all three engines (the store is a cookie set by the site's own
+picker — see `lidl_stores.py`), and `--sort`, `h/…` aisle categories,
+product pages and the no-match page were run live. pyppeteer now picks
+up an installed Google Chrome on Apple Silicon by itself.
+
+The Scraping Browser path (`--cdp-endpoint`) was run live the same
+evening with Playwright and pyppeteer — see CHANGELOG 0.4.1.
+
+Still requiring live verification: the
+`deal_valid_from`/`deal_valid_until` fields (no tile states a deal's dates;
+the "In stores starting 10/28" badge is an availability date). Offline
+checks remain useful, but do not substitute for these runs.
+
+Run everything below from a normal terminal on your own machine — wherever
+this repo lives for you.
+
+## 1. Basic setup
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-playwright.txt
+playwright install chromium
+cp .env.example .env
+```
+
+Leave `.env` blank for the first run — the whole point of "local-first" is
+that nothing in it is required. Fill in `TWOCAPTCHA_KEY` /
+`LIDL_PROXY` / `LIDL_CDP_ENDPOINT` later, only if you want to test those
+specifically.
+
+## 2. The most important run you can do: check what the real page looks like
+
+**Update, 2026-09-20 (later the same day) — this step has now been done
+for real**: `python3 playwright_scraper.py --query "whole milk"
+--max-results 10 --format json --out /tmp/lidl_test.json` (no `--dump-
+html` needed that run, since it succeeded) landed on the FIRST outcome
+below — exit `0`, `"status": "complete"`, 8 real products,
+`price_confirmed_pct: 1.0`, plausible rows (see README "Read this before
+trusting a run" for a real example row). This is the first live run of
+the actual engine, not just a manual browser capture — the rest of this
+section stays as the general decision tree for whoever runs it next
+(a different query, a different day, after a site change), but "will this
+even work at all" is now answered: yes, confirmed live.
+
+This is the step nothing else in this repo could do for you:
+
+```bash
+python3 playwright_scraper.py --query "whole milk" \
+  --max-results 10 --format json --out /tmp/lidl_test.json --dump-html
+echo "exit code: $?"
+cat /tmp/lidl_test.json.meta.json 2>/dev/null || echo "(no sidecar — see below)"
+```
+
+Four outcomes, and what each one means:
+
+- **`exit code: 0`, a `.meta.json` with `"status": "complete"` and a
+  believable `product_count`**: either the JSON-LD path, the
+  `__NEXT_DATA__` heuristic, or the DOM fallback selectors happened to
+  match the real page. Open `/tmp/lidl_test.json` and actually look at a
+  few rows — a plausible-looking `price`/`brand`/`title` is what "happened
+  to match" looks like; a null-filled row is what "matched the wrong
+  shape" looks like even when the exit code says 0.
+- **`exit code: 4` (zero products), no `.meta.json` written** (by design —
+  see `output_writer.finish_run`): open `lidl_test_debug.html` and check,
+  in this order: (1) does the raw HTML contain an `application/ld+json`
+  block with `"@type":"Product"` or `"ItemList"` anywhere — if so,
+  `lidl_parser._find_products_in_json_ld`'s property-name assumptions
+  need adjusting, not the whole strategy; (2) does it contain
+  `__NEXT_DATA__` at all — confirms or refutes the Next.js guess; (3)
+  compare the actual product-tile markup against `lidl_parser.py`'s
+  `_CARD_SELECTORS`. This is the expected first-run outcome if the
+  selectors need updating — not evidence the free path is blocked.
+- **`exit code: 3` (blocked)**: a `captcha_solver.GENERIC_BOT_CHALLENGE_
+  MARKERS` hit, or an HTTP >=400 status. No incident like this has ever
+  been captured for lidl.com — if you get one, this is genuinely new
+  information: save a scrubbed capture, and add site-specific markers to
+  `lidl_parser.BOT_CHALLENGE_MARKERS` the same way skyscanner-scraper's
+  PerimeterX incident did for that repo (see its CHANGELOG entry for the
+  shape of that kind of entry).
+- **Prices that do not match a store you picked in a browser**: the
+  store is the `st`/`wh`/`zn`/`ar` cookie set (`lidl_stores.py`). Compare
+  the cookies your browser holds on www.lidl.com with
+  `lidl_stores.resolve_store(store_id=...).cookies()`.
+
+Whatever you find, **updating `lidl_parser.py`'s selectors/heuristics to
+match what you actually saw — with a saved, scrubbed fixture under
+`tests/fixtures/` and a new `smoke_test.py` check against it — is the
+single most valuable contribution this repo can receive** (see
+`CONTRIBUTING.md`).
+
+## 3. Selenium, for real
+
+```bash
+python3 -m venv .venv-selenium   # separate venv — see README "Engines"
+source .venv-selenium/bin/activate
+pip install -r requirements-selenium.txt
+python3 selenium_scraper.py --query "whole milk" --out /tmp/lidl_selenium.json
+```
+
+## 4. Puppeteer (pyppeteer), for real
+
+```bash
+python3 -m venv .venv-puppeteer
+source .venv-puppeteer/bin/activate
+pip install -r requirements-puppeteer.txt
+python3 puppeteer_scraper.py --query "whole milk" --out /tmp/lidl_puppeteer.json
+```
+
+## 5. The 2Captcha REST API, with your real key
+
+Confirms the key and hits a real, billed-nothing endpoint first:
+
+```bash
+python3 -c "
+import env_config
+from scraper_api_client import TwoCaptchaClient
+args = type('A', (), {'twocaptcha_key': None, 'proxy': None, 'cdp_endpoint': None, 'url': None})()
+env_config.apply_env(args)
+c = TwoCaptchaClient(args.twocaptcha_key)
+print('balance: \$%.2f' % c.get_balance())
+"
+```
+
+## 6. The Scraping Browser API (`--cdp-endpoint`), for real
+
+`LIDL_CDP_ENDPOINT` in `.env` is picked up automatically:
+
+```bash
+python3 playwright_scraper.py --query "whole milk" --out /tmp/lidl_cdp.json
+```
+
+**Gotcha**, same as the rest of the family: if `.env` has BOTH
+`LIDL_CDP_ENDPOINT` and `LIDL_PROXY` set, the code ignores `LIDL_PROXY`
+and warns — a CDP session already carries its own exit IP, stacking a
+second one on top is a contradiction, not better cover (same for a
+fingerprint over `--cdp-endpoint`). Comment out whichever you're not
+testing if you want to test them in isolation.
+
+## 7. The residential proxy (`--proxy` / `LIDL_PROXY`), for real
+
+```bash
+python3 playwright_scraper.py --query "whole milk" --out /tmp/lidl_proxy.json
+```
+
+## 8. Push to GitHub and let CI do the rest
+
+```bash
+git remote add origin git@github.com:2scraper/lidl-scraper.git
+git push -u origin main
+git push --tags
+```
+
+Then, in the GitHub repo's Settings:
+
+- **Secrets and variables → Actions**: add `TWOCAPTCHA_KEY`,
+  `LIDL_CDP_ENDPOINT` / `LIDL_PROXY` (only if you want the `canary-cdp`
+  job using them — `canary-local` needs no secrets at all), and
+  `CLAUDE_CODE_OAUTH_TOKEN` (for `claude.yml` / `claude-code-review.yml` —
+  both silently no-op without it, by design, rather than failing every
+  PR check).
+- **Actions → canary → Run workflow**: dispatch it manually at least once
+  rather than waiting a day for the cron and trusting the badge blind —
+  this is this repo's actual FIRST live test, so look at the run's log and
+  uploaded artifact, not just the badge color.
+
+## 9. What "done" looks like
+
+- `tests.yml` green on both Python versions and all three `engine-smoke`
+  matrix legs.
+- At least one manually-dispatched `canary.yml` run, looked at — not just
+  the badge — including whichever of the outcomes in step 2 above it
+  landed on.
+- If step 2 landed on anything other than a clean `complete` with
+  plausible-looking rows: `lidl_parser.py` updated to match what you
+  actually saw, with a fixture under `tests/fixtures/` and a new
+  `smoke_test.py` check, per `CONTRIBUTING.md`.
+- A `--store-id` run whose prices differ from a run with no store, which
+  is how you know the store cookies still take effect.

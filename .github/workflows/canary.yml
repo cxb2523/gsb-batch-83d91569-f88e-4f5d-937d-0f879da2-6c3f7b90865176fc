@@ -1,0 +1,129 @@
+name: canary
+
+on:
+  schedule:
+    - cron: "7 8 * * 1"   # weekly, Mondays; avoid :00 so it doesn't pile up with everyone else's
+  workflow_dispatch: {}     # dispatch manually at least once before trusting the badge
+
+jobs:
+  # A real local-first browser run. Blocked, empty, partial, and remote-error
+  # outcomes are red: a canary that accepts them cannot detect selector or
+  # pagination regressions.
+  canary-local:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Run the local-first default against a real multi-round search
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --query "milk" --max-results 30 --format json --out canary_out.json --dump-html
+          echo "exit_code=$?" >> "$GITHUB_ENV"
+
+      - name: Require a complete, multi-round, useful result
+        run: |
+          python3 -c "
+          import json, os
+
+          code = int(os.environ['exit_code'])
+          print(f'playwright_scraper.py exited {code}')
+
+          if code != 0:
+              raise SystemExit(f'canary requires EXIT_OK=0, got {code}')
+          meta = json.load(open('canary_out.json.meta.json'))
+          print(json.dumps(meta, indent=2))
+          assert meta['status'] == 'complete', meta
+          assert meta['pages_completed'] >= 3, meta
+          assert meta['product_count'] >= 20, meta
+          assert (meta['price_confirmed_pct'] or 0) >= 0.9, meta
+          rows = json.load(open('canary_out.json'))
+          assert len(rows) == meta['product_count'] >= 20, (len(rows), meta['product_count'])
+          for field in ('sku', 'title', 'product_url', 'price'):
+              missing = [r.get('sku') for r in rows if r.get(field) in (None, '')]
+              assert not missing, f'{field} is null on {len(missing)} of {len(rows)} rows'
+          print(f\"canary: got {meta['product_count']} products in {meta['pages_completed']} rounds\")
+          "
+
+      - name: Upload artifacts (output + debug HTML) on every run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-local-${{ github.run_id }}
+          path: |
+            canary_out.json
+            canary_out.json.meta.json
+            canary_out_debug.html
+          retention-days: 14
+
+  # Exercises the --cdp-endpoint (2Captcha Scraping Browser API) path. It
+  # needs the LIDL_CDP_ENDPOINT secret, and without it this job FAILS with
+  # an error naming the secret: a skipped job tests nothing and must not
+  # read as green. canary-local above tests the no-secret default path.
+  canary-cdp:
+    runs-on: ubuntu-latest
+    env:
+      HAS_CDP: ${{ secrets.LIDL_CDP_ENDPOINT != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail — no LIDL_CDP_ENDPOINT secret configured
+        if: env.HAS_CDP != 'true'
+        run: |
+          echo "::error::canary-cdp cannot test the Scraping Browser API path: the \
+          LIDL_CDP_ENDPOINT repo secret is not set. Add it (a ws://… Scraping Browser \
+          endpoint) to make this job meaningful."
+          exit 1
+
+      - uses: actions/setup-python@v5
+        if: env.HAS_CDP == 'true'
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-playwright.txt
+        if: env.HAS_CDP == 'true'
+
+      # Both secrets go through the ENVIRONMENT, never a command-line flag
+      # (credentials never reach argv). env_config.py already reads
+      # LIDL_CDP_ENDPOINT/TWOCAPTCHA_KEY unconditionally, so this is
+      # correct with or without either secret set.
+      - name: Run over the Scraping Browser API
+        if: env.HAS_CDP == 'true'
+        env:
+          LIDL_CDP_ENDPOINT: ${{ secrets.LIDL_CDP_ENDPOINT }}
+          TWOCAPTCHA_KEY: ${{ secrets.TWOCAPTCHA_KEY }}
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --query "whole milk" --max-results 10 --format json --out canary_cdp_out.json --dump-html
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ]; then
+            echo "::error::playwright_scraper.py over --cdp-endpoint exited $code (3 blocked, 4 empty, 5 never obtained, 6 partial)"
+            exit 1
+          fi
+          python3 -c "
+          import json
+          meta = json.load(open('canary_cdp_out.json.meta.json'))
+          rows = json.load(open('canary_cdp_out.json'))
+          assert meta['status'] == 'complete', meta
+          assert len(rows) >= 5, len(rows)
+          assert all(r.get('sku') and r.get('title') and r.get('price') is not None for r in rows), 'null core field'
+          print(f'canary-cdp: {len(rows)} rows')
+          "
+
+      - name: Upload artifacts on every non-skipped run
+        if: always() && env.HAS_CDP == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-cdp-${{ github.run_id }}
+          path: |
+            canary_cdp_out.json
+            canary_cdp_out.json.meta.json
+            canary_cdp_out_debug.html
+          retention-days: 14
