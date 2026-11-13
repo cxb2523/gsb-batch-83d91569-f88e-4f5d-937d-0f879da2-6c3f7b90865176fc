@@ -328,6 +328,40 @@ temporary file beside it and renamed into place, so a write that fails halfway
 leaves the previous file intact rather than truncated. A new file gets the
 mode your umask gives it; an existing file keeps its own.
 
+### Per-page ledger (`<out>.pages.json`)
+
+A multi-page run's worst failure is silent: the output looks complete while a
+middle page is missing, or one product is counted twice. Every multi-page run
+therefore also writes a per-page attribution record sharing the output prefix,
+with one entry per **requested** page and a run-level summary.
+
+Each page entry records the page number, the requested URL, the final URL the
+browser landed on, how many rows the page parsed, how many were actually new
+after sku dedupe (`rows_new`), a `status`, and — where relevant — a
+`failure_reason` or `not_attempted_reason`. The six statuses are:
+
+| status | meaning |
+|---|---|
+| `success` | fetched and parsed trustworthily — may still have zero parsed rows (a served empty grid) or zero new rows (all duplicates) |
+| `blocked` | an edge refusal or an unsolved challenge |
+| `load_failed` | the navigation never produced a page (timeout, dead exit) |
+| `not_found` | the site answered that the address does not exist (404) |
+| `parse_empty` | the page was served and links to products, but the parser extracted zero rows — our bug, not an empty category |
+| `not_attempted` | planned but never dispatched (the listing ended early, the site's result count truncated the plan, or the run stopped); never a failure |
+
+Dedupe stays keyed on `sku` and is applied in page-number order, so the
+summary's invariant holds: **the sum of every page's `rows_new` equals the
+number of rows in the output file** — the builder refuses to write a record
+that does not reconcile. Under concurrency the entries are sorted by page
+number regardless of worker completion order. The summary adds the requested
+page count, the succeeded count, the failed page numbers, the pages not
+attempted, the count of pages truncated by the site's own result count, and
+the final `stop_reason`.
+
+Like the other outputs it is written via a temp file and rename, and only
+when row output is written — a run that gathers nothing cannot replace a
+previous good run's ledger with a half-record.
+
 **CSV only:** a text cell starting with `=`, `+`, `-`, `@`, a tab or a line
 break is prefixed with `'`, so a spreadsheet shows it as text instead of
 running it as a formula. Numbers are never touched, the JSON keeps the site's

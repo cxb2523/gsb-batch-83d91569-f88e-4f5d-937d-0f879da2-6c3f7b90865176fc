@@ -57,6 +57,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import asdict, fields
 
 from output_writer import Product
@@ -2065,7 +2066,10 @@ def check_concurrency_with_the_browser_stubbed():
     check("...so the 49 queued pages cost far fewer fetches",
           len(fetched) < 15, "fetched %d of 49" % len(fetched))
     check("unattempted pages are REPORTED, not counted as failed",
-          len(unattempted) > 0 and all(isinstance(n, int) for n in unattempted))
+          len(unattempted) > 0 and all(isinstance(n, int) for n, _ in unattempted))
+    check("unattempted pages carry the listing-ended REASON, not a failure one",
+          all(reason == engine.page_ledger.REASON_LISTING_ENDED
+              for _, reason in unattempted), unattempted)
     equal("attempted + unattempted covers the whole queue",
           len(set(fetched)) + len(unattempted), 49)
     equal("outcomes are restorable to page order",
@@ -2116,7 +2120,13 @@ def check_a_dead_worker_neither_hangs_nor_loses_its_siblings():
     engine._BrowserSession = FakeSession
     engine.sync_playwright = lambda: FakePlaywright()
     try:
-        specs = [(n, "u%d" % n) for n in range(2, 8)]
+        # A queue deliberately LARGER than the workers can drain before one of
+        # them dies. With only a handful of specs every item could be dequeued
+        # before the exception propagated, leaving nothing in the queue to
+        # label — the assertion then raced the scheduler. Forty pages across
+        # three workers guarantees pages remain queued when page 3's worker
+        # dies, so the worker_died reason is always exercisable.
+        specs = [(n, "u%d" % n) for n in range(2, 42)]
         results, unattempted, exhausted = engine._fetch_pages_concurrently(
             Args(), None, specs, 3)
     finally:
@@ -2129,6 +2139,14 @@ def check_a_dead_worker_neither_hangs_nor_loses_its_siblings():
           len(results) >= 3, "%d results" % len(results))
     check("page 3 is not reported as a success",
           3 not in [o.page_num for o in results])
+    check("the pages the dead worker never reached say WHY (worker_died)",
+          unattempted and all(
+              reason == engine.page_ledger.REASON_WORKER_DIED
+              for _, reason in unattempted),
+          unattempted)
+    check("attempted + unattempted still accounts for every queued page",
+          len(results) + len(unattempted) == len(specs),
+          (len(results), len(unattempted), len(specs)))
 
 
 def check_worker_pools_start_on_different_exits():
@@ -3062,6 +3080,552 @@ def check_no_private_citations_in_shipped_files():
                 hits.append("%s:%d" % (name, lineno))
     check("scanned the tracked files", len(tracked) > 10, len(tracked))
     equal("no shipped file cites the private notes", hits[:10], [])
+
+
+# ---------------------------------------------------------------------------
+# The per-page ledger (<out>.pages.json) — driven entirely on self-made local
+# HTML, no network and no browser. These check the thing the ledger exists to
+# guarantee: every requested page leaves a reconcilable, per-page attribution,
+# including the pages that parse empty, the pages that add nothing new, and the
+# pages concurrency never dispatched.
+# ---------------------------------------------------------------------------
+
+# A plain HTTP origin (not a file:// URL): it lets the parser and the state
+# classifier behave exactly as they do against the real site, served from a
+# thread-local directory and an ephemeral port.
+_LEDGER_BASE_URL = "http://127.0.0.1:9/en-fi/test-listing"
+
+
+def _listing_html(skus, *, total=None, title_prefix="Item"):
+    """Self-made Montblanc-shaped listing HTML for the given sku list.
+
+    Carries the JSON-LD ItemList the parser reads first, the matching
+    `data-pid` tiles, and — when `total` is given — page 1's result-count and
+    page-size attributes. No external asset is referenced; everything is
+    inline, so the document parses offline.
+    """
+    items = []
+    tiles = []
+    for i, sku in enumerate(skus, 1):
+        href = "/en-fi/item-%s-%s.html" % (title_prefix.lower(), sku)
+        items.append(
+            '{"@type":"ListItem","position":%d,"item":{'
+            '"@type":"Product","name":"%s %s",'
+            '"brand":{"@type":"Brand","name":"montblanc"},'
+            '"url":"%s",'
+            '"offers":{"@type":"Offer","priceCurrency":"EUR","price":100,'
+            '"availability":"http://schema.org/InStock"}}}'
+            % (i, title_prefix, sku, href))
+        tiles.append(
+            '<div class="product" data-pid="%s"><div class="product-tile">'
+            '<a href="%s" class="pdp-link"></a>'
+            '<span class="sales">€ 100.00</span></div></div>'
+            % (sku, href))
+    result_count = (
+        '<div class="result-count"><span>%d Results</span></div>' % total
+        if total is not None else "")
+    return (
+        '<!doctype html><html><head><title>Montblanc</title>'
+        '<script>var preloadedData = {"pg_country":"FI","pg_language":"en",'
+        '"currency":"EUR"};</script>'
+        '<script type="application/ld+json">{"@context":"https://schema.org",'
+        '"@type":"ItemList","itemListElement":[%s]}</script></head><body>'
+        '%s<div class="grid" data-page-size="24.0" data-page-number="0.0">%s'
+        '</div></body></html>' % (",".join(items), result_count, "".join(tiles)))
+
+
+def _parse_broken_html(skus):
+    """A page Montblanc SERVED, which links to products but whose structured
+    data and tiles the parser cannot read: product hrefs survive while every
+    JSON-LD block and `data-pid` anchor is gone. `detect_page_state` still
+    calls it content (the hrefs are product links) so the zero-parse outcome
+    is a parser failure, not an empty category."""
+    links = "".join(
+        '<a href="/en-fi/broken-%s.html">see product %s</a>' % (s, s)
+        for s in skus)
+    # Two references to the site's own asset host (the parser's marker is the
+    # literal `demandware.static` substring) clear its "real Montblanc page"
+    # structural threshold, so this is classified as served content rather
+    # than as an edge refusal.
+    return ('<!doctype html><html><head><title>Montblanc</title></head><body>'
+            '<img src="https://www.montblanc.com/on/demandware.static/-/a.png">'
+            '<img src="https://www.montblanc.com/on/demandware.static/-/b.png">'
+            '<div class="grid">%s</div></body></html>' % links)
+
+
+def _outcome_from_html(engine, html, page_num, url, args):
+    """The offline twin of `_fetch_one_page`: parse local HTML through the
+    real `_parse_for_mode` / page_flow policy and wrap it in the same
+    PageOutcome the browser path produces, including the parse-failure
+    detection that distinguishes a broken parser from an empty category."""
+    import page_flow
+    from product_parser import product_link_count
+    state = page_flow.classify(html, 200, url)
+    outcome = engine.PageOutcome(page_num=page_num, url=url)
+    outcome.final_url = url
+    outcome.state = state
+    if not page_flow.should_parse(state):
+        return outcome
+    products, listing = engine._parse_for_mode(html, url, args, page_num)
+    if listing is not None:
+        outcome.total_available = listing.total_results
+        outcome.pages_available = listing.pages_available
+        outcome.sort_applied = listing.site_default_sort
+    if not products and page_flow.looks_like_a_parse_failure(
+            state, len(products), product_link_count(html)):
+        outcome.state = "parse_failed"
+    outcome.products = products
+    return outcome
+
+
+def _ledger_args():
+    import argparse
+    return argparse.Namespace(mode="category", sort="price-asc",
+                              page_size=24, category=None)
+
+
+def check_ledger_status_taxonomy_covers_every_outcome():
+    """The six ledger statuses must partition every PageOutcome shape, and the
+    engine's own `ok` predicate must agree exactly with "not a ledger
+    failure" — otherwise a page could be reported one way to the run and
+    another way to the ledger."""
+    import page_ledger as L
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+
+    cases = [
+        (dict(state="content", products=[object()]), L.STATUS_SUCCESS, True),
+        # A served, genuinely empty page is still a SUCCESS.
+        (dict(state="empty", products=[]), L.STATUS_SUCCESS, True),
+        (dict(state="parse_failed", products=[]), L.STATUS_PARSE_EMPTY, False),
+        (dict(state="not_found"), L.STATUS_NOT_FOUND, False),
+        (dict(state="blocked", blocked_by="edge refusal"),
+         L.STATUS_BLOCKED, False),
+        (dict(state="captcha", blocked_by="recaptcha"),
+         L.STATUS_BLOCKED, False),
+        (dict(state="unknown", load_failed=True),
+         L.STATUS_LOAD_FAILED, False),
+    ]
+    for fields, want_status, want_ok in cases:
+        oc = engine.PageOutcome(page_num=1, url="u")
+        for k, v in fields.items():
+            setattr(oc, k, v)
+        equal("ledger status for %r" % fields, L.status_of(oc), want_status)
+        equal("ledger failure partition agrees with PageOutcome.ok",
+              oc.ok, want_ok)
+
+    # Failure reasons keep the engine's stop-reason vocabulary.
+    blocked = engine.PageOutcome(page_num=2, url="u")
+    blocked.blocked_by = "edge refusal"
+    equal("blocked reason names the vendor",
+          L.failure_reason_of(blocked), "blocked_edge refusal")
+    broken = engine.PageOutcome(page_num=3, url="u")
+    broken.state = "parse_failed"
+    equal("parse failure reason", L.failure_reason_of(broken),
+          "parser_found_nothing")
+    good = engine.PageOutcome(page_num=1, url="u")
+    good.state = "content"
+    check("a success carries no failure reason",
+          L.failure_reason_of(good) is None)
+
+
+def check_ledger_normal_multi_page_reconciles_on_local_html():
+    """Scenario 1: a normal multi-page run over self-made local HTML.
+
+    Every page is a success, the per-page new-row counts are the parsed
+    counts, and their sum equals the output row count — including a final
+    short page, which is legitimate rather than a truncation.
+    """
+    import page_ledger as L
+    from product_parser import page_url
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    args = _ledger_args()
+
+    # 3 pages of 24/24/7 = 55 products; page 1 prints the site's own count.
+    pages_html = [
+        _listing_html(["MB%04d" % i for i in range(1, 25)], total=55),
+        _listing_html(["MB%04d" % i for i in range(25, 49)]),
+        _listing_html(["MB%04d" % i for i in range(49, 56)]),
+    ]
+    outcomes = []
+    requested_urls = {}
+    for n, html in enumerate(pages_html, 1):
+        url = page_url(_LEDGER_BASE_URL, n, 24, "price-asc")
+        requested_urls[n] = url
+        outcomes.append(_outcome_from_html(engine, html, n, url, args))
+
+    rows, new_counts = L.merge_rows_in_page_order(outcomes)
+    equal("normal run: output holds every parsed row", len(rows), 55)
+    equal("normal run: per-page new counts",
+          [new_counts[n] for n in (1, 2, 3)], [24, 24, 7])
+
+    ledger = L.build_pages_ledger(
+        outcomes=outcomes, new_row_counts=new_counts,
+        requested_urls=requested_urls, unattempted=[], pages_requested=3,
+        truncated_page_nums=[], stop_reason="completed",
+        output_row_count=len(rows))
+    pages = ledger["pages"]
+    equal("normal run: one record per page, in PAGE order",
+          [p["page"] for p in pages], [1, 2, 3])
+    check("normal run: every page succeeded",
+          all(p["status"] == L.STATUS_SUCCESS for p in pages))
+    equal("normal run: request and final URLs are both recorded",
+          pages[1]["request_url"], requested_urls[2])
+    equal("normal run: final URL carried through",
+          pages[1]["final_url"], requested_urls[2])
+    equal("normal run: parsed rows per page",
+          [p["rows_parsed"] for p in pages], [24, 24, 7])
+    summary = ledger["summary"]
+    equal("normal run: requested/succeeded",
+          (summary["pages_requested"], summary["pages_succeeded"]), (3, 3))
+    equal("normal run: no failures, nothing unattempted",
+          (summary["pages_failed"], summary["pages_not_attempted"]), ([], []))
+    equal("normal run: nothing truncated by the site",
+          summary["pages_truncated_by_site_count"], 0)
+    equal("normal run: new-row total reconciles with the output",
+          summary["rows_new_total"], 55)
+    equal("normal run: stop reason echoed", summary["stop_reason"], "completed")
+
+
+def check_ledger_parse_empty_middle_page_is_named_not_swallowed():
+    """Scenario 2: the middle page was SERVED and links to products but parsed
+    to zero rows. It must be `parse_empty` (a failure), while a DIFFERENT page
+    whose rows are all duplicates of an earlier one must stay a SUCCESS with
+    rows_new == 0 — the two zero-contribution pages mean opposite things and
+    must not be conflated.
+    """
+    import page_ledger as L
+    from product_parser import page_url
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    args = _ledger_args()
+
+    url1 = page_url(_LEDGER_BASE_URL, 1, 24, "price-asc")
+    url2 = page_url(_LEDGER_BASE_URL, 2, 24, "price-asc")
+    url3 = page_url(_LEDGER_BASE_URL, 3, 24, "price-asc")
+
+    page1 = _outcome_from_html(
+        engine, _listing_html(["MB1", "MB2", "MB3"], total=10), 1, url1, args)
+    # Page 2: served, product links present, parser finds nothing.
+    page2 = _outcome_from_html(
+        engine, _parse_broken_html(["MB9", "MB10"]), 2, url2, args)
+    equal("the broken page really parses to zero rows", len(page2.products), 0)
+    equal("...and is flagged as a parse failure, not an empty category",
+          page2.state, "parse_failed")
+    # Page 3: parses fine but repeats page 1's skus — all duplicates.
+    page3 = _outcome_from_html(
+        engine, _listing_html(["MB1", "MB2", "MB3"]), 3, url3, args)
+
+    outcomes = [page1, page2, page3]
+    rows, new_counts = L.merge_rows_in_page_order(outcomes)
+    equal("only page 1's three unique skus survive dedupe", len(rows), 3)
+    equal("the parse-empty page contributes nothing", new_counts[2], 0)
+    equal("the all-duplicate page also contributes nothing", new_counts[3], 0)
+    equal("page 1 still contributes all three", new_counts[1], 3)
+
+    ledger = L.build_pages_ledger(
+        outcomes=outcomes, new_row_counts=new_counts,
+        requested_urls={1: url1, 2: url2, 3: url3}, unattempted=[],
+        pages_requested=3, truncated_page_nums=[],
+        stop_reason="parser_found_nothing", output_row_count=len(rows))
+    by_page = {p["page"]: p for p in ledger["pages"]}
+    equal("middle page is named parse_empty",
+          by_page[2]["status"], L.STATUS_PARSE_EMPTY)
+    equal("...with the parser reason attached",
+          by_page[2]["failure_reason"], "parser_found_nothing")
+    equal("...and it lands in the failed-page list",
+          ledger["summary"]["pages_failed"], [2])
+    check("the all-duplicate page is still a SUCCESS, not a failure",
+          by_page[3]["status"] == L.STATUS_SUCCESS
+          and by_page[3]["rows_parsed"] == 3
+          and by_page[3]["rows_new"] == 0
+          and by_page[3]["failure_reason"] is None,
+          by_page[3])
+    equal("succeeded pages exclude only the broken one",
+          ledger["summary"]["pages_succeeded"], 2)
+    equal("the new-row invariant still holds despite two zero pages",
+          ledger["summary"]["rows_new_total"], len(rows))
+
+
+def check_ledger_concurrent_completion_order_is_written_in_page_order():
+    """Scenario 3: concurrency hands outcomes over in worker-COMPLETION order,
+    deliberately shuffled here. The ledger records and the merged rows must be
+    ordered by page number regardless, and the pages the queue never
+    dispatched (the listing ended early) must be `not_attempted`, never failed.
+    """
+    import page_ledger as L
+    from product_parser import page_url
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    args = _ledger_args()
+
+    requested = 6
+    requested_urls = {n: page_url(_LEDGER_BASE_URL, n, 24, "price-asc")
+                      for n in range(1, requested + 1)}
+    # Pages 1-3 hold products; page 4 is the served empty grid that ends the
+    # listing; 5 and 6 are never dispatched.
+    html_by_page = {
+        1: _listing_html(["MB1", "MB2"], total=8),
+        2: _listing_html(["MB3", "MB4"]),
+        3: _listing_html(["MB5", "MB6", "MB7", "MB8"]),
+        4: _listing_html([]),
+    }
+    outcomes = [
+        _outcome_from_html(engine, html_by_page[n], n,
+                           requested_urls[n], args)
+        for n in (1, 2, 3, 4)]
+
+    # Simulate out-of-order arrival: shuffle WITHOUT relying on randomness, so
+    # the check is deterministic. Page 4 (the empty one) "arrives" first.
+    shuffled = [outcomes[3], outcomes[1], outcomes[0], outcomes[2]]
+    rows, new_counts = L.merge_rows_in_page_order(shuffled)
+    equal("dedupe is independent of arrival order", len(rows), 8)
+    equal("new counts are keyed by page, not arrival",
+          [new_counts[n] for n in (1, 2, 3, 4)], [2, 2, 4, 0])
+
+    unattempted = [(5, L.REASON_LISTING_ENDED),
+                   (6, L.REASON_LISTING_ENDED)]
+    ledger = L.build_pages_ledger(
+        outcomes=shuffled, new_row_counts=new_counts,
+        requested_urls=requested_urls, unattempted=unattempted,
+        pages_requested=requested, truncated_page_nums=[],
+        stop_reason="no_new_products", output_row_count=len(rows))
+    pages = ledger["pages"]
+    equal("records are written in PAGE order despite shuffled arrival",
+          [p["page"] for p in pages], [1, 2, 3, 4, 5, 6])
+    equal("the empty grid is a success with zero rows",
+          (pages[3]["status"], pages[3]["rows_parsed"], pages[3]["rows_new"]),
+          (L.STATUS_SUCCESS, 0, 0))
+    for idx in (4, 5):
+        equal("never-dispatched page %d is not_attempted" % (idx + 1),
+              pages[idx]["status"], L.STATUS_NOT_ATTEMPTED)
+        equal("...and says the listing ended, not that it failed",
+              pages[idx]["not_attempted_reason"], L.REASON_LISTING_ENDED)
+        check("...with no failure reason and no final URL",
+              pages[idx]["failure_reason"] is None
+              and pages[idx]["final_url"] is None)
+    summary = ledger["summary"]
+    equal("unattempted pages are listed separately from failures",
+          (summary["pages_failed"], summary["pages_not_attempted"]),
+          ([], [5, 6]))
+    equal("the new-row total still equals the output under concurrency",
+          summary["rows_new_total"], 8)
+
+    # Now exercise the REAL concurrent driver with the browser stubbed and a
+    # fetch that completes in deliberately reverse order: its returned
+    # unattempted reasons must already carry the ledger vocabulary, and its
+    # outcomes must still sort back to page order.
+    class ConcurrencyArgs:
+        delay = 0
+        retries = 1
+        retry_delay = 0
+        out = "unused"
+        mode = "search"
+        sort = "a-z"
+        pages = requested
+
+    def slow_reverse_fetch(session, cargs, pool, page_num, url):
+        # Higher page numbers return first, so completion order is reversed.
+        time.sleep(0.01 * (requested - page_num))
+        oc = engine.PageOutcome(page_num=page_num, url=url)
+        oc.final_url = url
+        if page_num >= 4:
+            oc.products = []
+            oc.state = "empty"
+        else:
+            oc.products = html_by_page and [object()] * 2
+            oc.state = "content"
+        return oc
+
+    class FakeSession:
+        def __init__(self, *a, **k):
+            self.pool = None
+        def open(self):
+            return self
+        def close(self):
+            pass
+
+    class FakePlaywright:
+        def __enter__(self):
+            return None
+        def __exit__(self, *a):
+            return False
+
+    real_fetch = engine._fetch_one_page
+    real_session = engine._BrowserSession
+    real_pw = engine.sync_playwright
+    engine._fetch_one_page = slow_reverse_fetch
+    engine._BrowserSession = FakeSession
+    engine.sync_playwright = lambda: FakePlaywright()
+    try:
+        specs = [(n, requested_urls[n]) for n in range(2, requested + 1)]
+        results, driver_unattempted, exhausted = engine._fetch_pages_concurrently(
+            ConcurrencyArgs(), None, specs, 3)
+    finally:
+        engine._fetch_one_page = real_fetch
+        engine._BrowserSession = real_session
+        engine.sync_playwright = real_pw
+    check("the real driver stopped dispatch at the empty page", exhausted)
+    equal("driver outcomes restore to page order",
+          [o.page_num for o in sorted(results, key=lambda o: o.page_num)],
+          sorted(o.page_num for o in results))
+    check("driver unattempted pages use the ledger reason vocabulary",
+          driver_unattempted and all(
+              reason == L.REASON_LISTING_ENDED
+              for _, reason in driver_unattempted),
+          driver_unattempted)
+    attempted_nums = {o.page_num for o in results} | {1}
+    equal("driver attempted + unattempted covers every requested page",
+          sorted(attempted_nums | {n for n, _ in driver_unattempted}),
+          list(range(1, requested + 1)))
+
+
+def check_ledger_site_result_limit_marks_pages_not_attempted():
+    """Pages planned away against page 1's site-stated result count are
+    truncated-by-site: not_attempted with the site-limit reason, and counted
+    in the summary's truncation count rather than the failure list."""
+    import page_ledger as L
+    from product_parser import page_url
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    args = _ledger_args()
+
+    requested = 5
+    urls = {n: page_url(_LEDGER_BASE_URL, n, 24, "price-asc")
+            for n in range(1, requested + 1)}
+    # The site says 2 pages exist; the run asked for 5.
+    first = _outcome_from_html(
+        engine, _listing_html(["MB1", "MB2"], total=40), 1, urls[1], args)
+    second = _outcome_from_html(
+        engine, _listing_html(["MB3", "MB4"]), 2, urls[2], args)
+    outcomes = [first, second]
+    rows, new_counts = L.merge_rows_in_page_order(outcomes)
+    truncated = [3, 4, 5]
+    ledger = L.build_pages_ledger(
+        outcomes=outcomes, new_row_counts=new_counts, requested_urls=urls,
+        unattempted=[(n, L.REASON_SITE_RESULT_LIMIT) for n in truncated],
+        pages_requested=requested, truncated_page_nums=truncated,
+        stop_reason="page_cap_reached", output_row_count=len(rows))
+    equal("truncated pages are not_attempted",
+          [p["status"] for p in ledger["pages"][2:]],
+          [L.STATUS_NOT_ATTEMPTED] * 3)
+    check("truncated pages name the site result limit",
+          all(p["not_attempted_reason"] == L.REASON_SITE_RESULT_LIMIT
+              for p in ledger["pages"][2:]))
+    equal("summary counts the truncation",
+          ledger["summary"]["pages_truncated_by_site_count"], 3)
+    equal("...and lists which pages",
+          ledger["summary"]["pages_truncated_by_site"], [3, 4, 5])
+    equal("truncation is never a failure",
+          ledger["summary"]["pages_failed"], [])
+
+
+def check_ledger_rejects_a_record_that_does_not_reconcile():
+    """The builder must be loud about the two holes that would make a ledger
+    lie: a page neither fetched nor accounted for, and a new-row total that
+    disagrees with the output. A silent ledger is the failure this feature
+    exists to prevent."""
+    import page_ledger as L
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    args = _ledger_args()
+    url = _LEDGER_BASE_URL + "?start=0&sz=24"
+    oc = _outcome_from_html(engine, _listing_html(["MB1", "MB2"]), 1, url, args)
+    rows, new_counts = L.merge_rows_in_page_order([oc])
+
+    def build(**overrides):
+        kwargs = dict(outcomes=[oc], new_row_counts=new_counts,
+                      requested_urls={1: url}, unattempted=[],
+                      pages_requested=2, truncated_page_nums=[],
+                      stop_reason="completed", output_row_count=len(rows))
+        kwargs.update(overrides)
+        return L.build_pages_ledger(**kwargs)
+
+    # Page 2 requested but never claimed by any bucket.
+    try:
+        build()
+        check("a missing page is refused", False, "no error raised")
+    except ValueError:
+        check("a page neither fetched nor unattempted is refused", True)
+
+    # Claim page 2 as unattempted, but lie about the output row count.
+    try:
+        build(requested_urls={1: url, 2: url + "&p=2"},
+              unattempted=[(2, L.REASON_RUN_STOPPED)],
+              output_row_count=len(rows) + 1)
+        check("a non-reconciling row total is refused", False, "no error")
+    except ValueError:
+        check("rows_new != output rows is refused rather than written", True)
+
+
+def check_pages_ledger_is_written_atomically_and_guarded_like_the_output():
+    """The ledger goes through the same temp-file-then-rename path as the row
+    output, and — like the meta sidecar — is only written when row output is
+    written, so a zero-row run cannot overwrite a previous good record."""
+    import output_writer as O
+    import page_ledger as L
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+
+    good_ledger = {"summary": {"pages_requested": 1,
+                               "pages_succeeded": 1, "pages_failed": [],
+                               "pages_not_attempted": [],
+                               "pages_truncated_by_site_count": 0,
+                               "pages_truncated_by_site": [],
+                               "rows_parsed_total": 1, "rows_new_total": 1,
+                               "stop_reason": "completed"},
+                   "pages": []}
+    with tempfile.TemporaryDirectory() as tmp:
+        prefix = os.path.join(tmp, "run")
+        ledger_path = prefix + ".pages.json"
+
+        # A run that gathered NOTHING and lacks --allow-empty writes neither
+        # rows nor ledger, and reports the no-products exit.
+        rc = O.finish_run([], prefix, "json", False, blocked=False,
+                          stop_reason="completed", pages_requested=1,
+                          pages_completed=0, start_url="u", final_url="u",
+                          pages_ledger=good_ledger)
+        equal("zero rows is the no-products exit", rc, O.EXIT_NO_PRODUCTS)
+        check("a failed run writes NO ledger over the old one",
+              not os.path.exists(ledger_path))
+
+        # Seed a previous good ledger, then run a zero-row attempt again: the
+        # good record must survive untouched.
+        O.write_pages_ledger(prefix, good_ledger)
+        before = open(ledger_path, encoding="utf-8").read()
+        O.finish_run([], prefix, "json", False, blocked=False,
+                     stop_reason="completed", pages_requested=1,
+                     pages_completed=0, start_url="u", final_url="u",
+                     pages_ledger=good_ledger)
+        equal("the previous good ledger survives a failed re-run",
+              open(ledger_path, encoding="utf-8").read(), before)
+
+        # A successful run replaces it atomically with the new record.
+        row = Product(url="u1", sku="MB1", title="t", price=1.0,
+                      currency="EUR", page=1, position=1, mode="category",
+                      locale="en-fi", sort="price-asc")
+        rc = O.finish_run([row], prefix, "json", False, blocked=False,
+                          stop_reason="completed", pages_requested=1,
+                          pages_completed=1, start_url="u", final_url="u",
+                          pages_ledger=good_ledger)
+        equal("a row-bearing run exits 0", rc, 0)
+        with open(ledger_path, encoding="utf-8") as f:
+            on_disk = json.load(f)
+        equal("the ledger on disk is the record passed in",
+              on_disk["summary"]["stop_reason"], "completed")
+        check("no temp file is left beside the record",
+              not [n for n in os.listdir(tmp) if n.endswith(".tmp")])
+        # The shared prefix really does produce the documented file name.
+        check("the ledger shares the output prefix: <out>.pages.json",
+              os.path.basename(ledger_path) == "run.pages.json")
 
 
 CHECKS = [v for k, v in sorted(globals().items()) if k.startswith("check_")]

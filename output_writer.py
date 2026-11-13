@@ -499,6 +499,25 @@ def write_run_meta(out_prefix: str, meta: dict) -> str:
     return path
 
 
+def write_pages_ledger(out_prefix: str, ledger: dict) -> str:
+    """Write the per-page attribution record `<out>.pages.json`, atomically.
+
+    One entry per requested page plus a run-level summary — see
+    page_ledger.build_pages_ledger for the shape. It goes through the SAME
+    temp-file-then-rename path as the JSON/CSV outputs, for the same reason:
+    a crash, kill or full disk mid-serialisation must leave the previous
+    successful run's record in place rather than a truncated half-record
+    where it was. This function is only called once a run's row output was
+    written, so a failed run cannot overwrite a good record at all.
+    """
+    path = f"{out_prefix}.pages.json"
+    with _atomic(path) as f:
+        json.dump(ledger, f, ensure_ascii=False, indent=2)
+    print(f"[+] Wrote per-page ledger -> {path} "
+          f"({ledger['summary']['pages_requested']} page(s))")
+    return path
+
+
 def run_meta(status: str, stop_reason: str, pages_requested: int,
              pages_completed: int, start_url: str, final_url: str,
              products: int, pages_failed: Optional[List[int]] = None,
@@ -661,7 +680,8 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
                start_url: str, final_url: str,
                pages_failed: Optional[List[int]] = None,
                mode: str = "listing", source: str = SOURCE_DEFAULT,
-               extra: Optional[dict] = None) -> int:
+               extra: Optional[dict] = None,
+               pages_ledger: Optional[dict] = None) -> int:
     """Write output + the run-metadata sidecar; return the exit code.
 
     Shared by all three browser engines so the status/exit-code mapping
@@ -672,6 +692,12 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     the previous run's still-intact good output (which `save` deliberately
     does not overwrite) — the two files would contradict each other, and
     diff_runs.py would refuse to compare data that is in fact fine.
+
+    `pages_ledger` (the per-page attribution document built by
+    page_ledger.build_pages_ledger) follows the same gate: it is written only
+    when the row output is written, and atomically, so a run that gathered
+    nothing or crashed never replaces the previous good run's
+    `<out>.pages.json` with a half-record.
     """
     # Completeness is decided by the reason AND by the evidence. A named
     # list of stop reasons cannot cover a failure recorded somewhere else,
@@ -704,6 +730,11 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
             # Housekeeping merged UNDER the caller's facts: a collision must
             # never let a write statistic replace site data.
             extra=({**write_stats, **(extra or {})} if write_stats else extra)))
+        if pages_ledger is not None:
+            # Same gate as the sidecar above: no row output means no ledger
+            # write, so an earlier good run's pages.json survives a failed
+            # one untouched.
+            write_pages_ledger(out_prefix, pages_ledger)
 
     if not rows:
         # Nothing gathered at all, and WHY decides the code. The three

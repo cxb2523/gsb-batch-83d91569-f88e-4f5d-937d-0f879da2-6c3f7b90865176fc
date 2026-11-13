@@ -10,6 +10,26 @@ When it does, the release notes lead with it.
 
 ## [Unreleased]
 
+### Added
+
+- Every Playwright run now writes a per-page attribution record
+  `<out>.pages.json`, sharing the output prefix with the JSON/CSV files. One
+  entry per requested page carries the page number, request and final URLs,
+  rows parsed, rows actually new after sku dedupe, a six-way `status`
+  (`success`, `blocked`, `load_failed`, `not_found`, `parse_empty`,
+  `not_attempted`) and the failure/unattempted reason; a summary block adds the
+  requested/succeeded counts, failed page numbers, pages truncated by the
+  site's result count and the final `stop_reason`. Dedupe is still sku-keyed
+  in page-number order, and the writer enforces that the per-page `rows_new`
+  sum equals the output row count. Concurrent runs sort the entries by page
+  number rather than completion order, and pages the queue never dispatches
+  are `not_attempted` (with the reason), never failures. The file is written
+  via the same temp-file-then-rename path and only when row output is written,
+  so a failed run cannot overwrite the previous good record. New offline tests
+  cover a normal multi-page run, a middle page that parses empty (and an
+  all-duplicate page that must stay a success), and shuffled concurrent
+  completion, all on self-made local HTML with no network.
+
 ### Changed
 
 - CI only: the scheduled canary now starts at 04:07 UTC (Mondays) instead of 05:40, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.

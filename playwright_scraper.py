@@ -103,10 +103,12 @@ from product_parser import (DEFAULT_LOCALE, DEFAULT_SORT, PAGE_SIZE, SORTS,
                             parse_product_detail, parse_products,
                             product_link_count, references_own_assets, search_url,
                             total_results)
-from output_writer import (dedupe_by_key, finish_run, EXIT_API_ERROR,
-                           SOURCE_DEFAULT)
+from output_writer import (finish_run, EXIT_API_ERROR, SOURCE_DEFAULT)
 import page_flow
 from page_flow import MIN_CARD_MATCHES
+import page_ledger
+from page_ledger import (REASON_LISTING_ENDED, REASON_RUN_STOPPED,
+                         REASON_SITE_RESULT_LIMIT, REASON_WORKER_DIED)
 from proxy_pool import (from_args as proxy_pool_from_args, to_playwright, mask,
                         ROTATE_MODES, ProxyError, ProxyPool)
 import env_config
@@ -1160,6 +1162,12 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
     Each worker owns its own Playwright instance, browser and exit: with the
     sync API a browser belongs to the thread that made it, so sharing one
     across threads is not an option even if it were desirable.
+
+    Returns `(results, unattempted, exhausted)` where `unattempted` is a list
+    of `(page_num, reason)` — the reason is one of the page_ledger
+    REASON_* constants, because the per-page ledger must distinguish a page
+    skipped because the listing ended from one skipped because its worker
+    died: both were never dispatched, but only the second is damage.
     """
     work = queue.Queue()
     for spec in specs:
@@ -1172,6 +1180,20 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
     # 45 empty ones. Workers check it before taking more work, so at most
     # (concurrency - 1) extra pages are in flight when it trips.
     exhausted = threading.Event()
+    # A worker that raised out of its own loop is dead, and the pages it left
+    # in the queue must be named `worker_died` rather than conflated with an
+    # honest end-of-listing.
+    dead_workers = set()
+    dead_lock = threading.Lock()
+    # Page numbers a worker dequeued and is currently fetching. A queue alone
+    # cannot answer "which pages were never answered": when a worker dies its
+    # surviving siblings drain the rest of the queue, so the page the dead
+    # worker had IN FLIGHT — dequeued, never returned — would otherwise
+    # vanish from both `results` and the leftover-queue accounting. Tracking
+    # in-flight pages under the same lock makes that orphan recoverable after
+    # the threads join.
+    in_flight = set()
+    state_lock = threading.Lock()
 
     def worker(index: int):
         name = f"worker-{index + 1}"
@@ -1182,14 +1204,25 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
                     first = True
                     while not exhausted.is_set():
                         try:
-                            page_num, url = work.get_nowait()
+                            with state_lock:
+                                page_num, url = work.get_nowait()
+                                in_flight.add(page_num)
                         except queue.Empty:
                             break
                         if not first:
                             time.sleep(args.delay)
                         first = False
-                        outcome = _fetch_one_page(session, args, session.pool,
-                                                  page_num, url)
+                        try:
+                            outcome = _fetch_one_page(session, args, session.pool,
+                                                      page_num, url)
+                        except BaseException:
+                            # Leave page_num in `in_flight`: this worker is
+                            # about to exit its loop, so the page is an orphan
+                            # the join below must account for. Re-raising here
+                            # is what the outer handler logs.
+                            raise
+                        with state_lock:
+                            in_flight.discard(page_num)
                         with results_lock:
                             results.append(outcome)
                         if outcome.ok and not outcome.products:
@@ -1201,6 +1234,8 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
                     session.close()
         except Exception:  # noqa: BLE001 — a dead worker must not hang the run
             logger.exception("[%s] died; its pages will be reported as failed.", name)
+            with dead_lock:
+                dead_workers.add(name)
 
     threads = [threading.Thread(target=worker, args=(i,), name=f"page-worker-{i + 1}")
                for i in range(concurrency)]
@@ -1211,14 +1246,41 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
 
     # Anything still queued was never attempted (a worker died, or dispatch
     # stopped at the end of the listing). Not reported as failed pages: they
-    # were not tried, and claiming otherwise would overstate the damage.
+    # were not tried, and claiming otherwise would overstate the damage. The
+    # reason distinguishes the two, for the per-page ledger.
     unattempted = []
     while True:
         try:
-            unattempted.append(work.get_nowait()[0])
+            page_num, _url = work.get_nowait()
         except queue.Empty:
             break
-    return results, sorted(unattempted), exhausted.is_set()
+        if exhausted.is_set():
+            reason = REASON_LISTING_ENDED
+        elif dead_workers:
+            reason = REASON_WORKER_DIED
+        else:
+            # No end-of-listing signal and no dead worker, yet work remains —
+            # a stop we did not originate. Still not a failure: the page was
+            # never tried.
+            reason = REASON_RUN_STOPPED
+        unattempted.append((page_num, reason))
+
+    # Orphans: dequeued by a worker that then died, so never returned and no
+    # longer in the queue. Same accounting as the leftover queue, but found
+    # through the in-flight registry rather than by emptiness.
+    with state_lock:
+        orphaned = sorted(in_flight)
+    for page_num in orphaned:
+        if exhausted.is_set():
+            reason = REASON_LISTING_ENDED
+        elif dead_workers:
+            reason = REASON_WORKER_DIED
+        else:
+            reason = REASON_RUN_STOPPED
+        unattempted.append((page_num, reason))
+
+    unattempted.sort(key=lambda pair: pair[0])
+    return results, unattempted, exhausted.is_set()
 
 
 class _SolveBudget:
@@ -1287,6 +1349,18 @@ def scrape(args) -> int:
     # All three modes are one row per business-at-a-location, so `sku` is the
     # key for all of them.
     dedupe_key = "sku"
+    # Per-page ledger bookkeeping. These survive every branch below so the
+    # `<out>.pages.json` record can be assembled once at the end regardless of
+    # which path (sequential, concurrent, page-1 failure, single-page) the run
+    # actually took.
+    #
+    # `unattempted_reasons` maps a never-dispatched page to a page_ledger
+    # REASON_*; `planned_urls` holds the request URL of EVERY requested page,
+    # including ones never fetched; `truncated_pages` are the pages planned
+    # away against page 1's own result-count.
+    unattempted_reasons: dict = {}
+    planned_urls: dict = {}
+    truncated_pages: List[int] = []
     # Why the loop ended. "completed" means every requested page was fetched;
     # "no_new_products" means the listing itself ran out (also a complete
     # result). "single_page_mode" is complete by construction — a detail page
@@ -1363,21 +1437,48 @@ def scrape(args) -> int:
             # how many pages 2..N there are to address at all.
             first = _fetch_one_page(session, args, pool, 1, target)
             outcomes.append(first)
+            planned_urls[1] = target
 
             if not first.ok:
                 stop_reason = _failure_reason(first)
                 blocked = first.blocked_by is not None
+                # Nothing past page 1 was planned, let alone dispatched.
+                # Record the URLs the run WOULD have asked for so the ledger
+                # has a request address for every requested page, and mark
+                # the rest unattempted — they were never tried, so they are
+                # not failures. Product mode is single-page, so only listing
+                # modes have pages 2..N to account for.
+                if args.mode != "product":
+                    base = first.final_url or target
+                    for n in range(2, args.pages + 1):
+                        planned_urls[n] = page_url(base, n, args.page_size,
+                                                   args.sort)
+                        unattempted_reasons[n] = REASON_RUN_STOPPED
             elif args.mode == "product":
                 pass  # one page is the whole run — but many rows
             else:
                 seen_keys.update(p.sku for p in first.products if p.sku is not None)
                 planned = _plan_page_urls(args, first.final_url,
                                           first.pages_available)
+                # Every requested page gets a request URL in the ledger,
+                # whether or not it was ultimately dispatched. Pages beyond
+                # the site's own result count are constructible (the site
+                # serves them as empty grids) — see _plan_page_urls.
+                base = first.final_url or target
+                for n in range(2, args.pages + 1):
+                    planned_urls[n] = (planned[n - 2]
+                                       if n - 2 < len(planned)
+                                       else page_url(base, n, args.page_size,
+                                                     args.sort))
                 if len(planned) + 1 < args.pages:
                     # Clamped to the site's own result count, which is a
                     # complete answer rather than an early stop — see
                     # COMPLETE_STOP_REASONS.
                     stop_reason = "page_cap_reached"
+                    capped = list(range(len(planned) + 2, args.pages + 1))
+                    truncated_pages.extend(capped)
+                    for n in capped:
+                        unattempted_reasons[n] = REASON_SITE_RESULT_LIMIT
 
                 if args.pages > 1 and concurrency > 1 and not page_flow.pagination_is_addressable(first.final_url):
                     logger.warning("--concurrency %d requested, but this "
@@ -1398,6 +1499,10 @@ def scrape(args) -> int:
                     rest, unattempted, exhausted = _fetch_pages_concurrently(
                         args, pool, specs, concurrency)
                     outcomes.extend(rest)
+                    # `unattempted` already carries a per-page REASON_*
+                    # (listing ended / worker died / run stopped).
+                    for n, reason in unattempted:
+                        unattempted_reasons.setdefault(n, reason)
 
                     failed = [o for o in rest if not o.ok]
                     if failed:
@@ -1412,6 +1517,10 @@ def scrape(args) -> int:
                         stop_reason = "pages_unattempted"
                     session = None  # already closed
                 elif planned:
+                    # What the sequential loop stopped FOR, used only to name
+                    # the ledger status of pages past the break: an honest
+                    # end-of-listing versus an early stop after a fault.
+                    sequential_stop_reason = REASON_RUN_STOPPED
                     url = planned[0]
                     for page_num in range(2, len(planned) + 2):
                         # A new exit per page is what actually spreads a run's
@@ -1449,11 +1558,21 @@ def scrape(args) -> int:
                                         "— treating that as the end of the "
                                         "listing.", page_num)
                             stop_reason = "no_new_products"
+                            sequential_stop_reason = REASON_LISTING_ENDED
                             break
 
                         if page_num - 1 < len(planned):
                             url = planned[page_num - 1]
                             time.sleep(args.delay)
+
+                    # Pages the sequential loop never reached. Never failures:
+                    # the break above decided not to dispatch them, and the
+                    # reason says whether that was the listing ending or a
+                    # fault on an earlier page.
+                    attempted = {o.page_num for o in outcomes}
+                    for n in range(2, args.pages + 1):
+                        if n not in attempted and n not in unattempted_reasons:
+                            unattempted_reasons[n] = sequential_stop_reason
         finally:
             if session is not None:
                 session.close()
@@ -1462,11 +1581,16 @@ def scrape(args) -> int:
     # At one page at a time the two are identical, which is the point: this is
     # what keeps the output byte-for-byte the same while removing the
     # dependency on arrival order that concurrency would otherwise introduce.
-    all_rows = []
-    merged_seen = set()
+    #
+    # The SAME merge produces both the output rows and the per-page ledger's
+    # `rows_new` counts (page_ledger.merge_rows_in_page_order wraps this
+    # dedupe), so `sum(rows_new) == len(all_rows)` is structural: there is no
+    # second bookkeeping path that could disagree with it.
+    all_rows, rows_new_by_page = page_ledger.merge_rows_in_page_order(
+        outcomes, key=dedupe_key)
     for oc in sorted(outcomes, key=lambda o: o.page_num):
-        fresh = dedupe_by_key(oc.products, merged_seen, key=dedupe_key)
-        if len(fresh) < len(oc.products):
+        fresh_count = rows_new_by_page.get(oc.page_num, 0)
+        if fresh_count < len(oc.products):
             # Not necessarily "on an earlier page" — a duplicate can be on
             # this page. Montblanc's pagination was measured NOT repeating:
             # start=0 and start=24 of /en-fi/writing-instruments shared 0 of
@@ -1474,8 +1598,7 @@ def scrape(args) -> int:
             # count near the page size means a page was re-fetched rather
             # than advanced.
             logger.info("Page %d: dropped %d duplicate row(s).",
-                        oc.page_num, len(oc.products) - len(fresh))
-        all_rows.extend(fresh)
+                        oc.page_num, len(oc.products) - fresh_count)
 
     # Completeness, checked over the MERGED result rather than per page — a
     # per-page check cannot see a gap BETWEEN two pages, which is exactly
@@ -1564,13 +1687,38 @@ def scrape(args) -> int:
         # pages x page_size would OVERSTATE a short last page: 2 x 24 = 48
         # on a category holding 25.
 
+    # The per-page attribution record. Built for every run shape — sequential
+    # and concurrent, product and listing — from the SAME page-ordered merge
+    # as the rows above, which is what lets build_pages_ledger assert that the
+    # per-page new-row total reconciles exactly with the output. Any hole in
+    # the page bookkeeping raises here rather than being written as a record
+    # that hides a page.
+    requested_urls = dict(planned_urls)
+    # Defensive backfill: every requested page needs a request URL even on an
+    # unanticipated branch (e.g. an engine-internal error path). The listing
+    # convention is addressable, so construct rather than leave blank.
+    backfill_base = final_url or args.url
+    for n in range(1, args.pages + 1):
+        requested_urls.setdefault(
+            n, page_url(backfill_base, n, args.page_size, args.sort)
+            if args.mode != "product" else args.url)
+    pages_ledger = page_ledger.build_pages_ledger(
+        outcomes=outcomes,
+        new_row_counts=rows_new_by_page,
+        requested_urls=requested_urls,
+        unattempted=sorted(unattempted_reasons.items()),
+        pages_requested=args.pages,
+        truncated_page_nums=sorted(truncated_pages),
+        stop_reason=stop_reason,
+        output_row_count=len(all_rows))
+
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       blocked=blocked, stop_reason=stop_reason,
                       pages_requested=args.pages, pages_completed=len(ok_pages),
                       pages_failed=failed_pages, mode=args.mode,
                       source=SOURCE_DEFAULT,
                       start_url=args.url, final_url=final_url,
-                      extra=extra)
+                      extra=extra, pages_ledger=pages_ledger)
 
 
 def parse_args():

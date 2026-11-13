@@ -48,6 +48,7 @@ py-modules = [
     "fingerprint_client",
     "output_writer",
     "page_flow",
+    "page_ledger",
     "playwright_scraper",
     "product_parser",
     "proxy_pool",
