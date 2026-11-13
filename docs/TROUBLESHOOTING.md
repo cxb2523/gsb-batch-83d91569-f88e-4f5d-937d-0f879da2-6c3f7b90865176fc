@@ -152,7 +152,15 @@ The solve did not finish within 300.0s. Raise the timeout parameter, or check Ca
 
 3. Check CapSkip's own queue/log in the desktop app — a solve that never finishes is often stuck there, not waiting on the network.
 
-The timeout error also names the CapSkip captcha id when one was assigned, so a solve that completes just after the deadline can still be read back via `res.php` or any CapSkip SDK.
+The timeout error also names the CapSkip captcha id when one was assigned, and tells the model to call `capskip_get_result` with it:
+
+```
+The solve did not finish within 300.0s. Raise the timeout parameter, or check CapSkip's own queue. CapSkip captcha id 48213 may still complete. Do not resubmit: call capskip_get_result with captchaId "48213" to wait for it and read the answer, or come back to it later with the same id.
+```
+
+Calling `capskip_get_result` with that id is the better fix than resubmitting. A resubmit spends another solve and may be handed a sitekey or challenge that has already expired. CapSkip serves each answer once, so read it promptly once the tool returns.
+
+If `capskip_get_result` itself waits out its timeout, the task may still be queued — call it again with the same id rather than submitting a new challenge. If it reports `ERROR_WRONG_CAPTCHA_ID`, the id was never issued (or was mistyped). If it keeps timing out with no answer and no error, the id's answer may already have been read: CapSkip answers an already-read id with an empty body, which is indistinguishable from "not ready".
 
 ---
 

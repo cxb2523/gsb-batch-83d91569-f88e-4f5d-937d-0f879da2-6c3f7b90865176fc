@@ -117,6 +117,22 @@ export const mtCaptchaOutput = baseSolveOutput.extend({
   token: z.string(),
 });
 
+/**
+ * The result of retrieving a still-running solve by its captcha id.
+ *
+ * The tool cannot know which solve tool submitted the id, so it reports the
+ * three fields every solve returns and forwards only the extra values the
+ * res.php reply itself carried.
+ */
+export const retrievedResultOutput = baseSolveOutput.extend({
+  /** The User-Agent the answer must be submitted with, when CapSkip reported one. */
+  userAgent: z.string().optional(),
+  /** hCaptcha's second widget value, present when the reply carried one. */
+  respKey: z.string().optional(),
+  /** DataDome's own proxy list address, when the cookie was earned through one. */
+  proxy: z.string().optional(),
+});
+
 export const statusOutput = z.object({
   reachable: z.boolean(),
   host: z.string(),

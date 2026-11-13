@@ -141,6 +141,14 @@ function createMockServer() {
   const idType = {};
   const idFields = {};
   const pollCount = {};
+  // An id whose answer has been served once. Real CapSkip serves a result only
+  // once: a second read of the same id gets the same empty body an unknown id
+  // does. Modelling that is what lets the retrieval tool's "already read" path
+  // be exercised rather than assumed.
+  const served = {};
+  // A `hold` task stays queued until the test releases it, which is how a solve
+  // is made to time out deterministically while its answer is still on its way.
+  const released = {};
 
   const handleRes = (res, query) => {
     // Real CapSkip validates the key on res.php too, not only on in.php. The
@@ -155,6 +163,31 @@ function createMockServer() {
     const wantJson = String(query.json) === '1';
     pollCount[cid] = (pollCount[cid] || 0) + 1;
 
+    // CapSkip serves a solved answer exactly once. Reading it again is
+    // indistinguishable from an unknown id: an empty 200 body.
+    if (served[cid]) {
+      send(res, '');
+      return;
+    }
+
+    // An id the server never issued. Real CapSkip answers it with
+    // ERROR_WRONG_CAPTCHA_ID rather than an empty body when it can tell, which
+    // is the arm the retrieval tool reports as "invalid id" immediately.
+    if (cid.startsWith('badid')) {
+      send(res, 'ERROR_WRONG_CAPTCHA_ID');
+      return;
+    }
+
+    // A held task is not ready until the test says so.
+    if (cid.startsWith('hold') && !released[cid]) {
+      send(
+        res,
+        wantJson ? '{"status":0,"request":"CAPCHA_NOT_READY"}' : 'CAPCHA_NOT_READY',
+        wantJson ? 'application/json' : 'text/plain',
+      );
+      return;
+    }
+
     // CapSkip returns an empty 200 body when no result is available yet
     // (briefly right after submit, for an unknown id, or once a solved token
     // has already been read). It must be treated as "not ready".
@@ -165,6 +198,11 @@ function createMockServer() {
 
     const notReady = cid.startsWith('never')
       || (cid.startsWith('slow') && pollCount[cid] < 2);
+
+    if (!notReady) {
+      // Everything below returns an answer, and CapSkip serves an answer once.
+      served[cid] = true;
+    }
 
     if (notReady) {
       send(
@@ -322,6 +360,8 @@ function createMockServer() {
     let cid;
     if (pageurl.includes('never')) {
       cid = `never${ids}`;
+    } else if (pageurl.includes('hold')) {
+      cid = `hold${ids}`;
     } else if (pageurl.includes('slow')) {
       cid = `slow${ids}`;
     } else if (pageurl.includes('empty')) {
@@ -374,6 +414,16 @@ function createMockServer() {
 
   /** The field set of the most recent in.php submit, or null if none yet. */
   server.lastSubmit = null;
+
+  /**
+   * Let a `hold` task produce its answer. Until this is called, res.php reports
+   * it as CAPCHA_NOT_READY, which is how a solve is made to time out while its
+   * answer is still pending.
+   */
+  server.release = (cid) => { released[cid] = true; };
+
+  /** Whether res.php has already served this id's answer. */
+  server.wasServed = (cid) => Boolean(served[cid]);
 
   return server;
 }

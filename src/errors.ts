@@ -86,6 +86,14 @@ const API_CODES: Array<[RegExp, (ctx: ErrorContext) => string]> = [
     () => 'CapSkip could not read the proxy. Use host:port or login:password@host:port.',
   ],
   [
+    /ERROR_WRONG_CAPTCHA_ID/,
+    (ctx) =>
+      `CapSkip does not know captcha id ${ctx.captchaId ? `'${ctx.captchaId}' ` : ''}on res.php. `
+      + 'It was never submitted, or its answer was already read — CapSkip serves a '
+      + 'result only once. Check the id is copied exactly, and do not submit a new '
+      + 'challenge until you are sure this one has no pending answer.',
+  ],
+  [
     /ERROR_BAD_PARAMETERS/,
     () => 'CapSkip rejected the parameters for this captcha type. Re-check the values supplied.',
   ],
@@ -130,9 +138,14 @@ export function mapError(err: unknown, ctx: ErrorContext): CallToolResult {
     const elapsed = ctx.elapsedSeconds !== undefined
       ? `${ctx.elapsedSeconds.toFixed(1)}s`
       : 'the configured timeout';
+    // The solve may well finish after the deadline. Naming the id and the tool
+    // that polls it is what keeps the model from resubmitting a fresh challenge
+    // — and burning a new solve — for an answer that is already on its way.
     const id = ctx.captchaId
-      ? ` CapSkip captcha id ${ctx.captchaId} may still complete — it can be read later `
-        + 'via res.php or any CapSkip SDK.'
+      ? ` CapSkip captcha id ${ctx.captchaId} may still complete. Do not resubmit: `
+        + `call capskip_get_result with captchaId "${ctx.captchaId}" to wait for it `
+        + 'and read the answer, or come back to it later with the same id. '
+        + '(It is also readable via res.php or any CapSkip SDK.)'
       : '';
     return toolError(
       `The solve did not finish within ${elapsed}. Raise the timeout parameter, or `

@@ -9,6 +9,7 @@ import { registerCaptchaFoxTool } from './tools/captchafox.js';
 import { registerCapyTool } from './tools/capy.js';
 import { registerFriendlyCaptchaTool } from './tools/friendlycaptcha.js';
 import { registerGeetestTool } from './tools/geetest.js';
+import { registerGetResultTool } from './tools/getresult.js';
 import { registerHCaptchaTool } from './tools/hcaptcha.js';
 import { registerImageTool } from './tools/image.js';
 import { registerMtCaptchaTool } from './tools/mtcaptcha.js';
@@ -38,6 +39,8 @@ export function createServer(config: CapSkipConfig): McpServer {
         + 'capskip_solve_recaptcha. An MTCaptcha widget (a mtcaptchaConfig object with an '
         + "'MTPublic-' sitekey, or an iframe from service.mtcaptcha.com) takes "
         + 'capskip_solve_mtcaptcha, not capskip_solve_image_captcha. '
+        + 'If a solve times out, its CapSkip captcha id usually keeps running: call '
+        + 'capskip_get_result with that id to read the answer instead of resubmitting. '
         + 'If a solve fails unexpectedly, call capskip_status to check CapSkip is '
         + 'running.',
     },
@@ -46,6 +49,7 @@ export function createServer(config: CapSkipConfig): McpServer {
   const ctx = createContext(config);
 
   registerStatusTool(server, ctx);
+  registerGetResultTool(server, ctx);
   registerImageTool(server, ctx);
   registerRecaptchaTool(server, ctx);
   registerTurnstileTool(server, ctx);

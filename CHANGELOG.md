@@ -7,8 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet. Add entries here as changes land; they move into a version
-section at release time.
+### Added
+
+- **`capskip_get_result`** — retrieve the answer for a captcha that was already
+  submitted, by its CapSkip captcha id. Requires `captchaId`; optional `timeout`
+  (1–600s, default `CAPSKIP_RECAPTCHA_TIMEOUT`). Polls `res.php`, waiting while
+  CapSkip reports the task as not ready, at the configured
+  `CAPSKIP_POLLING_INTERVAL`, and returns `captchaId`, `code` and
+  `solveSeconds` (plus `userAgent`, `respKey` or `proxy` when the answer
+  carries one). Invalid ids (`ERROR_WRONG_CAPTCHA_ID`), already-read answers
+  and connection failures during the wait are returned as readable `isError`
+  results, not protocol exceptions. Emits progress notifications, so a long
+  retrieval does not trip the client's tool-call timeout.
+- Output schema `retrievedResultOutput`.
+- Error guidance for `ERROR_WRONG_CAPTCHA_ID`.
+
+### Changed
+
+- The timeout error now tells the model to call `capskip_get_result` with the
+  captcha id instead of only suggesting a larger `timeout`, so a timed-out
+  solve no longer costs a fresh challenge.
+- The server's instructions mention `capskip_get_result` for timed-out solves.
+
 
 ## [1.6.0] - 2026-11-10
 

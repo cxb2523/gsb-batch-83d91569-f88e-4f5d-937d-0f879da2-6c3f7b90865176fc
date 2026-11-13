@@ -120,6 +120,26 @@ test('timeout reports elapsed seconds and the captcha id', () => {
   assert.match(text, /9912/);
 });
 
+test('timeout points at capskip_get_result with the id, not just a bigger timeout', () => {
+  // Raising the timeout and resubmitting are the two things a model falls back
+  // to when a solve times out, and both waste a solve for an answer that is
+  // still on its way. The error has to name the retrieval tool and the id.
+  const err = new TimeoutException('timeout 30 exceeded');
+  const text = textOf(mapError(err, { ...CTX, captchaId: '48213', elapsedSeconds: 31.2 }));
+  assert.match(text, /capskip_get_result/);
+  assert.match(text, /captchaId "48213"/);
+  assert.match(text, /Do not resubmit/);
+});
+
+test('ERROR_WRONG_CAPTCHA_ID explains the id is unknown or already read', () => {
+  const text = textOf(mapError(new ApiException('ERROR_WRONG_CAPTCHA_ID'), {
+    ...CTX, captchaId: 'zzz',
+  }));
+  assert.match(text, /does not know captcha id/i);
+  assert.match(text, /already read/i);
+  assert.match(text, /zzz/);
+});
+
 test('unknown throwables still produce an error result, not a throw', () => {
   const result = mapError(new Error('something odd'), CTX);
   assert.strictEqual(result.isError, true);

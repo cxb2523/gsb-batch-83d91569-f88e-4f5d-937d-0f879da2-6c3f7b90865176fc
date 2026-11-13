@@ -17,7 +17,7 @@ npx -y capskip-mcp
 
 ## What this solves
 
-An AI agent driving a browser hits a captcha and stops. This server gives it thirteen tools so it can read the sitekey, solve the challenge, and carry on — without a human stepping in and without a per-solve API bill.
+An AI agent driving a browser hits a captcha and stops. This server gives it fourteen tools so it can read the sitekey, solve the challenge, and carry on — without a human stepping in and without a per-solve API bill.
 
 CapSkip runs as a desktop app exposing a captcha-solving HTTP API on `127.0.0.1:8080`. `capskip-mcp` is a thin translation layer over that API: the fifth official CapSkip client, alongside the [Python](https://github.com/capskip/capskip-python), [Node.js](https://github.com/capskip/capskip-node), [PHP](https://github.com/capskip/capskip-php) and [.NET](https://github.com/capskip/capskip-dotnet) SDKs.
 
@@ -84,7 +84,7 @@ No install step — `npx` fetches and runs it on demand.
 
 ### 3. Restart your client
 
-It should list thirteen tools, all prefixed `capskip_`.
+It should list fourteen tools, all prefixed `capskip_`.
 
 ### 4. Ask your agent to solve a captcha
 
@@ -116,6 +116,7 @@ CapSkip exposes the familiar `in.php` / `res.php` endpoints, so it works as a **
 | Tool | Purpose | Required arguments |
 |---|---|---|
 | `capskip_status` | Check whether the CapSkip desktop app is running and reachable | none |
+| `capskip_get_result` | Retrieve the answer for an already-submitted captcha by its id — use it when a solve timed out instead of resubmitting | `captchaId` |
 | `capskip_solve_image_captcha` | Read the text out of a distorted-text captcha image | `image` |
 | `capskip_solve_recaptcha` | Solve reCAPTCHA v2 or v3, including invisible and Enterprise | `sitekey`, `url` |
 | `capskip_solve_turnstile` | Solve a Cloudflare Turnstile widget or challenge page | `sitekey`, `url` |
@@ -213,7 +214,21 @@ Every solve tool returns a human-readable text block and `structuredContent` mat
 - **`capskip_solve_hcaptcha`** adds `token`, for the hidden `h-captcha-response` field (and `g-recaptcha-response`, if the form has one), `respKey` (the second value hCaptcha hands the widget; most sites never read it, and it can be empty) and `userAgent`, the one the token was earned with. Submit the form with that User-Agent, promptly: tokens are single use and expire about two minutes after they are issued.
 - **`capskip_solve_mtcaptcha`** adds `token`, `v1(...)`, for the hidden `mtcaptcha-verifiedtoken` field.
 
-Long solves emit MCP progress notifications, so a 45-second reCAPTCHA does not trip your client's tool-call timeout.
+`capskip_get_result` returns the same shape — `captchaId`, `code`, `solveSeconds` — and forwards `userAgent`, `respKey` or `proxy` when the polled answer carried one. It cannot know which captcha type you submitted, so its text reply names the usual fields rather than one specific field.
+
+Long solves emit MCP progress notifications, so a 45-second reCAPTCHA does not trip your client's tool-call timeout. `capskip_get_result` emits them while it waits too, for the same reason.
+
+### When a solve times out
+
+A timeout does not mean the answer is lost. CapSkip keeps working on the task, so the timeout error names the captcha id and tells the model to call `capskip_get_result` with it:
+
+```
+The solve did not finish within 30.0s. Raise the timeout parameter, or check CapSkip's own queue. CapSkip captcha id 48213 may still complete. Do not resubmit: call capskip_get_result with captchaId "48213" to wait for it and read the answer, or come back to it later with the same id.
+```
+
+`capskip_get_result` polls `res.php` for that id, waiting up to its own `timeout` (1–600s, default `CAPSKIP_RECAPTCHA_TIMEOUT`) and honouring `CAPSKIP_POLLING_INTERVAL`. This is the path to prefer over resubmitting: a second submit spends another solve and may be handed a sitekey or challenge that has already expired. CapSkip serves each answer once, so read it promptly once the tool returns.
+
+An id CapSkip does not know (`ERROR_WRONG_CAPTCHA_ID`), or one whose answer was already read, comes back as a readable `isError` result rather than a protocol exception. So does a lost connection during the wait.
 
 ---
 
@@ -231,7 +246,9 @@ Every tool call returns `isError: true` with readable text on failure — never 
 | `ERROR_PAGEURL` | `CapSkip rejected the url. Pass the full page URL, including its scheme.` |
 | `ERROR_INVALID_IMAGE` | `CapSkip could not read that image. Check the file is a valid, uncorrupted PNG or JPEG.` |
 | `ERROR_BAD_PARAMETERS` | `CapSkip rejected the parameters for this captcha type. Re-check the values supplied.` |
-| Solve exceeded `timeout` | `The solve did not finish within <elapsed>s. Raise the timeout parameter, or check CapSkip's own queue.` — plus the captcha id when one was assigned |
+| Solve exceeded `timeout` | `The solve did not finish within <elapsed>s. Raise the timeout parameter, or check CapSkip's own queue.` — plus the captcha id and a pointer to `capskip_get_result` when one was assigned |
+| Unknown or already-read `captchaId` | `CapSkip does not know captcha id '<id>' on res.php. It was never submitted, or its answer was already read — CapSkip serves a result only once. …` |
+| Retrieval waited out its `timeout` | `CapSkip returned no answer for captcha id <id> within <n>s. The task may still be queued — call capskip_get_result again with the same id to keep waiting. …` |
 | Unknown or misspelled parameter | Rejected before the call reaches CapSkip, naming the key, e.g. `Unrecognized key: "min_score"` |
 
 See [Troubleshooting](docs/TROUBLESHOOTING.md) for fixes.

@@ -1,6 +1,6 @@
 # CapSkip MCP Server — API Reference
 
-Complete reference for all thirteen tools `capskip-mcp` registers. Parameter descriptions below are copied verbatim from each tool's schema in `src/tools/` so this document cannot drift from what a client actually sees when it lists tools.
+Complete reference for all fourteen tools `capskip-mcp` registers. Parameter descriptions below are copied verbatim from each tool's schema in `src/tools/` so this document cannot drift from what a client actually sees when it lists tools.
 
 Every solve tool declares an `outputSchema` and returns MCP `structuredContent` matching it, plus a human-readable text block for clients that do not render structured output. Every tool schema rejects unknown keys — a misspelled or unsupported parameter is rejected by name rather than silently ignored.
 
@@ -11,6 +11,7 @@ Every solve tool declares an `outputSchema` and returns MCP `structuredContent` 
 | Tool | Purpose | Proxy support |
 |---|---|---|
 | `capskip_status` | Check whether CapSkip is running and reachable | n/a |
+| `capskip_get_result` | Retrieve the answer for an already-submitted captcha by its id | n/a |
 | `capskip_solve_image_captcha` | Read the text out of a distorted-text captcha image | No |
 | `capskip_solve_recaptcha` | Solve a Google reCAPTCHA v2 or v3 widget | Yes |
 | `capskip_solve_turnstile` | Solve a Cloudflare Turnstile widget or challenge page | Yes |
@@ -95,6 +96,67 @@ When something else holds the port:
   "detail": "Something is listening on 127.0.0.1:8080 but it did not answer as CapSkip (HTTP 404). Check the API port in CapSkip settings, and that nothing else has taken that port — override with CAPSKIP_HOST / CAPSKIP_PORT."
 }
 ```
+
+---
+
+## `capskip_get_result`
+
+Fetch the answer for a captcha that was already submitted, by its CapSkip captcha id. This is the recovery path for a solve that returned a timeout: the task usually keeps running in CapSkip, and its answer is still on `res.php`. Resubmitting a fresh challenge instead spends another solve and may be handed a sitekey that has already expired.
+
+The tool polls `res.php` for the id. While CapSkip reports the task as not ready it keeps waiting, starting at 0.25s between polls and backing off (doubling) to `CAPSKIP_POLLING_INTERVAL`. It emits MCP progress notifications during the wait, so a long retrieval does not trip the client's tool-call timeout.
+
+### Parameters
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `captchaId` | string | Yes | — | "The CapSkip captcha id, copied from a solve tool that timed out (the error text names it, e.g. 'CapSkip captcha id 48213') or from a solve result. Not a sitekey or a token." |
+| `timeout` | integer | No | `CAPSKIP_RECAPTCHA_TIMEOUT` (300) | "Seconds to wait before giving up. Maximum 600." |
+
+### Output shape
+
+| Field | Type | Always present | Description |
+|---|---|---|---|
+| `captchaId` | string | yes | The id that was polled |
+| `code` | string | yes | The token (or answer) — the value a solve tool would have returned |
+| `solveSeconds` | number | yes | Wall-clock seconds spent polling in this call |
+| `userAgent` | string | when the answer carries one | The User-Agent the token must be submitted with |
+| `respKey` | string | when the answer carries one | hCaptcha's second widget value; may be empty |
+| `proxy` | string | when the answer carries one | DataDome's own proxy-list address the cookie was earned through |
+
+The tool cannot know which captcha type originally submitted the id, so it forwards the generic fields above rather than the type-specific expansion a solve tool adds (`challenge` / `validate` / `seccode`, `token`, `captcha_voucher` / `existing_token`, and so on). For a GeeTest or AWS WAF answer, `code` holds the raw JSON CapSkip returns; parse it as that type's solve tool documents.
+
+### Failures
+
+All are `isError: true` with readable text, never a protocol exception:
+
+| Situation | Text says |
+|---|---|
+| CapSkip answers `ERROR_WRONG_CAPTCHA_ID` | `CapSkip does not know captcha id '<id>' on res.php. It was never submitted, or its answer was already read — CapSkip serves a result only once. …` |
+| The id's answer was already read (res.php returns an empty body for the whole wait) | `CapSkip returned no answer for captcha id <id> within <n>s. The task may still be queued — call capskip_get_result again with the same id to keep waiting. If it never resolves, the id may be wrong, or its answer may already have been read …` |
+| The connection fails mid-wait | The usual `CapSkip is not reachable at <host>:<port>. …` guidance |
+| `timeout` outside 1–600, or not a whole number | Rejected before any poll, naming `timeout` |
+
+An empty 200 body from `res.php` is treated as "not ready", not as a wrong id: CapSkip sends one briefly after a submit, for an unknown id, and after an answer has already been read, and the tool cannot tell those apart. That is why an already-read id reports a timeout rather than an invalid-id error — the guidance covers both causes.
+
+### Example
+
+Request:
+
+```json
+{ "captchaId": "48213", "timeout": 120 }
+```
+
+Response (`structuredContent`):
+
+```json
+{
+  "captchaId": "48213",
+  "code": "03AGdBq26f...",
+  "solveSeconds": 38.42
+}
+```
+
+Text output: `Retrieved the answer for CapSkip captcha id 48213 after 38.42s of polling.\nThis is the token (or answer) the solve tool would have returned. …\nToken: 03AGdBq26f...\nCapSkip serves each answer once; this one is gone from res.php now.`
 
 ---
 
