@@ -1,0 +1,27 @@
+{
+  "name": "music-bot-workspace",
+  "private": true,
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "format": "oxfmt .",
+    "bot": "pnpm run --filter music-bot",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "format:check": "oxfmt . --check"
+  },
+  "devDependencies": {
+    "eslint": "^10.14.0",
+    "oxfmt": "0.75.0",
+    "tsconfig": "workspace:*",
+    "turbo": "^2.11.11",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "8.72.2"
+  },
+  "engines": {
+    "node": ">=24.0.0",
+    "pnpm": ">=12 <13"
+  },
+  "packageManager": "pnpm@12.18.0"
+}

@@ -1,0 +1,52 @@
+{
+  "name": "music-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Discord music bot example built with discord-player.",
+  "keywords": [],
+  "license": "MIT",
+  "author": "twlite",
+  "files": [
+    "dist",
+    "app.config.json",
+    "commandkit.config.ts"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "commandkit build",
+    "start": "node --enable-source-maps --env-file-if-exists .env dist/index.js",
+    "dev": "commandkit dev",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run",
+    "test:native": "node scripts/native-smoke.mjs",
+    "test:remote": "node scripts/remote-smoke.mjs"
+  },
+  "dependencies": {
+    "@discord-player/plugin-host": "8.0.0-dev.6",
+    "@music-bot/shared": "workspace:*",
+    "@remedia/client": "0.2.1",
+    "@remedia/node": "0.2.1",
+    "@socket.io/redis-adapter": "^8.3.0",
+    "commandkit": "^1.2.6",
+    "commandkit-plugin-discord-player": "1.0.0",
+    "cors": "^2.8.6",
+    "discord-player": "8.0.0-dev.6",
+    "discord.js": "14.28.1",
+    "dotenv": "18.0.10",
+    "express": "^5.3.0",
+    "ioredis": "6.0.0",
+    "mongoose": "9.12.1",
+    "socket.io": "4.8.4",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5",
+    "@types/node": "^24",
+    "tsconfig": "workspace:*",
+    "typescript": "^6.0.3",
+    "vitest": "5.1.0"
+  }
+}

@@ -1,0 +1,26 @@
+import { useQueue } from '@/player/runtime';
+import { SocketUser } from '../socket.js';
+import type { Socket } from 'socket.io';
+import { PlayerMetadata } from '@/player/player-metadata.js';
+import { EmbedGenerator } from '@/utils/embed-generator.js';
+
+export async function PauseAction(info: SocketUser, socket: Socket, paused: boolean) {
+  const queue = useQueue<PlayerMetadata>(info.guildId);
+  if (!queue?.node.session) return socket.disconnect(true);
+
+  await queue.node.setPaused(paused);
+
+  const state = queue.node.isPaused();
+
+  if (queue.metadata.channel.isSendable())
+    await queue.metadata.channel.send({
+      embeds: [
+        EmbedGenerator.Success({
+          title: `Track ${state ? 'paused' : 'resumed'}!`,
+          description: `The track was ${state ? 'paused' : 'resumed'} by ${info.displayName} (<@${info.id}>).`,
+        }),
+      ],
+    });
+
+  socket.to(info.guildId).emit('pause', state);
+}
