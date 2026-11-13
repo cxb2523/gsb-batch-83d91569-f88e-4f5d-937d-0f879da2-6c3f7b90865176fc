@@ -1,0 +1,215 @@
+# Global ARGs defined before any FROM statement
+ARG BUILD_ENV=prod
+ARG BASE=registry.access.redhat.com/ubi10/ubi:10.2-1781510001
+# Default to 3.12 if no PY_VER is passed via --build-arg
+ARG PY_VER=3.12
+
+# ==========================================
+# STAGE 1: Production Build Template
+# ==========================================
+FROM $BASE AS build_prod
+ONBUILD ARG PY_VER
+ONBUILD COPY ./requirements/requirements_ubi10.txt /root/requirements_ubi10.txt
+ONBUILD COPY get_licenses.py /tmp/get_licenses.py
+ONBUILD RUN LICENSES_DIR=/licenses && \
+            mkdir -p ${LICENSES_DIR} && \
+            dnf install -y python${PY_VER} python${PY_VER}-pip && dnf clean all -y && \
+            python${PY_VER} -m pip install --no-cache-dir -r /root/requirements_ubi10.txt && \
+            dnf remove -y python${PY_VER}-pip && dnf clean all -y && \
+            rm -rf /usr/lib/python${PY_VER}/site-packages/pip* && \
+            rm -rf /usr/local/lib/python${PY_VER}/site-packages/cherrypy/test && \
+            echo "Installed python version: $(python${PY_VER} -V)" && \
+            echo "Installed python packages compiled in requirements_ubi10 file" && \
+            python${PY_VER} /tmp/get_licenses.py ${LICENSES_DIR}/packages_licenses.tsv && \
+            echo "Installed packages license info stored in ${LICENSES_DIR}/packages_licenses.tsv:" && \
+            cat ${LICENSES_DIR}/packages_licenses.tsv && \
+            rm -f /tmp/get_licenses.py && \
+            # Enforce the chosen python version for ENTRYPOINT
+            ln -sf $(which python${PY_VER}) /usr/bin/python3
+
+# ==========================================
+# STAGE 2: Test Build Template
+# ==========================================
+FROM $BASE AS build_test
+
+ONBUILD ARG PY_VER
+ONBUILD COPY ./requirements/requirements_ubi.in  /root/requirements_ubi.in
+ONBUILD COPY get_licenses.py /tmp/get_licenses.py
+ONBUILD RUN LICENSES_DIR=/licenses && \
+            mkdir -p ${LICENSES_DIR} && \
+            dnf install -y python${PY_VER} python${PY_VER}-pip && dnf clean all -y && \
+            python${PY_VER} -m pip install pip-tools && \
+            python${PY_VER} -m piptools compile /root/requirements_ubi.in  --output-file /root/requirements_ubi10.txt && \
+            echo "Compiled python packages: $(cat /root/requirements_ubi10.txt)" && \
+            python${PY_VER} -m pip install --no-cache-dir --ignore-installed -r /root/requirements_ubi10.txt && \
+            python${PY_VER} -m pip uninstall -y $(python${PY_VER} -m pip show pip-tools | grep -i "^requires:" | sed 's/Requires: //I;s/,//g') pip-tools && \
+            dnf remove -y python${PY_VER}-pip && dnf clean all -y && \
+            rm -rf /usr/lib/python${PY_VER}/site-packages/pip* && \
+            rm -rf /usr/local/lib/python${PY_VER}/site-packages/cherrypy/test && \
+            echo "Installed python version: $(python${PY_VER} -V)" && \
+            echo "Installed python packages compiled in requirements_ubi10 file" && \
+            python${PY_VER} /tmp/get_licenses.py ${LICENSES_DIR}/packages_licenses.tsv && \
+            echo "Installed packages license info stored in ${LICENSES_DIR}/packages_licenses.tsv:" && \
+            cat ${LICENSES_DIR}/packages_licenses.tsv && \
+            rm -f /tmp/get_licenses.py && \
+            # Enforce the chosen python version for ENTRYPOINT
+            ln -sf $(which python${PY_VER}) /usr/bin/python3
+
+# ==========================================
+# STAGE 3: Custom Build Template
+# ==========================================
+FROM $BASE AS build_custom
+
+USER root
+
+ONBUILD COPY ./requirements/requirements.in  /root/requirements.in
+ONBUILD RUN echo "Already using python container as base image. No need to install it." && \
+            _PY_VER=$(python3 --version 2>&1 | sed 's/Python \([0-9]*\.[0-9]*\).*/\1/') && \
+            echo "Working with python version: ${_PY_VER}" && \
+            python${_PY_VER} -m pip install --no-cache-dir -r /root/requirements.in && \
+            echo "Installed python packages: $(python${_PY_VER} -m pip list)" && \
+            # Enforce the chosen python version for ENTRYPOINT
+            ln -sf $(which python${_PY_VER}) /usr/bin/python3
+
+# ==========================================
+# FINAL STAGE: Target Image
+# ==========================================
+FROM build_${BUILD_ENV}
+ARG PY_VER
+ARG BUILD_ENV
+ARG BASE
+
+LABEL com.ibm.name="IBM Storage Scale bridge for Grafana"
+LABEL com.ibm.vendor="IBM"
+LABEL com.ibm.version="9.1.3-dev"
+LABEL com.ibm.url="https://github.com/IBM/ibm-spectrum-scale-bridge-for-grafana"
+LABEL com.ibm.description="This tool translates the IBM Storage Scale performance data collected internally \
+to the query requests acceptable by the Grafana integrated openTSDB plugin"
+LABEL com.ibm.summary="It allows the IBM Storage Scale users to perform performance monitoring for IBM Storage Scale devices using Grafana"
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+ARG USER=bridge
+ARG GROUP=bridge
+ARG UID=2001
+ARG GID=2099
+
+ARG HTTPPROTOCOL=None
+ENV PROTOCOL=$HTTPPROTOCOL
+
+ARG HTTPBASICAUTH=None
+ENV BASICAUTH=$HTTPBASICAUTH
+
+ARG AUTHUSER=None
+ENV BASICU=$AUTHUSER
+
+ARG AUTHPASSW=None
+ENV BASICP=$AUTHPASSW
+
+ARG HTTPPORT=None
+ENV PORT=$HTTPPORT
+
+ARG PROMPORT=None
+ENV PROMETHEUS=$PROMPORT 
+
+ARG PERFMONPORT=9980
+ENV SERVERPORT=$PERFMONPORT
+
+ARG CERTPATH='/etc/bridge_ssl/certs'
+ENV TLSKEYPATH=$CERTPATH
+
+ARG KEYFILE=None
+ENV TLSKEYFILE=$KEYFILE
+
+ARG CERTFILE=None
+ENV TLSCERTFILE=$CERTFILE
+
+ARG KEYNAME=None
+ENV APIKEYNAME=$KEYNAME
+
+ARG KEYVALUE=None
+ENV APIKEYVALUE=$KEYVALUE
+
+ARG PMCOLLECTORIP=None
+ENV SERVER=$PMCOLLECTORIP
+
+ARG DEFAULTLOGPATH='/var/log/ibm_bridge_for_grafana'
+ENV LOGPATH=$DEFAULTLOGPATH
+
+ARG DEFAULTLOGLEVEL=None
+ENV LOGLEVEL=$DEFAULTLOGLEVEL
+
+ARG RAWDATA=None
+ENV RAWCOUNTERS=$RAWDATA
+
+RUN echo "the HTTP/S protocol is set to $PROTOCOL"  && \
+    echo "the HTTP/S basic authentication is set to $BASICAUTH"  && \
+    echo "the OpentTSDB API HTTP/S port is set to $PORT"  && \
+    echo "the Prometheus API HTTPS port is set to $PROMETHEUS"  && \
+    echo "the PERFMONPORT port is set to $SERVERPORT" && \
+    echo "the pmcollector server ip is set to $SERVER" && \
+    echo "the log will use $LOGPATH" 
+
+USER root
+
+RUN mkdir -p /opt/IBM/bridge /opt/IBM/zimon /var/mmfs/gen && \
+    mkdir -p /etc/ssl/certs /etc/perfmon-api-keys $CERTPATH $LOGPATH
+
+COPY LICENSE /licenses/
+
+COPY ./source/ /opt/IBM/bridge
+COPY ./source/gpfsConfig/mmsdrfs* /var/mmfs/gen/
+COPY ./source/gpfsConfig/ZIMon* /opt/IBM/zimon/
+
+RUN if [ "${APIKEYVALUE:0:1}" = "/" ]; then ln -s $APIKEYVALUE /etc/perfmon-api-keys; echo "APIKEYVALUE is a PATH"; else echo "APIKEYVALUE not a PATH"; fi && \
+    if [ -z "$TLSKEYPATH" ] || [ -z "$TLSCERTFILE" ] || [ -z "$TLSKEYFILE" ] && [ "$PROTOCOL" = "https" ]; then echo "TLSKEYPATH FOR SSL CONNECTION NOT SET - ERROR"; exit 1; else echo "PASS"; fi && \
+    echo "the ssl certificates path is set to $TLSKEYPATH" 
+
+# Switch to the working directory
+WORKDIR /opt/IBM/bridge
+RUN echo "$(pwd)"
+
+# Create a container user 
+RUN if [ "$GID" -gt "0" ]; then groupadd -g $GID $GROUP; else echo "Since root GID specified skipping groupadd"; fi && \
+    if [ "$UID" -gt "0" ]; then useradd -rm -d /home/$UID -s /bin/bash -g $GID -u $UID $USER; else echo "Since root UID specified skipping useradd"; fi
+
+RUN chmod -R a+w $LOGPATH
+
+# Chown all needed files 
+RUN chown -R $UID:$GID /opt/IBM/bridge && \
+    chown -R $UID:$GID /opt/IBM/zimon && \
+    chown -R $UID:$GID /var/mmfs/gen && \
+    chown -R $UID:$GID /etc/ssl/certs && \
+    chown -R $UID:$GID /etc/perfmon-api-keys && \
+    chown -R $UID:$GID $TLSKEYPATH && \
+    chown -R $UID:$GID $LOGPATH
+
+# Switch user
+USER $UID
+
+# CMD ["sh", "-c", "python3 zimonGrafanaIntf.py -c $LOGLEVEL -s $SERVER -r $PROTOCOL -b $BASICAUTH -u $BASICU -a $BASICP -p $PORT -e $PROMETHEUS -P $SERVERPORT -t $TLSKEYPATH -l $LOGPATH -k $TLSKEYFILE -m $TLSCERTFILE -n $APIKEYNAME -v $APIKEYVALUE -w $RAWCOUNTERS"]
+CMD ["sh", "-c", "\
+    ARGS=''; \
+    [ -n \"$LOGLEVEL\" ] && [ \"$LOGLEVEL\" != 'None' ] && ARGS=\"$ARGS -c $LOGLEVEL\"; \
+    [ -n \"$SERVER\" ] && [ \"$SERVER\" != 'None' ] && ARGS=\"$ARGS -s $SERVER\"; \
+    [ -n \"$PROTOCOL\" ] && [ \"$PROTOCOL\" != 'None' ] && ARGS=\"$ARGS -r $PROTOCOL\"; \
+    [ -n \"$BASICAUTH\" ] && [ \"$BASICAUTH\" != 'None' ] && ARGS=\"$ARGS -b $BASICAUTH\"; \
+    [ -n \"$BASICU\" ] && [ \"$BASICU\" != 'None' ] && ARGS=\"$ARGS -u $BASICU\"; \
+    [ -n \"$BASICP\" ] && [ \"$BASICP\" != 'None' ] && ARGS=\"$ARGS -a $BASICP\"; \
+    [ -n \"$PORT\" ] && [ \"$PORT\" != 'None' ] && ARGS=\"$ARGS -p $PORT\"; \
+    [ -n \"$PROMETHEUS\" ] && [ \"$PROMETHEUS\" != 'None' ] && ARGS=\"$ARGS -e $PROMETHEUS\"; \
+    [ -n \"$SERVERPORT\" ] && [ \"$SERVERPORT\" != 'None' ] && ARGS=\"$ARGS -P $SERVERPORT\"; \
+    [ -n \"$TLSKEYPATH\" ] && [ \"$TLSKEYPATH\" != 'None' ] && ARGS=\"$ARGS -t $TLSKEYPATH\"; \
+    [ -n \"$LOGPATH\" ] && [ \"$LOGPATH\" != 'None' ] && ARGS=\"$ARGS -l $LOGPATH\"; \
+    [ -n \"$TLSKEYFILE\" ] && [ \"$TLSKEYFILE\" != 'None' ] && ARGS=\"$ARGS -k $TLSKEYFILE\"; \
+    [ -n \"$TLSCERTFILE\" ] && [ \"$TLSCERTFILE\" != 'None' ] && ARGS=\"$ARGS -m $TLSCERTFILE\"; \
+    [ -n \"$APIKEYNAME\" ] && [ \"$APIKEYNAME\" != 'None' ] && ARGS=\"$ARGS -n $APIKEYNAME\"; \
+    [ -n \"$APIKEYVALUE\" ] && [ \"$APIKEYVALUE\" != 'None' ] && ARGS=\"$ARGS -v $APIKEYVALUE\"; \
+    [ -n \"$RAWCOUNTERS\" ] && [ \"$RAWCOUNTERS\" != 'None' ] && ARGS=\"$ARGS -w $RAWCOUNTERS\"; \
+    exec python3 zimonGrafanaIntf.py $ARGS \
+"]
+
+EXPOSE 4242 8443 9250
+
+#CMD ["tail", "-f", "/dev/null"]

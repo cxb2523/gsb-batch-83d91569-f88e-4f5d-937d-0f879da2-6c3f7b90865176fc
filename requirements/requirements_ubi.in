@@ -1,0 +1,14 @@
+# This file is used for generating python requirements list "requirements_ubi9.txt".
+# It includes the packages needed to be installed to run the IBM Storage Scale Performance Monitoring bridge for Grafana
+# in an OpenShift production environment, on top of the Redhat UBI9 image.
+#
+# To update, run:
+#
+#  $ pip-compile requirements_ubi.in  --output-file requirements_ubi9.txt
+#
+# setuptools
+cherrypy
+PyYAML
+# psutil
+# urllib3
+# requests

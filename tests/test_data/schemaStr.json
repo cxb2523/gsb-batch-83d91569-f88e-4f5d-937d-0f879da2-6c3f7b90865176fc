@@ -1,0 +1,52 @@
+{
+    "sensor_metric": {
+        "CPU": {
+            "cpu_user":    {"semantic": "quantity",     "data_type": "fixedpoint_32"},
+            "cpu_system":  {"semantic": "quantity",     "data_type": "fixedpoint_32"},
+            "cpu_idle":    {"semantic": "quantity",     "data_type": "fixedpoint_32"},
+            "cpu_iowait":  {"semantic": "quantity",     "data_type": "fixedpoint_32"},
+            "cpu_nice":    {"semantic": "quantity",     "data_type": "fixedpoint_32"},
+            "cpu_steal":   {"semantic": "quantity",     "data_type": "fixedpoint_32"},
+            "cpu_siq":     {"semantic": "quantity",     "data_type": "fixedpoint_32"},
+            "cpu_hiq":     {"semantic": "quantity",     "data_type": "fixedpoint_32"},
+            "cpu_guest":   {"semantic": "quantity",     "data_type": "fixedpoint_32"},
+            "cpu_guest_nice": {"semantic": "quantity",  "data_type": "fixedpoint_32"},
+            "cpu_contexts":   {"semantic": "counter",   "data_type": "uint_64"},
+            "cpu_interrupts": {"semantic": "counter",   "data_type": "uint_64"}
+        },
+        "GPFSDiskCap": {
+            "gpfs_disk_disksize":      {"semantic": "quantity", "data_type": "uint_64"},
+            "gpfs_disk_free_fullkb":   {"semantic": "quantity", "data_type": "uint_64"},
+            "gpfs_disk_free_fragkb":   {"semantic": "quantity", "data_type": "uint_64"}
+        },
+        "GPFSNSDFS": {
+            "gpfs_nsdfs_bytes_read":    {"semantic": "counter", "data_type": "uint_64"},
+            "gpfs_nsdfs_bytes_written": {"semantic": "counter", "data_type": "uint_64"},
+            "gpfs_nsdfs_read_ops":      {"semantic": "counter", "data_type": "uint_64"},
+            "gpfs_nsdfs_write_ops":     {"semantic": "counter", "data_type": "uint_64"}
+        }
+    },
+    "sensor_key_names": {
+        "CPU":        ["node"],
+        "GPFSDiskCap": ["node", "gpfs_fs_name", "gpfs_diskpool_name", "gpfs_disk_name"],
+        "GPFSNSDFS":  ["node", "gpfs_fs_name"]
+    },
+    "sensor_key_values": {
+        "CPU": [
+            ["scale-11"],
+            ["scale-12"]
+        ],
+        "GPFSDiskCap": [
+            ["scale-cluster-1.vmlocal", "cesSharedRoot", "system", "disk01"],
+            ["scale-cluster-1.vmlocal", "cesSharedRoot", "data",   "disk06"],
+            ["scale-cluster-1.vmlocal", "localFS",       "system", "disk02"],
+            ["scale-cluster-1.vmlocal", "localFS",       "system", "disk03"]
+        ],
+        "GPFSNSDFS": [
+            ["scale-11", "(free disk)"],
+            ["scale-11", "afmCacheFS"],
+            ["scale-11", "cesSharedRoot"],
+            ["scale-11", "localFS"]
+        ]
+    }
+}

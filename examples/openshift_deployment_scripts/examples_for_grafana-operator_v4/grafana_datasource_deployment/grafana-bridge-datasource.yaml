@@ -1,0 +1,28 @@
+﻿apiVersion: integreatly.org/v1alpha1
+kind: GrafanaDataSource
+metadata:
+  name: bridge-grafanadatasource
+spec:
+  datasources:
+    - access: proxy
+      editable: true
+      isDefault: true
+      jsonData:
+        httpHeaderName1: 'Authorization'
+        timeInterval: 5s
+        tlsSkipVerify: true
+        tlsAuth: true
+        tsdbVersion: '2.3'
+      name: grafana-bridge
+      type: opentsdb
+      secureJsonData:
+        tlsClientCert: 'TLS cert ${TLS_CERT}'
+        tlsClientKey: 'TLS key ${TLS_KEY}'
+      ###########################################################################################
+      #
+      # url: 'https://$(service name of the grafana-bridge DeploymentSet).${namespace-name of the CNSA project}.svc.cluster.local:8443'
+      #
+      ###########################################################################################
+      url: 'https://ibm-spectrum-scale-grafana-bridge.ibm-spectrum-scale.svc.cluster.local:8443'
+      version: 1
+  name: grafana-bridge-datasource.yaml

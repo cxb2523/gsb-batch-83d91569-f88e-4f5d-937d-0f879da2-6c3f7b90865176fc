@@ -1,0 +1,140 @@
+'''
+##############################################################################
+# Copyright 2021 IBM Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
+Created on Feb 15, 2021
+
+@author: HWASSMAN
+'''
+
+
+ERR = {400: 'Bad Request',
+       404: 'Not Found',
+       500: 'Internal Server Error. Please check logs for more details.'}
+
+MSG = {'IntError': 'Server internal error occurred. Reason: {}',
+       'sysStart': 'Initial cherryPy server engine start have been invoked. Python version: {}, cherryPy version: {}.',
+       'MissingParm': 'Missing mandatory parameters, quitting',
+       'MissingApiKeySettings': 'Missing mandatory ApiKey settings, quitting',
+       'MissingPortParam': 'Missing applications port configuration, quitting',
+       'MissingSSLCert': 'Missing ssl configuration settings, quitting',
+       'MissingBasicAuthSettings': 'Missing basic authentication settings, quitting',
+       'KeyPathError': 'KeyPath directory not found, quitting',
+       'MissingFileFromPathError': 'Missing certificates in the specified keyPath directory, quitting',
+       'CollectorErr': 'Failed to initialize connection to pmcollector: {}, quitting',
+       'MetaError': 'Metadata could not be retrieved. Check log file for more details, quitting',
+       'MetaSuccess': 'Successfully retrieved MetaData',
+       'RequestMetaUpdate': 'MetaData update requested',
+       'ElapsedTimeSinceLastUpdate': 'Elapsed time:{} since last MetaData update',
+       'QueryError': 'Query request could not be proceed. Reason: {}',
+       'SearchErr': 'Search for {} did cause exception: {}',
+       'LookupErr': 'Lookup for metric {} did not return any results',
+       'FilterByErr': 'No component entry found for the specified \'filterby\' attribute',
+       'GroupByErr': 'In the current setup the group aggregation \'groupby\' is not possible.',
+       'MetricErr': 'Metric {0} cannot be found. Please check if the corresponding sensor is configured',
+       'InconsistentParams': 'Received parameters {} inconsistent with request parameters {}',
+       'InvalidConfigParm': 'Configuration Parameter "{}" has not allowed value, quitting',
+       'SensorDisabled': 'Sensor for metric {} is disabled',
+       'SensorForceRawData': 'Sensor {} includes metrics type counter, which need to be collected as raw data',
+       'EndpointNotSupported': 'Endpoint {} you try to access is not supported',
+       'EndpointNotSupportedForPort': 'Endpoint {} is not supported for port {}',
+       'NoData': 'Empty results received',  # Please check the pmcollector is properly configured and running.
+       'NoSensorConfigData': 'No sensor configuration data parsed',
+       'NoDataStartNextAttempt': 'No Metadata results received from the pmcollector. Start retry attempt {} in 60s (MAX_ATTEMPTS_COUNT:{})',
+       'NullValues': 'Null values in all dps for {} {}',
+       'NoDps': 'No dps for {} {}',
+       'AllDpsNullForSensor': 'Null values in all timeseries for {}',
+       'BucketsizeChange': 'Based on requested downsample value: {} the bucketsize will be set: {}',
+       'BucketsizeToPeriod': 'Bucketsize will be set to sensors period: {}',
+       'DownsampleAggregation': 'Perform downsample aggregation: {} for metric: {}',
+       'ReceivedQuery': 'Received query request for query:{}, start:{}, end:{}',
+       'AttrNotValid': 'Invalid attribute:{}',
+       'AllowedAttrValues': 'For attribute {} applicable values:{}',
+       'ReceivAttrValues': 'Received {}:{}',
+       'StartMethod': 'Starting method: {} with args: {}.',
+       'RunMethod': 'Executed method: {} with args: {}.',
+       'TimerInfo': 'Processing {} took real time: {:.6f} seconds, cpu time: {:.6f} seconds.',
+       'Query2port': 'For better bridge performance multithreaded port {} will be used',
+       'CollectorConnInfo': 'Connection to the collector server established successfully',
+       'BridgeVersionInfo': ' *** IBM Storage Scale bridge for Grafana - Version: {} ***',
+       'FileNotFound': 'The file {} not found.',
+       'PathNotFound': 'The Path specified in {} not found.',
+       'FileChanged': 'The file {} has been changed.',
+       'FileAddedToWatch': 'The file {} added to watching files.',
+       'StartWatchingFiles': 'Start watching file changes in the path {}.',
+       'StopWatchingFiles': 'Stop watching file changes in the path {}.',
+       'StartMonitoringTopoChanges': 'Start monitoring if a Metadata refresh needed.',
+       'StopMonitoringTopoChanges': 'Stop monitoring Metadata refresh requests.',
+       'PathNoCfgFiles': 'The path does not contain any configuration files.',
+       'NewKeyDetected': 'Detected not known single ts identifiers {}.',
+       'NewKeyAlreadyReported': 'Single ts identifiers {} already reported as not known.',
+       'UnexpecterError': 'Unexpected error: {}',
+       'SchemaNotAvailable': 'perfmon/schema endpoint not available, falling back to perfmon/topo',
+       'DataWrongFormat': 'Content could not be parsed: {}',
+       'StartCustomThread': 'Started custom thread {}',
+       'StopCustomThread': 'Stopped custom thread {}',
+       'MetricInResults': 'Metric {} is in Collector.metrcs',
+       'MetricNotInResults': 'Metric {} is not in Collector.metrcs',
+       'ConnApplications': 'Registered applications: \n {}',
+       'WrongFormat': 'The {} specified in wrong format.',
+       'AuthValidationError': 'Basic authentication data not valid',
+       'BundleIdTrackingDisabled': 'Bundle ID tracking is disabled. Enable http_metrics_enabled in analytics.py',
+       'InvalidJobSuffix': 'Invalid job_suffix "{}". Allowed pattern: ^[A-Za-z0-9_.:-]{{1,64}}$',
+       'InvalidBooleanParam': 'Invalid value "{}" for parameter {}. Allowed values: true, false',
+       'InternalMetricsDisabled': 'Internal metrics endpoints are not available, because http_metrics_enabled is disabled in analytics.py',
+       'InvalidTargetParam': 'Invalid target "{}". Expected <host> or <host>:<port> where port is a number.',
+       'TargetFallbackDetected': 'promBindIp is a wildcard; using outbound-route detection to determine scrape target IP: {}',
+       'TargetFallbackFailed': 'Could not detect outbound IP via route detection: {}',
+       'TargetFallbackAny': 'Outbound-route detection failed; falling back to first available IP from hostname resolution: {}',
+       'ScrapeConfigFileWritten': 'Scrape config written to: {}',
+       'ScrapeConfigFileWriteError': 'Failed to write scrape config to "{}": {}',
+       'CertFilesCopied': 'TLS cert/key copied to: {}',
+       'CertFilesCopyError': 'Failed to copy TLS cert/key to "{}": {}',
+       'TlsCertsServed': 'Served TLS cert/key archive for job_suffix "{}"',
+       'TlsCertsMissingConfig': 'Cannot serve TLS certs: bridge is not running HTTPS or TLS settings are incomplete',
+       'InvalidPathParam': 'Invalid path "{}". Must be an absolute path to a writable directory or file.',
+       'HttpMetricsRecordFailed': 'Failed to record HTTP metrics: {}',
+       'CollectorThreadTrace': 'Collector thread statistics:\n%s\nCollector thread labels:\n%s\nCollector thread bundle_id:\n%s',
+       'InternalExecutionMetricsCacheFailed': 'Failed to cache internal execution time metrics: {}',
+       'BundleIdGenerated': '{} bundle_id: {}',
+       'BundleIdNotFound': 'Bundle ID not found in registry',
+       'MsResolutionSent': 'msResolution field sent in request, value: {}',
+       'MsResolutionNotSent': 'msResolution field not sent in request, defaulting to False',
+       'RestApiInfo': ('Use http(s)://<grafana-bridge ip>:<app port>/endpoints with optional flags \n\t '
+                       '-u <credentials> for basic authentication and \n\t '
+                       '-k to bypass certificate verification,\n '
+                       'to list the available REST API endpoints registered with the system.'),
+       'ConfigApiUpdated': 'Config key "{}" updated to value "{}" via REST API',
+       'ConfigApiPersisted': 'Config changes persisted to file: {}',
+       'ConfigApiPersistError': 'Failed to persist config changes to file: {}',
+       'ConfigApiRestartRequired': 'read-only: restart the bridge to apply this change',
+       'ConfigApiNoTarget': ('Config changes applied in-memory only - no custom '
+                             'config file available. Call POST /config/init to '
+                             'create one, or start the bridge with -F <path> to '
+                             'persist changes across restarts.'),
+       'ConfigApiTemplateWriteBlocked': ('Config changes applied in-memory only '
+                                         '- the template config.ini was passed as '
+                                         '-F and will not be written to. Call '
+                                         'POST /config/init to create a custom '
+                                         'config file, then restart the bridge '
+                                         'with -F pointing to the new file.'),
+       'ConfigApiInitAlreadyExists': 'POST /config/init: file already exists: {}',
+       'ConfigApiInitCreated': 'Custom config file created: {}',
+       'ConfigApiInitError': 'Failed to create custom config file: {}',
+       'ConfigApiInitRestartRequired': ("Restart required: update your service "
+                                        "to add '-F {}' and restart the bridge "
+                                        "before writes are persisted to this file."),
+       }
