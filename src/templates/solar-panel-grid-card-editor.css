@@ -1,0 +1,231 @@
+:host {
+  display: block;
+}
+
+.card-config {
+  padding: 16px;
+}
+
+h2 {
+  margin: 16px 0 8px 0;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.panels-info {
+  background: var(--secondary-background-color);
+  padding: 12px;
+  border-radius: 4px;
+  margin-top: 8px;
+}
+
+.panels-info p {
+  margin: 8px 0;
+  font-size: 14px;
+}
+
+.panels-config {
+  background: var(--secondary-background-color);
+  padding: 12px;
+  border-radius: 4px;
+  margin-top: 8px;
+}
+
+.panels-config p {
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.panels-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.panel-config-item {
+  background: var(--primary-background-color);
+  border: 1px solid var(--divider-color);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.panel-header {
+  padding: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-left: 3px solid var(--primary-color);
+  user-select: none;
+  transition: background-color 0.2s;
+}
+
+.panel-header:hover {
+  background-color: var(--secondary-background-color);
+}
+
+.panel-header-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+}
+
+.panel-toggle-icon {
+  font-size: 14px;
+  width: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary-color);
+}
+
+.panel-entity-name {
+  font-weight: 500;
+  color: var(--primary-text-color);
+}
+
+.panel-content {
+  padding: 12px;
+  border-top: 1px solid var(--divider-color);
+  background-color: var(--secondary-background-color);
+}
+
+.config-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0;
+}
+
+.config-row label {
+  min-width: 150px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.config-row ha-entity-picker {
+  flex: 1;
+}
+
+.config-row ha-textfield {
+  flex: 1;
+  max-width: 150px;
+}
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.rotation-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--disabled-color, #bdbdbd);
+  outline: none;
+  cursor: pointer;
+}
+
+.rotation-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--primary-color, #03a9f4);
+  cursor: pointer;
+}
+
+.rotation-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--primary-color, #03a9f4);
+  border: none;
+  cursor: pointer;
+}
+
+.slider-value {
+  min-width: 40px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--primary-text-color);
+}
+
+.entity-select {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--divider-color);
+  border-radius: 4px;
+  background-color: var(--primary-background-color);
+  color: var(--primary-text-color);
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.entity-select:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 2px rgba(var(--primary-color-rgb), 0.1);
+}
+
+.entity-select option {
+  background-color: var(--secondary-background-color);
+  color: var(--primary-text-color);
+}
+
+.delete-btn {
+  margin-top: 8px;
+}
+
+ha-button {
+  display: block;
+  margin: 12px 0;
+}
+
+.yaml-note {
+  margin-top: 12px;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--secondary-text-color);
+}
+
+.panels-list {
+  margin-top: 12px;
+  padding: 8px 0;
+}
+
+.panels-list > p {
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.panel-item {
+  padding: 8px 8px;
+  margin: 4px 0;
+  font-size: 12px;
+  background: var(--primary-background-color);
+  border-left: 2px solid var(--primary-color);
+  border-radius: 2px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.position {
+  color: var(--secondary-text-color);
+  font-size: 11px;
+  margin-left: 8px;
+}
+
+.no-panels {
+  font-style: italic;
+  color: var(--secondary-text-color);
+}
