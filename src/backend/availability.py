@@ -23,12 +23,18 @@ import re
 import statistics
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from .alerts import raise_alert, resolve_alerts
-from .models import Check, CheckResult, CheckRollup, IncidentAlert, Server
+from .models import Check, CheckHeartbeat, CheckResult, CheckRollup, IncidentAlert, Server
 
 TYPES = ("http", "keyword", "tcp", "tls", "dns", "json", "ping")
+# Fixed vocabulary the collectors use to name a failure's cause; anything else reported is dropped as untrusted.
+ERROR_CATEGORIES = ("timeout", "connection_refused", "connection_reset", "dns_error", "certificate_error",
+                    "tls_error", "http_status", "assertion_mismatch", "invalid_response", "icmp_denied", "network_error", "error")
+MAX_ATTEMPTS = 12
+HEARTBEAT_KEPT = timedelta(days=30)
 URL_TYPES = ("http", "keyword", "json")       # check an http(s) URL
 HOSTPORT_TYPES = ("tcp", "tls")               # connect to host:port
 HOST_TYPES = ("ping", "dns")                  # a bare host or name, no port
@@ -226,7 +232,7 @@ def for_collector(db, server: Server) -> list[dict]:
     for check in db.query(Check).filter(Check.paused.is_(False)).order_by(Check.id):
         if server.id in servers_of(check):
             result.append({"id": check.id, "type": check.type, "target": check.target, "interval": check.interval_seconds, "retry_interval": check.retry_interval_seconds,
-                           "timeout": check.timeout_seconds, **{key: value for key, value in options_of(check).items() if key != "upside_down"}})
+                           "timeout": check.timeout_seconds, "retries": check.retries, **{key: value for key, value in options_of(check).items() if key != "upside_down"}})
     return result[:MAX_CHECKS_PER_SERVER]
 
 
@@ -244,7 +250,7 @@ IDLE_EVERY = 10
 def _spec(fields: dict, check_id: int) -> dict:
     options = {key: value for key, value in json.loads(fields["options"]).items() if key != "upside_down"}
     return {"id": check_id, "type": fields["type"], "target": fields["target"], "interval": fields["interval_seconds"], "retry_interval": fields["retry_interval_seconds"],
-            "timeout": fields["timeout_seconds"], **options}
+            "timeout": fields["timeout_seconds"], "retries": fields["retries"], **options}
 
 
 def start_test(redis, fields: dict, servers: list[int]) -> int:
@@ -301,6 +307,92 @@ def test_status(redis, test_id: int, names: dict[int, str]) -> dict | None:
     return {"id": test_id, "servers": servers, "done": all(server["state"] == "done" for server in servers)}
 
 # ---------- results ----------
+
+def _clean_text(value, limit: int = 200) -> str | None:
+    """A short, printable string from untrusted input, or None."""
+    if not isinstance(value, str):
+        return None
+    cleaned = "".join(char for char in value if char.isprintable())[:limit]
+    return cleaned or None
+
+
+def clean_attempts(raw: Any) -> list[dict] | None:
+    """The per-attempt list a collector reported, reduced to known fields of safe types.
+
+    Returns None when the report carries no usable detail (an older collector, or malformed data): the caller keeps
+    the heartbeat but marks it "no details", never fabricating an empty success or a latency."""
+    if not isinstance(raw, list) or not raw:
+        return None
+    attempts: list[dict] = []
+    for index, item in enumerate(raw[:MAX_ATTEMPTS], start=1):
+        if not isinstance(item, dict) or not isinstance(item.get("ok"), bool):
+            return None
+        number = lambda key, low, high: item.get(key) if isinstance(item.get(key), int) and not isinstance(item.get(key), bool) and low <= item[key] <= high else None  # noqa: E731
+        entry = {
+            "attempt": index,
+            "ok": item["ok"],
+            "response_ms": number("response_ms", 0, 600_000),
+            "error_category": item["error_category"] if item["error_category"] in ERROR_CATEGORIES else None,
+            "detail": _clean_text(item.get("detail")),
+            "basis": _clean_text(item.get("basis")),
+        }
+        code, cert_days = number("code", 100, 599), number("cert_days", -10_000, 10_000)
+        if code is not None:
+            entry["code"] = code
+        if cert_days is not None:
+            entry["cert_days"] = cert_days
+        attempts.append(entry)
+    return attempts or None
+
+
+def store_heartbeats(db, server: Server, results: list, now: datetime | None = None) -> None:
+    """Keep, per check, the attempt detail of the newest heartbeat this server's collector sent.
+
+    A result without a usable ``attempts`` list still upserts a row with attempts=NULL, so the read can answer
+    "no details" rather than show stale detail from a previous, newer collector. Timestamps outside the same window
+    ``store`` accepts are ignored, so a collector with a wrong clock can't pin a stale heartbeat row."""
+    now = now or datetime.now(timezone.utc)
+    mine = {check.id for check in db.query(Check).filter(Check.paused.is_(False)) if server.id in servers_of(check)}
+    seen: set[int] = set()
+    for item in results[:MAX_RESULTS_PER_REPORT]:
+        if not isinstance(item, dict) or item.get("check_id") not in mine or not isinstance(item.get("ok"), bool):
+            continue
+        try:
+            moment = _utc(datetime.fromisoformat(str(item.get("time"))))
+        except (ValueError, TypeError):
+            continue
+        if not now - timedelta(hours=1) <= moment <= now + timedelta(seconds=60):
+            continue
+        check_id = item["check_id"]
+        if check_id in seen:   # two results for one check in a report: the later one in the batch wins
+            continue
+        seen.add(check_id)
+        attempts = clean_attempts(item.get("attempts"))
+        row = db.query(CheckHeartbeat).filter(CheckHeartbeat.check_id == check_id, CheckHeartbeat.server_id == server.id).one_or_none()
+        if row is None:
+            db.add(CheckHeartbeat(check_id=check_id, server_id=server.id, time=moment, ok=item["ok"],
+                                  attempts=json.dumps(attempts) if attempts is not None else None))
+        else:
+            row.time, row.ok, row.attempts = moment, item["ok"], json.dumps(attempts) if attempts is not None else None
+            row.updated_at = now
+
+
+def heartbeat_details(db, check: Check, names: dict[int, str]) -> dict:
+    """The latest heartbeat per server for the check's detail view. A server whose last report had no attempt
+    detail comes back with has_details False ("no details"); it is never padded with an empty success."""
+    rows = db.query(CheckHeartbeat).filter(CheckHeartbeat.check_id == check.id).order_by(CheckHeartbeat.server_id).all()
+    servers = [{"server_id": server_id, "hostname": names.get(server_id, f"server {server_id}")} for server_id in servers_of(check)]
+    by_server = {row.server_id: row for row in rows}
+    heartbeats = []
+    for server in servers:
+        row = by_server.get(server["server_id"])
+        if row is None:
+            heartbeats.append({**server, "has_details": False, "time": None, "ok": None, "attempts": None})
+            continue
+        attempts = json.loads(row.attempts) if row.attempts else None
+        heartbeats.append({**server, "has_details": attempts is not None, "time": _utc(row.time).isoformat(), "ok": row.ok, "attempts": attempts})
+    return {"check_id": check.id, "heartbeats": heartbeats}
+
 
 def store(db, server: Server, results: list, now: datetime | None = None) -> set[int]:
     """Keep the valid results this server's collector reported for its own checks. Returns the checks touched.
@@ -455,6 +547,7 @@ def forget_check(db, check: Check) -> None:
     servers = servers_of(check)
     if servers:
         resolve_alerts(db, servers[0], [rule_key(check)])
+    db.query(CheckHeartbeat).filter(CheckHeartbeat.check_id == check.id).delete(synchronize_session=False)
     db.query(CheckResult).filter(CheckResult.check_id == check.id).delete(synchronize_session=False)
     db.query(CheckRollup).filter(CheckRollup.check_id == check.id).delete(synchronize_session=False)
     db.delete(check)
@@ -462,6 +555,7 @@ def forget_check(db, check: Check) -> None:
 
 def forget_server(db, server_id: int) -> None:
     """A server is removed: its results go, and checks stop running from it (a check left with no server pauses)."""
+    db.query(CheckHeartbeat).filter(CheckHeartbeat.server_id == server_id).delete(synchronize_session=False)
     db.query(CheckResult).filter(CheckResult.server_id == server_id).delete(synchronize_session=False)
     for check in db.query(Check):
         servers = servers_of(check)
@@ -651,5 +745,7 @@ def purge(db, now: datetime | None = None) -> int:
     """Drop raw results older than a week; the hourly rollups keep the history. Returns how many went."""
     now = now or datetime.now(timezone.utc)
     removed = db.query(CheckResult).filter(CheckResult.time < now - RAW_KEPT).delete(synchronize_session=False)
+    # Only the newest heartbeat per (check, server) exists, so this just clears checks that stopped reporting.
+    db.query(CheckHeartbeat).filter(CheckHeartbeat.time < now - HEARTBEAT_KEPT).delete(synchronize_session=False)
     db.commit()
     return removed

@@ -134,7 +134,7 @@ def test_a_collector_gets_only_the_checks_of_its_own_server(app):
 
     assert [check["target"] for check in alpha["checks"]] == ["https://git.example.com/"]
     assert [check["target"] for check in bravo["checks"]] == ["https://git.example.com/", "10.0.0.12:3306"]
-    assert set(alpha["checks"][0]) == {"id", "type", "target", "interval", "retry_interval", "timeout", "accepted_codes", "follow_redirects", "ignore_tls", "method"}
+    assert set(alpha["checks"][0]) == {"id", "type", "target", "interval", "retry_interval", "timeout", "retries", "accepted_codes", "follow_redirects", "ignore_tls", "method"}
 
 
 def test_check_results_need_the_servers_own_collector_token(app):
@@ -540,3 +540,133 @@ def test_the_incident_description_does_not_leak_the_query_string(app):
 
     alert = incident(app, check["id"])
     assert alert is not None and "secret" not in alert.description and "stock.home.lan/api/" in alert.description
+
+
+# --- per-attempt heartbeat detail ----------------------------------------------------------------------
+
+def _attempt(attempt, ok, **extra):
+    base = {"attempt": attempt, "ok": ok, "response_ms": 12 if ok else None,
+            "error_category": None if ok else "timeout", "detail": None if ok else "Timed out after 5 s",
+            "basis": "HTTP 200 accepted" if ok else None}
+    return {**base, **extra}
+
+
+def _heartbeats(app, check_id):
+    return app.get(f"/availability/checks/{check_id}/heartbeats").json()["heartbeats"]
+
+
+def test_a_successful_heartbeat_keeps_its_latency_and_basis(app):
+    check = create(app, server_ids=[1])
+    result = run(check["id"], True, response_ms=42, attempts=[_attempt(1, True, response_ms=42, basis="HTTP 200 accepted", code=200)])
+
+    report(app, 1, [result])
+
+    heartbeat = _heartbeats(app, check["id"])[0]
+    assert heartbeat["hostname"] == "alpha" and heartbeat["has_details"] is True and heartbeat["ok"] is True
+    assert heartbeat["attempts"] == [{"attempt": 1, "ok": True, "response_ms": 42, "error_category": None,
+                                     "detail": None, "basis": "HTTP 200 accepted", "code": 200}]
+
+
+def test_a_failed_heartbeat_keeps_the_failure_category_and_short_reason(app):
+    check = create(app, server_ids=[1])
+    failed = _attempt(1, False, error_category="certificate_error", detail="Certificate not valid: expired")
+    report(app, 1, [run(check["id"], False, attempts=[failed])])
+
+    heartbeat = _heartbeats(app, check["id"])[0]
+    assert heartbeat["ok"] is False and heartbeat["attempts"][0]["error_category"] == "certificate_error"
+    assert heartbeat["attempts"][0]["detail"] == "Certificate not valid: expired"
+    assert heartbeat["attempts"][0]["response_ms"] is None   # no fabricated latency
+
+
+def test_retries_keep_every_attempt_in_order_and_leave_the_verdict_unchanged(app):
+    check = create(app, server_ids=[1], retries=2)
+    age(app, check["id"])
+    attempts = [
+        _attempt(1, False, error_category="connection_refused", detail="Connection refused"),
+        _attempt(2, False, error_category="timeout", detail="Timed out after 5 s"),
+        _attempt(3, True, response_ms=31, basis="HTTP 200 accepted"),
+    ]
+
+    report(app, 1, [run(check["id"], True, response_ms=31, attempts=attempts)])
+
+    heartbeat = _heartbeats(app, check["id"])[0]
+    assert [entry["attempt"] for entry in heartbeat["attempts"]] == [1, 2, 3]
+    assert [entry["ok"] for entry in heartbeat["attempts"]] == [False, False, True]
+    # The aggregate rule is untouched: one eventual success means the check is not down and has no incident.
+    assert check_row(app, check["id"]).state != "down"
+    assert incident(app, check["id"]) is None
+
+
+def test_three_failed_attempts_still_aggregate_to_down_under_the_existing_rule(app):
+    check = create(app, server_ids=[1], retries=2)
+    age(app, check["id"])
+    attempts = [_attempt(index, False, detail=f"Timed out after 5 s") for index in (1, 2, 3)]
+    for index in range(3):
+        report(app, 1, [run(check["id"], False, detail="Timed out after 5 s", attempts=[attempts[index]])])
+
+    heartbeat = _heartbeats(app, check["id"])[0]
+    assert len(heartbeat["attempts"]) == 1   # only the newest heartbeat's detail is kept
+    assert check_row(app, check["id"]).state == "down"
+    assert incident(app, check["id"]) is not None
+
+
+def test_only_the_latest_heartbeat_detail_is_kept_per_server(app):
+    check = create(app, server_ids=[1, 2])
+    report(app, 1, [run(check["id"], True, attempts=[_attempt(1, True, basis="old")])])
+    report(app, 2, [run(check["id"], False, attempts=[_attempt(1, False)])])
+    report(app, 1, [run(check["id"], True, attempts=[_attempt(1, True, basis="new")])])
+
+    by_host = {row["hostname"]: row for row in _heartbeats(app, check["id"])}
+    assert [row["hostname"] for row in _heartbeats(app, check["id"])] == ["alpha", "bravo"]
+    assert by_host["alpha"]["attempts"][0]["basis"] == "new"
+    assert by_host["bravo"]["has_details"] is True and by_host["bravo"]["ok"] is False
+
+
+def test_a_report_without_attempts_is_marked_no_details_not_fabricated(app):
+    check = create(app, server_ids=[1, 2])
+    # Old collector: no attempts field at all.
+    report(app, 1, [run(check["id"], True, response_ms=42)])
+    # Malformed detail is treated the same way as missing, not as an empty success.
+    report(app, 2, [run(check["id"], False, attempts=[{"ok": "yes"}])])
+
+    rows = {row["hostname"]: row for row in _heartbeats(app, check["id"])}
+    assert rows["alpha"]["has_details"] is False and rows["alpha"]["attempts"] is None and rows["alpha"]["ok"] is True
+    assert rows["bravo"]["has_details"] is False and rows["bravo"]["attempts"] is None
+    # A newer report afterwards replaces the "no details" marker with real detail.
+    report(app, 1, [run(check["id"], True, attempts=[_attempt(1, True)])])
+    assert _heartbeats(app, check["id"])[0]["has_details"] is True
+
+
+def test_heartbeat_detail_requires_a_session(app, monkeypatch):
+    check = create(app, server_ids=[1])
+    report(app, 1, [run(check["id"], True, attempts=[_attempt(1, True)])])
+
+    def refuse(*_args):
+        raise main.HTTPException(status_code=401, detail="Session is invalid or expired.")
+
+    monkeypatch.setattr(main, "_current_user", refuse)
+    response = app.get(f"/availability/checks/{check['id']}/heartbeats")
+    assert response.status_code == 401
+    assert app.get("/availability/checks/999/heartbeats").status_code == 401
+
+
+def test_untrusted_attempt_fields_are_dropped_but_the_heartbeat_stays(app):
+    check = create(app, server_ids=[1])
+    weird = {"attempt": 1, "ok": True, "response_ms": -5, "error_category": "made-up-category",
+             "detail": "x\x00" + "y" * 300, "basis": "HTTP 200 accepted", "code": 200, "extra": "ignored"}
+    report(app, 1, [run(check["id"], True, attempts=[weird])])
+
+    entry = _heartbeats(app, check["id"])[0]["attempts"][0]
+    assert entry == {"attempt": 1, "ok": True, "response_ms": None, "error_category": None,
+                     "detail": "x" + "y" * 199, "basis": "HTTP 200 accepted", "code": 200}
+    assert "extra" not in entry
+
+
+def test_an_out_of_window_report_cannot_replace_a_fresh_heartbeat(app):
+    check = create(app, server_ids=[1])
+    report(app, 1, [run(check["id"], True, attempts=[_attempt(1, True, basis="fresh")])])
+
+    report(app, 1, [run(check["id"], False, seconds_ago=2 * 3600, attempts=[_attempt(1, False)])])
+
+    heartbeat = _heartbeats(app, check["id"])[0]
+    assert heartbeat["ok"] is True and heartbeat["attempts"][0]["basis"] == "fresh"

@@ -61,6 +61,16 @@ def get_check(check_id: main.PathId, range: str = Query(default="24h"), session_
     return availability.detail(db, _check_or_404(db, check_id), range)
 
 
+@router.get("/availability/checks/{check_id}/heartbeats")
+def get_check_heartbeats(check_id: main.PathId, session_id: Annotated[str | None, Cookie(alias=SESSION_COOKIE_NAME)] = None, db=Depends(get_db)):
+    """The per-attempt detail of each server's latest heartbeat for a check. Requires a signed-in session; heartbeats
+    whose collector sent no detail come back with has_details False, so the page shows "no details", not a fake ok."""
+    main._current_user(session_id, db)
+    check = _check_or_404(db, check_id)
+    names = dict(db.query(Server.id, Server.hostname).all())
+    return availability.heartbeat_details(db, check, names)
+
+
 @router.post("/availability/test")
 def test_check(payload: dict, session_id: Annotated[str | None, Cookie(alias=SESSION_COOKIE_NAME)] = None, db=Depends(get_db)):
     """Run a check once from its servers before saving it. Only servers whose collector can run checks are asked."""

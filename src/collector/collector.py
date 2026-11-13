@@ -1204,6 +1204,10 @@ def _container_usage(socket_path: str, container_id: str) -> dict[str, Any]:
 
 CHECK_TYPES = ("http", "keyword", "tcp", "tls", "dns", "json", "ping")
 URL_CHECK_TYPES = ("http", "keyword", "json")
+# Fixed vocabulary for how one attempt ended, so the dashboard can group failures by cause instead of just "down".
+ERROR_CATEGORIES = ("timeout", "connection_refused", "connection_reset", "dns_error", "certificate_error",
+                    "tls_error", "http_status", "assertion_mismatch", "invalid_response", "icmp_denied", "network_error", "error")
+MAX_ATTEMPTS = 12
 DNS_RECORD_NUMS = {"A": 1, "NS": 2, "CNAME": 5, "MX": 15, "TXT": 16, "AAAA": 28}
 JSON_OPS = ("equals", "contains", "gt", "lt", "exists")
 DEFAULT_TLS_PORT = 443
@@ -1274,8 +1278,9 @@ def validate_check(raw: Any) -> dict[str, Any] | None:
     timeout = _whole(raw.get("timeout"), 1, MAX_CHECK_TIMEOUT)
     if None in (check_id, interval, retry_interval, timeout):
         return None
+    retries = _whole(raw.get("retries"), 0, 10) or 0
     kind, target = raw["type"], raw["target"].strip()
-    check: dict[str, Any] = {"id": check_id, "type": kind, "target": target, "interval": interval, "retry_interval": retry_interval, "timeout": timeout}
+    check: dict[str, Any] = {"id": check_id, "type": kind, "target": target, "interval": interval, "retry_interval": retry_interval, "timeout": timeout, "retries": retries}
     if kind in ("tcp", "tls"):
         parsed = _check_host_port(target, DEFAULT_TLS_PORT if kind == "tls" else None)
         if not parsed:
@@ -1377,6 +1382,28 @@ def _failure(exc: BaseException, timeout: int) -> str:
     return type(reason).__name__
 
 
+def _error_category(exc: BaseException, timed_out: bool = False) -> str:
+    """The fixed-vocabulary cause of a transport-level failure (see ERROR_CATEGORIES); the human phrase stays in detail."""
+    if timed_out:
+        return "timeout"
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, (TimeoutError, socket.timeout)) or isinstance(exc, (TimeoutError, socket.timeout)):
+        return "timeout"
+    if isinstance(reason, ssl.SSLCertVerificationError) or isinstance(exc, ssl.SSLCertVerificationError):
+        return "certificate_error"
+    if isinstance(reason, ssl.SSLError) or isinstance(exc, ssl.SSLError):
+        return "tls_error"
+    if isinstance(reason, socket.gaierror) or isinstance(exc, socket.gaierror):
+        return "dns_error"
+    if isinstance(reason, ConnectionRefusedError) or isinstance(exc, ConnectionRefusedError):
+        return "connection_refused"
+    if isinstance(reason, ConnectionResetError) or isinstance(exc, ConnectionResetError):
+        return "connection_reset"
+    if isinstance(reason, OSError) or isinstance(exc, OSError):
+        return "network_error"
+    return "error"
+
+
 class _Deadline:
     """A check's timeout as a hard limit for the whole run (#204). A socket timeout only limits each read, so a
     server that sends its answer a byte at a time could hold a check, and one of the CHECK_WORKERS, for as long as
@@ -1447,14 +1474,17 @@ class _DeadlineHTTPS(urllib.request.HTTPSHandler):
 
 
 def run_http(check: dict[str, Any]) -> dict[str, Any]:
-    """One run of an HTTP(s) or keyword check: {ok, response_ms, code, detail, cert_days}."""
+    """One run of an HTTP(s) or keyword check: {ok, response_ms, code, detail, cert_days, error_category, basis}.
+
+    error_category names the failure cause with a fixed vocabulary (None on success); basis says what a success
+    was judged on, so the dashboard records the decision behind every attempt, not just ok/not-ok."""
     context = ssl.create_default_context()
     if check["ignore_tls"]:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
     request = urllib.request.Request(check["target"], method=check["method"], headers={"User-Agent": f"Infradeck-Check/{COLLECTOR_VERSION}", "Accept": "*/*"})
     started = time.monotonic()
-    result: dict[str, Any] = {"ok": False, "response_ms": None, "code": None, "detail": None, "cert_days": None}
+    result: dict[str, Any] = {"ok": False, "response_ms": None, "code": None, "detail": None, "cert_days": None, "error_category": None, "basis": None}
     body = b""
     with _Deadline(check["timeout"]) as deadline:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _DeadlineHTTP(deadline), _DeadlineHTTPS(context, deadline), _Redirects(check["follow_redirects"]))
@@ -1473,35 +1503,47 @@ def run_http(check: dict[str, Any]) -> dict[str, Any]:
             result["code"] = exc.code
             exc.close()
         except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as exc:
-            result["detail"] = f"Timed out after {check['timeout']} s" if deadline.expired else _failure(exc, check["timeout"])
+            timed_out = deadline.expired
+            result["detail"] = f"Timed out after {check['timeout']} s" if timed_out else _failure(exc, check["timeout"])
+            result["error_category"] = _error_category(exc, timed_out)
             return result
     if deadline.expired:   # the answer was cut off, so it can't be judged
         result["detail"] = f"Timed out after {check['timeout']} s"
+        result["error_category"] = "timeout"
         return result
     result["response_ms"] = int((time.monotonic() - started) * 1000)
     if not _code_accepted(result["code"], check["accepted_codes"]):
         result["detail"] = f"HTTP {result['code']}"
+        result["error_category"] = "http_status"
         return result
     if check["type"] == "keyword":
         text = body.decode("utf-8", errors="replace")
         found = check["keyword"] in text if check["case_sensitive"] else check["keyword"].casefold() in text.casefold()
         if not found:
             result["detail"] = "Keyword not found"
+            result["error_category"] = "assertion_mismatch"
             return result
-    if check["type"] == "json":
+        result["basis"] = "keyword found"
+    elif check["type"] == "json":
         try:
             data = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             result["detail"] = "The reply is not JSON"
+            result["error_category"] = "invalid_response"
             return result
         try:
             value = _json_walk(data, check["json_path"])
         except (KeyError, IndexError, TypeError):
             result["detail"] = f"No value at {check['json_path']}"[:200]
+            result["error_category"] = "assertion_mismatch"
             return result
         if not _json_match(value, check["json_op"], check.get("json_expect", "")):
             result["detail"] = f"{check['json_path']} is {json.dumps(value)[:80]}"[:200]
+            result["error_category"] = "assertion_mismatch"
             return result
+        result["basis"] = f"json {check['json_path']} {check['json_op']}"
+    else:
+        result["basis"] = f"HTTP {result['code']} accepted"
     result["ok"] = True
     return result
 
@@ -1552,18 +1594,25 @@ def run_tls(check: dict[str, Any]) -> dict[str, Any]:
                 with context.wrap_socket(sock, server_hostname=check["host"]) as tls:
                     cert = tls.getpeercert()
         except ssl.SSLCertVerificationError as exc:
-            return {"ok": False, "response_ms": None, "code": None, "detail": f"Certificate not valid: {getattr(exc, 'verify_message', None) or exc}"[:200], "cert_days": None}
+            return {"ok": False, "response_ms": None, "code": None, "detail": f"Certificate not valid: {getattr(exc, 'verify_message', None) or exc}"[:200], "cert_days": None,
+                    "error_category": "certificate_error", "basis": None}
         except (ssl.SSLError, OSError, http.client.HTTPException) as exc:
-            detail = f"Timed out after {check['timeout']} s" if deadline.expired else _failure(exc, check["timeout"])
-            return {"ok": False, "response_ms": None, "code": None, "detail": detail, "cert_days": None}
+            # The deadline's timer can lose the race by a few milliseconds against the socket's own failure; the
+            # elapsed time decides then, so a handshake cut off at the timeout is recorded as a timeout either way.
+            timed_out = deadline.expired or time.monotonic() - started >= check["timeout"] * 0.9
+            detail = f"Timed out after {check['timeout']} s" if timed_out else _failure(exc, check["timeout"])
+            return {"ok": False, "response_ms": None, "code": None, "detail": detail, "cert_days": None,
+                    "error_category": _error_category(exc, timed_out), "basis": None}
     response_ms = int((time.monotonic() - started) * 1000)
     try:
         days = int((ssl.cert_time_to_seconds(cert["notAfter"]) - time.time()) // 86400)
     except (KeyError, ValueError, TypeError):
-        return {"ok": False, "response_ms": response_ms, "code": None, "detail": "The certificate has no expiry date", "cert_days": None}
+        return {"ok": False, "response_ms": response_ms, "code": None, "detail": "The certificate has no expiry date", "cert_days": None,
+                "error_category": "certificate_error", "basis": None}
     ok = days >= check.get("warn_days", 14)
     detail = None if ok else (f"Certificate expired {abs(days)} d ago" if days < 0 else f"Certificate expires in {days} d")
-    return {"ok": ok, "response_ms": response_ms, "code": None, "detail": detail, "cert_days": days}
+    return {"ok": ok, "response_ms": response_ms, "code": None, "detail": detail, "cert_days": days,
+            "error_category": None if ok else "certificate_error", "basis": f"certificate valid for {days} d" if ok else None}
 
 
 def _system_resolver() -> str:
@@ -1675,22 +1724,28 @@ def run_dns(check: dict[str, Any]) -> dict[str, Any]:
     """Ask a DNS server for a record and be down when it doesn't resolve or doesn't match the expected value."""
     resolver = check.get("resolver") or _system_resolver()
     if not resolver:
-        return {"ok": False, "response_ms": None, "code": None, "detail": "No DNS server to ask", "cert_days": None}
+        return {"ok": False, "response_ms": None, "code": None, "detail": "No DNS server to ask", "cert_days": None,
+                "error_category": "dns_error", "basis": None}
     want_type = DNS_RECORD_NUMS[check["record_type"]]
     started = time.monotonic()
     try:
         answers = _dns_query(check["target"].rstrip("."), want_type, resolver, check["timeout"])
     except _DnsError as exc:
-        return {"ok": False, "response_ms": None, "code": None, "detail": str(exc)[:200], "cert_days": None}
+        return {"ok": False, "response_ms": None, "code": None, "detail": str(exc)[:200], "cert_days": None,
+                "error_category": "dns_error", "basis": None}
     except (OSError, UnicodeError, struct.error) as exc:
-        return {"ok": False, "response_ms": None, "code": None, "detail": _failure(exc, check["timeout"]), "cert_days": None}
+        return {"ok": False, "response_ms": None, "code": None, "detail": _failure(exc, check["timeout"]), "cert_days": None,
+                "error_category": _error_category(exc), "basis": None}
     response_ms = int((time.monotonic() - started) * 1000)
     if not answers:
-        return {"ok": False, "response_ms": response_ms, "code": None, "detail": f"No {check['record_type']} record", "cert_days": None}
+        return {"ok": False, "response_ms": response_ms, "code": None, "detail": f"No {check['record_type']} record", "cert_days": None,
+                "error_category": "dns_error", "basis": None}
     expected = (check.get("expected") or "").strip()
     if expected and not any(expected.casefold() == answer.casefold() or (check["record_type"] == "TXT" and expected in answer) for answer in answers):
-        return {"ok": False, "response_ms": response_ms, "code": None, "detail": f"Resolved to {', '.join(answers)}"[:200], "cert_days": None}
-    return {"ok": True, "response_ms": response_ms, "code": None, "detail": None, "cert_days": None}
+        return {"ok": False, "response_ms": response_ms, "code": None, "detail": f"Resolved to {', '.join(answers)}"[:200], "cert_days": None,
+                "error_category": "assertion_mismatch", "basis": None}
+    return {"ok": True, "response_ms": response_ms, "code": None, "detail": None, "cert_days": None,
+            "error_category": None, "basis": f"{check['record_type']} record resolved"}
 
 
 def _icmp_checksum(data: bytes) -> int:
@@ -1708,7 +1763,8 @@ def run_ping(check: dict[str, Any]) -> dict[str, Any]:
     try:
         family, _, _, _, sockaddr = socket.getaddrinfo(check["host"], None)[0]
     except (socket.gaierror, IndexError):
-        return {"ok": False, "response_ms": None, "code": None, "detail": "Host name not found", "cert_days": None}
+        return {"ok": False, "response_ms": None, "code": None, "detail": "Host name not found", "cert_days": None,
+                "error_category": "dns_error", "basis": None}
     address = sockaddr[0]
     if family == socket.AF_INET6:
         proto, echo_type, reply_type = socket.IPPROTO_ICMPV6, 128, 129
@@ -1727,12 +1783,16 @@ def run_ping(check: dict[str, Any]) -> dict[str, Any]:
                 sock.settimeout(max(0.05, deadline - time.monotonic()))
                 reply, _ = sock.recvfrom(1024)
                 if reply and reply[0] == reply_type:
-                    return {"ok": True, "response_ms": int((time.monotonic() - started) * 1000), "code": None, "detail": None, "cert_days": None}
+                    return {"ok": True, "response_ms": int((time.monotonic() - started) * 1000), "code": None, "detail": None, "cert_days": None,
+                            "error_category": None, "basis": "ICMP echo reply"}
     except PermissionError:
-        return {"ok": False, "response_ms": None, "code": None, "detail": "ICMP is not permitted on this collector (ping_group_range)", "cert_days": None}
+        return {"ok": False, "response_ms": None, "code": None, "detail": "ICMP is not permitted on this collector (ping_group_range)", "cert_days": None,
+                "error_category": "icmp_denied", "basis": None}
     except (OSError, struct.error) as exc:
-        return {"ok": False, "response_ms": None, "code": None, "detail": _failure(exc, check["timeout"]), "cert_days": None}
-    return {"ok": False, "response_ms": None, "code": None, "detail": "No reply", "cert_days": None}
+        return {"ok": False, "response_ms": None, "code": None, "detail": _failure(exc, check["timeout"]), "cert_days": None,
+                "error_category": _error_category(exc), "basis": None}
+    return {"ok": False, "response_ms": None, "code": None, "detail": "No reply", "cert_days": None,
+            "error_category": "timeout", "basis": None}
 
 
 def run_tcp(check: dict[str, Any]) -> dict[str, Any]:
@@ -1741,19 +1801,67 @@ def run_tcp(check: dict[str, Any]) -> dict[str, Any]:
         with socket.create_connection((check["host"], check["port"]), timeout=check["timeout"]):
             pass
     except OSError as exc:
-        return {"ok": False, "response_ms": None, "code": None, "detail": _failure(exc, check["timeout"]), "cert_days": None}
-    return {"ok": True, "response_ms": int((time.monotonic() - started) * 1000), "code": None, "detail": None, "cert_days": None}
+        return {"ok": False, "response_ms": None, "code": None, "detail": _failure(exc, check["timeout"]), "cert_days": None,
+                "error_category": _error_category(exc), "basis": None}
+    return {"ok": True, "response_ms": int((time.monotonic() - started) * 1000), "code": None, "detail": None, "cert_days": None,
+            "error_category": None, "basis": "TCP connection opened"}
 
 
 _RUNNERS = {"tcp": lambda c: run_tcp(c), "tls": lambda c: run_tls(c), "dns": lambda c: run_dns(c), "ping": lambda c: run_ping(c)}
+
+
+def _attempt_from_outcome(outcome: dict[str, Any], attempt: int) -> dict[str, Any]:
+    """One attempt's honest verdict, in the shape the backend keeps per heartbeat: the fixed-vocabulary cause on
+    failure and the decision basis on success, plus the latency when one was measured."""
+    entry: dict[str, Any] = {
+        "attempt": attempt,
+        "ok": bool(outcome.get("ok")),
+        "response_ms": outcome.get("response_ms"),
+        "error_category": outcome.get("error_category"),
+        "detail": outcome.get("detail"),
+        "basis": outcome.get("basis"),
+    }
+    if outcome.get("code") is not None:
+        entry["code"] = outcome["code"]
+    if outcome.get("cert_days") is not None:
+        entry["cert_days"] = outcome["cert_days"]
+    return entry
 
 
 def run_check(check: dict[str, Any]) -> dict[str, Any]:
     try:
         outcome = _RUNNERS.get(check["type"], run_http)(check)
     except Exception as exc:  # one broken check must never stop the others
-        outcome = {"ok": False, "response_ms": None, "code": None, "detail": f"Check failed: {type(exc).__name__}", "cert_days": None}
-    return {"check_id": check["id"], "time": datetime.now(timezone.utc).isoformat(), **{key: value for key, value in outcome.items() if value is not None or key == "ok"}}
+        outcome = {"ok": False, "response_ms": None, "code": None, "detail": f"Check failed: {type(exc).__name__}", "cert_days": None,
+                   "error_category": "error", "basis": None}
+    # The wire fields stay as they were; ``attempts`` is added alongside, so older backends simply ignore it.
+    return {"check_id": check["id"], "time": datetime.now(timezone.utc).isoformat(),
+            **{key: value for key, value in outcome.items() if key not in ("error_category", "basis") and (value is not None or key == "ok")},
+            "attempts": [_attempt_from_outcome(outcome, 1)]}
+
+
+def run_check_with_retries(check: dict[str, Any], retries: int) -> dict[str, Any]:
+    """Run a check once, and on failure up to ``retries`` more times straight away when the dashboard asked for it.
+
+    Every attempt is recorded in order in ``attempts`` — the first failure, each retry, and the success or final
+    failure — so the dashboard can show the whole story. The aggregate verdict is unchanged: the result is ok only
+    when an attempt succeeded, and the next scheduled run still follows the existing interval/retry-interval rule."""
+    retries = max(0, min(int(retries or 0), MAX_ATTEMPTS - 1))
+    attempts: list[dict[str, Any]] = []
+    outcome: dict[str, Any] = {}
+    for index in range(retries + 1):
+        try:
+            outcome = _RUNNERS.get(check["type"], run_http)(check)
+        except Exception as exc:  # one broken check must never stop the others
+            outcome = {"ok": False, "response_ms": None, "code": None, "detail": f"Check failed: {type(exc).__name__}",
+                       "cert_days": None, "error_category": "error", "basis": None}
+        attempts.append(_attempt_from_outcome(outcome, index + 1))
+        if outcome.get("ok"):
+            break
+    result = {"check_id": check["id"], "time": datetime.now(timezone.utc).isoformat(),
+              **{key: value for key, value in outcome.items() if key not in ("error_category", "basis") and (value is not None or key == "ok")},
+              "attempts": attempts}
+    return result
 
 
 class _ApiRedirect(urllib.error.URLError):
@@ -1851,7 +1959,8 @@ class CheckRunner(threading.Thread):
             due = [check for check_id, check in self.checks.items() if self.next_run.get(check_id, 0) <= now and check_id not in self.running]
             self.running.update(check["id"] for check in due)
         for check in due:
-            self.pool.submit(run_check, check).add_done_callback(lambda future, check=check: self._done(check, future))
+            # Retries configured on the dashboard happen inside one run; each attempt is kept in the result's attempts list.
+            self.pool.submit(run_check_with_retries, check, check.get("retries", 0)).add_done_callback(lambda future, check=check: self._done(check, future))
 
     def report(self) -> bool:
         with self.lock:

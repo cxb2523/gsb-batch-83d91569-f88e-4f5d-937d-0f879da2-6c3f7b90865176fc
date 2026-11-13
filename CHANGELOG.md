@@ -4,6 +4,26 @@ All notable changes to Infradeck are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Per-attempt detail for availability checks.** A collector now records how every attempt of a check ended:
+  on success the response time and the basis of the verdict (accepted status, keyword found, JSON match, TLS
+  certificate, DNS record, TCP or ICMP answer), and on failure a fixed-vocabulary cause — timeout, connection
+  refused or reset, DNS failure, certificate or other TLS problem, unexpected HTTP status, assertion mismatch,
+  invalid response, ICMP denied or another network error — together with a short reason. When the check retries
+  inside a run, each attempt is kept in order rather than only the last one. The combined state still follows
+  the existing "all fail" / "any fails" rules; the new records never change a verdict.
+- The per-attempt detail travels with the collector's check report. The backend keeps the most recent heartbeat
+  per check and server in the new `check_heartbeats` table (migration 0004) and serves it at
+  `GET /availability/checks/{id}/heartbeats`, which requires a signed-in session. A report without attempt
+  detail, such as one from an older collector, is explicitly shown as "No details" rather than turned into an
+  empty success or a fabricated latency.
+- On a check's detail page, the bars of the "Last 30 checks" strip are clickable and open the latest
+  heartbeat's attempts per server, with each failure's category and reason; heartbeats without detail show
+  "No details".
+
 ## [1.0.0] - 2026-11-12
 
 The first public release. Earlier 0.x versions were private pre-releases.

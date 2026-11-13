@@ -175,7 +175,8 @@ def test_the_runner_runs_due_checks_and_reports_them(monkeypatch, site):
     runner.report()
 
     assert sent[0] == [] and len(sent[1]) == 1
-    assert sent[1][0]["check_id"] == 1 and sent[1][0]["ok"] is True and set(sent[1][0]) <= {"check_id", "time", "ok", "response_ms", "code", "detail", "cert_days"}
+    assert sent[1][0]["check_id"] == 1 and sent[1][0]["ok"] is True and set(sent[1][0]) <= {"check_id", "time", "ok", "response_ms", "code", "detail", "cert_days", "attempts"}
+    assert [attempt["attempt"] for attempt in sent[1][0]["attempts"]] == [1] and sent[1][0]["attempts"][0]["basis"]
     assert runner.next_run[1] > time.monotonic() + 50   # next run after the interval
 
 
@@ -231,6 +232,112 @@ def test_a_test_that_isnt_well_formed_is_not_run(monkeypatch):
     runner.run_tests([{**GOOD, "target": "file:///etc/shadow"}, "junk", None] + [{**GOOD, "id": index} for index in range(1, 10)])
 
     assert len(submitted) == 2   # only the first five are looked at, and three of those aren't checks
+
+
+# --- per-attempt records and in-run retries ------------------------------------------------------------
+
+def test_run_check_records_a_successful_attempt_with_latency_and_basis(site):
+    result = collector.run_check(check(target=f"{site}/ok"))
+
+    assert result["ok"] is True
+    assert result["attempts"] == [{"attempt": 1, "ok": True, "response_ms": result["response_ms"],
+                                   "error_category": None, "detail": None, "basis": "HTTP 200 accepted", "code": 200}]
+
+
+def test_run_check_records_the_failure_category_and_short_reason():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+
+    http_result = collector.run_check(check(target=f"http://127.0.0.1:{port}/"))
+    tcp_result = collector.run_check(check(type="tcp", target=f"127.0.0.1:{port}"))
+
+    assert (http_result["ok"], http_result["attempts"][0]["error_category"], http_result["attempts"][0]["detail"]) == (False, "connection_refused", "Connection refused")
+    assert tcp_result["attempts"][0]["error_category"] == "connection_refused"
+    assert http_result["attempts"][0]["response_ms"] is None   # a failed attempt never invents a latency
+
+
+def test_keyword_and_status_failures_are_assertion_and_http_status_categories(site):
+    keyword = collector.run_check(check(type="keyword", target=f"{site}/ok", keyword="not in the page"))
+    status = collector.run_check(check(target=f"{site}/broken"))
+
+    assert keyword["ok"] is False and keyword["attempts"][0]["error_category"] == "assertion_mismatch"
+    assert status["attempts"][0]["error_category"] == "http_status" and status["attempts"][0]["code"] == 503
+
+
+def test_retries_keep_every_attempt_and_stop_at_the_first_success(monkeypatch):
+    calls = []
+
+    def flaky(_check):
+        calls.append(1)
+        if len(calls) < 3:
+            return {"ok": False, "response_ms": None, "code": None, "detail": "Connection refused", "cert_days": None,
+                    "error_category": "connection_refused", "basis": None}
+        return {"ok": True, "response_ms": 25, "code": 200, "detail": None, "cert_days": None,
+                "error_category": None, "basis": "HTTP 200 accepted"}
+
+    monkeypatch.setattr(collector, "run_http", flaky)
+    result = collector.run_check_with_retries(check(retries=4), 4)
+
+    assert len(calls) == 3 and result["ok"] is True
+    assert [attempt["attempt"] for attempt in result["attempts"]] == [1, 2, 3]
+    assert [attempt["ok"] for attempt in result["attempts"]] == [False, False, True]
+    assert result["attempts"][0]["error_category"] == "connection_refused"
+    assert result["attempts"][2]["response_ms"] == 25 and result["attempts"][2]["basis"] == "HTTP 200 accepted"
+
+
+def test_exhausted_retries_record_each_attempt_and_remain_failed(monkeypatch):
+    monkeypatch.setattr(collector, "run_http", lambda _check: {"ok": False, "response_ms": None, "code": None,
+                                                                "detail": "Timed out after 5 s", "cert_days": None,
+                                                                "error_category": "timeout", "basis": None})
+    result = collector.run_check_with_retries(check(retries=2), 2)
+
+    assert result["ok"] is False
+    assert len(result["attempts"]) == 3 and all(attempt["error_category"] == "timeout" for attempt in result["attempts"])
+
+
+def test_zero_retries_makes_exactly_one_attempt(monkeypatch):
+    runs = []
+    monkeypatch.setattr(collector, "run_http", lambda _check: runs.append(1) or {"ok": True, "response_ms": 1, "code": 200,
+                                                                                 "detail": None, "cert_days": None,
+                                                                                 "error_category": None, "basis": "HTTP 200 accepted"})
+    result = collector.run_check_with_retries(check(), 0)
+
+    assert len(runs) == 1 and len(result["attempts"]) == 1
+
+
+def test_the_runner_runs_configured_retries_inside_one_scheduled_run(monkeypatch, site):
+    attempts = []
+    original_http = collector.run_http
+
+    def flaky(_check):
+        outcome = (original_http(check(target=f"{site}/broken")) if len(attempts) < 2
+                   else original_http(check(target=f"{site}/ok")))
+        attempts.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(collector, "run_http", flaky)
+    sent = []
+    monkeypatch.setattr(collector, "send_check_results", lambda *args: sent.append(args[3]) or {"checks": [{**GOOD, "retries": 2, "target": f"{site}/ok"}]})
+    runner = collector.CheckRunner("http://dashboard/api", (3, "token"))
+
+    runner.report()
+    assert runner.checks[1]["retries"] == 2
+    runner.run_due()
+    deadline = time.monotonic() + 5
+    while not runner.pending and time.monotonic() < deadline:
+        time.sleep(0.05)
+    runner.report()
+
+    assert len(attempts) == 3
+    result = sent[1][0]
+    assert result["ok"] is True and [entry["ok"] for entry in result["attempts"]] == [False, False, True]
+
+
+def test_validate_check_keeps_the_retry_count():
+    assert collector.validate_check({**GOOD, "retries": 3})["retries"] == 3
+    assert collector.validate_check({**GOOD})["retries"] == 0
+    assert collector.validate_check({**GOOD, "retries": 99})["retries"] == 0   # out-of-range values clamp to the default, never reach a runner
 
 
 # --- TLS, DNS, JSON and ping validation + parsing ----------------------------------------------------
@@ -306,9 +413,11 @@ def test_system_resolver_reads_resolv_conf(tmp_path, monkeypatch):
 
 def test_ping_returns_a_clean_result_whether_or_not_icmp_is_permitted():
     result = collector.run_ping({"host": "127.0.0.1", "timeout": 2})
-    assert isinstance(result["ok"], bool) and set(result) == {"ok", "response_ms", "code", "detail", "cert_days"}
+    assert isinstance(result["ok"], bool) and set(result) == {"ok", "response_ms", "code", "detail", "cert_days", "error_category", "basis"}
     if not result["ok"]:
-        assert result["detail"]
+        assert result["detail"] and result["error_category"] in collector.ERROR_CATEGORIES
+    else:
+        assert result["basis"] and result["error_category"] is None
 
 
 def test_run_check_dispatches_by_type(monkeypatch):

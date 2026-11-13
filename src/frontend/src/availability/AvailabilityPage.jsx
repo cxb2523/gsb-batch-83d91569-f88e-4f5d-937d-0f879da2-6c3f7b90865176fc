@@ -9,6 +9,7 @@ import { AppShell, PhoneHeader } from '../shell.jsx'
 import { Drawer, Notice, Soon, ago, useAction, usePhone } from '../ui.jsx'
 import { SectionHeading } from '../dashboard/NeedsAttention.jsx'
 import { CheckForm } from './CheckForm.jsx'
+import HeartbeatDetail from './HeartbeatDetail.jsx'
 
 const REFRESH_SECONDS = 15
 const TYPE_LABEL = { http: 'HTTP(s)', keyword: 'Keyword', json: 'JSON query', tcp: 'TCP port', tls: 'TLS cert', dns: 'DNS', ping: 'Ping' }
@@ -44,13 +45,19 @@ function useAvailability() {
 }
 
 // The last 30 results, oldest on the left; missing slots (a new check) are drawn empty in front.
-function Strip({ check, size = 'md' }) {
+// When onSlotClick is given (the check detail), each bar is a button that opens that heartbeat's attempt detail.
+function Strip({ check, size = 'md', onSlotClick }) {
   const slots = check.strip.length >= 30 ? check.strip.slice(-30) : [...Array(30 - check.strip.length).fill(null), ...check.strip]
   const height = size === 'sm' ? 'h-4' : 'h-5'
   return (
     <span className="flex items-center gap-[2px]" role="img" aria-label={`Last ${check.strip.length} checks: ${check.strip.filter((slot) => slot.status === 'down').length} down`}>
-      {slots.map((slot, index) => <span key={index} title={slot ? `${new Date(slot.start).toLocaleString()} · ${slot.status}${slot.response_ms != null ? ` · ${slot.response_ms} ms` : ''}` : 'no result yet'}
-        className={`${height} w-[4px] shrink-0 rounded-[1px] ${SLOT_CLASS[check.paused ? 'paused' : slot ? slot.status : 'empty']}`} />)}
+      {slots.map((slot, index) => {
+        const title = slot ? `${new Date(slot.start).toLocaleString()} · ${slot.status}${slot.response_ms != null ? ` · ${slot.response_ms} ms` : ''}${onSlotClick ? ' · click for attempts' : ''}` : 'no result yet'
+        const className = `${height} w-[4px] shrink-0 rounded-[1px] ${SLOT_CLASS[check.paused ? 'paused' : slot ? slot.status : 'empty']}`
+        return onSlotClick && slot
+          ? <button key={index} type="button" title={title} aria-label={`Show attempts for the ${slot.status} heartbeat at ${new Date(slot.start).toLocaleString()}`} onClick={() => onSlotClick(slot)} className={`${className} cursor-pointer border-0 p-0`} />
+          : <span key={index} title={title} className={className} />
+      })}
     </span>
   )
 }
@@ -282,6 +289,8 @@ function useCheckDetail(checkId, range, refreshedAt) {
 function Detail({ check, canEdit, onEdit, onPause, onDelete, refreshedAt }) {
   const phone = usePhone()
   const [range, setRange] = useState('24h')
+  const [heartbeatOpen, setHeartbeatOpen] = useState(false)
+  const [selectedSlot, setSelectedSlot] = useState(null)
   const detail = useCheckDetail(check.id, range, refreshedAt)
   const options = check.options || {}
   const settings = [
@@ -335,7 +344,9 @@ function Detail({ check, canEdit, onEdit, onPause, onDelete, refreshedAt }) {
           {detail?.days && <Days days={detail.days} />}
           <div>
             <h3 className="m-0 text-[13px] font-semibold text-paper">Last 30 checks</h3>
-            <div className="mt-2.5"><Strip check={check} /></div>
+            <div className="mt-2.5"><Strip check={check} onSlotClick={(slot) => { setSelectedSlot(slot); setHeartbeatOpen(true) }} /></div>
+            <HeartbeatDetail check={check} open={heartbeatOpen} onClose={() => setHeartbeatOpen(false)} refreshedAt={refreshedAt} />
+            {selectedSlot && heartbeatOpen && <p className="mb-0 mt-2 text-xs text-muted">Selected heartbeat: {new Date(selectedSlot.start).toLocaleString()} · {selectedSlot.status}{selectedSlot.response_ms != null ? ` · ${selectedSlot.response_ms} ms` : ''}.</p>}
             <p className="mb-0 mt-2.5 text-xs text-muted">
               {check.paused ? 'Paused: no checks run and no alerts are sent.' : check.state === 'pending' ? 'Waiting for the first results from its servers.' : check.state === 'stale' ? `No recent results since ${check.state_since ? new Date(check.state_since).toLocaleString() : '—'}: its servers aren't running it, or their results don't arrive.` : `${check.state === 'down' ? 'Down' : 'Up'} since ${check.state_since ? new Date(check.state_since).toLocaleString() : '—'}.`}
               {check.last_result_at && ` Last result ${ago(check.last_result_at)}${check.last_detail ? `: ${check.last_detail}` : ''}.`}

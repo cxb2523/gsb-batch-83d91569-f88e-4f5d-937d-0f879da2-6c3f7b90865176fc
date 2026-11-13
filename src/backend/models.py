@@ -596,6 +596,26 @@ class CheckResult(Base):
     cert_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
 
+class CheckHeartbeat(Base):
+    """The per-attempt detail of the most recent heartbeat a collector sent for a check from one server.
+
+    Only the newest heartbeat per (check, server) is kept. ``attempts`` is the checked JSON the collector reported
+    for that heartbeat (every attempt with its cause or basis); it is NULL when the reporting collector is older and
+    sent no detail, which the read API presents as "no details" rather than an empty success."""
+
+    __tablename__ = "check_heartbeats"
+    __table_args__ = (UniqueConstraint("check_id", "server_id"), Index("ix_check_heartbeats_check", "check_id"))
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    check_id: Mapped[int] = mapped_column(ForeignKey("checks.id", ondelete="CASCADE"), nullable=False)
+    server_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # NULL means the heartbeat carried no attempt detail (an older collector); [] is never stored.
+    attempts: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
 class CheckRollup(Base):
     """One check's hour: how many check slots there were, how many were down, and its response times. The 30-day,
     1-year and 90-day views are added up from these; the current hour comes from the raw results."""

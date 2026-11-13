@@ -4,7 +4,7 @@ Infradeck ships with an automated test suite. This page explains how to run it, 
 covers (and what it doesn't), and what every single test is for, so you can decide
 whether a failure matters before you upgrade or change your setup.
 
-- **1633 test cases** from 883 test functions, plus 45 small tests of the frontend helpers (see [Frontend helper tests](#frontend-helper-tests)) (some functions run once per input).
+- **1649 test cases** from 899 test functions, plus 50 small tests of the frontend helpers (see [Frontend helper tests](#frontend-helper-tests)) (some functions run once per input).
 - **About four minutes** to run. No Docker, PostgreSQL, Redis, network or root access needed.
 - **Safe to run next to a live install.** The tests use a throwaway in-memory database
   and fakes; they never touch your running containers or your data. (Two collector
@@ -157,9 +157,9 @@ The frontend's helper tests are separate, in `src/frontend/tests/` (see [Fronten
 | [`test_agent_watch.py`](#test_agent_watchpy) | 10 | Reusing a recent diagnosis, and watching the fix until the agent resolves the incident. |
 | [`test_agent_worker.py`](#test_agent_workerpy) | 13 | The agent's job queue and worker: one job per opened or worsened incident after the commit, retries, time limit, restarts. |
 | [`test_alerts.py`](#test_alertspy) | 10 | The incident engine: one incident per problem, resolve, container rules. |
-| [`test_availability.py`](#test_availabilitypy) | 75 | Availability checks: what a check may be, how results from collectors are combined, when incidents open and resolve, tests from the form, and the page's uptime and heartbeat. |
+| [`test_availability.py`](#test_availabilitypy) | 83 | Availability checks: what a check may be, how results from collectors are combined, when incidents open and resolve, tests from the form, the page's uptime and heartbeat, and the per-attempt heartbeat detail. |
 | [`test_auth_backend.py`](#test_auth_backendpy) | 50 | Accounts, passwords, the first-account setup token, and the cross-site request check. |
-| [`test_collector_checks.py`](#test_collector_checkspy) | 58 | The collector's side of availability checks: only well-formed checks run, timeouts hold, no page content is reported, and calls to the dashboard never follow redirects. |
+| [`test_collector_checks.py`](#test_collector_checkspy) | 66 | The collector's side of availability checks: only well-formed checks run, timeouts hold, no page content is reported, every attempt is recorded, and calls to the dashboard never follow redirects. |
 | [`test_collector_mounts.py`](#test_collector_mountspy) | 1 | Which filesystems the collector reports. |
 | [`test_container_detail.py`](#test_container_detailpy) | 18 | Per-container details and parsing of Docker's stats. |
 | [`test_container_stats.py`](#test_container_statspy) | 10 | The Statistics page's container views, the period before a range, container swap, CPU spikes and installed updates. |
@@ -592,6 +592,14 @@ reported up while it is down, or a check could be pointed somewhere it shouldn't
 | `test_credentials_in_a_check_url_are_refused` | A check address with a user name and password in it is refused. |
 | `test_a_non_admin_sees_the_target_without_its_query_or_credentials` | Non-admins see a check's address without its query string, so a token in it stays with admins. |
 | `test_the_incident_description_does_not_leak_the_query_string` | The incident description names the address without its query string. |
+| `test_a_successful_heartbeat_keeps_its_latency_and_basis` | A reported success keeps its response time and the basis it was judged on, with its failure category left empty. |
+| `test_a_failed_heartbeat_keeps_the_failure_category_and_short_reason` | A failed attempt keeps its fixed-vocabulary cause (e.g. a certificate problem) and short reason, never a fabricated latency. |
+| `test_retries_keep_every_attempt_in_order_and_leave_the_verdict_unchanged` | When retries eventually succeed, every attempt (two failures then the success) is kept in order and the existing aggregation still says the check isn't down. |
+| `test_three_failed_attempts_still_aggregate_to_down_under_the_existing_rule` | Failures with per-attempt detail still open the "down" state and incident exactly as before; the new records don't change the verdict. |
+| `test_only_the_latest_heartbeat_detail_is_kept_per_server` | Only each server's newest heartbeat keeps its attempts; an older report's detail is replaced, one row per server. |
+| `test_a_report_without_attempts_is_marked_no_details_not_fabricated` | An old collector's report without attempts, or malformed detail, is stored as "no details" (never an empty success or made-up time); a later detailed report replaces the marker. |
+| `test_heartbeat_detail_requires_a_session` | The per-attempt read endpoint refuses a request without a signed-in session (401), as it does for an unknown check. |
+| `test_untrusted_attempt_fields_are_dropped_but_the_heartbeat_stays` | Out-of-range numbers, unknown categories and non-printable or overlong text in attempts are cleaned away while the heartbeat itself is still kept. |
 
 ### test_auth_backend.py
 
@@ -659,6 +667,14 @@ collector could run a malformed check, hang on a slow service, or send a page's 
 | `test_validate_check_rejects_credentials_in_a_url` | A check address with a user name and password is rejected; a query string is allowed. |
 | `test_a_call_to_the_dashboard_never_follows_a_redirect_with_the_token` | A redirect from the dashboard address is never followed, so the collector token can't reach another host; the error names only the new address. |
 | `test_a_huge_answer_from_the_dashboard_is_refused` | An answer from the dashboard larger than the limit is refused, and a non-HTTP dashboard address is rejected. |
+| `test_run_check_records_a_successful_attempt_with_latency_and_basis` | One run is reported with an attempts list naming its success basis and measured response time. |
+| `test_run_check_records_the_failure_category_and_short_reason` | A closed port is recorded as a connection-refused failure with the reason text and no response time, for HTTP and TCP. |
+| `test_keyword_and_status_failures_are_assertion_and_http_status_categories` | A missing keyword is an assertion mismatch and an unaccepted status code is an HTTP-status failure, each in the fixed vocabulary. |
+| `test_retries_keep_every_attempt_and_stop_at_the_first_success` | In-run retries record every attempt in order and stop at the first success, keeping each attempt's own cause or basis. |
+| `test_exhausted_retries_record_each_attempt_and_remain_failed` | When every retry fails, all attempts are kept and the run still reports not-ok, so aggregation rules are untouched. |
+| `test_zero_retries_makes_exactly_one_attempt` | With no retries configured a check is tried exactly once and the attempts list has one entry. |
+| `test_the_runner_runs_configured_retries_inside_one_scheduled_run` | The scheduler runs the dashboard-configured retries inside one scheduled run and reports one result holding all attempts. |
+| `test_validate_check_keeps_the_retry_count` | The retry count sent by the dashboard is validated; out-of-range values never reach a runner. |
 
 ### test_collector_mounts.py
 
@@ -1508,6 +1524,7 @@ cd src/frontend && node --test        # Node 24 or newer; nothing to install
 | `tests/dashboardLogic.test.js` | 13 | The Overview's helpers: number formats and forecasts, a server's worst state, the one action for each alert, published ports and their owners, which containers other machines can reach, port changes in plain lines, Compose groups, health verdicts, traffic across a reboot, the timeline, and the install commands. |
 | `tests/statisticsLogic.test.js` | 9 | The Statistics page's helpers: when a peak happened, gaps versus late starts, the busiest container at a moment, findings in plain words (and none for a quiet range), time at each level, percentiles and the disk projection, event marks, and the CSV export. |
 | `tests/stepsLogic.test.js` | 7 | The window of an agent's look-up in the viewer's clock (one day, several days, up to now, one moment, a time without a zone read as UTC, none or unreadable), and the look-up count leaving out refused calls. |
+| `tests/heartbeatLogic.test.js` | 5 | The check-heartbeat helpers: a success line with latency and basis, a failure line with its category and reason, "no details" for heartbeats without attempts (never an empty success), every retry kept in order, and per-server rows marking the ones with no detail. |
 
 The React components themselves (the page layout, tooltips, selection) have no automated tests;
 they were checked by hand in a real browser.

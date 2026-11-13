@@ -513,6 +513,8 @@ def report_check_results(payload: main.CheckResultsRequest, authorization: Annot
     main._enforce_report_spacing(server)
     now = datetime.now(timezone.utc)
     alerting = "check:down" not in main.get_disabled_rules(db)
+    # Keep the latest heartbeat's per-attempt detail first; the verdict below is still taken from the results alone.
+    main.availability.store_heartbeats(db, server, payload.results, now)
     for check_id in sorted(main.availability.store(db, server, payload.results, now)):
         check = db.get(main.Check, check_id)
         check.last_result_at = now
