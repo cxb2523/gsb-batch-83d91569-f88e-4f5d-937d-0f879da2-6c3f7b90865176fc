@@ -158,9 +158,12 @@ run_spider(MySpider, request_middlewares=[RobotsTxtMiddleware(user_agent="silkbo
 
 ### AutoThrottleMiddleware
 - Spaces requests per host and adapts the delay to the host's latency (`latency / target_concurrency`, averaged with the previous delay).
-- Throttling statuses (429/503 by default) double the delay and honour `Retry-After`; error responses never make crawling faster.
+- Per-host waiting is serial: concurrent requests to the same host queue in one slot, while different hosts never block each other.
+- Throttling statuses (429/503 by default) double the delay and honour `Retry-After` (both delta-seconds and HTTP-date forms); every delay and wait stays within `[min_delay, max_delay]`. Error responses never make crawling faster.
+- Retries from `RetryMiddleware` re-enter the request pipeline, so a retried `dont_filter` request with copied `meta` still waits in the host's slot and is re-stamped with its own release time.
 - Options: `start_delay`, `min_delay`, `max_delay`, `target_concurrency`, `backoff_statuses`.
-- Register the same instance as a request and a response middleware.
+- Register the same instance as a request and a response middleware. With `RetryMiddleware`, put this middleware first in `response_middlewares` so a throttling response adjusts the slot before the retry is enqueued.
+- Observability: `delay_for(url)` returns the current per-host delay; `slot_for(url)` returns a `ThrottleSlot(host, delay, next_request_at)` whose timestamps use the monotonic clock.
 - Code: [src/silkworm/_middlewares/autothrottle.py](https://github.com/BitingSnakes/silkworm/blob/main/src/silkworm/_middlewares/autothrottle.py)
 
 ```python

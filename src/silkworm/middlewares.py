@@ -4,7 +4,7 @@ Implementations live in :mod:`silkworm._middlewares`; this module re-exports
 the public API.
 """
 
-from ._middlewares.autothrottle import AutoThrottleMiddleware
+from ._middlewares.autothrottle import AutoThrottleMiddleware, ThrottleSlot
 from ._middlewares.base import (
     ExceptionMiddleware,
     RequestMiddleware,
@@ -42,5 +42,6 @@ __all__ = [
     "RobotsTxtFetcher",
     "RobotsTxtMiddleware",
     "SkipNonHTMLMiddleware",
+    "ThrottleSlot",
     "UserAgentMiddleware",
 ]
