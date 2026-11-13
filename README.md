@@ -260,6 +260,95 @@ get_success_rate("g2.com") # Get statistics for specific domain
 get_success_rate("g2.*") # Get statistics for all top-level domains
 ```
 
+### 统一采集模块：逐页可核对的结局
+
+G2 评论页受 Cloudflare 保护，直接请求常被 403 拦下。早期示例脚本存在两个问题：
+把请求失败混进"空标题的成功页"，以及等待元素未出现时仍按成功处理。
+现在三个脚本（`g2_wait.py`、`g2_mobile.py`、`g2_debug.py`）共用
+[`src/g2_collector.py`](src/g2_collector.py)，对**每一页**产出可核对的结局对象
+`PageOutcome`，任一页失败都不会中断后续页，也不会把失败页标题计入成功。
+
+#### 四种结局
+
+| 结局 `status` | 判定条件 |
+| --- | --- |
+| `success`（成功） | HTTP 200、未命中拦截特征，且配置的等待元素在 DOM 中存在（或未配置等待元素） |
+| `blocked`（被拦截） | HTTP 403，或响应体 / 响应头命中 Cloudflare 拦截特征（含"200 包着挑战页"） |
+| `wait_timeout`（等待超时） | HTTP 200 且未被拦截，但指定等待元素不存在 |
+| `request_error`（请求异常） | 请求抛出 `requests.RequestException`，或收到 403 以外的非 2xx 状态 |
+
+每个结局都带：`url`、`status`、`h2_headings` / `h3_headings`（含计数）、
+`wait_element_hit`（等待元素是否命中）、`blocked` / `block_reason`（是否触发拦截）、
+`debug_info_present`（是否有 `x-brd-debug` 调试信息）、`http_status`、`error`。
+汇总 `CollectionSummary` 的标题总数**只累加成功页**。
+
+#### 三个脚本保留各自出口差异
+
+| 脚本 | 通道 | 独有特征 | 主输出 |
+| --- | --- | --- | --- |
+| `g2_wait.py` | API 直连 `POST api.brightdata.com/request` | `x-unblock-expect` 等待 `.star-wrapper__desc`，本地再复核 | h2 |
+| `g2_mobile.py` | 原生代理 `brd.superproxy.io:33335` | 代理用户名附加 `-ua-mobile` | h3 |
+| `g2_debug.py` | 原生代理 `brd.superproxy.io:33335` | 附加 `-debug-full`，读取 `x-brd-debug` 响应头 | h2 |
+
+三个脚本都支持传入多个目标 URL，逐页输出结局后再给汇总；存在非成功页时退出码为 1，
+凭据错误退出码为 2：
+
+```bash
+python src/g2_wait.py https://www.g2.com/products/mongodb/reviews?page=1 \
+                      https://www.g2.com/products/mongodb/reviews?page=2
+```
+
+#### 凭据：只从环境变量读取
+
+脚本不再接受硬编码或占位符凭据，缺失或仍是占位符（如 `<customer_id>`、
+`INSERT_YOUR_API_TOKEN`）时直接报错退出，不会发请求：
+
+| 环境变量 | 用途 | 使用方 |
+| --- | --- | --- |
+| `BRD_CUSTOMER_ID` | 客户 ID | 三个脚本 |
+| `BRD_ZONE_NAME` | Web Unlocker 区域名 | 三个脚本 |
+| `BRD_API_TOKEN` | API 令牌 | `g2_wait.py`（API 直连） |
+| `BRD_ZONE_PASSWORD` | 区域密码 | `g2_mobile.py` / `g2_debug.py`（代理） |
+
+```bash
+export BRD_CUSTOMER_ID="hl-..."
+export BRD_ZONE_NAME="web_unlocker"
+export BRD_API_TOKEN="..."        # g2_wait
+export BRD_ZONE_PASSWORD="..."    # g2_mobile / g2_debug
+```
+
+也可在代码中复用模块，自行传入 URL 列表：
+
+```python
+from g2_collector import (
+    Credentials, ApiDirectFetcher, G2Collector, format_report, summarize,
+)
+
+creds = Credentials.from_env(require_api_token=True)
+fetcher = ApiDirectFetcher(creds, wait_selector=".star-wrapper__desc")
+outcomes = G2Collector(fetcher, wait_selector=".star-wrapper__desc").collect_all(
+    ["https://www.g2.com/products/mongodb/reviews"]
+)
+print(format_report(outcomes))
+print(summarize(outcomes).to_dict())
+```
+
+#### 离线验证（假响应，非真实链路）
+
+`tests/` 下用本地 HTML 样例与假 fetcher 覆盖四类结局，全程不触网：
+
+```bash
+python -I tests/test_g2_collector.py   # 20 个单元测试
+python -I tests/demo_fixtures.py       # 四类结局的汇总输出演示
+```
+
+本地样例：`tests/fixtures/normal.html`（正常页）、`blocked_403.html`（403 拦截页）、
+`wait_missing.html`（200 但缺等待元素页）；请求异常页由假 fetcher 抛
+`ConnectionError` 模拟。演示期望输出见 `tests/expected_output.txt`。
+
+> 注意：这些测试只验证判定逻辑，使用的是本地假响应，**不代表真实 G2 链路已跑通**。
+> 真实链路需要配置有效环境变量后自行运行三个脚本确认。
+
 ## 最后说明
 网络解锁器让你可以轻松抓取防护最严密的网站。请牢记以下要点：
 

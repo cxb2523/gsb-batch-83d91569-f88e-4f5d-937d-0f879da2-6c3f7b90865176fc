@@ -1,25 +1,60 @@
-import requests
-from bs4 import BeautifulSoup
+"""G2 评论采集 —— API 直连通道（带 x-unblock-expect 等待元素）。
 
-API_URL = "https://api.brightdata.com/request"
-API_TOKEN = "INSERT_YOUR_API_TOKEN"
-ZONE_NAME = "INSERT_YOUR_ZONE"
-TARGET_URL = "https://www.g2.com/products/mongodb/reviews"
+出口差异（本脚本独有）：
+* 走 Web Unlocker API 直连（POST https://api.brightdata.com/request）；
+* 请求头携带 ``x-unblock-expect``，让 Unlocker 在服务端等待
+  ``.star-wrapper__desc`` 元素，本地再独立复核一次；
+* 主输出 <h2> 标题。
 
-headers = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {API_TOKEN}",
-    "x-unblock-expect": '{"element": ".star-wrapper__desc"}',
-}
+凭据从环境变量读取（缺失即报错，不使用占位符）：
+    BRD_API_TOKEN、BRD_CUSTOMER_ID、BRD_ZONE_NAME
 
-payload = {"zone": ZONE_NAME, "url": TARGET_URL, "format": "raw"}
+用法：
+    python g2_wait.py [URL ...]
+    不传 URL 时默认采集 https://www.g2.com/products/mongodb/reviews
+"""
 
-response = requests.post(API_URL, headers=headers, json=payload)
+from __future__ import annotations
 
-if response.ok:
-    soup = BeautifulSoup(response.text, "lxml")
-    headings = [h2.get_text(strip=True) for h2 in soup.find_all("h2")]
-    print("\nExtracted <h2> Headings:" if headings else "No <h2> headings found.")
-    print(*headings, sep="\n- ")
-else:
-    print(f"Error {response.status_code}: {response.text}")
+import sys
+from pathlib import Path
+from typing import List
+
+# 允许直接 `python src/g2_wait.py` 运行
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from g2_collector import (  # noqa: E402
+    ApiDirectFetcher,
+    CredentialError,
+    Credentials,
+    G2Collector,
+    ensure_utf8_output,
+    format_report,
+    summarize,
+)
+
+WAIT_SELECTOR = ".star-wrapper__desc"
+DEFAULT_URLS = ["https://www.g2.com/products/mongodb/reviews"]
+
+
+def main(urls: List[str]) -> int:
+    ensure_utf8_output()
+    try:
+        credentials = Credentials.from_env(require_api_token=True)
+        fetcher = ApiDirectFetcher(credentials, wait_selector=WAIT_SELECTOR)
+    except CredentialError as exc:
+        print(f"凭据错误: {exc}", file=sys.stderr)
+        return 2
+
+    collector = G2Collector(fetcher, wait_selector=WAIT_SELECTOR)
+    outcomes = collector.collect_all(urls)
+
+    print(f"采集通道: API 直连（x-unblock-expect 等待 {WAIT_SELECTOR}）")
+    print(format_report(outcomes))
+
+    # 任一页非成功即返回非零退出码，便于自动化核对
+    return 0 if summarize(outcomes).success == len(outcomes) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:] or list(DEFAULT_URLS)))

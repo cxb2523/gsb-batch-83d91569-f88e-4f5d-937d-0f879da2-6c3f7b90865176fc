@@ -1,0 +1,63 @@
+本地样例演示（离线假响应，非真实 G2 链路）
+等待元素: .star-wrapper__desc
+
+URL: https://www.g2.com/products/mongodb/reviews?page=normal
+  状态: 成功 (success) [HTTP 200]
+  h2 标题数: 3，h3 标题数: 2
+  等待元素 '.star-wrapper__desc': 命中
+  是否触发拦截: 否
+  调试信息(x-brd-debug): 无
+  h2 标题:
+    - What is Mongodb?
+    - What do you like best about Mongodb?
+    - What do you dislike about Mongodb?
+  h3 标题:
+    - Review 1: Great document database
+    - Review 2: Flexible schema design
+
+URL: https://www.g2.com/products/mongodb/reviews?page=blocked
+  状态: 被拦截 (blocked) [HTTP 403]
+  h2 标题数: 0，h3 标题数: 0
+  等待元素 '.star-wrapper__desc': 未命中
+  是否触发拦截: 是（HTTP 403）
+  调试信息(x-brd-debug): 无
+
+URL: https://www.g2.com/products/mongodb/reviews?page=wait-missing
+  状态: 等待超时 (wait_timeout) [HTTP 200]
+  h2 标题数: 2，h3 标题数: 1
+  等待元素 '.star-wrapper__desc': 未命中
+  是否触发拦截: 否
+  调试信息(x-brd-debug): 无
+  处置说明: 等待元素 '.star-wrapper__desc' 在 200 响应中不存在
+  h2 标题:
+    - What is Mongodb?
+    - Top reviews
+  h3 标题:
+    - Review 1: Incomplete render
+
+URL: https://www.g2.com/products/mongodb/reviews?page=conn-error
+  状态: 请求异常 (request_error)
+  h2 标题数: 0，h3 标题数: 0
+  等待元素 '.star-wrapper__desc': 未命中
+  是否触发拦截: 否
+  调试信息(x-brd-debug): 无
+  处置说明: 请求异常: ConnectionError: 模拟：连接 brd.superproxy.io:33335 失败（隧道建立超时）
+
+============================================================
+汇总（标题数仅统计成功页，失败页不计入）
+  总页数: 4
+  成功: 1
+  被拦截: 1
+  等待超时: 1
+  请求异常: 1
+  成功页 h2 标题总数: 3
+  成功页 h3 标题总数: 2
+============================================================
+
+逐页核对表:
+  1. success       | h2=3 h3=2 | 等待元素=命中 | 拦截=否 | 调试信息=无 | https://www.g2.com/products/mongodb/reviews?page=normal
+  2. blocked       | h2=0 h3=0 | 等待元素=未命中 | 拦截=是 | 调试信息=无 | https://www.g2.com/products/mongodb/reviews?page=blocked
+  3. wait_timeout  | h2=2 h3=1 | 等待元素=未命中 | 拦截=否 | 调试信息=无 | https://www.g2.com/products/mongodb/reviews?page=wait-missing
+  4. request_error | h2=0 h3=0 | 等待元素=未命中 | 拦截=否 | 调试信息=无 | https://www.g2.com/products/mongodb/reviews?page=conn-error
+
+注意：以上均为本地假响应，仅验证判定逻辑，不代表真实 G2 链路已跑通。
