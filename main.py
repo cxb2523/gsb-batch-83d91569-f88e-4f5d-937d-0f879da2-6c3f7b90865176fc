@@ -10,10 +10,21 @@ from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
-from webdriver_manager.chrome import ChromeDriverManager
 from dotenv import load_dotenv
 from retrying import retry
 from tabulate import tabulate
+
+from run_support import (
+    PROGRESS_FILENAME,
+    STATUS_FAILED,
+    STATUS_SKIPPED,
+    STATUS_SUCCESS,
+    consolidate_csvs,
+    files_for_consolidation,
+    load_progress,
+    run_batch,
+    summarise_results,
+)
 
 # Setup logging with detailed format
 logging.basicConfig(
@@ -31,6 +42,9 @@ SUB_ACCOUNTS = [
     'IN303028-76957826-7510072528-NPNRO'
 ]
 
+# Accounts that additionally download My Portfolio and Orderbook.
+EXTRA_DATA_ACCOUNTS = {'IN303028-76957826-7510072528-NPNRO'}
+
 # Configuration
 CONFIG = {
     'download_base_dir': os.path.abspath("downloads"),
@@ -41,19 +55,36 @@ CONFIG = {
     'switch_timeout': 60,  # Timeout for account switching
 }
 
-# Initialize WebDriver
-options = webdriver.ChromeOptions()
-options.add_argument("--no-sandbox")
-options.add_argument("--disable-dev-shm-usage")
-options.add_experimental_option("prefs", {
-    "download.default_directory": CONFIG['download_base_dir'],
-    "download.prompt_for_download": False,
-    "download.directory_upgrade": True,
-    "profile.default_content_setting_values.notifications": 2,
-})
-service = Service(ChromeDriverManager().install())
-driver = webdriver.Chrome(service=service, options=options)
-wait = WebDriverWait(driver, 30)
+# Browser handles.  They are created by init_driver() just before the first
+# account is processed, so importing this module (and running the resume
+# logic/tests) does not launch Chrome.
+driver = None
+wait = None
+
+
+def init_driver():
+    """Create the WebDriver and the shared WebDriverWait on first use."""
+    global driver, wait
+    if driver is not None:
+        return
+    # Imported here so that importing main.py (resume logic, tests) does not
+    # require the ChromeDriver manager to be present or to hit the network.
+    from webdriver_manager.chrome import ChromeDriverManager
+
+    options = webdriver.ChromeOptions()
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_experimental_option("prefs", {
+        "download.default_directory": CONFIG['download_base_dir'],
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "profile.default_content_setting_values.notifications": 2,
+    })
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
+    wait = WebDriverWait(driver, 30)
+    logging.info("WebDriver initialized")
+    return driver
 
 def get_account_download_dir(account_id):
     """Get the download directory for a specific account."""
@@ -61,16 +92,43 @@ def get_account_download_dir(account_id):
     os.makedirs(account_dir, exist_ok=True)
     return account_dir
 
-def wait_for_download(account_id, partial_name, timeout=30):
-    """Wait for a file to appear in the account's download directory."""
-    download_dir = get_account_download_dir(account_id)
+def csv_search_dirs(account_id):
+    """Directories where a browser download may land.
+
+    Chrome is configured with the base download directory, while files are
+    filed per account.  Both are searched so a download is picked up
+    wherever Chrome writes it, then moved into the account directory.
+    """
+    return [get_account_download_dir(account_id), CONFIG['download_base_dir']]
+
+def csv_snapshot(account_id):
+    """CSV file names already present before a download is triggered.
+
+    Used to distinguish a download started by this run from a file left
+    behind by an earlier run.
+    """
+    return {
+        os.path.basename(path)
+        for directory in csv_search_dirs(account_id)
+        for path in glob(os.path.join(directory, "*.csv"))
+    }
+
+def wait_for_download(account_id, partial_name, timeout=30, before=None):
+    """Wait for a new file matching ``partial_name`` to finish downloading."""
+    before = set(before or ())
     start_time = time.time()
     while time.time() - start_time < timeout:
-        files = glob(os.path.join(download_dir, f"*{partial_name}*.csv"))
-        if files:
-            return files[0]
+        candidates = [
+            path
+            for directory in csv_search_dirs(account_id)
+            for path in glob(os.path.join(directory, f"*{partial_name}*.csv"))
+            if os.path.basename(path) not in before
+            and not path.lower().endswith(('.crdownload', '.part', '.tmp'))
+        ]
+        if candidates:
+            return max(candidates, key=os.path.getmtime)
         time.sleep(1)
-    raise TimeoutError(f"No file matching {partial_name} found in {timeout} seconds for account {account_id}")
+    raise TimeoutError(f"No new file matching {partial_name} found in {timeout} seconds for account {account_id}")
 
 def rename_downloaded_file(original_path, account_id, data_type):
     """Rename downloaded file to include account ID and data type."""
@@ -79,26 +137,6 @@ def rename_downloaded_file(original_path, account_id, data_type):
     os.rename(original_path, new_name)
     logging.info(f"Renamed {original_path} to {new_name}")
     return new_name
-
-def consolidate_csvs(data_type, account_files):
-    """Combine CSVs for a given data type into a single file in the base download directory."""
-    if not CONFIG['consolidate_output'] or not account_files:
-        return
-    output_path = os.path.join(CONFIG['download_base_dir'], f"all_{data_type}_{int(time.time())}.csv")
-    headers_written = False
-    with open(output_path, 'w', newline='', encoding='utf-8') as outfile:
-        writer = csv.writer(outfile)
-        for file_path in account_files:
-            with open(file_path, 'r', encoding='utf-8') as infile:
-                reader = csv.reader(infile)
-                headers = next(reader)
-                if not headers_written:
-                    writer.writerow(['Account ID'] + headers)
-                    headers_written = True
-                account_id = os.path.basename(os.path.dirname(file_path))
-                for row in reader:
-                    writer.writerow([account_id] + row)
-    logging.info(f"Consolidated {data_type} CSVs to {output_path}")
 
 def login():
     """Log in to ICICI Direct, allowing manual OTP entry on the website."""
@@ -260,10 +298,12 @@ def download_tradebook(account_id):
         download_menu = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@id='dvequity']//div[@class='pull-right']")))
         ActionChains(driver).move_to_element(download_menu).click().perform()
         csv_link = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(),'CSV')]")))
+        existing = csv_snapshot(account_id)
         driver.execute_script("arguments[0].click();", csv_link)  # JavaScript click
-        downloaded_file = wait_for_download(account_id, "TradeBook")
-        rename_downloaded_file(downloaded_file, account_id, "tradebook")
+        downloaded_file = wait_for_download(account_id, "TradeBook", before=existing)
+        renamed = rename_downloaded_file(downloaded_file, account_id, "tradebook")
         time.sleep(2)
+        return renamed
     except Exception as e:
         logging.error(f"Failed to download Trade Book for account {account_id}: {str(e)}\n{traceback.format_exc()}")
         raise
@@ -280,10 +320,12 @@ def download_portfolio(account_id):
         third_li.click()
         time.sleep(2)
         summary_csv = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Summary: CSV')]")))
+        existing = csv_snapshot(account_id)
         driver.execute_script("arguments[0].click();", summary_csv)  # JavaScript click
-        downloaded_file = wait_for_download(account_id, "Summary")
-        rename_downloaded_file(downloaded_file, account_id, "portfolio")
+        downloaded_file = wait_for_download(account_id, "Summary", before=existing)
+        renamed = rename_downloaded_file(downloaded_file, account_id, "portfolio")
         time.sleep(2)
+        return renamed
     except Exception as e:
         logging.error(f"Failed to download Portfolio for account {account_id}: {str(e)}\n{traceback.format_exc()}")
         raise
@@ -449,9 +491,11 @@ def download_myportfolio(account_id):
             ActionChains(driver).move_to_element(download_menu).click().perform()
             
             wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(),'CSV')]"))).click()
-            downloaded_file = wait_for_download(account_id, "Portfolio")
-            rename_downloaded_file(downloaded_file, account_id, "myportfolio")
+            existing = csv_snapshot(account_id)
+            downloaded_file = wait_for_download(account_id, "Portfolio", before=existing)
+            renamed = rename_downloaded_file(downloaded_file, account_id, "myportfolio")
             time.sleep(2)
+            return renamed
         except Exception as e:
             logging.error(f"Failed to download My Portfolio for {account_id}: {str(e)}\n{traceback.format_exc()}")
             raise
@@ -477,45 +521,79 @@ def download_orderbook(account_id):
         time.sleep(2)
         
         wait.until(EC.element_to_be_clickable((By.XPATH, "//a[@class='dropdown' and normalize-space()='Download']"))).click()
+        existing = csv_snapshot(account_id)
         wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(),'CSV')]"))).click()
-        
-        downloaded_file = wait_for_download(account_id, "OrderBook")
-        rename_downloaded_file(downloaded_file, account_id, "orderbook")
+
+        downloaded_file = wait_for_download(account_id, "OrderBook", before=existing)
+        renamed = rename_downloaded_file(downloaded_file, account_id, "orderbook")
         time.sleep(2)
+        return renamed
     except Exception as e:
         logging.error(f"Failed to download Orderbook for {account_id}: {str(e)}\n{traceback.format_exc()}")
         raise
     
+def process_account(account_id):
+    """Run the existing collection flow for one account.
+
+    Returns the paths produced for this account.  Any failure is propagated
+    to run_batch(), which records the conclusion and moves to the next
+    account.
+    """
+    logging.info(f"Processing account {account_id}")
+    produced = []
+    switch_account(account_id)
+    produced.append(download_tradebook(account_id))
+    produced.append(download_portfolio(account_id))
+    orders = show_orderbook(account_id)
+    if orders:
+        produced.append(os.path.join(get_account_download_dir(account_id), f"{account_id}_orders_cleaned.csv"))
+    if account_id in EXTRA_DATA_ACCOUNTS:
+        produced.append(download_myportfolio(account_id))
+        produced.append(download_orderbook(account_id))
+    return [path for path in produced if path and os.path.isfile(path)]
+
+
 def main():
     """Main function to orchestrate data extraction."""
-    order_files = []
+    os.makedirs(CONFIG['download_base_dir'], exist_ok=True)
+    progress = load_progress(CONFIG['download_base_dir'], PROGRESS_FILENAME)
+    results = []
     try:
-        # Create base download directory
-        os.makedirs(CONFIG['download_base_dir'], exist_ok=True)
-        login()
-        for account in SUB_ACCOUNTS:
-            logging.info(f"Processing account {account}")
-            try:
-                switch_account(account)
-                download_tradebook(account)
-                download_portfolio(account)
-                orders = show_orderbook(account)
-                if orders:
-                    order_files.append(os.path.join(get_account_download_dir(account), f"{account}_orders_cleaned.csv"))
-                if account == 'IN303028-76957826-7510072528-NPNRO':
-                    download_myportfolio(account)
-                    download_orderbook(account)
-                    continue
-            except Exception as e:
-                logging.error(f"Failed processing account {account}: {str(e)}")
-                continue
-        # Consolidate order files
-        consolidate_csvs("orders", order_files)
+        results = run_batch(
+            SUB_ACCOUNTS,
+            process_account,
+            CONFIG['download_base_dir'],
+            PROGRESS_FILENAME,
+            pre_run=lambda: (init_driver(), login()),
+            progress=progress,
+        )
+        # Only files belonging to accounts that succeeded (or were skipped
+        # because their files already exist) take part in the merge.
+        order_files = files_for_consolidation(results, "_orders_cleaned.csv")
+        consolidate_csvs(
+            "orders",
+            order_files,
+            CONFIG['download_base_dir'],
+            enabled=CONFIG['consolidate_output'],
+        )
     except Exception as e:
         logging.error(f"Script failed: {str(e)}\n{traceback.format_exc()}")
     finally:
-        driver.quit()
-        logging.info("Browser closed")
+        if driver is not None:
+            driver.quit()
+            logging.info("Browser closed")
+        summary = summarise_results(results)
+        logging.info(
+            "Run summary: %d succeeded, %d skipped, %d failed",
+            summary[STATUS_SUCCESS],
+            summary[STATUS_SKIPPED],
+            summary[STATUS_FAILED],
+        )
+        print(
+            f"Run summary: {summary[STATUS_SUCCESS]} succeeded, "
+            f"{summary[STATUS_SKIPPED]} skipped, {summary[STATUS_FAILED]} failed"
+        )
+
 
 if __name__ == "__main__":
     main()

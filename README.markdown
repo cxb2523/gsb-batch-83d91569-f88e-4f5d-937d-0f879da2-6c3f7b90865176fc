@@ -9,9 +9,40 @@ This Python script uses Selenium WebDriver to automate data extraction from the 
 - Extracts and displays Order Book data from the GTT tab in a formatted table, saving it to CSV.
 - For the `IN303028-76957826-7510072528-NPNRO` account, downloads My Portfolio and Orderbook CSVs.
 - Organizes downloaded files into account-specific subdirectories under `downloads` (e.g., `downloads/IN303028-76957800-6500081466-NRE/`).
-- Consolidates downloaded CSVs by data type into the base `downloads` directory (if enabled).
+- Records a per-account conclusion (account ID, status, first error, files produced) and keeps processing the remaining accounts after a failure.
+- Supports resuming: completed accounts whose files still exist are skipped, while failed or incomplete accounts are collected again.
+- Consolidates downloaded CSVs by data type into the base `downloads` directory (if enabled), including only accounts that succeeded in this run or were skipped because their files already existed.
 - Includes retry logic for robust handling of transient errors.
 - Logs all actions and errors to a file (`icici_extract.log`).
+
+## Resume and run progress
+- Every account leaves a conclusion: account ID, overall status (`success` / `failed`), a short first-error reason when it failed, and the files it produced. A failure no longer aborts the batch; the next account is still attempted.
+- Progress is persisted after each account in `downloads/run_progress.json` (created next to the downloaded CSVs). Example:
+  ```json
+  {
+    "version": 1,
+    "accounts": {
+      "IN303028-76957800-6500081466-NRE": {
+        "status": "success",
+        "error": null,
+        "files": [".../IN303028-76957800-6500081466-NRE_tradebook_1700000000.csv"],
+        "updated_at": "2026-11-13T20:00:00+05:30"
+      }
+    }
+  }
+  ```
+- On startup the progress file is read. An account is skipped only when its recorded status is `success` and every recorded file still exists; otherwise it is collected again.
+- A missing, unreadable, or corrupt progress file is treated as a fresh run (with a warning), never as a fatal error.
+- After the batch, `all_orders_<timestamp>.csv` contains only the `_orders_cleaned.csv` files of accounts that succeeded in this run (or were skipped because their files already existed). Files from failed accounts are excluded, so an old file left by a previous run cannot leak into the merge.
+- At the end of the run the log and the console report how many accounts succeeded, were skipped and failed.
+
+## Tests
+The resume, progress-file and consolidation logic lives in `run_support.py` and is covered by local tests (temporary directories and locally generated CSVs; no browser or live site involved):
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests
+```
 
 ## Prerequisites
 - **Python 3.10+**: Ensure Python is installed on your system. The pinned Selenium release requires 3.10 or newer.
@@ -51,6 +82,7 @@ This Python script uses Selenium WebDriver to automate data extraction from the 
    - The script creates a `downloads` directory in the same folder as the script to store downloaded CSVs.
    - For each account, a subdirectory is created (e.g., `downloads/IN303028-76957800-6500081466-NRE/`) to store account-specific files.
    - Consolidated CSVs (if enabled) are saved directly in the `downloads` directory.
+   - The resume state is kept in `downloads/run_progress.json`; delete it to force a full re-collection.
 
 ## How to Run the Script
 1. **Save the Script**:
@@ -102,7 +134,7 @@ To process different sub-accounts, update the `SUB_ACCOUNTS` list in the script 
 ## Notes
 - **Manual OTP Handling**: The script relies on manual OTP entry on the ICICI Direct website. Ensure you are available to enter the OTP when prompted.
 - **Browser Automation**: The script opens a Chrome browser window. Do not interact with the browser while the script is running, except to enter the OTP.
-- **Error Handling**: The script includes retry logic (up to 3 attempts) for account switching, downloading Trade Book, Portfolio, My Portfolio, and Orderbook. If an error occurs, the script logs the error and continues with the next account.
+- **Error Handling**: The script includes retry logic (up to 3 attempts) for account switching, downloading Trade Book, Portfolio, My Portfolio, and Orderbook. If an account fails, the error is recorded in the log and in `run_progress.json`, and the script continues with the next account.
 - **File Naming**: Downloaded files include the account ID, data type, and a timestamp to avoid conflicts (e.g., `IN303028-76957800-6500081466-NRE_tradebook_1234567890.csv`).
 - **Order Book Cleaning**: The Order Book CSV has its `Stock` column cleaned (removing "Single" and extra spaces) and saved as a separate file in the account’s subdirectory (e.g., `<account_id>_orders_cleaned.csv`).
 - **Dependencies**: The `webdriver_manager` package automatically downloads the appropriate ChromeDriver version, so no manual ChromeDriver installation is required.
