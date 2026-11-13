@@ -75,6 +75,7 @@ export type {
   ClassifyAction,
   ClassifyResult,
   SearchResult,
+  SearchResultContext,
   ScreenshotOptions,
   DownloadResult,
   ScrollPosition,

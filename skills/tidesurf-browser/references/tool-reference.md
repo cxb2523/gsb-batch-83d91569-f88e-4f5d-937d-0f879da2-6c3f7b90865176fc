@@ -29,7 +29,7 @@ All 20 canonical tools, in registry order. Element IDs (`id`, `elementId`) come 
 
 - `get_state`: returns the compressed DOM with action IDs. `mode` is one of `full`, `minimal`, `interactive`.
 - `scroll`: `direction` is `up` or `down`; `amount` is in pixels.
-- `search`: searches page content and returns matching regions, cheaper than a full state dump on large pages.
+- `search`: searches page content and returns matching regions, cheaper than a full state dump on large pages. Each hit keeps `text`, `tag`, `index`, `elementId` plus a `context` block (`elementTag`, `sectionTag`/`sectionName`, `accessibleName`, `heading`, `location`, `path`) so identical text in different regions stays distinguishable; `elementId` is empty when no interactive ancestor exists.
 - `screenshot`: defaults to the viewport; `elementId` captures one element; `fullPage: true` captures the whole scrollable page.
 - `upload`: `filePath` is a local filesystem path.
 - `download`: `downloadDir` defaults to the session download directory; `timeout` is in milliseconds.

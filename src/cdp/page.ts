@@ -17,7 +17,7 @@ import { serialize, wrapPage, pageHeader } from "../parser/serializer.js";
 import { pruneToFit, weightedTextLength } from "../parser/token-budget.js";
 import { filterViewportOnly } from "../parser/viewport-filter.js";
 import { filterInteractive, filterMinimal } from "../parser/mode-filter.js";
-import { truncateGraphemes } from "../parser/truncation.js";
+import { searchNodes } from "../parser/search.js";
 import {
   ActionCommittedError,
   CDPConnectionError,
@@ -336,52 +336,16 @@ export class SurfingPage {
       backendToStableId.set(backendNodeId, id);
     }
 
-    const results: SearchResult[] = [];
-
-    const walk = (node: OSNode, parentTag?: string, nearestId?: string): void => {
-      if (results.length >= maxResults) {
-        return;
-      }
-
-      const currentTag = node.tag === "#text" ? parentTag ?? "text" : node.tag;
-
-      let currentId = nearestId;
-      if (node.id) {
-        const backendId = freshNodeMap.get(node.id);
-        const stableId =
-          backendId !== undefined ? backendToStableId.get(backendId) : undefined;
-        if (stableId) {
-          currentId = stableId;
-        }
-      }
-
-      const text = node.text?.trim();
-
-      if (text && text.toLowerCase().includes(needle)) {
-        results.push({
-          text: truncateGraphemes(text, 100),
-          tag: currentTag,
-          index: results.length + 1,
-          elementId: currentId,
-        });
-      }
-
-      for (const child of node.children) {
-        walk(child, currentTag, currentId);
-        if (results.length >= maxResults) {
-          return;
-        }
-      }
-    };
-
-    for (const node of nodes) {
-      walk(node);
-      if (results.length >= maxResults) {
-        break;
-      }
-    }
-
-    return results;
+    return searchNodes(nodes, {
+      needle,
+      maxResults,
+      resolveStableId: (nodeId) => {
+        const backendId = freshNodeMap.get(nodeId);
+        return backendId !== undefined
+          ? backendToStableId.get(backendId)
+          : undefined;
+      },
+    });
   }
 
   async screenshot(options?: ScreenshotOptions): Promise<string> {

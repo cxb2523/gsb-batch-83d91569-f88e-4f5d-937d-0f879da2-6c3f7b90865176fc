@@ -114,11 +114,33 @@ export interface ToolResult {
   stack?: string;
 }
 
+/**
+ * Readable clues that distinguish which region of the page a search hit came
+ * from, so identical text repeated in different sections stays tellable apart.
+ */
+export interface SearchResultContext {
+  /** Tag of the element that owns the match ("#text" when the hit is a text node). */
+  elementTag: string;
+  /** Innermost landmark/section wrapping the hit, e.g. "header", "nav", "footer", "section". */
+  sectionTag?: string;
+  /** Accessible name of that wrapping section (aria-label, etc.), when present. */
+  sectionName?: string;
+  /** Accessible name of the element that owns the match: aria-label, alt, title, or placeholder. */
+  accessibleName?: string;
+  /** Text of the nearest heading before the hit. */
+  heading?: string;
+  /** Human-readable region description composed from the section/heading clues. */
+  location: string;
+  /** Tag path from the retained document root down to the owning element. */
+  path: string[];
+}
+
 export interface SearchResult {
   text: string;
   tag: string;
   index: number;
   elementId?: string;
+  context: SearchResultContext;
 }
 
 export interface ScreenshotOptions {

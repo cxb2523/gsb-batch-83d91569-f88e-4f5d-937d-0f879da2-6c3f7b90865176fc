@@ -309,6 +309,24 @@ interface SearchResult {
   tag: string;
   index: number;
   elementId?: string;
+  context: SearchResultContext;
+}
+
+interface SearchResultContext {
+  // Tag of the element owning the match ("#text" for a text node)
+  elementTag: string;
+  // Innermost landmark/section wrapping the hit
+  sectionTag?: string;
+  // Accessible name of that wrapping section
+  sectionName?: string;
+  // aria-label, alt, title, or placeholder of the owning element
+  accessibleName?: string;
+  // Text of the nearest heading before the hit
+  heading?: string;
+  // Human-readable region description, e.g. nav "Site nav" > heading "Pricing"
+  location: string;
+  // Tag path from the document root to the owning element
+  path: string[];
 }
 ```
 
