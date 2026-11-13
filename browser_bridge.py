@@ -53,6 +53,7 @@ from output_writer import (dedupe_by_key, finish_run, EXIT_FETCH_FAILED,
                            write_private_text, make_private, output_dir_problem)
 import page_flow
 from page_flow import MIN_CARD_MATCHES, BLOCK_RETRIES_WITHOUT_POOL
+import page_manifest
 from proxy_pool import (from_args as proxy_pool_from_args, mask, ROTATE_MODES,
                         ProxyError, ProxyPool)
 import env_config
@@ -714,6 +715,12 @@ def scrape(args, make_driver: Callable) -> int:
                     # A worker died before its queue drained. Not "complete".
                     stop_reason = "pages_unattempted"
             else:
+                # The sequential loop owns this list: it starts empty and, on an
+                # early break, every planned page above the one that stopped the
+                # run was never fetched. The concurrent branch above computes its
+                # own list from the work queue and must not be touched here.
+                unattempted = []
+                planned_nums = [start_page + k + 1 for k in range(len(urls))]
                 for k, url in enumerate(urls):
                     page_num = start_page + k + 1
                     if pool and pool.rotates_per_page():
@@ -726,6 +733,7 @@ def scrape(args, make_driver: Callable) -> int:
                             outcomes.append(PageOutcome(page_num=page_num, url=url,
                                                         load_failed=True, error=msg))
                             stop_reason = "page_error"
+                            unattempted = [n for n in planned_nums[k + 1:]]
                             break
                     time.sleep(args.delay)
                     outcome = fetch_guarded(driver, args, pool, page_num, url)
@@ -733,9 +741,11 @@ def scrape(args, make_driver: Callable) -> int:
                     if not outcome.ok:
                         stop_reason = _stop_reason_for(outcome)
                         blocked = outcome.blocked_by is not None
+                        unattempted = [n for n in planned_nums[k + 1:]]
                         break
                     if outcome.parsed_nothing:
                         stop_reason = "served_but_unparsed"
+                        unattempted = [n for n in planned_nums[k + 1:]]
                         break
                     if outcome.ended:
                         stop_reason = "end_of_listing"
@@ -791,9 +801,32 @@ def merge_and_finish(args, outcomes: List[PageOutcome], blocked: bool,
     final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
                  if ok_pages else args.url) or args.url
 
+    start_page = page_number_from_url(args.url) or 1
+    # Resolve the internal-error override FIRST so the manifest and the
+    # sidecar below report the same final stop reason.
     internal = [o.page_num for o in outcomes if o.error_kind == "internal"]
     if internal:
         stop_reason = "internal_error"
+    manifest = None
+    if args.mode == "listing":
+        # Account for EVERY planned page, including the sequential path where a
+        # failure stops the loop before the remaining pages are even fetched:
+        # those pages have no outcome and were not in the concurrent path's
+        # queue either. A run that ended AT the listing's end leaves pages past
+        # that end, which are not unattempted — build_page_manifest omits them.
+        # The concurrent path passes an explicit (possibly empty) list, which
+        # is authoritative; None means "derive it for the sequential loop".
+        if unattempted is None:
+            planned = set(range(start_page, start_page + args.pages))
+            if stop_reason not in ("end_of_listing", "no_new_products"):
+                unattempted = sorted(planned - {o.page_num for o in outcomes})
+            else:
+                unattempted = []
+        manifest = page_manifest.build_page_manifest(
+            outcomes, start_page=start_page, pages_requested=args.pages,
+            pages_available=listing_meta.get("pages_available"),
+            stop_reason=stop_reason, blocked=blocked)
+
     rc = finish_run(all_rows, args.out, args.format, args.allow_empty,
                     blocked=blocked, stop_reason=stop_reason,
                     pages_requested=args.pages, pages_completed=len(ok_pages),
@@ -801,7 +834,7 @@ def merge_and_finish(args, outcomes: List[PageOutcome], blocked: bool,
                     mode=args.mode,
                     source=site_host(final_url) or site_host(args.url),
                     start_url=args.url, final_url=final_url,
-                    listing=listing_meta)
+                    listing=listing_meta, page_manifest=manifest)
     if internal:
         logger.error("Internal error on page(s) %s — exit %d, not %d: this is a "
                      "bug in the scraper, not a statement about the site. "

@@ -26,8 +26,8 @@ RUN pip install --no-cache-dir -r requirements.txt -r requirements-playwright.tx
 # image that died with ModuleNotFoundError on every invocation, `--help`
 # included, because one module was missing from a list like this.
 COPY browser_bridge.py captcha_solver.py env_config.py fingerprint_client.py \
-     output_writer.py page_flow.py playwright_scraper.py product_parser.py \
-     proxy_pool.py diff_runs.py ./
+     output_writer.py page_flow.py page_manifest.py playwright_scraper.py \
+     product_parser.py proxy_pool.py diff_runs.py ./
 
 ENTRYPOINT ["python3", "playwright_scraper.py"]
 CMD ["--help"]

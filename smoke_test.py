@@ -45,6 +45,7 @@ from captcha_solver import detect_recaptcha_v3
 from diff_runs import diff_products
 import env_config
 import page_flow
+import page_manifest
 from output_writer import (Product, save, finish_run, write_csv, dedupe_by_key,
                            EXIT_BLOCKED, EXIT_NO_PRODUCTS, EXIT_PARTIAL,
                            EXIT_FETCH_FAILED, COMPLETE_STOP_REASONS)
@@ -567,8 +568,12 @@ def test_whole_run():
 
     rc, meta, rows = _run(["--url", url4], {1: (403, deny)})
     d = FakeDriver.instances[0]
-    ok &= check("a refused page 1: exit 3, and no output or sidecar written",
-                rc == EXIT_BLOCKED and meta is None and rows is None)
+    ok &= check("a refused page 1: exit 3, no product JSON, but the manifest and "
+                "sidecar ARE written (they explain the refusal)",
+                rc == EXIT_BLOCKED and rows is None and meta is not None
+                and meta["status"] == "failed"
+                and meta.get("zero_rows_reason") == "blocked"
+                and meta.get("page_manifest") == "out.pages.json")
     ok &= check("...retried exactly BLOCK_RETRIES_WITHOUT_POOL times in a fresh session",
                 len(d.gotos) == 1 + page_flow.BLOCK_RETRIES_WITHOUT_POOL
                 and d.relaunches == page_flow.BLOCK_RETRIES_WITHOUT_POOL)
@@ -759,6 +764,270 @@ def test_concurrent_dispatch():
     pool = ProxyPool(["http://a:1", "http://b:2", "http://c:3"])
     ok &= check("three workers start on three different exits",
                 len({browser_bridge.worker_pool(pool, i).current for i in range(3)}) == 3)
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# The per-page manifest (<out>.pages.json)
+# ---------------------------------------------------------------------------
+SYNTH_URL = ("https://www.kohls.com/catalog/test-cat.jsp"
+             "?CN=Department:Test+Department")
+
+
+def _astro_encoded(value):
+    """Encode a value the way Astro serialises island props ([type, value])."""
+    if isinstance(value, dict):
+        return [0, {k: _astro_encoded(v) for k, v in value.items()}]
+    if isinstance(value, list):
+        return [1, [_astro_encoded(v) for v in value]]
+    return [0, value]
+
+
+def _synthetic_product(sku):
+    return {
+        "webID": str(sku),
+        "seoURL": "/product/prd-%s/synthetic-item.jsp" % sku,
+        "productTitle": "Synthetic item %s" % sku,
+        "prodType": "product",
+        "sponsoredData": None,
+        "prices": [{"isCurrentPrice": True,
+                    "regularPrice": {"minPrice": 9.99, "maxPrice": None},
+                    "salePrice": None}],
+        "rating": {"avgRating": 0, "count": 0},
+        "image": {"url": None},
+        "isAvailableforShip": True,
+        "isAvailableforPickUp": True,
+    }
+
+
+def synthetic_listing_html(skus, *, current_page, total_pages=5,
+                           product_count=None):
+    """A self-made, minimal but REAL listing page: one astro-island whose
+    catalogData the production parser reads end to end. No capture data is
+    involved, so duplicate and page-number scenarios can be constructed on
+    purpose rather than hoped for in a fixture."""
+    data = {
+        "productCount": product_count if product_count is not None
+        else total_pages * 120,
+        "totalPages": total_pages,
+        "limit": 120,
+        "currentPage": current_page,
+        "products": [_synthetic_product(s) for s in skus],
+        "sorts": [{"name": "Featured", "active": True, "ID": "1"}],
+    }
+    props = {"catalogData": _astro_encoded(data)}
+    tag = ('<astro-island component-url="/shopnext/_astro/index.js" props="%s">'
+           % __import__("html").escape(json.dumps(props), quote=True))
+    # Visible text as well as the island: product_parser._is_blank treats a
+    # document under 2000 bytes with no text content as a never-loaded blank,
+    # and a compact synthetic page otherwise falls under that threshold even
+    # though it carries a perfectly good listing island.
+    return ('<html><head><title>Synthetic Kohl&apos;s listing page %d</title></head>'
+            '<body><h1>Synthetic category grid for the offline manifest tests</h1>'
+            '<div class="grid">%s</div>'
+            '<p>Server-rendered test content: %s products on page %d of %s, '
+            'enough prose that this document is never mistaken for a blank '
+            'load failure by the page-state classifier.</p>'
+            '<script src="https://designsystem.kohls.com/x.js"></script>'
+            '</body></html>'
+            % (current_page, tag, len(skus), current_page, total_pages))
+
+
+def _manifest_outcome(page_num, skus, *, served_page=None, state="content",
+                      blocked_by=None, load_failed=False, served_other=False,
+                      parsed_nothing=False, error=""):
+    oc = PageOutcome(page_num=page_num, url="u%d" % page_num, state=state,
+                     blocked_by=blocked_by, load_failed=load_failed,
+                     served_other=served_other, parsed_nothing=parsed_nothing,
+                     error=error)
+    oc.products = [Product(sku=str(s), price=9.99) for s in skus]
+    oc.listing = {"served_page": served_page} if served_page is not None else {}
+    return oc
+
+
+def test_page_manifest_unit():
+    group("page_manifest: per-page accounting, built directly from outcomes")
+    ok = True
+
+    # 1) Cross-page duplicates AND a repeat inside one page. Page 2 re-serves
+    #    sku 3 (seen on page 1) and serves sku 4 twice on the same page.
+    outcomes = [_manifest_outcome(1, [1, 2, 3], served_page=1),
+                _manifest_outcome(2, [3, 4, 4], served_page=2)]
+    doc = page_manifest.build_page_manifest(
+        outcomes, start_page=1, pages_requested=2, pages_available=5,
+        stop_reason="completed", blocked=False)
+    pages = {e["requested_page"]: e for e in doc["pages"]}
+    ok &= check("page 1: 3 rows, 3 new, 0 duplicates",
+                (pages[1]["rows_emitted"], pages[1]["new_skus"],
+                 pages[1]["duplicate_skus"]) == (3, 3, 0)
+                and pages[1]["status"] == page_manifest.STATUS_SUCCESS
+                and pages[1]["served_page"] == 1)
+    ok &= check("page 2: 3 rows, 1 new, 2 duplicates (one cross-page, one in-page)",
+                (pages[2]["rows_emitted"], pages[2]["new_skus"],
+                 pages[2]["duplicate_skus"]) == (3, 1, 2))
+    s = doc["summary"]
+    ok &= check("summary: 2 requested, 2 succeeded, 6 rows, 4 unique, 2 duplicate",
+                (s["pages_requested"], s["pages_succeeded"], s["rows_emitted"],
+                 s["unique_skus"], s["duplicate_rows"], s["pages_unattempted"])
+                == (2, 2, 6, 4, 2, 0))
+    ok &= check("...the row arithmetic reconciles (rows = unique + duplicates)",
+                s["rows_emitted"] == s["unique_skus"] + s["duplicate_rows"])
+
+    # 2) The server answers page 3's URL with page 2: end_of_listing, and the
+    #    entry keeps BOTH numbers instead of being re-homed under page 2.
+    mismatch = _manifest_outcome(3, [1, 2], served_page=2, served_other=True)
+    doc = page_manifest.build_page_manifest(
+        [_manifest_outcome(1, [1, 2], served_page=1),
+         _manifest_outcome(2, [3, 4], served_page=2), mismatch],
+        start_page=1, pages_requested=3, pages_available=5,
+        stop_reason="end_of_listing", blocked=False)
+    entry = next(e for e in doc["pages"] if e["requested_page"] == 3)
+    ok &= check("a page-number mismatch is end_of_listing with requested 3 and "
+                "served 2 on the SAME entry",
+                entry["status"] == page_manifest.STATUS_END
+                and entry["requested_page"] == 3 and entry["served_page"] == 2)
+    ok &= check("...its rows are all duplicates of earlier pages, not new SKUs",
+                entry["new_skus"] == 0 and entry["duplicate_skus"] == 2)
+    ok &= check("...there is no second entry pretending to be requested page 2",
+                [e["requested_page"] for e in doc["pages"]] == [1, 2, 3])
+    ok &= check("summary counts one end_of_listing page",
+                doc["summary"]["pages_end_of_listing"] == 1)
+
+    # 3) One failed page and one never-attempted page: nothing disappears.
+    doc = page_manifest.build_page_manifest(
+        [_manifest_outcome(1, [1], served_page=1),
+         _manifest_outcome(2, [], blocked_by="akamai-deny", state="blocked"),
+         _manifest_outcome(3, [], load_failed=True)],
+        start_page=1, pages_requested=4, pages_available=5,
+        stop_reason="blocked_akamai-deny", blocked=True)
+    by = {e["requested_page"]: e for e in doc["pages"]}
+    ok &= check("a blocked outcome is status 'blocked' (the exit-3 case)",
+                by[2]["status"] == page_manifest.STATUS_BLOCKED)
+    ok &= check("a load failure is status 'not_obtained' (the exit-5 case)",
+                by[3]["status"] == page_manifest.STATUS_NOT_OBTAINED)
+    ok &= check("the planned page with no outcome is 'unattempted'",
+                by[4]["status"] == page_manifest.STATUS_UNATTEMPTED
+                and by[4]["rows_emitted"] == 0)
+    s = doc["summary"]
+    ok &= check("summary tallies every category once",
+                (s["pages_succeeded"], s["pages_blocked"], s["pages_not_obtained"],
+                 s["pages_unattempted"]) == (1, 1, 1, 1)
+                and s["zero_rows"] is False and s["zero_rows_reason"] is None)
+
+    # 4) A whole run with zero rows states why.
+    doc = page_manifest.build_page_manifest(
+        [_manifest_outcome(1, [], blocked_by="akamai-deny", state="blocked")],
+        start_page=1, pages_requested=1, pages_available=None,
+        stop_reason="blocked_akamai-deny", blocked=True)
+    ok &= check("a zero-row blocked run says so in the summary",
+                doc["summary"]["zero_rows"] is True
+                and doc["summary"]["zero_rows_reason"] == "blocked")
+    doc = page_manifest.build_page_manifest(
+        [_manifest_outcome(1, [], load_failed=True)],
+        start_page=1, pages_requested=2, pages_available=None,
+        stop_reason="page_load_timeout", blocked=False)
+    ok &= check("a zero-row never-obtained run names that reason and leaves "
+                "page 2 unattempted",
+                doc["summary"]["zero_rows_reason"] == "not_obtained"
+                and doc["summary"]["pages_unattempted"] == 1)
+    return ok
+
+
+def test_page_manifest_end_to_end():
+    group("page_manifest: whole runs with the browser stubbed, synthetic pages")
+    ok = True
+
+    def read_pages(d):
+        path = os.path.join(d, "out.pages.json")
+        return json.load(open(path, encoding="utf-8")) if os.path.exists(path) else None
+
+    # 1) Two self-made pages with cross-page and in-page duplicates.
+    p1 = synthetic_listing_html([900001, 900002, 900003, 900004], current_page=1)
+    p2 = synthetic_listing_html([900003, 900005, 900005], current_page=2)
+    rc, meta, rows, doc = _run(["--url", SYNTH_URL, "--pages", "2"],
+                               {1: (200, p1), 2: (200, p2)},
+                               inspect=read_pages)
+    ok &= check("two overlapping pages: exit 0 and the product file keeps 5 unique SKUs",
+                rc == 0 and rows and sorted(r["sku"] for r in rows)
+                == ["900001", "900002", "900003", "900004", "900005"])
+    ok &= check("...the manifest file was written next to the product files",
+                doc is not None and meta.get("page_manifest") == "out.pages.json")
+    s = doc["summary"]
+    ok &= check("...summary: 7 rows emitted, 5 unique, 2 duplicates, 2 successful pages",
+                (s["rows_emitted"], s["unique_skus"], s["duplicate_rows"],
+                 s["pages_succeeded"], s["pages_unattempted"]) == (7, 5, 2, 2, 0))
+    entry2 = next(e for e in doc["pages"] if e["requested_page"] == 2)
+    ok &= check("...page 2 alone shows 1 new and 2 duplicate SKUs, served page 2",
+                (entry2["new_skus"], entry2["duplicate_skus"],
+                 entry2["served_page"], entry2["status"])
+                == (1, 2, 2, page_manifest.STATUS_SUCCESS))
+
+    # 2) Page-number mismatch: asking for page 3 gets a page that says it is 2.
+    p3_wrong = synthetic_listing_html([900001, 900002], current_page=2, total_pages=5)
+    rc, meta, rows, doc = _run(
+        ["--url", SYNTH_URL, "--pages", "3"],
+        {1: (200, p1), 2: (200, p2), 3: (200, p3_wrong)}, inspect=read_pages)
+    entry3 = next(e for e in doc["pages"] if e["requested_page"] == 3)
+    ok &= check("asked 3 / served 2 ends the run as end_of_listing, exit 0",
+                rc == 0 and meta["stop_reason"] == "end_of_listing"
+                and entry3["status"] == page_manifest.STATUS_END
+                and entry3["served_page"] == 2)
+    ok &= check("...the mismatched page's rows are not kept as new products",
+                meta["products"] == 5 and doc["summary"]["pages_end_of_listing"] == 1)
+
+    # 3a) One page refused (exit 3's shape) mid-run: partial, exit 6, named.
+    deny, _ = fx("deny_dom_403")
+    rc, meta, rows, doc = _run(["--url", SYNTH_URL, "--pages", "2"],
+                               {1: (200, p1), 2: (403, deny)}, inspect=read_pages)
+    ok &= check("a refused second page: exit 6 partial, page 2 status 'blocked'",
+                rc == EXIT_PARTIAL and meta["status"] == "partial"
+                and meta["pages_failed"] == [2]
+                and next(e for e in doc["pages"] if e["requested_page"] == 2)["status"]
+                == page_manifest.STATUS_BLOCKED)
+    ok &= check("...the summary counts one blocked page and no unattempted page",
+                doc["summary"]["pages_blocked"] == 1
+                and doc["summary"]["pages_unattempted"] == 0)
+
+    # 3b) One page never obtained (the exit-5 shape) mid-run: also partial.
+    rc, meta, rows, doc = _run(
+        ["--url", SYNTH_URL, "--pages", "2"],
+        {1: (200, p1), 2: DriverError("dead proxy", "ERR_PROXY_CONNECTION_FAILED")},
+        inspect=read_pages)
+    ok &= check("a never-obtained second page: exit 6, page 2 status 'not_obtained'",
+                rc == EXIT_PARTIAL
+                and next(e for e in doc["pages"] if e["requested_page"] == 2)["status"]
+                == page_manifest.STATUS_NOT_OBTAINED
+                and doc["summary"]["pages_not_obtained"] == 1)
+
+    # 3c) A sequential failure leaves the rest unattempted, and they appear.
+    rc, meta, rows, doc = _run(
+        ["--url", SYNTH_URL, "--pages", "3"],
+        {1: (200, p1), 2: DriverError("timed out")}, inspect=read_pages)
+    by_page = {e["requested_page"]: e for e in doc["pages"]}
+    ok &= check("page 3 was never fetched and is listed 'unattempted', not dropped",
+                rc == EXIT_PARTIAL and by_page[2]["status"]
+                == page_manifest.STATUS_NOT_OBTAINED
+                and by_page[3]["status"] == page_manifest.STATUS_UNATTEMPTED
+                and meta["pages_unattempted"] == [3])
+
+    # 4) A whole run that gathers ZERO rows still writes the manifest and the
+    #    sidecar, names the reason, and withholds the product files.
+    rc, meta, rows, doc = _run(["--url", SYNTH_URL], {1: (403, deny)},
+                               inspect=read_pages)
+    ok &= check("zero rows from a refusal: exit 3, no product JSON, manifest + "
+                "sidecar written with the reason",
+                rc == EXIT_BLOCKED and rows is None and doc is not None and meta is not None
+                and doc["summary"]["zero_rows"] is True
+                and doc["summary"]["zero_rows_reason"] == "blocked"
+                and meta.get("zero_rows_reason") == "blocked"
+                and meta.get("page_manifest") == "out.pages.json")
+    blank = "<html><head></head><body></body></html>"
+    rc, meta, rows, doc = _run(["--url", SYNTH_URL], {1: (200, blank)},
+                               inspect=read_pages)
+    ok &= check("zero rows from a never-obtained page: exit 5, reason not_obtained",
+                rc == EXIT_FETCH_FAILED and rows is None
+                and doc["summary"]["zero_rows_reason"] == "not_obtained"
+                and meta.get("zero_rows_reason") == "not_obtained")
     return ok
 
 
@@ -1675,7 +1944,32 @@ def test_canary_assert():
         meta = {"status": "complete", "pages_completed": 3,
                 "listing": {"total_results": 337, "pages_available": 3, "per_page": 120}}
         json.dump(meta, open(prefix + ".meta.json", "w"))
-        ok &= check("a good run passes", all(ca.checks(prefix, 0).values()))
+
+        def write_manifest(n_unique, n_duplicates=0, statuses=("success", "success", "success")):
+            # One entry per page; the first two hold 120 new each, the last the
+            # remaining new SKUs PLUS any duplicates the run saw there.
+            remaining = n_unique - 240
+            emitted = [120, 120, remaining + n_duplicates]
+            new = [120, 120, remaining]
+            dup = [0, 0, n_duplicates]
+            entries = [{"requested_page": i + 1, "served_page": i + 1,
+                        "rows_emitted": emitted[i], "new_skus": new[i],
+                        "duplicate_skus": dup[i],
+                        "status": statuses[i]} for i in range(3)]
+            json.dump({"summary": {"rows_emitted": sum(emitted),
+                                   "unique_skus": n_unique,
+                                   "duplicate_rows": n_duplicates},
+                       "pages": entries}, open(prefix + ".pages.json", "w"))
+
+        # No manifest yet: the new checks must be red, the legacy ones green.
+        legacy_green = all(v for k, v in ca.checks(prefix, 0).items()
+                           if "manifest" not in k and "manifest page" not in k)
+        ok &= check("without a manifest the legacy canary checks still pass", legacy_green)
+        ok &= check("...but the manifest checks are red until one is written",
+                    not all(ca.checks(prefix, 0).values()))
+        write_manifest(337)
+        ok &= check("a good run with a reconciling manifest passes",
+                    all(ca.checks(prefix, 0).values()))
         for rc in (3, 4, 5):
             ok &= check("exit %d is red" % rc, not all(ca.checks(prefix, rc).values()))
         json.dump(rows[:150], open(prefix + ".json", "w"))
@@ -1684,8 +1978,34 @@ def test_canary_assert():
         json.dump(rows[:240], open(prefix + ".json", "w"))
         json.dump(dict(meta, pages_completed=2, listing={"total_results": 240,
                        "pages_available": 2, "per_page": 120}), open(prefix + ".meta.json", "w"))
+        # Two-page manifest matching the smaller product file.
+        json.dump({"summary": {"rows_emitted": 240, "unique_skus": 240,
+                               "duplicate_rows": 0},
+                   "pages": [{"requested_page": i, "served_page": i,
+                              "rows_emitted": 120, "new_skus": 120,
+                              "duplicate_skus": 0, "status": "success"}
+                             for i in (1, 2)]}, open(prefix + ".pages.json", "w"))
         ok &= check("a SMALLER brand (2 pages, 240 rows) is not a failure",
                     all(ca.checks(prefix, 0).values()))
+        # A manifest whose unique count disagrees with the product file is red.
+        json.dump(rows, open(prefix + ".json", "w"))
+        json.dump(meta, open(prefix + ".meta.json", "w"))
+        write_manifest(337)
+        bad = json.load(open(prefix + ".pages.json"))
+        bad["summary"]["unique_skus"] = 300
+        json.dump(bad, open(prefix + ".pages.json", "w"))
+        ok &= check("a manifest that disagrees with the product file is red",
+                    not all(ca.checks(prefix, 0).values()))
+        write_manifest(337)
+        broken = json.load(open(prefix + ".pages.json"))
+        # Break the arithmetic on purpose: emitted no longer equals the sum.
+        broken["summary"]["rows_emitted"] += 1
+        json.dump(broken, open(prefix + ".pages.json", "w"))
+        ok &= check("a manifest whose row arithmetic does not reconcile is red",
+                    not all(ca.checks(prefix, 0).values()))
+        write_manifest(337, statuses=("success", "blocked", "success"))
+        ok &= check("a manifest with a non-success page is red on an exit-0 run",
+                    not all(ca.checks(prefix, 0).values()))
         os.remove(prefix + ".json")
         ok &= check("no rows at all is red", not all(ca.checks(prefix, 0).values()))
     wf = open(os.path.join(REPO_ROOT, ".github", "workflows", "canary.yml"), encoding="utf-8").read()
@@ -1801,7 +2121,8 @@ def main() -> int:
     skips = []
     for t in (test_listing_values, test_sponsored_and_positions, test_jsonld_is_a_decoy,
               test_fallback_path, test_detail, test_page_state, test_urls, test_page_flow,
-              test_whole_run, test_concurrent_dispatch, test_output_contract, test_diff,
+              test_whole_run, test_concurrent_dispatch, test_page_manifest_unit,
+              test_page_manifest_end_to_end, test_output_contract, test_diff,
               test_captcha, test_env_config, test_proxy_and_masking,
               test_fingerprint_helpers, test_wording, test_fixture_corpus_is_scrubbed,
               test_static_analysis, test_shared_calls_bind, test_dockerfile,

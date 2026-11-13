@@ -335,7 +335,13 @@ def write_private_text(path: str, text: str) -> None:
     """
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        else:
+            # Windows builds of Python carry no fchmod; the O_CREAT mode above
+            # already restricted the new file, and chmod re-asserts owner-only
+            # access for a path that existed beforehand.
+            os.chmod(path, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             fd = -1
             f.write(text or "")
@@ -441,6 +447,15 @@ def _meta_path(out_prefix: str) -> str:
 
 def _meta_writer(meta: dict) -> Callable[[Any], None]:
     return lambda f: json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+def pages_path(out_prefix: str) -> str:
+    """The per-page manifest's path: `<out>.pages.json`."""
+    return f"{out_prefix}.pages.json"
+
+
+def _pages_writer(manifest: dict) -> Callable[[Any], None]:
+    return lambda f: json.dump(manifest, f, ensure_ascii=False, indent=2)
 
 
 def run_meta(status: str, stop_reason: str, pages_requested: int,
@@ -608,7 +623,8 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
                pages_failed: Optional[List[int]] = None,
                mode: str = "listing", source: str = SOURCE_DEFAULT,
                listing: Optional[dict] = None,
-               pages_unattempted: Optional[List[int]] = None) -> int:
+               pages_unattempted: Optional[List[int]] = None,
+               page_manifest: Optional[dict] = None) -> int:
     """Write output + the run-metadata sidecar; return the exit code.
 
     Shared by all three browser engines so the status/exit-code mapping
@@ -620,10 +636,17 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     does not overwrite) — the two files would contradict each other, and
     diff_runs.py would refuse to compare data that is in fact fine.
 
-    Row files and sidecar are published in ONE commit, sidecar last: they
-    are staged first, and nothing is renamed into place until all of them
-    were written. A sidecar describing a run whose rows never landed (or
-    the reverse) cannot be left behind by a failure mid-write.
+    The exception is a LISTING run that carries a `page_manifest` (the
+    `<out>.pages.json` document): the manifest and the sidecar are the run's
+    accounting, not product data, so they are written even when zero rows were
+    gathered and the product JSON/CSV are deliberately withheld. A run that
+    fetched nothing therefore still leaves a readable answer to "which pages
+    were refused, missing or unattempted, and why is there no data file?".
+
+    Row files, the manifest and sidecar are published in ONE commit, sidecar
+    last: they are staged first, and nothing is renamed into place until all
+    of them were written. A sidecar describing a run whose rows never landed
+    (or the reverse) cannot be left behind by a failure mid-write.
     """
     # Completeness is decided by the reason AND by the evidence. A named
     # list of stop reasons cannot cover a failure recorded somewhere else,
@@ -645,16 +668,39 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     rc, staged = _stage_rows(rows, out_prefix, fmt, allow_empty, row_cls, csv_escaped)
     wrote_output = bool(rows) or allow_empty
 
-    if wrote_output:
+    # The per-page manifest is accounting, never product rows: it is written
+    # even for a zero-row listing run. Product mode has one page and no
+    # manifest (None), keeping its historical behaviour exactly.
+    manifest_path = pages_path(out_prefix) if page_manifest is not None else None
+    if manifest_path is not None:
+        try:
+            staged.append((_stage(manifest_path, _pages_writer(page_manifest)),
+                           manifest_path))
+        except BaseException:
+            _discard(staged)
+            raise
+
+    if wrote_output or page_manifest is not None:
         status = "complete" if (rows and complete) else (
             "partial" if rows else "failed")
+        outputs = [os.path.basename(final) for _, final in staged
+                   if not final.endswith(".meta.json")]
         meta = run_meta(
             status=status, stop_reason=stop_reason,
             pages_requested=pages_requested, pages_completed=pages_completed,
             pages_failed=pages_failed, pages_unattempted=pages_unattempted,
-            outputs=[os.path.basename(final) for _, final in staged],
+            outputs=outputs,
             mode=mode, source=source, listing=listing,
             start_url=start_url, final_url=final_url, products=len(rows))
+        if page_manifest is not None:
+            # Point the sidecar at its sibling accounting file, including on a
+            # zero-row run whose `outputs` lists no product JSON/CSV.
+            meta["page_manifest"] = os.path.basename(manifest_path)
+            if not rows:
+                reason = (page_manifest.get("summary") or {}).get(
+                    "zero_rows_reason")
+                if reason:
+                    meta["zero_rows_reason"] = reason
         if csv_escaped:
             # Merged UNDER the run's own keys: housekeeping never overwrites
             # a field the run recorded.
@@ -671,7 +717,10 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
             _discard(staged)
             raise
         _commit(staged)
-        _report_saved(rows, staged[:-1])
+        _report_saved(rows, [pair for pair in staged[:-1]
+                             if pair[1] != manifest_path])
+        if manifest_path is not None:
+            print(f"[+] Wrote per-page manifest -> {manifest_path}")
         print(f"[+] Wrote run metadata -> {meta_path} (status={status})")
 
     if not rows:

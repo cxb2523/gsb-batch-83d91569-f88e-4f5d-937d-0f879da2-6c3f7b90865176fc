@@ -28,6 +28,7 @@ def load(path, default):
 def checks(prefix, rc):
     meta = load(prefix + ".meta.json", {})
     rows = load(prefix + ".json", [])
+    pages_doc = load(prefix + ".pages.json", {})
     listing = meta.get("listing") or {}
     available = listing.get("pages_available") or PAGES_ASKED
     per_page = listing.get("per_page") or 0
@@ -54,6 +55,20 @@ def checks(prefix, rc):
     out["no original_price at or below its price"] = all(
         r.get("original_price") is None or r.get("price") is None
         or r["original_price"] > r["price"] for r in rows)
+    # The per-page manifest must reconcile with the product file: its unique
+    # SKU count equals the rows kept, and the row arithmetic holds
+    # (emitted = unique + duplicates). A manifest that disagreed with the
+    # JSON would be an accounting bug, not a site change.
+    summary = pages_doc.get("summary") or {}
+    entries = pages_doc.get("pages") or []
+    out["the per-page manifest is present"] = bool(entries)
+    out["manifest unique SKUs equal the rows the product file holds"] = (
+        summary.get("unique_skus") == len(rows) and bool(rows))
+    out["manifest rows reconcile (emitted = unique + duplicates)"] = (
+        summary.get("rows_emitted") ==
+        (summary.get("unique_skus") or 0) + (summary.get("duplicate_rows") or 0))
+    out["every manifest page succeeded"] = bool(entries) and all(
+        e.get("status") == "success" for e in entries)
     return out
 
 

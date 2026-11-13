@@ -8,6 +8,24 @@ frozen — a patch that changes a default says so at the top of its entry.
 
 ## [Unreleased]
 
+### Added
+
+- **A per-page manifest, `<out>.pages.json`, for listing runs.** The product
+  JSON/CSV hold one row per unique SKU, so they cannot say what each fetched
+  page actually delivered while the default "Featured" ordering drifts. The
+  manifest records, per page, the requested page number, the number the server
+  reported, rows emitted, new unique SKUs, duplicates (on the `webID`,
+  accumulated across the run and counting repeats within one page), and a
+  status (`success`, `no_products`, `blocked`, `not_obtained`,
+  `end_of_listing`, `unattempted`). A page whose server-reported number does
+  not match the request ends the run as `end_of_listing` and keeps both
+  numbers on its entry. A `summary` block tallies requested/succeeded/
+  unattempted pages, total rows, unique SKUs and duplicate rows. The manifest
+  and `.meta.json` are now written even on a zero-row run (with a
+  `zero_rows_reason`), while the product JSON/CSV are still withheld; the
+  sidecar names the manifest in a new `page_manifest` field. CLI flags and
+  exit codes are unchanged.
+
 ### Fixed
 
 - **Akamai's behavioural challenge is given time to clear.** A page that

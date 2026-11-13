@@ -99,6 +99,24 @@ and the listing's own arithmetic (`total_results`, `pages_available`,
 `per_page`, `sort`) — so "complete" is not mistaken for "exhaustive". A
 3-page run of a 1,317-page category is a complete run and a 0.2% sample.
 
+A listing run also writes `<out>.pages.json`, a per-page manifest that
+answers the questions the deduped product file cannot, because the default
+"Featured" ordering drifts between fetches and a SKU can show up on two
+pages (or be missed entirely). Each entry carries the requested page number,
+the page number the **server** reported, the rows that page emitted, how
+many were new unique SKUs versus duplicates (judged on the `webID` and
+accumulated across pages — a repeat inside one page counts too), and a
+status: `success`, `no_products`, `blocked` (exit 3's case), `not_obtained`
+(exit 5's case), `end_of_listing`, or `unattempted`. Page numbers follow the
+server: when the reported page does not match the request the run ends as
+`end_of_listing` and the entry keeps both numbers rather than being recorded
+under the requested one. The manifest's `summary` tallies requested pages,
+successful pages, unattempted pages, total rows, unique SKUs and duplicate
+rows. On a zero-row run the product JSON/CSV are still withheld, but the
+manifest and `.meta.json` are written and carry the zero-row reason
+(`blocked`, `not_obtained`, …), so a run that produced no data still says
+exactly what each page did.
+
 See [`sample_output.json`](sample_output.json) — eight rows cut from a real
 run — and [`sample_output.meta.json`](sample_output.meta.json).
 
@@ -205,12 +223,14 @@ command line, where `ps` and your shell history would keep them.
 answered with no products · `5` the page was never obtained (a dead proxy, a
 blank document, a timeout, a CDP connection refused, a remote API failing),
 or it was served and this parser read no rows from it ·
-`6` partial. A run that gathers nothing writes nothing, so last night's good
-file is never replaced by an empty one — and every file is written to a
-temporary name and renamed into place, so a run killed mid-write cannot
-leave a truncated one either. `1` also covers an internal error (a bug here,
-not the site): what was gathered is still written, marked partial with stop
-reason `internal_error`, and the log carries the masked traceback.
+`6` partial. A run that gathers no product rows writes no product JSON/CSV, so
+last night's good file is never replaced by an empty one — but it DOES still
+write `<out>.pages.json` and `<out>.meta.json`, which name the reason and the
+status of every page. Every file is written to a temporary name and renamed
+into place, so a run killed mid-write cannot leave a truncated one either. `1`
+also covers an internal error (a bug here, not the site): what was gathered is
+still written, marked partial with stop reason `internal_error`, and the log
+carries the masked traceback.
 
 ## Engines
 
