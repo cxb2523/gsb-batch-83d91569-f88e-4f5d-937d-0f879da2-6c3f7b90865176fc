@@ -596,7 +596,10 @@ Found a missing Worker, stale description or better category?
 4. Include a direct Worker URL, source, category and one-sentence description.
 5. Preserve the affiliate disclosure and referral parameter on public Worker links.
 
-Run `python scripts/validate_catalog.py` before opening a pull request.
+Run `python scripts/sync_catalog.py` before opening a pull request. It syncs the
+README directory and category pages from `data/workers.csv` and then validates
+the result; `python scripts/sync_catalog.py --check` performs the same checks
+without writing files.
 
 ## Maintenance principles
 
