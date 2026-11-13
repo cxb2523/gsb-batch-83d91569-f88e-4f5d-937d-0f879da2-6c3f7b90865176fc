@@ -146,6 +146,37 @@ same parser as the response arrives. Writable backpressure bounds queued input.
 HTTP loading supports redirects, abort signals, header/body timeouts and response
 size limits. A caller can supply an Undici-compatible dispatcher.
 
+`collectURLs(urls, options?)` batches `fromURL()` requests while recording a
+success or failure for every address. It always resolves to an array of the same
+length and order as the input, so one bad address never hides the rest:
+
+```js
+import { collectURLs } from 'rusteerio';
+
+const results = await collectURLs(pages, {
+  concurrency: 8, // 1–64; defaults to 4
+  requestOptions: { headers: { 'user-agent': 'crawler' }, maxResponseSize: 5_000_000 },
+  encoding: { userEncoding: 'utf-8' },
+});
+
+for (const result of results) {
+  if (result.ok) console.log(result.url, result.document('title').text());
+  else console.error(result.url, result.error.code, result.error.message);
+}
+```
+
+Each entry has the input `url` as a string and an `ok` flag. Successful entries
+carry `document`; failures carry `error` with readable `name`, `message` and
+`code` fields, plus the fields the rejection exposed (such as `statusCode` for
+`ResponseError`/`UND_ERR_RESPONSE`). Non-HTML/XML content raises a `RangeError`,
+oversized bodies keep `UND_ERR_RES_EXCEEDED_MAX_SIZE`, and excessive redirects
+report `max redirects reached`. Validating `concurrency` happens before any
+request is sent, and aborting the supplied `signal` cancels in-flight requests
+while the remaining addresses are recorded as failed without being requested.
+
+The parser and encoding options are passed through per address, so every URL
+keeps the same decoding and parsing chain as a single `fromURL()` call.
+
 Custom HTML5 `treeAdapter` methods participate in tree construction, and
 `onParseError` receives parser diagnostics. The HTML/XML tokenizer's custom
 `Tokenizer` constructor and callbacks are supported as well. User code runs in

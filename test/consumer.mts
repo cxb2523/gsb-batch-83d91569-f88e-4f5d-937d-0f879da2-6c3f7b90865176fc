@@ -15,7 +15,20 @@ const load: typeof cheerioLoad = rusteerio.load;
 const fetchDocument: typeof cheerioFromURL = rusteerio.fromURL;
 declare const httpOptions: CheerioRequestOptions;
 const compatibleHTTPOptions: rusteerio.CheerioRequestOptions = httpOptions;
-void [fetchDocument, compatibleHTTPOptions];
+const collected: rusteerio.CollectURLResult[] = await rusteerio.collectURLs(['https://example.com', new URL('https://example.com/x')], { concurrency: 2, requestOptions: { headers: { accept: 'text/html' } }, encoding: { userEncoding: 'utf-8' } });
+for (const entry of collected) {
+  const url: string = entry.url;
+  if (entry.ok) { const document: CheerioAPI = entry.document; void document; }
+  else {
+    const failure: string = `${entry.error.name}:${entry.error.message}:${entry.error.code}`;
+    void failure;
+    const noDocument: undefined = entry.document;
+    void noDocument;
+  }
+  void url;
+}
+const collectOptions: rusteerio.CollectURLOptions = { concurrency: 4 };
+void [fetchDocument, compatibleHTTPOptions, collectOptions];
 const options: CheerioOptions = { baseURI: 'https://example.com' };
 const $: CheerioAPI = load('<h1>Hello</h1>', options);
 const text: string = $('h1').text();

@@ -8,7 +8,7 @@ import { createAPI, flattenOptions, load } from './index.js';
 import { requireNative, type NativeStream } from './native.js';
 import { createDiagnosticSession, createTokenizerSession, createTreeAdapterSession, deliverParseErrors, parserOptions } from './hooks.js';
 import { routeDocument } from './router.js';
-import type { CheerioAPI, CheerioOptions, CheerioRequestOptions, DecodeStreamOptions, EncodingOptions } from './types.js';
+import type { CheerioAPI, CheerioOptions, CheerioRequestOptions, CollectURLError, CollectURLOptions, CollectURLResult, DecodeStreamOptions, EncodingOptions } from './types.js';
 
 export type LoadCallback = (error: Error | null | undefined, document: CheerioAPI) => void;
 
@@ -488,4 +488,116 @@ async function loadURL(url: string | URL, options: CheerioRequestOptions): Promi
       parser.end();
     })().catch((error: Error) => { parser.destroy(error); reject(error); });
   });
+}
+
+/** Keep the readable fields of any rejection reason, including statusCode. */
+function collectError(reason: unknown): CollectURLError {
+  if (reason instanceof Error) {
+    const error = reason as Error & { code?: unknown; [key: string]: unknown };
+    // Own enumerable fields carry ResponseError's statusCode and headers.
+    const fields: Record<string, unknown> = {};
+    for (const key of Object.keys(error)) {
+      if (key === 'name' || key === 'code') continue;
+      fields[key] = error[key];
+    }
+    // DOMException's numeric legacy `code` is not a readable classification.
+    const code = typeof error.code === 'string' && error.code ? error.code : error.name;
+    return { ...fields, name: error.name, message: error.message, code };
+  }
+  const text = typeof reason === 'string' ? reason : (() => { try { return String(reason); } catch { return 'Unknown error'; } })();
+  return { name: 'Error', message: text, code: 'Error' };
+}
+
+/** The abort reason, normalized so the failure record is always readable. */
+function abortReason(reason: unknown): CollectURLError {
+  if (reason instanceof Error) return collectError(reason);
+  const error = Object.assign(new Error(reason == null ? 'The operation was aborted' : String(reason)), { name: 'AbortError' });
+  return collectError(error);
+}
+
+/**
+ * Fetch documents concurrently, recording a success or failure for every input.
+ * The returned array always matches the input length and order; one address
+ * failing never rejects the call or affects the others.
+ */
+export async function collectURLs(urls: readonly (string | URL)[], options: CollectURLOptions = {}): Promise<CollectURLResult[]> {
+  if (!Array.isArray(urls)) throw new TypeError('collectURLs expects an array of URLs');
+  const { concurrency = 4, ...requestOptions } = options ?? {};
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 64) {
+    throw new RangeError('concurrency must be an integer from 1 to 64');
+  }
+  for (const url of urls) {
+    if (typeof url !== 'string' && !(url instanceof URL)) throw new TypeError('collectURLs expects strings or URL instances');
+  }
+  const inputs = urls.map((url) => typeof url === 'string' ? url : url.href);
+  if (!inputs.length) return [];
+  const { signal: batchSignal, dispose } = abortController(requestOptions.requestOptions?.signal);
+  const results: CollectURLResult[] = new Array(inputs.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next++;
+      if (index >= inputs.length) return;
+      const url = inputs[index];
+      // A new address after the batch abort is recorded without a request.
+      if (batchSignal.aborted) { results[index] = { url, ok: false, error: abortReason(batchSignal.reason) }; continue; }
+      try {
+        // Each request has its own controller so the batch can cancel exactly
+        // the requests in flight while leaving other results intact.
+        const controller = new AbortController();
+        const forward = () => controller.abort(batchSignal.reason);
+        batchSignal.addEventListener('abort', forward, { once: true });
+        try {
+          const document = await loadURL(url, {
+            ...requestOptions,
+            // loadURL records the response charset on `encoding`; give each
+            // address its own copy so concurrent responses cannot mix labels.
+            ...(requestOptions.encoding ? { encoding: { ...requestOptions.encoding } } : {}),
+            requestOptions: { ...requestOptions.requestOptions, signal: controller.signal },
+          });
+          // A document that finished before the abort stays a success; requests
+          // still in flight are cancelled and land in the catch below.
+          results[index] = { url, ok: true, document };
+        } finally {
+          batchSignal.removeEventListener('abort', forward);
+        }
+      } catch (error) {
+        results[index] = batchSignal.aborted
+          ? { url, ok: false, error: abortReason(batchSignal.reason) }
+          : { url, ok: false, error: collectError(error) };
+      }
+    }
+  };
+  try {
+    await Promise.all(Array.from({ length: Math.min(concurrency, inputs.length) }, () => worker()));
+  } finally {
+    dispose();
+  }
+  return results;
+}
+
+/**
+ * Normalize an AbortSignal or Cheerio's EventEmitter-style signal. The dispose
+ * callback releases a listener the batch added to a caller-owned emitter.
+ */
+function abortController(signal: unknown): { signal: AbortSignal; dispose: () => void } {
+  const controller = new AbortController();
+  if (signal == null) return { signal: controller.signal, dispose: () => {} };
+  if (typeof signal === 'object' && 'aborted' in signal && 'addEventListener' in signal) {
+    const source = signal as AbortSignal;
+    if (source.aborted) controller.abort(source.reason);
+    else {
+      const forward = () => controller.abort(source.reason);
+      source.addEventListener('abort', forward, { once: true });
+      return { signal: controller.signal, dispose: () => source.removeEventListener('abort', forward) };
+    }
+    return { signal: controller.signal, dispose: () => {} };
+  }
+  if (typeof signal === 'object' && 'once' in signal && 'removeListener' in signal) {
+    const emitter = signal as EventEmitter;
+    const forward = () => controller.abort();
+    emitter.once('abort', forward);
+    return { signal: controller.signal, dispose: () => emitter.removeListener('abort', forward) };
+  }
+  throw new TypeError('signal must be an AbortSignal or EventEmitter');
 }

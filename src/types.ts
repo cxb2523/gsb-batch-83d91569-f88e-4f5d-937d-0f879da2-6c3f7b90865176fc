@@ -166,6 +166,7 @@ export interface FormDataLike extends Iterable<[string, string | import('node:bu
 export interface CheerioRequestOptions extends DecodeStreamOptions {
   requestOptions?: {
     method?: string;
+    maxResponseSize?: number;
     headers?: Record<string, string | string[] | undefined> | string[] | Iterable<[string, string | string[] | undefined]> | Headers | null;
     body?: string | Buffer | Uint8Array | import('node:stream').Readable | FormData | FormDataLike | null;
     query?: import('node:querystring').ParsedUrlQueryInput;
@@ -183,4 +184,30 @@ export interface CheerioRequestOptions extends DecodeStreamOptions {
   };
 }
 export interface ParallelOptions extends CheerioOptions { threads?: number }
+
+/** A failure record retains the thrown error's readable name, message and code. */
+export interface CollectURLError {
+  name: string;
+  message: string;
+  code: string;
+  [key: string]: unknown;
+}
+export interface CollectURLSuccess {
+  /** The original input, coerced to its string form. */
+  url: string;
+  ok: true;
+  document: CheerioAPI;
+  error?: never;
+}
+export interface CollectURLFailure {
+  url: string;
+  ok: false;
+  document?: never;
+  error: CollectURLError;
+}
+export type CollectURLResult = CollectURLSuccess | CollectURLFailure;
+export interface CollectURLOptions extends CheerioRequestOptions {
+  /** Maximum simultaneous requests. An integer from 1 to 64; defaults to 4. */
+  concurrency?: number;
+}
 export type SerializedField = { name: string; value: string };

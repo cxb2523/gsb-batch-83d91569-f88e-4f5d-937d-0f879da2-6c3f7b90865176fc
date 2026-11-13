@@ -24,7 +24,7 @@ export const dom = {
 } as const;
 export { configureWorkers, workerPoolInfo } from './workers.js';
 export type { WorkerOptions, WorkerPoolInfo } from './workers.js';
-export { loadBuffer, stringStream, decodeStream, fromURL } from './io.js';
+export { loadBuffer, stringStream, decodeStream, fromURL, collectURLs } from './io.js';
 
 const defaultOptions: CheerioOptions = { _useHtmlParser2: false };
 
