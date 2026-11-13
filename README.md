@@ -1,0 +1,270 @@
+> [!WARNING]
+> Version 4 deliberately removes the legacy `BaseMedia.load(api=..., html=...)`
+> and TaskGroup-based `Helper.iterator()` contracts. Applications must migrate
+> to source-aware media fields and the new scrape stream described below.
+
+# EAF Base API
+
+# What is this?
+When using one of my Porn site APIs, you probably came across this package and wondered what it actually does, so here's
+a detailed answer. 
+
+A lot of Porn sites use very similar methods for m3u8 (HLS) parsing and other things. I also wanted to implement proxy
+support, and there was a lot of code that I would have rewritten in every API again and again. That's why I made this API
+package. The `BaseCore` class does all the necessary stuff like m3u8 parsing, a great caching system, network request
+fetching with retry attempts and proxy support.
+
+## Consistent errors and logging (4.2)
+
+Configure logging once in your application to capture all 15 provider APIs and
+the base library:
+
+```python
+import logging
+from base_api import configure_app_logging, DownloadFailed
+
+configure_app_logging(level=logging.WARNING, log_file="api-errors.log")
+
+# Inside your async application:
+try:
+    await video.download(configuration)
+except DownloadFailed as error:
+    print(error.api, error.class_name, error.url)
+    # The failure and its full traceback have already been logged.
+```
+
+Logs use Python module names, such as `xvideos_api.api` and `base_api.base`.
+Request, source-loading, and download logs include the qualified class name and
+URL in the message and in `LogRecord.class_name` / `LogRecord.url`. For example:
+
+```text
+ERROR xvideos_api.api [class=xvideos_api.api.Video url=https://example.test/video/123] Download failed: disk full
+Traceback (most recent call last):
+  ...
+OSError: disk full
+```
+
+Network logs identify the actual request URL, including CDN/segment URLs; media
+errors also identify the original video page. Context stays separate for
+concurrent downloads and follows parsing work into worker threads. Creating a
+client/core does not install handlers or override your application's log level.
+Without configuration, Python's fallback logging handler still prints warnings
+and errors to stderr.
+
+Catch common failures from `base_api`: `DownloadFailed`, `NetworkError`,
+`NotFound`, `ProxyError`, `BotDetection`, `VideoUnavailable`, `LoginFailed`, and
+`RegionBlocked`. Existing provider exception imports remain compatible,
+including Pornhub's `PornhubAPIError` hierarchy. Translated exceptions preserve
+the original exception as `__cause__`.
+
+Ordinary download failures now raise `DownloadFailed` instead of returning
+`False`. A stop signal raises `base_api.modules.errors.DownloadCancelled`;
+async task cancellation propagates unchanged. Neither is logged as an error.
+With `DownloadConfigHLS(return_report=True)`, incomplete/cancelled downloads
+still return their explicit `DownloadReport`; unexpected exceptions still raise.
+
+Shared request translation, download error handling, HLS preparation, and output
+configuration live in `base_api.modules.provider`. The identical Tube8 and
+Thumbzilla result-grid extraction lives in `base_api.modules.static_functions`.
+Site-specific parsing, quality selection, and fallback behavior stay in each
+provider. Updated providers require `eaf-base-api>=4.2.0`; update the base library
+alongside them.
+
+## FFmpeg remuxing and single-pass metadata tagging (4.3)
+
+HLS TS→MP4 remuxing (`DownloadConfigHLS(remux=True)`) now runs directly via an
+`ffmpeg` binary (discovered on `PATH` or configured via `RuntimeConfig.ffmpeg_path`)
+instead of `PyAV`. You can also pass `metadata` (a provider `Video` object or `dict`)
+and `thumbnail` (`bytes` or path) on `DownloadConfigHLS` so `eaf_base_api` embeds
+MP4 container tags and cover art in the **same single FFmpeg remux pass** without
+rewriting the file a second time:
+
+```python
+from base_api import DownloadConfigHLS, write_metadata_tags
+
+config = DownloadConfigHLS(
+    quality="best",
+    path="./downloads",
+    remux=True,
+    metadata=video,           # Writes title, author, genre, date, description, url, comment
+    thumbnail=cover_bytes,    # Optional JPEG/PNG cover art embedded in the same pass
+    return_report=True,
+)
+report = await video.download(configuration=config)
+print(report.metadata_written)  # True when single-pass metadata/cover tagging succeeded
+```
+
+For direct MP4 downloads (`DownloadConfigRAW`) or existing MP4 files, use
+`write_metadata_tags(path, metadata=video, thumbnail=cover_bytes)` from
+`base_api.modules.ffmpeg` (or `base_api`). If `ffmpeg` is not installed when
+`remux=True`, `eaf_base_api` logs a warning and preserves the raw MPEG-TS stream.
+
+# Documentation (IMPORTANT!)
+> [!IMPORTANT]
+> Configuring eaf_base_api is necessary if you use any of my Porn APIs, because they all depend on this project.
+> Please read through the documentation to learn how `PROXIES`, `CACHING` and `LOGGING` etc... work!
+
+You can find the documentation here ->: https://github.com/EchterAlsFake/API_Docs/blob/master/Porn_APIs/eaf_base_api.md
+
+## Source-aware media models
+
+Use `media_field()` for every attribute populated by a remote loader. The first
+source is the highest-priority source if multiple sources provide the same field.
+Each configured loader is async and returns a complete mapping for all fields
+assigned to that source; loaders do not mutate the model directly.
+
+```python
+from dataclasses import dataclass
+from typing import ClassVar
+
+from base_api import BaseMedia, media_field
+
+
+@dataclass(kw_only=True, slots=True)
+class Video(BaseMedia):
+    title: str | None = media_field("html", "api")
+    available_qualities: list[int] | None = media_field("html")
+
+    loader_methods: ClassVar[dict[str, str]] = {
+        "html": "_load_html",
+        "api": "_load_api",
+    }
+
+    async def _load_html(self) -> dict[str, object]:
+        data = await fetch_and_parse_html(self.url)
+        return {
+            "title": data.get("title"),
+            "available_qualities": data.get("available_qualities"),
+        }
+
+    async def _load_api(self) -> dict[str, object]:
+        data = await fetch_and_parse_api(self.url)
+        return {"title": data.get("title")}
+```
+
+Load exactly the information a caller needs:
+
+```python
+video = Video(url=url, core=core)
+await video.load_fields("title", "available_qualities")
+
+# Or request a known source explicitly.
+await video.load_sources("html")
+
+# Convenience form that loads one field and returns it.
+title = await video.get_field("title")
+```
+
+An unresolved field raises `DataNotLoadedError` with the exact field and eligible
+sources. A loader returning `None` marks the field as loaded and does not raise.
+Loader mappings are validated before any values are committed, preventing partial
+model updates after parser failures.
+
+## HTTP requests and caching
+
+`BaseCore` exposes one method per response representation. Use the core as an
+async context manager so its connection pool is closed deterministically:
+
+```python
+from base_api import BaseCore, CachePolicy
+
+async with BaseCore() as core:
+    response = await core.request("https://example.com/status")
+    text = await core.fetch_text("https://example.com/page")
+    data = await core.fetch_bytes("https://example.com/file")
+
+    fresh_text = await core.fetch_text(
+        "https://example.com/live",
+        cache_policy=CachePolicy.REFRESH,
+    )
+    uncached_text = await core.fetch_text(
+        "https://example.com/volatile",
+        cache_policy=CachePolicy.BYPASS,
+    )
+```
+
+Only successful GET text responses are cached. Cache keys distinguish parameters,
+request bodies, headers, and cookies without storing credentials in plaintext.
+`CachePolicy.USE` reads and writes the cache, `REFRESH` skips the read and replaces
+the entry, and `BYPASS` neither reads nor writes. Concurrent misses for the same
+request share one network operation.
+
+Network failures and retryable HTTP statuses are retried automatically for
+idempotent methods. Set `retry_non_idempotent=True` only when repeating a POST or
+PATCH is known to be safe.
+
+## Concurrent page and media iteration
+
+`Helper` uses bounded `asyncio` task sets. Completion order is the default because
+it exposes fast media without waiting for slower earlier media. Original page and
+extractor order is available with `ResultOrder.ORIGINAL`.
+
+```python
+from base_api import Helper, ResultOrder
+from base_api.modules.config import IteratorConfig
+
+helper = Helper(core=core, constructor=Video)
+stream = helper.iterator(
+    page_urls,
+    extractor_videos,
+    iterator_config=IteratorConfig(
+        max_page_concurrency=3,
+        max_item_concurrency=20,
+        load_specific_fields=("title", "available_qualities"),
+        order=ResultOrder.COMPLETION,  # The default.
+    ),
+)
+
+# The context manager guarantees immediate task cleanup if this loop breaks early.
+async with stream:
+    async for result in stream:
+        if not result.succeeded:
+            logger.error(
+                "%s failed for %s: %s", result.stage, result.url, result.error,
+                exc_info=(type(result.error), result.error, result.error.__traceback__),
+            )
+            continue
+        video = result.unwrap()
+```
+
+Use `IteratorConfig(order=ResultOrder.ORIGINAL)` when presentation order matters.
+Page and item failures independently support `ErrorMode.YIELD`, `ErrorMode.SKIP`,
+or `ErrorMode.RAISE`. `RetryPolicy` provides a strict maximum attempt count and
+optional exponential delay; the independent page and item handlers return an
+`ErrorAction` and cannot create an unbounded retry loop.
+
+## Error logging
+
+Configure logging once in the application to capture all provider and base API logs:
+
+```python
+import logging
+from base_api.modules.logger import configure_app_logging
+
+configure_app_logging(log_file="api.log", level=logging.INFO)
+```
+
+Failures include the operation, video/page URL, and original traceback. The default
+formatter also shows the file, line, and function. Media source failures are logged
+even when a caller catches the exception; iterator failures are logged even when
+the configured policy skips or yields them. Provider CLIs configure console logging
+automatically.
+
+Provider request and download exceptions use the shared types in
+`base_api.modules.errors`, preserving the original exception as `__cause__`.
+Pornhub's existing exception classes remain catchable as `PornhubAPIError` and as
+their shared equivalents. `ScraperException` also inherits `BaseScraperError`.
+Download preparation errors now carry the video URL in `DownloadFailed`, and
+explicit cancellation remains `DownloadCancelled` or `asyncio.CancelledError`.
+Existing boolean/download-report results from the base downloader remain supported.
+
+# Can I use this for myself?
+Yes, you can, but I may change stuff here and there from time to time, and it would maybe break your project.
+I would not recommend you to install and use it as a package, but just copy the code you need.
+
+I can recommend everyone the download functions for HLS streaming since, for example, the threaded preset is very well 
+optimized. If you just use mine, you need to consume less caffeine and brain cells to make such a function :)
+
+# License
+Licensed under The [AGPLv3](https://opensource.org/license/agpl-3-0) license.
+<br>Copyright (C) 2024-2026 Johannes Habel

@@ -1,0 +1,51 @@
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
+
+[project]
+name = "eaf_base_api"
+version = "4.2.6"
+description = "A base API for EchterAlsFake's Porn APIs"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.12"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE*"]
+
+authors = [
+  { name = "Johannes Habel", email = "EchterAlsFake@proton.me" }
+]
+
+classifiers = [
+  "Programming Language :: Python",
+]
+
+dependencies = [
+  "cachetools>=7.0.0",
+  "curl_cffi",
+  "tenacity>=9.1.2",
+]
+
+[project.optional-dependencies]
+hls = [
+  "m3u8",
+]
+
+[project.urls]
+Homepage = "https://github.com/EchterAlsFake/eaf_base_api"
+Repository = "https://github.com/EchterAlsFake/eaf_base_api"
+
+[tool.uv]
+publish-url = "https://upload.pypi.org/legacy/"
+
+[tool.uv.build-backend]
+module-root = ""
+module-name = "base_api" # Because I named it differently we need to change here
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "types-m3u8",
+    "pylint",
+    "pytest",
+    "pytest-asyncio"
+]
