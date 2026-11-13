@@ -1,0 +1,17 @@
+{
+  "httpStatus": 200,
+  "transport": "json",
+  "body": {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "result": {
+      "isError": true,
+      "content": [
+        {
+          "type": "text",
+          "text": "HasData API error: 429 concurrency_limit: too many concurrent requests for your plan"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "httpStatus": 200,
+  "transport": "json",
+  "body": {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "result": {
+      "isError": true,
+      "content": [
+        {
+          "type": "text",
+          "text": "{\"url\":\"https://api.hasdata.com/scrape/instagram/profile?handle=definitely.not.a.real.account.xyz\",\"status\":400,\"text\":\"HasData API error: 400 Bad Request\",\"json\":null,\"requestMetadata\":{\"id\":\"req-notfound-1\",\"status\":\"error\"}}"
+        }
+      ]
+    }
+  }
+}

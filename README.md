@@ -271,6 +271,33 @@ What is guaranteed and what is not, measured across twenty accounts: `id`, `user
 }
 ```
 
+### Batch profile collection
+
+Looking up several handles at once needs a per-account verdict, not one pass/fail for the whole batch. The package ships a zero-dependency batch runner, `lib/batch-profiles.mjs`, that calls the profile tool once per handle and returns one record per handle in input order.
+
+```js
+import { collectProfiles } from '@hasdata/instagram-mcp/lib/batch-profiles.mjs';
+
+const records = await collectProfiles(['nasa', 'natgeo', 'a.private.account', 'ghost.account']);
+```
+
+Each record carries `handle` and `status`, then either `data` or `error`:
+
+| `status` | When it is used | Record shape |
+| --- | --- | --- |
+| `success` | A public profile came back | `data` with the retained fields |
+| `private` | The response carries `private: true` | `data` with the retained fields; missing `biography` or `latestPosts` is expected, not a failure |
+| `not_found` | The upstream answers `400 Bad Request` or `requestMetadata.status` is `error` | `error` with the reason |
+| `error` | Any other call failure, including retries exhausted | `error` with the reason |
+
+A success or private record retains `id`, `username`, `followersCount` and `followsCount`, plus `fullName`, `verified` and `bioLinks` when present, and `latestPostsCount` (the number of recent posts, not the posts themselves) when the feed exists. One handle failing never interrupts the others.
+
+The free tier allows five concurrent requests, so the runner defaults to a concurrency of five (override with the `concurrency` option or `HASDATA_MAX_CONCURRENCY`). A `429 concurrency_limit` response is backed off and retried with exponential backoff — five attempts by default — instead of failing the handle immediately; when every attempt is exhausted the record is honestly marked `error` with the reason preserved.
+
+```js
+await collectProfiles(handles, { concurrency: 5, maxAttempts: 5, initialDelayMs: 1000 });
+```
+
 ### Get Instagram posts
 
 [`hasdata_instagram_posts_getInstagramPosts`](https://docs.hasdata.com/apis/instagram/posts?utm_source=github&utm_medium=syndication&utm_campaign=instagram-mcp)
@@ -545,7 +572,7 @@ Any MCP client that supports streamable HTTP with custom headers. The configs ab
 
 This repository is configuration and documentation for a remote server. There is no build step and nothing to containerize.
 
-It does carry a contract test. The README promises its tools with specific parameters, and the upstream tool list can change without a commit here, and that would leave this file quietly lying to you. The test asserts the promise and runs weekly in CI as well as on every push.
+It does carry tests. The README promises its tools with specific parameters, and the upstream tool list can change without a commit here, and that would leave this file quietly lying to you. The contract test asserts the promise and runs weekly in CI as well as on every push. The batch runner additionally has offline unit tests under `test/batch-profiles.test.mjs` and `test/instagram-client.test.mjs`, which run against local response fixtures in `test/fixtures` and need no API key at all.
 
 ```bash
 HASDATA_API_KEY=your_key_here npm test

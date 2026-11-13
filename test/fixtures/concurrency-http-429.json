@@ -1,0 +1,5 @@
+{
+  "httpStatus": 429,
+  "transport": "json",
+  "rawBody": "{\"error\":{\"code\":\"concurrency_limit\",\"message\":\"429 concurrency_limit: free plan allows 5 concurrent requests\"}}"
+}

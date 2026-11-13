@@ -1,0 +1,5 @@
+{
+  "httpStatus": 401,
+  "transport": "json",
+  "rawBody": "{\"error\":{\"code\":\"unauthorized\",\"message\":\"HasData API error: 401 Unauthorized\"}}"
+}

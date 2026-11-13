@@ -1,0 +1,16 @@
+{
+  "httpStatus": 200,
+  "transport": "sse",
+  "body": {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": {
+      "content": [
+        {
+          "type": "text",
+          "text": "{\"url\":\"https://api.hasdata.com/scrape/instagram/profile?handle=private.guy\",\"status\":200,\"json\":{\"id\":\"999000111\",\"username\":\"private.guy\",\"fullName\":\"Private Guy\",\"followersCount\":42,\"followsCount\":130,\"profilePicUrl\":\"https://example.test/private.jpg\",\"fbid\":\"17841400000000001\",\"private\":true,\"requestMetadata\":{\"id\":\"req-private-1\",\"status\":\"ok\"}}}"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "httpStatus": 502,
+  "transport": "json",
+  "rawBody": "Bad Gateway: upstream did not respond"
+}
