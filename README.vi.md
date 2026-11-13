@@ -169,6 +169,7 @@ Sau đó chỉ cần nhắn AI, ví dụ: *"Mở profile tiktok-us-02, vào tikt
 | Cookie & fingerprint | `export_cookies`, `import_cookies`, `get_fingerprint`, `reset_fingerprint`, `check_proxy`, `check_profile_ip` |
 | Trang | `browser_navigate`, `browser_back`, `browser_snapshot`, `browser_get_text`, `browser_click`, `browser_click_at`, `browser_type`, `browser_press`, `browser_wait_for`, `browser_screenshot`, `browser_evaluate` |
 | Tab | `browser_tabs`, `browser_tab_new`, `browser_tab_select`, `browser_tab_close` |
+| Lô | `browser_batch_extract`, `browser_batch_results` |
 
 MCP **không** có tool xóa profile, để AI không thể vô tình xóa cookie của tài khoản. Trang chỉ mở được `http`, `https` và `about:blank`; `file://` và `about:config` bị chặn.
 
@@ -262,6 +263,8 @@ Tiền tố: `/api/v1`. Xem đầy đủ tại `/docs` khi ứng dụng đang ch
 | `POST` | `/browser/{name}/page/evaluate` | Chạy JavaScript |
 | `GET` / `POST` | `/browser/{name}/page/tabs` | Liệt kê / mở tab mới |
 | `POST` / `DELETE` | `/browser/{name}/page/tabs/{index}/select` · `/page/tabs/{index}` | Chọn / đóng tab |
+| `POST` | `/browser/{name}/page/batch-extract` | Lấy text của một selector cho một loạt URL, mỗi URL một tab mới; trạng thái và loại lỗi theo từng mục tiêu, chính sách `skip_succeeded` khi chạy lại |
+| `GET` | `/browser/{name}/page/batch-extract` · `/batch-extract/{batch_id}` | Kết quả lô đã lưu (mới nhất hoặc theo batch_id) |
 | `GET` | `/mcp/setup?base_url=...` | Cấu hình MCP cho từng ứng dụng AI (dùng bởi hộp thoại Kết nối AI) |
 
 Khi có `FOXPROFILE_API_TOKEN`, mọi request (trừ `/health` và `/info`) phải gửi header `Authorization: Bearer <token>`.

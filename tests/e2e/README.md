@@ -6,6 +6,7 @@ Chạy thủ công với một FoxProfile thật (không thuộc `pytest`/CI vì
 | --- | --- | --- |
 | `api_e2e.py` | API đang chạy | vân tay cố định, cookie JSON/Netscape, launch thành công/thất bại |
 | `control_e2e.py` | không (tự chạy launcher, headless) | điều khiển trang: navigate, snapshot, click, tab, chặn `file://` |
+| `batch_e2e.py` | API đang chạy | lấy text theo lô: trạng thái/loại lỗi từng mục tiêu, chạy lại với `skip_succeeded` |
 | `mcp_stdio_e2e.py` | API đang chạy | MCP qua stdio (`python -m src.mcp_server`) |
 | `mcp_http_e2e.py` | API đang chạy | MCP qua HTTP tại `/mcp`, 401 khi thiếu token |
 | `panel_e2e.py` | API + web panel | đăng nhập, tạo/sửa profile, xem màn hình từ xa |

@@ -51,3 +51,24 @@ class EvaluateRequest(BaseModel):
 
 class TabNewRequest(BaseModel):
     url: str | None = None
+
+
+class BatchTarget(BaseModel):
+    """One URL to extract text from; unset fields fall back to the batch defaults."""
+
+    id: str = Field(min_length=1, max_length=200, description="Caller-chosen target identifier")
+    url: str = Field(min_length=1, max_length=4000)
+    selector: str | None = None
+    timeout: int | None = Field(None, ge=100, le=120_000)
+    max_chars: int | None = Field(None, ge=500, le=200_000)
+
+
+class BatchExtractRequest(BaseModel):
+    targets: list[BatchTarget] = Field(min_length=1, max_length=500)
+    selector: str = "body"
+    timeout: int = Field(15_000, ge=100, le=120_000)
+    max_chars: int = Field(40_000, ge=500, le=200_000)
+    skip_succeeded: bool = Field(
+        False,
+        description="Skip targets that already succeeded in an earlier batch of this profile",
+    )

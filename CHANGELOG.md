@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Thêm
+- Lấy text theo lô trên profile đang chạy: `POST /browser/{name}/page/batch-extract` nhận một danh sách mục tiêu (id, url, selector/timeout/max_chars riêng hoặc theo mặc định của lô), mở từng URL trong một tab mới, chờ selector, đọc text rồi đóng tab. Mỗi mục tiêu có kết luận riêng: trạng thái (success/failed/skipped), loại lỗi (proxy_or_network_unreachable, wait_timeout, script_error, invalid_params) và text (cắt theo giới hạn hiện có, kèm cờ `truncated`). Một mục tiêu lỗi không làm dừng cả lô và không để lại trạng thái trang cho mục tiêu sau. Kết quả lô được lưu lại để xem qua `GET .../page/batch-extract` (mới nhất hoặc theo batch_id); chạy lại với `skip_succeeded` sẽ đánh dấu skipped kèm lý do cho các mục tiêu đã thành công thay vì tải lại. Có cả trên MCP (`browser_batch_extract`, `browser_batch_results`).
+
 ## [2.4.0] - 2026-10-30
 
 ### Thay đổi

@@ -169,6 +169,7 @@ Then just ask, e.g. *"Open profile tiktok-us-02, go to tiktok.com and send me a 
 | Cookies & fingerprints | `export_cookies`, `import_cookies`, `get_fingerprint`, `reset_fingerprint`, `check_proxy`, `check_profile_ip` |
 | Page | `browser_navigate`, `browser_back`, `browser_snapshot`, `browser_get_text`, `browser_click`, `browser_click_at`, `browser_type`, `browser_press`, `browser_wait_for`, `browser_screenshot`, `browser_evaluate` |
 | Tabs | `browser_tabs`, `browser_tab_new`, `browser_tab_select`, `browser_tab_close` |
+| Batch | `browser_batch_extract`, `browser_batch_results` |
 
 There is deliberately **no** delete tool, so an agent cannot wipe an account's cookies by mistake. Only `http`, `https` and `about:blank` can be opened; `file://` and `about:config` are blocked.
 
@@ -262,6 +263,8 @@ Prefix `/api/v1`. The full reference is at `/docs` while the app is running.
 | `POST` | `/browser/{name}/page/evaluate` | Run JavaScript |
 | `GET` / `POST` | `/browser/{name}/page/tabs` | List tabs / open a new tab |
 | `POST` / `DELETE` | `/browser/{name}/page/tabs/{index}/select` · `/page/tabs/{index}` | Select / close a tab |
+| `POST` | `/browser/{name}/page/batch-extract` | Extract a selector's text for a list of URLs, one fresh tab each; per-target status and failure kind, `skip_succeeded` re-run policy |
+| `GET` | `/browser/{name}/page/batch-extract` · `/batch-extract/{batch_id}` | Stored batch results (latest or by id) |
 | `GET` | `/mcp/setup?base_url=...` | MCP configs for each AI app (used by the Connect AI dialog) |
 
 With `FOXPROFILE_API_TOKEN` set, every request except `/health` and `/info` needs `Authorization: Bearer <token>`.

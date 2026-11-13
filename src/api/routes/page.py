@@ -8,9 +8,14 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from ...services.browser.launcher import BrowserControlError
-from ..dependencies import get_browser_launcher, get_profile_manager
+from ..dependencies import (
+    get_batch_extract_service,
+    get_browser_launcher,
+    get_profile_manager,
+)
 from ..helpers import require_profile
 from ..schemas.page import (
+    BatchExtractRequest,
     ClickAtRequest,
     ClickRequest,
     EvaluateRequest,
@@ -44,6 +49,44 @@ def _run(
 
 _PM = Depends(get_profile_manager)
 _BL = Depends(get_browser_launcher)
+_BATCH = Depends(get_batch_extract_service)
+
+
+@router.post("/batch-extract")
+def batch_extract(name: str, body: BatchExtractRequest, pm=_PM, batch=_BATCH) -> dict:
+    """Extract text for a list of targets, one fresh tab per target.
+
+    Each result carries the target id, a status (success/failed/skipped), a
+    failure classification (proxy_or_network_unreachable, wait_timeout,
+    script_error, invalid_params) and the extracted text, truncated like
+    GET /text. With `skip_succeeded`, targets that succeeded in an earlier
+    batch are reported as skipped instead of fetched again.
+    """
+    require_profile(name, pm)
+    try:
+        return batch.run(name, body.model_dump())
+    except BrowserControlError as e:
+        raise HTTPException(status_code=e.status, detail=str(e)) from e
+
+
+@router.get("/batch-extract")
+def batch_extract_latest(name: str, pm=_PM, batch=_BATCH) -> dict:
+    """The most recent batch-extract result of this profile."""
+    require_profile(name, pm)
+    record = batch.latest(name)
+    if record is None:
+        raise HTTPException(status_code=404, detail="No batch has run for this profile yet")
+    return record
+
+
+@router.get("/batch-extract/{batch_id}")
+def batch_extract_get(name: str, batch_id: str, pm=_PM, batch=_BATCH) -> dict:
+    """One stored batch-extract result of this profile."""
+    require_profile(name, pm)
+    record = batch.get(name, batch_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"No batch '{batch_id}' for this profile")
+    return record
 
 
 @router.post("/navigate")

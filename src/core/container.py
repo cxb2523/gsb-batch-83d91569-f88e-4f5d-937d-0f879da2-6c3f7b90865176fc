@@ -46,3 +46,9 @@ class Container:
         from ..services.proxy.service import ProxyService
 
         return self._get("ps", ProxyService)
+
+    @property
+    def batch_extract_service(self):
+        from ..services.browser.batch import BatchExtractService
+
+        return self._get("be", lambda: BatchExtractService(self.browser_launcher))

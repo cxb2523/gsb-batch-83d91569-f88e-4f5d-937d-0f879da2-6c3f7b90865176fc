@@ -36,3 +36,7 @@ def get_event_bus(
     container: Container = Depends(_container),
 ) -> EventBus:
     return container.event_bus
+
+
+def get_batch_extract_service(container: Container = Depends(_container)):
+    return container.batch_extract_service
