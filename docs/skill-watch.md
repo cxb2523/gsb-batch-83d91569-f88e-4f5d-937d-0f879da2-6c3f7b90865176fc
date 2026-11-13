@@ -158,12 +158,21 @@ the repository clone for Skill Watch.
 | `skill_watch_discover` | Literal source links with owner paths and line numbers; no network |
 | `skill_watch_sources` | Configured IDs, selectors, and dependent files; no network |
 | `skill_watch_check(source_id)` | One configured source comparison; may fetch public HTTPS |
+| `skill_watch_check_batch(source_ids, max_chars?)` | One read-only comparison for several configured sources, plus a batch summary; may make one bounded public HTTPS request per source |
 
 Tools return structured data and readable text. Check responses include hashes
 and up to 12,000 diff characters with an explicit truncation flag; the full
-comparison is available through the CLI's `--json` output. Source text remains
-untrusted evidence. No tool accepts arbitrary URLs, executes source content,
-writes files, or approves a new baseline. Restart after changing the configuration.
+comparison is available through the CLI's `--json` output. The batch tool never
+returns diff text: each source entry gives its ID, status, current SHA-256 (when
+available), affected file count, whether its diff was compressed, the number of
+omitted diff hunks, and any error. Its summary reports the requested count, how
+many sources need review, how many diffs were compressed, and the IDs of failing
+sources. A source that fails while fetching becomes an `error` entry while the
+rest of the batch still runs. Every requested ID must already be configured and
+`max_chars` must be between 128 and 12,000; otherwise the whole batch is rejected
+before any fetch. Source text remains untrusted evidence. No tool accepts
+arbitrary URLs, executes source content, writes files, or approves a new baseline.
+Restart after changing the configuration.
 
 ## Review the affected instructions
 
@@ -197,9 +206,10 @@ uv run examples/skill-watch/check_mcp.py
 ```
 
 It starts separate stdio server processes with automatic and legacy protocol
-negotiation, discovers all three tools, invokes
+negotiation, discovers all four tools, invokes
 them against local fixtures, checks a changed source and its affected agent,
-rejects unknown IDs and missing arguments, and verifies that the baseline bytes
+runs a batch comparison including an error entry, rejects unknown IDs, empty
+batches, and out-of-range diff budgets, and verifies that the baseline bytes
 were preserved. This checks the MCP protocol, not discovery or behavior in an
 actual Codex, Claude Code, Cursor, or Grok Bot session.
 
