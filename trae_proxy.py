@@ -3158,9 +3158,8 @@ def _run_model_probe(scope="current", limit=0, force=False):
                     MODEL_PROBE_STATE["skipped"] += 1
                 elif (row or {}).get("ok"):
                     MODEL_PROBE_STATE["ok"] += 1
-                elif (row or {}).get("status") == "no_account":
-                    MODEL_PROBE_STATE["skipped"] += 1
                 else:
+                    # no_account 也算失败：与 probe_models 的 summary 口径一致
                     MODEL_PROBE_STATE["failed"] += 1
 
         result = trae_probe.probe_models(accounts, models, limit=limit,

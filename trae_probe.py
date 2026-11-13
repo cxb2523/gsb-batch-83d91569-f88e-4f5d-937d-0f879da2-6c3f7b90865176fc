@@ -79,18 +79,22 @@ def _bucket(data, realm):
     return data["models"].setdefault(realm, {})
 
 
-def _status_from_error(exc):
-    code = getattr(exc, "code", None)
-    text = str(exc or "")
-    if code in (4015, 4019) or "risk control" in text.lower():
+def _status_from_code(code, text=""):
+    """上游错误码 → 五类失败原因之一，供异常与 errors 列表两条路径共用。"""
+    low = str(text or "").lower()
+    if code in (4015, 4019) or "risk control" in low:
         return "risk_control"
-    if code in (4023, 4003) or "model" in text.lower() and "not" in text.lower():
+    if code in (4023, 4003) or ("model" in low and "not" in low):
         return "unavailable"
     if code in (401, 403):
         return "auth"
     if code in (429,):
         return "rate_limited"
     return "error"
+
+
+def _status_from_error(exc):
+    return _status_from_code(getattr(exc, "code", None), str(exc or ""))
 
 
 def probe_one(account, model, realm, timeout=60):
@@ -121,9 +125,9 @@ def probe_one(account, model, realm, timeout=60):
         if errors:
             err = errors[0] if isinstance(errors[0], dict) else {"message": str(errors[0])}
             code = err.get("code")
-            result["status"] = "risk_control" if code in (4015, 4019) else "error"
-            result["error"] = (err.get("message") or err.get("error") or
-                               ("上游错误 %s" % code))[:300]
+            message = err.get("message") or err.get("error") or ("上游错误 %s" % code)
+            result["status"] = _status_from_code(code, message)
+            result["error"] = str(message)[:300]
         else:
             result["ok"] = True
             result["status"] = "ok"
@@ -176,7 +180,10 @@ def probe_models(accounts, models, limit=None, force=False, stale_seconds=86400,
     for key, old in cached_rows:
         done += 1
         if on_progress:
-            on_progress(done, total, key, dict(old, cached=True))
+            try:
+                on_progress(done, total, key, dict(old, cached=True))
+            except Exception:                        # noqa: BLE001
+                pass
     for index, item in enumerate(pending):
         if stop_event is not None and stop_event.is_set():
             break
@@ -202,11 +209,18 @@ def probe_models(accounts, models, limit=None, force=False, stale_seconds=86400,
         with _lock:
             _bucket(data, realm)[key] = row
             data["updated_at"] = time.time()
-            # 每探测完一个就落盘：中途被杀也能保留结果
-            save_health(data)
+            # 每探测完一个就落盘：中途被杀也能保留结果；
+            # 落盘失败（磁盘满/权限等）只丢这一条持久化，不中断整批。
+            try:
+                save_health(data)
+            except Exception:                        # noqa: BLE001
+                pass
         done += 1
         if on_progress:
-            on_progress(done, total, key, row)
+            try:
+                on_progress(done, total, key, row)
+            except Exception:                        # noqa: BLE001
+                pass                                  # 回调异常不中断探测
         # 轻间隔：避免探测本身触发上游频控
         if done < total:
             time.sleep(0.5)
