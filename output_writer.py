@@ -326,6 +326,64 @@ def dedupe_by_sku(rows: Sequence[Any], seen: Set[str]) -> List[Any]:
     return dedupe_by_key(rows, seen, key="sku")
 
 
+# Sidecar key for the per-page list. Kept as a constant so an engine and a
+# reader name the same thing; a typo in either would silently produce a
+# sidecar whose pages nobody could find.
+PAGES_KEY = "pages"
+
+
+def build_page_manifest(outcomes: Sequence[Any], key: str = "sku"):
+    """Merge one page outcome per attempted page AND build the per-page list.
+
+    Returns ``(rows, pages)`` where ``rows`` is the final merged output in
+    page order (identical to what the engines' old inline merge produced)
+    and ``pages`` is the sidecar's per-page manifest, one entry per page the
+    run actually ATTEMPTED, sorted by page number.
+
+    Each entry records:
+
+        page                the 1-based page number
+        status              one of the page_flow PAGE_STATUS_* names:
+                            content / empty / throttled / blocked /
+                            load_failed / parse_failed
+        products_returned   the raw length of that page's response array
+                            BEFORE any dedupe (None when no listing payload
+                            was read — a throttle, a block, a failed load)
+        rows_added          how many of this page's rows survive into the
+                            final merged output, counting duplicates against
+                            every earlier page AND against repeats on THIS
+                            page
+        error               the failure reason, or null for a page that
+                            answered
+
+    The merge happens HERE, once, in page order — never in the order pages
+    happened to finish — so ``rows_added`` is deterministic under concurrent
+    fetching. A page whose fetch failed carries no rows, so its count is 0;
+    its status, not a zero, is what tells the reader why.
+    """
+    import page_flow
+
+    seen: Set[str] = set()
+    rows: List[Any] = []
+    pages: List[dict] = []
+    for oc in sorted(outcomes, key=lambda o: o.page_num):
+        status = page_flow.page_status(oc)
+        fresh = dedupe_by_key(oc.products, seen, key=key)
+        rows.extend(fresh)
+        pages.append({
+            "page": oc.page_num,
+            "status": status,
+            # The response array's ORIGINAL length. Read off the outcome the
+            # parser filled, so a parse failure still reports how many
+            # entries the store actually sent rather than the zero rows it
+            # parsed down to.
+            "products_returned": getattr(oc, "products_returned", None),
+            "rows_added": len(fresh),
+            "error": page_flow.page_failure_reason(oc),
+        })
+    return rows, pages
+
+
 @contextlib.contextmanager
 def _atomic(path: str, newline: Optional[str] = None):
     """Write to a temporary file beside `path`, then rename over it.
@@ -564,7 +622,8 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
              pages_completed: int, start_url: str, final_url: str,
              products: int, pages_failed: Optional[List[int]] = None,
              mode: str = "listing", source: str = SOURCE_DEFAULT,
-             extra: Optional[dict] = None) -> dict:
+             extra: Optional[dict] = None,
+             pages: Optional[List[dict]] = None) -> dict:
     """Build the metadata dict for a finished run.
 
     `status` is the field a consumer branches on:
@@ -621,6 +680,9 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
         "pages_requested": pages_requested,
         "pages_completed": pages_completed,
         "pages_failed": pages_failed or [],
+        # One entry per page actually attempted, in page order. See
+        # build_page_manifest for the per-entry contract.
+        PAGES_KEY: pages or [],
         # Named "products" even though these are products, and kept that
         # way deliberately: every repo in this family writes this key, and a
         # consumer reading several of them reads one sidecar shape.
@@ -727,7 +789,8 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
                start_url: str, final_url: str,
                pages_failed: Optional[List[int]] = None,
                mode: str = "listing", source: str = SOURCE_DEFAULT,
-               extra: Optional[dict] = None) -> int:
+               extra: Optional[dict] = None,
+               pages: Optional[List[dict]] = None) -> int:
     """Write output + the run-metadata sidecar; return the exit code.
 
     Shared by all three browser engines so the status/exit-code mapping
@@ -738,7 +801,30 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     the previous run's still-intact good output (which `save` deliberately
     does not overwrite) — the two files would contradict each other, and
     diff_runs.py would refuse to compare data that is in fact fine.
+
+    When `pages` (the per-page manifest from `build_page_manifest`) is given,
+    it is the EVIDENCE the rest of the sidecar is reconciled against:
+
+      * `stop_reason` is brought into line with what the pages actually show
+        — a throttle that exhausted its wait budget says `throttled`, a page
+        the parser could not read says `parser_found_nothing`, and a final
+        empty/no-new page says `no_new_products`;
+      * `pages_completed` counts only the pages whose status is content/empty,
+        so a parse failure is never counted as a completed page;
+      * `pages_failed` is every other attempted page, by number.
+
+    Passing no manifest keeps the older call shape working (used by the
+    suite's direct calls), where the caller's own values stand.
     """
+    if pages:
+        import page_flow
+        stop_reason = page_flow.reconcile_stop_reason(stop_reason, pages)
+        pages_completed = sum(
+            1 for e in pages
+            if e["status"] in page_flow.COMPLETED_PAGE_STATUSES)
+        pages_failed = [e["page"] for e in pages
+                        if e["status"] not in page_flow.COMPLETED_PAGE_STATUSES]
+
     # Completeness is decided by the reason AND by the evidence. A named
     # list of stop reasons cannot cover a failure recorded somewhere else,
     # and `pages_failed` is somewhere else: a run whose loop ended for a
@@ -767,6 +853,7 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
             pages_requested=pages_requested, pages_completed=pages_completed,
             pages_failed=pages_failed, mode=mode, source=source,
             start_url=start_url, final_url=final_url, products=len(rows),
+            pages=pages,
             # UNDER the caller's `extra`, never over it: a collision here
             # would be housekeeping silently dropping something the site said.
             extra=({**write_stats, **(extra or {})} if write_stats else extra)))

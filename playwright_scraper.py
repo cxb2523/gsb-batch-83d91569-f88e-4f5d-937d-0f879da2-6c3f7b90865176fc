@@ -129,7 +129,7 @@ from product_parser import (DEFAULT_LOCALE, DEFAULT_MODE, PAGE_SIZE,
                             payload_currency, product_link_count,
                             product_url, references_own_assets,
                             search_endpoint)
-from output_writer import (dedupe_by_key, finish_run, EXIT_API_ERROR,
+from output_writer import (build_page_manifest, finish_run, EXIT_API_ERROR,
                            SOURCE_DEFAULT)
 import page_flow
 from page_flow import MIN_CARD_MATCHES
@@ -1466,7 +1466,13 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
                                                   page_num, url)
                         with results_lock:
                             results.append(outcome)
-                        if outcome.ok and not outcome.products:
+                        # Only a genuinely EMPTY served page is the end of the
+                        # listing. A parse failure also carries zero rows with
+                        # ok=True, but it is OUR parser that failed, not the
+                        # catalogue ending — treating it as exhaustion would
+                        # stop dispatch and write a run that looks complete.
+                        if (outcome.ok and not outcome.products
+                                and outcome.state == "empty"):
                             logger.info("[%s] page %d returned no rows — "
                                         "treating that as the end of the listing "
                                         "and stopping dispatch.", name, page_num)
@@ -1591,13 +1597,12 @@ def scrape(args) -> int:
             outcomes.append(first)
 
             if not first.ok:
-                stop_reason = ("page_load_timeout" if first.load_failed
-                               else f"blocked_{first.blocked_by}")
+                stop_reason = page_flow.stop_reason_for_failure(first)
                 blocked = first.blocked_by is not None
             elif first.state == "parse_failed":
                 # Served, linked to products, parsed to nothing: OUR bug, and
                 # it must not reach the sidecar as a complete run.
-                stop_reason = "parser_found_nothing"
+                stop_reason = page_flow.stop_reason_for_failure(first)
             elif args.mode == "product":
                 pass  # one page is the whole run — but many rows
             else:
@@ -1633,8 +1638,7 @@ def scrape(args) -> int:
                     failed = [o for o in rest if not o.ok]
                     if failed:
                         worst = min(failed, key=lambda o: o.page_num)
-                        stop_reason = ("page_load_timeout" if worst.load_failed
-                                       else f"blocked_{worst.blocked_by}")
+                        stop_reason = page_flow.stop_reason_for_failure(worst)
                         blocked = any(o.blocked_by for o in rest)
                     elif exhausted:
                         stop_reason = "no_new_products"
@@ -1656,8 +1660,7 @@ def scrape(args) -> int:
                         outcome = _fetch_one_page(session, args, pool, page_num, url)
                         outcomes.append(outcome)
                         if not outcome.ok:
-                            stop_reason = ("page_load_timeout" if outcome.load_failed
-                                           else f"blocked_{outcome.blocked_by}")
+                            stop_reason = page_flow.stop_reason_for_failure(outcome)
                             blocked = outcome.blocked_by is not None
                             break
 
@@ -1695,11 +1698,15 @@ def scrape(args) -> int:
     # At one page at a time the two are identical, which is the point: this is
     # what keeps the output byte-for-byte the same while removing the
     # dependency on arrival order that concurrency would otherwise introduce.
-    all_rows = []
-    merged_seen = set()
-    for oc in sorted(outcomes, key=lambda o: o.page_num):
-        fresh = dedupe_by_key(oc.products, merged_seen, key=dedupe_key)
-        if len(fresh) < len(oc.products):
+    # The same pass builds the sidecar's per-page manifest, so each page's
+    # `rows_added` is computed against the same in-order merge the output
+    # uses — never against concurrent completion order.
+    all_rows, page_manifest = build_page_manifest(outcomes, key=dedupe_key)
+    for entry in page_manifest:
+        returned = entry["products_returned"]
+        if (entry["status"] == page_flow.PAGE_STATUS_CONTENT
+                and returned is not None
+                and entry["rows_added"] < returned):
             # Not necessarily "on an earlier page" — a duplicate can be on
             # this page. This store's pagination was measured NOT repeating:
             # walking the whole catalogue at limit=250 gave 772 rows and 772
@@ -1707,8 +1714,7 @@ def scrape(args) -> int:
             # and a count near the page size means a page was re-fetched
             # rather than advanced.
             logger.info("Page %d: dropped %d duplicate row(s).",
-                        oc.page_num, len(oc.products) - len(fresh))
-        all_rows.extend(fresh)
+                        entry["page"], returned - entry["rows_added"])
 
     # Completeness, checked over the MERGED result rather than per page — a
     # per-page check cannot see a gap BETWEEN two pages, which is exactly
@@ -1814,7 +1820,7 @@ def scrape(args) -> int:
                       pages_failed=failed_pages, mode=args.mode,
                       source=SOURCE_DEFAULT,
                       start_url=args.url, final_url=final_url,
-                      extra=extra)
+                      extra=extra, pages=page_manifest)
 
 
 def parse_args():

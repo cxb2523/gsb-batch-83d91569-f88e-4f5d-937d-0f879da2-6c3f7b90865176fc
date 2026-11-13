@@ -469,6 +469,137 @@ class SolveBudget:
 
 
 # ---------------------------------------------------------------------------
+# Per-page outcome taxonomy — the language of the sidecar's page list
+# ---------------------------------------------------------------------------
+#
+# The internal `state` names describe what the CLASSIFIER saw ("throttled",
+# "captcha", "unknown", ...). A sidecar reader does not want classifier
+# vocabulary — they want six plain answers that name what happened to the
+# page they are looking at. These constants are that vocabulary, and the
+# mapping lives here rather than being restated three times in the engines
+# for the same reason STATE_POLICY is: three copies of an if-chain drift,
+# and the drift is silent.
+#
+# Six answers, deliberately:
+#
+#   content        the store served a listing and it parsed to rows
+#   empty          the store served a listing holding ZERO products — the
+#                  page after the last one. A correct ANSWER and the normal
+#                  end of a run, never retried (see STATE_POLICY["empty"]).
+#   throttled      the edge asked us to slow down (429/503) and the wait
+#                  budget ran out. NOT an empty page and NOT a block: the
+#                  catalogue was never answered.
+#   blocked        a refusal or a challenge widget stood between the run and
+#                  the payload.
+#   load_failed    the page never loaded at all — a navigation timeout, a
+#                  dead proxy, a connection reset.
+#   parse_failed   the payload named products and the parser produced zero
+#                  rows. That is THIS code's bug, not the site's, and the
+#                  page must not be counted as completed.
+PAGE_STATUS_CONTENT = "content"
+PAGE_STATUS_EMPTY = "empty"
+PAGE_STATUS_THROTTLED = "throttled"
+PAGE_STATUS_BLOCKED = "blocked"
+PAGE_STATUS_LOAD_FAILED = "load_failed"
+PAGE_STATUS_PARSE_FAILED = "parse_failed"
+
+# The statuses that mean the page really was fetched and answered: these are
+# the only ones that count toward `pages_completed`. Everything else is a
+# page that was attempted but never yielded its data.
+COMPLETED_PAGE_STATUSES = (PAGE_STATUS_CONTENT, PAGE_STATUS_EMPTY)
+
+# The stop reason that matches each failure-shaped page status, so the
+# sidecar's `stop_reason` can never disagree with its own page list. Kept as
+# data rather than three engines spelling the strings inline.
+STOP_REASON_BY_PAGE_STATUS = {
+    PAGE_STATUS_THROTTLED: "throttled",
+    PAGE_STATUS_BLOCKED: "blocked",
+    PAGE_STATUS_LOAD_FAILED: "page_load_timeout",
+    PAGE_STATUS_PARSE_FAILED: "parser_found_nothing",
+}
+
+
+def page_status(outcome) -> str:
+    """Name what finally happened to one fetched page, in sidecar vocabulary.
+
+    `outcome` is an engine's PageOutcome (duck-typed: every engine's carries
+    the same fields). The ordering matters — a parse failure, for example,
+    leaves `ok` True, so it must be read before the generic success branch.
+    """
+    state = getattr(outcome, "state", None)
+    if state == "parse_failed":
+        return PAGE_STATUS_PARSE_FAILED
+    if state == "throttled":
+        # The engines set `load_failed` on a throttle whose wait budget is
+        # exhausted, but a throttle is its own answer: reporting it as a
+        # generic load failure would hide the one fact the reader needs,
+        # which is that waiting longer (or coming back later) is the remedy.
+        return PAGE_STATUS_THROTTLED
+    if getattr(outcome, "blocked_by", None) is not None:
+        return PAGE_STATUS_BLOCKED
+    if getattr(outcome, "load_failed", False):
+        return PAGE_STATUS_LOAD_FAILED
+    if state == "empty":
+        return PAGE_STATUS_EMPTY
+    return PAGE_STATUS_CONTENT
+
+
+def page_failure_reason(outcome) -> Optional[str]:
+    """The human-readable reason a non-OK page did not yield its data.
+
+    None for a page that answered (content/empty). Engines already record
+    the detail — the classifier's marker, the block vendor or the throttle
+    status — so this reads what is there rather than inventing a wording.
+    """
+    status = page_status(outcome)
+    if status in COMPLETED_PAGE_STATUSES:
+        return None
+    if status == PAGE_STATUS_PARSE_FAILED:
+        return ("the response named product handles but the parser produced "
+                "zero rows")
+    if status == PAGE_STATUS_THROTTLED:
+        return "rate-limited by the edge; throttle wait budget exhausted"
+    if status == PAGE_STATUS_BLOCKED:
+        blocked_by = getattr(outcome, "blocked_by", None)
+        return "blocked%s" % (": %s" % blocked_by if blocked_by else "")
+    # load_failed
+    state = getattr(outcome, "state", None)
+    if state and state not in ("ok", None):
+        return "page failed to load (last state: %s)" % state
+    return "page failed to load (navigation/transport error)"
+
+
+def stop_reason_for_failure(outcome) -> str:
+    """The stop reason a failed page implies, matching its page-list status."""
+    return STOP_REASON_BY_PAGE_STATUS[page_status(outcome)]
+
+
+def reconcile_stop_reason(stop_reason: str, page_entries) -> str:
+    """Make a run's stop_reason consistent with its per-page list.
+
+    The page list is the evidence; a stop reason copied from loop control can
+    disagree with it (a throttle recorded as `page_load_timeout`, a parse
+    failure still counted as `completed`). Rules, in order:
+
+      1. A failed page always wins, and its reason names the fault — a
+         throttle says `throttled` so the run can never look complete.
+      2. The final attempted page being empty, or adding no new rows, is the
+         listing's own end: `no_new_products`, a COMPLETE stop.
+      3. Otherwise the loop's own reason stands (e.g. `completed`,
+         `page_cap_reached`, `single_page_mode`).
+    """
+    for entry in page_entries:
+        status = entry["status"]
+        if status not in COMPLETED_PAGE_STATUSES:
+            return STOP_REASON_BY_PAGE_STATUS[status]
+    if page_entries:
+        last = page_entries[-1]
+        if last["status"] == PAGE_STATUS_EMPTY or last["rows_added"] == 0:
+            return "no_new_products"
+    return stop_reason
+
+
+# ---------------------------------------------------------------------------
 # Pagination
 # ---------------------------------------------------------------------------
 

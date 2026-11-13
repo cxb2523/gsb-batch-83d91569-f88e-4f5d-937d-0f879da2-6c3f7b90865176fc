@@ -130,7 +130,7 @@ from product_parser import (DEFAULT_LOCALE, DEFAULT_MODE, PAGE_SIZE,
                             payload_currency, product_link_count,
                             product_url, references_own_assets,
                             search_endpoint)
-from output_writer import (dedupe_by_key, finish_run, EXIT_API_ERROR,
+from output_writer import (build_page_manifest, finish_run, EXIT_API_ERROR,
                            SOURCE_DEFAULT)
 import page_flow
 from page_flow import MIN_CARD_MATCHES
@@ -807,6 +807,12 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     # keeps coming back as a challenge would otherwise buy one solve per
     # rotation, which is how a run quietly turns into a bill.
     budget = page_flow.SolveBudget()
+    # A throttle waits out its OWN budget at the same exit — see the
+    # Playwright engine's identical loop. Selenium cannot read a status or a
+    # Retry-After header (chromedriver exposes neither), so the backoff is
+    # always page_flow's own; the body marker is what gets the page
+    # classified `throttled` in the first place.
+    throttle_waits = 0
 
     for block_attempt in range(block_retries + 1):
         logger.info("Fetching page %d/%d: %s", page_num, args.pages, url)
@@ -858,6 +864,31 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
 
         html = _snapshot(session, url) or ""
         state = page_flow.classify(html, status, d["current_url"]())
+
+        # A throttle is not a block and not a transient fault: re-asking at
+        # once is what caused it. Wait out a budget of its own — never
+        # rotating, never solving — so it does not eat `--retries`, and so a
+        # page that stays throttled is REPORTED as a throttle rather than
+        # retried into an empty-looking failure. Mirrors playwright_scraper.
+        if state == "throttled":
+            if throttle_waits < page_flow.THROTTLE_WAITS:
+                pause = page_flow.throttle_pause(None, throttle_waits + 1)
+                throttle_waits += 1
+                logger.warning("The edge is throttling. Waiting %.0fs at the "
+                               "same exit and asking again (%d/%d) — this is "
+                               "not a block and a different address would not "
+                               "help.", pause, throttle_waits,
+                               page_flow.THROTTLE_WAITS)
+                time.sleep(pause)
+                continue
+            logger.error("Still throttled after %d wait(s). Reporting it as a "
+                         "throttle rather than as an empty catalogue: the "
+                         "store never answered this page.",
+                         page_flow.THROTTLE_WAITS)
+            outcome.load_failed = True
+            outcome.state = "throttled"
+            outcome.final_url = d["current_url"]()
+            return outcome
 
         # A JSON endpoint arrives complete, so a listing is parseable in the
         # FIRST response and there is nothing to wait for on a healthy page.
@@ -1198,13 +1229,12 @@ def scrape(args) -> int:
         outcomes.append(first)
 
         if not first.ok:
-            stop_reason = ("page_load_timeout" if first.load_failed
-                           else f"blocked_{first.blocked_by}")
+            stop_reason = page_flow.stop_reason_for_failure(first)
             blocked = first.blocked_by is not None
         elif first.state == "parse_failed":
             # Served, linked to products, parsed to nothing: OUR bug, and it
             # must not reach the sidecar as a complete run.
-            stop_reason = "parser_found_nothing"
+            stop_reason = page_flow.stop_reason_for_failure(first)
         elif args.mode != "product":
             seen_keys.update(p.sku for p in first.products if p.sku is not None)
 
@@ -1247,8 +1277,7 @@ def scrape(args) -> int:
                 outcome = _fetch_one_page(session, args, pool, page_num, url)
                 outcomes.append(outcome)
                 if not outcome.ok:
-                    stop_reason = ("page_load_timeout" if outcome.load_failed
-                                   else f"blocked_{outcome.blocked_by}")
+                    stop_reason = page_flow.stop_reason_for_failure(outcome)
                     blocked = outcome.blocked_by is not None
                     break
 
@@ -1269,14 +1298,18 @@ def scrape(args) -> int:
         if session is not None:
             session.close()
 
-    all_rows = []
-    merged_seen = set()
-    for oc in sorted(outcomes, key=lambda o: o.page_num):
-        fresh = dedupe_by_key(oc.products, merged_seen, key=dedupe_key)
-        if len(fresh) < len(oc.products):
+    # Merge once, in PAGE order. The same pass builds the sidecar's per-page
+    # manifest, so each page's `rows_added` is computed against the same
+    # in-order dedupe the output uses, with both in-page and cross-page
+    # duplicates counted.
+    all_rows, page_manifest = build_page_manifest(outcomes, key=dedupe_key)
+    for entry in page_manifest:
+        returned = entry["products_returned"]
+        if (entry["status"] == page_flow.PAGE_STATUS_CONTENT
+                and returned is not None
+                and entry["rows_added"] < returned):
             logger.info("Page %d: dropped %d duplicate row(s).",
-                        oc.page_num, len(oc.products) - len(fresh))
-        all_rows.extend(fresh)
+                        entry["page"], returned - entry["rows_added"])
 
     # Completeness, checked over the MERGED result rather than per page — a
     # per-page check cannot see a gap BETWEEN two pages, which is exactly
@@ -1367,7 +1400,7 @@ def scrape(args) -> int:
                       pages_failed=failed_pages, mode=args.mode,
                       source=SOURCE_DEFAULT,
                       start_url=args.url, final_url=final_url,
-                      extra=extra)
+                      extra=extra, pages=page_manifest)
 
 
 def parse_args():

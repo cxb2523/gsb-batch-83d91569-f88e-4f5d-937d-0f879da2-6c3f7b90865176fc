@@ -285,8 +285,18 @@ things in the two modes, and `diff_runs.py` refuses to compare them.
 
 Every run writes `<out>.meta.json` beside the data with `status`,
 `stop_reason`, which pages failed by number, the market, the currency and its
-source. **A failed run writes nothing** — last night's good output is never
-replaced with `[]` (`--allow-empty` opts out).
+source. It also carries a per-page list (`pages`), one entry for every page
+the run actually attempted and ordered by page number. Each entry records the
+page, its final status — `content`, `empty`, `throttled`, `blocked`,
+`load_failed` or `parse_failed` — the raw number of entries in that page's
+response array, how many rows it added to the merged output (in-page and
+cross-page duplicates already removed), and its failure reason when it did
+not answer. That list is what lets a reader tell the listing simply ending
+(the last page empty or adding nothing) apart from a throttle that used up
+its wait budget or a page the parser could not read; `stop_reason` and the
+status counts are reconciled against it. **A failed run writes nothing** —
+last night's good output is never replaced with `[]`
+(`--allow-empty` opts out).
 
 **Exit codes:** `0` ok · `1` crash · `2` bad usage · `3` blocked ·
 `4` zero products · `5` no rows, the content was never obtained (a

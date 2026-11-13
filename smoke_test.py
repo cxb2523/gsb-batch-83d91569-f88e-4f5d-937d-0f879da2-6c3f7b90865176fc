@@ -4433,6 +4433,476 @@ _PRIVATE_CITATIONS = ("CLAUDE" + ".md", "claude" + "_2scraper",
 _SECTION_REF = re.compile("\u00a7" + r"\s?\d")
 
 
+# ---------------------------------------------------------------------------
+# The sidecar's per-page manifest — driven entirely offline over synthetic
+# listing payloads built locally. Nothing here opens a socket: the rows come
+# from product_parser over JSON strings, the pages are plain outcome objects,
+# and the sidecar is written into a TemporaryDirectory.
+# ---------------------------------------------------------------------------
+
+# A collection endpoint under test. The host is only ever a string here.
+_MANIFEST_URL = "https://andieswim.com/collections/demo-collection"
+
+
+def _synthetic_listing(ids, *, handle_prefix="item"):
+    """A store-shaped products.json payload holding exactly `ids`.
+
+    Built locally rather than read from a capture, so these tests own their
+    fixtures and never depend on the network or on a saved file. Only the
+    keys product_parser reads are supplied.
+    """
+    products = []
+    for product_id in ids:
+        products.append({
+            "id": product_id,
+            "title": "Item %s" % product_id,
+            "handle": "%s-%s" % (handle_prefix, product_id),
+            "vendor": "Andie",
+            "product_type": "One Piece",
+            "variants": [{
+                "id": product_id * 10,
+                "title": "DEFAULT",
+                "sku": "SKU-%s" % product_id,
+                "available": True,
+                "price": "100.00",
+            }],
+        })
+    return json.dumps({"products": products})
+
+
+def _parsed_page(page_num, ids):
+    """Parse one synthetic payload the way an engine would, returning
+    (rows, products_returned) for a PageOutcome."""
+    import product_parser as P
+    text = _synthetic_listing(ids)
+    listing = P.parse_listing(text, _MANIFEST_URL, page=page_num)
+    return listing.rows, listing.products_returned
+
+
+class _Outcome:
+    """A stand-in for an engine PageOutcome: same field names, no engine."""
+
+    def __init__(self, page_num, *, state="content", products=None,
+                 products_returned=None, blocked_by=None, load_failed=False):
+        self.page_num = page_num
+        self.url = "%s?page=%d" % (_MANIFEST_URL, page_num)
+        self.final_url = self.url
+        self.products = products or []
+        self.state = state
+        self.products_returned = products_returned
+        self.blocked_by = blocked_by
+        self.load_failed = load_failed
+
+
+def _content_outcome(page_num, ids):
+    rows, returned = _parsed_page(page_num, ids)
+    return _Outcome(page_num, state="content", products=rows,
+                    products_returned=returned)
+
+
+def _run_to_sidecar(outcomes, *, stop_reason, tmp, blocked=False):
+    """Merge outcomes and write a real sidecar, exactly as an engine does,
+    then read it back. Returns (rows, meta)."""
+    import output_writer as ow
+    rows, pages = ow.build_page_manifest(outcomes, key="sku")
+    with redirect_stdout(io.StringIO()):
+        ow.finish_run(
+            rows, os.path.join(tmp, "run"), "json", False,
+            blocked=blocked, stop_reason=stop_reason,
+            pages_requested=len(outcomes),
+            pages_completed=len(outcomes),
+            start_url=_MANIFEST_URL, final_url=_MANIFEST_URL,
+            mode="listing", pages=pages)
+    meta = json.load(open(os.path.join(tmp, "run.meta.json"),
+                          encoding="utf-8"))
+    return rows, meta
+
+
+def _manifest_by_page(meta):
+    return {entry["page"]: entry for entry in meta["pages"]}
+
+
+def check_page_manifest_covers_a_normal_multi_page_run_with_duplicates():
+    """Three content pages with BOTH in-page and cross-page repeats.
+
+    Page 1: ids 1,2,3 (plus an in-page duplicate of 1). Page 2: 3,4,5 —
+    id 3 already seen on page 1. Page 3: 6,7. The manifest must be in page
+    order, report each page's raw array length, and count rows_added against
+    the in-order merge regardless of any completion ordering.
+    """
+    import output_writer as ow
+    import page_flow
+
+    p1_rows, p1_returned = _parsed_page(1, [1, 2, 3])
+    # Repeat id 1 WITHIN page 1 by appending the parsed row a second time:
+    # the raw array really held four entries, but only three are distinct.
+    p1_dupe = _Outcome(1, state="content",
+                       products=p1_rows + [p1_rows[0]],
+                       products_returned=p1_returned + 1)
+    p2 = _content_outcome(2, [3, 4, 5])   # id 3 is a cross-page duplicate
+    p3 = _content_outcome(3, [6, 7])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        rows, meta = _run_to_sidecar([p1_dupe, p2, p3],
+                                     stop_reason="completed", tmp=tmp)
+
+    pages = meta["pages"]
+    equal("manifest: one entry per attempted page",
+          [e["page"] for e in pages], [1, 2, 3])
+    check("manifest: entries are ordered by page, not completion",
+          all(pages[i]["page"] < pages[i + 1]["page"]
+              for i in range(len(pages) - 1)))
+    by_page = _manifest_by_page(meta)
+
+    equal("page 1 raw array held 4 entries (the duplicate included)",
+          by_page[1]["products_returned"], 4)
+    equal("page 1 added 3 rows after the in-page duplicate was dropped",
+          by_page[1]["rows_added"], 3)
+    equal("page 2 raw array held 3 entries",
+          by_page[2]["products_returned"], 3)
+    equal("page 2 added only 2 rows — id 3 was already on page 1",
+          by_page[2]["rows_added"], 2)
+    equal("page 3 raw array held 2 entries",
+          by_page[3]["products_returned"], 2)
+    equal("page 3 added both", by_page[3]["rows_added"], 2)
+    check("every attempted page reports a content status",
+          all(e["status"] == page_flow.PAGE_STATUS_CONTENT for e in pages))
+    check("successful pages carry no error",
+          all(e["error"] is None for e in pages))
+    equal("the merged output holds exactly the distinct rows",
+          len(rows), 3 + 2 + 2)
+    equal("rows_added sums to the merged row count",
+          sum(e["rows_added"] for e in pages), len(rows))
+    # Determinism: feeding the same outcomes shuffled must produce the same
+    # rows and the same per-page counts — the merge cannot depend on order.
+    shuffled_rows, shuffled_pages = ow.build_page_manifest(
+        [p3, p1_dupe, p2], key="sku")
+    equal("merge is independent of arrival order (rows)",
+          [r.sku for r in shuffled_rows], [r.sku for r in rows])
+    equal("merge is independent of arrival order (per-page counts)",
+          {e["page"]: e["rows_added"] for e in shuffled_pages},
+          {e["page"]: e["rows_added"] for e in pages})
+    equal("a healthy run is complete", meta["status"], "complete")
+    equal("...and reports no failed pages", meta["pages_failed"], [])
+    equal("...with every page completed", meta["pages_completed"], 3)
+
+
+def check_page_manifest_marks_an_empty_final_page_as_the_listing_end():
+    """An empty page is a normal ANSWER and the end of the listing.
+
+    It must not be retried into a failure, must not look throttled, and the
+    reconciled stop reason must name the data-based end while the run stays
+    complete.
+    """
+    import page_flow
+    p1 = _content_outcome(1, [1, 2])
+    empty = _Outcome(2, state="empty", products=[], products_returned=0)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # Hand in the loop's own generic reason; reconciliation must turn it
+        # into the data-based end reason because the last page is empty.
+        rows, meta = _run_to_sidecar([p1, empty],
+                                     stop_reason="completed", tmp=tmp)
+
+    by_page = _manifest_by_page(meta)
+    equal("the empty page records zero raw entries",
+          by_page[2]["products_returned"], 0)
+    equal("the empty page added no rows", by_page[2]["rows_added"], 0)
+    equal("an empty page has the empty status, not a failure status",
+          by_page[2]["status"], page_flow.PAGE_STATUS_EMPTY)
+    check("an empty page carries no error", by_page[2]["error"] is None)
+    equal("the stop reason reflects the listing's own end",
+          meta["stop_reason"], "no_new_products")
+    equal("reaching the end is a COMPLETE run", meta["status"], "complete")
+    equal("an empty page still counts as a completed page",
+          meta["pages_completed"], 2)
+    equal("and is not a failed page", meta["pages_failed"], [])
+    equal("the two real rows are still written", len(rows), 2)
+
+    # A final page that returned products but added nothing new (pagination
+    # looping onto already-seen handles) is the same end condition.
+    looped = _content_outcome(2, [1, 2])
+    with tempfile.TemporaryDirectory() as tmp:
+        _, meta2 = _run_to_sidecar([p1, looped],
+                                   stop_reason="completed", tmp=tmp)
+    equal("a no-new-rows final page also ends the listing",
+          meta2["stop_reason"], "no_new_products")
+    equal("...and stays complete", meta2["status"], "complete")
+    equal("its rows_added is zero even though the array held entries",
+          _manifest_by_page(meta2)[2]["rows_added"], 0)
+
+
+def check_page_manifest_marks_a_throttle_that_exhausted_its_wait_budget():
+    """A throttle whose wait budget ran out is NOT an empty directory.
+
+    The page keeps the rows already gathered, reports a `throttled` status,
+    points the stop reason at the throttle, and the run is partial rather
+    than complete. Its products_returned is null because no listing payload
+    was ever answered.
+    """
+    import page_flow
+    p1 = _content_outcome(1, [1, 2])
+    throttled = _Outcome(2, state="throttled", products=[],
+                         products_returned=None, load_failed=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        rows, meta = _run_to_sidecar(
+            [p1, throttled], stop_reason="page_load_timeout", tmp=tmp)
+
+    by_page = _manifest_by_page(meta)
+    equal("the throttled page keeps its throttle status",
+          by_page[2]["status"], page_flow.PAGE_STATUS_THROTTLED)
+    check("a throttle never fabricates an empty array count",
+          by_page[2]["products_returned"] is None)
+    equal("a throttle adds no rows", by_page[2]["rows_added"], 0)
+    check("the error names rate limiting",
+          "throttl" in (by_page[2]["error"] or "").lower()
+          or "rate" in (by_page[2]["error"] or "").lower(),
+          by_page[2]["error"])
+    equal("the stop reason points at the throttle",
+          meta["stop_reason"], "throttled")
+    equal("a throttled run is NOT complete", meta["status"], "partial")
+    equal("the throttled page is listed among the failed pages",
+          meta["pages_failed"], [2])
+    equal("only page 1 counts as completed", meta["pages_completed"], 1)
+    equal("rows gathered before the throttle are still written", len(rows), 2)
+
+    # And the unit-level mapping must never confuse throttle with load fail.
+    equal("a throttled outcome maps to the throttle status",
+          page_flow.page_status(throttled),
+          page_flow.PAGE_STATUS_THROTTLED)
+    equal("its implied stop reason is the throttle one",
+          page_flow.stop_reason_for_failure(throttled), "throttled")
+
+
+def check_page_manifest_marks_a_parse_failure_and_excludes_it_from_completed():
+    """A payload that names product handles but parses to zero rows.
+
+    That is OUR parser's fault. The page records the raw array length, a
+    parse_failed status and a reason; it does not count as a completed page;
+    and the stop reason says parser_found_nothing so the run cannot read as
+    complete or as an empty catalogue.
+    """
+    import page_flow
+    import product_parser as P
+    p1 = _content_outcome(1, [1, 2])
+
+    # The shape a future top-level key rename takes: the entries (and their
+    # handles) are present, but the key the parser reads is gone.
+    broken_payload = json.dumps({
+        "items": json.loads(_synthetic_listing([10, 11, 12]))["products"]
+    })
+    broken_rows = P.parse_products(broken_payload, _MANIFEST_URL)
+    links = P.product_link_count(broken_payload)
+    check("the broken payload really parses to zero rows",
+          broken_rows == [])
+    check("and really names multiple product handles", links >= 2, links)
+    check("the page-flow rule recognises this as a parse failure",
+          page_flow.looks_like_a_parse_failure("content", 0, links))
+
+    # An engine sets state=parse_failed while products_returned still holds
+    # the raw array length, because the payload was read before parsing.
+    parse_failed = _Outcome(2, state="parse_failed", products=[],
+                            products_returned=3)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        rows, meta = _run_to_sidecar(
+            [p1, parse_failed], stop_reason="completed", tmp=tmp)
+
+    by_page = _manifest_by_page(meta)
+    equal("the page keeps the raw array length even though nothing parsed",
+          by_page[2]["products_returned"], 3)
+    equal("it added zero rows", by_page[2]["rows_added"], 0)
+    equal("its status is parse_failed",
+          by_page[2]["status"], page_flow.PAGE_STATUS_PARSE_FAILED)
+    check("its error explains the parser fault",
+          "pars" in (by_page[2]["error"] or "").lower(), by_page[2]["error"])
+    equal("the stop reason names the parser fault",
+          meta["stop_reason"], "parser_found_nothing")
+    equal("a parse failure cannot be a complete run",
+          meta["status"], "partial")
+    equal("the failed page is NOT counted as completed",
+          meta["pages_completed"], 1)
+    equal("the failed page IS listed in pages_failed",
+          meta["pages_failed"], [2])
+    equal("the good page's rows are still written", len(rows), 2)
+    equal("the parse-failed outcome maps to the parse_failed status",
+          page_flow.page_status(parse_failed),
+          page_flow.PAGE_STATUS_PARSE_FAILED)
+
+
+def check_page_manifest_distinguishes_blocked_and_load_failed():
+    """The two transport-shaped failures the six-status taxonomy separates.
+
+    A block carries a vendor/refusal reason; a load failure carries none.
+    Both are non-completed pages with a null raw count, but their statuses
+    and reasons differ.
+    """
+    import page_flow
+    blocked = _Outcome(2, state="blocked", products=[],
+                       products_returned=None,
+                       blocked_by="edge refusal")
+    load_failed = _Outcome(3, state=None, products=[],
+                           products_returned=None, load_failed=True)
+    equal("a blocked outcome maps to blocked",
+          page_flow.page_status(blocked), page_flow.PAGE_STATUS_BLOCKED)
+    equal("a load failure maps to load_failed",
+          page_flow.page_status(load_failed),
+          page_flow.PAGE_STATUS_LOAD_FAILED)
+    check("the blocked reason names the refuser",
+          "edge refusal" in (page_flow.page_failure_reason(blocked) or ""))
+    check("the load-failure reason says it did not load",
+          "load" in (page_flow.page_failure_reason(load_failed) or "").lower())
+    equal("blocked implies the blocked stop reason",
+          page_flow.stop_reason_for_failure(blocked), "blocked")
+    equal("load failure implies the timeout stop reason",
+          page_flow.stop_reason_for_failure(load_failed),
+          "page_load_timeout")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # Rows from an earlier good page survive a later block, and the run
+        # is partial with the block reconciled into the stop reason.
+        good = _content_outcome(1, [1])
+        rows, meta = _run_to_sidecar(
+            [good, blocked], stop_reason="completed", tmp=tmp, blocked=True)
+    equal("a block after a good page keeps the gathered rows", len(rows), 1)
+    equal("the reconciled reason is the block, not the loop's placeholder",
+          meta["stop_reason"], "blocked")
+    equal("the run is partial", meta["status"], "partial")
+    equal("the blocked page is failed", meta["pages_failed"], [2])
+
+
+def check_a_concurrent_parse_failure_does_not_stop_dispatch_as_empty():
+    """In the concurrent path a parse_failed page is ok=True with zero rows.
+
+    The dispatcher's end-of-listing tripwire must fire ONLY on a genuinely
+    EMPTY served page; otherwise one parser fault would halt every remaining
+    worker and the run would look as if the catalogue simply ended.
+    """
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+
+    class Args:
+        delay = 0
+        retries = 1
+        retry_delay = 0
+        out = "unused"
+        mode = "listing"
+        sort = "a-z"
+        pages = 10
+
+    def fake_fetch(session, args, pool, page_num, url):
+        outcome = engine.PageOutcome(page_num=page_num, url=url)
+        if page_num == 4:
+            # Served, names products, but the parser produced nothing.
+            outcome.products = []
+            outcome.state = "parse_failed"
+            outcome.products_returned = 3
+        else:
+            outcome.products = [object()] * 5
+            outcome.state = "content"
+            outcome.products_returned = 5
+        return outcome
+
+    class FakeSession:
+        def __init__(self, *a, **k):
+            self.pool = None
+
+        def open(self):
+            return self
+
+        def close(self):
+            pass
+
+    class FakePlaywright:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *a):
+            return False
+
+    real_fetch = engine._fetch_one_page
+    real_session = engine._BrowserSession
+    real_pw = engine.sync_playwright
+    engine._fetch_one_page = fake_fetch
+    engine._BrowserSession = FakeSession
+    engine.sync_playwright = lambda: FakePlaywright()
+    try:
+        specs = [(n, "u%d" % n) for n in range(2, 9)]
+        results, unattempted, exhausted = engine._fetch_pages_concurrently(
+            Args(), None, specs, 3)
+    finally:
+        engine._fetch_one_page = real_fetch
+        engine._BrowserSession = real_session
+        engine.sync_playwright = real_pw
+
+    check("a parse failure does NOT trip the empty-page stop", not exhausted)
+    fetched = sorted(o.page_num for o in results)
+    check("dispatch continued past the parse-failed page",
+          4 in fetched and fetched[-1] >= 8, fetched)
+    failed_page = next(o for o in results if o.page_num == 4)
+    equal("the failed page keeps its parse_failed state for the manifest",
+          failed_page.state, "parse_failed")
+
+
+def check_every_engine_page_outcome_feeds_the_manifest():
+    """The manifest builder must understand EACH engine's own PageOutcome.
+
+    The three engines define the dataclass separately (the driver import
+    keeps one shared class out), so this constructs the real class from each
+    engine through the stubbed loader and walks all six manifest statuses,
+    proving a reader gets the same six answers regardless of which engine
+    produced the run.
+    """
+    import output_writer as ow
+    import page_flow
+
+    rows1, returned1 = _parsed_page(1, [1, 2])
+
+    def make_outcomes(mod):
+        OC = mod.PageOutcome
+        content = OC(page_num=1, url="u1", products=rows1,
+                     state="content", products_returned=returned1)
+        empty = OC(page_num=2, url="u2", products=[], state="empty",
+                   products_returned=0)
+        throttled = OC(page_num=3, url="u3", products=[], state="throttled",
+                       products_returned=None, load_failed=True)
+        blocked = OC(page_num=4, url="u4", products=[], state="blocked",
+                     products_returned=None, blocked_by="edge refusal")
+        load_failed = OC(page_num=5, url="u5", products=[], state=None,
+                         products_returned=None, load_failed=True)
+        parse_failed = OC(page_num=6, url="u6", products=[],
+                          state="parse_failed", products_returned=3)
+        return [content, empty, throttled, blocked, load_failed, parse_failed]
+
+    expected = [page_flow.PAGE_STATUS_CONTENT, page_flow.PAGE_STATUS_EMPTY,
+                page_flow.PAGE_STATUS_THROTTLED, page_flow.PAGE_STATUS_BLOCKED,
+                page_flow.PAGE_STATUS_LOAD_FAILED,
+                page_flow.PAGE_STATUS_PARSE_FAILED]
+    for name in ENGINES:
+        mod = _load_engine_stubbed(name)
+        outcomes = make_outcomes(mod)
+        rows, pages = ow.build_page_manifest(outcomes, key="sku")
+        got = [e["status"] for e in pages]
+        equal("%s: all six manifest statuses from its real PageOutcome"
+              % name, got, expected)
+        equal("%s: manifest stays in page order" % name,
+              [e["page"] for e in pages], [1, 2, 3, 4, 5, 6])
+        equal("%s: only the content page adds rows" % name,
+              [e["rows_added"] for e in pages],
+              [2, 0, 0, 0, 0, 0])
+        equal("%s: raw counts survive, null where no payload was read" % name,
+              [e["products_returned"] for e in pages],
+              [returned1, 0, None, None, None, 3])
+        # Every non-answer page carries a reason; the two answer pages do not.
+        equal("%s: error is null exactly on content/empty" % name,
+              [e["error"] is None for e in pages],
+              [True, True, False, False, False, False])
+        equal("%s: merged output keeps only the good rows" % name,
+              len(rows), 2)
+
+
 def check_no_private_citations_in_shipped_files():
     """Public files state their rules in their own words.
 
