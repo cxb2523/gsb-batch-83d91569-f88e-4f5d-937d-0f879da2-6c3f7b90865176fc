@@ -24,12 +24,18 @@ from homeassistant.components.frontend import (
     DATA_EXTRA_MODULE_URL,
     UrlManager,
 )
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components import eink_dashboard as eink_init
 from custom_components.eink_dashboard import (
+    CALENDAR_FETCH_FAILED,
+    CALENDAR_FETCH_MISSING,
+    CALENDAR_FETCH_SUCCESS,
+    WEEK_CALENDAR_WINDOW_DAYS,
+    CalendarFetchOutcome,
     _async_get_locale,
     _enrich_display_precision,
     _enrich_entity_icons,
@@ -39,6 +45,7 @@ from custom_components.eink_dashboard import (
     async_setup,
     async_setup_entry,
     async_unload_entry,
+    collect_calendar_outcomes,
 )
 from custom_components.eink_dashboard.battery import resolve_battery_level
 from custom_components.eink_dashboard.const import DOMAIN, NumberFormat
@@ -842,15 +849,260 @@ class TestCalendarFetchers:
         assert "week_events" not in states["calendar.bad"]["attributes"]
         assert states["calendar.good"]["attributes"]["week_events"]
 
-    async def test_processing_errors_are_not_swallowed(self) -> None:
-        # Only the service call is guarded: a snapshot entry without
-        # "attributes" is a bug and must surface.
+    async def test_processing_error_stays_per_source(self) -> None:
+        # A snapshot entry without "attributes" is a data bug, but the
+        # collection must contain it per source: the calendar reports a
+        # failed outcome instead of taking down the whole render.
         hass = self._hass()
         states: dict[str, Any] = {"calendar.home": {"state": "off"}}
         widgets = [{"type": "week_calendar", "entity": "calendar.home"}]
 
-        with pytest.raises(KeyError):
-            await _fetch_week_calendar_events(hass, widgets, states)
+        outcomes = await collect_calendar_outcomes(hass, widgets, states)
+
+        assert len(outcomes) == 1
+        assert outcomes[0].entity_id == "calendar.home"
+        assert outcomes[0].status == CALENDAR_FETCH_FAILED
+        assert outcomes[0].reason
+
+    async def test_two_calendars_one_failure_keeps_success_and_reason(
+        self,
+    ) -> None:
+        # One good and one failing calendar: the good one's events are
+        # still written, and the outcomes carry the failure reason while
+        # staying sorted by entity ID.
+        async def call(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            entity_id = args[2]["entity_id"]
+            if entity_id == "calendar.bad":
+                raise HomeAssistantError("service down")
+            return {
+                entity_id: {
+                    "events": [
+                        {
+                            "start": "2026-10-19T10:00:00",
+                            "end": "2026-10-19T11:00:00",
+                            "summary": "Meeting",
+                        }
+                    ]
+                }
+            }
+
+        hass = MagicMock()
+        hass.services.async_call = AsyncMock(side_effect=call)
+        states = {
+            "calendar.bad": {"state": "off", "attributes": {}},
+            "calendar.good": {"state": "off", "attributes": {}},
+        }
+        widgets = [
+            {"type": "calendar", "entity": "calendar.bad"},
+            {
+                "type": "calendar",
+                "entity": "calendar.good",
+                "days_ahead": 14,
+            },
+        ]
+
+        outcomes = await collect_calendar_outcomes(hass, widgets, states)
+
+        # The successful calendar kept its events and is untouched by
+        # the other one's failure.
+        assert states["calendar.good"]["attributes"]["events"] == [
+            {
+                "start": "2026-10-19T10:00:00",
+                "end": "2026-10-19T11:00:00",
+                "summary": "Meeting",
+            }
+        ]
+        assert "events" not in states["calendar.bad"]["attributes"]
+        assert [outcome.entity_id for outcome in outcomes] == [
+            "calendar.bad",
+            "calendar.good",
+        ]
+        failed, succeeded = outcomes
+        assert failed.status == CALENDAR_FETCH_FAILED
+        assert "service down" in (failed.reason or "")
+        assert failed.window_days == 7
+        assert succeeded.status == CALENDAR_FETCH_SUCCESS
+        assert succeeded.reason is None
+        assert succeeded.window_days == 14
+
+    async def test_shared_entity_is_fetched_once_with_widest_window(
+        self,
+    ) -> None:
+        # The same entity referenced by two calendar widgets triggers
+        # exactly one service call and uses the largest days_ahead.
+        hass = self._hass()
+        states = self._states()
+        widgets = [
+            {"type": "calendar", "entity": "calendar.home", "days_ahead": 3},
+            {"type": "calendar", "entity": "calendar.home", "days_ahead": 30},
+        ]
+
+        outcomes = await collect_calendar_outcomes(hass, widgets, states)
+
+        assert hass.services.async_call.await_count == 1
+        data = hass.services.async_call.await_args.args[2]
+        start = dt.datetime.fromisoformat(data["start_date_time"])
+        end = dt.datetime.fromisoformat(data["end_date_time"])
+        assert (end - start).days == 30
+        assert outcomes == [
+            CalendarFetchOutcome(
+                "calendar.home", 30, CALENDAR_FETCH_SUCCESS, None
+            )
+        ]
+
+    async def test_shared_entity_across_widget_types_one_call(self) -> None:
+        # An entity used by both a calendar and a week calendar is
+        # fetched once and feeds both attribute keys.
+        hass = self._hass()
+        states = self._states()
+        widgets = [
+            {"type": "calendar", "entity": "calendar.home", "days_ahead": 5},
+            {"type": "week_calendar", "entity": "calendar.home"},
+        ]
+
+        outcomes = await collect_calendar_outcomes(hass, widgets, states)
+
+        assert hass.services.async_call.await_count == 1
+        attrs = states["calendar.home"]["attributes"]
+        assert "events" in attrs
+        assert "week_events" in attrs
+        assert outcomes == [
+            CalendarFetchOutcome(
+                "calendar.home",
+                WEEK_CALENDAR_WINDOW_DAYS,
+                CALENDAR_FETCH_SUCCESS,
+                None,
+            )
+        ]
+
+    async def test_shared_entity_filters_past_events_from_calendar_key(
+        self,
+    ) -> None:
+        # The single union-window fetch feeds the full list to
+        # week_events but only upcoming events to the calendar's
+        # forward-only "events" key.
+        past = {
+            "start": "2000-01-01T08:00:00",
+            "end": "2000-01-01T09:00:00",
+            "summary": "Past",
+        }
+        future = {
+            "start": "2999-01-01T08:00:00",
+            "end": "2999-01-01T09:00:00",
+            "summary": "Future",
+        }
+        hass = MagicMock()
+        hass.services.async_call = AsyncMock(
+            return_value={"calendar.home": {"events": [past, future]}}
+        )
+        states = self._states()
+        widgets = [
+            {"type": "calendar", "entity": "calendar.home", "days_ahead": 5},
+            {"type": "week_calendar", "entity": "calendar.home"},
+        ]
+
+        await collect_calendar_outcomes(hass, widgets, states)
+
+        assert hass.services.async_call.await_count == 1
+        attrs = states["calendar.home"]["attributes"]
+        assert attrs["week_events"] == [past, future]
+        assert attrs["events"] == [future]
+
+    async def test_missing_entity_is_reported_without_service_call(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # An entity absent from the states snapshot is reported as
+        # missing, keeps the warning log and never calls the service.
+        hass = self._hass()
+        states: dict[str, Any] = {}
+        widgets = [
+            {"type": "calendar", "entity": "calendar.gone", "days_ahead": 9}
+        ]
+
+        outcomes = await collect_calendar_outcomes(hass, widgets, states)
+
+        hass.services.async_call.assert_not_awaited()
+        assert outcomes == [
+            CalendarFetchOutcome(
+                "calendar.gone", 9, CALENDAR_FETCH_MISSING, None
+            )
+        ]
+        assert "calendar.gone" in caplog.text
+        assert "not in the states snapshot" in caplog.text
+
+    async def test_missing_week_entity_uses_week_window(self) -> None:
+        # A missing entity referenced only by a week calendar reports
+        # the fixed week window, not the calendar default.
+        hass = self._hass()
+        states: dict[str, Any] = {}
+        widgets = [{"type": "week_calendar", "entity": "calendar.gone"}]
+
+        outcomes = await collect_calendar_outcomes(hass, widgets, states)
+
+        hass.services.async_call.assert_not_awaited()
+        assert outcomes == [
+            CalendarFetchOutcome(
+                "calendar.gone",
+                WEEK_CALENDAR_WINDOW_DAYS,
+                CALENDAR_FETCH_MISSING,
+                None,
+            )
+        ]
+
+    async def test_failure_does_not_clear_previous_events(self) -> None:
+        # A failed fetch leaves the events written by an earlier
+        # successful pass in place instead of blanking the widget.
+        hass = self._hass()
+        previous = [{"start": "2026-10-19", "summary": "Kept"}]
+        states = {
+            "calendar.home": {
+                "state": "off",
+                "attributes": {"events": previous},
+            }
+        }
+        hass.services.async_call.side_effect = RuntimeError("down again")
+        widgets = [{"type": "calendar", "entity": "calendar.home"}]
+
+        outcomes = await collect_calendar_outcomes(hass, widgets, states)
+
+        assert states["calendar.home"]["attributes"]["events"] is previous
+        assert outcomes[0].status == CALENDAR_FETCH_FAILED
+        assert "down again" in (outcomes[0].reason or "")
+
+    async def test_outcomes_sorted_across_mixed_statuses(self) -> None:
+        # Missing, failed and successful entities together come back
+        # sorted by entity ID, each with the expected window.
+        async def call(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            entity_id = args[2]["entity_id"]
+            if entity_id == "calendar.b":
+                raise RuntimeError("nope")
+            return {entity_id: {"events": []}}
+
+        hass = MagicMock()
+        hass.services.async_call = AsyncMock(side_effect=call)
+        states = {
+            "calendar.b": {"state": "off", "attributes": {}},
+            "calendar.c": {"state": "off", "attributes": {}},
+        }
+        widgets = [
+            {"type": "week_calendar", "entity": ["calendar.b", "calendar.c"]},
+            {"type": "calendar", "entity": "calendar.a"},
+        ]
+
+        outcomes = await collect_calendar_outcomes(hass, widgets, states)
+
+        assert [outcome.entity_id for outcome in outcomes] == [
+            "calendar.a",
+            "calendar.b",
+            "calendar.c",
+        ]
+        by_id = {outcome.entity_id: outcome for outcome in outcomes}
+        assert by_id["calendar.a"].status == CALENDAR_FETCH_MISSING
+        assert by_id["calendar.a"].window_days == 7
+        assert by_id["calendar.b"].status == CALENDAR_FETCH_FAILED
+        assert by_id["calendar.b"].window_days == WEEK_CALENDAR_WINDOW_DAYS
+        assert by_id["calendar.c"].status == CALENDAR_FETCH_SUCCESS
+        assert by_id["calendar.c"].window_days == WEEK_CALENDAR_WINDOW_DAYS
 
 
 class TestEnrichEntityIcons:

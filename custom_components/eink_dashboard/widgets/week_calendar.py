@@ -1167,7 +1167,7 @@ def _build_week_calendar_context(
     grid its minimum height switches, by size alone, to an agenda of
     one row per event under each day.  Events are read from
     ``states[entity]["attributes"]["week_events"]``, injected by
-    ``_fetch_week_calendar_events()``.
+    ``collect_calendar_outcomes()``.
 
     Args:
         widget: Widget config.  Recognised keys: ``entity``

@@ -717,3 +717,129 @@ class TestWsRenderWidgets:
 
         assert not result["success"]
         assert result["error"]["code"] == websocket_api.ERR_INVALID_FORMAT
+
+
+class TestWsCalendarOutcomes:
+    """Calendar collection outcomes ride along with render responses."""
+
+    @staticmethod
+    def _failing_service() -> AsyncMock:
+        """Return a service mock whose calendar.get_events always fails."""
+
+        async def _call(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            if args[0] == "calendar":
+                raise RuntimeError("calendar integration offline")
+            return {}
+
+        return AsyncMock(side_effect=_call)
+
+    async def test_render_widget_survives_failing_calendar(
+        self, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+    ) -> None:
+        # A calendar whose service call fails must not fail the whole
+        # render: the SVG still comes back and the outcome explains why.
+        hass.states.async_set("calendar.home", "off", {})
+        widget = {"type": "calendar", "entity": "calendar.home"}
+        client, entry = await _setup_entry(
+            hass, hass_ws_client, widgets=[widget]
+        )
+
+        with (
+            patch(
+                "homeassistant.core.ServiceRegistry.async_call",
+                self._failing_service(),
+            ),
+            patch(_RENDER_SVG_TARGET, return_value="<svg/>"),
+        ):
+            result = await _send_render_widget(client, entry.entry_id, 0)
+
+        assert result["success"]
+        assert result["result"]["svg"] == "<svg/>"
+        outcomes = result["result"]["calendar_fetch_outcomes"]
+        assert outcomes == [
+            {
+                "entity_id": "calendar.home",
+                "window_days": 7,
+                "status": "failed",
+                "reason": "calendar integration offline",
+            }
+        ]
+
+    async def test_render_widgets_survives_missing_calendar(
+        self, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+    ) -> None:
+        # A calendar missing from the states snapshot is reported as
+        # missing, makes no service call, and still renders every widget.
+        widget = {"type": "week_calendar", "entity": "calendar.gone"}
+        client, entry = await _setup_entry(
+            hass, hass_ws_client, widgets=[widget]
+        )
+
+        with (
+            patch(
+                "homeassistant.core.ServiceRegistry.async_call",
+                AsyncMock(),
+            ) as mock_call,
+            patch(_RENDER_SVG_TARGET, return_value="<svg/>"),
+        ):
+            result = await _send_render_widgets(client, entry.entry_id)
+
+        assert result["success"]
+        assert result["result"]["svgs"] == ["<svg/>"]
+        outcomes = result["result"]["calendar_fetch_outcomes"]
+        assert outcomes == [
+            {
+                "entity_id": "calendar.gone",
+                "window_days": 13,
+                "status": "missing",
+                "reason": None,
+            }
+        ]
+        # No calendar service call was attempted for the missing entity.
+        assert not [
+            call
+            for call in mock_call.await_args_list
+            if call.args[0] == "calendar"
+        ]
+
+    async def test_render_widgets_reports_mixed_outcomes(
+        self, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+    ) -> None:
+        # One good and one failing calendar in a batch: both outcomes
+        # come back sorted by entity ID and the render still succeeds.
+        hass.states.async_set("calendar.bad", "off", {})
+        hass.states.async_set("calendar.good", "off", {})
+
+        async def _call(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            entity_id = args[2]["entity_id"]
+            if entity_id == "calendar.bad":
+                raise RuntimeError("boom")
+            return {entity_id: {"events": []}}
+
+        widgets = [
+            {"type": "calendar", "entity": "calendar.bad"},
+            {"type": "calendar", "entity": "calendar.good"},
+        ]
+        client, entry = await _setup_entry(
+            hass, hass_ws_client, widgets=widgets
+        )
+
+        with (
+            patch(
+                "homeassistant.core.ServiceRegistry.async_call",
+                AsyncMock(side_effect=_call),
+            ),
+            patch(_RENDER_SVG_TARGET, return_value="<svg/>"),
+        ):
+            result = await _send_render_widgets(client, entry.entry_id)
+
+        assert result["success"]
+        outcomes = result["result"]["calendar_fetch_outcomes"]
+        assert [item["entity_id"] for item in outcomes] == [
+            "calendar.bad",
+            "calendar.good",
+        ]
+        assert outcomes[0]["status"] == "failed"
+        assert outcomes[0]["reason"] == "boom"
+        assert outcomes[1]["status"] == "success"
+        assert outcomes[1]["reason"] is None

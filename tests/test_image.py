@@ -503,6 +503,61 @@ class TestEinkDashboardImage:
         assert start.time() == dt.time.min
         assert end.time() == dt.time.min
 
+    async def test_refresh_records_calendar_outcomes_and_keeps_rendering(
+        self, make_entity: Callable[..., Any], hass: HomeAssistant
+    ) -> None:
+        # The scheduled render collects both widget types in one pass:
+        # a failing calendar neither aborts the refresh nor clears the
+        # successful one's events, and the outcomes are exposed both on
+        # the entity and on the render config.
+        hass.states.async_set("calendar.bad", "off", {})
+        hass.states.async_set("calendar.good", "off", {})
+        entity, _entry = make_entity()
+        entity.set_widgets(
+            [
+                {"type": "calendar", "entity": "calendar.bad"},
+                {"type": "calendar", "entity": "calendar.good"},
+            ]
+        )
+
+        async def _call(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            entity_id = args[2]["entity_id"]
+            if entity_id == "calendar.bad":
+                raise RuntimeError("scheduled boom")
+            return {entity_id: {"events": [{"start": "2026-10-19"}]}}
+
+        with (
+            patch(
+                "homeassistant.core.ServiceRegistry.async_call",
+                AsyncMock(side_effect=_call),
+            ),
+            patch(
+                "custom_components.eink_dashboard.image.render_dashboard",
+                return_value=b"fake-png-bytes",
+            ) as mock_render,
+        ):
+            await entity._async_refresh(None)
+
+        # The image still rendered despite the failing calendar.
+        assert await entity.async_image() == b"fake-png-bytes"
+        states = mock_render.call_args.args[1]["states"]
+        assert states["calendar.good"]["attributes"]["events"]
+        assert "events" not in states["calendar.bad"]["attributes"]
+
+        outcomes = entity.calendar_fetch_outcomes
+        assert [item["entity_id"] for item in outcomes] == [
+            "calendar.bad",
+            "calendar.good",
+        ]
+        assert outcomes[0]["status"] == "failed"
+        assert outcomes[0]["reason"] == "scheduled boom"
+        assert outcomes[1]["status"] == "success"
+        # The same outcomes are visible to the render path.
+        assert (
+            mock_render.call_args.args[1]["calendar_fetch_outcomes"]
+            == outcomes
+        )
+
     async def test_fetch_hourly_forecasts_for_meteogram(
         self, make_entity: Callable[..., Any]
     ) -> None:

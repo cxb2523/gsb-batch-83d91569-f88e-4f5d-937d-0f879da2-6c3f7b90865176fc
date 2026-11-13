@@ -60,7 +60,7 @@ def _build_calendar_context(
     is left blank below them.
     Events are sourced from
     ``states[entity_id]["attributes"]["events"]``, which is
-    injected by ``_fetch_calendar_events()`` before rendering.
+    injected by ``collect_calendar_outcomes()`` before rendering.
 
     Icon urgency rules:
 

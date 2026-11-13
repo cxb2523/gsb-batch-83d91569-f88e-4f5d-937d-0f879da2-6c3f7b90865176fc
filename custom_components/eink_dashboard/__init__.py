@@ -25,7 +25,7 @@ import logging
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import probatio as vol
 from homeassistant.components import websocket_api
@@ -698,6 +698,20 @@ async def _fetch_history(
             states[entity_id]["history"] = entries
 
 
+class _CalendarServiceResult(NamedTuple):
+    """Outcome of one ``calendar.get_events`` service call.
+
+    Attributes:
+        events: The sorted events, or ``None`` when the call failed or
+            returned no usable response.
+        reason: Short failure reason when ``events`` is ``None``,
+            otherwise ``None``.
+    """
+
+    events: list[dict[str, Any]] | None
+    reason: str | None
+
+
 async def _get_calendar_events(
     hass: HomeAssistant,
     entity_id: str,
@@ -705,11 +719,13 @@ async def _get_calendar_events(
     end: dt.datetime,
     label: str,
     level: int,
-) -> list[dict[str, Any]] | None:
+) -> _CalendarServiceResult:
     """Return a calendar's events between two times, sorted by start.
 
     Only the service call is guarded, so a bug in the processing of its
-    result is not swallowed.
+    result is not swallowed.  A failed call is reported both through the
+    log at ``level`` and via the returned result's ``reason`` so the
+    collection outcome can tell the caller why the calendar failed.
 
     Args:
         hass: Home Assistant instance.
@@ -720,7 +736,8 @@ async def _get_calendar_events(
         level: Log level used when the call fails.
 
     Returns:
-        The events, or ``None`` if the call failed or returned nothing.
+        A result holding the events, or ``None`` events plus a short
+        reason when the call failed or returned nothing usable.
     """
     try:
         result = await hass.services.async_call(
@@ -738,8 +755,8 @@ async def _get_calendar_events(
         _LOGGER.log(
             level, "Could not fetch %s for %s: %s", label, entity_id, err
         )
-        return None
-    except Exception:  # noqa: BLE001
+        return _CalendarServiceResult(None, str(err) or err.__class__.__name__)
+    except Exception as err:  # noqa: BLE001
         # Calendar integrations call third-party libraries that raise
         # arbitrary errors; one failing calendar must not blank the
         # others, but keep the traceback for diagnosis.
@@ -750,9 +767,11 @@ async def _get_calendar_events(
             entity_id,
             exc_info=True,
         )
-        return None
+        return _CalendarServiceResult(None, str(err) or err.__class__.__name__)
     if not isinstance(result, dict):
-        return None
+        return _CalendarServiceResult(
+            None, "calendar service returned a non-mapping response"
+        )
     entity_data = result.get(entity_id)
     raw = entity_data.get("events") if isinstance(entity_data, dict) else None
     events: list[dict[str, Any]] = cast(
@@ -763,7 +782,269 @@ async def _get_calendar_events(
     # truncates to max_events.  ISO strings sort chronologically; an
     # all-day "YYYY-MM-DD" sorts before timed events on the same day.
     events.sort(key=lambda e: str(e.get("start", "")))
-    return events
+    return _CalendarServiceResult(events, None)
+
+
+# Outcome states reported per calendar source by
+# :func:`collect_calendar_outcomes`.
+CALENDAR_FETCH_SUCCESS = "success"
+CALENDAR_FETCH_FAILED = "failed"
+CALENDAR_FETCH_MISSING = "missing"
+
+# The week view spans at most the 13-day window any week containing
+# today can cover: local midnight six days ago until local midnight
+# seven days ahead.
+WEEK_CALENDAR_WINDOW_DAYS = 13
+
+
+class CalendarFetchOutcome(NamedTuple):
+    """The per-source result of one calendar collection pass.
+
+    Attributes:
+        entity_id: Calendar entity ID the outcome belongs to.
+        window_days: Collection window in days.  A calendar widget
+            uses its maximum ``days_ahead`` (default 7, minimum 1);
+            a week calendar uses the fixed
+            :data:`WEEK_CALENDAR_WINDOW_DAYS` window; an entity used
+            by both gets the wider of the two.
+        status: One of :data:`CALENDAR_FETCH_SUCCESS`,
+            :data:`CALENDAR_FETCH_FAILED` or
+            :data:`CALENDAR_FETCH_MISSING`.
+        reason: Short failure reason, or ``None`` on success or when
+            the entity is missing from the states snapshot.
+    """
+
+    entity_id: str
+    window_days: int
+    status: str
+    reason: str | None
+
+
+def _forward_only_events(
+    events: list[dict[str, Any]], now: dt.datetime
+) -> list[dict[str, Any]]:
+    """Drop events that ended before ``now`` from a mixed-window fetch.
+
+    An entity used by both widget types is fetched once over the union
+    window, which for the week view can start six days in the past.
+    The regular calendar widget only shows upcoming events, so its
+    ``events`` list is filtered back to events not already over while
+    the week view keeps the full list.  Events whose start cannot be
+    parsed are kept rather than silently dropped.
+
+    Args:
+        events: Events returned over the union window, already sorted
+            by start.
+        now: Naive-or-aware "now" used as the cutoff; compared against
+            event starts after both are reduced to naive wall-clock
+            values (HA returns local wall-clock datetimes).
+
+    Returns:
+        The events whose start is at or after ``now``'s wall clock.
+    """
+    cutoff = now.replace(tzinfo=None)
+
+    def starts_at_or_after_now(event: dict[str, Any]) -> bool:
+        """Return whether the event starts at or after the cutoff."""
+        raw = event.get("start")
+        if not isinstance(raw, str) or not raw:
+            return True
+        try:
+            if len(raw) == 10:
+                start = dt.datetime.combine(
+                    dt.date.fromisoformat(raw), dt.time.min
+                )
+            else:
+                start = dt.datetime.fromisoformat(raw).replace(tzinfo=None)
+        except ValueError:
+            return True
+        return start >= cutoff
+
+    return [event for event in events if starts_at_or_after_now(event)]
+
+
+async def collect_calendar_outcomes(
+    hass: HomeAssistant,
+    widgets: list[dict[str, Any]],
+    states: dict[str, Any],
+) -> list[CalendarFetchOutcome]:
+    """Collect calendar events for every calendar widget, with outcomes.
+
+    Scans ``widgets`` for calendar and week-calendar widgets and
+    fetches each referenced calendar entity exactly once, concurrently
+    with the others.  A regular calendar widget's events are written to
+    ``states[entity_id]["attributes"]["events"]`` using the widest
+    ``days_ahead`` window configured for that entity (default 7,
+    minimum 1 day); a week calendar's events go to
+    ``attributes["week_events"]`` using the fixed
+    :data:`WEEK_CALENDAR_WINDOW_DAYS`-day week window.  An entity used
+    by both widget types is fetched once over the union window: the
+    full result feeds ``week_events`` while ``events`` receives only
+    the upcoming portion, matching a forward-only calendar fetch.
+
+    One calendar failing never interrupts the others and never clears
+    events a previous successful fetch already wrote: on failure the
+    corresponding attributes key is simply left untouched.  An entity
+    absent from the ``states`` snapshot is reported as missing, keeps
+    the historical warning log and triggers no service call.
+
+    Args:
+        hass: Home Assistant instance.
+        widgets: Widget dicts to scan for calendar entity IDs.
+        states: Mutable states dict; events are injected in-place
+            under each entity's ``events`` and/or ``week_events``
+            attributes.
+
+    Returns:
+        One :class:`CalendarFetchOutcome` per referenced entity,
+        sorted by entity ID.
+    """
+    # Per entity: widest days_ahead of its calendar widgets, whether a
+    # week calendar references it, and the largest window needed.
+    calendar_days: dict[str, int] = {}
+    week_entities: set[str] = set()
+    for widget in widgets:
+        wtype = widget.get("type")
+        if wtype == WidgetType.CALENDAR:
+            entity_id = str(widget.get("entity", ""))
+            if not entity_id:
+                continue
+            try:
+                days = max(1, int(widget.get("days_ahead", 7)))
+            except (ValueError, TypeError):
+                days = 7
+            if days > calendar_days.get(entity_id, 0):
+                calendar_days[entity_id] = days
+        elif wtype == WidgetType.WEEK_CALENDAR:
+            week_entities.update(week_calendar_entity_ids(widget))
+
+    entity_ids = set(calendar_days) | week_entities
+    if not entity_ids:
+        return []
+
+    tz_name = _ha_time_zone(hass)
+    tz: dt.tzinfo = dt.UTC
+    if tz_name:
+        with contextlib.suppress(ValueError):
+            tz = await dt_util.async_get_time_zone(tz_name) or dt.UTC
+    local_today = dt.datetime.now(tz).date()
+    utc_now = dt.datetime.now(dt.UTC)
+    week_start = dt.datetime.combine(
+        local_today - timedelta(days=6), dt.time.min, tzinfo=tz
+    )
+    week_end = dt.datetime.combine(
+        local_today + timedelta(days=7), dt.time.min, tzinfo=tz
+    )
+
+    async def fetch_one(
+        entity_id: str,
+    ) -> CalendarFetchOutcome:
+        """Fetch one entity once and write every key its widgets need."""
+        if entity_id not in states:
+            _LOGGER.warning(
+                "Calendar entity %r is not in the states snapshot; "
+                "events will not be fetched and its widget will render "
+                "blank. Check that the entity exists in Home Assistant.",
+                entity_id,
+            )
+            return CalendarFetchOutcome(
+                entity_id,
+                WEEK_CALENDAR_WINDOW_DAYS
+                if entity_id in week_entities
+                else calendar_days[entity_id],
+                CALENDAR_FETCH_MISSING,
+                None,
+            )
+
+        wants_week = entity_id in week_entities
+        days_ahead = calendar_days.get(entity_id)
+        if wants_week:
+            start_dt, end_dt = week_start, week_end
+            window_days = WEEK_CALENDAR_WINDOW_DAYS
+            if days_ahead is not None:
+                # Both widget types share this entity: one fetch over
+                # the union window, and the calendar's forward-only
+                # view is the portion not older than now.
+                start_dt = min(start_dt, utc_now)
+                end_dt = max(end_dt, utc_now + timedelta(days=days_ahead))
+                window_days = max(WEEK_CALENDAR_WINDOW_DAYS, days_ahead)
+            label = "week calendar events"
+        else:
+            # An entity outside week_entities comes only from calendar
+            # widgets, so calendar_days always holds its days_ahead.
+            assert days_ahead is not None
+            start_dt, end_dt = (
+                utc_now,
+                utc_now + timedelta(days=days_ahead),
+            )
+            window_days = days_ahead
+            label = "calendar events"
+
+        try:
+            result = await _get_calendar_events(
+                hass,
+                entity_id,
+                start_dt,
+                end_dt,
+                label,
+                logging.WARNING,
+            )
+        except Exception as err:  # noqa: BLE001
+            # Defensive: _get_calendar_events already guards the
+            # service call, but an unexpected failure here must stay
+            # per-source instead of taking down the whole render.
+            _LOGGER.warning(
+                "Could not fetch %s for %s: %s", label, entity_id, err
+            )
+            return CalendarFetchOutcome(
+                entity_id,
+                window_days,
+                CALENDAR_FETCH_FAILED,
+                str(err) or err.__class__.__name__,
+            )
+        if result.events is None:
+            return CalendarFetchOutcome(
+                entity_id,
+                window_days,
+                CALENDAR_FETCH_FAILED,
+                result.reason or "calendar service returned no response",
+            )
+
+        try:
+            attributes = states[entity_id]["attributes"]
+            if wants_week:
+                attributes["week_events"] = result.events
+            if days_ahead is not None:
+                if wants_week:
+                    # Shared entity: the one fetch covered the wider
+                    # week window too, so trim the calendar's list back
+                    # to upcoming events before writing its own key.
+                    attributes["events"] = _forward_only_events(
+                        result.events, utc_now
+                    )
+                else:
+                    attributes["events"] = result.events
+        except (KeyError, TypeError) as err:
+            # A malformed states entry (e.g. one without an
+            # "attributes" mapping) is a data bug; report it for this
+            # source instead of failing the whole render.
+            _LOGGER.warning(
+                "Could not store %s for %s: %s", label, entity_id, err
+            )
+            return CalendarFetchOutcome(
+                entity_id,
+                window_days,
+                CALENDAR_FETCH_FAILED,
+                str(err) or err.__class__.__name__,
+            )
+        return CalendarFetchOutcome(
+            entity_id, window_days, CALENDAR_FETCH_SUCCESS, None
+        )
+
+    outcomes = await asyncio.gather(
+        *(fetch_one(entity_id) for entity_id in entity_ids)
+    )
+    return sorted(outcomes, key=lambda outcome: outcome.entity_id)
 
 
 async def _fetch_week_calendar_events(
@@ -773,14 +1054,11 @@ async def _fetch_week_calendar_events(
 ) -> None:
     """Fetch a full week of events for week-calendar widgets.
 
-    The week view needs events from the start of the displayed week,
-    which depends on the first weekday and so can begin up to six
-    days before today.  The fetcher does not know the first weekday,
-    so it requests the widest window any week containing today can
-    span (local midnight six days ago until local midnight seven
-    days ahead) and lets the widget context builder pick the days it
-    shows.  Results go to ``attributes["week_events"]`` so a regular
-    calendar widget on the same entity keeps its own ``events`` list.
+    Legacy single-purpose fetcher kept for callers that only need the
+    side effect.  New code should use
+    :func:`collect_calendar_outcomes`, which additionally reports the
+    per-source outcome and dedupes entities shared with calendar
+    widgets.
 
     Args:
         hass: Home Assistant instance.
@@ -788,52 +1066,12 @@ async def _fetch_week_calendar_events(
         states: Mutable states dict; events are injected in-place
             under ``states[entity_id]["attributes"]["week_events"]``.
     """
-    entity_ids = {
-        eid
-        for w in widgets
-        if w.get("type") == WidgetType.WEEK_CALENDAR
-        for eid in week_calendar_entity_ids(w)
-    }
-    if not entity_ids:
+    week_widgets = [
+        w for w in widgets if w.get("type") == WidgetType.WEEK_CALENDAR
+    ]
+    if not week_widgets:
         return
-
-    tz_name = _ha_time_zone(hass)
-    tz: dt.tzinfo = dt.UTC
-    if tz_name:
-        with contextlib.suppress(ValueError):
-            tz = await dt_util.async_get_time_zone(tz_name) or dt.UTC
-    today = dt.datetime.now(tz).date()
-    start_dt = dt.datetime.combine(
-        today - timedelta(days=6), dt.time.min, tzinfo=tz
-    )
-    end_dt = dt.datetime.combine(
-        today + timedelta(days=7), dt.time.min, tzinfo=tz
-    )
-
-    async def fetch(entity_id: str) -> None:
-        """Fetch one calendar's week into its state."""
-        events = await _get_calendar_events(
-            hass,
-            entity_id,
-            start_dt,
-            end_dt,
-            "week calendar events",
-            logging.WARNING,
-        )
-        if events is not None:
-            states[entity_id]["attributes"]["week_events"] = events
-
-    known: list[str] = []
-    for entity_id in sorted(entity_ids):
-        if entity_id in states:
-            known.append(entity_id)
-        else:
-            _LOGGER.warning(
-                "Calendar entity %r is not in the states snapshot; "
-                "the week calendar will render blank.",
-                entity_id,
-            )
-    await asyncio.gather(*(fetch(entity_id) for entity_id in known))
+    await collect_calendar_outcomes(hass, week_widgets, states)
 
 
 async def _fetch_calendar_events(
@@ -843,16 +1081,11 @@ async def _fetch_calendar_events(
 ) -> None:
     """Fetch upcoming events for calendar widgets and inject into states.
 
-    Calls the ``calendar.get_events`` service for each unique calendar
-    entity referenced by ``widgets`` and writes the event list into
-    ``states[entity_id]["attributes"]["events"]`` so the widget
-    context builder can access multiple events without real-time HA
-    access at render time.
-
-    The fetch window starts at the current time and extends to the
-    maximum ``days_ahead`` configured across all calendar widgets that
-    reference the same entity.  Silently skips any entity where the
-    service call fails (entity offline, integration not loaded, etc.).
+    Legacy single-purpose fetcher kept for callers that only need the
+    side effect.  New code should use
+    :func:`collect_calendar_outcomes`, which additionally reports the
+    per-source outcome and dedupes entities shared with week-calendar
+    widgets.
 
     Args:
         hass: Home Assistant instance.
@@ -860,48 +1093,12 @@ async def _fetch_calendar_events(
         states: Mutable states dict; events are injected in-place
             under ``states[entity_id]["attributes"]["events"]``.
     """
-    calendar_entities: dict[str, int] = {}
-    for w in widgets:
-        if w.get("type") == WidgetType.CALENDAR:
-            eid = w.get("entity", "")
-            if not eid:
-                continue
-            if eid not in states:
-                _LOGGER.warning(
-                    "Calendar entity %r is not in the states snapshot; "
-                    "events will not be fetched and the widget will render "
-                    "blank. Check that the entity exists in Home Assistant.",
-                    eid,
-                )
-                continue
-            try:
-                days = max(1, int(w.get("days_ahead", 7)))
-            except (ValueError, TypeError):
-                days = 7
-            if days > calendar_entities.get(eid, 0):
-                calendar_entities[eid] = days
-
-    if not calendar_entities:
+    calendar_widgets = [
+        w for w in widgets if w.get("type") == WidgetType.CALENDAR
+    ]
+    if not calendar_widgets:
         return
-
-    now = dt.datetime.now(dt.UTC)
-
-    async def fetch(entity_id: str, days: int) -> None:
-        """Fetch one calendar's upcoming events into its state."""
-        events = await _get_calendar_events(
-            hass,
-            entity_id,
-            now,
-            now + timedelta(days=days),
-            "calendar events",
-            logging.DEBUG,
-        )
-        if events is not None:
-            states[entity_id]["attributes"]["events"] = events
-
-    await asyncio.gather(
-        *(fetch(eid, days) for eid, days in calendar_entities.items())
-    )
+    await collect_calendar_outcomes(hass, calendar_widgets, states)
 
 
 @websocket_api.websocket_command(
@@ -956,8 +1153,14 @@ async def ws_render_widget(
     config = await _build_display_config(hass, entry)
     await _fetch_forecasts(hass, [widget], config["states"])
     await _fetch_history(hass, [widget], config["states"])
-    await _fetch_calendar_events(hass, [widget], config["states"])
-    await _fetch_week_calendar_events(hass, [widget], config["states"])
+    calendar_outcomes = await collect_calendar_outcomes(
+        hass, [widget], config["states"]
+    )
+    # Exposed on the render config so any render-time consumer can see
+    # which calendars failed and why instead of only rendering blank.
+    config["calendar_fetch_outcomes"] = [
+        outcome._asdict() for outcome in calendar_outcomes
+    ]
     try:
         svg = await hass.async_add_executor_job(
             render_widget_svg, widget, config
@@ -976,7 +1179,13 @@ async def ws_render_widget(
             str(exc),
         )
         return
-    connection.send_result(msg["id"], {"svg": svg})
+    connection.send_result(
+        msg["id"],
+        {
+            "svg": svg,
+            "calendar_fetch_outcomes": config["calendar_fetch_outcomes"],
+        },
+    )
 
 
 @websocket_api.websocket_command(
@@ -1023,8 +1232,14 @@ async def ws_render_widgets(
     config = await _build_display_config(hass, entry)
     await _fetch_forecasts(hass, widgets, config["states"])
     await _fetch_history(hass, widgets, config["states"])
-    await _fetch_calendar_events(hass, widgets, config["states"])
-    await _fetch_week_calendar_events(hass, widgets, config["states"])
+    calendar_outcomes = await collect_calendar_outcomes(
+        hass, widgets, config["states"]
+    )
+    # Exposed on the render config so any render-time consumer can see
+    # which calendars failed and why instead of only rendering blank.
+    config["calendar_fetch_outcomes"] = [
+        outcome._asdict() for outcome in calendar_outcomes
+    ]
 
     # Render all widgets in a single executor job: render_widget_svg
     # is CPU-bound (Jinja2 + resvg), and one thread per widget would
@@ -1050,7 +1265,13 @@ async def ws_render_widgets(
             str(exc),
         )
         return
-    connection.send_result(msg["id"], {"svgs": svgs})
+    connection.send_result(
+        msg["id"],
+        {
+            "svgs": svgs,
+            "calendar_fetch_outcomes": config["calendar_fetch_outcomes"],
+        },
+    )
 
 
 _FRONTEND_DIR = Path(__file__).parent / "frontend"

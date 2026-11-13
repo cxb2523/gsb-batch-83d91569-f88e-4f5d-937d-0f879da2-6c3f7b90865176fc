@@ -47,12 +47,11 @@ from . import (
     _async_get_locale,
     _enrich_display_precision,
     _enrich_entity_icons,
-    _fetch_calendar_events,
     _fetch_forecasts,
     _fetch_history,
-    _fetch_week_calendar_events,
     _ha_time_zone,
     build_display_config,
+    collect_calendar_outcomes,
 )
 from .const import (
     DEFAULT_UPDATE_INTERVAL,
@@ -121,6 +120,9 @@ class EinkDashboardImage(ImageEntity):
         self._unsub: Callable[[], None] | None = None
         self._refresh_lock = asyncio.Lock()
         self._last_push: float | None = None
+        # Per-source outcomes of the latest calendar collection pass,
+        # sorted by entity ID; empty until the first refresh.
+        self._calendar_fetch_outcomes: list[dict[str, Any]] = []
         self._attr_name = entry.title
         self._attr_unique_id = entry.entry_id
         self._attr_device_info = DeviceInfo(
@@ -235,8 +237,16 @@ class EinkDashboardImage(ImageEntity):
                 await self._async_enrich_display_precision(states)
                 await self._async_fetch_forecasts(states)
                 await self._async_fetch_history(states)
-                await self._async_fetch_calendar_events(states)
-                await self._async_fetch_week_calendar_events(states)
+                # One collection pass for calendar and week-calendar
+                # widgets: each entity is fetched once, and a failing
+                # calendar neither interrupts the others nor clears
+                # events an earlier pass wrote successfully.
+                outcomes = await collect_calendar_outcomes(
+                    self.hass, self._widgets, states
+                )
+                self._calendar_fetch_outcomes = [
+                    outcome._asdict() for outcome in outcomes
+                ]
                 config = build_display_config(
                     self._entry.options,
                     states,
@@ -251,6 +261,9 @@ class EinkDashboardImage(ImageEntity):
                     ),
                     battery_sensor=self._entry.runtime_data.battery_sensor,
                     for_png=True,
+                )
+                config["calendar_fetch_outcomes"] = (
+                    self._calendar_fetch_outcomes
                 )
                 widgets = self._resolve_templates(self._widgets)
                 _LOGGER.debug(
@@ -392,29 +405,57 @@ class EinkDashboardImage(ImageEntity):
         """Fetch calendar events for calendar widgets and inject into
         states.
 
-        Delegates to the module-level ``_fetch_calendar_events`` so
-        the logic is shared with the WebSocket preview handlers.
+        Delegates to the module-level
+        :func:`collect_calendar_outcomes` so the logic is shared with
+        the WebSocket preview handlers.  The scheduled render calls
+        that function directly to collect both widget types in one
+        pass; this wrapper remains for callers and tests that only
+        need the calendar-widget side effect.
 
         Args:
             states: Mutable states dict; event lists are injected
                 in-place for calendar entities.
         """
-        await _fetch_calendar_events(self.hass, self._widgets, states)
+        widgets = [
+            w for w in self._widgets if w.get("type") == WidgetType.CALENDAR
+        ]
+        if widgets:
+            await collect_calendar_outcomes(self.hass, widgets, states)
 
     async def _async_fetch_week_calendar_events(
         self, states: dict[str, Any]
     ) -> None:
         """Fetch a week of events for week calendar widgets into states.
 
-        Delegates to the module-level ``_fetch_week_calendar_events``
-        so the logic is shared with the WebSocket preview handlers.
+        Delegates to the module-level
+        :func:`collect_calendar_outcomes` so the logic is shared with
+        the WebSocket preview handlers.  The scheduled render calls
+        that function directly to collect both widget types in one
+        pass; this wrapper remains for callers and tests that only
+        need the week-calendar side effect.
 
         Args:
             states: Mutable states dict; the events are injected
                 in-place under ``week_events`` for the calendars of
                 week calendar widgets.
         """
-        await _fetch_week_calendar_events(self.hass, self._widgets, states)
+        widgets = [
+            w
+            for w in self._widgets
+            if w.get("type") == WidgetType.WEEK_CALENDAR
+        ]
+        if widgets:
+            await collect_calendar_outcomes(self.hass, widgets, states)
+
+    @property
+    def calendar_fetch_outcomes(self) -> list[dict[str, Any]]:
+        """Outcomes of the latest calendar collection pass.
+
+        One dict per referenced calendar entity, sorted by entity ID,
+        each holding ``entity_id``, ``window_days``, ``status`` and
+        ``reason``.  Empty until the first refresh.
+        """
+        return self._calendar_fetch_outcomes
 
     def _build_states(self) -> dict[str, Any]:
         """Snapshot all HA states as a plain dict for the renderer."""
