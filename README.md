@@ -82,6 +82,49 @@ Three effects of this design are important:
   same retry procedure. The browser procedure tries to get a WAF token, because
   only a WAF token is useful in the cache.
 
+### What a retry keeps, and what it reports
+
+A bot check at either step restarts the flow from the site page, but the retry
+is not a new session. The cookies collected so far — the `session-id` from the
+first site page, the `ak_bmsc` from an Akamai page, and anything else a response
+set — go into the retry request together with the new WAF token. Only the
+`aws-waf-token` is replaced: the new token comes with its own user agent, and
+an old token under a new user agent gets challenged again.
+
+Each successful result also carries a record of what happened, under the
+`_challenge_report` key next to the cookies:
+
+```json
+{
+  "session-id": "138-7674092-2025337",
+  "_challenge_report": {
+    "store_url": "https://www.amazon.com",
+    "total_attempts": 2,
+    "blocked_attempts": 1,
+    "attempts": [
+      {
+        "step": "storefront",
+        "url": "https://www.amazon.com/",
+        "status": 202,
+        "bytes": 2048,
+        "waf_rejected": true,
+        "reharvested": true
+      }
+    ]
+  }
+}
+```
+
+`total_attempts` counts every request the flow made; `blocked_attempts` counts
+the ones a bot check answered. Each entry names the step that was blocked
+(`storefront` or `csrf`), the response status and size, whether the WAF turned
+the token away (`202` or an `x-amzn-waf-action` header), and whether that caused
+a new token harvest. The report is metadata, not a cookie: it is only in the
+returned item and never in a request's `Cookie` header.
+
+When the retry limit is reached the `ValueError` carries the same summary after
+the site, last URL, status and size of the last response.
+
 ### The WAF token cache
 
 The service keeps the tokens in `.waf_cache/<host>.json`. Git ignores this
