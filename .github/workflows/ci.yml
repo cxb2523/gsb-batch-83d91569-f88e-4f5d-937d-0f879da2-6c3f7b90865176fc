@@ -1,0 +1,200 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }})
+    if: github.event_name != 'schedule'
+    # Pinned: ubuntu-latest may move to an image without this Python floor.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # uv installs the project (tool.uv.package) + the dev-group tools. uv's own
+      # version doesn't affect gate output: regen determinism comes from the ruff
+      # pinned in that group.
+      - name: Install uv
+        run: python -m pip install uv
+
+      - name: Sync
+        run: uv sync --project python --python ${{ matrix.python-version }}
+
+      - name: Ruff lint
+        run: uv run --project python ruff check python codegen
+
+      - name: Ruff format
+        run: uv run --project python ruff format --check python codegen
+
+      - name: Pyright
+        run: uv run --project python pyright --project python
+
+      - name: Unit tests
+        run: uv run --project python pytest python/tests -m "not live" -v
+
+      # Python only: the TS generator needs prettier, installed in the js job.
+      - name: Generated files are up to date
+        run: |
+          uv run --project python python -c "from codegen.generate import generate, PACKAGE_DIR; generate(out_dir=PACKAGE_DIR)"
+          git diff --exit-code -- \
+            python/herascrape/types.py \
+            python/herascrape/_endpoints_sync.py \
+            python/herascrape/_endpoints_async.py
+
+  js:
+    name: js client
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: js
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: js/package-lock.json
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        run: npm ci
+
+      - name: ESLint
+        run: npx eslint .
+
+      - name: Prettier
+        run: npx prettier --check "**/*.ts"
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # Capped workers: never fan out across the whole machine.
+      - name: Unit tests
+        run: npx vitest run --minWorkers=1 --maxWorkers=2
+
+      - name: Build
+        run: npm run build
+
+      # prettier is pinned in package-lock, so the emitted TS is byte-stable.
+      - name: Generated TS is up to date
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 -c "from codegen.generate import generate_ts, JS_SRC_DIR; generate_ts(out_dir=JS_SRC_DIR)"
+          git diff --exit-code -- js/src/endpoints.ts js/src/types.ts
+
+  docs:
+    name: docs
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Sphinx 9 needs 3.13; Read the Docs builds on the same version.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # autodoc imports the package, so install it alongside the pinned toolchain.
+      - name: Install
+        run: |
+          python -m pip install -r python/docs/requirements.txt
+          python -m pip install ./python
+
+      # -W mirrors sphinx.fail_on_warning in .readthedocs.yaml.
+      - name: Build
+        run: |
+          python -m sphinx -W --keep-going -b html \
+            python/docs python/docs/_build/html
+
+  gitleaks:
+    name: gitleaks
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks
+        run: |
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl --proto '=https' --tlsv1.2 -sSfL -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+
+      - name: Scan history
+        run: |
+          "$RUNNER_TEMP/gitleaks" git --redact --verbose --no-banner .
+
+  live:
+    name: live API
+    # Never on push or pull_request: untrusted PRs must not reach the secret.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        run: python -m pip install uv
+
+      - name: Sync
+        run: uv sync --project python
+
+      # The key is exposed to this step only; the sync above ran without it.
+      - name: Live API tests
+        env:
+          HERASCRAPE_API_KEY: ${{ secrets.HERASCRAPE_API_KEY }}
+        run: |
+          if [ -z "$HERASCRAPE_API_KEY" ]; then
+            echo "::error::HERASCRAPE_API_KEY secret is not set"
+            exit 1
+          fi
+          uv run --no-sync --project python pytest python/tests/live -v -m live

@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+uv.lock
+build/
+dist/
+_build/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.pyright/
+.coverage
+htmlcov/
+
+# Secrets and local environment
+.env
+.env.*
+
+# Local tooling
+.superpowers/
+.vscode/
+.DS_Store
+
+# Node
+node_modules/

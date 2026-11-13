@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "herascrape"
+dynamic = ["version"]
+description = "Official Python client for the herascrape Instagram API."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "herascrape" }]
+keywords = ["instagram api", "instagram scraper", "instagram private api"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+dependencies = ["httpx>=0.24"]
+
+# Dev tooling lives in a PEP 735 group so `uv run`/`uv sync` install it by default.
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio", "ruff==0.15.10", "pyright==1.1.414"]
+
+# Build + install the project itself (editable) into uv's env.
+[tool.uv]
+package = true
+
+[project.urls]
+Homepage = "https://herascrape.com"
+Documentation = "https://herascrape.readthedocs.io/"
+Repository = "https://github.com/herascrape/herascrape"
+
+[tool.hatch.version]
+path = "herascrape/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["/herascrape"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["herascrape"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "live: hits the real api.herascrape.com (needs HERASCRAPE_API_KEY)",
+]
+
+[tool.pyright]
+include = ["herascrape", "tests"]
+extraPaths = [".."]
+pythonVersion = "3.10"
+typeCheckingMode = "strict"
