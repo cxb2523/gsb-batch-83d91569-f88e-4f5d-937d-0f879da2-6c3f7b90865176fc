@@ -1,0 +1,3422 @@
+#!/usr/bin/env python3
+"""smoke_test.py — the offline suite.
+
+One file of plain functions with inline fixtures, plus the real captures in
+`fixtures_generated.json`. No pytest, no conftest, no
+fixtures directory. `tests/test_smoke.py` wraps this as a single pytest test
+so `pytest` works as an entry point without a second copy of the checks.
+
+    python3 smoke_test.py            run everything
+    python3 smoke_test.py -v         print every check as it passes
+
+It MUST pass with no engine library installed at all: every
+`import playwright_scraper` / `selenium_scraper` / `puppeteer_scraper` is
+guarded and the skip is recorded. CI's `engine-smoke` job installs each
+engine in its own virtualenv and FAILS if the matching group reports a skip,
+because "skipped, engine absent" reads identically to a broken import.
+
+What this suite is FOR, beyond the obvious
+------------------------------------------
+Most of these checks exist because something was actually wrong. The ones
+worth knowing about before you edit anything:
+
+* Two markers were wrong in this repo, in the same way, a few hours apart —
+  `akamai` and "couldn't find any" are both on EVERY page Woolworths serves.
+  `test_markers_absent_from_a_good_page` counts them on a real served capture
+  so neither can come back.
+* Akamai's refusal reaches a parser in two encodings and a literal marker
+  catches only one of them.
+* Past the end of a listing the API answers 200 with nothing but ads, so
+  "the page was empty" never fires.
+* `WasPrice` equals `Price` on 81% of rows, so reading it straight puts a 0%
+  discount on four products in five.
+"""
+
+from __future__ import annotations
+
+import ast
+import inspect
+import io
+import argparse
+import dataclasses
+import json
+import logging
+import os
+import pathlib
+import re
+import stat
+import sys
+import tempfile
+from contextlib import redirect_stderr, redirect_stdout
+
+ROOT = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+import product_parser as P          # noqa: E402
+import page_flow                    # noqa: E402
+import output_writer                # noqa: E402
+import env_config                   # noqa: E402
+import proxy_pool                   # noqa: E402
+import captcha_solver               # noqa: E402
+from output_writer import Product   # noqa: E402
+
+VERBOSE = "-v" in sys.argv
+FAILURES: list = []
+PASSES: list = []
+SKIPS: list = []
+
+FIXTURES = json.loads((ROOT / "fixtures_generated.json").read_text(encoding="utf-8"))
+
+
+# ===========================================================================
+# harness
+# ===========================================================================
+def check(fn):
+    """Register and run one check. Plain functions, no framework."""
+    name = fn.__name__
+    try:
+        fn()
+    except AssertionError as e:
+        FAILURES.append((name, str(e)))
+        print(f"FAIL  {name}\n        {e}")
+    except Exception as e:  # noqa: BLE001
+        FAILURES.append((name, f"{type(e).__name__}: {e}"))
+        print(f"ERROR {name}\n        {type(e).__name__}: {e}")
+    else:
+        PASSES.append(name)
+        if VERBOSE:
+            print(f"ok    {name}")
+    return fn
+
+
+def skip(group, reason):
+    SKIPS.append((group, reason))
+    print(f"SKIP  {group}: {reason}")
+
+
+def _engine(name):
+    """Import an engine, or record a skip. Never raises."""
+    try:
+        return __import__(name)
+    except ImportError as e:
+        skip(name, f"driver library absent ({e})")
+        return None
+
+
+PW = _engine("playwright_scraper")
+SE = _engine("selenium_scraper")
+PP = _engine("puppeteer_scraper")
+ENGINES = [e for e in (PW, SE, PP) if e is not None]
+ENGINE_NAMES = ("playwright_scraper", "selenium_scraper", "puppeteer_scraper")
+
+
+def _shipped_files(suffixes):
+    """Every file this repo SHIPS, with the suffixes given.
+
+    Excludes `.claude/` and `.git/` RELATIVE TO THE REPO ROOT rather than
+    anywhere in the absolute path — this repo is developed inside a worktree
+    under `.claude/worktrees/`, so an absolute-path test excluded everything
+    and quietly turned two checks into no-ops (CI caught it; the local run
+    could not).
+    """
+    for path in ROOT.rglob("*"):
+        if not path.is_file() or path.suffix not in suffixes:
+            continue
+        rel = path.relative_to(ROOT)
+        if rel.parts and rel.parts[0] in {".git", ".claude", "captures",
+                                          "__pycache__", ".pytest_cache"}:
+            continue
+        if path.name.startswith("_"):
+            continue
+        # A virtualenv inside the checkout (CI's engine jobs make `.venv`)
+        # is third-party code, recognised by its pyvenv.cfg, whatever its name.
+        if any((ROOT.joinpath(*rel.parts[:i]) / "pyvenv.cfg").is_file()
+               for i in range(1, len(rel.parts))):
+            continue
+        yield path
+
+
+# ===========================================================================
+# 1. The payload: shapes that would silently lose everything
+# ===========================================================================
+@check
+def test_flatten_products_unwraps_the_group():
+    """`Products` is a list of GROUP WRAPPERS, not of products.
+
+    Reading the outer list as the product list yields wrapper dicts with no
+    `Stockcode` on any of them — a run that "succeeds" with every column
+    null. The fixture keeps the wrapper shape on purpose.
+    """
+    payload = FIXTURES["api_search"]
+    outer = payload["Products"]
+    assert outer and "Stockcode" not in outer[0], (
+        "the fixture no longer has the group wrapper, so this check is "
+        "vacuous — regenerate it with make_fixtures.py")
+    flat = P.flatten_products(payload)
+    assert flat, "flatten_products returned nothing from a real search payload"
+    assert all("Stockcode" in p for p in flat), (
+        "flatten_products returned something that is not a product")
+
+
+@check
+def test_flatten_products_handles_bundles_and_bare_lists():
+    """A category calls its list `Bundles`; the by-stockcode endpoint is bare."""
+    assert P.flatten_products(FIXTURES["api_category"]), "Bundles not unwrapped"
+    bare = [{"Stockcode": 1, "DisplayName": "x"}]
+    assert len(P.flatten_products(bare)) == 1, "a bare product list was dropped"
+    for junk in (None, {}, [], {"Products": None}, {"Products": [None, 3]}, 7):
+        assert P.flatten_products(junk) == [], f"{junk!r} should flatten to []"
+
+
+@check
+def test_total_count_reads_both_spellings():
+    """Search calls it `SearchResultsCount`, a category `TotalRecordCount`.
+
+    Asserted against the fixture's OWN value rather than against a literal.
+    The literals were 2205 and 575, and the category one was 576 the next
+    time the captures were regenerated — Woolworths had added a product.
+    A number that describes a living catalogue does not belong in an
+    assertion; what belongs there is that both spellings are read and
+    that a zero is a zero rather than a None.
+    """
+    assert (P.total_count(FIXTURES["api_search"])
+            == FIXTURES["api_search"]["SearchResultsCount"])
+    assert (P.total_count(FIXTURES["api_category"])
+            == FIXTURES["api_category"]["TotalRecordCount"])
+    assert P.total_count(FIXTURES["api_search"]) > 100, "implausibly small"
+    assert P.total_count(FIXTURES["api_category"]) > 100, "implausibly small"
+    # Zero is a real answer and must not come back as None: it is the only
+    # thing that tells an empty listing from a broken parser.
+    assert P.total_count(FIXTURES["api_empty"]) == 0
+    assert P.total_count(None) is None and P.total_count([]) is None
+
+
+# ===========================================================================
+# 2. The was-price trap, and the canary
+# ===========================================================================
+@check
+def test_was_price_is_only_a_was_price_when_it_exceeds_price():
+    """`WasPrice` is populated on 100% of rows and equals `Price` on 81%.
+
+    Copying it across gives an `original_price` identical to the price and a
+    0% discount on four products in five.
+    """
+    same = {"Stockcode": 1, "Price": 4.70, "WasPrice": 4.70,
+            "SavingsAmount": 0.0, "IsOnSpecial": False}
+    original, savings, pct = P.was_price_of(same)
+    assert original is None, f"a WasPrice equal to Price became {original}"
+    assert pct is None, f"discount should be None, not {pct}"
+    assert savings is None, f"a 0.0 saving should be None, not {savings}"
+
+    real = {"Stockcode": 2, "Price": 4.50, "WasPrice": 5.05,
+            "SavingsAmount": 0.55, "IsOnSpecial": True}
+    original, savings, pct = P.was_price_of(real)
+    assert original == 5.05 and savings == 0.55
+    assert abs(pct - 10.89) < 0.01, f"discount_pct was {pct}, expected 10.89"
+
+
+@check
+def test_no_row_has_an_original_price_at_or_below_its_price():
+    """The canary, on every fixture that yields rows."""
+    for key in ("api_search", "api_category", "api_ads_only"):
+        for row in P.products_from_payload(FIXTURES[key], page=1):
+            if row.original_price is not None and row.price is not None:
+                assert row.original_price > row.price, (
+                    f"{key} sku {row.sku}: original_price "
+                    f"{row.original_price} is not above price {row.price}")
+
+
+@check
+def test_discount_is_never_zero_or_negative():
+    for key in ("api_search", "api_category"):
+        for row in P.products_from_payload(FIXTURES[key], page=1):
+            if row.discount_pct is not None:
+                assert row.discount_pct > 0, (
+                    f"{key} sku {row.sku}: discount_pct {row.discount_pct}")
+
+
+# ===========================================================================
+# 3. Values on real fixtures — not coverage
+# ===========================================================================
+@check
+def test_pinned_values_from_a_real_search_payload():
+    """A column can be 100% populated and entirely wrong.
+
+    These ARE pinned to literals, unlike `total_count` above, and the
+    difference is worth stating so nobody "fixes" it the same way. Comparing
+    a parsed price against the fixture's own `Price` field would be
+    circular — that is the field the parser read. A literal is what catches
+    it reading `InstorePrice`, or `Name` instead of `DisplayName`.
+
+    So these go stale only when someone regenerates the captures, and that is
+    the intended moment to look again: the fixture and the expectation move
+    together, in one commit, under human eyes.
+    """
+    rows = {r.sku: r for r in P.products_from_payload(FIXTURES["api_search"],
+                                                      page=1)}
+    assert rows, "the search fixture parsed to nothing"
+    r = rows.get("50923")
+    assert r is not None, f"expected sku 50923 in the fixture, got {sorted(rows)}"
+    assert r.title == "Woolworths Full Cream Milk 1L", r.title
+    assert r.price == 1.75, r.price
+    assert r.currency == "AUD", r.currency
+    assert r.brand == "Woolworths", r.brand
+    assert r.unit == "Each", r.unit
+    assert r.cup_string == "$1.75 / 1L", r.cup_string
+    assert r.is_sponsored is False, r.is_sponsored
+    assert r.url == ("https://www.woolworths.com.au/shop/productdetails/"
+                     "50923/woolworths-full-cream-milk"), r.url
+
+
+@check
+def test_title_uses_displayname_not_name():
+    """`Name` drops the pack size and duplicates the variety.
+
+    Both are 100% populated, which is exactly why the wrong one is easy to
+    ship: the column would look complete and read worse on every row.
+    """
+    node = {"Stockcode": 88436,
+            "DisplayName": "Dairy Farmers Full Cream Milk 2L",
+            "Name": "Dairy Farmers Full Cream Milk Full Cream Milk"}
+    row = P.product_from_api(node)
+    assert row.title == "Dairy Farmers Full Cream Milk 2L", row.title
+
+
+@check
+def test_additional_attributes_are_read_and_the_string_None_is_not_a_value():
+    """The API writes the STRING "None" as well as JSON null."""
+    node = {"Stockcode": 1, "DisplayName": "x",
+            "AdditionalAttributes": {"healthstarrating": "4",
+                                     "ingredients": "Milk.",
+                                     "countryoforigin": "None",
+                                     "sapdepartmentname": "DAIRY"}}
+    row = P.product_from_api(node)
+    assert row.health_star_rating == 4.0, row.health_star_rating
+    assert row.ingredients == "Milk.", row.ingredients
+    assert row.country_of_origin_is_absent if False else True  # column removed
+    assert row.department == "DAIRY", row.department
+    assert getattr(row, "country_of_origin", None) is None, (
+        "country_of_origin was measured null on 660 of 660 rows and should "
+        "not be a column")
+
+
+@check
+def test_description_html_is_stripped():
+    node = {"Stockcode": 1, "DisplayName": "x",
+            "Description": " Dairy Farmers Full Cream<br>Milk 2L "}
+    row = P.product_from_api(node)
+    assert row.description == "Dairy Farmers Full Cream Milk 2L", row.description
+
+
+@check
+def test_absent_fields_are_none_not_zero_or_empty_string():
+    row = P.product_from_api({"Stockcode": 9, "DisplayName": "x",
+                              "Brand": "", "Price": None, "SupplyLimit": 0})
+    assert row.brand is None, row.brand
+    assert row.price is None, row.price
+    assert row.supply_limit is None, row.supply_limit
+
+
+@check
+def test_a_row_without_a_stockcode_is_dropped():
+    assert P.product_from_api({"DisplayName": "no id"}) is None
+    assert P.product_from_api({"Stockcode": "", "DisplayName": "x"}) is None
+    assert P.product_from_api("not a dict") is None
+
+
+# ===========================================================================
+# 4. The ads trap — the reason a run terminates at all
+# ===========================================================================
+@check
+def test_a_page_past_the_end_is_ads_only():
+    """The fixture is page 18 of a 16-page category: 200, and only ads."""
+    rows = P.products_from_payload(FIXTURES["api_ads_only"], page=18)
+    assert rows, "the ads-only fixture parsed to nothing; regenerate it"
+    assert P.organic_count(rows) == 0, (
+        f"the ads-only fixture has {P.organic_count(rows)} organic row(s) — "
+        "it is no longer past the end of the listing, so regenerate it")
+    assert all(r.is_sponsored for r in rows)
+
+
+@check
+def test_advance_page_stops_on_ads_and_not_on_rows():
+    """"Were there rows" never terminates on this site."""
+    ads = P.products_from_payload(FIXTURES["api_ads_only"], page=18)
+    assert page_flow.advance_page(ads, set()) == page_flow.ADS_ONLY, (
+        "a page of nothing but ads must not read as progress")
+    assert page_flow.advance_page([], set()) == page_flow.NO_GROWTH
+
+    fresh = P.products_from_payload(FIXTURES["api_search"], page=1)
+    organic = [r.sku for r in fresh if not r.is_sponsored]
+    assert organic, "the search fixture has no organic row to test with"
+    assert page_flow.advance_page(fresh, set()) == page_flow.ADVANCED
+    assert page_flow.advance_page(fresh, set(organic)) in (
+        page_flow.NO_GROWTH, page_flow.ADS_ONLY), (
+        "a page whose organic rows were all seen before must not advance")
+
+
+@check
+def test_organic_count_reads_rows_and_raw_dicts():
+    assert P.organic_count([]) == 0
+    rows = P.products_from_payload(FIXTURES["api_search"], page=1)
+    assert 0 < P.organic_count(rows) < len(rows), (
+        "the search fixture should hold both sponsored and organic rows")
+    assert P.organic_count([{"IsSponsoredAd": True}, {"IsSponsoredAd": False}]) == 1
+
+
+# ===========================================================================
+# 5. Markers — counted on a page known to be GOOD
+# ===========================================================================
+@check
+def test_markers_absent_from_a_good_page():
+    """Every block marker must score 0 on a page the site really served.
+
+    This check exists because two markers in this repo scored high on good
+    pages: `akamai` (Woolworths is fronted by Akamai, and its performance
+    script is on every page) and "couldn't find any" (the no-results copy
+    ships in the JS bundle). Both are asserted below as NON-markers.
+    """
+    served = FIXTURES["served_page"]
+    for marker in P.BOT_CHALLENGE_MARKERS:
+        assert marker not in P.unescape_prefix(served, len(served)), (
+            f"{marker!r} appears on a page Woolworths SERVED — it is a fact "
+            "about the site, not a block marker")
+
+
+@check
+def test_the_two_markers_that_were_wrong_stay_out():
+    """Pinned as non-markers, with the counts that disqualified them."""
+    served = FIXTURES["served_page"]
+    akamai = served.lower().count("akamai")
+    noresults = served.count("couldn't find any")
+    assert akamai >= 1, (
+        "the served fixture no longer references Akamai, so this check has "
+        "stopped proving anything — regenerate the capture")
+    assert noresults >= 1, (
+        "the served fixture no longer carries the no-results copy, so this "
+        "check has stopped proving anything — regenerate the capture")
+    assert not any("akamai" in m.lower() for m in P.BOT_CHALLENGE_MARKERS), (
+        f"`akamai` is back in BOT_CHALLENGE_MARKERS and it occurs {akamai} "
+        "time(s) on a page the site served")
+    assert not hasattr(P, "NO_RESULTS_MARKERS"), (
+        f"NO_RESULTS_MARKERS is back; the copy it keys on occurs {noresults} "
+        "time(s) on a served page and made a 2,205-result search report "
+        "itself empty")
+
+
+@check
+def test_a_good_page_classifies_as_content():
+    served = FIXTURES["served_page"]
+    state = P.detect_page_state(
+        served, status=200,
+        url="https://www.woolworths.com.au/shop/search/products?searchTerm=milk")
+    assert state == "content", f"a served page classified as {state!r}"
+    assert not page_flow.counts_as_blocked(state)
+
+
+@check
+def test_both_denial_encodings_are_blocked():
+    """The SAME refusal reaches a parser spelled two ways."""
+    dom, raw = FIXTURES["denial_dom"], FIXTURES["denial_raw"]
+    assert dom.count("errors.edgesuite.net") == 1 and \
+        dom.count("errors&#46;edgesuite&#46;net") == 0, "dom fixture changed"
+    assert raw.count("errors.edgesuite.net") == 0 and \
+        raw.count("errors&#46;edgesuite&#46;net") == 1, "raw fixture changed"
+    for label, text in (("dom", dom), ("raw", raw)):
+        assert P.detect_block_marker(text), f"{label} denial matched no marker"
+        state = P.detect_page_state(
+            text, status=403, url="https://www.woolworths.com.au/shop/x")
+        assert state == "blocked", f"{label} denial classified as {state!r}"
+        assert page_flow.counts_as_blocked(state)
+
+
+@check
+def test_a_denial_is_blocked_even_without_a_status():
+    """Selenium reports no HTTP status, so the markers must carry it alone."""
+    for key in ("denial_dom", "denial_raw"):
+        state = P.detect_page_state(FIXTURES[key], status=None,
+                                    url="https://www.woolworths.com.au/shop/x")
+        assert state == "blocked", f"{key} without a status classified {state!r}"
+
+
+@check
+def test_the_positive_asset_signal_separates_served_from_refused():
+    """A served page is built out of the site's own assets; a denial is not."""
+    served = P.asset_reference_count(FIXTURES["served_page"])
+    assert served >= 50, f"only {served} asset references on a served page"
+    for key in ("denial_dom", "denial_raw"):
+        assert P.asset_reference_count(FIXTURES[key]) == 0, (
+            f"{key} references the site's asset host")
+
+
+@check
+def test_unescape_is_bounded():
+    """A refusal is ~400 bytes; unescaping 800 KB on every fetch buys nothing."""
+    big = "&amp;" * 100_000
+    assert len(P.unescape_prefix(big)) <= P.UNESCAPE_PREFIX_BYTES
+
+
+# ===========================================================================
+# 6. URLs, hosts, modes
+# ===========================================================================
+@check
+def test_mode_is_inferred_from_the_path():
+    S = "https://www.woolworths.com.au/shop/search/products?searchTerm=milk"
+    C = "https://www.woolworths.com.au/shop/browse/bakery"
+    N = "https://www.woolworths.com.au/shop/browse/fruit-veg/fruit"
+    assert P.mode_for_url(S) == "search"
+    assert P.mode_for_url(C) == "category"
+    assert P.mode_for_url(N) == "category"
+    assert P.search_term_from_url(S) == "milk"
+    assert P.category_slug_from_url(N) == "fruit-veg/fruit"
+    assert P.mode_for_url("https://www.woolworths.com.au/") is None
+
+
+@check
+def test_unsupported_urls_are_refused_with_the_real_reason():
+    """The message "is not a Woolworths site" is false and sends the reader hunting."""
+    nz = P.unsupported_reason("https://www.woolworths.co.nz/shop/browse/x")
+    assert nz and "New Zealand" in nz, nz
+    za = P.unsupported_reason("https://www.woolworths.co.za/x")
+    assert za and "South Africa" in za, za
+    detail = P.unsupported_reason(
+        "https://www.woolworths.com.au/shop/productdetails/88436/milk")
+    assert detail and "listing row" in detail, detail
+    assert P.unsupported_reason(
+        "https://www.woolworths.com.au/shop/browse/bakery") is None
+
+
+@check
+def test_the_apex_host_is_accepted_and_the_www_host_is_canonical():
+    assert P.is_woolworths_host("https://woolworths.com.au/shop/browse/bakery")
+    assert P.is_woolworths_host("https://www.woolworths.com.au/x")
+    assert not P.is_woolworths_host("https://woolworths.com.au.evil.test/x")
+    assert P.product_url(1, "s").startswith("https://www.woolworths.com.au/")
+
+
+@check
+def test_currency_is_host_derived_and_never_defaulted():
+    """Absent is null, never a guessed "USD"."""
+    assert P.currency_for("https://www.woolworths.com.au/x") == "AUD"
+    assert P.currency_for("https://example.com/x") is None
+    assert P.currency_for("") is None
+
+
+@check
+def test_product_url_matches_a_link_the_site_actually_renders():
+    """Rebuilt, not read — so it is pinned against a real tile's href."""
+    href = "/shop/productdetails/144607/strawberries-punnet"
+    code = P.stockcode_from_href(href)
+    assert code == "144607", code
+    assert P.product_url(code, "strawberries-punnet").endswith(href)
+
+
+@check
+def test_unauthorised_redirect_is_recognised():
+    """A client-side bounce after a perfectly normal 200."""
+    assert P.is_unauthorised_redirect(
+        "https://www.woolworths.com.au/unauthorisederror")
+    assert P.is_unauthorised_redirect(
+        "https://www.woolworths.com.au/unauthorisederror/")
+    assert not P.is_unauthorised_redirect(
+        "https://www.woolworths.com.au/shop/browse/bakery")
+
+
+# ===========================================================================
+# 7. Category resolution
+# ===========================================================================
+@check
+def test_category_slugs_resolve_to_opaque_ids():
+    tree = FIXTURES["categories_head"]
+    assert P.category_id_for_slug(tree, "bakery") == "1_DEB537E"
+    assert P.category_id_for_slug(tree, "fruit-veg") == "1-E5BEE36E"
+    assert P.category_id_for_slug(tree, "specials") == "specialsgroup"
+    assert P.category_id_for_slug(tree, "not-a-node") is None
+    assert P.category_id_for_slug(tree, "") is None
+
+
+@check
+def test_a_child_slug_resolves_to_the_child_not_the_parent():
+    """Asking for the parent would silently return a larger listing."""
+    tree = FIXTURES["categories_head"]
+    parent = P.category_id_for_slug(tree, "fruit-veg")
+    child = P.category_id_for_slug(tree, "fruit-veg/fruit")
+    assert child and child != parent, (
+        f"the child slug resolved to {child!r} and the parent to {parent!r}")
+
+
+@check
+def test_the_request_bodies_carry_the_ids_the_api_needs():
+    path, body, src = P.api_request_for("search", term="milk", page=2)
+    assert path == P.API_SEARCH_PATH and src == "api-search"
+    assert body["SearchTerm"] == "milk" and body["PageNumber"] == 2
+    assert body["PageSize"] == P.PAGE_SIZE
+
+    path, body, src = P.api_request_for("category", category_id="1_DEB537E",
+                                        slug="bakery", page=3)
+    assert path == P.API_CATEGORY_PATH and src == "api-category"
+    assert body["categoryId"] == "1_DEB537E" and body["pageNumber"] == 3
+    # A slug where the id belongs returns 200 with zero products, which is
+    # indistinguishable from a real empty category.
+    assert body["categoryId"] != "bakery"
+
+    for bad in (("search", {}), ("category", {}), ("nonsense", {})):
+        try:
+            P.api_request_for(bad[0], **bad[1])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"api_request_for{bad} should have raised")
+
+
+# ===========================================================================
+# 8. The DOM second view
+# ===========================================================================
+@check
+def test_dom_overlay_confirms_and_never_overwrites():
+    rows = [Product(sku="1", price=4.70, price_source="api"),
+            Product(sku="2", price=9.99, price_source="api")]
+    tiles = [{"href": "/shop/productdetails/1/a", "price_text": "$4.70 $2.35 / 1L"},
+             {"href": "/shop/productdetails/2/b", "price_text": "$8.00"}]
+    confirmed, checked = P.overlay_dom_prices(rows, tiles)
+    assert (confirmed, checked) == (1, 2), (confirmed, checked)
+    assert rows[0].price_source == "api+dom"
+    # Disagreement leaves the row ALONE.
+    assert rows[1].price == 9.99, "a disagreeing tile overwrote the API price"
+    assert rows[1].price_source == "api"
+
+
+@check
+def test_dom_index_keys_on_the_tiles_own_stockcode():
+    """A carousel tile can only ever index itself (the neighbour trap)."""
+    tiles = [{"href": "/shop/productdetails/11/a", "price_text": "$1.00"},
+             {"href": "/shop/productdetails/22/b", "price_text": "$2.00"},
+             {"href": "/nonsense", "price_text": "$3.00"},
+             {"href": "", "price_text": "$4.00"}]
+    index = P.dom_tiles_to_index(tiles)
+    assert sorted(index) == ["11", "22"], sorted(index)
+
+
+class _TileOps:
+    """Just enough of an engine's ops for `confirm_with_dom`: a sequence of
+    tile reads, the last one repeated, and a clock that only counts."""
+
+    def __init__(self, *reads):
+        self.reads, self.calls, self.waited = list(reads), 0, 0
+
+    def read_tiles(self):
+        i = min(self.calls, len(self.reads) - 1)
+        self.calls += 1
+        return self.reads[i]
+
+    def wait_ms(self, ms):
+        self.waited += ms
+
+
+def _carousel_capture():
+    fx = FIXTURES["tiles_carousel_first"]
+    rows = P.products_from_payload(fx["api_page1"], page=1)
+    return fx, rows
+
+
+@check
+def test_the_carousel_tiles_carry_none_of_page_ones_stockcodes():
+    """The real capture behind the 2026-10-13 red canary: a 19-tile
+    carousel painted first, and page 1's rows are not in it."""
+    fx, rows = _carousel_capture()
+    assert len(fx["early"]) == 19 and len(fx["late"]) == 56, (
+        len(fx["early"]), len(fx["late"]))
+    assert [(r.sku, r.price) for r in rows[:3]] == [
+        ("6041394", 4.0), ("49622", 5.2), ("6037735", 2.6)], rows[:3]
+    assert P.rows_with_a_tile(rows, fx["early"]) == 0
+    assert P.overlay_dom_prices(rows, fx["early"]) == (0, 0)
+    rows = P.products_from_payload(fx["api_page1"], page=1)
+    assert P.rows_with_a_tile(rows, fx["late"]) == len(rows) == 8
+    assert P.overlay_dom_prices(rows, fx["late"]) == (8, 8)
+
+
+@check
+def test_dom_confirmation_waits_past_a_carousel_for_the_grid():
+    fx, rows = _carousel_capture()
+    ops = _TileOps(fx["early"], fx["early"], fx["late"])
+    dom = page_flow.confirm_with_dom(ops, rows, 1)
+    assert dom == {"tiles": 56, "checked": 8, "confirmed": 8}, (
+        f"the cross-check read the carousel and stopped: {dom}")
+    assert all(r.price_source == "api+dom" for r in rows)
+    assert ops.waited == 2 * page_flow.POLL_MS, ops.waited
+
+
+@check
+def test_dom_confirmation_gives_up_on_a_grid_that_never_paints():
+    fx, rows = _carousel_capture()
+    ops = _TileOps(fx["early"])
+    records = []
+
+    class _Grab(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    h = _Grab(level=logging.WARNING)
+    page_flow.logger.addHandler(h)
+    try:
+        dom = page_flow.confirm_with_dom(ops, rows, 1)
+    finally:
+        page_flow.logger.removeHandler(h)
+    assert dom == {"tiles": 19, "checked": 0, "confirmed": 0}, dom
+    assert ops.waited == page_flow.GRID_SETTLE_MS, ops.waited
+    assert any("none of them carries" in r.getMessage() for r in records), (
+        "0 rows checked against rendered tiles must be said at WARNING")
+    assert all(r.price_source == "api" for r in rows)
+
+
+@check
+def test_tile_price_parsing():
+    assert P.price_from_tile_text("$4.70\n  $2.35 / 1L") == 4.70
+    assert P.price_from_tile_text("$1,234.56") == 1234.56
+    assert P.price_from_tile_text("no price here") is None
+    assert P.price_from_tile_text("") is None
+
+
+# ===========================================================================
+# 9. Rows, ordering, the sidecar
+# ===========================================================================
+@check
+def test_page_and_position_are_unique_as_a_pair():
+    """`position` restarts at 1 on every page."""
+    rows = (P.products_from_payload(FIXTURES["api_search"], page=1)
+            + P.products_from_payload(FIXTURES["api_category"], page=2))
+    pairs = [(r.page, r.position) for r in rows]
+    assert len(set(pairs)) == len(pairs), "page+position is not unique"
+    assert all(p is not None and n is not None for p, n in pairs)
+
+
+@check
+def test_sku_is_not_unique_across_pages_and_that_is_the_ads():
+    """Documents the reason the dedupe is not optional here."""
+    page1 = P.products_from_payload(FIXTURES["api_search"], page=1)
+    page3 = P.products_from_payload(FIXTURES["api_search"], page=3)
+    seen = set()
+    kept = (output_writer.dedupe_by_key(page1, seen, "sku")
+            + output_writer.dedupe_by_key(page3, seen, "sku"))
+    assert len(kept) == len(page1), (
+        "the same payload deduped twice should add nothing the second time")
+
+
+@check
+def test_row_column_order_starts_with_the_family_prefix():
+    """One column name works across the family."""
+    names = [f.name for f in __import__("dataclasses").fields(Product)]
+    assert names[:5] == ["source", "scraped_at", "url", "sku", "title"], names[:5]
+
+
+@check
+def test_columns_measured_absent_are_absent():
+    """Absent columns, with the measurement in output_writer's docstring."""
+    names = {f.name for f in __import__("dataclasses").fields(Product)}
+    for gone in ("rating", "rating_count", "review_count", "country_of_origin",
+                 "instore_price"):
+        assert gone not in names, (
+            f"{gone!r} was measured null (or duplicate) on every row and "
+            "should not be a column")
+
+
+@check
+def test_modes_and_row_classes_agree():
+    assert set(output_writer.ROW_CLASS_BY_MODE) == {"search", "category",
+                                                    "stores"}
+    assert set(output_writer.UNIQUE_BY_SKU_MODES) == {"search", "category",
+                                                      "stores"}
+    # Two row classes, and the sidecar's `mode` is what tells them apart —
+    # The family row contract allows the second only with that condition, and `diff_runs`
+    # refuses a pair that does not share one.
+    assert output_writer.ROW_CLASS_BY_MODE["stores"] is output_writer.Store
+    assert output_writer.ROW_CLASS_BY_MODE["search"] is Product
+
+
+@check
+def test_an_exhausted_listing_is_complete_not_partial():
+    """A run that asked for 8 pages of a 2-page listing read the whole listing."""
+    assert "pagination_exhausted" in output_writer.COMPLETE_STOP_REASONS, (
+        "a correct short run would report partial (exit 6) and put the "
+        "canary permanently red")
+
+
+@check
+def test_empty_csv_keeps_its_header():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "out.csv")
+        output_writer.write_csv([], path)
+        text = pathlib.Path(path).read_text(encoding="utf-8")
+    assert text.strip(), "an empty CSV should still carry its header"
+    assert text.splitlines()[0].startswith("source,scraped_at,url,sku,title")
+
+
+# ===========================================================================
+# 10. Engine parity (the checks worth stealing)
+# ===========================================================================
+# Scoped to the ARGUMENT PARSER, not to every add_argument in the file:
+# Selenium builds Chrome's own command line with `options.add_argument`, and
+# `--no-sandbox` is not a CLI flag this repo offers anyone.
+_FLAG_RE = re.compile(r'(?<!options)\.add_argument\(\s*"(--[a-z0-9-]+)"')
+
+# The family's contract, plus this repo's documented additions.
+CONTRACT_FLAGS = {
+    "--url", "--pages", "--category", "--format", "--out", "--delay",
+    "--retries", "--retry-delay", "--concurrency", "--proxy", "--proxy-file",
+    "--proxy-rotate", "--proxy-shuffle", "--proxy-block-retries",
+    "--twocaptcha-key", "--captcha-api", "--solve-captcha", "--min-score",
+    "--cdp-endpoint", "--allow-empty", "--dump-html", "--headless",
+    # Choosing a store. All four are in all three engines: the lookup is
+    # engine-independent (it is one GET from inside a loaded page) and the
+    # refusal on a listing run has to be identical everywhere, or one
+    # engine would quietly return another store's prices.
+    "--postcode", "--suburb", "--near", "--store-id",
+    "--headful", "--mode",
+}
+# Differences that are DOCUMENTED rather than accidental. This list IS the
+# documentation, so closing one of these without updating it fails too.
+ALLOWED_FLAG_DIFFERENCES = {
+    # chromedriver has no bundled browser to choose between.
+    "--browser-channel": {"playwright_scraper"},
+    # Selenium attaches by debuggerAddress; there is no WebSocket upgrade to
+    # wait for, so there is nothing for a connect timeout to bound.
+    "--cdp-connect-timeout": {"playwright_scraper", "puppeteer_scraper"},
+    # pyppeteer drives a browser it downloads itself, and lets you point at
+    # another one.
+    "--chromium-path": {"puppeteer_scraper"},
+    # The fingerprint client applies through context kwargs the pyppeteer
+    # engine does not have an equivalent for.
+    "--fingerprint": {"playwright_scraper", "selenium_scraper"},
+    "--fp-tags": {"playwright_scraper", "selenium_scraper"},
+    "--fp-country": {"playwright_scraper", "selenium_scraper"},
+    "--locale": {"playwright_scraper", "selenium_scraper"},
+}
+
+
+def _flags_of(name):
+    return set(_FLAG_RE.findall((ROOT / f"{name}.py").read_text(encoding="utf-8")))
+
+
+@check
+def test_every_engine_offers_the_contract_flags():
+    for name in ENGINE_NAMES:
+        missing = CONTRACT_FLAGS - _flags_of(name)
+        assert not missing, f"{name} is missing {sorted(missing)}"
+
+
+@check
+def test_engine_flag_differences_are_exactly_the_documented_ones():
+    """Both directions: a new unshared flag fails, and so does closing a
+    documented difference — the exception list IS the documentation."""
+    per_engine = {n: _flags_of(n) for n in ENGINE_NAMES}
+    everything = set().union(*per_engine.values())
+    for flag in sorted(everything - CONTRACT_FLAGS):
+        have = {n for n in ENGINE_NAMES if flag in per_engine[n]}
+        expected = ALLOWED_FLAG_DIFFERENCES.get(flag)
+        assert expected is not None, (
+            f"{flag} is in {sorted(have)} and is neither in the contract nor "
+            "in ALLOWED_FLAG_DIFFERENCES — document it or remove it")
+        assert have == expected, (
+            f"{flag} is in {sorted(have)} but ALLOWED_FLAG_DIFFERENCES says "
+            f"{sorted(expected)} — update the list, which is the documentation")
+
+
+@check
+def test_shared_module_calls_bind_against_the_real_signatures():
+    """A check worth stealing: `classify(html, status, url)` called as
+    `classify(html, url=…)` crashed two engines on their FIRST fetch, and was
+    invisible to import, --help, compileall and 400 green assertions."""
+    targets = {"page_flow": page_flow, "product_parser": P,
+               "output_writer": output_writer}
+    problems = []
+    for name in ENGINE_NAMES:
+        tree = ast.parse((ROOT / f"{name}.py").read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if not (isinstance(fn, ast.Attribute)
+                    and isinstance(fn.value, ast.Name)
+                    and fn.value.id in targets):
+                continue
+            callee = getattr(targets[fn.value.id], fn.attr, None)
+            if not callable(callee):
+                continue
+            try:
+                sig = inspect.signature(callee)
+            except (TypeError, ValueError):
+                continue
+            args = [inspect.Parameter.empty] * len(node.args)
+            kwargs = {}
+            for kw in node.keywords:
+                if kw.arg is None:
+                    kwargs = None
+                    break
+                kwargs[kw.arg] = inspect.Parameter.empty
+            if kwargs is None:
+                continue
+            try:
+                sig.bind(*args, **kwargs)
+            except TypeError as e:
+                problems.append(
+                    f"{name}:{node.lineno} {fn.value.id}.{fn.attr}(): {e}")
+    assert not problems, "shared-module calls that would fail at runtime:\n  " \
+        + "\n  ".join(problems)
+
+
+@check
+def test_engines_agree_on_the_shared_constants():
+    """A threshold that differed would mean one engine warning about a page
+    its twin called healthy."""
+    if len(ENGINES) < 2:
+        return
+    for const in ("FIELD_FLOOR", "DOM_CONFIRM_FLOOR", "LAUNCH_ARGS",
+                  "_PROXY_ERROR_MARKERS", "_API_PATH_MARKER"):
+        values = {e.__name__: getattr(e, const, None) for e in ENGINES}
+        distinct = {repr(v) for v in values.values()}
+        assert len(distinct) == 1, f"{const} differs between engines: {values}"
+
+
+@check
+def test_every_engine_passes_the_automation_flag():
+    """Without it the SPA bounces to /unauthorisederror while the run still
+    reports success — the defect class this check is about."""
+    for name in ENGINE_NAMES:
+        src = (ROOT / f"{name}.py").read_text(encoding="utf-8")
+        assert "--disable-blink-features=AutomationControlled" in src, (
+            f"{name} does not pass the automation flag")
+        assert "LAUNCH_ARGS" in src, (
+            f"{name} should carry the flag as LAUNCH_ARGS so the suite can "
+            "compare the three")
+
+
+@check
+def test_engines_import_their_driver_at_module_level():
+    """Otherwise the module imports fine with no driver installed, the group
+    never skips, and the CI job that exists to catch a broken import cannot.
+   """
+    expect = {"playwright_scraper": "playwright",
+              "selenium_scraper": "selenium",
+              "puppeteer_scraper": "pyppeteer"}
+    for name, lib in expect.items():
+        tree = ast.parse((ROOT / f"{name}.py").read_text(encoding="utf-8"))
+        top = set()
+        for node in tree.body:           # MODULE level only, deliberately
+            if isinstance(node, ast.Import):
+                top.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                top.add(node.module.split(".")[0])
+        assert lib in top, (
+            f"{name} does not import {lib} at module level, so it would "
+            "import cleanly with the driver absent")
+
+
+@check
+def test_no_policy_constant_is_without_a_consumer():
+    """A policy constant nothing reads is the same defect as dead code.
+
+    The consumer may be an engine OR the shared page loop, which is the
+    same thing one step removed: every engine calls
+    `page_flow.fetch_one_page`, so a constant that loop reads is a constant
+    all three engines read. Before the shared-loop conversion the loop lived in the engines and
+    this check only looked there; after it, looking only there would fail
+    on constants that are MORE consumed than before, not less.
+
+    The pairing is what keeps it honest: a constant must have a reader, and
+    the shared loop must itself be reached from every engine — asserted by
+    `test_every_engine_drives_the_shared_loop` below. Without that second
+    half this would pass for a constant read by a page_flow function
+    nobody calls, which is the dead code it exists to find.
+    """
+    consumers = "\n".join((ROOT / f"{n}.py").read_text(encoding="utf-8")
+                          for n in ENGINE_NAMES)
+    flow = (ROOT / "page_flow.py").read_text(encoding="utf-8")
+    # Only the part of page_flow BELOW the loop's own banner counts: a
+    # definition is not a consumer of itself.
+    marker = "# The page loop itself"
+    assert marker in flow, "the shared-loop section was renamed"
+    consumers += "\n" + flow.split(marker, 1)[1]
+    for name in ("should_retry", "should_solve", "counts_as_blocked",
+                 "block_retries", "advance_page", "wait_for_tiles",
+                 "organic_count", "RETRY_NEEDS_FRESH_CONTEXT", "ADS_ONLY",
+                 "page_cap_reached", "block_advice", "classify",
+                 "ready_selector", "min_matches"):
+        assert name in consumers, (
+            f"page_flow.{name} has no consumer in any engine or in the "
+            "shared loop — either use it or delete it")
+
+
+@check
+def test_the_engines_call_their_shared_helpers_the_same_way():
+    """The three engines must pass the same THING to a same-named helper.
+
+    This check exists because of a bug that reached main. A refactor changed
+    `_fetch_api` to take the SESSION rather than the page, and two engines
+    were updated while the Playwright one kept `_fetch_api(session.page, …)`
+    in `_resolve_target`. Arity was identical, so it bound fine; every
+    offline check passed; `--help` worked; a live SEARCH run passed, because
+    search never reaches that line. Only a live CATEGORY run failed, with
+    `'Page' object has no attribute 'page'`.
+
+    Comparing the ARGUMENT SPELLING across the three engines catches exactly
+    that: a signature change that lands in two of three files. It is the
+    call-binding check extended to a module's own helpers, where
+    `inspect.signature` cannot help because the types are not in the
+    signature.
+    """
+    import collections
+
+    watched = {"_fetch_api", "_read_tiles", "_confirm_with_dom",
+               "_rows_from_payload", "_land", "_resolve_target",
+               "_api_error_count", "_fetch_api_with_retries"}
+    # first-argument spelling, per helper, per engine
+    seen = collections.defaultdict(dict)
+    for name in ENGINE_NAMES:
+        tree = ast.parse((ROOT / f"{name}.py").read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id in watched
+                    and node.args):
+                continue
+            first = ast.unparse(node.args[0])
+            # An ops method holds the session on `self`, so `self.session`
+            # and `session` are the same argument reached two ways. The
+            # check is about WHICH THING is passed, not about how the
+            # caller happens to hold it.
+            first = first.replace("self.session", "session")
+            seen[node.func.id].setdefault(name, set()).add(first)
+
+    problems = []
+    for helper, per_engine in sorted(seen.items()):
+        if len(per_engine) < 2:
+            continue          # only one engine calls it; nothing to compare
+        spellings = {frozenset(v) for v in per_engine.values()}
+        if len(spellings) > 1:
+            detail = ", ".join(f"{eng}={sorted(v)}"
+                               for eng, v in sorted(per_engine.items()))
+            problems.append(f"{helper}(): {detail}")
+    assert not problems, (
+        "the engines disagree about what to pass a shared-name helper — a "
+        "signature change that landed in some files and not others:\n  "
+        + "\n  ".join(problems))
+
+
+@check
+def test_undefined_names_in_every_module():
+    """Compileall proves a file PARSES, not that its names RESOLVE.
+
+    Coarse on purpose — pool-scoped rather than scope-accurate — so it
+    under-reports rather than inventing problems.
+    """
+    import builtins
+    allowed = set(dir(builtins)) | {"__file__", "__name__", "__doc__",
+                                    "__builtins__", "self", "cls"}
+    problems = []
+    for path in sorted(ROOT.glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        bound = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Lambda):
+                a = node.args
+                bound.update(arg.arg for arg in
+                             list(a.args) + list(a.posonlyargs)
+                             + list(a.kwonlyargs)
+                             + ([a.vararg] if a.vararg else [])
+                             + ([a.kwarg] if a.kwarg else []))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                bound.add(node.name)
+                if not isinstance(node, ast.ClassDef):
+                    a = node.args
+                    bound.update(arg.arg for arg in
+                                 list(a.args) + list(a.posonlyargs)
+                                 + list(a.kwonlyargs)
+                                 + ([a.vararg] if a.vararg else [])
+                                 + ([a.kwarg] if a.kwarg else []))
+            elif isinstance(node, ast.Name) and isinstance(node.ctx,
+                                                           (ast.Store, ast.Del)):
+                bound.add(node.id)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                bound.update((a.asname or a.name).split(".")[0]
+                             for a in node.names)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                bound.add(node.name)
+            elif isinstance(node, ast.Global):
+                bound.update(node.names)
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                for item in node.items:
+                    if item.optional_vars:
+                        bound.update(n.id for n in ast.walk(item.optional_vars)
+                                     if isinstance(n, ast.Name))
+        used = {n.id for n in ast.walk(tree)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        missing = sorted(used - bound - allowed)
+        if missing:
+            problems.append(f"{path.name}: {missing}")
+    assert not problems, "names used but never bound:\n  " + "\n  ".join(problems)
+
+
+# ===========================================================================
+# 10b. The concurrency machinery, with the browser stubbed out
+# ===========================================================================
+# A LIVE run cannot reach most of this: page 1 is fetched alone and decides
+# whether the rest is worth asking for, so a blocked or short page 1 means
+# the workers never start at all. Stubbing the browser is the only way
+# to assert what the dispatcher actually does.
+class _FakeArgs:
+    """The attributes `_fetch_pages_concurrently` and its callees touch."""
+    def __init__(self, **kw):
+        self.url = "https://www.woolworths.com.au/shop/browse/bakery"
+        self.mode = "category"
+        self.pages = 9
+        self.delay = 0
+        self.retries = 1
+        self.retry_delay = 0
+        self.out = "unused"
+        self.concurrency = 3
+        self.cdp_endpoint = None
+        self.headless = False
+        self.dump_html = None
+        self.allow_empty = False
+        self.format = "json"
+        self.page_size = 36
+        self.proxy = self.proxy_file = None
+        self.twocaptcha_key = None
+        self.solve_captcha = "never"
+        self.__dict__.update(kw)
+
+
+class _FakeSession:
+    pool = None
+
+    def __init__(self, *a, **kw):
+        pass
+
+    def open(self):
+        return self
+
+    def close(self):
+        pass
+
+
+class _FakeSyncPlaywright:
+    """Stands in for `sync_playwright()` — a context manager yielding a stub."""
+    def __enter__(self):
+        return object()
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _drive_concurrently(fetch_impl, specs, concurrency=3, pool=None):
+    """Run the real dispatcher against a stubbed browser and fetch."""
+    import threading
+    saved = (PW.sync_playwright, PW._BrowserSession, PW._fetch_one_page)
+    calls = []
+    lock = threading.Lock()
+
+    def counting_fetch(session, args, worker_pool, page_num, url):
+        with lock:
+            calls.append(page_num)
+        return fetch_impl(session, args, worker_pool, page_num, url)
+
+    PW.sync_playwright = lambda: _FakeSyncPlaywright()
+    PW._BrowserSession = _FakeSession
+    PW._fetch_one_page = counting_fetch
+    try:
+        results, unattempted, exhausted = PW._fetch_pages_concurrently(
+            _FakeArgs(), pool, specs, concurrency)
+    finally:
+        PW.sync_playwright, PW._BrowserSession, PW._fetch_one_page = saved
+    return calls, results, unattempted, exhausted
+
+
+def _outcome(page_num, products, **kw):
+    o = PW.PageOutcome(page_num=page_num,
+                       url="https://www.woolworths.com.au/shop/browse/bakery")
+    o.products = products
+    for k, v in kw.items():
+        setattr(o, k, v)
+    return o
+
+
+def _organic(n, start=0):
+    return [Product(sku=str(start + i), is_sponsored=False) for i in range(n)]
+
+
+@check
+def test_concurrency_fetches_every_queued_page_exactly_once():
+    if PW is None:
+        return
+    specs = [(n, "u") for n in range(2, 10)]
+    calls, results, unattempted, exhausted = _drive_concurrently(
+        lambda s, a, p, n, u: _outcome(n, _organic(3, n * 100)), specs)
+    assert sorted(calls) == list(range(2, 10)), f"pages fetched: {sorted(calls)}"
+    assert len(calls) == len(set(calls)), f"a page was fetched twice: {calls}"
+    assert not unattempted, unattempted
+    assert not exhausted
+
+
+@check
+def test_concurrency_outcomes_are_restorable_to_page_order():
+    """Workers finish out of order; the merge must not depend on that."""
+    if PW is None:
+        return
+    import random, time as _t
+
+    def jittery(session, args, pool, page_num, url):
+        _t.sleep(random.uniform(0, 0.02))
+        return _outcome(page_num, _organic(2, page_num * 100))
+
+    specs = [(n, "u") for n in range(2, 10)]
+    calls, results, _, _ = _drive_concurrently(jittery, specs)
+    ordered = [o.page_num for o in sorted(results, key=lambda o: o.page_num)]
+    assert ordered == list(range(2, 10)), ordered
+
+
+@check
+def test_concurrency_stops_dispatch_at_the_end_of_the_listing():
+    """And stops on ORGANIC rows, not on "the page was empty" — past its last
+    real page this API answers 200 with nothing but ads."""
+    if PW is None:
+        return
+    ads_only = [Product(sku="ad1", is_sponsored=True),
+                Product(sku="ad2", is_sponsored=True)]
+
+    def ads_from_page_4(session, args, pool, page_num, url):
+        if page_num >= 4:
+            return _outcome(page_num, list(ads_only))
+        return _outcome(page_num, _organic(3, page_num * 100))
+
+    specs = [(n, "u") for n in range(2, 40)]
+    calls, results, unattempted, exhausted = _drive_concurrently(
+        ads_from_page_4, specs, concurrency=2)
+    assert exhausted, "a page of nothing but ads did not stop dispatch"
+    assert len(calls) < 10, (
+        f"dispatch kept going for {len(calls)} pages after the listing ended; "
+        "at most (concurrency - 1) extra fetches should be in flight")
+    assert unattempted, "pages left in the queue were not reported"
+
+
+@check
+def test_concurrency_reports_unattempted_pages_rather_than_failing_them():
+    """They were never tried; claiming otherwise overstates the damage."""
+    if PW is None:
+        return
+
+    def empty_at_3(session, args, pool, page_num, url):
+        if page_num == 3:
+            return _outcome(page_num, [])
+        return _outcome(page_num, _organic(3, page_num * 100))
+
+    specs = [(n, "u") for n in range(2, 30)]
+    calls, results, unattempted, exhausted = _drive_concurrently(
+        empty_at_3, specs, concurrency=2)
+    assert exhausted
+    assert unattempted, "nothing reported as unattempted"
+    assert all(not o.load_failed and o.blocked_by is None for o in results), (
+        "an unattempted page was recorded as a failed one")
+    assert set(unattempted).isdisjoint(set(calls)), (
+        "a page is both fetched and unattempted")
+
+
+@check
+def test_a_worker_that_raises_neither_hangs_the_run_nor_loses_its_siblings():
+    if PW is None:
+        return
+
+    def explode_on_5(session, args, pool, page_num, url):
+        if page_num == 5:
+            raise RuntimeError("worker died on purpose")
+        return _outcome(page_num, _organic(3, page_num * 100))
+
+    specs = [(n, "u") for n in range(2, 10)]
+    calls, results, unattempted, exhausted = _drive_concurrently(
+        explode_on_5, specs, concurrency=3)
+    # It returned at all — that is the "does not hang" half.
+    got = {o.page_num for o in results}
+    assert got, "a dying worker lost every result"
+    # The page that raised is a FAILED page. This check used to assert the
+    # opposite (that page 5 was in no list at all), and that is exactly how
+    # a concurrent run missing a page reported `complete`, exit 0.
+    five = [o for o in results if o.page_num == 5]
+    assert len(five) == 1 and five[0].load_failed and not five[0].ok, (
+        "the page a worker was holding when it raised was lost, not failed")
+    # Every other page is either done or reported unattempted, never lost.
+    accounted = got | set(unattempted)
+    assert accounted >= set(range(2, 10)), (
+        f"pages went missing entirely: {set(range(2, 10)) - accounted}")
+
+
+def _scrape_with_stub_workers(fetch_impl, pages=4, concurrency=2,
+                              session_cls=None):
+    """Drive the real `scrape()` with the browser stubbed out; returns
+    (exit code, sidecar dict or None)."""
+    saved = (PW.sync_playwright, PW._BrowserSession, PW._fetch_one_page)
+    PW.sync_playwright = lambda: _FakeSyncPlaywright()
+    PW._BrowserSession = session_cls or _FakeSession
+    PW._fetch_one_page = fetch_impl
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            args = _FakeArgs(pages=pages, concurrency=concurrency,
+                             out=os.path.join(d, "o"), store_id=None,
+                             postcode=None, category="bakery",
+                             proxy_rotate="per-run", proxy_shuffle=False,
+                             proxy_block_retries=None)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                rc = PW.scrape(args)
+            meta_path = os.path.join(d, "o.meta.json")
+            meta = (json.load(open(meta_path, encoding="utf-8"))
+                    if os.path.exists(meta_path) else None)
+    finally:
+        PW.sync_playwright, PW._BrowserSession, PW._fetch_one_page = saved
+    return rc, meta
+
+
+@check
+def test_a_concurrent_run_that_loses_a_page_is_partial_not_complete():
+    if PW is None:
+        return
+
+    def raise_on_3(session, args, pool, page_num, url):
+        if page_num == 3:
+            raise RuntimeError("worker died on purpose")
+        return _outcome(page_num, _organic(3, page_num * 100), state="content")
+
+    rc, meta = _scrape_with_stub_workers(raise_on_3)
+    assert rc == 6 and meta["status"] == "partial", (rc, meta and meta["status"])
+    assert meta["pages_failed"] == [3], meta["pages_failed"]
+
+
+@check
+def test_workers_that_never_launch_leave_a_partial_run():
+    if PW is None:
+        return
+    launches = []
+
+    class _DeadWorkers(_FakeSession):
+        def open(self):
+            launches.append(1)
+            if len(launches) > 1:          # page 1's browser works
+                raise RuntimeError("browser failed to launch")
+            return self
+
+    rc, meta = _scrape_with_stub_workers(
+        lambda s, a, p, n, u: _outcome(n, _organic(3, n * 100),
+                                       state="content"),
+        session_cls=_DeadWorkers)
+    assert rc == 6 and meta["status"] == "partial", (rc, meta and meta["status"])
+    assert meta["stop_reason"] == "pages_unattempted", meta["stop_reason"]
+    assert meta["pages_unattempted"] == [2, 3, 4], meta["pages_unattempted"]
+
+
+@check
+def test_pyppeteer_proxy_auth_and_identity_survive_current_chromium():
+    """page.authenticate needs a CDP method current Chromium removed, so the
+    engine must fall back to Fetch.authRequired; it must not hardcode a
+    Windows UA on a Linux host; and connect() must not pass
+    ignoreHTTPSErrors to a managed browser. Read from source so it runs in
+    every venv."""
+    src = (ROOT / "puppeteer_scraper.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    assert "Fetch.authRequired" in src and '"Proxy"' in src, (
+        "no Fetch-domain proxy auth fallback")
+    assert "Windows NT" not in src, "a hardcoded Windows user agent is back"
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "connect"):
+            kws = {k.arg for k in node.keywords}
+            assert "ignoreHTTPSErrors" not in kws, (
+                "connect() passes ignoreHTTPSErrors to a remote browser")
+    ns = {}
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+              and n.name == "_ua_without_headless")
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), "pp", "exec"),
+         {"Optional": __import__("typing").Optional}, ns)
+    ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like "
+          "Gecko) HeadlessChrome/140.0.0.0 Safari/537.36")
+    assert ns["_ua_without_headless"](ua) == ua.replace("HeadlessChrome",
+                                                        "Chrome")
+    assert ns["_ua_without_headless"](ua.replace("Headless", "")) is None
+
+
+@check
+def test_each_worker_starts_on_a_different_exit():
+    """Workers all leaving from one address is just a faster way to burn it."""
+    if PW is None:
+        return
+    pool = proxy_pool.ProxyPool(["http://a:1", "http://b:2", "http://c:3"],
+                                rotate="per-run")
+    firsts = {PW._worker_pool(pool, i).current for i in range(3)}
+    assert len(firsts) == 3, f"workers started on {firsts}"
+    assert PW._worker_pool(None, 0) is None
+
+
+@check
+def test_paid_api_kwargs_are_ones_the_driver_accepts():
+    """An unknown key in `new_context(**kwargs)` is a TypeError at launch, on
+    the PAID path, at runtime."""
+    if PW is None:
+        return
+    import inspect as _inspect
+    from playwright.sync_api import BrowserContext  # noqa: F401
+    import fingerprint_client
+
+    fake_fp = {"id": 1, "country": "AU", "userAgent": {"value": "UA/1.0"},
+               "screen": {"width": 1440, "height": 900},
+               "timezone": "Australia/Sydney", "locale": "en-AU"}
+    try:
+        kwargs = fingerprint_client.playwright_context_kwargs(fake_fp)
+    except Exception as e:  # noqa: BLE001 — a shape we do not model is not a failure here
+        skip("fingerprint kwargs", f"could not build from a stub fingerprint ({e})")
+        return
+    from playwright.sync_api import Browser
+    sig = _inspect.signature(Browser.new_context)
+    accepted = set(sig.parameters)
+    unknown = [k for k in kwargs if k not in accepted]
+    assert not unknown, (
+        f"fingerprint_client hands new_context {unknown}, which Playwright "
+        "does not accept — a TypeError at launch on the paid path")
+
+
+# ===========================================================================
+# 10c. What the October audit found, pinned
+# ===========================================================================
+@check
+def test_a_parse_failure_is_not_a_completed_page():
+    """The audit's P1, the defect a sibling repo had first, on this site.
+
+    `parse_failed` was SET and then discarded: `ok` consulted only
+    `load_failed` and `blocked_by`, so a page whose parser produced nothing
+    from a payload stating results came back as a completed page with zero
+    rows — which `advance_page` reads as the end of the listing. Reproduced
+    on the audited commit with a renamed container: exit 0, status complete,
+    stop_reason pagination_exhausted, pages_failed empty.
+    """
+    if PW is None:
+        return
+    o = PW.PageOutcome(page_num=2, url="u")
+    assert o.ok, "a fresh outcome should be ok"
+    o.parse_failed = True
+    assert not o.ok, (
+        "a parser failure still counts as a completed page — the run will "
+        "report complete over a listing it could not read")
+    assert PW._stop_reason_for(o) == "parser_found_nothing", (
+        f"got {PW._stop_reason_for(o)!r}; without this the branch falls "
+        "through to blocked_None")
+    assert "parser_found_nothing" not in output_writer.COMPLETE_STOP_REASONS, (
+        "a run that could not read the listing must not report complete")
+
+
+@check
+def test_the_page_cap_is_inclusive_and_shared_by_both_branches():
+    """The audit's second P2, both halves.
+
+    `page_cap_reached` read `>=`, so `--pages 200` fetched 199 while the
+    help said "cap 200"; and the concurrent branch queued
+    `range(2, args.pages + 1)` with no bound at all, so
+    `--pages 201 --concurrency 2` planned page 201 against a cap of 200.
+    """
+    cap = P.PAGE_CAP
+    assert not page_flow.page_cap_reached(cap), (
+        f"page {cap} of a {cap}-page cap is the last page fetched, not the "
+        "first one skipped")
+    assert page_flow.page_cap_reached(cap + 1)
+    planned = page_flow.planned_pages(cap + 50)
+    assert planned[-1] == cap, f"the plan runs to {planned[-1]}, not {cap}"
+    assert planned[0] == 2, "page 1 is fetched alone and is not in the plan"
+    assert page_flow.planned_pages(1) == [], "a one-page run plans nothing"
+    if PW is not None:
+        src = inspect.getsource(PW.scrape)
+        assert "planned_pages" in src, (
+            "the concurrent branch builds its own range again, so the two "
+            "branches can disagree about the cap")
+
+
+@check
+def test_proxy_block_retries_reaches_the_policy():
+    """The audit's third P2: the flag parsed, defaulted and did nothing."""
+    assert page_flow.block_retries(True, 0) == 0, (
+        "--proxy-block-retries 0 must mean zero extra attempts; it is a "
+        "meaningful value, not an unset one")
+    assert page_flow.block_retries(True, 7) == 7
+    assert page_flow.block_retries(True, None) == page_flow.BLOCK_RETRIES_WITH_POOL
+    assert page_flow.block_retries(False, 7) == page_flow.BLOCK_RETRIES_WITHOUT_POOL, (
+        "without a pool there is nothing to rotate to, so the flag does not "
+        "apply and the constant is the re-fetch budget")
+    # Read in the SHARED loop since the shared-loop conversion, which is how all three engines
+    # read it. Asserted there rather than per engine, and the engines are
+    # asserted not to have grown a second copy.
+    flow = (ROOT / "page_flow.py").read_text(encoding="utf-8")
+    assert "proxy_block_retries" in flow, (
+        "the shared loop never passes the flag into the policy")
+    for name in ENGINE_NAMES:
+        src = (ROOT / f"{name}.py").read_text(encoding="utf-8")
+        assert "block_retries(" not in src, (
+            f"{name} computes its own block-retry budget again — that is "
+            f"the triplication the shared-loop conversion removed, growing back")
+
+
+@check
+def test_the_pool_is_advanced_by_a_method_that_exists():
+    """NOT in the audit, and worse than what was: `ProxyPool` stores the
+    rotation MODE as `self.rotate`, so `pool.rotate()` is a string and
+    calling it raised TypeError — exit 1, in all three engines, on the one
+    path a proxy pool exists for. A live blocked run without a pool never
+    reaches it, which is why it survived.
+    """
+    pool = proxy_pool.ProxyPool(["http://a:1", "http://b:2"], rotate="per-run")
+    assert isinstance(pool.rotate, str), (
+        "ProxyPool.rotate is no longer the mode string; re-read this check")
+    assert callable(getattr(pool, "advance", None)), "advance() is the method"
+    first = pool.current
+    # `advance` takes a REASON, and it is required. The first fix for this
+    # bug called `pool.advance()` — swapping one TypeError for another, on
+    # the same unreachable path — and this check is what caught it.
+    pool.advance("a test")
+    assert pool.current != first, "advance() did not move to another exit"
+    import inspect as _i
+    assert "reason" in _i.signature(proxy_pool.ProxyPool.advance).parameters
+    # Checked on the AST, not on the text. The first version grepped the
+    # source and failed on the COMMENT that explains the bug — the rule that
+    # "a note about a banned phrase is a use of it", met immediately.
+    # In the SHARED loop since the conversion — one call site for three engines,
+    # which is the point: this bug was three copies of one mistake.
+    for name in ("page_flow",) + ENGINE_NAMES:
+        tree = ast.parse((ROOT / f"{name}.py").read_text(encoding="utf-8"))
+        called = {}
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "pool"):
+                called[node.func.attr] = len(node.args)
+        assert "rotate" not in called, (
+            f"{name} calls pool.rotate(), which is the mode string")
+        if name == "page_flow":
+            assert called.get("advance") == 1, (
+                f"the shared loop must call pool.advance(reason); saw {called}")
+        else:
+            assert "advance" not in called, (
+                f"{name} rotates the pool itself again — the shared loop "
+                f"owns that, and two rotations per refusal is what three "
+                f"copies of this code used to risk")
+
+
+@check
+def test_every_row_says_which_store_its_price_is_for():
+    """A price is a fact about a place, and the payload states the place."""
+    names = [f.name for f in __import__("dataclasses").fields(Product)]
+    assert "store_id" in names, (
+        "without it, two runs cannot tell a price change from a different "
+        "store's price")
+    rows = P.products_from_payload(FIXTURES["api_category"], page=1)
+    assert rows and all(r.store_id for r in rows), (
+        "FulfilmentStoreId is 100% populated on the measured corpus")
+    assert len({r.store_id for r in rows}) == 1, "one session, one store"
+
+
+@check
+def test_diff_runs_refuses_two_different_listings():
+    """Two complete runs of DIFFERENT categories diffed cleanly: same mode,
+    same host, so every row was reported added or removed — a 100% churn
+    report about two things that were never the same question. The sidecar
+    already carried `start_url`; it was simply unread."""
+    src = (ROOT / "diff_runs.py").read_text(encoding="utf-8")
+    assert "listing" in src and "meta.json" in src, (
+        "diff_runs does not read the sidecar's listing")
+    assert "different listings" in src, "the refusal does not name the cause"
+    assert "fulfilment stores" in src, (
+        "two runs served different stores diff as a price change")
+
+
+@check
+def test_the_canary_is_not_gated_on_a_credential():
+    """A canary that CAN pass without a credential must
+    never be gated on one.
+
+    This one was, on the reasoning that "Akamai refuses datacentre addresses
+    and a GitHub runner is one" — an inference from the wrong axis, since
+    what was measured is that the site refuses HEADLESS and serves HEADFUL.
+    Measured 2026-10-08 by forcing the live path on a bare runner with no
+    secret of any kind: Azure westus3, 109 rows, status complete, exit 0.
+    Every scheduled run before that had been the skip branch, so the badge
+    was green over a claim that nothing tested.
+    """
+    wf = (ROOT / ".github/workflows/canary.yml").read_text(encoding="utf-8")
+    assert "HAVE_PROXY" not in wf and "RUN_LIVE" not in wf, (
+        "the live steps are gated again, so a green badge means nothing")
+    for step in ("Run the canary", "Assert what the run actually produced"):
+        assert f"name: {step}" in wf, f"the canary lost its {step!r} step"
+    # A proxy secret, where one IS set, must still reach the run — and still
+    # through the environment rather than a command line.
+    assert "WOOLWORTHS_PROXY: ${{ secrets.WOOLWORTHS_PROXY }}" in wf, (
+        "a proxy secret would no longer be used even if set")
+    assert "--proxy " not in wf, "a credential must not reach a command line"
+
+# ===========================================================================
+# 11. Credentials, config, wording
+# ===========================================================================
+@check
+def test_credentials_are_masked_globally_not_once():
+    """A Playwright CDP error repeats the endpoint five times."""
+    if PW is None:
+        return
+    # Built by CONCATENATION on purpose, so that no line of this file holds a
+    # complete `scheme://user:pass@host` literal. That keeps the credential
+    # scan fully live on smoke_test.py — the one file where a real key is
+    # most likely to get pasted while debugging — instead of switching it off
+    # here with an allowlist entry.
+    endpoint = "ws://user:" + "secret" + "@cb.2captcha.com:9222"
+    text = " ".join([endpoint] * 5)
+    masked = PW._mask_credentials(text)
+    assert "secret" not in masked, masked
+    assert masked.count("***:***@") == 5, masked
+    assert "cb.2captcha.com:9222" in masked, "the host and port are not the secret"
+
+
+@check
+def test_env_example_documents_exactly_what_the_code_reads():
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    declared = {line.split("=", 1)[0].strip().lstrip("# ").strip()
+                for line in example.splitlines()
+                if "=" in line and not line.strip().startswith("##")}
+    declared = {d for d in declared if d and d.isupper()}
+    known = set(env_config.ENV_KEYS)
+    assert declared == known, (
+        f"only in .env.example: {sorted(declared - known)}; "
+        f"only in ENV_KEYS: {sorted(known - declared)}")
+
+
+@check
+def test_a_copied_env_example_reads_as_unset():
+    """A braced placeholder was read as CONFIGURED in two repos, and a
+    `cp .env.example .env` then sent `{login}-zone-…` to the API as a
+    username and got a 401 a long way from its cause."""
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    saved = {k: os.environ.get(k) for k in env_config.ENV_KEYS}
+    try:
+        for line in example.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if key.strip() in env_config.ENV_KEYS:
+                os.environ[key.strip()] = value.strip()
+        for key in env_config.ENV_KEYS:
+            if key == "WOOLWORTHS_URL":
+                continue   # a plain example URL is usable, not a credential
+            assert env_config.env_value(key) is None, (
+                f"{key} from a copied .env.example reads as configured")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+@check
+def test_env_keys_are_not_mapped_onto_flags_with_defaults():
+    """The loader only fills unset values, so such a variable is inert."""
+    assert "out" not in env_config.ENV_KEYS.values()
+    assert "format" not in env_config.ENV_KEYS.values()
+
+
+@check
+def test_a_built_captcha_task_type_is_reachable_or_documented():
+    """A solver a caller never reaches is dead code wearing a
+    capability's clothes, and the README is where that costs money.
+
+    `captcha_solver.py` builds five task types. reCAPTCHA is wired through
+    all three engines; Turnstile is NOT — the `turnstile.render` interception
+    that a Cloudflare Challenge page needs lives in the shared module and no
+    engine installs it. That is a fine state to be in on a site that has
+    never served a challenge, and it is NOT a fine thing to leave a reader to
+    discover. So: every task type the solver builds is either reachable from
+    an engine, or named in the README as not yet wired.
+
+    The pairing is asserted rather than a keyword searched, so it cannot go
+    quiet by accident (a guard is only as good as the fixture
+    it runs against).
+    """
+    solver = (ROOT / "captcha_solver.py").read_text(encoding="utf-8")
+    engines = ""
+    for name in ENGINE_NAMES:
+        path = ROOT / f"{name}.py"
+        if path.exists():
+            engines += path.read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    # reCAPTCHA is the wired one and must stay wired.
+    assert "solve_recaptcha" in engines, \
+        "no engine calls solve_recaptcha: the reCAPTCHA path is unreachable"
+
+    # Turnstile: wired, or documented as not wired. Never silently neither.
+    wired = "TURNSTILE_INTERCEPT_JS" in engines
+    documented = "no engine installs that script yet" in readme.lower()
+    assert "TurnstileTaskProxyless" not in solver or wired or documented, (
+        "captcha_solver builds TurnstileTaskProxyless but no engine installs "
+        "TURNSTILE_INTERCEPT_JS, and the README does not say so. Either wire "
+        "it or say it is not wired -- a reader cannot tell from the outside.")
+
+    # And the README must not overstate the reCAPTCHA side either.
+    assert "already implements" not in readme.lower(), (
+        "'already implements' reads as 'this works end to end'. Name the task "
+        "types and say which are wired.")
+
+
+@check
+def test_banned_wording():
+    """The words are a product decision, and a test is what keeps them."""
+    # Assembled rather than written out, so that THIS file does not contain
+    # the literals it forbids and the scan can stay live on it — the same
+    # reasoning as the masking fixture above. An exemption for smoke_test.py
+    # would switch the check off on one of the files most likely to acquire
+    # a stray phrase by copy-paste.
+    ad = "anti" + "detect"
+    banned = (" ".join(["cloud", "browser"]),
+              f"{ad} browser",
+              f"gate.2prx" + ".com",
+              f"--{ad}",
+              f"{ad.upper()}_LOCAL_API",
+              # The bare stem as well, in any identifier or sentence: the
+              # forms above missed a `use_<stem>` in a docstring.
+              ad)
+    shipped = list(_shipped_files({".py", ".md", ".yml", ".yaml", ".txt", ".toml"}))
+    # The scan must actually have scanned something. An earlier version
+    # excluded any path containing `.claude`, and this repo is developed in a
+    # worktree under `.claude/worktrees/` — so the exclusion matched EVERY
+    # file and the check silently passed on nothing, locally, while failing
+    # in CI where the path differs. A check that can quietly scan zero files
+    # is not a check.
+    assert len(shipped) > 20, f"only {len(shipped)} file(s) scanned"
+    problems = []
+    for path in shipped:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for word in banned:
+            if word.lower() in text.lower():
+                problems.append(f"{path.relative_to(ROOT)}: {word!r}")
+    assert not problems, "banned wording:\n  " + "\n  ".join(problems)
+
+
+@check
+def test_no_private_citations_in_shipped_files():
+    """Public files state their rules in their own words. Citations of the
+    maintainers' private instruction files, or of their numbered sections,
+    point a reader at documents they cannot open. Tokens are assembled so
+    this file does not match itself."""
+    banned = ("CLAUDE" + ".md", "claude_" + "2scraper",
+              "2scraper_" + "repo_rules", chr(0xA7))
+    section_ref = re.compile(r"\b[Ss]ections? \d+(?:\.\d+)?\b(?! of)")
+    suffixes = {".py", ".md", ".yml", ".yaml", ".txt", ".toml", ".sh",
+                ".example", ".cfg", ".ini", ""}
+    shipped = [p for p in _shipped_files(suffixes)
+               if p.suffix or p.name in ("Dockerfile", ".gitignore",
+                                         ".dockerignore", "LICENSE")]
+    assert len(shipped) > 20, f"only {len(shipped)} file(s) scanned"
+    problems = []
+    for path in shipped:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for token in banned:
+            if token in text:
+                problems.append(f"{path.relative_to(ROOT)}: {token!r}")
+        if section_ref.search(text):
+            problems.append(f"{path.relative_to(ROOT)}: "
+                            f"{section_ref.search(text).group(0)!r}")
+    assert not problems, "private citations:\n  " + "\n  ".join(problems)
+
+
+@check
+def test_removed_flags_stay_removed_on_the_engines():
+    """Scoped to the ENGINES: --country is banned on a scraper (it could
+    disagree with the URL) and legitimate on fingerprint_client.py, where it
+    picks a fingerprint locale."""
+    for name in ENGINE_NAMES:
+        flags = _flags_of(name)
+        # "--anti" + "detect" for the same reason as the banned list above:
+        # writing the literal here would make this file trip that check.
+        for gone in ("--country", "--anti" + "detect", "--page-size",
+                     "--search-term"):
+            assert gone not in flags, f"{name} reintroduced {gone}"
+
+
+@check
+def test_no_credentials_committed():
+    """The shipped check and CI must be ONE implementation."""
+    script = ROOT / ".github" / "ci_checks.py"
+    assert script.is_file(), "ci_checks.py is missing"
+    workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(
+        encoding="utf-8")
+    assert "ci_checks.py" in workflow, (
+        "tests.yml does not invoke ci_checks.py — two sources of truth, one "
+        "of them dead, is exactly what a family audit found in three repos")
+
+
+@check
+def test_the_credential_scan_runs_here_and_finds_nothing():
+    """The suite RUNS the scan, rather than only checking CI names it: a
+    local run used to pass with a key in an untracked `.env.bak`."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "ci_checks", ROOT / ".github" / "ci_checks.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    names = {p.relative_to(ROOT).as_posix() for p in mod.scanned_files()}
+    for must in ("fixtures_generated.json", "sample_output.json",
+                 "sample_output.csv", "Dockerfile", ".env.example"):
+        assert must in names, f"the credential scan does not read {must}"
+    with redirect_stdout(io.StringIO()):
+        failed = mod.secret_check()
+    assert not failed, failed
+
+
+@check
+def test_fixtures_carry_no_tokens_or_shopper_fields():
+    """By SHAPE, not by the old literals, so the next capture is caught."""
+    blob = json.dumps(FIXTURES)
+    patterns = {
+        "ad token": r"display_[A-Za-z0-9_+/=-]{20,}",
+        "AdID field": r'"AdID"',
+        "attribution token": r'"AttributionTokenR?e?f?"\s*:\s*"[^"]{20,}"',
+        "trolley field": r'"(QuantityInTrolley|IsInTrolley|HasBeenBoughtBefore)"',
+        "bearer token": r"[Bb]earer\s+[A-Za-z0-9._-]{20,}",
+        # A 32-hex API key. Requires real ENTROPY: the site's own JavaScript
+        # carries "000...0", which is 32 hex characters and is not a
+        # credential, and a check that cries wolf on it teaches people to
+        # ignore it.
+        "2captcha key": r"\b(?=[0-9a-f]{32}\b)(?=.*[a-f])(?=.*[0-9])[0-9a-f]{32}\b",
+    }
+    problems = []
+    for label, pat in patterns.items():
+        for m in re.finditer(pat, blob):
+            if label == "2captcha key" and len(set(m.group(0))) < 8:
+                continue     # a run of repeated characters is not a key
+            problems.append(label)
+            break
+    assert not problems, f"fixtures carry {problems} — rerun make_fixtures.py"
+
+
+@check
+def test_diff_runs_reports_a_real_price_move():
+    """diff_runs.py was medium-scraper's: TRACKED_FIELDS was claps,
+    responses and reading time, none of which a Woolworths row has, so a
+    real price move diffed as "0 changed". Moves ONE value on a real sample
+    row at a time and requires exactly one reported change, and a run
+    against itself to report none."""
+    import copy
+    import diff_runs
+    rows = json.loads((ROOT / "sample_output.json").read_text(encoding="utf-8"))
+    same = diff_runs.diff_products(rows, copy.deepcopy(rows))
+    assert not (same["added"] or same["removed"] or same["changed"]), same
+    base = next(r for r in rows if isinstance(r.get("price"), (int, float))
+                and isinstance(r.get("cup_price"), (int, float)))
+    for field, value in (("price", round(base["price"] * 1.5 + 1, 2)),
+                         ("cup_price", round(base["cup_price"] * 2 + 1, 2)),
+                         ("is_in_stock", not base.get("is_in_stock")),
+                         ("is_on_special", not base.get("is_on_special"))):
+        moved = copy.deepcopy(rows)
+        moved[rows.index(base)][field] = value
+        res = diff_runs.diff_products(rows, moved)
+        assert len(res["changed"]) == 1, (field, res["changed"])
+        assert field in res["changed"][0]["changes"], (field, res["changed"])
+    # A price that moved together with price_source is not a price change.
+    moved = copy.deepcopy(rows)
+    moved[rows.index(base)]["price"] = base["price"] + 1
+    moved[rows.index(base)]["price_source"] = "dom"
+    res = diff_runs.diff_products(rows, moved)
+    assert not res["changed"] and len(res["source_changed"]) == 1, res
+
+
+@check
+def test_diff_runs_refuses_store_lookups_instead_of_reporting_no_change():
+    """Two store files with an address, phone and latitude moved used to
+    print "0 added, 0 removed, 0 changed" and exit 0: the tracked fields are
+    product prices and a Store row has none of them."""
+    import subprocess
+    rows = json.loads((ROOT / "sample_stores.json").read_text(encoding="utf-8"))
+    moved = json.loads(json.dumps(rows))
+    moved[0]["phone"] = "(00) 0000 0000"
+    with tempfile.TemporaryDirectory() as d:
+        paths = []
+        for name, data in (("a", rows), ("b", moved)):
+            path = os.path.join(d, f"{name}.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            with open(os.path.join(d, f"{name}.meta.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump({"status": "complete", "mode": "stores",
+                           "pages_completed": 1, "pages_requested": 1}, f)
+            paths.append(path)
+        for extra in ([], ["--force"]):
+            res = subprocess.run(
+                [sys.executable, str(ROOT / "diff_runs.py"), "--old", paths[0],
+                 "--new", paths[1], "--fail-on-change", *extra],
+                capture_output=True, text=True, cwd=d)
+            assert res.returncode == 2, (extra, res.returncode, res.stdout)
+            assert "0 changed" not in res.stdout, res.stdout
+
+
+@check
+def test_sample_output_matches_the_row_schema():
+    sample = ROOT / "sample_output.json"
+    assert sample.is_file(), "sample_output.json is missing"
+    rows = json.loads(sample.read_text(encoding="utf-8"))
+    assert rows, "sample_output.json is empty"
+    names = [f.name for f in __import__("dataclasses").fields(Product)]
+    assert list(rows[0].keys()) == names, (
+        "sample_output.json columns drifted from Product")
+    csv_path = ROOT / "sample_output.csv"
+    assert csv_path.is_file(), "sample_output.csv is missing"
+    header = csv_path.read_text(encoding="utf-8").splitlines()[0]
+    assert header.split(",")[:5] == names[:5]
+    # a real run, not a fabrication.
+    blob = json.dumps(rows).lower()
+    for fake in ("example.com", "lorem ipsum", "foo bar", "test product",
+                 "placeholder"):
+        assert fake not in blob, f"sample_output.json looks fabricated: {fake!r}"
+
+
+@check
+def test_dockerfile_copies_everything_the_entrypoint_imports():
+    """All three repos in this family shipped an image that died on every
+    invocation because one module was missing from the COPY list."""
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    # Join backslash continuations first: the COPY list spans several lines,
+    # and a parser that read only the first of them reported every module on
+    # the later lines as missing — a check that cries wolf is a check people
+    # learn to ignore.
+    joined = re.sub(r"\\\s*\n\s*", " ", dockerfile)
+    copied = set()
+    for line in joined.splitlines():
+        if line.strip().upper().startswith("COPY"):
+            for token in line.split()[1:-1]:
+                copied.add(token.strip())
+    needed = set()
+    seen = set()
+    stack = ["playwright_scraper"]
+    local = {p.stem for p in ROOT.glob("*.py")}
+    while stack:
+        mod = stack.pop()
+        if mod in seen:
+            continue
+        seen.add(mod)
+        path = ROOT / f"{mod}.py"
+        if not path.is_file():
+            continue
+        needed.add(f"{mod}.py")
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.name in local:
+                        stack.append(a.name)
+            elif isinstance(node, ast.ImportFrom) and node.module in local:
+                stack.append(node.module)
+    missing = sorted(m for m in needed if m not in copied)
+    assert not missing, (
+        f"the Dockerfile does not COPY {missing}, so the image would die "
+        "with ModuleNotFoundError on every invocation, --help included")
+
+
+# ===========================================================================
+# 12. Captcha: detected != paying
+# ===========================================================================
+@check
+def test_no_captcha_is_detected_on_a_good_page():
+    """And in particular the Scraping Browser extension's injected hunters
+    must not read as the site's own captcha — that is a solve paid for a
+    captcha that was never there."""
+    served = FIXTURES["served_page"]
+    assert captcha_solver.detect_recaptcha_v3(served, "https://x") is None, (
+        "a served Woolworths page reads as carrying a reCAPTCHA")
+    assert captcha_solver.detect_turnstile(served, "https://x") is None, (
+        "a served Woolworths page reads as carrying a Turnstile")
+    # And on a REAL page fetched over --cdp-endpoint, not a synthetic one.
+    # the guard that missed this in a sibling repo passed for the wrong
+    # reason — it ran only against a page fetched with plain curl, which
+    # carries no extension injection at all. The fixture that matters is the
+    # one fetched the way a real run fetches.
+    cdp = FIXTURES["served_cdp_page"]
+    injected = cdp.count("chrome-extension://")
+    assert injected >= 5, (
+        f"the CDP fixture carries only {injected} extension reference(s) — "
+        "it is no longer a page fetched through the Scraping Browser, so "
+        "this check has stopped proving anything. Recapture it.")
+    assert captcha_solver.detect_recaptcha_v3(cdp, "https://x") is None, (
+        "a page served over --cdp-endpoint reads as carrying a reCAPTCHA; "
+        "the markers on it are the auto-solve extension's, not the site's")
+    assert captcha_solver.detect_turnstile(cdp, "https://x") is None, (
+        "the auto-solve extension's own hunter reads as a Turnstile — it "
+        "appears on every page fetched over --cdp-endpoint, so this would "
+        "buy a solve on a page that was served perfectly well")
+    assert P.detect_page_state(cdp, status=200,
+                               url="https://www.woolworths.com.au/shop/"
+                                   "search/products?searchTerm=milk") == "content", (
+        "a page served over --cdp-endpoint does not classify as content")
+
+
+@check
+def test_the_denial_page_carries_nothing_to_solve():
+    """A statement about THIS PAGE, never about what a solver can do."""
+    for key in ("denial_dom", "denial_raw"):
+        text = FIXTURES[key]
+        assert "sitekey" not in text.lower()
+        assert "<iframe" not in text.lower()
+        assert captcha_solver.detect_recaptcha_v3(text, "https://x") is None
+        assert captcha_solver.detect_turnstile(text, "https://x") is None
+
+
+@check
+def test_the_solver_implements_the_task_types_the_docs_promise():
+    """Never write that a captcha cannot be solved; name the task type."""
+    src = (ROOT / "captcha_solver.py").read_text(encoding="utf-8")
+    for task in ("TurnstileTaskProxyless", "RecaptchaV2TaskProxyless",
+                 "RecaptchaV3TaskProxyless"):
+        assert task in src, f"{task} is not implemented in captcha_solver.py"
+
+
+@check
+def test_no_file_claims_a_captcha_cannot_be_solved():
+    """The most expensive bug this family has shipped was a SENTENCE."""
+    bad = re.compile(
+        r"(captcha|recaptcha|turnstile)[^.\n]{0,80}"
+        r"(cannot be solved|can't be solved|is unsolvable|impossible to solve)",
+        re.IGNORECASE)
+    # A sentence STATING THE RULE is not a violation of it. CONTRIBUTING.md
+    # says "Never write that a captcha cannot be solved", which is the
+    # instruction, and matching it would make the rule impossible to write
+    # down.
+    stating_the_rule = re.compile(
+        r"(never|do not|don't|not to|nor)\s+(write|say|claim|state)\b[^.\n]{0,40}$",
+        re.IGNORECASE)
+    problems = []
+    scanned = 0
+    for path in _shipped_files({".py", ".md"}):
+        if path.name == "smoke_test.py":
+            continue   # this file necessarily contains the phrase it forbids
+        scanned += 1
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for m in bad.finditer(text):
+            before = text[max(0, m.start() - 60):m.start()]
+            if stating_the_rule.search(before):
+                continue
+            problems.append(f"{path.relative_to(ROOT)}: {m.group(0)[:90]!r}")
+    assert scanned > 10, f"only {scanned} file(s) scanned"
+    assert not problems, (
+        "a claim that a captcha cannot be solved — say 'this repo does not "
+        "implement X' instead:\n  " + "\n  ".join(problems))
+
+
+# ===========================================================================
+# 13. Engine-specific groups (skipped when the driver is absent)
+# ===========================================================================
+@check
+def test_playwright_helpers():
+    if PW is None:
+        return
+    assert PW.FIELD_FLOOR == 90
+    assert PW.LAUNCH_ARGS == ("--disable-blink-features=AutomationControlled",)
+    ua = PW._chrome_ua("140.0.0.0")
+    assert "Chrome/140.0.0.0" in ua and "HeadlessChrome" not in ua
+    assert PW._proxy_failure(Exception("net::ERR_PROXY_CONNECTION_FAILED")) \
+        == "ERR_PROXY_CONNECTION_FAILED"
+    assert PW._proxy_failure(Exception("Timeout 30000ms exceeded")) == ""
+
+
+@check
+def test_selenium_helpers():
+    if SE is None:
+        return
+    assert SE.FIELD_FLOOR == 90
+    assert SE._proxy_failure(Exception("net::ERR_TUNNEL_CONNECTION_FAILED")) \
+        == "ERR_TUNNEL_CONNECTION_FAILED"
+
+
+@check
+def test_puppeteer_helpers():
+    if PP is None:
+        return
+    assert PP.FIELD_FLOOR == 90
+    assert PP._proxy_failure(Exception("net::ERR_PROXY_CONNECTION_FAILED")) \
+        == "ERR_PROXY_CONNECTION_FAILED"
+
+
+@check
+def test_every_engine_help_runs():
+    """The exact invocation a missing module breaks."""
+    import subprocess
+    for name in ENGINE_NAMES:
+        mod = {"playwright_scraper": PW, "selenium_scraper": SE,
+               "puppeteer_scraper": PP}[name]
+        if mod is None:
+            continue
+        r = subprocess.run([sys.executable, str(ROOT / f"{name}.py"), "--help"],
+                           capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, f"{name} --help exited {r.returncode}: {r.stderr[:300]}"
+        assert "woolworths" in r.stdout.lower(), f"{name} --help does not name the site"
+
+
+# ===========================================================================
+# ===========================================================================
+# 15. Replacing a file without destroying it
+# ===========================================================================
+# These assert the BEHAVIOUR — a write that dies halfway leaves the previous
+# file intact — rather than grepping `output_writer.py` for `_atomic`. A
+# textual check passes the moment the name appears, including in the comment
+# that explains why it is needed (the first version of another check in
+# this file matched the prose describing the bug it guarded).
+
+class _Unserialisable:
+    """json.dump writes the rows before it, then raises on this."""
+
+
+def _poison_row():
+    row = output_writer.Product(source="woolworths", url="u", sku="1",
+                                title="good")
+    bad = output_writer.Product(source="woolworths", url="u", sku="2",
+                                title="bad")
+    bad.title = _Unserialisable()
+    return [row, bad]
+
+
+@check
+def test_a_failed_json_write_leaves_the_previous_good_file_intact():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "out.json")
+        output_writer.write_json(
+            [output_writer.Product(source="woolworths", url="u", sku="1",
+                                   title="last night's good run")], path)
+        good = pathlib.Path(path).read_bytes()
+        assert b"last night" in good
+
+        try:
+            output_writer.write_json(_poison_row(), path)
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("the poisoned write did not fail — this "
+                                 "check is no longer testing anything")
+
+        after = pathlib.Path(path).read_bytes()
+        assert after == good, (
+            "a write that died halfway truncated the previous good output. "
+            "`open(path, 'w')` empties the file before the first byte is "
+            "written, so a crash, a kill or a full disk destroys the last "
+            "known good run by ATTEMPTING to replace it")
+        json.loads(after)   # and it is still valid JSON, not a prefix
+        leftovers = [n for n in os.listdir(d) if n.endswith(".tmp")]
+        assert not leftovers, f"temp file left behind: {leftovers}"
+
+
+@check
+def test_a_failed_sidecar_write_leaves_the_previous_sidecar_intact():
+    """The sidecar matters most: it is the file a consumer branches on."""
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "out")
+        output_writer.write_run_meta(prefix, {"status": "complete"})
+        path = prefix + ".meta.json"
+        good = pathlib.Path(path).read_bytes()
+
+        try:
+            output_writer.write_run_meta(
+                prefix, {"status": "complete", "x": _Unserialisable()})
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("the poisoned write did not fail")
+
+        assert pathlib.Path(path).read_bytes() == good, (
+            "a truncated sidecar beside good rows reads as a broken run "
+            "over data that is fine")
+
+
+@check
+def test_a_failed_csv_write_leaves_the_previous_good_file_intact():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "out.csv")
+        rows = [output_writer.Product(source="woolworths", url="u", sku="1",
+                                      title="good")]
+        output_writer.write_csv(rows, path)
+        good = pathlib.Path(path).read_bytes()
+
+        original = output_writer._csv_value
+        output_writer._csv_value = lambda v: (_ for _ in ()).throw(
+            RuntimeError("disk full"))
+        try:
+            output_writer.write_csv(rows, path)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("the poisoned write did not fail")
+        finally:
+            output_writer._csv_value = original
+
+        assert pathlib.Path(path).read_bytes() == good
+        assert not [n for n in os.listdir(d) if n.endswith(".tmp")]
+
+
+@check
+def test_the_csv_asks_for_newline_through_the_temp_file():
+    """`newline=""` has to survive the move into the temp file.
+
+    Without it the text layer translates the csv module's own CRLF again
+    and every row gains a stray CR. This asserts the ARGUMENT rather than
+    the bytes on purpose: `os.linesep` is "\n" here, so dropping it
+    changes nothing a Linux CI run can observe, and a byte assertion would
+    be a control that cannot fail on every machine this suite runs
+    on. Measured: with the argument dropped, the planted fault left the
+    output byte-identical on Linux and would produce "\r\r\n" per row on
+    Windows.
+    """
+    seen = {}
+    original = output_writer._atomic
+
+    def recording(path, newline=None):
+        seen[os.path.basename(path)] = newline
+        return original(path, newline)
+
+    output_writer._atomic = recording
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            prefix = os.path.join(d, "out")
+            rows = [output_writer.Product(source="woolworths", url="u",
+                                          sku="1", title="t")]
+            output_writer.write_csv(rows, prefix + ".csv")
+            output_writer.write_json(rows, prefix + ".json")
+            raw = pathlib.Path(prefix + ".csv").read_bytes()
+    finally:
+        output_writer._atomic = original
+
+    assert seen.get("out.csv") == "", (
+        f"write_csv asked for newline={seen.get('out.csv')!r}; the csv "
+        f"module requires '' and that requirement has to reach the temp "
+        f"file, not just the final name")
+    assert seen.get("out.json") is None, (
+        "only the CSV needs it; passing it to the JSON writer would be "
+        "cargo-culting the flag")
+    assert b"\r\r\n" not in raw
+
+
+@check
+def test_an_output_file_is_not_private_to_the_user_that_wrote_it():
+    """`NamedTemporaryFile` creates at 0600 and `os.replace` keeps the mode.
+
+    So adopting an atomic write silently narrows every output, and breaks a
+    consumer running as another account or as a container user — only once
+    the write became atomic, which is the worst time to find out. Measured
+    2026-10-08 by calling each sibling's sidecar writer: of 43 repos, 8
+    produce a 0600 sidecar — exactly the ones that took `_atomic` without
+    this.
+
+    A new file gets what `open()` would have given it: 0666 masked with the
+    umask, so 0644 under umask 022 and 0664 under umask 002.
+    """
+    previous = os.umask(0o022)
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            prefix = os.path.join(d, "out")
+            rows = [output_writer.Product(source="woolworths", url="u",
+                                          sku="1", title="t")]
+            output_writer.write_json(rows, prefix + ".json")
+            output_writer.write_csv(rows, prefix + ".csv")
+            output_writer.write_run_meta(prefix, {"status": "complete"})
+            for suffix in (".json", ".csv", ".meta.json"):
+                mode = stat.S_IMODE(os.stat(prefix + suffix).st_mode)
+                assert mode == 0o644, (
+                    f"{suffix} came out {oct(mode)} rather than 0o644 under "
+                    f"umask 022 — an atomic write that keeps the temp "
+                    f"file's 0600 makes the output private to this user")
+    finally:
+        os.umask(previous)
+
+
+@check
+def test_a_permissive_umask_is_honoured_too():
+    """0666 masked, not a flat 0644.
+
+    The first version here used `0o644 & ~umask`, which is indistinguishable
+    from the right rule under the common umask 022 and quietly narrows 0664
+    to 0644 under 002 — so a group-writable output directory stops being
+    group-writable, which is exactly the setup where several accounts share
+    a scrape. `open(path, "w")` would have given 0664; so does this.
+    """
+    previous = os.umask(0o002)
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "out.json")
+            output_writer.write_json(
+                [output_writer.Product(source="woolworths", url="u", sku="1",
+                                       title="t")], path)
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        assert mode == 0o664, (
+            f"umask 002 should give 0664, got {oct(mode)} — a flat 0644 "
+            f"narrows what the user deliberately left open")
+    finally:
+        os.umask(previous)
+
+
+@check
+def test_an_existing_target_keeps_the_mode_someone_gave_it():
+    """A save must not undo a tightening somebody did on purpose.
+
+    If an operator chmods an output to 0600 because it holds a price list
+    they are not ready to share, the next run should not reopen it. Only a
+    file that does not exist yet gets the umask default.
+    """
+    previous = os.umask(0o022)
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "out.json")
+            rows = [output_writer.Product(source="woolworths", url="u",
+                                          sku="1", title="t")]
+            output_writer.write_json(rows, path)
+            os.chmod(path, 0o600)
+            output_writer.write_json(rows, path)
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        assert mode == 0o600, (
+            f"a deliberately tightened output was reopened to {oct(mode)}")
+    finally:
+        os.umask(previous)
+
+
+@check
+def test_a_restrictive_umask_is_still_respected():
+    """0644 is MASKED, not forced: this must not widen what the user closed."""
+    previous = os.umask(0o077)
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "out.json")
+            output_writer.write_json(
+                [output_writer.Product(source="woolworths", url="u", sku="1",
+                                       title="t")], path)
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        assert mode == 0o600, f"umask 077 should still give 0600, got {oct(mode)}"
+    finally:
+        os.umask(previous)
+
+
+@check
+def test_a_formula_shaped_cell_is_neutralised_in_csv_only():
+    """A cell beginning `=`, `+`, `-`, `@` or whitespace is executed.
+
+    Every string in these rows was written by whoever listed the product.
+    The apostrophe goes in the CSV, which spreadsheets read as "this is
+    text" and do not display; the JSON keeps the site's bytes exactly.
+    """
+    row = output_writer.Product(
+        source="woolworths", url="u", sku="1",
+        title="=HYPERLINK(\"http://evil\",\"Woolworths Milk 2L\")",
+        brand="@SUM(A1:A9)")
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "out")
+        escaped = output_writer.write_csv([row], prefix + ".csv")
+        output_writer.write_json([row], prefix + ".json")
+        csv_text = pathlib.Path(prefix + ".csv").read_text(encoding="utf-8")
+        js = json.loads(pathlib.Path(prefix + ".json").read_text(encoding="utf-8"))
+
+    assert escaped == 2, f"expected 2 escaped cells, got {escaped}"
+    assert "'=HYPERLINK" in csv_text and "'@SUM" in csv_text
+    assert js[0]["title"].startswith("="), (
+        "the JSON must keep the site's bytes — only the CSV is neutralised")
+    assert js[0]["brand"].startswith("@")
+
+
+@check
+def test_a_negative_number_is_not_turned_into_text():
+    """Escaping `-5` breaks every sum a consumer writes over the column.
+
+    And this schema has negative numbers that matter: `savings_amount` and
+    `discount_pct` are the columns anyone monitoring this site sums.
+    """
+    assert output_writer._csv_escape(-5) == (-5, False)
+    assert output_writer._csv_escape(-5.5) == (-5.5, False)
+    assert output_writer._csv_escape(None) == (None, False)
+    # The string form IS escaped: a cell is a cell, whatever produced it.
+    assert output_writer._csv_escape("-5") == ("'-5", True)
+
+
+@check
+def test_a_list_cell_is_escaped_after_it_becomes_a_string():
+    """The order matters and only one of the two orderings is correct.
+
+    A list is not a string, so `_csv_escape` skips it; the cell it JOINS
+    into can perfectly well start with a formula character. Escaping before
+    the list serialiser therefore misses exactly the case hardest to
+    notice.
+
+    Driven through `write_csv` rather than by composing the two helpers by
+    hand. The first version of this check called
+    `_csv_escape(_csv_value(...))` directly, which is the correct order
+    written out in the test — so it passed with `write_csv` doing it
+    backwards (a weak check passes against a broken filter). Found by
+    planting exactly that fault and watching the suite stay green.
+
+    `Product` has no list column today; the row class is local so the rule
+    is pinned before a column that needs it is added, not after.
+    """
+    @dataclasses.dataclass
+    class _ListRow:
+        sku: str = "1"
+        tags: list = dataclasses.field(default_factory=list)
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "out.csv")
+        escaped = output_writer.write_csv(
+            [_ListRow(tags=["=cmd|calc", "fresh"])], path, row_cls=_ListRow)
+        text = pathlib.Path(path).read_text(encoding="utf-8")
+
+    assert escaped == 1, f"the joined list cell was not counted ({escaped})"
+    assert "'=cmd|calc" in text, (
+        "a joined list cell reached the file unneutralised — _csv_escape "
+        "must run AFTER _csv_value")
+
+
+@check
+def test_the_escape_count_reaches_the_sidecar_under_the_callers_extra():
+    """Declared, not discovered.
+
+    The CSV and the JSON deliberately differ once anything is escaped, and
+    `csv_cells_escaped` is what says so. It merges UNDER the caller's
+    `extra`: a collision there would be housekeeping silently dropping
+    something the engine measured about the site.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "out")
+        rc = output_writer.finish_run(
+            [output_writer.Product(source="woolworths", url="u", sku="1",
+                                   title="=1+1")],
+            prefix, "both", False, blocked=False, stop_reason="completed",
+            pages_requested=1, pages_completed=1, start_url="u",
+            final_url="u", mode="search",
+            extra={"csv_cells_escaped": "the caller's own value"})
+        meta = json.loads(
+            pathlib.Path(prefix + ".meta.json").read_text(encoding="utf-8"))
+    assert rc == 0
+    assert meta["csv_cells_escaped"] == "the caller's own value", (
+        "housekeeping overwrote a value the caller put in `extra`")
+
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "out")
+        output_writer.finish_run(
+            [output_writer.Product(source="woolworths", url="u", sku="1",
+                                   title="=1+1")],
+            prefix, "both", False, blocked=False, stop_reason="completed",
+            pages_requested=1, pages_completed=1, start_url="u",
+            final_url="u", mode="search")
+        meta = json.loads(
+            pathlib.Path(prefix + ".meta.json").read_text(encoding="utf-8"))
+    assert meta["csv_cells_escaped"] == 1
+
+
+# ===========================================================================
+# 16. One page, one solve
+# ===========================================================================
+# Nothing is bought on this site today — `should_solve` is False for every
+# state, because Akamai's denial here carries no widget. These guard the
+# day that changes, which is the only day the bug is expensive. A family note measured
+# a sibling buying THREE Turnstile solves for one page against a
+# `SOLVES_PER_PAGE = 1` that nothing read; a family-wide audit then found the same bypass
+# in 33 of 39 family repos.
+
+@check
+def test_the_solve_budget_counts_attempts_not_successes():
+    """A failed solve is still billed (87 seconds and real money)."""
+    b = page_flow.SolveBudget(limit=2)
+    assert b.charge() is True and b.spent == 1
+    assert b.charge() is True and b.spent == 2
+    assert b.exhausted
+    assert b.charge() is False, "the budget was exceeded"
+    assert b.spent == 2, "a refused charge must not count either"
+
+
+@check
+def test_the_budget_is_not_refilled_by_a_rotation():
+    """A fresh exit is a reason to re-fetch, not a fresh allowance.
+
+    Pinned as a check because the tempting edit is exactly the wrong one:
+    rotation is HOW a run reaches the same page again, so refilling there
+    turns a per-page cap into a per-attempt one — which is the bug.
+    """
+    assert not hasattr(page_flow.SolveBudget, "reset"), (
+        "a reset() on the budget is how SOLVES_PER_PAGE becomes advisory")
+    src = inspect.getsource(page_flow.SolveBudget)
+    assert "rotat" in src.lower(), (
+        "the reason this is not reset on rotation belongs in the code")
+
+
+@check
+def test_every_engine_passes_the_budget_to_every_captcha_call():
+    """Read off disk, NOT behind an engine import.
+
+    A family note records this exact check being written so it skipped for the
+    engines whose driver was absent — so a fix that reached one engine of
+    three passed locally with a green suite and failed in `engine-smoke`,
+    which installs each driver. It needs no import and must not have one.
+    """
+    scanned = 0
+    for name in ("playwright_scraper.py", "selenium_scraper.py",
+                 "puppeteer_scraper.py"):
+        tree = ast.parse((ROOT / name).read_text(encoding="utf-8"))
+        calls = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)
+                 and (getattr(n.func, "id", None)
+                      or getattr(n.func, "attr", None))
+                 == "handle_captcha_if_present"]
+        assert calls, f"{name}: no captcha call found — has it been renamed?"
+        for call in calls:
+            kw = {k.arg for k in call.keywords}
+            assert "budget" in kw, (
+                f"{name}:{call.lineno} calls handle_captcha_if_present "
+                f"without a budget. One unbudgeted call site is all it "
+                f"takes: the cap then describes the other one")
+            scanned += 1
+    assert scanned >= 3, f"only {scanned} call site(s) scanned"
+    # And the shared loop, which is what each of those ops methods is
+    # called FROM, passes the page's budget rather than minting one.
+    flow = ast.parse((ROOT / "page_flow.py").read_text(encoding="utf-8"))
+    hc = [n for n in ast.walk(flow)
+          if isinstance(n, ast.Call)
+          and getattr(n.func, "attr", None) == "handle_captcha"]
+    assert len(hc) == 1, f"expected one captcha call in the loop, got {len(hc)}"
+    assert {k.arg for k in hc[0].keywords} >= {"allow_solve", "budget"}
+
+
+@check
+def test_the_budget_is_created_per_page_not_per_attempt():
+    """Outside the block-retry loop, or retrying buys another solve.
+
+    In the shared loop since the shared-loop conversion, so this is one assertion rather than
+    three — and the engines are asserted not to have grown their own.
+    """
+    src = (ROOT / "page_flow.py").read_text(encoding="utf-8")
+    made = src.index("solve_budget = SolveBudget()")
+    loop = src.index("for block_attempt in range(block_retries_left + 1):")
+    assert made < loop, (
+        "the budget is built inside the retry loop, so every attempt gets "
+        "a fresh one and the cap means nothing")
+    for name in ENGINE_NAMES:
+        assert "SolveBudget()" not in (ROOT / f"{name}.py").read_text(
+            encoding="utf-8"), (
+            f"{name} builds its own solve budget again — the shared loop "
+            f"owns it, and two budgets is no budget")
+
+
+@check
+def test_the_charge_happens_before_the_solver_is_called():
+    """After it returns is too late: a failed solve is billed anyway."""
+    for name in ("playwright_scraper.py", "selenium_scraper.py",
+                 "puppeteer_scraper.py"):
+        src = (ROOT / name).read_text(encoding="utf-8")
+        charge = src.index("budget.charge()")
+        solve = src.index("token = solve_recaptcha(")
+        assert charge < solve, f"{name}: charged after the money was spent"
+
+@check
+def test_a_retried_page_buys_only_one_solve():
+    """Drive the real function over a whole block-retry budget.
+
+    The AST checks above say the budget is WIRED; this says it WORKS.
+    The family-wide audit is explicit that this one is verified by running it: stub the
+    solver, call the real path once per block attempt, and assert the
+    solver was invoked `SOLVES_PER_PAGE` times rather than once per
+    attempt.
+    """
+    if PW is None:
+        return
+    import captcha_solver
+
+    challenge = captcha_solver.CaptchaChallenge(
+        kind="recaptcha_v2", sitekey="6Lfake", page_url="https://x/",
+        source="html")
+    bought = []
+
+    class _Page:
+        url = "https://www.woolworths.com.au/"
+        def evaluate(self, *a, **k): return None
+        def wait_for_timeout(self, *a, **k): return None
+        def reload(self, *a, **k): return None
+
+    saved = {k: getattr(PW, k) for k in
+             ("_content_when_settled", "_count", "detect_recaptcha_v3",
+              "detect_recaptcha_in_page", "reconcile_detections",
+              "solve_recaptcha")}
+    PW._content_when_settled = lambda p: "<html></html>"
+    PW._count = lambda p, sel: 0
+    PW.detect_recaptcha_v3 = lambda h, u: challenge
+    PW.detect_recaptcha_in_page = lambda ev, page_url=None: None
+    PW.reconcile_detections = lambda a, b: challenge
+    PW.solve_recaptcha = (
+        lambda *a, **k: (bought.append(1), "token")[1])
+    try:
+        args = argparse.Namespace(
+            solve_captcha="always", twocaptcha_key="k" * 32,
+            captcha_api="v1", min_score=0.3, out="out", mode="search")
+        budget = page_flow.SolveBudget()
+        attempts = page_flow.block_retries(False) + 1
+        assert attempts > 1, "a one-attempt loop cannot show the bug"
+        for _ in range(attempts):
+            PW.handle_captcha_if_present(
+                _Page(), args, allow_solve=True, budget=budget)
+    finally:
+        for k, v in saved.items():
+            setattr(PW, k, v)
+
+    assert len(bought) == page_flow.SOLVES_PER_PAGE, (
+        f"{attempts} attempts at one page bought {len(bought)} solve(s) "
+        f"against SOLVES_PER_PAGE={page_flow.SOLVES_PER_PAGE}")
+    assert budget.spent == page_flow.SOLVES_PER_PAGE
+
+# ===========================================================================
+# 17. One fetch loop, three drivers
+# ===========================================================================
+# The two checks a family note says to ship WITH this pattern, because the pattern is
+# only safe if they exist: derive the operation set from the loop's own AST
+# so a hand-written list cannot drift, and drive the whole loop offline with
+# a fake driver answering from real fixtures.
+
+def _required_ops():
+    """Every `ops.<name>` the shared loop reaches for, read off its AST.
+
+    A hand-written list would drift the day the loop uses a new one, which
+    is the whole reason a family note specifies deriving it. Mind tuple targets
+    (`self.a, self.b = ...`): a family note records the first version of this check
+    missing them and reporting three false positives.
+    """
+    tree = ast.parse((ROOT / "page_flow.py").read_text(encoding="utf-8"))
+    names = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "ops"):
+            names.add(node.attr)
+    return names
+
+
+def _ops_class_node(engine_name):
+    """The engine's `*Ops` class, read off disk. NO import."""
+    tree = ast.parse((ROOT / f"{engine_name}.py").read_text(encoding="utf-8"))
+    for n in tree.body:
+        if isinstance(n, ast.ClassDef) and n.name.endswith("Ops"):
+            return n
+    return None
+
+
+def _provided(cls_node):
+    """Methods and class attributes, PLUS whatever __init__ assigns to self."""
+    names = set()
+    for m in cls_node.body:
+        if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(m.name)
+        elif isinstance(m, ast.Assign):
+            for t in m.targets:
+                if isinstance(t, ast.Name):
+                    names.add(t.id)
+        elif isinstance(m, ast.AnnAssign) and isinstance(m.target, ast.Name):
+            names.add(m.target.id)
+    for node in ast.walk(cls_node):
+        # `self.x = ...` and `self.x, self.y = ...` — the tuple form is the
+        # one a family note records the first version of this check missing.
+        targets = (node.targets if isinstance(node, ast.Assign)
+                   else [node.target] if isinstance(node, ast.AnnAssign)
+                   else [])
+        for t in targets:
+            for part in (t.elts if isinstance(t, (ast.Tuple, ast.List)) else [t]):
+                if (isinstance(part, ast.Attribute)
+                        and isinstance(part.value, ast.Name)
+                        and part.value.id == "self"):
+                    names.add(part.attr)
+    return names
+
+
+@check
+def test_every_engine_provides_every_operation_the_loop_asks_for():
+    """Derived from the loop, never from a list someone keeps up to date.
+
+    Read off DISK, with no engine import — which is the whole point and was
+    wrong in the first version. Written against the imported modules, this
+    skipped for every engine whose driver is absent, so it covered one
+    engine of three locally and ZERO in the offline CI job, where it then
+    failed on its own "nothing was scanned" guard. A family note records
+    exactly this trap in exactly this kind of check: a guard gated behind
+    the import is a guard that is quietest where it is needed most. It
+    needs no import, so it has none, and it now covers all three engines in
+    every environment.
+    """
+    need = _required_ops()
+    assert len(need) >= 15, (
+        f"only {len(need)} operations derived — the loop stopped going "
+        f"through `ops`, or this check stopped finding it")
+    checked = 0
+    for name in ENGINE_NAMES:
+        node = _ops_class_node(name)
+        assert node is not None, f"{name} has no *Ops class"
+        missing = sorted(need - _provided(node))
+        assert not missing, (
+            f"{name}.{node.name} is missing {missing}. The shared loop "
+            f"calls every one of these, so this engine would die on the "
+            f"page it first reaches — which is exactly the divergence "
+            f"the shared-loop conversion removed the triplication to prevent")
+        checked += 1
+    assert checked == len(ENGINE_NAMES), (
+        f"only {checked} of {len(ENGINE_NAMES)} engines were scanned")
+
+
+@check
+def test_every_engine_drives_the_shared_loop():
+    """Nobody kept a private copy of the loop.
+
+    The pairing half of `test_no_policy_constant_is_without_a_consumer`:
+    that one accepts page_flow's loop as a consumer, which is only sound
+    if every engine actually reaches it.
+    """
+    for name in ENGINE_NAMES:
+        tree = ast.parse((ROOT / f"{name}.py").read_text(encoding="utf-8"))
+        calls = {ast.unparse(n.func) for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)}
+        assert "page_flow.fetch_one_page" in calls, (
+            f"{name} does not call the shared loop")
+        # And it has no loop of its own left behind.
+        defs = {n.name for n in tree.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        for gone in ("_land", "_resolve_target", "_fetch_api_with_retries",
+                     "_confirm_with_dom"):
+            assert gone not in defs, (
+                f"{name} still defines {gone}() — the shared loop owns it, "
+                f"and two copies is how they drift")
+
+
+@check
+def test_the_shared_loop_runs_end_to_end_against_a_fake_driver():
+    """The second check: drive the WHOLE decision tree offline.
+
+    Three copies of this loop could never share a test like this, which is
+    half the argument for merging them. Every answer below comes from a
+    real capture in `fixtures_generated.json`, so the payload shapes are
+    the site's rather than ones invented to make the test pass.
+    """
+    served = FIXTURES["served_page"]
+    denial = FIXTURES["denial_dom"]
+    payload = FIXTURES["api_search"]
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    empty = FIXTURES["api_empty"]
+    if isinstance(empty, str):
+        empty = json.loads(empty)
+
+    class _FakeOps:
+        driver_errors = (RuntimeError,)
+        launch_arg_hint = "--a-flag"
+
+        def __init__(self, html, api, *, status=200):
+            self.html, self.api, self.status = html, api, status
+            self.category_ids = {}
+            self.landed = None
+            self.relaunches = 0
+            self.solves = 0
+            self.screenshots = 0
+
+        def is_live(self): return True
+        def is_landed(self, url): return self.landed == url
+        def set_landed(self, url): self.landed = url
+        def clear_landing(self): self.landed = None
+        def current_url(self): return "https://www.woolworths.com.au/x"
+        def goto(self, url, timeout_ms): return self.status
+        def document_text(self): return self.html
+        def classify(self, html, status=None):
+            return page_flow.classify(html, status, self.current_url())
+        def count(self, selector): return 12
+        def wait_ms(self, ms): pass
+        def screenshot(self, path): self.screenshots += 1
+        def read_tiles(self): return []
+        def fetch_api(self, path, body=None):
+            return 200, self.api, json.dumps(self.api)
+        def api_error_count(self): return 0
+        def rows_from_payload(self, pl, args, page_num, data_source):
+            return P.products_from_payload(
+                pl, page=page_num, data_source=data_source)
+        def proxy_failure(self, exc): return ""
+        def relaunch(self): self.relaunches += 1
+        def handle_captcha(self, args, allow_solve, budget):
+            if allow_solve and budget.charge():
+                self.solves += 1
+            return False
+
+    def run(ops, **over):
+        with tempfile.TemporaryDirectory() as d:
+            a = argparse.Namespace(
+                url="https://www.woolworths.com.au/shop/search/products"
+                    "?searchTerm=milk",
+                mode="search", pages=1, retries=1, retry_delay=0, delay=0,
+                page_size=36, dump_html=None, solve_captcha="when-blocked",
+                out=os.path.join(d, "o"), headless=False,
+                proxy_block_retries=None)
+            for k, v in over.items():
+                setattr(a, k, v)
+            return page_flow.fetch_one_page(ops, a, None, 1)
+
+    # 1. a served page with a full payload
+    ops = _FakeOps(served, payload)
+    out = run(ops)
+    assert out.ok and out.products, "a served page produced no rows"
+    assert out.state in ("content", "shell"), out.state
+    assert out.blocked_by is None
+
+    # 2. the Akamai denial: blocked, retried, a screenshot, never parsed
+    ops = _FakeOps(denial, payload, status=403)
+    out = run(ops)
+    assert out.blocked_by, "the denial was not recognised as a refusal"
+    assert not out.products
+    assert ops.relaunches >= 1, "a refusal must be retried on a fresh browser"
+    assert ops.screenshots == 1
+
+    # 3. a genuinely empty listing: NOT a parser failure
+    ops = _FakeOps(served, empty)
+    out = run(ops)
+    assert out.state == "empty", out.state
+    assert not out.parse_failed, (
+        "an empty listing the site itself reports as empty must not be "
+        "blamed on the parser")
+
+    # 4. the site states results and the parser finds none: OURS, and it
+    #    must not read as a completed page.
+    broken = json.loads(json.dumps(payload))
+    for key in ("Bundles", "Products"):
+        if key in broken:
+            broken[key] = []
+    # Measured on this fixture rather than guarded with an `if`: emptying
+    # `Products` leaves `SearchResultsCount` at 2,205, so the site states
+    # results and the parser produces none — which is the case, not a
+    # scenario the test might skip past.
+    assert P.total_count(broken) == 2205, (
+        f"the fixture no longer states a total ({P.total_count(broken)}); "
+        f"without one this branch tests nothing")
+    ops = _FakeOps(served, broken)
+    out = run(ops)
+    assert out.state == "parse_failed", out.state
+    assert out.parse_failed is True
+    assert not out.ok, (
+        "a parser failure counted as a completed page — the audit's P1, "
+        "now guarded in ONE place instead of three")
+
+    # 5. a page that is never served spends the whole block budget and
+    #    reports blocked rather than empty.
+    ops = _FakeOps(denial, payload, status=403)
+    out = run(ops, proxy_block_retries=None)
+    assert ops.relaunches == page_flow.block_retries(False), (
+        f"{ops.relaunches} relaunch(es) against a budget of "
+        f"{page_flow.block_retries(False)}")
+
+    # 6. ALREADY LANDED, and refused in between. The loop must re-classify
+    #    the document it finds rather than assume the page it was served
+    #    once is the page that is there now. Two of the three engines used
+    #    to hardcode "content" on this path; the third re-classified, and
+    #    the third was right — a session can be refused between page 1 and
+    #    page 2, and the other two would have carried on asking the API
+    #    from inside a denial page.
+    ops = _FakeOps(served, payload)
+    first = run(ops)
+    assert first.ok and ops.landed, "the first fetch did not land"
+    ops.html = denial          # refused while we sat on the page
+    second = run(ops)
+    assert second.blocked_by, (
+        "a session refused between pages was reported as content, because "
+        "the loop trusted that it had already been served this URL")
+    assert not second.products
+
+    # 7. every navigation times out: NO document, so not a refusal. This
+    #    used to come back blocked_by='no-response' and exit 3 with advice
+    #    to buy an exit; it is content not obtained, exit 5.
+    class _TimeoutOps(_FakeOps):
+        def goto(self, url, timeout_ms):
+            raise RuntimeError("Timeout 60000ms exceeded")
+        def document_text(self): return ""
+
+    ops = _TimeoutOps(served, payload)
+    out = run(ops, retries=2)
+    assert out.load_failed and out.blocked_by is None, (out.state, out.blocked_by)
+    assert out.state == "unreachable", out.state
+    assert ops.screenshots == 0, "a load failure was handled as a refusal"
+    assert page_flow.stop_reason_for(out) == "page_load_timeout"
+
+    # 8. a dead proxy: also no document, also not a refusal.
+    class _DeadProxyOps(_TimeoutOps):
+        def proxy_failure(self, exc): return "net::ERR_PROXY_CONNECTION_FAILED"
+
+    out = run(_DeadProxyOps(served, payload))
+    assert out.blocked_by is None and out.state == "proxy_failed", (
+        out.state, out.blocked_by)
+    assert page_flow.stop_reason_for(out) == "proxy_failed"
+    with tempfile.TemporaryDirectory() as d:
+        with redirect_stdout(io.StringIO()):
+            rc = output_writer.finish_run(
+                [], os.path.join(d, "o"), "json", False, blocked=False,
+                stop_reason=page_flow.stop_reason_for(out),
+                pages_requested=1, pages_completed=0, start_url="u",
+                final_url="u")
+    assert rc == 5, f"a dead proxy exited {rc}, not 5"
+
+@check
+def test_every_ops_method_reaches_a_session_attribute_that_exists():
+    """`self.session.<x>` must be something the session class really has.
+
+    Written because it happened, on the first live run after the loop was
+    shared: `PuppeteerOps.goto` called `self.session.run(...)` where that
+    engine's bridge is `self.session.bridge.run(...)`. The METHOD existed,
+    so the ops-coverage check above was perfectly happy; the attribute did
+    not, so the engine died with `AttributeError` on its first navigation —
+    in BOTH modes, on every URL.
+
+    That is the same shape as the call-binding check and as the bug that
+    produced `'Page' object has no attribute 'page'` here in v0.1.0: an
+    arity-compatible call into something that is not there. Offline it is
+    invisible to import, `--help`, `compileall` and the undefined-name walk
+    (which is pool-scoped on purpose), and a live run of all three engines
+    is three minutes. This is five lines and instant.
+
+    Pool-scoped like its neighbour: every attribute ASSIGNED anywhere on a
+    session counts as present, so this under-reports rather than inventing
+    problems.
+    """
+    checked = 0
+    for name in ENGINE_NAMES:
+        tree = ast.parse((ROOT / f"{name}.py").read_text(encoding="utf-8"))
+        session_cls = next(
+            (n for n in tree.body
+             if isinstance(n, ast.ClassDef) and "Session" in n.name), None)
+        ops_cls = next(
+            (n for n in tree.body
+             if isinstance(n, ast.ClassDef) and n.name.endswith("Ops")), None)
+        if session_cls is None or ops_cls is None:
+            continue
+
+        have = {m.name for m in session_cls.body
+                if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        for node in ast.walk(session_cls):
+            # `self.x = ...`, including the tuple form.
+            targets = (node.targets if isinstance(node, ast.Assign)
+                       else [node.target] if isinstance(node, ast.AnnAssign)
+                       else [])
+            for t in targets:
+                parts = t.elts if isinstance(t, (ast.Tuple, ast.List)) else [t]
+                for part in parts:
+                    if (isinstance(part, ast.Attribute)
+                            and isinstance(part.value, ast.Name)
+                            and part.value.id == "self"):
+                        have.add(part.attr)
+
+        wanted = set()
+        for node in ast.walk(ops_cls):
+            # self.session.<attr>
+            if (isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Attribute)
+                    and node.value.attr == "session"
+                    and isinstance(node.value.value, ast.Name)
+                    and node.value.value.id == "self"):
+                wanted.add(node.attr)
+
+        missing = sorted(wanted - have)
+        assert not missing, (
+            f"{ops_cls.name} reaches {missing} on {session_cls.name}, which "
+            f"does not have it. The method exists, so the ops-coverage "
+            f"check passes and the engine dies on its first use")
+        checked += 1
+    assert checked == len(ENGINE_NAMES), (
+        f"only {checked} of {len(ENGINE_NAMES)} engines had both a session "
+        f"and an ops class — this check scanned less than it should")
+
+@check
+def test_the_block_retry_flag_says_whether_it_counts_attempts_or_retries():
+    """The audit asked for exactly this and the first fix did not give it.
+
+    The flag reached the policy (that was the bug) but the help still read
+    "how many exits to try", which says total. It is a count of RETRIES:
+    the loop is `range(N + 1)`, so 4 means up to 5 landings. A reader who
+    sets 1 expecting one attempt gets two.
+    """
+    for name in ENGINE_NAMES:
+        src = (ROOT / f"{name}.py").read_text(encoding="utf-8")
+        block = src.split('"--proxy-block-retries"', 1)[1][:600]
+        assert "EXTRA" in block and "RETRIES" in block, (
+            f"{name}'s help for --proxy-block-retries does not say whether "
+            f"N counts attempts or extra retries")
+    # And the arithmetic the help promises is the arithmetic the loop does.
+    flow = (ROOT / "page_flow.py").read_text(encoding="utf-8")
+    assert "range(block_retries_left + 1)" in flow, (
+        "the loop no longer does N+1 landings, so the help is now wrong")
+
+
+@check
+def test_diff_runs_refuses_a_file_with_no_sidecar():
+    """Strict, because without one every other guard is blind.
+
+    `_run_status` used to call a missing sidecar "the normal case for a
+    single-page run", and that was simply false — `finish_run` writes one
+    whenever it writes rows. So the only files without one are pre-sidecar
+    output, hand-edited files, or the leftovers of a failed run, and on all
+    three the completeness, mode, listing and store checks silently did
+    nothing. `--force` is the opt-out, the same one a partial run has.
+    """
+    src = (ROOT / "diff_runs.py").read_text(encoding="utf-8")
+    body = src.split("def _check_comparable", 1)[1].split("\ndef ", 1)[0]
+    i = body.index("if status is None:")
+    window = body[i:i + 700]
+    assert "problems.append" in window, (
+        "a file with no sidecar still skips every guard in silence")
+    assert "continue  # no sidecar" not in body
+
+# ===========================================================================
+# 18. Choosing a store — the half the site permits, and the half it does not
+# ===========================================================================
+# Measured live 2026-10-08. The LOOKUP is open to anyone; SETTING the store
+# that prices a listing answers 401 to a guest. These pin both halves,
+# because the expensive mistake here is not a crash — it is a file whose
+# every cell is real and whose store is wrong.
+
+def _store_fixture(name):
+    payload = FIXTURES[name]
+    return json.loads(payload) if isinstance(payload, str) else payload
+
+
+@check
+def test_stores_parse_from_all_three_real_lookups():
+    for name, how, least in (("stores_postcode", "postcode", 1),
+                             ("stores_suburb", "suburb", 1),
+                             ("stores_latlong", "latlong", 1)):
+        rows = P.stores_from_payload(_store_fixture(name), how=how)
+        assert len(rows) >= least, f"{name}: {len(rows)} rows"
+        first = rows[0]
+        assert first.sku and first.title and first.suburb and first.state
+        assert first.postcode and first.url
+        assert first.data_source == how
+        assert first.position == 1
+        assert first.source == output_writer.SOURCE_DEFAULT
+
+
+@check
+def test_a_suburb_lookup_has_no_distance_and_does_not_fake_one():
+    """40 of 50 store records carried a `Distance`; the 10 without are
+    exactly the suburb query, which has no origin to measure from. An
+    absent distance must not read as a store on the doorstep (the "zero
+    is not a rating", wearing different clothes).
+    """
+    near = P.stores_from_payload(_store_fixture("stores_postcode"),
+                                 how="postcode")
+    far = P.stores_from_payload(_store_fixture("stores_suburb"), how="suburb")
+    assert all(r.distance_km is not None for r in near), (
+        "a postcode lookup states a distance for every store")
+    assert all(r.distance_km is None for r in far), (
+        "a suburb lookup has no origin, so distance must be null and never 0")
+
+
+@check
+def test_store_coordinates_are_numbers_not_strings():
+    """The site sends them as strings and every Australian latitude is
+    NEGATIVE — so left as strings, the CSV formula guard apostrophe-
+    prefixes all of them and the column stops being numeric for any
+    mapping tool. Measured on the first live run: 10 of 10 rows escaped.
+    """
+    rows = P.stores_from_payload(_store_fixture("stores_postcode"),
+                                 how="postcode")
+    for r in rows:
+        assert isinstance(r.latitude, float), type(r.latitude)
+        assert isinstance(r.longitude, float), type(r.longitude)
+        assert r.latitude < 0, "Australia is in the southern hemisphere"
+    # And therefore nothing in a store row trips the CSV guard.
+    escaped = 0
+    for r in rows:
+        for v in dataclasses.asdict(r).values():
+            _, was = output_writer._csv_escape(output_writer._csv_value(v))
+            escaped += was
+    assert escaped == 0, f"{escaped} store cell(s) still read as formulas"
+
+
+@check
+def test_the_four_always_null_store_fields_are_not_columns():
+    """A column null on every row of every run costs more than a
+    missing one. `AddressLine2`, `PartnerUrl`, `CategorisedFacilities` and
+    `NearbyPartners` were null on 50 of 50 records across three captures
+    on 2026-10-08. The measurement is written down so someone can put one
+    back with a better one.
+    """
+    names = {f.name for f in dataclasses.fields(output_writer.Store)}
+    for gone in ("address_line2", "partner_url", "categorised_facilities",
+                 "nearby_partners"):
+        assert gone not in names, f"{gone} was measured null on 50 of 50"
+    # and the ones that ARE populated are all there
+    for wanted in ("sku", "title", "address", "suburb", "state", "postcode",
+                   "latitude", "longitude", "phone", "trading_hours",
+                   "facilities"):
+        assert wanted in names, wanted
+
+
+@check
+def test_the_store_row_keeps_the_family_prefix():
+    """A second row class may exist, and then the prefix is a contract."""
+    prod = [f.name for f in dataclasses.fields(Product)][:5]
+    store = [f.name for f in dataclasses.fields(output_writer.Store)][:5]
+    assert prod == store == ["source", "scraped_at", "url", "sku", "title"], (
+        f"{store} does not open the way every row in this family does")
+    assert output_writer.ROW_CLASS_BY_MODE["stores"] is output_writer.Store
+    assert "stores" in output_writer.UNIQUE_BY_SKU_MODES
+
+
+@check
+def test_an_impossible_postcode_is_refused_before_the_request():
+    """The locator answers 9999, 0000 and 99999 with HTTP 200 and an empty
+    list — the SAME answer a real postcode with no nearby store gets. So a
+    typo would read as "Woolworths does not serve that area" unless it is
+    caught first.
+    """
+    assert P.postcode_problem("3000") is None
+    assert P.postcode_problem("0800") is None
+    for bad in ("abc", "99", "300", "30000", "", "3o00", "-300"):
+        assert P.postcode_problem(bad), f"{bad!r} was accepted as a postcode"
+    assert "0200" in P.postcode_problem("0199")
+    # And the empty answer really is indistinguishable in the payload.
+    assert P.stores_from_payload(_store_fixture("stores_none"),
+                                 how="postcode") == []
+
+
+@check
+def test_one_lookup_at_a_time():
+    """The site's four parameter sets are not combinable: a postcode query
+    with a latitude beside it is simply the postcode query, so accepting
+    both would mean silently ignoring one.
+    """
+    ns = argparse.Namespace
+    assert page_flow.store_lookup_problem(
+        ns(postcode=None, suburb=None, near=None, store_id=None))
+    assert page_flow.store_lookup_problem(
+        ns(postcode="3000", suburb=None, near=None, store_id=None)) is None
+    two = page_flow.store_lookup_problem(
+        ns(postcode="3000", suburb="Bondi", near=None, store_id=None))
+    assert two and "ONE lookup" in two
+    # the order the request builder picks, so the help cannot lie about it
+    assert P.store_request_for(store_no="3304")[1] == "store-no"
+    assert P.store_request_for(postcode="3000")[1] == "postcode"
+    assert P.store_request_for(suburb="Bondi")[1] == "suburb"
+    assert P.store_request_for(latitude="-37.8", longitude="144.9")[1] == "latlong"
+
+
+@check
+def test_a_negative_latitude_survives_the_argument_parser():
+    """Every Australian latitude is negative, so `--near -37.8,144.9` is
+    what every user of this flag types — and argparse reads a leading `-`
+    as another option and dies with "expected one argument", which reads
+    like the flag is broken. Measured: it fails on 100% of real Australian
+    coordinates, which is why the tokens are joined before argparse sees
+    them.
+
+    Lives in `page_flow`, not in an engine, so this check needs no driver
+    installed. The first version read it off `PW` and therefore SKIPPED in
+    the bare offline environment — where two planted controls then came
+    back green, which is how it was found (met for the third time
+    in one session).
+    """
+    join = page_flow.join_near_argument
+    assert join(["--near", "-37.8136,144.9631"]) == ["--near=-37.8136,144.9631"]
+    assert join(["--near", "-37.8,144.9", "--pages", "2"]) == [
+        "--near=-37.8,144.9", "--pages", "2"]
+    # already joined, or not a coordinate pair: left exactly alone
+    assert join(["--near=-37.8,144.9"]) == ["--near=-37.8,144.9"]
+    assert join(["--near", "Bondi"]) == ["--near", "Bondi"]
+    assert join(["--out", "-weird"]) == ["--out", "-weird"], (
+        "the fix-up must only ever touch --near")
+
+
+@check
+def test_a_store_that_was_not_granted_stops_the_run():
+    """The expensive mistake here is not a crash.
+
+    Accepting `--store-id` and then scraping whatever store the session
+    happens to have, with the requested number stamped on every row,
+    produces a file that is real in every cell and wrong in the one that
+    matters. Measured 2026-10-08: POST /apis/ui/Fulfilment answers
+    401 to a guest and the session's store stays 1101, so this is the
+    live case rather than a hypothetical.
+    """
+    ns = argparse.Namespace(store_id="3304", postcode=None)
+    unchanged = page_flow.store_selection_problem(ns, 1101, 1101)
+    assert unchanged, "a store that did not change was treated as granted"
+    assert "1101" in unchanged
+    assert "does not implement" in unchanged.lower(), (
+        "the sentence must be about what this REPO does, never about "
+        "what is possible")
+    assert "--mode stores" in unchanged, (
+        "a refusal should name the thing that does work")
+    # changed -> no problem
+    assert page_flow.store_selection_problem(ns, 1101, 3304) is None
+
+
+@check
+def test_the_shopper_fixture_states_the_store_and_carries_no_session():
+    """Where `store_id` on a listing row comes from, and the scrub."""
+    shopper = _store_fixture("shopper")
+    assert shopper["FulfilmentStoreId"] == 1101
+    assert shopper["IsGuest"] is True, (
+        "the measurement this whole feature rests on is that the session "
+        "is a GUEST")
+    sid = str(shopper.get("SessionId") or "")
+    assert set(sid) <= set("0-"), (
+        f"a real session id reached the fixtures: {sid!r}. Scrub it in "
+        f"make_fixtures.py, and keep the check on the SHAPE so the next "
+        f"capture is caught too")
+
+
+@check
+def test_store_mode_has_its_own_landing_url_and_ignores_pages():
+    """A store lookup is one GET, so there is nothing to paginate — and it
+    still needs a page to be fetched FROM, because the API is asked from
+    inside a loaded page.
+    """
+    for name in ENGINE_NAMES:
+        src = (ROOT / f"{name}.py").read_text(encoding="utf-8")
+        assert "STORE_LANDING_URL" in src, f"{name} has no landing page"
+        assert '"--pages is ignored for a store lookup' in src or \
+               "--pages is ignored for a store lookup" in src, (
+            f"{name} does not say that --pages cannot apply")
+
+def _retries_validation_problems():
+    """Every shipped --retries flag must go through page_flow.attempts.
+
+    With `--retries 0` the load loop never runs, nothing is fetched, and the
+    engine reports the browser's blank page as a result. This
+    reads the SOURCE of every entry point rather than a hand-kept list, so a
+    new engine that declares the flag with a plain int is caught the day it is
+    added, and it also CALLS the validator rather than trusting its name.
+
+    scraper_api_client.py is out of scope on purpose: it counts EXTRA attempts
+    (`retries + 1`), so 0 is legal there and means one try.
+    """
+    import argparse as _ap
+    import ast as _ast
+    import importlib as _il
+    import pathlib as _pl
+
+    root = _pl.Path(__file__).resolve().parent
+    pf = _il.import_module("page_flow")
+    problems, seen = [], 0
+    for path in sorted(root.glob("*.py")):
+        if path.name in ("smoke_test.py", "scraper_api_client.py"):
+            continue
+        tree = _ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in _ast.walk(tree):
+            if not (isinstance(node, _ast.Call)
+                    and getattr(node.func, "attr", "") == "add_argument"
+                    and node.args and isinstance(node.args[0], _ast.Constant)
+                    and node.args[0].value == "--retries"):
+                continue
+            seen += 1
+            kind = next((_ast.unparse(k.value) for k in node.keywords if k.arg == "type"), None)
+            want = "attempts" if path.name == "page_flow.py" else "page_flow.attempts"
+            if kind != want:
+                problems.append("%s:%d declares --retries with type=%s, expected %s"
+                                % (path.name, node.lineno, kind, want))
+    if not seen:
+        problems.append("found no --retries flag in any entry point, so this check "
+                        "would pass for the wrong reason")
+    for bad in (0, -1, "x"):
+        try:
+            pf.attempts(bad)
+        except _ap.ArgumentTypeError:
+            continue
+        problems.append("page_flow.attempts accepted %r" % (bad,))
+    if pf.attempts(1) != 1 or pf.attempts("3") != 3:
+        problems.append("page_flow.attempts rejects a valid count")
+    return problems
+
+
+@check
+def test_retries_is_validated_in_every_entry_point():
+    problems = _retries_validation_problems()
+    assert not problems, "; ".join(problems)
+
+
+_NUMERIC_FLAGS = {
+    "--pages": ("pages_flag", (0, -2, "x"), ("1", 1)),
+    "--concurrency": ("concurrency_flag", (0, -1, "x"), ("2", 2)),
+    "--delay": ("delay_flag", (-1, "-0.5", "nan", "x"), ("0", 0.0)),
+    "--retry-delay": ("retry_delay_flag", (-5, "x"), ("1.5", 1.5)),
+    "--proxy-block-retries": ("block_retries_flag", (-1, "x"), ("0", 0)),
+}
+
+
+@check
+def test_numeric_flags_are_validated_in_every_engine():
+    """--pages 0 ran one page and said complete; --delay -1 crashed after
+    page 1 with its rows unsaved. Each engine must declare these flags with
+    the shared validator, and the validator must refuse the bad values."""
+    import argparse as _ap
+    problems = []
+    for name in ENGINE_NAMES:
+        tree = ast.parse((ROOT / f"{name}.py").read_text(encoding="utf-8"))
+        found = {}
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, "attr", "") == "add_argument"
+                    and node.args and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value in _NUMERIC_FLAGS):
+                found[node.args[0].value] = next(
+                    (ast.unparse(k.value) for k in node.keywords
+                     if k.arg == "type"), None)
+        for flag, (fn, _, _) in _NUMERIC_FLAGS.items():
+            if found.get(flag) != f"page_flow.{fn}":
+                problems.append(f"{name} declares {flag} with "
+                                f"type={found.get(flag)}")
+    for flag, (fn, bad, (good_in, good_out)) in _NUMERIC_FLAGS.items():
+        conv = getattr(page_flow, fn)
+        for value in bad:
+            try:
+                conv(value)
+            except _ap.ArgumentTypeError as e:
+                if flag not in str(e):
+                    problems.append(f"{fn} error does not name {flag}: {e}")
+            else:
+                problems.append(f"{fn} accepted {value!r}")
+        if conv(good_in) != good_out:
+            problems.append(f"{fn} rejects or mangles {good_in!r}")
+    assert not problems, "; ".join(problems)
+
+
+@check
+def test_a_url_from_env_does_not_turn_a_store_lookup_into_a_listing():
+    """A copied .env.example used to set WOOLWORTHS_URL, and the engines read
+    it as a typed --url, so `--postcode 3000` became a search run. The store
+    branch must decide on what was TYPED, captured before .env is applied."""
+    for name in ENGINE_NAMES:
+        src = (ROOT / f"{name}.py").read_text(encoding="utf-8")
+        typed = src.find("typed_url = args.url")
+        applied = src.find("env_config.apply(args)")
+        assert 0 <= typed < applied, f"{name} reads the URL after .env"
+        assert "(_store_lookup and typed_url is None)" in src, (
+            f"{name} decides the store shortcut on the .env URL")
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert not re.search(r"^WOOLWORTHS_URL=", example, re.M), (
+        ".env.example ships an active WOOLWORTHS_URL")
+
+
+def _allow_empty_contract(O, row_cls):
+    """(label, got, want) for every outcome `--allow-empty` must keep apart.
+
+    The flag writes an empty file, with a CSV header and a sidecar saying
+    `status: empty`, ONLY for a genuine empty result: a finished run whose
+    answer was nothing (exit 4). Blocked (3), never-obtained or parser
+    failure (5) and partial (6) keep their exit codes, and an earlier good
+    output is never overwritten for them, rows or sidecar.
+    """
+    import types
+    import diff_runs
+    out = []
+    good = [row_cls(sku="A1", title="yesterday")]
+
+    def run(prefix, rows, allow, **kw):
+        base = dict(blocked=False, stop_reason="completed", pages_requested=1,
+                    pages_completed=1, start_url="u", final_url="u",
+                    mode=O.UNIQUE_BY_SKU_MODES[0])
+        base.update(kw)
+        with open(os.devnull, "w") as sink, redirect_stdout(sink):
+            return O.finish_run(rows, prefix, "both", allow, **base)
+
+    def snapshot(prefix):
+        return {ext: open(prefix + ext, "rb").read()
+                for ext in (".json", ".csv", ".meta.json")
+                if os.path.exists(prefix + ext)}
+
+    failures = (
+        ("blocked", dict(blocked=True, stop_reason="blocked",
+                         pages_completed=0), O.EXIT_BLOCKED, "blocked"),
+        ("never obtained", dict(stop_reason="page_failed", pages_completed=0,
+                                pages_failed=[1]), 5, "failed"),
+        ("a parser failure on a served page",
+         dict(stop_reason="completed", pages_failed=[1]), 5, "failed"),
+    )
+    with tempfile.TemporaryDirectory() as d:
+        # A genuine empty result.
+        p = os.path.join(d, "empty")
+        rc = run(p, [], True)
+        out.append(("genuine empty + --allow-empty: exit", rc,
+                    O.EXIT_NO_PRODUCTS))
+        out.append(("...the JSON is []",
+                    json.load(open(p + ".json", encoding="utf-8")), []))
+        header = open(p + ".csv", encoding="utf-8").read().splitlines()
+        out.append(("...the CSV is its header and nothing else",
+                    (len(header), "sku" in (header[0] if header else "")),
+                    (1, True)))
+        meta = json.load(open(p + ".meta.json", encoding="utf-8"))
+        out.append(("...the sidecar says empty, why, and 0 rows",
+                    (meta.get("status"), meta.get("stop_reason"),
+                     meta.get("products")), ("empty", "completed", 0)))
+        p2 = os.path.join(d, "empty_plain")
+        rc = run(p2, [], False)
+        out.append(("genuine empty without the flag: exit 4, nothing written",
+                    (rc, snapshot(p2)), (O.EXIT_NO_PRODUCTS, {})))
+
+        # An empty run compares like a complete one.
+        g = os.path.join(d, "good0")
+        run(g, good, False)
+        with open(os.devnull, "w") as sink, redirect_stdout(sink), \
+                redirect_stderr(sink):
+            ok = diff_runs._check_comparable(types.SimpleNamespace(
+                old=g + ".json", new=p + ".json", force=False))
+        out.append(("diff_runs compares a complete run with an empty one",
+                    bool(ok), True))
+
+        for label, kw, code, status in failures:
+            # Over a previous good result: nothing at all changes.
+            p = os.path.join(d, label.replace(" ", "_"))
+            run(p, good, False)
+            before = snapshot(p)
+            rc = run(p, [], True, **kw)
+            out.append(("%s + --allow-empty: exit" % label, rc, code))
+            out.append(("...the earlier output and its sidecar are kept "
+                        "byte for byte" % (), snapshot(p) == before, True))
+            # With nothing to preserve: the sidecar alone, with the truth.
+            q = p + "_fresh"
+            rc = run(q, [], True, **kw)
+            meta = (json.load(open(q + ".meta.json", encoding="utf-8"))
+                    if os.path.exists(q + ".meta.json") else {})
+            out.append(("%s, nothing earlier: exit, row files, status"
+                        % label,
+                        (rc, os.path.exists(q + ".json"),
+                         os.path.exists(q + ".csv"), meta.get("status")),
+                        (code, False, False, status)))
+
+        # Rows, then a failure: partial whatever the flag says.
+        p = os.path.join(d, "partial")
+        rc = run(p, good, True, stop_reason="page_failed", pages_requested=2,
+                 pages_failed=[2])
+        meta = json.load(open(p + ".meta.json", encoding="utf-8"))
+        out.append(("rows then a failure + --allow-empty: exit 6, partial",
+                    (rc, meta.get("status")), (O.EXIT_PARTIAL, "partial")))
+    return out
+
+
+@check
+def allow_empty_writes_only_a_genuine_empty_result():
+    import output_writer as O
+    bad = ["%s: got %r, want %r" % (label, got, want)
+           for label, got, want in _allow_empty_contract(O, O.Product)
+           if got != want]
+    assert not bad, "; ".join(bad)
+
+
+def main() -> int:
+    total = len(PASSES) + len(FAILURES)
+    print()
+    print(f"{len(PASSES)}/{total} checks passed"
+          + (f", {len(SKIPS)} group(s) skipped" if SKIPS else ""))
+    for group, reason in SKIPS:
+        print(f"  skipped: {group} ({reason})")
+    if FAILURES:
+        print(f"\n{len(FAILURES)} FAILED:")
+        for name, err in FAILURES:
+            print(f"  {name}: {err}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
