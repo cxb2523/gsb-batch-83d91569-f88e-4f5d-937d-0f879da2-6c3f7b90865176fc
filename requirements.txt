@@ -1,0 +1,12 @@
+dash>=2.17
+dash-bootstrap-components>=1.6
+plotly>=5.20
+pandas>=2.1
+numpy>=1.26
+scipy>=1.11
+requests>=2.31
+openpyxl>=3.1      # .xlsx disclosures and AMFI's market-cap list
+xlrd>=2.0          # older .xls disclosures
+lxml>=4.9          # disclosures saved as HTML with an .xls name
+gunicorn>=21.2
+pytest>=7.4
