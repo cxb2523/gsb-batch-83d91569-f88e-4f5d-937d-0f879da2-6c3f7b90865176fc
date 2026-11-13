@@ -405,12 +405,325 @@ class CredentialHandlingTests(unittest.TestCase):
 
     def test_an_unwritable_state_directory_falls_back_to_a_plain_sleep(self) -> None:
         """With interval 0.0 the function returns before touching the directory,
-        so the fallback was never exercised."""
+        so the fallback was never exercised. An embedded NUL makes the path
+        invalid on every platform (Linux rejects /proc paths too, but Windows
+        happily creates them)."""
         import time
 
         started = time.monotonic()
-        public_db_lookup.pace_across_processes("string", 0.2, Path("/proc/nonexistent/x"))
+        public_db_lookup.pace_across_processes("string", 0.2, Path("bad\0path/x"))
         self.assertGreaterEqual(time.monotonic() - started, 0.19)
+
+
+def write_tasks(directory: Path, tasks: object, name: str = "tasks.json") -> Path:
+    path = directory / name
+    path.write_text(json.dumps(tasks), encoding="utf-8")
+    return path
+
+
+def run_batch(directory: Path, session: Mock, tasks: object, env: dict[str, str] | None = None) -> tuple[int, dict, str, str]:
+    task_path = write_tasks(directory, tasks)
+    output_path = directory / "report.json"
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        code = public_db_lookup.main(
+            ["--tasks", str(task_path), "--output", str(output_path)],
+            session=session,
+            env=env or {},
+        )
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    return code, report, stdout.getvalue(), stderr.getvalue()
+
+
+class BatchModeTests(unittest.TestCase):
+    """Batch mode reuses the single-lookup pipeline for every task and writes
+    one report; a failing task never aborts the remaining ones."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_all_tasks_succeed_and_the_report_keeps_the_contract(self) -> None:
+        bodies = [
+            {"results": [{"id": i} for i in range(3)]},
+            [{"accession": "MGYS00001031"}, {"accession": "MGYS00001032"}],
+        ]
+        session = Mock()
+        session.get = Mock(side_effect=[response(200, bodies[0]), response(200, bodies[1])])
+        tasks = [
+            {
+                "service": "uniprot",
+                "path": "uniprotkb/search",
+                "params": [["query", "p53"], ["size", "3"]],
+                "record_path": "results",
+                "max_items": 3,
+            },
+            {
+                "service": "mgnify",
+                "path": "studies/",
+                "params": [["page_size", "2"]],
+            },
+        ]
+        code, report, _stdout, stderr = run_batch(self.tmp, session, tasks)
+        self.assertEqual(code, 0)
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["mode"], "batch")
+        self.assertEqual((report["task_count"], report["success_count"], report["failure_count"]), (2, 2, 0))
+        self.assertEqual(session.get.call_count, 2)
+        self.assertIn("2/2", stderr)
+        for index, record in enumerate(report["results"]):
+            self.assertEqual(record["task"], index)
+            self.assertEqual(record["status"], "ok")
+            self.assertIn("record_count_returned", record)
+            self.assertIn("record_count_available", record)
+            self.assertIn("truncated", record)
+            self.assertIsNone(record["error"])
+            self.assertTrue(record["url"].startswith("https://"))
+            self.assertTrue(record["envelope"]["ok"])
+        self.assertEqual(report["results"][0]["service"], "uniprot")
+        self.assertEqual(report["results"][0]["record_count_available"], 3)
+        self.assertFalse(report["results"][0]["truncated"])
+        # The task params really reached the wire.
+        sent = dict(session.get.call_args_list[0].kwargs["params"])
+        self.assertEqual(sent["query"], "p53")
+        self.assertEqual(sent["size"], "3")
+
+    def test_one_failing_task_is_recorded_but_the_others_still_run(self) -> None:
+        session = Mock()
+        session.get = Mock(
+            side_effect=[
+                response(200, {"results": [{"id": 1}]}),
+                response(404, "not found"),
+                response(200, {"error": "Invalid db name"}),
+                response(200, [{"id": 9}]),
+            ]
+        )
+        tasks = [
+            {"service": "uniprot", "path": "uniprotkb/search"},
+            {"service": "uniprot", "path": "uniprotkb/NOPE"},
+            {"service": "ncbi-entrez", "path": "esearch.fcgi"},
+            {"service": "alphafold", "path": "prediction/P04637"},
+        ]
+        code, report, _stdout, _stderr = run_batch(self.tmp, session, tasks)
+        self.assertEqual(code, 1)
+        self.assertFalse(report["ok"])
+        self.assertEqual((report["success_count"], report["failure_count"]), (2, 2))
+        self.assertEqual(session.get.call_count, 4)
+        statuses = [record["status"] for record in report["results"]]
+        self.assertEqual(statuses, ["ok", "failed", "failed", "ok"])
+        http_failure, service_failure = report["results"][1], report["results"][2]
+        self.assertEqual(http_failure["error"]["code"], "http_error")
+        self.assertEqual(service_failure["error"]["code"], "service_error")
+        # A failed record still names the service and the redacted URL.
+        self.assertEqual(http_failure["service"], "uniprot")
+        self.assertIn("uniprotkb/NOPE", http_failure["url"])
+        for field in ("record_count_returned", "record_count_available", "truncated"):
+            self.assertIsNone(http_failure[field])
+
+    def test_a_network_error_fails_one_task_without_stopping_the_batch(self) -> None:
+        session = Mock()
+        session.get = Mock(
+            side_effect=[
+                requests.ConnectionError("boom"),
+                response(200, [{"id": 1}]),
+            ]
+        )
+        tasks = [
+            {"service": "uniprot", "path": "uniprotkb/A"},
+            {"service": "uniprot", "path": "uniprotkb/B"},
+        ]
+        code, report, _stdout, _stderr = run_batch(self.tmp, session, tasks)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["results"][0]["error"]["code"], "network_error")
+        self.assertEqual(report["results"][1]["status"], "ok")
+
+    def test_credentials_in_params_or_path_fail_the_task_and_never_leak(self) -> None:
+        secret = "BATCH-SECRET-VALUE"
+        address = "batch@example.org"
+        session = Mock()
+        session.get = Mock(return_value=response(200, {"results": []}))
+        tasks = [
+            {
+                "service": "ncbi-entrez",
+                "path": "esearch.fcgi",
+                "params": [["api_key", secret]],
+            },
+            {
+                "service": "ncbi-entrez",
+                "path": f"esearch.fcgi?token={secret}",
+                "params": [],
+            },
+            {
+                "service": "ncbi-entrez",
+                "path": "esearch.fcgi",
+                "params": [["email", address]],
+            },
+            {
+                "service": "ncbi-entrez",
+                "path": "esearch.fcgi",
+                "params": [["db", "taxonomy"], ["term", "Escherichia"]],
+            },
+        ]
+        code, report, _stdout, _stderr = run_batch(
+            self.tmp, session, tasks, env={"NCBI_API_KEY": "ambient-key"}
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(report["failure_count"], 3)
+        self.assertEqual(report["success_count"], 1)
+        # The three rejected tasks never produced a request.
+        self.assertEqual(session.get.call_count, 1)
+        raw_report = json.dumps(report)
+        self.assertNotIn(secret, raw_report)
+        self.assertNotIn(address, raw_report)
+        for record in report["results"][:3]:
+            self.assertEqual(record["status"], "failed")
+            self.assertEqual(record["error"]["code"], "invalid_input")
+        # The rejected task still carries a redacted URL pointing at the endpoint.
+        self.assertTrue(report["results"][0]["url"].endswith("/esearch.fcgi"))
+        self.assertNotIn("api_key", report["results"][0]["url"])
+        # The surviving task kept its ordinary parameters.
+        sent = dict(session.get.call_args.kwargs["params"])
+        self.assertEqual(sent["db"], "taxonomy")
+        self.assertEqual(sent["api_key"], "ambient-key")
+
+    def test_esearch_total_hits_drive_record_count_available_and_truncated(self) -> None:
+        body = {
+            "esearchresult": {
+                "count": "11018",
+                "retmax": "20",
+                "idlist": [str(i) for i in range(20)],
+            }
+        }
+        session = Mock()
+        session.get = Mock(return_value=response(200, body))
+        tasks = [
+            {
+                "service": "ncbi-entrez",
+                "path": "esearch.fcgi",
+                "params": [["db", "taxonomy"], ["term", "Escherichia"], ["retmode", "json"]],
+                "record_path": "esearchresult.idlist",
+                "max_items": 5,
+            }
+        ]
+        code, report, _stdout, _stderr = run_batch(self.tmp, session, tasks)
+        self.assertEqual(code, 0)
+        record = report["results"][0]
+        self.assertEqual(record["record_count_returned"], 5)
+        self.assertEqual(record["record_count_available"], 11018)
+        self.assertTrue(record["truncated"])
+
+    def test_duplicate_params_are_preserved_through_the_batch_pipeline(self) -> None:
+        session = Mock()
+        session.get = Mock(return_value=response(200, []))
+        tasks = [
+            {
+                "service": "ncbi-entrez",
+                "path": "elink.fcgi",
+                "params": [
+                    ["dbfrom", "protein"],
+                    ["id", "15718680"],
+                    ["id", "157427902"],
+                ],
+            }
+        ]
+        code, report, _stdout, _stderr = run_batch(self.tmp, session, tasks)
+        self.assertEqual(code, 0)
+        sent = session.get.call_args.kwargs["params"]
+        self.assertEqual([value for key, value in sent if key == "id"], ["15718680", "157427902"])
+
+    def test_an_empty_task_array_is_a_successful_noop(self) -> None:
+        session = Mock()
+        code, report, _stdout, _stderr = run_batch(self.tmp, session, [])
+        self.assertEqual(code, 0)
+        self.assertTrue(report["ok"])
+        self.assertEqual((report["task_count"], report["success_count"], report["failure_count"]), (0, 0, 0))
+        self.assertEqual(report["results"], [])
+        session.get.assert_not_called()
+
+    def test_unparseable_and_structurally_invalid_task_files_exit_2(self) -> None:
+        session = Mock()
+        output_path = self.tmp / "report.json"
+        bad_cases = [
+            ("not json at all", "tasks-bad-json.json"),
+            ({"not": "an array"}, "tasks-object.json"),
+            ([{"service": "uniprot"}], "tasks-missing-path.json"),
+            ([{"service": "uniprot", "path": "x", "params": {"db": "taxonomy"}}], "tasks-params-object.json"),
+            ([{"service": "uniprot", "path": "x", "params": [["db", 7]]}], "tasks-nonstring-param.json"),
+            ([{"service": "uniprot", "path": "x", "max_items": "5"}], "tasks-max-items-string.json"),
+            ([{"service": "uniprot", "path": "x", "bogus": 1}], "tasks-unknown-key.json"),
+            ([{"service": "uniprot", "path": "x", "record_path": 5}], "tasks-record-path-int.json"),
+        ]
+        for raw, name in bad_cases:
+            task_path = self.tmp / name
+            task_path.write_text(raw if isinstance(raw, str) else json.dumps(raw), encoding="utf-8")
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = public_db_lookup.main(
+                    ["--tasks", str(task_path), "--output", str(output_path)],
+                    session=session,
+                    env={},
+                )
+            with self.subTest(name=name):
+                self.assertEqual(code, 2)
+                envelope = json.loads(stdout.getvalue())
+                self.assertEqual(envelope["error"]["code"], "invalid_input")
+        session.get.assert_not_called()
+        self.assertFalse(output_path.exists())
+
+    def test_an_unknown_service_is_a_per_task_failure_not_a_file_error(self) -> None:
+        session = Mock()
+        session.get = Mock(return_value=response(200, []))
+        tasks = [
+            {"service": "no-such-service", "path": "x"},
+            {"service": "uniprot", "path": "uniprotkb/P04637"},
+        ]
+        code, report, _stdout, _stderr = run_batch(self.tmp, session, tasks)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["results"][0]["error"]["code"], "invalid_input")
+        self.assertEqual(report["results"][1]["status"], "ok")
+        self.assertEqual(session.get.call_count, 1)
+
+    def test_batch_mode_requires_output_and_rejects_save_raw(self) -> None:
+        task_path = write_tasks(self.tmp, [])
+        session = Mock()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = public_db_lookup.main(["--tasks", str(task_path)], session=session, env={})
+        self.assertEqual(code, 2)
+        self.assertIn("--output", json.loads(stdout.getvalue())["error"]["message"])
+        raw_path = self.tmp / "raw.txt"
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = public_db_lookup.main(
+                ["--tasks", str(task_path), "--output", str(self.tmp / "r.json"), "--save-raw", str(raw_path)],
+                session=session,
+                env={},
+            )
+        self.assertEqual(code, 2)
+        session.get.assert_not_called()
+
+    def test_the_batch_report_is_redacted_when_a_response_echoes_a_secret(self) -> None:
+        secret = "SYNTHETIC-BATCH-KEY"
+        session = Mock()
+        session.get = Mock(return_value=response(200, {"results": [{"echo": f"key={secret}"}]}))
+        tasks = [
+            {
+                "service": "ncbi-entrez",
+                "path": "esearch.fcgi",
+                "params": [["db", "taxonomy"]],
+            }
+        ]
+        _code, report, _stdout, _stderr = run_batch(
+            self.tmp, session, tasks, env={"NCBI_API_KEY": secret}
+        )
+        raw_report = json.dumps(report)
+        self.assertNotIn(secret, raw_report)
+        self.assertIn("REDACTED", raw_report)
+        self.assertNotIn(secret, report["results"][0]["url"])
+
 
 if __name__ == "__main__":
     unittest.main()
