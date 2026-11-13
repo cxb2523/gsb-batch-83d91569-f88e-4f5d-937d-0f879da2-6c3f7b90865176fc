@@ -10,6 +10,21 @@ from a row count, it leads the section in a blockquote.
 
 ## [Unreleased]
 
+### Added
+
+- `--mode events` now writes a per-page manifest to `<out>.meta.json`:
+  `event_page_results` holds one record per event page the listing named
+  (page, URL, `result`, and `reason` on failure), sorted by page, with
+  `event_page_summary` counting the four results and `pages_unattempted`
+  listing the never-fetched page numbers. `result` is `success`, `no_rows`,
+  `failed` or `unattempted`; failed and unattempted pages are counted
+  separately and an unattempted page never enters `pages_failed`. A dead
+  worker's in-flight page is recovered and reported as
+  `unattempted/worker_died` instead of being silently dropped. The
+  sequential (`--concurrency 1`) and concurrent paths emit the same
+  structure. Failure reasons distinguish `page_load_timeout`,
+  `proxy_unavailable`, `browser_failed` and `blocked_<vendor>`.
+
 ### Changed
 
 - CI only: the canary now runs weekly (Mondays 06:20 UTC) and on a manual dispatch, with its optional secret `POLYMARKET_PROXY` passed on every run; the daily schedule is removed.

@@ -408,6 +408,19 @@ picked up, without printing secrets.
   locale the URL carried. The last two of those answer different questions:
   a page that FAILED is a hole in the data, a page with no rows is a fact
   about that event, and `--mode events` keeps walking past the second.
+* **A per-page manifest in `--mode events`.** `event_page_results` holds one
+  record for every event page the listing named — page number, URL, `result`
+  and, on failure, `reason` — sorted by page. `result` is one of `success`,
+  `no_rows` (fetched, but the event held no markets), `failed` (the fetch
+  failed: `page_load_timeout`, `proxy_unavailable`, `browser_failed`,
+  `blocked_<vendor>`, …) or `unattempted` (named but never fetched, e.g. a
+  worker died mid-walk or the sequential run stopped on an earlier page).
+  `event_page_summary` counts the four kinds and `pages_unattempted` lists
+  their numbers. Failed and unattempted are kept in separate buckets — an
+  unattempted page never enters `pages_failed` — and any failed page means
+  the run is never reported `complete`, while a run whose only blemish is a
+  `no_rows` page still completes. The concurrent (`--concurrency > 1`) and
+  sequential paths emit the same structure for the same inputs.
 * **An empty CSV still carries its header.**
 * `diff_runs.py` compares two runs by `sku` and refuses a pair whose `mode`
   differs — a shallow run against a deep one would report a dozen columns as

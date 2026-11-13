@@ -2005,8 +2005,103 @@ def test_concurrency_machinery(skips):
                 {o.page_num for o in results} >= {2, 3, 4})
     ok &= check("...and nothing claims the dead worker's pages succeeded",
                 5 not in {o.page_num for o in results})
+    # The page the dead worker was FETCHING when it raised was already dequeued,
+    # so draining the queue alone loses it. The dispatcher must recover that
+    # in-flight page and report it — with every page still in the queue — as
+    # unattempted/worker_died rather than letting it vanish from both lists.
+    unattempted_nums = [spec[0] for spec in unattempted]
+    ok &= check("...the in-flight page is recovered, not silently dropped",
+                5 in unattempted_nums)
+    ok &= check("...every unattempted page names worker_died",
+                all(spec[2] == eng.REASON_WORKER_DIED for spec in unattempted))
+    ok &= check("...unattempted and fetched pages never overlap",
+                set(unattempted_nums).isdisjoint(
+                    {o.page_num for o in results}))
+    ok &= check("...the two buckets together still cover every planned page",
+                sorted(unattempted_nums + [o.page_num for o in results])
+                == list(range(2, 8)))
 
-    # 5. The pool is refused where it cannot help, and that refusal is DATA
+    # 5. The per-page manifest: one record for every NAMED event page, with
+    #    success / no_rows / failed / unattempted kept apart. Built here from
+    #    fabricated PageOutcomes — no browser, no site — so the four results
+    #    and their reasons are all exercised deterministically.
+    group("the per-page event manifest, four results kept apart")
+
+    def spec_for(n):
+        return (n, "https://polymarket.com/event/manifest-%02d" % n)
+
+    manifest_pages = list(range(2, 8))
+    manifest_specs = [spec_for(n) for n in manifest_pages]
+    manifest_outcomes = [
+        good(2, manifest_specs[0][1]),                       # success
+        good(3, manifest_specs[1][1], rows=0),               # no_rows
+        fail_at_4(4, manifest_specs[2][1]),                  # failed (timeout)
+        good(5, manifest_specs[3][1]),                       # success
+        good(6, manifest_specs[4][1]),                       # success
+        # page 7 deliberately absent: an unattempted named page
+    ]
+    manifest = eng.build_event_page_manifest(
+        manifest_specs, manifest_outcomes,
+        unattempted=[(7, manifest_specs[5][1],
+                      eng.REASON_PRECEDING_FAILED)])
+    by_page = {r["page"]: r for r in manifest}
+    ok &= check("the manifest has one record per named event page",
+                [r["page"] for r in manifest] == manifest_pages)
+    ok &= check("each record carries page, url, result and reason",
+                all(list(r) == ["page", "url", "result", "reason"]
+                    for r in manifest))
+    ok &= check("a fetched page with rows is success",
+                by_page[2]["result"] == eng.PAGE_RESULT_SUCCESS
+                and by_page[2]["reason"] is None)
+    ok &= check("a fetched page with no rows is no_rows, not failed",
+                by_page[3]["result"] == eng.PAGE_RESULT_NO_ROWS
+                and by_page[3]["reason"] is None)
+    ok &= check("a failed fetch is failed with a timeout reason",
+                by_page[4]["result"] == eng.PAGE_RESULT_FAILED
+                and by_page[4]["reason"] == "page_load_timeout")
+    ok &= check("a never-fetched page is unattempted with its own reason",
+                by_page[7]["result"] == eng.PAGE_RESULT_UNATTEMPTED
+                and by_page[7]["reason"] == eng.REASON_PRECEDING_FAILED)
+
+    summary = eng.summarize_page_manifest(manifest)
+    ok &= check("the summary counts all four results separately",
+                summary["succeeded"] == 3 and summary["without_rows"] == 1
+                and summary["failed"] == 1 and summary["unattempted"] == 1
+                and summary["total"] == 6)
+    ok &= check("unattempted page numbers stay out of the failed bucket",
+                summary["pages_unattempted"] == [7]
+                and 7 not in [o.page_num for o in manifest_outcomes
+                              if not o.ok])
+
+    # The proxy distinction: a dead exit is its own reason, not a timeout.
+    proxy_outcome = good(6, spec_for(6)[1])
+    proxy_outcome.products, proxy_outcome.load_failed = [], True
+    proxy_outcome.proxy_error = "ERR_PROXY_CONNECTION_FAILED"
+    ok &= check("a dead proxy is reported as proxy_unavailable",
+                eng.page_manifest_reason(proxy_outcome) == "proxy_unavailable")
+    crash_outcome = good(6, spec_for(6)[1])
+    crash_outcome.products, crash_outcome.load_failed = [], True
+    crash_outcome.browser_failure = "the page crashed"
+    ok &= check("a crashed browser is reported as browser_failed",
+                eng.page_manifest_reason(crash_outcome) == "browser_failed")
+
+    # stop_reason alignment: a failed page forbids complete even alongside
+    # unattempted pages; all-success with a no_rows page stays complete.
+    ok &= check("any failed page wins the stop_reason over unattempted",
+                eng.event_walk_stop_reason(
+                    [good(2, spec_for(2)[1]), fail_at_4(4, spec_for(4)[1])],
+                    [5, 6]).startswith("page_load_timeout"))
+    ok &= check("unattempted-only walks report pages_unattempted",
+                eng.event_walk_stop_reason(
+                    [good(2, spec_for(2)[1])], [3, 4])
+                == "pages_unattempted")
+    ok &= check("all-fetched with a no_rows page still completes",
+                eng.event_walk_stop_reason(
+                    [good(2, spec_for(2)[1]),
+                     good(3, spec_for(3)[1], rows=0)], [])
+                == "completed")
+
+    # 6. The pool is refused where it cannot help, and that refusal is DATA
     #    rather than three copies of an if-chain.
     ok &= check("--mode events may use workers",
                 page_flow.concurrency_limit(

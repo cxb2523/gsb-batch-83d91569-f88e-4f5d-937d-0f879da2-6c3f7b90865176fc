@@ -184,6 +184,12 @@ class PageOutcome:
     # Set when the BROWSER failed (a crashed page, a closed connection)
     # rather than the site: such a page is a fetch failure, not a block.
     browser_failure: Optional[str] = None
+    # The Chromium proxy-error name when a dead/misconfigured PROXY aborted
+    # the navigation (ERR_PROXY_CONNECTION_FAILED, ERR_TUNNEL_CONNECTION_FAILED,
+    # …). Kept distinct from a plain timeout because the per-page manifest
+    # reports the two as different reasons, and because a dead exit is fixed
+    # by rotating to another one rather than by waiting and retrying.
+    proxy_error: Optional[str] = None
     state: Optional[str] = None
     # How many events the LISTING holds in total, where the site states one
     # — 21,511 for /predictions against the twenty it ships. NOT a per-page
@@ -221,6 +227,171 @@ class PageOutcome:
 # could only be wrong for one of them; `mode` in the sidecar is what says
 # which columns to expect.
 FIELD_FLOOR = 95
+
+
+# ---------------------------------------------------------------------------
+# Per-page manifest — one record for every NAMED event page
+# ---------------------------------------------------------------------------
+# The four results a named event page can have, with fixed spellings so two
+# runs over the same input produce byte-stable manifest structure. A
+# consumer branches on these, so they are constants rather than ad-hoc
+# strings scattered down the two fetch paths:
+#
+#   success      the page was fetched and it produced at least one row
+#   no_rows      the page was fetched successfully (HTTP-wise) but produced
+#                no readable markets — a fact about THAT EVENT, and the
+#                opposite of a fetch failure. Still counts as a completed page.
+#   failed       the page was attempted and the attempt failed — a timeout, a
+#                dead proxy, a crashed browser, an interception/block. Carries
+#                a reason.
+#   unattempted  the page was named in the plan but never fetched at all — a
+#                worker died with it still in the queue, or the sequential
+#                walk stopped on an earlier page. Carries a reason, and is
+#                reported SEPARATELY from failed so "never tried" can never be
+#                mistaken for "tried and failed".
+PAGE_RESULT_SUCCESS = "success"
+PAGE_RESULT_NO_ROWS = "no_rows"
+PAGE_RESULT_FAILED = "failed"
+PAGE_RESULT_UNATTEMPTED = "unattempted"
+
+# Reasons a page ended up UNATTEMPTED. Kept in one vocabulary shared by the
+# concurrent and sequential paths so the manifest is identical in shape.
+#
+#   worker_died            a worker thread died with this page still queued —
+#                          the concurrent path's characteristic loss
+#   preceding_page_failed  the sequential walk stops at the first failure, so
+#                          every page after it was never reached
+#   page_cap               the run's --pages cap stopped the walk before this
+#                          planned page was reached
+REASON_WORKER_DIED = "worker_died"
+REASON_PRECEDING_FAILED = "preceding_page_failed"
+REASON_PAGE_CAP = "page_cap"
+REASON_NOT_DISPATCHED = "not_dispatched"
+
+
+def page_manifest_result(outcome: PageOutcome) -> str:
+    """Which of the four manifest results a fetched page produced."""
+    if not outcome.ok:
+        return PAGE_RESULT_FAILED
+    if outcome.products:
+        return PAGE_RESULT_SUCCESS
+    return PAGE_RESULT_NO_ROWS
+
+
+def page_manifest_reason(outcome: PageOutcome) -> Optional[str]:
+    """The machine-readable failure reason for a fetched-and-failed page.
+
+    Mirrors page_flow.failure_stop_reason so the vocabulary matches the
+    sidecar's own stop_reason, but adds the proxy distinction that function
+    cannot see: a dead exit is `proxy_unavailable`, not a timeout, because the
+    fixes are opposite (rotate vs. wait).
+    """
+    if outcome.ok:
+        return None
+    if outcome.browser_failure:
+        return "browser_failed"
+    if outcome.proxy_error:
+        return "proxy_unavailable"
+    if outcome.load_failed:
+        return "page_load_timeout"
+    if outcome.blocked_by is not None:
+        return f"blocked_{outcome.blocked_by}"
+    # A failure flag that names neither transport nor block: keep it visible
+    # rather than inventing a confident reason.
+    return "unknown_failure"
+
+
+def build_event_page_manifest(specs, outcomes, unattempted=None) -> List[dict]:
+    """One sorted record per event page the listing NAMED.
+
+    `specs` is the page plan the run actually built from page 1 —
+    [(page_num, url), …], pages 2..N in listing order. `outcomes` are the
+    PageOutcomes that came back (arrival order is fine; this sorts).
+    `unattempted` lists pages that never left the queue as
+    (page_num, url, reason) triples; missing URLs are filled from `specs`.
+
+    Every spec gets EXACTLY one record, which is the contract: there is no
+    way for a named page to be absent from the manifest, so the three facts
+    that used to be indistinguishable — "not fetched", "fetched, no markets",
+    "fetched and failed" — each have their own result. Sorted by page number
+    so the same inputs always produce the same structure.
+    """
+    unattempted = unattempted or []
+    by_num = {o.page_num: o for o in outcomes}
+    unattempted_by_num = {}
+    for entry in unattempted:
+        if len(entry) == 3:
+            num, reason = entry[0], entry[2]
+        else:  # tolerate the old (page_num, url) shape
+            num, reason = entry[0], REASON_NOT_DISPATCHED
+        unattempted_by_num[num] = reason
+
+    records = []
+    for num, url in specs:
+        if num in by_num:
+            outcome = by_num[num]
+            result = page_manifest_result(outcome)
+            reason = page_manifest_reason(outcome)
+        else:
+            result = PAGE_RESULT_UNATTEMPTED
+            reason = unattempted_by_num.get(num, REASON_NOT_DISPATCHED)
+        records.append({
+            "page": num,
+            "url": url,
+            "result": result,
+            "reason": reason,
+        })
+    records.sort(key=lambda r: r["page"])
+    return records
+
+
+def summarize_page_manifest(records: List[dict]) -> dict:
+    """Counts for each of the four results plus the unattempted page numbers.
+
+    The page-number lists are what lets a consumer act without re-scanning the
+    records: `pages_unattempted` is deliberately separate from any failed list
+    so the two losses are never conflated.
+    """
+    tally = {PAGE_RESULT_SUCCESS: 0, PAGE_RESULT_NO_ROWS: 0,
+             PAGE_RESULT_FAILED: 0, PAGE_RESULT_UNATTEMPTED: 0}
+    for record in records:
+        tally[record["result"]] = tally.get(record["result"], 0) + 1
+    return {
+        "total": len(records),
+        "succeeded": tally[PAGE_RESULT_SUCCESS],
+        "without_rows": tally[PAGE_RESULT_NO_ROWS],
+        "failed": tally[PAGE_RESULT_FAILED],
+        "unattempted": tally[PAGE_RESULT_UNATTEMPTED],
+        "pages_unattempted": sorted(
+            r["page"] for r in records
+            if r["result"] == PAGE_RESULT_UNATTEMPTED),
+    }
+
+
+def event_walk_stop_reason(outcomes, unattempted_nums,
+                           current="completed") -> str:
+    """The stop_reason for an event-page walk, aligned with exit codes.
+
+    `outcomes` is every page the walk actually fetched (successful ones
+    included); the failed pages are filtered here so a caller cannot skew the
+    result by handing this function the pre-sorted minimum.
+
+    Rules (the existing contract, made explicit and testable):
+      * any FAILED page wins — a failed run must never report complete, even
+        when other pages also went unattempted;
+      * with no failure but pages left unattempted, the walk did not cover the
+        plan → `pages_unattempted`;
+      * otherwise every named page was fetched (some may be `no_rows`, which
+        is still a completed fetch) → keep the caller's current reason, normally
+        `completed` or a benign single-page reason.
+    """
+    failed_outcomes = [o for o in outcomes if not o.ok]
+    if failed_outcomes:
+        return page_flow.failure_stop_reason(
+            min(failed_outcomes, key=lambda o: o.page_num))
+    if unattempted_nums:
+        return "pages_unattempted"
+    return current
 
 
 
@@ -854,6 +1025,19 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
 
     results = []
     results_lock = threading.Lock()
+    # The spec each live worker is currently fetching, keyed by worker index.
+    # This is what closes the silent-loss hole: a page is dequeued the moment
+    # a worker takes it, so a worker that dies MID-FETCH leaves nothing in the
+    # queue to drain and the page used to vanish from both the results and the
+    # unattempted list. Tracking it here means the join can still name it as a
+    # page that was never completed. Guarded by results_lock alongside results.
+    in_flight = {}
+    # Set by any worker whose thread-level handler fires — a browser launch
+    # failure, a sync_playwright context error, anything that kills the worker
+    # while pages it was going to take are still queued. It is what turns those
+    # drained queue entries into `unattempted / worker_died` instead of leaving
+    # them as a silent, reason-less gap.
+    worker_died = threading.Event()
     # Kept, and deliberately never set by an empty page.
     #
     # It arrived from a sibling repo whose pages are consecutive DAYS, where
@@ -878,9 +1062,14 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
                     first = True
                     while not exhausted.is_set():
                         try:
-                            page_num, url = work.get_nowait()
+                            spec = work.get_nowait()
                         except queue.Empty:
                             break
+                        page_num, url = spec
+                        # Mark in flight BEFORE the fetch so a crash inside it
+                        # still leaves the page accounted for after the join.
+                        with results_lock:
+                            in_flight[index] = spec
                         if not first:
                             time.sleep(args.delay)
                         first = False
@@ -888,6 +1077,7 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
                                                   page_num, url)
                         with results_lock:
                             results.append(outcome)
+                            in_flight.pop(index, None)
                         if outcome.ok and not outcome.products:
                             # Recorded, NOT acted on. Every spec in this
                             # queue is an event URL page 1 named, so one
@@ -902,6 +1092,7 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
                 finally:
                     session.close()
         except Exception:  # noqa: BLE001 — a dead worker must not hang the run
+            worker_died.set()
             logger.exception("[%s] died; its pages will be reported as "
                              "unattempted rather than failed.", name)
 
@@ -913,16 +1104,33 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
     for t in threads:
         t.join()
 
-    # Anything still queued was never attempted (a worker died, or dispatch
-    # stopped at the end of the listing). NOT reported as failed pages: they
-    # were not tried, and claiming otherwise would overstate the damage.
-    unattempted = []
+    # Anything still queued was never attempted, and so is any page a dead
+    # worker held in flight when it died: neither produced a PageOutcome.
+    # NOT reported as failed pages — they were not completed, and claiming
+    # otherwise would overstate the damage. The reason distinguishes a dead
+    # worker (the real case here) from a terminator that stopped dispatch, and
+    # the URL is carried alongside so the manifest can name every page the
+    # listing named, not just the numbers that happened to come back.
+    unattempted_map = {}
     while True:
         try:
-            unattempted.append(work.get_nowait()[0])
+            page_num, url = work.get_nowait()
         except queue.Empty:
             break
-    return results, sorted(unattempted), exhausted.is_set()
+        reason = (REASON_WORKER_DIED if worker_died.is_set()
+                  else REASON_NOT_DISPATCHED)
+        unattempted_map[page_num] = (page_num, url, reason)
+    # A page a dead worker was mid-fetch on is no longer in the queue; recover
+    # it from in_flight so it cannot silently disappear. Every surviving
+    # worker cleared its own slot on success, so whatever remains belongs to a
+    # thread that did not make it to the append.
+    with results_lock:
+        stranded = list(in_flight.values())
+    for page_num, url in stranded:
+        unattempted_map.setdefault(
+            page_num, (page_num, url, REASON_WORKER_DIED))
+    unattempted = sorted(unattempted_map.values(), key=lambda spec: spec[0])
+    return results, unattempted, exhausted.is_set()
 
 
 def _fetch_one_page(session, args, pool, page_num: int, url: Optional[str]) -> PageOutcome:
@@ -992,6 +1200,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: Optional[str]) -> P
                     reason = _proxy_failure(e)
                     if reason:
                         exit_failed, load_failed = reason, True
+                        outcome.proxy_error = reason
                         break  # a different exit is the only thing that helps
                     load_failed = True
                     if attempt < args.retries:
@@ -1302,6 +1511,12 @@ def scrape(args) -> int:
     blocked = False
     dedupe_key = "sku"
     stop_reason = "completed"
+    # The event-walk page plan (pages 2..N, [(page_num, url), …]) and the
+    # named pages that never left the queue as (page_num, url, reason). Both
+    # are populated identically by the concurrent and sequential paths so the
+    # per-page manifest below has one record for every NAMED event page.
+    event_specs: List[tuple] = []
+    unattempted_specs: List[tuple] = []
 
     pool = proxy_pool_from_args(args)
     if pool and args.cdp_endpoint:
@@ -1428,31 +1643,41 @@ def scrape(args) -> int:
                     # window than was asked for.
                     session.close()
                     specs = [(n + 2, u) for n, u in enumerate(planned)]
+                    event_specs = specs
                     logger.info("Fetching %d event page(s) across %d "
                                 "workers%s.", len(specs), concurrency,
                                 f" over {len(pool)} exit(s)" if pool else "")
                     rest, unattempted, _exhausted = _fetch_pages_concurrently(
                         args, pool, specs, concurrency)
                     outcomes.extend(rest)
-                    failed = [o for o in rest if not o.ok]
-                    if failed:
-                        worst = min(failed, key=lambda o: o.page_num)
-                        stop_reason = page_flow.failure_stop_reason(worst)
-                        blocked = any(o.blocked_by for o in rest)
-                    elif unattempted:
-                        stop_reason = "pages_unattempted"
+                    unattempted_specs = unattempted
+                    # A failed page always wins over unattempted ones: the run
+                    # must never report complete while a fetch actually
+                    # failed. Unattempted-only walks (a dead worker) get their
+                    # own reason and stay out of pages_failed.
+                    stop_reason = event_walk_stop_reason(
+                        rest, [spec[0] for spec in unattempted], stop_reason)
+                    blocked = any(o.blocked_by for o in rest)
                     # `exhausted` is deliberately not consulted: nothing in
                     # this mode sets it (see _fetch_pages_concurrently). It
                     # used to map an empty event page to `no_new_products`,
                     # which `COMPLETE_STOP_REASONS` called a whole run.
                     session = None       # already closed
                 elif planned:
+                    # The whole plan up front, so pages the loop never reaches
+                    # can be accounted for as `unattempted` in the manifest
+                    # rather than silently vanishing.
+                    event_specs = [(n + 2, u)
+                                   for n, u in enumerate(planned)]
+                    walk_stopped = False
+                    stop_cause = None
                     for index, url in enumerate(planned):
                         page_num = index + 2
                         if page_flow.page_cap_reached(page_num):
                             logger.warning("Stopping at the %d-page cap.",
                                            PAGE_CAP)
                             stop_reason = "page_cap"
+                            walk_stopped, stop_cause = True, REASON_PAGE_CAP
                             break
                         if pool and pool.rotates_per_page():
                             pool.advance(f"per-page rotation, page {page_num}")
@@ -1465,6 +1690,12 @@ def scrape(args) -> int:
                             stop_reason = page_flow.failure_stop_reason(
                                 outcome)
                             blocked = outcome.blocked_by is not None
+                            # The sequential walk halts at the first failed
+                            # page; every planned page after it was never
+                            # attempted and must say so, separately from the
+                            # one that failed.
+                            walk_stopped, stop_cause = (
+                                True, REASON_PRECEDING_FAILED)
                             break
                         seen_keys.update(p.sku for p in outcome.products
                                          if p.sku is not None)
@@ -1491,6 +1722,12 @@ def scrape(args) -> int:
                                         "remaining event pages are "
                                         "independent URLs page 1 already "
                                         "named.", url)
+                    if walk_stopped:
+                        attempted = {o.page_num for o in outcomes}
+                        unattempted_specs = [
+                            (num, url, stop_cause)
+                            for num, url in event_specs
+                            if num not in attempted]
 
             else:
                 seen_keys.update(p.sku for p in first.products if p.sku is not None)
@@ -1568,6 +1805,20 @@ def scrape(args) -> int:
     final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
                  if ok_pages else args.url)
 
+    # The per-page manifest: one record for every event page the listing
+    # NAMED, whether it succeeded, failed, came back empty or was never
+    # attempted. Built for both the concurrent and sequential walks from the
+    # same plan, so the structure is identical and sorted by page number.
+    # Empty outside --mode events (page 1 is the listing, not a named event
+    # page), which keeps the field present and stable in every sidecar.
+    event_outcomes = [o for o in outcomes if o.page_num != 1]
+    page_manifest = build_event_page_manifest(
+        event_specs, event_outcomes, unattempted_specs)
+    page_manifest_summary = summarize_page_manifest(page_manifest)
+    # Failed and unattempted stay separate HERE as well as in the manifest:
+    # pages_failed must never absorb a page that was not tried.
+    unattempted_pages = page_manifest_summary["pages_unattempted"]
+
     # One-per-run context, in the sidecar rather than repeated down a column.
     extra = {
         "scroll": {o.page_num: o.scroll for o in outcomes if o.scroll},
@@ -1612,6 +1863,14 @@ def scrape(args) -> int:
         # events into pages 2..N.
         "pagination": ("listing+event-pages" if args.mode == "events"
                        else "single-page"),
+        # One record per NAMED event page, in page order. This is what makes
+        # the three old ambiguities distinct: a page that failed its fetch
+        # (`result: failed`, with a reason), a page that was served but held
+        # no markets (`result: no_rows`, still complete), and a page the run
+        # never even tried (`result: unattempted`, kept out of pages_failed).
+        "event_page_results": page_manifest,
+        "event_page_summary": page_manifest_summary,
+        "pages_unattempted": unattempted_pages,
     }
 
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
