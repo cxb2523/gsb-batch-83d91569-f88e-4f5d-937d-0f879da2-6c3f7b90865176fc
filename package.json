@@ -1,0 +1,59 @@
+{
+  "name": "@decodo/cli",
+  "version": "0.0.0-semantic-release",
+  "description": "Official CLI for the Decodo APIs",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Decodo/cli.git"
+  },
+  "homepage": "https://github.com/Decodo/cli#readme",
+  "bugs": {
+    "url": "https://github.com/Decodo/cli/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "decodo": "./build/esm/index.js"
+  },
+  "files": [
+    "build"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "build:esm": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "ultracite check",
+    "fix": "ultracite fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "pretest": "pnpm build",
+    "prepack": "pnpm build"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "packageManager": "pnpm@10.33.3",
+  "dependencies": {
+    "@decodo/sdk-ts": "^2.6.1",
+    "commander": "^14.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.15",
+    "@types/json-schema": "^7.0.15",
+    "@types/node": "^25.7.0",
+    "conventional-changelog-conventionalcommits": "^9.3.1",
+    "semantic-release": "^25.0.9",
+    "typescript": "^5.3.3",
+    "ultracite": "7.7.0",
+    "vitest": "^3.2.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "vite": "^7.3.5",
+      "esbuild": "^0.28.1"
+    }
+  }
+}
