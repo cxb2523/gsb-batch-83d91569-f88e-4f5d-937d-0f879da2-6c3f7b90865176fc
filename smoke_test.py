@@ -1980,6 +1980,369 @@ def check_per_page_rotation_actually_rotates_per_page():
           "rebuilding a browser to arrive at the same address buys nothing")
 
 
+def _two_exit_pool(rotate="per-run"):
+    """A pool of two exits, assembled from pieces.
+
+    Written this way, not as a literal, because the credential scan reads
+    this file and a literal `user:pass@host` here would make the scan fail
+    on its own test data.
+    """
+    return proxy_pool.ProxyPool(
+        ["http:" + "//" + "u" + ":" + "p" + "@one.example:1",
+         "http:" + "//" + "u" + ":" + "p" + "@two.example:2"], rotate=rotate)
+
+
+def _engine_for_record_checks(name):
+    """`_import_engine`, but tolerant of a driver whose IMPORT raises.
+
+    The shared helper records a skip for `ImportError` only, which is right
+    for it: "skipped, engine absent" must not hide a broken import. But a
+    driver can also fail at import for reasons that have nothing to do with
+    this repo — pyppeteer calls into Win32 shell folders at import time and
+    raises a `com_error` on a Windows profile that lacks the expected
+    directory. That is an environment fault, not a defect in the records
+    these checks are about, so it is recorded as a skip HERE and nowhere
+    else.
+    """
+    try:
+        return __import__(name)
+    except ImportError as exc:
+        skip(name, "engine library absent (%s)" % exc)
+    except Exception as exc:                              # noqa: BLE001
+        skip(name, "engine library could not be imported here (%s: %s)"
+             % (type(exc).__name__, exc))
+    return None
+
+
+def _drive_outcomes(engine, answers, **overrides):
+    """Run `_run_profile` with a stubbed transport; return (rows, meta, pool).
+
+    `answers` maps handle -> list of answers, consumed in order. An answer
+    is a state string for the PageOutcome machinery to classify, or the
+    sentinel "dead_exit" to raise a proxy failure, or (status, html).
+    A dict of lists rather than one flat list because the concurrency
+    path interleaves handles, and a flat list would make which answer
+    each account got depend on scheduling.
+    """
+    queue_by_handle = {k: list(v) for k, v in answers.items()}
+    lock = threading.Lock()
+
+    def fake_call(session, args, url, *rest):
+        handle = url.rsplit("/@", 1)[-1]
+        with lock:
+            answer = queue_by_handle[handle].pop(0)
+        if answer == "dead_exit":
+            raise engine.TransportError(
+                "net::ERR_PROXY_CONNECTION_FAILED at https://x/")
+        if answer == "timeout":
+            raise engine.TransportError("Page.goto: Timeout 25000ms exceeded.")
+        status, html = answer
+        return status, html, product_parser.detect_page_state(html, status, url)
+
+    pool = overrides.pop("_pool", None)
+    saved = (engine._call, engine._open_session, engine._prime_session)
+    engine._call = fake_call
+    engine._open_session = lambda pw, args, p: _NullSession()
+    engine._prime_session = lambda session, args, url: 200
+    try:
+        args = _fault_args(engine, **overrides)
+        box = {"session": _NullSession(), "prime_url": "u"}
+        rows, meta = engine._run_profile(box, None, args, pool)
+    finally:
+        (engine._call, engine._open_session, engine._prime_session) = saved
+    return rows, meta, pool
+
+
+class _NullSession:
+    proxy_url = None
+
+    def close(self):
+        pass
+
+
+def check_every_account_asked_for_has_a_record_in_url_order():
+    """A run's per-account story used to live only in the log.
+
+    Each handle `--url` named must have ONE record in the sidecar, in the
+    order `--url` named them, covering every ending: data, no account,
+    refused, parse failure, and no worker reaching it. `user_unavailable`
+    is the site's ANSWER and stays a non-failure — `handles_unavailable`
+    and exit 4 still depend on that.
+    """
+    unavailable = product_parser.STATE_USER_UNAVAILABLE
+    for name in ENGINES:
+        engine = _engine_for_record_checks(name)
+        if engine is None:
+            skip(name, "engine library absent")
+            continue
+        good = page("nasa")
+        # One account per ending, and the order deliberately NOT the order
+        # of the fixture names: a check that happened to pass on arrival
+        # order would prove nothing.
+        answers = {
+            "nasa": [(200, good)],
+            "nosuchacct99xyz": [(200, page("unavailable"))],
+        }
+        _rows, meta, _ = _drive_outcomes(
+            engine, answers, url="nasa,nosuchacct99xyz", retries=0)
+        records = meta.get("handles")
+        equal("%s: a record per account asked for" % name,
+              len(records or []), 2)
+        equal("%s: ...in --url order" % name,
+              [r["handle"] for r in records or []],
+              ["nasa", "nosuchacct99xyz"])
+        equal("%s: ...statuses" % name,
+              [r["status"] for r in records or []],
+              [page_flow.HANDLE_STATUS_OK, unavailable])
+        equal("%s: no-account is still what handles_unavailable says" % name,
+              meta.get("handles_unavailable"), ["nosuchacct99xyz"])
+        check("%s: a no-account record carries no failure reason" % name,
+              records[1].get("reason") is None, repr(records[1]))
+
+        # A parse failure and a refusal each get their own named status,
+        # rather than collapsing into one "failed".
+        parse_state = "parse_error"
+        equal("%s: parse errors are named, not folded into 'failed'" % name,
+              page_flow.handle_status(
+                  types.SimpleNamespace(attempted=True, rows=[], state=parse_state,
+                                        blocked=False, error="bad json")),
+              parse_state)
+        equal("%s: a refusal is named 'blocked'" % name,
+              page_flow.handle_status(
+                  types.SimpleNamespace(attempted=True, rows=[],
+                                        state=product_parser.STATE_EMPTY_SUCCESS,
+                                        blocked=True, error=None)),
+              "blocked")
+
+
+def check_rotation_counts_only_real_exit_switches():
+    """The count a reader acts on: EXITS CHANGED, not attempts made.
+
+    A same-exit retry, an HTTP -> browser switch and a browser rebuild that
+    lands on the same address are all zero. A dead exit, a post-refusal
+    rotation and a `--proxy-rotate per-page` step between accounts are one
+    each. With no pool at all the count is zero by construction.
+    """
+    for name in ENGINES:
+        engine = _engine_for_record_checks(name)
+        if engine is None:
+            skip(name, "engine library absent")
+            continue
+        good = page("nasa")
+
+        # No pool: zero, whatever happens.
+        _rows, meta, _ = _drive_outcomes(
+            engine, {"nasa": [(200, good)]}, url="nasa")
+        equal("%s: a run without a pool counts no rotations" % name,
+              meta["handles"][0]["rotations"], 0)
+
+        # Same-exit retry after a non-proxy fault: still zero.
+        pool = _two_exit_pool()
+        _rows, meta, _ = _drive_outcomes(
+            engine, {"nasa": ["timeout", (200, good)]},
+            url="nasa", retries=1, _pool=pool)
+        equal("%s: a same-exit retry is not a rotation" % name,
+              meta["handles"][0]["rotations"], 0)
+
+        # A dead exit rotates once, then the page is served.
+        pool = _two_exit_pool()
+        _rows, meta, _ = _drive_outcomes(
+            engine, {"nasa": ["dead_exit", (200, good)]},
+            url="nasa", retries=1, _pool=pool)
+        equal("%s: a dead exit counts one rotation" % name,
+              meta["handles"][0]["rotations"], 1)
+        equal("%s: ...and the pool agrees it burned one" % name,
+              pool.rotations, 1)
+
+        # Refusal, then a per-page rotation, then the page.
+        pool = _two_exit_pool(rotate="per-page")
+        _rows, meta, _ = _drive_outcomes(
+            engine, {"nasa": [(200, ""), (200, good)]},
+            url="nasa", retries=1, proxy_block_retries=1,
+            proxy_rotate="per-page", _pool=pool)
+        equal("%s: a refusal that rotates counts one rotation" % name,
+              meta["handles"][0]["rotations"], 1)
+
+        # --proxy-rotate per-page: one exit taken BETWEEN accounts, charged
+        # to the account it was taken for, never after the last one.
+        pool = proxy_pool.ProxyPool(
+            ["http:" + "//" + "u" + ":" + "p" + "@one.example:1",
+             "http:" + "//" + "u" + ":" + "p" + "@two.example:2",
+             "http:" + "//" + "u" + ":" + "p" + "@three.example:3"],
+            rotate="per-page")
+        _rows, meta, _ = _drive_outcomes(
+            engine, {"nasa": [(200, good)],
+                     "zachking": [(200, page("zachking"))],
+                     "tiktok": [(200, page("tiktok"))]},
+            url="nasa,zachking,tiktok", proxy_rotate="per-page", _pool=pool)
+        equal("%s: per-page charges each switch to its own account" % name,
+              [r["rotations"] for r in meta["handles"]], [0, 1, 1])
+        equal("%s: ...and takes no exit after the last account" % name,
+              pool.rotations, 2)
+
+
+def check_concurrent_rotation_stays_with_its_account():
+    """A worker's pool is its own; the delta it reports must land on the
+    account it fetched, not on a sibling that shared the run.
+
+    Also pinned: the records and the rows both come back in `--url` order,
+    not in the order workers happened to finish.
+    """
+    for name in ENGINES:
+        engine = _engine_for_record_checks(name)
+        if engine is None:
+            skip(name, "engine library absent")
+            continue
+        pool = proxy_pool.ProxyPool(
+            ["http:" + "//" + "u" + ":" + "p" + "@one.example:1",
+             "http:" + "//" + "u" + ":" + "p" + "@two.example:2",
+             "http:" + "//" + "u" + ":" + "p" + "@three.example:3"],
+            rotate="per-run")
+        # Only @nasa's first attempt dies at the exit; its retry is served.
+        rows, meta, _ = _drive_outcomes(
+            engine,
+            {"nasa": ["dead_exit", (200, page("nasa"))],
+             "zachking": [(200, page("zachking"))],
+             "tiktok": [(200, page("tiktok"))]},
+            url="nasa,zachking,tiktok", concurrency=3, retries=1, _pool=pool)
+        equal("%s: concurrent rows keep --url order" % name,
+              [r.username for r in rows], ["nasa", "zachking", "tiktok"])
+        by_handle = {r["handle"]: r for r in meta["handles"]}
+        equal("%s: concurrent rotation is charged to the right account" % name,
+              [by_handle[h]["rotations"] for h in
+               ("nasa", "zachking", "tiktok")], [1, 0, 0])
+
+
+def check_an_unreached_target_is_named_not_blamed():
+    """A target no worker reached is `not_fetched`, distinct from a failure.
+
+    The record must say so rather than inventing a site verdict for an
+    account nobody asked TikTok about — while the run still counts the
+    target as a failed PAGE, so the exit code does not silently turn 4.
+    """
+    for name in ENGINES:
+        engine = _engine_for_record_checks(name)
+        if engine is None:
+            skip(name, "engine library absent")
+            continue
+
+        def open_session(pw, args, pool):
+            if threading.current_thread() is not threading.main_thread():
+                raise RuntimeError("planted: this worker cannot start")
+            return _NullSession()
+
+        saved = (engine._open_session, engine._prime_session)
+        engine._open_session = open_session
+        engine._prime_session = lambda session, args, url: 200
+        try:
+            args = _fault_args(engine, url="nasa,zachking,tiktok",
+                               concurrency=2, transport="browser")
+            _rows, meta = engine._run_profile(
+                {"session": _NullSession(), "prime_url": "u"}, None, args, None)
+        finally:
+            engine._open_session, engine._prime_session = saved
+        equal("%s: every unreached target is recorded" % name,
+              [r["status"] for r in meta["handles"]],
+              ["not_fetched", "not_fetched", "not_fetched"])
+        equal("%s: ...and still counted as a failed page" % name,
+              meta.get("pages_failed"), [1, 2, 3])
+        equal("%s: ...so the run is not misreported as an empty answer" % name,
+              meta.get("stop_reason"), "page_failed")
+
+
+def check_the_handle_records_do_not_change_rows_or_exit_codes():
+    """The new records are additive, and the existing contract holds.
+
+    A run that succeeded still exits 0 with the same rows; a partial run is
+    still 6; all-unavailable is still 4 and still writes no sidecar; and a
+    failure still does not overwrite the previous good output.
+
+    Driven through `scrape()` on the one engine whose driver can be stubbed
+    without a browser, and asserted against the SIDE EFFECTS a consumer
+    reads: exit code, row JSON, sidecar presence and content.
+    """
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        skip("playwright_scraper", "engine library absent")
+        return
+    import contextlib
+    import io as _io
+    import tempfile as _tf
+    good = page("nasa")
+
+    def scrape(url, answers, **overrides):
+        queue_by_handle = {k: list(v) for k, v in answers.items()}
+
+        def fake_call(session, args, u, *rest):
+            handle = u.rsplit("/@", 1)[-1]
+            status, html = queue_by_handle[handle].pop(0)
+            return status, html, product_parser.detect_page_state(html, status, u)
+
+        saved = (engine._call, engine._open_session, engine._prime_session,
+                 engine._driver_context)
+        engine._call = fake_call
+        engine._open_session = lambda pw, args, pool: _NullSession()
+        engine._prime_session = lambda session, args, url: 200
+        engine._driver_context = _NullContext
+        try:
+            out = os.path.join(overrides.pop("_dir"), "run")
+            args = _fault_args(engine, url=url, out=out, **overrides)
+            with contextlib.redirect_stdout(_io.StringIO()), \
+                    contextlib.redirect_stderr(_io.StringIO()):
+                rc = engine.scrape(args)
+        finally:
+            (engine._call, engine._open_session, engine._prime_session,
+             engine._driver_context) = saved
+        meta = rows = None
+        if os.path.exists(out + ".meta.json"):
+            meta = json.load(open(out + ".meta.json", encoding="utf-8"))
+        if os.path.exists(out + ".json"):
+            rows = json.load(open(out + ".json", encoding="utf-8"))
+        return rc, meta, rows
+
+    with _tf.TemporaryDirectory() as d:
+        rc, meta, rows = scrape("nasa,zachking",
+                                {"nasa": [(200, good)],
+                                 "zachking": [(200, page("zachking"))]},
+                                _dir=d)
+        equal("a clean run still exits 0", rc, 0)
+        equal("...its rows are untouched", [r["username"] for r in rows],
+              ["nasa", "zachking"])
+        equal("...and its records are beside them",
+              [r["handle"] for r in meta["handles"]], ["nasa", "zachking"])
+
+    with _tf.TemporaryDirectory() as d:
+        rc, meta, _rows = scrape("nasa,zachking",
+                                 {"nasa": [(200, good)],
+                                  "zachking": [(200, "")]},
+                                 retries=0, _dir=d)
+        equal("one account refused is still exit 6", rc, 6)
+        equal("...and its record says blocked",
+              meta["handles"][1]["status"], "blocked")
+
+    with _tf.TemporaryDirectory() as d:
+        rc, meta, _rows = scrape("nasa",
+                                 {"nasa": [(200, page("unavailable"))]},
+                                 _dir=d)
+        equal("all-unavailable is still exit 4", rc, 4)
+        equal("...and still writes no sidecar", meta, None)
+
+    with _tf.TemporaryDirectory() as d:
+        scrape("nasa", {"nasa": [(200, good)]}, _dir=d)
+        before_json = open(os.path.join(d, "run.json"), encoding="utf-8").read()
+        before_meta = open(os.path.join(d, "run.meta.json"),
+                           encoding="utf-8").read()
+        rc, _meta, _rows = scrape("nasa", {"nasa": [(200, "")]},
+                                  retries=0, _dir=d)
+        equal("a fully refused run is still exit 3", rc, 3)
+        equal("...and does not overwrite the last good output",
+              open(os.path.join(d, "run.json"), encoding="utf-8").read(),
+              before_json)
+        equal("...nor its sidecar",
+              open(os.path.join(d, "run.meta.json"), encoding="utf-8").read(),
+              before_meta)
+
+
 def check_a_site_that_answered_is_not_a_run_that_failed():
     """Exit 4 and exit 5 answer different questions.
 

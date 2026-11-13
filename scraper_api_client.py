@@ -354,6 +354,18 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
                       mode="video", extra={
                           "engine": "scraper_api",
                           "category": args.category,
+                          # The same per-account record the three engines
+                          # write, for the one account this path fetches.
+                          # This path has no PageOutcome to read, so it
+                          # states the facts and goes through the shared
+                          # constructor — one record shape across all four
+                          # entry points rather than a fifth vocabulary.
+                          # Every branch above that returns early writes no
+                          # sidecar at all, so the only record this path
+                          # ever writes is the successful one.
+                          "handles": [page_flow.make_handle_record(
+                              handle_from_url(args.url),
+                              page_flow.HANDLE_STATUS_OK)],
                           "player_fields_unreachable": list(
                               PLAYER_ONLY_FIELDS),
                           "upstream_status": upstream_status,

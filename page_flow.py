@@ -48,7 +48,7 @@ that is not there.
 from __future__ import annotations
 
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from product_parser import (STATE_CHALLENGE, STATE_CONTENT,
                             STATE_EMPTY_SUCCESS, STATE_ERROR,
@@ -224,6 +224,140 @@ def counts_as_blocked(state: str) -> bool:
 
 def should_parse(state: str) -> bool:
     return STATE_POLICY.get(state, STATE_POLICY[STATE_UNKNOWN])["parse"]
+
+
+# ---------------------------------------------------------------------------
+# One record per account asked for
+# ---------------------------------------------------------------------------
+#
+# A run of N `--url` handles used to end with its per-account story only in
+# the log: which account moved to another exit, how many times, and whether
+# its fetch ended with data, no account, a refusal, a parse failure or no
+# worker at all. The sidecar named only `pages_failed` (by NUMBER) and
+# `handles_unavailable` (by name), so "what happened to @zachking" was a
+# question you answered by reading a log afterwards.
+#
+# These records answer it in the sidecar, in `--url` order. The STATUS
+# vocabulary is deliberately small and each name is a fact about the account
+# rather than about the machinery:
+#
+#   ok                rows were read from the page
+#   user_unavailable  TikTok returned no account (banned or never existed —
+#                     one answer, and this repo does not tell them apart)
+#   blocked           the page ended refused (challenge, WAF, zero-byte 200)
+#   parse_error       TikTok served a page this parser could not read — OUR bug
+#   failed            the content was never obtained (transport, 5xx, unknown)
+#   not_fetched       NO worker reached it — a crashed worker, not a site answer
+#
+# `user_unavailable` is the one that must never be folded into a failure: it
+# is the site ANSWERING the question asked, and the run's `handles_unavailable`
+# list and exit code 4 depend on that distinction.
+HANDLE_STATUS_OK = "ok"
+HANDLE_STATUS_UNAVAILABLE = STATE_USER_UNAVAILABLE
+HANDLE_STATUS_BLOCKED = "blocked"
+HANDLE_STATUS_PARSE_ERROR = STATE_PARSE_ERROR
+HANDLE_STATUS_FAILED = "failed"
+HANDLE_STATUS_NOT_FETCHED = "not_fetched"
+
+
+def handle_status(outcome) -> str:
+    """Name one account's final outcome from its PageOutcome.
+
+    Duck-typed rather than importing an engine's PageOutcome: the three
+    engines each define that dataclass, and this module is what keeps their
+    TRIAGE from drifting. Reading it here, once, is what stops the three
+    sidecars acquiring three vocabularies for the same five facts.
+    """
+    if outcome is None or not getattr(outcome, "attempted", True):
+        # Nothing reached this account. Distinct from "the fetch failed":
+        # a worker that never started says nothing about TikTok or the exit.
+        return HANDLE_STATUS_NOT_FETCHED
+    if getattr(outcome, "rows", None):
+        return HANDLE_STATUS_OK
+    state = getattr(outcome, "state", STATE_UNKNOWN)
+    if state == STATE_USER_UNAVAILABLE:
+        return HANDLE_STATUS_UNAVAILABLE
+    if state == STATE_PARSE_ERROR:
+        return HANDLE_STATUS_PARSE_ERROR
+    if getattr(outcome, "blocked", False):
+        return HANDLE_STATUS_BLOCKED
+    return HANDLE_STATUS_FAILED
+
+
+def handle_reason(outcome, status: str) -> Optional[str]:
+    """Why a non-successful account ended the way it did, or None.
+
+    `user_unavailable` is not a failure — it is the site's answer — so it
+    carries no reason. Everything else says what was seen: the state the
+    classifier named, the HTTP status where there was one, and the error
+    text the engine recorded when there was one.
+    """
+    if status in (HANDLE_STATUS_OK, HANDLE_STATUS_UNAVAILABLE):
+        return None
+    if status == HANDLE_STATUS_NOT_FETCHED:
+        return str(getattr(outcome, "error", None) or
+                   "no worker could fetch it (see the log)")
+    error = getattr(outcome, "error", None)
+    if error:
+        return str(error)
+    detail = "state: %s" % getattr(outcome, "state", STATE_UNKNOWN)
+    http_status = getattr(outcome, "status", None)
+    if http_status is not None:
+        detail += ", http %s" % http_status
+    return detail
+
+
+def make_handle_record(handle: str, status: str, rotations: int = 0,
+                       reason: Optional[str] = None) -> Dict[str, Any]:
+    """Build one record from its facts.
+
+    The single place the record's SHAPE is written. Every engine builds its
+    records from a `PageOutcome` (see `handle_record`), and the one
+    single-account path (`scraper_api_client.py`) has no outcome to read —
+    it knows the facts directly. Going through this constructor is what
+    stops that path growing a second, subtly different record shape, which
+    is the drift this family treats as a defect rather than a style choice.
+    """
+    rotations = max(0, int(rotations or 0))
+    return {
+        "handle": handle,
+        "status": status,
+        "rotated": rotations > 0,
+        "rotations": rotations,
+        "reason": reason,
+    }
+
+
+def handle_record(handle: str, outcome) -> Dict[str, Any]:
+    """The sidecar record for one account asked for, in `--url` order.
+
+    `rotations` counts EXIT SWITCHES, not attempts: the engines read it from
+    their pool's own counter, which only moves when `advance()` actually
+    lands on a different exit (a one-exit pool refuses to move). A retry at
+    the same exit, an HTTP -> browser switch, and a browser rebuild that
+    stays on the same exit are all correctly zero. With no pool at all the
+    count is zero by construction.
+    """
+    status = handle_status(outcome)
+    return make_handle_record(
+        handle, status,
+        rotations=int(getattr(outcome, "rotations", 0) or 0),
+        reason=handle_reason(outcome, status))
+
+
+def handle_records(handles: List[str], outcomes) -> List[Dict[str, Any]]:
+    """One record per handle, in the order `--url` named them.
+
+    Indexed rather than zipped for a reason: a missing outcome must still
+    produce a record (`not_fetched`), because the whole point is that every
+    account asked for is accounted for. `zip` would silently shorten the
+    list, which is the defect this feature exists to end.
+    """
+    out = []
+    for i, handle in enumerate(handles):
+        outcome = outcomes[i] if i < len(outcomes) else None
+        out.append(handle_record(handle, outcome))
+    return out
 
 
 # Whether a blocked page is worth re-fetching at all. CONSULTED by the

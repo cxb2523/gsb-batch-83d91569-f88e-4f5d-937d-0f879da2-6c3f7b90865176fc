@@ -294,6 +294,46 @@ the stop reason, **which** accounts failed by number, and
 file, so the last good output and its own sidecar stay together; the
 terminal output and exit code say what happened.
 
+### One record per account: `handles`
+
+`handles` is the per-account answer the log used to hold alone. It has ONE
+entry for every handle `--url` named, **in `--url` order** (arrival order
+never reorders it), so "what happened to @zachking" does not require
+reading a log afterwards:
+
+```json
+"handles": [
+  {"handle": "nasa",             "status": "ok",              "rotated": false, "rotations": 0, "reason": null},
+  {"handle": "nosuchacct99xyz",  "status": "user_unavailable", "rotated": false, "rotations": 0, "reason": null},
+  {"handle": "someblocked",      "status": "blocked",          "rotated": true,  "rotations": 2, "reason": "state: waf_challenge"},
+  {"handle": "someparsed",       "status": "parse_error",      "rotated": false, "rotations": 0, "reason": "..."},
+  {"handle": "neverreached",     "status": "not_fetched",      "rotated": false, "rotations": 0, "reason": "no worker could fetch it (see the log)"}
+]
+```
+
+| status | meaning |
+|---|---|
+| `ok` | rows were read from the account's page |
+| `user_unavailable` | TikTok returned no account — banned or never existed, one answer. Also in `handles_unavailable`; never a block or a failure |
+| `blocked` | the page ended refused (challenge, WAF interstitial, zero-byte 200) |
+| `parse_error` | TikTok served a page this parser could not read — a parser bug, not an empty answer |
+| `failed` | the content was never obtained (transport failure, 5xx, unknown page) |
+| `not_fetched` | NO worker reached it (a worker that could not start); the site was never asked |
+
+**`rotations` counts EXITS CHANGED, not attempts.** It moves only when the
+proxy pool actually advances to a different exit *and the session is torn
+down and rebuilt*: a dead exit, a refusal after which `--proxy-block-retries`
+takes another exit, and a `--proxy-rotate per-page` switch between accounts.
+A retry at the same exit, the HTTP→browser switch and any rebuild that lands
+on the same address do **not** count. With no proxy pool the count is zero by
+construction. `rotated` is `rotations > 0`. Under `--concurrency` each worker
+owns its own pool, so a switch is charged to the account that worker was
+fetching — never to a sibling, and never to whichever account finished first.
+
+`reason` names what was seen on a non-successful account (the classified
+state, the HTTP status, or the engine's masked error); it is `null` for `ok`
+and `user_unavailable`, because a real answer is not a failure.
+
 ---
 
 ## Configuration

@@ -10,6 +10,20 @@ in one, the note leads with it.
 
 ## [Unreleased]
 
+### Added
+
+- The `.meta.json` sidecar now carries `handles`: ONE record per account
+  `--url` named, in `--url` order, for every ending — data, no account
+  (`user_unavailable`, still also in `handles_unavailable`), refused,
+  parse failure, transport failure, and no worker reaching it
+  (`not_fetched`). Each record states `status`, `rotated`, `rotations` and
+  a `reason` for failures. `rotations` counts exits actually changed and
+  the session rebuilt — a dead exit, a post-refusal `--proxy-block-retries`
+  rotation, or a `--proxy-rotate per-page` switch between accounts — and
+  not a same-exit retry, an HTTP→browser switch, or a run with no pool.
+  Under `--concurrency` each worker's switches are charged to the account
+  it was fetching. Rows and exit codes are unchanged.
+
 ### Changed
 
 - CI only: the whole canary, free and paid jobs alike, now runs weekly (Mondays 06:23 UTC) and on a manual dispatch; the daily schedule is removed.

@@ -144,6 +144,13 @@ class PageOutcome:
     error: Optional[str] = None
     diagnostics: Dict[str, Any] = field(default_factory=dict)
     attempted: bool = True
+    # EXIT SWITCHES this account paid for, read from its pool's own
+    # counter. Counted per account because that is the question the
+    # sidecar now answers: a retry at the same exit, an HTTP -> browser
+    # switch and a browser rebuild that stays on one exit are all zero by
+    # construction — none of them calls `pool.advance()` and lands
+    # somewhere else.
+    rotations: int = 0
 
 
 def _mask_credentials(text: Any) -> str:
@@ -888,6 +895,14 @@ def _fetch_one_profile(session_box, pw, args, pool, handle: str,
     outcome = PageOutcome(number=1, url=url, state=state, status=status,
                           blocked=blocked)
 
+    # A transport failure reaches here as the error's own text with no HTTP
+    # status. Keeping it on the outcome is what lets the sidecar's
+    # per-account record carry WHY an account failed instead of only the
+    # state name — and it is masked, because a proxy URL in an error is a
+    # credential in a file that gets committed.
+    if state == parser.STATE_ERROR and status is None and text:
+        outcome.error = _mask_credentials(text)
+
     # The state policy decides whether to parse, rather than this engine
     # comparing the state against a literal of its own. A
     # policy constant
@@ -967,6 +982,9 @@ def _fetch_profiles_concurrently(pw, args, pool, handles, scraped_at, workers):
                     slot, handle = work.get_nowait()
                 except queue.Empty:
                     return
+                # This worker's own pool, so the delta belongs to THIS
+                # account and no other worker's rotation can be read into it.
+                rotations_before = worker_pool.rotations if worker_pool else 0
                 try:
                     outcome = _fetch_one_profile(box, own, args, worker_pool,
                                                  handle, scraped_at)
@@ -979,6 +997,8 @@ def _fetch_profiles_concurrently(pw, args, pool, handles, scraped_at, workers):
                                           url=profile_url(handle),
                                           state=STATE_UNKNOWN,
                                           error=_mask_credentials(exc))
+                outcome.rotations = ((worker_pool.rotations if worker_pool
+                                      else 0) - rotations_before)
                 with lock:
                     results[slot] = outcome
                 work.task_done()
@@ -1008,6 +1028,10 @@ def _fetch_profiles_concurrently(pw, args, pool, handles, scraped_at, workers):
             results[slot] = PageOutcome(
                 number=slot + 1, url=profile_url(handles[slot]),
                 state=STATE_UNKNOWN,
+                # NOT attempted: nothing was asked of the site on this
+                # account's behalf, so the record says `not_fetched` rather
+                # than blaming TikTok or the exit for it.
+                attempted=False,
                 error="no worker could fetch it (see the log)")
     # Restored to the order --url named them, never arrival order.
     return [results[i] for i in sorted(results)]
@@ -1050,11 +1074,18 @@ def _run_profile(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]
         for i, handle in enumerate(handles):
             if i and args.delay:
                 time.sleep(args.delay)
+            # The per-page switch happens BETWEEN accounts, so it is this
+            # account's rotation, not the previous one's: counted from
+            # before the switch to after the fetch.
+            rotations_before = pool.rotations if pool else 0
             if i and pool and pool.rotates_per_page():
                 _rotate_if_per_page(session_box, pw, args, pool,
                                     f"before @{handle}")
-            outcomes.append(_fetch_one_profile(session_box, pw, args, pool,
-                                               handle, scraped_at))
+            outcome = _fetch_one_profile(session_box, pw, args, pool,
+                                         handle, scraped_at)
+            outcome.rotations = ((pool.rotations if pool else 0)
+                                 - rotations_before)
+            outcomes.append(outcome)
 
     rows: List[Any] = []
     seen: set = set()
@@ -1098,6 +1129,13 @@ def _run_profile(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]
         "blocked": blocked,
         "handles_requested": len(handles),
         "handles_unavailable": unavailable or None,
+        # ONE record per account asked for, in `--url` order — this is the
+        # per-account story the log used to hold alone. Built from the
+        # outcomes by INDEX, so a target no worker reached still appears
+        # (as `not_fetched`) instead of quietly shortening the list, and
+        # each record's rotation count comes from the pool that worker
+        # actually used.
+        "handles": page_flow.handle_records(handles, outcomes),
         # Which stats object every row was read from, counted. A run whose
         # rows are all `stats` rather than `statsV2` is a run of ROUNDED
         # numbers, and that is a fact about the data the sidecar should
