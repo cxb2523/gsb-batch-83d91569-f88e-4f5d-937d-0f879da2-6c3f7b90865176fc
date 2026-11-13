@@ -16,8 +16,8 @@ from pathlib import Path
 
 from getcheapapi import lanes as L
 from getcheapapi import router
-from getcheapapi.api import DEFAULT_MAX_USD, charged_call, client_for as api_client
-from getcheapapi.core import Refused, Stop, env, home, ledger_path, load_env, now, write_json
+from getcheapapi.api import DEFAULT_MAX_USD, batch_call, charged_call, client_for as api_client
+from getcheapapi.core import EXIT_NO_BALANCE, Refused, Stop, env, home, ledger_path, load_env, now, write_json
 from getcheapapi.providers import DATA_DIR, PROVIDERS, AnyAPI, GoAnyAPI, Provider
 
 
@@ -151,6 +151,35 @@ def cmd_call(args) -> int:
     return execute(client, args.endpoint, as_inputs(parsed), args, f"{args.provider} {args.endpoint}")[0]
 
 
+def cmd_batch(args) -> int:
+    """One guarded call per keyword; report every keyword instead of dropping the rest on the first failure."""
+    body_for = None if args.field == "keyword" else lambda term: {args.field: term}
+    result = batch_call(args.provider, args.endpoint, as_keywords(read_input(args.input)),
+                        body_for=body_for, max_usd=args.max_usd, max_ratio=args.max_ratio,
+                        project=args.project, wait=args.wait)
+    if args.output:
+        path = Path(args.output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    counts = {k: result[k] for k in ("success", "failed", "refused", "not_run")}
+    print(json.dumps({"provider": args.provider, "endpoint": args.endpoint, "keywords": len(result["items"]),
+                      **counts, "totalUsd": result["totalUsd"], "stoppedForBalance": result["stoppedForBalance"],
+                      "saved": str(Path(args.output)) if args.output else None}))
+    for row in result["items"]:
+        if row["status"] != "success":
+            print(f"{row['keyword']}: {row['status']}: {row['error']}", file=sys.stderr)
+    return EXIT_NO_BALANCE if result["stoppedForBalance"] else (0 if result["failed"] + result["refused"] == 0 else 1)
+
+
+def as_keywords(parsed) -> list[str]:
+    """--input takes the keyword list itself, or {"keywords": [...]}, so a file of keywords needs no rewrite."""
+    if isinstance(parsed, dict) and "keywords" in parsed:
+        parsed = parsed["keywords"]
+    if not isinstance(parsed, list):
+        raise Stop("--input must be a JSON list of keywords, or an object with a \"keywords\" list")
+    return parsed
+
+
 def cmd_prices(args) -> int:
     if args.action == "show":
         for path in sorted((home() / "prices").glob("*.json")):
@@ -235,8 +264,8 @@ def cmd_accept(args) -> int:
     return 0
 
 
-def add_spend_flags(p):
-    p.add_argument("--input", required=True, help="JSON object or list of objects, or @file.json")
+def add_spend_flags(p, input_help="JSON object or list of objects, or @file.json"):
+    p.add_argument("--input", required=True, help=input_help)
     p.add_argument("--max-usd", type=float, default=DEFAULT_MAX_USD, help="refuse when the estimate, or stop when spend, passes this")
     p.add_argument("--max-ratio", type=float, default=L.DEFAULT_MAX_RATIO,
                    help="anyapi: let sources up to this multiple of the cheapest serve; raise it only after the user agrees")
@@ -266,6 +295,11 @@ def main() -> None:
     k.add_argument("endpoint", help="anyapi SKU, goanyapi id, dataforseo path after /v3/, twitterapi path, "
                                    "yir image|video|audio, googleads generateKeywordHistoricalMetrics|generateKeywordIdeas")
     add_spend_flags(k)
+    bt = sub.add_parser("batch", help="call one provider endpoint once per keyword and report every keyword")
+    bt.add_argument("provider", choices=PROVIDERS)
+    bt.add_argument("endpoint")
+    add_spend_flags(bt, input_help="JSON list of keywords, or {\"keywords\": [...]}, or @file.json")
+    bt.add_argument("--field", default="keyword", help="body field each keyword fills (default: keyword)")
     p = sub.add_parser("prices", help="refresh or show the local price cache")
     p.add_argument("action", choices=["refresh", "show"])
     p.add_argument("--write-snapshot", action="store_true", help="maintainers: update the bundled snapshot")
@@ -281,8 +315,9 @@ def main() -> None:
     args = parser.parse_args()
 
     load_env()
-    handlers = {"caps": cmd_caps, "quote": cmd_quote, "run": cmd_run, "call": cmd_call, "prices": cmd_prices,
-                "spend": cmd_spend, "balance": cmd_balance, "describe": cmd_describe, "accept-price": cmd_accept}
+    handlers = {"caps": cmd_caps, "quote": cmd_quote, "run": cmd_run, "call": cmd_call, "batch": cmd_batch,
+                "prices": cmd_prices, "spend": cmd_spend, "balance": cmd_balance, "describe": cmd_describe,
+                "accept-price": cmd_accept}
     try:
         sys.exit(handlers[args.cmd](args))
     except Stop as exc:

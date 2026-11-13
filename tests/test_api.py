@@ -29,6 +29,8 @@ def post(tmp_path, monkeypatch):
     def http(method, url, headers=None, body=None, timeout=180):
         calls.append(body)
         answer = http.answer
+        if callable(answer):
+            answer = answer(body)
         if isinstance(answer, Exception):
             raise answer
         return answer
@@ -40,6 +42,146 @@ def post(tmp_path, monkeypatch):
 
 def ledger():
     return [json.loads(l) for l in core.ledger_path().read_text(encoding="utf-8").splitlines()]
+
+
+def item(result, keyword):
+    return next(row for row in result["items"] if row["keyword"] == keyword)
+
+
+def test_batch_call_collects_every_keyword_and_sums_the_costs(post):
+    calls, _ = post
+    result = api.batch_call("anyapi", "twitter.search", ["a", "b", "c"], project="p")
+    assert [row["status"] for row in result["items"]] == ["success"] * 3
+    assert [row["keyword"] for row in result["items"]] == ["a", "b", "c"]
+    assert [row["costUsd"] for row in result["items"]] == [0.0005] * 3
+    assert all(row["charged"] and row["result"]["output"]["data"]["items"] == [1, 2] for row in result["items"])
+    assert (result["success"], result["failed"], result["refused"], result["not_run"]) == (3, 0, 0, 0)
+    assert result["totalUsd"] == pytest.approx(0.0015) and result["stoppedForBalance"] is False
+    assert [c["keyword"] for c in calls] == ["a", "b", "c"]  # one call per keyword, in order
+    assert all(c["source"] == ["cheap"] and c["allowFallbacks"] is False for c in calls)
+    rows = ledger()
+    assert [r["input"]["keyword"] for r in rows] == ["a", "b", "c"] and all(r["project"] == "p" for r in rows)
+
+
+def test_batch_call_goes_on_after_one_keyword_fails(post):
+    _, http = post
+    good = http.answer
+    http.answer = lambda body: (core.Stop("HTTP 400: invalid_input") if body["keyword"] == "b" else good)
+    result = api.batch_call("anyapi", "twitter.search", ["a", "b", "c"])
+    assert [row["status"] for row in result["items"]] == ["success", "failed", "success"]
+    assert "invalid_input" in item(result, "b")["error"]
+    assert (result["success"], result["failed"], result["totalUsd"]) == (2, 1, pytest.approx(0.001))
+    assert result["stoppedForBalance"] is False
+    assert [r["input"]["keyword"] for r in ledger()] == ["a", "b", "c"]  # the failed call is recorded too
+    assert ledger()[1]["costUsd"] == 0
+
+
+def test_batch_call_stops_on_no_balance_and_keeps_what_was_done(post):
+    _, http = post
+    good = http.answer
+    http.answer = lambda body: (core.Stop("HTTP 402: empty", core.EXIT_NO_BALANCE) if body["keyword"] == "c" else good)
+    result = api.batch_call("anyapi", "twitter.search", ["a", "b", "c", "d"])
+    assert [row["status"] for row in result["items"]] == ["success", "success", "failed", "not_run"]
+    assert "402" in item(result, "c")["error"] and item(result, "c")["charged"] is False
+    assert "out of balance" in item(result, "d")["error"] and item(result, "d")["charged"] is False
+    assert item(result, "a")["result"] is not None and item(result, "b")["result"] is not None
+    assert result["stoppedForBalance"] is True
+    assert (result["success"], result["failed"], result["not_run"], result["totalUsd"]) == (2, 1, 1, pytest.approx(0.001))
+    assert len(ledger()) == 3  # a, b and the 402 attempt; d was never sent
+
+
+def test_batch_call_refuses_one_keyword_over_the_cap_without_calling_it(post, monkeypatch):
+    _, http = post
+    good = http.answer
+    big = {"source": {"id": "cheap"}, "pricing": {"model": "linear", "baseUsd": 0.0, "perUnitUsd": 0.001,
+                                                   "maxUsd": 1.0}}
+    monkeypatch.setattr(L, "fetch_lanes", lambda sku, key, max_age=0: [big])  # $0.005 at limit 5, $0.06 at 60
+    http.answer = lambda body: ({"costUsd": 0.06, "source": {"id": "cheap"}, "output": {"data": [1]}}
+                                if body["limit"] == 60 else good)
+    result = api.batch_call("anyapi", "twitter.search", ["small", "big", "small2"],
+                            body_for=lambda term: {"keyword": term} | ({"limit": 60} if term == "big" else {"limit": 5}),
+                            max_usd=0.01)
+    assert [row["status"] for row in result["items"]] == ["success", "refused", "success"]
+    assert "exceeds the $0.01 cap" in item(result, "big")["error"]
+    assert item(result, "big")["charged"] is False and item(result, "big")["costUsd"] == 0
+    assert result["refused"] == 1 and result["totalUsd"] == pytest.approx(0.001)
+    assert [r["input"]["keyword"] for r in ledger()] == ["small", "small2"]  # big never reached the network
+
+
+def test_batch_call_reports_a_waited_out_source_as_one_failed_keyword(post, monkeypatch):
+    _, http = post
+    good = http.answer
+    slept = []
+    monkeypatch.setattr(api.time, "sleep", slept.append)
+    http.answer = lambda body: (core.Stop("HTTP 503: no capacity") if body["keyword"] == "b" else good)
+    result = api.batch_call("anyapi", "twitter.search", ["a", "b", "c"], wait=10, retries=0)
+    assert [row["status"] for row in result["items"]] == ["success", "failed", "success"]
+    assert slept == [5, 5]  # both tries of b waited; c was still called after it
+    assert result["stoppedForBalance"] is False
+
+
+def test_batch_call_keeps_the_charge_of_a_keyword_that_failed_after_being_served(post):
+    _, http = post
+    good = http.answer
+    http.answer = lambda body: ({"costUsd": 0.01, "source": {"id": "dear"}, "output": {}}
+                                if body["keyword"] == "b" else good)
+    result = api.batch_call("anyapi", "twitter.search", ["a", "b", "c"])
+    assert [row["status"] for row in result["items"]] == ["success", "failed", "success"]
+    assert item(result, "b")["charged"] is True and item(result, "b")["costUsd"] == pytest.approx(0.01)
+    assert "served by dear" in item(result, "b")["error"]
+    assert result["totalUsd"] == pytest.approx(0.011)  # the failed keyword's charge is counted, not lost
+    assert [r["costUsd"] for r in ledger()] == [0.0005, 0.01, 0.0005]
+
+
+def test_batch_call_rejects_a_keyword_list_that_is_not_plain_strings(post):
+    calls, _ = post
+    with pytest.raises(api.Stop, match="non-empty strings"):
+        api.batch_call("anyapi", "twitter.search", ["a", {"term": "b"}])
+    with pytest.raises(api.Stop):
+        api.batch_call("anyapi", "twitter.search", "a")
+    assert calls == [] and not core.ledger_path().exists()
+
+
+def test_cli_batch_reports_each_keyword_without_real_calls(post, tmp_path, capsys):
+    calls, http = post
+    from getcheapapi import cli
+    http.answer = lambda body: (core.Stop("HTTP 402: empty", core.EXIT_NO_BALANCE) if body["keyword"] == "c" else
+                                {"costUsd": 0.0005, "source": {"id": "cheap"}, "output": {"data": {"items": [1]}}})
+    argv = ["batch", "anyapi", "twitter.search", "--input", json.dumps(["a", "b", "c", "d"]),
+            "--max-usd", "0.01", "--output", str(tmp_path / "batch.json")]
+    import sys
+    old = sys.argv
+    sys.argv = ["getcheapapi", *argv]
+    try:
+        with pytest.raises(SystemExit) as stop:
+            cli.main()
+    finally:
+        sys.argv = old
+    assert stop.value.code == core.EXIT_NO_BALANCE  # scripts stop the loop on it
+    saved = json.loads((tmp_path / "batch.json").read_text(encoding="utf-8"))
+    assert [row["status"] for row in saved["items"]] == ["success", "success", "failed", "not_run"]
+    assert saved["totalUsd"] == pytest.approx(0.001) and saved["stoppedForBalance"] is True
+    assert len(calls) == 3
+    summary = json.loads(capsys.readouterr().out)
+    assert (summary["success"], summary["failed"], summary["not_run"]) == (2, 1, 1)
+
+
+def test_cli_batch_reads_a_keywords_object_and_leaves_clean_when_all_work(post, tmp_path, capsys):
+    _, http = post
+    from getcheapapi import cli
+    import sys
+    argv = ["batch", "anyapi", "twitter.search", "--input", json.dumps({"keywords": ["a", "b"]}),
+            "--output", str(tmp_path / "batch.json")]
+    old = sys.argv
+    sys.argv = ["getcheapapi", *argv]
+    try:
+        with pytest.raises(SystemExit) as stop:
+            cli.main()
+    finally:
+        sys.argv = old
+    assert stop.value.code == 0
+    saved = json.loads((tmp_path / "batch.json").read_text(encoding="utf-8"))
+    assert [row["keyword"] for row in saved["items"]] == ["a", "b"] and saved["success"] == 2
 
 
 def test_call_pins_sources_and_writes_ledger(post):

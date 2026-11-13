@@ -62,7 +62,7 @@ getcheapapi accept-price reddit.search   # only after the user accepts a higher 
 - **Cheapest source only, no switching**: one AnyAPI endpoint is served by several sources up to 200x apart, and by default a failing cheap source fails over to a dearer one. Calls name that one source with failover off, and a run served by any other source, or charged above its price, stops. A list of two is not safe: AnyAPI served one at the dearer price and billed an empty result at it. Yir jobs go out with `routing.fallback` off, since an attempt a channel billed is charged even when it fails; set `"routing":{"fallback":true}` in the input only when the user asks. A route that could not be priced stops the run instead of being skipped for the next one.
 - **Waits instead of switching**: a source that is down refuses with no charge. The run keeps trying the same source for `--wait` seconds (default 90), then exits with code 3. Run the same command again later, or tell the user it is waiting. Never add `--max-ratio`, `--via` or another endpoint to get around it without the user's OK: those are the dearer routes.
 - **Price baseline**: the lowest cheapest-price seen per AnyAPI endpoint is kept in `~/.getcheapapi/price-baseline.json`. When the cheapest price passes 1.5x the baseline, the run stops before spending and prints both prices; after the user accepts, run `accept-price <sku>`. Never accept on your own.
-- **Stops on trouble**: exit code 2 means out of balance, 3 means the source is still down after waiting; any first failure stops the batch.
+- **Stops on trouble**: exit code 2 means out of balance, 3 means the source is still down after waiting; any first failure stops the batch. The `batch` command and `batch_call` are the exception: `run`/`call` treat the input list as one unit, while `batch` keeps going after a per-keyword failure and stops only on exit code 2 — use it when one bad keyword must not throw away the rest.
 - **Keeps records**: full responses in `~/.getcheapapi/results/<provider>/`, one ledger line per call in `~/.getcheapapi/ledger.jsonl`; `--project` defaults to the current folder name. `GETCHEAPAPI_HOME` moves this folder.
 
 ## From a script
@@ -70,11 +70,14 @@ getcheapapi accept-price reddit.search   # only after the user accepts a higher 
 Scripts that make their own paid calls use the library, never a raw HTTP call, so the same guards apply and the spend lands in the ledger:
 
 ```python
-from getcheapapi.api import NotServed, Refused, Stop, call
+from getcheapapi.api import NotServed, Refused, Stop, batch_call, call
 result, cost = call("anyapi", "twitter.search", {"query": "x"}, max_usd=0.01)
+report = batch_call("anyapi", "twitter.search", ["a", "b", "c"], max_usd=0.01)
+for row in report["items"]:
+    print(row["keyword"], row["status"], row["costUsd"], row["error"])
 ```
 
-`Refused` means nothing was spent; `NotServed` means this call failed with no charge and a batch may go on; `Unavailable` is a `NotServed` for a source that is down, and `call(..., wait=300)` keeps trying it; any other `Stop` ends the batch.
+`Refused` means nothing was spent; `NotServed` means this call failed with no charge and a batch may go on; `Unavailable` is a `NotServed` for a source that is down, and `call(..., wait=300)` keeps trying it; any other `Stop` ends the batch. `batch_call` runs that same guarded `call` once per keyword, so each keyword is priced and capped on its own: a keyword over `max_usd` is refused without a call, `Refused`/`NotServed` failures fail only that keyword, and only exit code 2 (out of balance) stops the batch — the rest are marked `not_run`, and earlier results and costs are kept. It returns every keyword with `status` (`success`/`refused`/`failed`/`not_run`), `charged`, `costUsd`, `error` and `result`, plus `success`/`failed`/`refused`/`not_run` counts, `totalUsd` and `stoppedForBalance`. `getcheapapi batch <provider> <endpoint> --input '["a","b"]'` does the same from a shell.
 
 ## Tell the user what the comparison found
 

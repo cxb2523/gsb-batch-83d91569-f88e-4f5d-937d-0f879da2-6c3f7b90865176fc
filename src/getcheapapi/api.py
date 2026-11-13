@@ -1,7 +1,9 @@
-"""Library entry for scripts: the same guards as `getcheapapi call`, one call at a time.
+"""Library entry for scripts: the same guards as `getcheapapi call`, one call at a time, or one per keyword.
 
 call() prices on fresh prices, refuses past max_usd, pins AnyAPI to its cheapest source, and writes the ledger
-line, so spend made from a script shows up in `getcheapapi spend`.
+line, so spend made from a script shows up in `getcheapapi spend`. batch_call() applies that same protection
+to each keyword on its own and reports every keyword's outcome instead of stopping the whole list on the first
+trouble.
 
 Stop is the base of what it raises: Refused means nothing was spent, NotServed means this call failed
 without a charge and a batch may go on (Unavailable, a NotServed, says the source is down for now; wait=N
@@ -14,10 +16,10 @@ import time
 from pathlib import Path
 
 from getcheapapi import lanes as L
-from getcheapapi.core import DROPPED, NotServed, Refused, Stop, Unavailable, load_env, now, record
+from getcheapapi.core import EXIT_NO_BALANCE, DROPPED, NotServed, Refused, Stop, Unavailable, load_env, now, record
 from getcheapapi.providers import PROVIDERS, AnyAPI, Provider
 
-__all__ = ["DEFAULT_MAX_USD", "NotServed", "Refused", "Stop", "Unavailable", "call", "quote"]
+__all__ = ["DEFAULT_MAX_USD", "NotServed", "Refused", "Stop", "Unavailable", "batch_call", "call", "quote"]
 
 DEFAULT_MAX_USD = 0.1
 FIRST_WAIT = 5  # seconds before trying an unavailable source again; doubles each time. Rate limits clear in seconds
@@ -93,3 +95,63 @@ def call(provider: str, endpoint: str, body: dict, *, max_usd: float = DEFAULT_M
     if not ok:
         raise Stop(f"{provider} {endpoint}: call failed: {str(result)[:300]}", cost=cost)
     return result, cost
+
+
+def batch_call(provider: str, endpoint: str, keywords: list[str], *, body_for=None,
+               max_usd: float = DEFAULT_MAX_USD, max_ratio: float = L.DEFAULT_MAX_RATIO,
+               project: str | None = None, retries: int = 0, wait: float = 0) -> dict:
+    """Collect one keyword per call, each call guarded and ledgered exactly as call() does.
+
+    Every keyword goes through call(): its own prepare/estimate on fresh prices (AnyAPI still pinned to its
+    cheap source), its own max_usd check, its own wait, and its own ledger line when it is sent. One keyword
+    past the cap is refused on its own without a call, and the rest still run. A failure that concerns only
+    that call (invalid input, an unavailable source, a price that needs a person, a charged response that
+    failed) is reported for that keyword and the batch goes on. Only running out of balance (exit code 2)
+    stops the batch: the keyword that hit it and everything after it are marked failed or not_run, and the
+    keywords already done keep their results and costs.
+
+    body_for turns one keyword into that call's body; the default {"keyword": keyword} fits endpoints such as
+    goanyapi keyword-search-volume. Returns, for every submitted keyword in order:
+
+        {"keyword": str, "status": "success" | "refused" | "failed" | "not_run",
+         "charged": bool, "costUsd": float, "error": str | None, "result": the raw response when succeeded}
+
+    plus the counts "success", "failed", "refused" and "not_run", "totalUsd", and "stoppedForBalance".
+    """
+    load_env()
+    if isinstance(keywords, str) or not isinstance(keywords, (list, tuple)) or not all(
+            isinstance(term, str) and term.strip() for term in keywords):
+        raise Stop("batch_call: keywords must be a list of non-empty strings")
+    make_body = body_for or (lambda term: {"keyword": term})
+    project = project or Path.cwd().name
+    items: list[dict] = []
+    stopped = False
+    for term in keywords:
+        item = {"keyword": term, "status": "not_run", "charged": False, "costUsd": 0.0,
+                "error": None, "result": None}
+        items.append(item)
+        if stopped:
+            continue
+        try:
+            body = make_body(term)
+            if not isinstance(body, dict):
+                raise Stop("batch_call: body_for must return a JSON object")
+            result, cost = call(provider, endpoint, body, max_usd=max_usd, max_ratio=max_ratio,
+                                project=project, retries=retries, wait=wait)
+        except Refused as exc:  # nothing was sent: over the cap, or a price a person must accept first
+            item.update(status="refused", charged=exc.cost > 0, costUsd=round(exc.cost, 6), error=str(exc)[:300])
+            stopped = exc.code == EXIT_NO_BALANCE
+            continue
+        except Stop as exc:  # this call failed; the charge it may have taken is kept with this keyword
+            item.update(status="failed", charged=exc.cost > 0, costUsd=round(exc.cost, 6), error=str(exc)[:300])
+            stopped = exc.code == EXIT_NO_BALANCE
+            continue
+        item.update(status="success", charged=cost > 0, costUsd=round(cost, 6), result=result)
+    if stopped:
+        for item in items:
+            if item["status"] == "not_run":
+                item["error"] = f"not run: the batch stopped earlier, out of balance (exit code {EXIT_NO_BALANCE})"
+    counts = {status: sum(1 for item in items if item["status"] == status)
+              for status in ("success", "failed", "refused", "not_run")}
+    return {"provider": provider, "endpoint": endpoint, "items": items, **counts,
+            "totalUsd": round(sum(item["costUsd"] for item in items), 6), "stoppedForBalance": stopped}

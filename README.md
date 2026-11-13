@@ -117,6 +117,7 @@ getcheapapi quote serp.google --input '{"query":"cheap serp api"}'   # compare, 
 getcheapapi run serp.google --input '{"query":"cheap serp api"}' --max-usd 0.01
 getcheapapi run x.search --input '[{"query":"a"},{"query":"b"}]'      # a list runs as one batch
 getcheapapi call dataforseo backlinks/summary/live --input '{"target":"example.com"}'  # raw endpoint, same guards
+getcheapapi batch goanyapi keyword-search-volume --input '["a","b","c"]'  # one call per keyword, per-keyword report
 getcheapapi prices refresh                            # update the local price cache
 getcheapapi spend --days 7                            # spend by provider and endpoint
 getcheapapi balance anyapi

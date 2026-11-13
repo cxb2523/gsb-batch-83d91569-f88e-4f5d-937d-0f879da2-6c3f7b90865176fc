@@ -117,6 +117,7 @@ getcheapapi quote serp.google --input '{"query":"cheap serp api"}'   # 只比价
 getcheapapi run serp.google --input '{"query":"cheap serp api"}' --max-usd 0.01
 getcheapapi run x.search --input '[{"query":"a"},{"query":"b"}]'      # 传列表就作为一批运行
 getcheapapi call dataforseo backlinks/summary/live --input '{"target":"example.com"}'  # 原始接口，同样有护栏
+getcheapapi batch goanyapi keyword-search-volume --input '["a","b","c"]'  # 每条关键词一次调用，逐条报告结果
 getcheapapi prices refresh                            # 更新本地价格缓存
 getcheapapi spend --days 7                            # 按供应商和接口查看花费
 getcheapapi balance anyapi
