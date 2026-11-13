@@ -1,5 +1,5 @@
 import {OlostepTransport} from '../http/transport.js';
-import {MapRequest} from '../types.js';
+import {MapRequest, PagesIteratorOptions, WaitTillDoneOptions} from '../types.js';
 import {OlostepResource} from './base.js';
 import {Map} from '../client_state/Map.js';
 import {normalizeToCamel} from '../casing.js';
@@ -8,6 +8,13 @@ export interface MapResponse extends Record<string, unknown> {
   id: string;
   urlsCount: number;
   hasMore: boolean;
+}
+
+interface MapUrlsResponse {
+  urls?: string[];
+  items?: string[];
+  cursor?: string | number | null;
+  next_cursor?: string | number | null;
 }
 
 export class MapNamespace extends OlostepResource {
@@ -48,9 +55,66 @@ export class MapNamespace extends OlostepResource {
     return data;
   }
 
-  // Streamer/iterator not yet implemented
-  async *urls(mapId: string) {
-    throw new Error('Streaming map URLs not implemented yet.');
+  async waitTillDone(mapId: string, options?: WaitTillDoneOptions): Promise<void> {
+    const opts = options ? normalizeToCamel(options) : undefined;
+    const checkEveryNSecs = opts?.checkEveryNSecs ?? 10;
+    const timeoutSeconds = opts?.timeoutSeconds ?? 600;
+    const startTime = Date.now();
+
+    while (true) {
+      const info = (await this.info(mapId)) as {status?: string};
+      const waitElapsed = (Date.now() - startTime) / 1000;
+
+      if (info.status === 'completed' || info.status === 'failed') {
+        return;
+      }
+
+      if (waitElapsed >= timeoutSeconds) {
+        throw new Error(
+          `waitTillDone timed out after ${waitElapsed.toFixed(2)}s (timeout: ${timeoutSeconds}s)`
+        );
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, checkEveryNSecs * 1000));
+    }
+  }
+
+  async *urls(mapId: string, options?: PagesIteratorOptions): AsyncGenerator<string> {
+    const opts = options ? normalizeToCamel(options) : undefined;
+    const limit = opts?.batchSize ?? 50;
+    let cursor: string | undefined = opts?.cursor;
+
+    while (true) {
+      const {data} = await this.transport.request<MapUrlsResponse>({
+        method: 'GET',
+        path: `/maps/${mapId}/urls`,
+        query: {
+          limit,
+          cursor,
+          wait_for_completion: opts?.waitForCompletion
+        }
+      });
+
+      const items = data?.urls ?? data?.items ?? [];
+      if (!items.length) {
+        break;
+      }
+
+      for (const url of items) {
+        yield url;
+      }
+
+      const nextCursor = data?.next_cursor ?? data?.cursor;
+      if (!nextCursor) {
+        break;
+      }
+      const next = String(nextCursor);
+      if (next === cursor) {
+        // The cursor did not advance: yielding again would repeat the same page.
+        break;
+      }
+      cursor = next;
+    }
   }
 
   // Shorthand callable
