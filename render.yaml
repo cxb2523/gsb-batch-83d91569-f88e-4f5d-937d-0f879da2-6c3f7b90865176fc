@@ -1,0 +1,87 @@
+services:
+  - type: web
+    name: argus-investigator
+    runtime: docker
+    plan: starter
+    autoDeploy: true
+    envVars:
+      - key: GEMINI_API_KEYS
+        sync: false
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: AUTH_REQUIRED
+        value: "true"
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: GEMINI_FALLBACK_MODELS
+        value: gemini-2.0-flash
+      - key: GEMINI_RPM_LIMIT
+        value: "10"
+      - key: GEMINI_RPD_LIMIT
+        value: "250"
+      - key: GEMINI_TIMEOUT_SECONDS
+        value: "90"
+      - key: DATABASE_URL
+        sync: false
+      - key: REQUIRE_POSTGRES
+        value: "true"
+      - key: RESUME_ACTIVE_RUNS
+        value: "true"
+      - key: DATABASE_PATH
+        value: /var/data/data/argus.db
+      - key: EVIDENCE_DIR
+        value: /var/data/evidence
+      - key: EXPORT_DIR
+        value: /var/data/exports
+      - key: MAX_CANDIDATES_PER_RUN
+        value: "15000"
+      - key: MAX_MIRROR_CHECKS_PER_RUN
+        value: "6"
+      - key: SCAN_CONCURRENCY
+        value: "1"
+      - key: REQUEST_TIMEOUT_SECONDS
+        value: "6"
+      - key: CANDIDATE_TIMEOUT_SECONDS
+        value: "15"
+      - key: FAST_EVIDENCE_MODE
+        value: "true"
+      - key: SCREENSHOTS_ENABLED
+        value: "true"
+      - key: BROWSER_SCREENSHOTS_ENABLED
+        value: "true"
+      - key: SCREENSHOT_FALLBACK_ENABLED
+        value: "true"
+      - key: SCREENSHOT_CONCURRENCY
+        value: "1"
+      - key: SCREENSHOT_TIMEOUT_SECONDS
+        value: "5"
+      - key: SCREENSHOT_SETTLE_MS
+        value: "250"
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /ms-playwright
+      - key: OSINT_FEEDS_ENABLED
+        value: "true"
+      - key: OSINT_CANDIDATE_POOL_SIZE
+        value: "15000"
+      - key: SEARCH_PAGE_DELAY_SECONDS
+        value: "2.5"
+      - key: ML_ENABLED
+        value: "false"
+      - key: ML_MODEL_PATH
+        value: models/domain_classifier.cbm
+      - key: CYBERSCAN_MODEL_PATH
+        value: models/cyberscan_model.pkl
+      - key: ML_MIN_CONFIDENCE
+        value: "0.45"
+      - key: REQUIRE_KZ_PROXY
+        value: "false"
+      - key: KZ_PROXY_URL
+        sync: false
+      - key: KZ_PROXY_CHECK_URL
+        value: https://api.country.is/
+      - key: KZ_ACCESS_LABEL
+        value: server direct network
+    disk:
+      name: argus-data
+      mountPath: /var/data
+      sizeGB: 1

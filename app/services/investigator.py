@@ -1,0 +1,4032 @@
+from __future__ import annotations
+
+import asyncio
+import csv
+import gc
+import hashlib
+import random
+import re
+import time
+from dataclasses import dataclass, field
+from io import StringIO
+from itertools import islice
+from pathlib import Path
+from threading import Event, Lock
+from typing import Any, Iterable, Iterator
+from urllib.parse import urlencode, urljoin
+
+import httpx
+from bs4 import BeautifulSoup
+
+from app.config import Settings
+from app.database import Database, utc_now
+from app.services.domains import (
+    extract_domain,
+    find_domains,
+    is_candidate_domain,
+    is_candidate_url,
+    is_technical_url,
+    likely_related_domains,
+    normalize_url,
+    registered_domain,
+    unwrap_known_redirect_url,
+)
+from app.services.content_intelligence import ContentIntelligence
+from app.services.cyberscan_classifier import CyberScanClassifier
+from app.services.evidence import EvidenceCollector, score_finding
+from app.services.gemini import GeminiClient
+from app.services.groq_compound import GroqCompoundClient
+from app.services.ml_classifier import DomainMLClassifier
+from app.services.risky_domains import (
+    gambling_domain_signals,
+    has_casino_context,
+    has_user_risk_search_context,
+)
+from app.services.screenshots import ScreenshotService
+
+
+CYBERSCAN_OSINT_SOURCES = [
+    {
+        "name": "openphish",
+        "url": "https://openphish.com/feed.txt",
+        "category": "phishing",
+        "parser": "plain_list",
+    },
+    {
+        "name": "urlhaus",
+        "url": "https://urlhaus.abuse.ch/downloads/csv_recent/",
+        "category": "malware",
+        "parser": "csv",
+    },
+    {
+        "name": "phishing_database",
+        "url": "https://raw.githubusercontent.com/mitchellkrogza/Phishing.Database/master/phishing-domains-ACTIVE.txt",
+        "category": "phishing",
+        "parser": "plain_list",
+    },
+    {
+        "name": "stevenblack_gambling",
+        "url": "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling-only/hosts",
+        "category": "casino",
+        "parser": "hosts_file",
+    },
+    {
+        "name": "blocklistproject_gambling",
+        "url": "https://raw.githubusercontent.com/blocklistproject/Lists/master/gambling.txt",
+        "category": "casino",
+        "parser": "hosts_file",
+    },
+    {
+        "name": "stopgambling",
+        "url": "https://raw.githubusercontent.com/StopGambling/domain-list/main/domains.txt",
+        "category": "casino",
+        "parser": "plain_list",
+    },
+]
+
+BOOTSTRAP_CANDIDATES = [
+    {"domain": "1xbet.com", "category": "casino", "brand": "1xBet", "aliases": ["1xbet", "1x bet"]},
+    {"domain": "1win.com", "category": "casino", "brand": "1win", "aliases": ["1win", "1 win"]},
+    {"domain": "mostbet.com", "category": "casino", "brand": "Mostbet", "aliases": ["mostbet", "most bet"]},
+    {"domain": "mostbet-kz.org", "category": "casino", "brand": "Mostbet", "aliases": ["mostbet", "most bet"]},
+    {"domain": "pin-up.kz", "category": "casino", "brand": "Pin-Up", "aliases": ["pinup", "pin-up", "pin up"]},
+    {"domain": "pin-up.com", "category": "casino", "brand": "Pin-Up", "aliases": ["pinup", "pin-up", "pin up"]},
+    {"domain": "olimpbet.kz", "category": "casino", "brand": "Olimpbet", "aliases": ["olimp", "olimpbet"]},
+    {"domain": "melbet.com", "category": "casino", "brand": "Melbet", "aliases": ["melbet", "mel bet"]},
+    {"domain": "fonbet.kz", "category": "casino", "brand": "Fonbet", "aliases": ["fonbet", "fon bet"]},
+    {"domain": "parimatch.kz", "category": "casino", "brand": "Parimatch", "aliases": ["parimatch", "pari match"]},
+    {"domain": "bet365.com", "category": "casino", "brand": "Bet365", "aliases": ["bet365", "bet 365"]},
+    {"domain": "vavada.com", "category": "casino", "brand": "Vavada", "aliases": ["vavada"]},
+    {"domain": "vulkanvegas.com", "category": "casino", "brand": "Vulkan Vegas", "aliases": ["vulkan", "vulkan vegas"]},
+    {"domain": "joycasino.com", "category": "casino", "brand": "JoyCasino", "aliases": ["joycasino", "joy casino"]},
+    {"domain": "playfortuna.com", "category": "casino", "brand": "Play Fortuna", "aliases": ["playfortuna", "play fortuna"]},
+    {"domain": "mrbit.com", "category": "casino", "brand": "Mr Bit", "aliases": ["mrbit", "mr bit"]},
+    {"domain": "casinia.com", "category": "casino", "brand": "Casinia", "aliases": ["casinia"]},
+    {"domain": "ninecasino.com", "category": "casino", "brand": "NineCasino", "aliases": ["ninecasino", "nine casino"]},
+    {"domain": "playamo.com", "category": "casino", "brand": "PlayAmo", "aliases": ["playamo", "play amo"]},
+    {"domain": "bitcasino.io", "category": "casino", "brand": "Bitcasino", "aliases": ["bitcasino", "bit casino"]},
+    {"domain": "bitstarz.com", "category": "casino", "brand": "BitStarz", "aliases": ["bitstarz", "bit starz"]},
+    {"domain": "fortunejack.com", "category": "casino", "brand": "FortuneJack", "aliases": ["fortunejack", "fortune jack"]},
+    {"domain": "7bitcasino.com", "category": "casino", "brand": "7BitCasino", "aliases": ["7bitcasino", "7bit casino"]},
+    {"domain": "casino-x.com", "category": "casino", "brand": "Casino X", "aliases": ["casino-x", "casino x", "casinox"]},
+    {"domain": "boomerang-casino.com", "category": "casino", "brand": "Boomerang Casino", "aliases": ["boomerang casino", "boomerang"]},
+    {"domain": "spinanga.com", "category": "casino", "brand": "Spinanga", "aliases": ["spinanga"]},
+    {"domain": "nomini.com", "category": "casino", "brand": "Nomini", "aliases": ["nomini"]},
+    {"domain": "slottica.com", "category": "casino", "brand": "Slottica", "aliases": ["slottica"]},
+    {"domain": "wildz.com", "category": "casino", "brand": "Wildz", "aliases": ["wildz"]},
+    {"domain": "n1casino.com", "category": "casino", "brand": "N1 Casino", "aliases": ["n1casino", "n1 casino"]},
+    {"domain": "rocketplay.com", "category": "casino", "brand": "RocketPlay", "aliases": ["rocketplay", "rocket play"]},
+    {"domain": "hellspin.com", "category": "casino", "brand": "HellSpin", "aliases": ["hellspin", "hell spin"]},
+    {"domain": "mystake.com", "category": "casino", "brand": "MyStake", "aliases": ["mystake", "my stake"]},
+    {"domain": "ggbet.com", "category": "casino", "brand": "GG.Bet", "aliases": ["ggbet", "gg bet"]},
+    {"domain": "stake.com", "category": "casino", "brand": "Stake", "aliases": ["stake"]},
+    {"domain": "bc.game", "category": "casino", "brand": "BC.Game", "aliases": ["bcgame", "bc game"]},
+    {"domain": "roobet.com", "category": "casino", "brand": "Roobet", "aliases": ["roobet"]},
+    {"domain": "rollbit.com", "category": "casino", "brand": "Rollbit", "aliases": ["rollbit"]},
+    {"domain": "sportsbet.io", "category": "casino", "brand": "Sportsbet.io", "aliases": ["sportsbet"]},
+    {"domain": "cloudbet.com", "category": "casino", "brand": "Cloudbet", "aliases": ["cloudbet"]},
+    {"domain": "duelbits.com", "category": "casino", "brand": "Duelbits", "aliases": ["duelbits"]},
+    {"domain": "bitsler.com", "category": "casino", "brand": "Bitsler", "aliases": ["bitsler"]},
+    {"domain": "22bet.com", "category": "casino", "brand": "22Bet", "aliases": ["22bet", "22 bet"]},
+    {"domain": "betwinner.com", "category": "casino", "brand": "Betwinner", "aliases": ["betwinner"]},
+    {"domain": "linebet.com", "category": "casino", "brand": "Linebet", "aliases": ["linebet"]},
+    {"domain": "megapari.com", "category": "casino", "brand": "Megapari", "aliases": ["megapari"]},
+    {"domain": "rabona.com", "category": "casino", "brand": "Rabona", "aliases": ["rabona"]},
+    {"domain": "spinbetter.com", "category": "casino", "brand": "SpinBetter", "aliases": ["spinbetter", "spin better"]},
+    {"domain": "betway.com", "category": "casino", "brand": "Betway", "aliases": ["betway"]},
+    {"domain": "betfair.com", "category": "casino", "brand": "Betfair", "aliases": ["betfair"]},
+    {"domain": "unibet.com", "category": "casino", "brand": "Unibet", "aliases": ["unibet"]},
+    {"domain": "bwin.com", "category": "casino", "brand": "Bwin", "aliases": ["bwin"]},
+    {"domain": "betano.com", "category": "casino", "brand": "Betano", "aliases": ["betano"]},
+    {"domain": "pokerstars.com", "category": "casino", "brand": "PokerStars", "aliases": ["pokerstars", "poker stars"]},
+    {"domain": "888casino.com", "category": "casino", "brand": "888casino", "aliases": ["888casino", "888 casino"]},
+    {"domain": "leovegas.com", "category": "casino", "brand": "LeoVegas", "aliases": ["leovegas", "leo vegas"]},
+    {"domain": "williamhill.com", "category": "casino", "brand": "William Hill", "aliases": ["williamhill", "william hill"]},
+    {"domain": "ladbrokes.com", "category": "casino", "brand": "Ladbrokes", "aliases": ["ladbrokes"]},
+    {"domain": "coral.co.uk", "category": "casino", "brand": "Coral", "aliases": ["coral"]},
+    {"domain": "marathonbet.com", "category": "casino", "brand": "Marathonbet", "aliases": ["marathonbet", "marathon bet"]},
+    {"domain": "winline.ru", "category": "casino", "brand": "Winline", "aliases": ["winline"]},
+    {"domain": "leon.ru", "category": "casino", "brand": "Leon", "aliases": ["leon"]},
+    {"domain": "tennisi.kz", "category": "casino", "brand": "Tennisi", "aliases": ["tennisi"]},
+    {"domain": "fairspin.io", "category": "casino", "brand": "Fairspin", "aliases": ["fairspin"]},
+    {"domain": "zotabet.com", "category": "casino", "brand": "Zotabet", "aliases": ["zotabet"]},
+    {"domain": "xparibet.com", "category": "casino", "brand": "XpariBet", "aliases": ["xparibet", "xpari"]},
+    {"domain": "wazamba.com", "category": "casino", "brand": "Wazamba", "aliases": ["wazamba"]},
+    {"domain": "nationalcasino.com", "category": "casino", "brand": "National Casino", "aliases": ["national casino"]},
+]
+
+BOOKMAKER_FIRST_BRANDS = {
+    "1xbet",
+    "1win",
+    "22bet",
+    "bet365",
+    "betano",
+    "betfair",
+    "betway",
+    "betwinner",
+    "bwin",
+    "cloudbet",
+    "coral",
+    "fonbet",
+    "ggbet",
+    "ladbrokes",
+    "leon",
+    "linebet",
+    "marathonbet",
+    "megapari",
+    "melbet",
+    "mostbet",
+    "olimpbet",
+    "parimatch",
+    "rabona",
+    "sportsbet",
+    "stake",
+    "tennisi",
+    "unibet",
+    "williamhill",
+    "winline",
+    "xparibet",
+}
+
+OFFICIAL_BOOKMAKER_DOMAINS = {
+    "1xbet.com",
+    "1xbet.kz",
+    "1win.com",
+    "22bet.com",
+    "bet365.com",
+    "betano.com",
+    "betfair.com",
+    "betway.com",
+    "betwinner.com",
+    "bwin.com",
+    "coral.co.uk",
+    "fonbet.kz",
+    "fonbet.com",
+    "ggbet.com",
+    "ladbrokes.com",
+    "leon.ru",
+    "linebet.com",
+    "marathonbet.com",
+    "melbet.com",
+    "mostbet.com",
+    "olimpbet.kz",
+    "olimpbet.com",
+    "parimatch.kz",
+    "parimatch.com",
+    "tennisi.kz",
+    "unibet.com",
+    "williamhill.com",
+    "winline.ru",
+    "xparibet.com",
+}
+
+BOOKMAKER_FIRST_RE = re.compile(
+    r"(?i)(?:^|[^a-z0-9])("
+    + "|".join(re.escape(brand) for brand in sorted(BOOKMAKER_FIRST_BRANDS, key=len, reverse=True))
+    + r")(?:[^a-z0-9]|$)"
+)
+
+CASINO_PRODUCT_SIGNAL_RE = re.compile(
+    r"(?i)(casino|kazino|казино|slots?|слот|слоты|slot\s*games?|live\s+casino|roulette|рулет|"
+    r"blackjack|блэкджек|poker|покер|jackpot|джекпот|free\s*spins?|фриспин|"
+    r"игровые\s+автоматы|автоматы|1xslots|vulkan|joycasino|playfortuna|888casino|pinco|"
+    r"pin[-_\s]?up|vavada|wazamba|leovegas|fairspin|zotabet|mrbit|casinia|ninecasino|playamo|"
+    r"bitcasino|bitstarz|fortunejack|7bitcasino|casino[-_\s]?x|boomerang[-_\s]?casino|spinanga|"
+    r"nomini|slottica|wildz|n1casino|rocketplay|hellspin|mystake|roobet|rollbit|bc\.?game|stake)"
+)
+
+BLOCKED_PAGE_SIGNAL_RE = re.compile(
+    r"(?i)(access\s+(?:to\s+(?:this\s+)?site\s+is\s+)?blocked|access\s+denied|resource\s+is\s+blocked|"
+    r"site\s+is\s+blocked|unavailable\s+for\s+legal\s+reasons|451\s+unavailable|blocked\s+by|"
+    r"доступ.{0,80}(?:ограничен|запрещен|заблокирован)|сайт.{0,80}заблокирован|"
+    r"ресурс.{0,80}заблокирован|заблокировано|по\s+решению\s+суда|"
+    r"қолжетімділік.{0,80}шектелген|бұғатталған)"
+)
+
+MIRROR_TLDS = [
+    "com",
+    "net",
+    "org",
+    "site",
+    "online",
+    "club",
+    "vip",
+    "live",
+    "pro",
+    "xyz",
+    "bet",
+    "casino",
+    "win",
+    "io",
+    "kz",
+]
+
+MIRROR_MODIFIERS = [
+    "kz",
+    "kaz",
+    "top",
+    "go",
+    "login",
+    "mirror",
+    "zerkalo",
+    "new",
+    "club",
+    "vip",
+    "bonus",
+    "play",
+    "official",
+    "app",
+]
+
+NON_TARGET_REGISTERED_DOMAINS = {
+    "askgamblers.com",
+    "banki.ru",
+    "bcc.kz",
+    "casino.guru",
+    "bing.com",
+    "duckduckgo.com",
+    "finance.kz",
+    "facebook.com",
+    "forbes.kz",
+    "github.com",
+    "google.com",
+    "informburo.kz",
+    "instagram.com",
+    "kapital.kz",
+    "kursiv.media",
+    "linkedin.com",
+    "nur.kz",
+    "ok.ru",
+    "ranking.kz",
+    "scamadviser.com",
+    "sky.pro",
+    "telegram.org",
+    "t.me",
+    "tengrinews.kz",
+    "the-steppe.com",
+    "trustpilot.com",
+    "twitter.com",
+    "vc.ru",
+    "vk.com",
+    "x.com",
+    "youtube.com",
+    "youtu.be",
+    "ya.ru",
+    "yandex.kz",
+    "yandex.ru",
+    "zakon.kz",
+}
+
+SEARCH_PAGE_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+USER_SEARCH_ENGINES = [
+    {
+        "name": "duckduckgo",
+        "url": "https://html.duckduckgo.com/html/",
+        "params": {"kl": "wt-wt"},
+        "page_param": "s",
+        "page_step": 30,
+        "page_origin": 0,
+    },
+    {
+        "name": "google",
+        "url": "https://www.google.com/search",
+        "params": {"hl": "ru", "num": "20", "pws": "0", "gbv": "1"},
+        "page_param": "start",
+        "page_step": 20,
+        "page_origin": 0,
+    },
+    {
+        "name": "bing",
+        "url": "https://www.bing.com/search",
+        "params": {"setlang": "ru-RU", "count": "20"},
+        "page_param": "first",
+        "page_step": 20,
+        "page_origin": 1,
+    },
+    {
+        "name": "yandex_kz",
+        "url": "https://yandex.kz/search/",
+        "query_param": "text",
+        "params": {"lr": "162", "lang": "ru"},
+        "page_param": "p",
+        "page_step": 1,
+        "page_origin": 0,
+    },
+]
+
+EXTERNAL_DISCOVERY_REFRESH_INTERVAL = 6
+
+SEARCH_MODES = {"auto", "casino", "phishing", "scam", "all"}
+
+SEARCH_MODE_LABELS = {
+    "auto": "авто",
+    "casino": "казино",
+    "phishing": "фишинг",
+    "scam": "скам/легкие деньги",
+    "all": "все категории",
+}
+
+CASINO_SEARCH_QUERIES = [
+    "онлайн казино играть на деньги",
+    "онлайн казино Казахстан рабочий сайт",
+    "онлайн казино Россия рабочее зеркало",
+    "онлайн казино Кыргызстан рабочий сайт",
+    "онлайн казино Узбекистан рабочий сайт",
+    "онлайн казино Беларусь рабочий сайт",
+    "казино зеркало СНГ новый домен",
+    "казино онлайн регистрация бонус",
+    "слоты на деньги играть",
+    "live casino slots roulette blackjack bonus",
+    "казино зеркало рабочий вход",
+    "онлайн казино без блокировки зеркало",
+    "рабочие зеркала казино новый домен",
+    "новые онлайн казино регистрация депозит",
+    "casino mirror working login new domain",
+    "online casino play now deposit slots",
+    "мошеннические онлайн казино жалобы домен",
+    "онлайн казино отзывы форум рабочий сайт",
+    "казино не выводит деньги жалоба домен",
+    "форум жалобы казино адрес сайта",
+    "список нелегальных онлайн казино зеркала",
+    "online casino slots bonus registration",
+    "online casino complaints withdrawal website domain",
+    "casino blacklist direct domains",
+    "site:casino.guru complaints casino",
+    "site:askgamblers.com casino complaints",
+    "site:trustpilot.com online casino withdrawal",
+    "site:.casino slots register bonus",
+    "site:.bet casino slots roulette",
+    "crypto casino register deposit play",
+]
+
+SCAM_SEARCH_QUERIES = [
+    "легкие деньги регистрация онлайн Казахстан",
+    "быстрый заработок USDT регистрация Казахстан",
+    "инвестиции быстрый доход личный кабинет Казахстан",
+]
+
+PHISHING_SEARCH_QUERIES = [
+    "Kaspi фишинг вход Казахстан",
+    "Kaspi получить деньги вход карта",
+    "Kaspi подтвердить карту вход",
+    "Halyk Bank фишинг вход Казахстан",
+    "egov фишинг вход Казахстан",
+]
+
+USER_SEARCH_QUERIES = [*CASINO_SEARCH_QUERIES, *SCAM_SEARCH_QUERIES, *PHISHING_SEARCH_QUERIES]
+
+DIRECT_USER_TARGET_RE = re.compile(
+    r"(онлайн\s+казино|казино\s+(?:онлайн|играть|регистрац|вход|бонус|депозит)|"
+    r"слот(?:ы|ов)?\s+на\s+деньг|играть\s+на\s+деньг|рабоч(?:ее|ий)\s+зеркал|"
+    r"зеркал(?:о|а)?\s+(?:казино|вход)|официальн(?:ый|ое)\s+сайт|регистрац|"
+    r"личн(?:ый|ого)\s+кабинет|депозит|пополнить|вывод\s+средств|бонус|промокод|"
+    r"login|register|sign\s*up|deposit|withdraw|bonus|promo|play\s+now|casino|slots?|betting|bookmaker)",
+    re.IGNORECASE,
+)
+
+STRONG_DIRECT_USER_TARGET_RE = re.compile(
+    r"(регистрац|вход|личн(?:ый|ого)\s+кабинет|депозит|пополнить|вывод\s+средств|"
+    r"бонус|промокод|играть\s+на\s+деньг|слот(?:ы|ов)?\s+на\s+деньг|"
+    r"рабоч(?:ее|ий)\s+зеркал|login|register|sign\s*up|deposit|withdraw|bonus|promo|play\s+now)",
+    re.IGNORECASE,
+)
+
+PHISHING_SEARCH_RE = re.compile(
+    r"(phishing|фишинг|login|password|парол|kaspi|halyk|egov|карта|кошелек|wallet|verify|подтверд)",
+    re.IGNORECASE,
+)
+
+SCAM_SEARCH_RE = re.compile(
+    r"(легк(?:ие|их|ими)?\s+деньг|л[её]гк(?:ие|их|ими)?\s+деньг|"
+    r"быстр(?:ый|ого|ые|ых)\s+(?:заработ|доход)|инвестиц|пассивн(?:ый|ого)\s+доход|"
+    r"доход\s+без\s+влож|usdt|crypto|крипт|hyip|roi|гарантированн(?:ый|ая)\s+(?:доход|прибыл))",
+    re.IGNORECASE,
+)
+
+BETTING_ONLY_RE = re.compile(
+    r"(ставк(?:и|а)?\s+на\s+спорт|спортивн(?:ые|ая)\s+ставк|букмекер|букмекерск|"
+    r"bookmaker|sportsbook|sports\s+betting|betting|коэффициент|линия\s+ставок|тотализатор)",
+    re.IGNORECASE,
+)
+
+KZ_RELEVANCE_RE = re.compile(
+    r"(казахстан|қазақстан|kazakhstan|kazakstan|\.kz\b|(?:^|[/.?=&_-])kz(?:$|[/.?=&_-]))",
+    re.IGNORECASE,
+)
+
+CIS_DOMAIN_TLDS = (
+    ".kz",
+    ".ru",
+    ".xn--p1ai",
+    ".su",
+    ".by",
+    ".am",
+    ".az",
+    ".kg",
+    ".md",
+    ".tj",
+    ".tm",
+    ".uz",
+)
+
+CIS_DOMAIN_HINT_RE = re.compile(
+    r"(?:^|[.-])(?:kz|kaz|kazakhstan|ru|rus|russia|by|belarus|am|armenia|az|azer|"
+    r"kg|kyrgyz|uz|uzbek|tj|tajik|tm|turkmen|md|moldova)(?:[.-]|$)",
+    re.IGNORECASE,
+)
+
+CIS_CASINO_LABEL_HINT_RE = re.compile(
+    r"(?:(?:casino|kazino|slots?|vulkan|bet|play|win)"
+    r"(?:kz|kaz|kazakh|ru|rus|by|kg|kyrgyz|uz|uzbek|tj|az|am|md|tm)"
+    r"(?:\d{0,6}|official|online|site|club|vip|mirror)?$)|"
+    r"(?:^(?:kz|kaz|kazakh|ru|rus|by|kg|kyrgyz|uz|uzbek|tj|az|am|md|tm)"
+    r"(?:casino|kazino|slots?|vulkan|bet|play|win)"
+    r"(?:\d{0,6}|official|online|site|club|vip|mirror)?$)",
+    re.IGNORECASE,
+)
+
+KZ_CASINO_LABEL_HINT_RE = re.compile(
+    r"(?:(?:casino|kazino|slots?|vulkan|bet|play|win)(?:kz|kaz|kazakh)"
+    r"(?:\d{0,6}|official|online|site|club|vip|mirror)?$)|"
+    r"(?:^(?:kz|kaz|kazakh)(?:casino|kazino|slots?|vulkan|bet|play|win)"
+    r"(?:\d{0,6}|official|online|site|club|vip|mirror)?$)",
+    re.IGNORECASE,
+)
+
+INFORMATIONAL_SEARCH_URL_RE = re.compile(
+    r"(?i)(?:^|[/.?=&_-])(?:news|novosti|journal|blog|wiki|article|articles|guide|guides|"
+    r"learn|academy|media|press|story|stories|review|reviews|rating|ratings|obzor|otzyvy)"
+    r"(?:$|[/.?=&_-])"
+)
+
+INFORMATIONAL_SEARCH_CONTEXT_RE = re.compile(
+    r"(новост|журнал|стать[ьяи]|блог|вики|wiki|руководств|гайд|обзор|отзыв|рейтинг|"
+    r"топ\s*\d|как\s+(?:заработ|играть|выбрать|получить)|способ(?:ов|ы)|"
+    r"проверенн(?:ых|ые)\s+способ|что\s+такое|инструкц|совет|учеб|курс|банк|"
+    r"инвестиции\s+в\s+казахстан|куда\s+инвестировать|финансов(?:ый|ые)\s+совет)",
+    re.IGNORECASE,
+)
+
+INFORMATIONAL_DOMAIN_LABEL_RE = re.compile(
+    r"(news|finance|bank|media|journal|academy|wiki|learn|kurs|edu|press|review|rating|guide|blog)",
+    re.IGNORECASE,
+)
+
+CATEGORY_DISPLAY = {
+    "legit": "обычный сайт",
+    "casino": "казино или азартные игры",
+    "online_casino": "онлайн-казино",
+    "gambling": "казино или ставки",
+    "betting": "букмекер/ставки",
+    "sports_betting_review": "букмекер/ставки, требуется проверка лицензии",
+    "phishing": "фишинг",
+    "scam": "скам",
+    "pyramid": "финансовая пирамида",
+    "investment_pyramid": "финансовая пирамида",
+    "empty_or_parked": "пустой или parking-сайт",
+    "suspicious": "подозрительный сайт",
+}
+
+FEATURE_DISPLAY = {
+    "url_length": "длина адреса",
+    "hostname_length": "длина домена",
+    "path_length": "длина пути страницы",
+    "dot_count": "количество точек в адресе",
+    "hyphen_count": "дефисы в адресе",
+    "slash_count": "сложность пути",
+    "digit_count": "цифры в адресе",
+    "has_ip_host": "IP вместо домена",
+    "has_at_symbol": "символ @ в адресе",
+    "subdomain_count": "много уровней в домене",
+    "suspicious_tld": "рискованная доменная зона",
+    "domain_age_days": "возраст домена",
+    "domain_expiry_days": "срок регистрации домена",
+    "whois_privacy": "скрытый владелец домена",
+    "registrar_country_kz": "регистратор в Казахстане",
+    "whois_available": "наличие WHOIS/RDAP",
+    "dns_a_count": "IP-адреса в DNS",
+    "dns_mx_count": "почтовые MX-записи",
+    "dns_txt_count": "TXT-записи DNS",
+    "has_spf": "SPF для почты",
+    "has_dmarc": "DMARC для почты",
+    "ssl_valid": "SSL-сертификат",
+    "ssl_days_to_expiry": "срок SSL-сертификата",
+    "ssl_self_signed": "самоподписанный SSL",
+    "ssl_issuer_known": "известный издатель SSL",
+    "response_time_ms": "скорость ответа",
+    "page_size_bytes": "размер страницы",
+    "password_form_count": "форма ввода пароля",
+    "iframe_count": "встроенные чужие блоки",
+    "external_link_ratio": "доля внешних ссылок",
+    "popup_or_redirect": "редиректы или всплывающие окна",
+    "casino_keyword_count": "слова казино, ставок или бонусов",
+    "pyramid_keyword_count": "обещания дохода или инвестиций",
+    "phishing_keyword_count": "слова входа, пароля или кошелька",
+    "casino_confidence_score": "уверенность по казино-маркерам",
+    "casino_keywords_count": "слова казино, ставок или бонусов",
+    "num_password_forms": "форма ввода пароля",
+    "has_brand_impersonation": "упоминание чужого бренда",
+    "num_suspicious_patterns": "подозрительный JavaScript",
+    "has_casino_in_url": "казино или ставки в адресе",
+    "num_external_links": "много внешних ссылок",
+    "num_iframes": "встроенные чужие блоки",
+    "has_meta_refresh": "автоматический редирект",
+    "num_hidden_elements": "скрытые элементы страницы",
+}
+
+
+@dataclass
+class Candidate:
+    url: str
+    domain: str
+    category: str = "suspicious"
+    why: str = ""
+    search_query: str = ""
+    source_urls: list[str] = field(default_factory=list)
+    mirror_hints: list[str] = field(default_factory=list)
+    brand: str | None = None
+
+    def key(self) -> str:
+        return registered_domain(self.domain or extract_domain(self.url))
+
+
+@dataclass
+class SearchRequestBudget:
+    engine_limit: int
+    source_limit: int
+    deadline_at: float
+    engine_used: int = 0
+    source_used: int = 0
+
+    @property
+    def expired(self) -> bool:
+        return time.monotonic() >= self.deadline_at
+
+    def claim_engine(self) -> bool:
+        if self.expired or self.engine_used >= self.engine_limit:
+            return False
+        self.engine_used += 1
+        return True
+
+    def claim_source(self) -> bool:
+        if self.expired or self.source_used >= self.source_limit:
+            return False
+        self.source_used += 1
+        return True
+
+
+class Investigator:
+    def __init__(self, settings: Settings, db: Database, gemini: GeminiClient):
+        self.settings = settings
+        self.db = db
+        self.gemini = gemini
+        self.groq = GroqCompoundClient(settings)
+        self.evidence = EvidenceCollector(settings)
+        self.screenshots = ScreenshotService(settings)
+        self.ml = DomainMLClassifier(settings)
+        self.content_ai = ContentIntelligence(settings)
+        self.cyberscan = CyberScanClassifier(settings)
+        self._search_request_lock = Lock()
+        self._last_search_request_at = 0.0
+
+    def run(
+        self,
+        run_id: int,
+        seed_query: str | None,
+        max_candidates: int,
+        take_screenshots: bool,
+        cancel_event: Event | None = None,
+        search_mode: str = "auto",
+    ) -> None:
+        asyncio.run(self._run(run_id, seed_query, max_candidates, take_screenshots, cancel_event, search_mode))
+
+    def run_manual(
+        self,
+        run_id: int,
+        target: str,
+        category: str,
+        take_screenshots: bool,
+        cancel_event: Event | None = None,
+    ) -> None:
+        asyncio.run(self._run_manual(run_id, target, category, take_screenshots, cancel_event))
+
+    async def _run_manual(
+        self,
+        run_id: int,
+        target: str,
+        category: str,
+        take_screenshots: bool,
+        cancel_event: Event | None = None,
+    ) -> None:
+        self.db.update_run(run_id, status="running", candidate_count=1)
+        if self.settings.require_kz_proxy and not self.settings.kz_proxy_url:
+            message = "KZ proxy is required: set KZ_PROXY_URL, KZ_HTTP_PROXY, KZ_HTTPS_PROXY, or KZ_PROXY to a Kazakhstan HTTP/SOCKS proxy."
+            self.db.update_run(run_id, status="failed", finished_at=utc_now(), error=message)
+            self.db.add_log(run_id, "error", message, {"required": True, "configured": False})
+            return
+        self.db.add_log(run_id, "info", "Ручная проверка запущена", {"target": target, "started_at": utc_now()})
+        methodology = [
+            "Оператор вручную указал домен или URL для проверки.",
+            "Gemini не используется, поэтому квота AI не тратится.",
+            "Сайт открывается через ту же сеть проверки доступности, что и автоматический мониторинг.",
+            "Для сайта собираются HTTP, HTML, SHA-256, DNS, TLS, RDAP, скорость ответа, редиректы и скриншот.",
+        ]
+        self.db.update_run(run_id, methodology_json=methodology)
+
+        try:
+            domain = extract_domain(target)
+            if not is_candidate_domain(domain) or is_technical_url(target):
+                message = "Укажите публичный домен или URL, а не IP, localhost или тестовый адрес."
+                self.db.update_run(run_id, status="failed", finished_at=utc_now(), error=message)
+                self.db.add_log(run_id, "error", "Ручная проверка остановлена", {"reason": message})
+                return
+
+            if cancel_event and cancel_event.is_set():
+                self.db.update_run(run_id, status="canceled", finished_at=utc_now())
+                self.db.add_log(run_id, "warning", "Ручная проверка остановлена до анализа сайта")
+                return
+
+            candidate = Candidate(
+                url=normalize_url(target),
+                domain=domain,
+                category=self._category_from_domain_context(domain, target, (category or "manual").lower()),
+                why="Домен указан оператором для ручной проверки.",
+                search_query=target,
+            )
+            self.db.add_log(
+                run_id,
+                "info",
+                "Открываю сайт для ручного анализа",
+                {"domain": candidate.domain, "url": candidate.url},
+            )
+            finding = await self._build_finding(run_id, candidate, None, take_screenshots)
+            if finding.get("_skip"):
+                self.db.update_run(run_id, status="completed", finished_at=utc_now(), finding_count=0)
+                self.db.add_log(
+                    run_id,
+                    "warning",
+                    "Сайт не добавлен в отчет",
+                    {
+                        "domain": candidate.domain,
+                        "reason": finding.get("_skip_reason", "не удалось открыть"),
+                        "status_code": finding.get("status_code"),
+                    },
+                )
+                return
+
+            self.db.insert_finding(run_id, finding)
+            self.db.update_run(run_id, status="completed", finished_at=utc_now(), finding_count=1)
+            self.db.add_log(
+                run_id,
+                "info",
+                "Ручная проверка завершена, сайт добавлен в отчет",
+                {"domain": finding.get("domain"), "risk_score": finding.get("risk_score")},
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.db.update_run(run_id, status="failed", finished_at=utc_now(), error=f"{type(exc).__name__}: {exc}")
+            self.db.add_log(run_id, "error", "Ручная проверка завершилась ошибкой", {"error": str(exc)})
+
+    async def _run_discovery_pass(
+        self,
+        run_id: int,
+        seed_query: str | None,
+        max_candidates: int,
+        take_screenshots: bool,
+        cancel_event: Event | None = None,
+        search_mode: str = "auto",
+        discovery_round: int = 0,
+    ) -> None:
+        search_mode = self._effective_search_mode(seed_query, search_mode)
+        self.db.update_run(run_id, status="running")
+        if discovery_round == 0:
+            self.db.add_log(
+                run_id,
+                "info",
+                "Поиск запущен",
+                {
+                    "started_at": utc_now(),
+                    "search_mode": search_mode,
+                    "search_mode_label": SEARCH_MODE_LABELS[search_mode],
+                    "strategy": "search-results-plus-verified-mirror-expansion",
+                },
+            )
+        if self.settings.require_kz_proxy and not self.settings.kz_proxy_url:
+            message = "KZ proxy is required: set KZ_PROXY_URL, KZ_HTTP_PROXY, KZ_HTTPS_PROXY, or KZ_PROXY to a Kazakhstan HTTP/SOCKS proxy."
+            self.db.update_run(run_id, status="failed", finished_at=utc_now(), error=message)
+            self.db.add_log(run_id, "error", message, {"required": True, "configured": False})
+            return
+        if discovery_round == 0:
+            if self.settings.kz_proxy_url:
+                self.db.add_log(
+                    run_id,
+                    "info",
+                    "Проверка доступности выполняется через казахстанскую точку",
+                    {"access_origin": self.settings.kz_access_label},
+                )
+            else:
+                self.db.add_log(
+                    run_id,
+                    "info",
+                    "KZ_PROXY_URL не настроен: проверка доступности идет из сети хостинга",
+                    {"access_origin": self.settings.kz_access_label},
+                )
+
+            methodology = [
+                f"Режим поиска: {SEARCH_MODE_LABELS[search_mode]}.",
+                "Первый проход собирает реальные домены из выдачи DuckDuckGo/Google/Bing/Yandex, профильных OSINT-источников и Groq Compound при наличии ключа; Gemini не используется.",
+                "Пустая выдача не заменяется придуманными комбинациями доменов: в проверку попадают только адреса из публичного поиска, профильного списка или известного стартового реестра.",
+                "Внешний поиск обновляется периодически, а между обновлениями проверяются еще не использованные кандидаты без повторных запросов к поисковикам.",
+                "Поиск продолжается до достижения выбранного количества записей в реестре или ручной остановки.",
+                "В поисковых запросах берем живые домены, рабочие зеркала и страницы, доступные для пользователей Казахстана.",
+                "Открытие кандидатов проверяем через KZ_PROXY_URL; если прокси не задан, фиксируем прямую сеть сервера как ограничение доказательства.",
+                "Отбрасываем IP-адреса, localhost, тестовые домены и технические источники.",
+                "Домены, уже присутствующие в общем реестре, исключаем до открытия и повторно не добавляем в новый запуск.",
+                "Оставляем в таблице только сайты, которые удалось открыть и зафиксировать, а страницы блокировки не показываем как рабочие сайты.",
+                "Для каждого открытого сайта сохраняем HTML, SHA-256, DNS/TLS, RDAP, скорость ответа, размер страницы, редиректы и скриншот.",
+                "Зеркала группируем локально по сходству доменных имен и подтверждаем живой проверкой.",
+                "Все ошибки и пропущенные сайты пишем в журнал проверки и терминал.",
+            ]
+            self.db.update_run(run_id, methodology_json=methodology)
+
+        try:
+            findings_count = self.db.count_findings(run_id)
+            attempted_domains = self.db.list_run_attempted_domains(run_id)
+            run_state = self.db.get_run(run_id) or {}
+            checked_total = max(int(run_state.get("candidate_count") or 0), len(attempted_domains))
+            screenshot_queue: list[tuple[int, dict[str, Any]]] = []
+            screenshot_semaphore = asyncio.Semaphore(max(1, int(self.settings.screenshot_concurrency)))
+
+            def queue_screenshot(finding_id: int, finding: dict[str, Any]) -> None:
+                if not take_screenshots or not finding.get("final_url"):
+                    return
+                screenshot_queue.append(
+                    (
+                        finding_id,
+                        {
+                            "domain": finding.get("domain"),
+                            "final_url": finding.get("final_url"),
+                            "url": finding.get("url"),
+                            "title": finding.get("title"),
+                            "html_path": finding.get("html_path"),
+                            "status_code": finding.get("status_code"),
+                        },
+                    )
+                )
+
+            def handle_inspection_result(finding: dict[str, Any]) -> None:
+                nonlocal findings_count
+                if finding.get("_skip"):
+                    self.db.add_log(
+                        run_id,
+                        "warning",
+                        "Сайт пропущен и не показан пользователю",
+                        {
+                            "index": finding.get("_candidate_index"),
+                            "total": finding.get("_candidate_total"),
+                            "domain": finding.get("domain"),
+                            "reason": finding.get("_skip_reason", "не удалось открыть"),
+                            "status_code": finding.get("status_code"),
+                        },
+                    )
+                    return
+
+                finding_id = self.db.insert_finding(run_id, finding)
+                queue_screenshot(finding_id, finding)
+                findings_count += 1
+                self.db.update_run(run_id, finding_count=findings_count)
+                self.db.add_log(
+                    run_id,
+                    "info",
+                    "Сайт добавлен в отчет",
+                    {
+                        "domain": finding.get("domain"),
+                        "risk_score": finding.get("risk_score"),
+                        "findings": findings_count,
+                        "target": max_candidates,
+                    },
+                )
+
+            async def flush_screenshots(*, recovery: bool = False) -> bool:
+                if not take_screenshots:
+                    return True
+                queued_ids = {finding_id for finding_id, _ in screenshot_queue}
+                screenshot_queue.extend(
+                    item
+                    for item in self._pending_screenshot_queue(run_id, max_candidates)
+                    if item[0] not in queued_ids
+                )
+                if not screenshot_queue:
+                    return True
+                return await self._drain_screenshot_queue(
+                    run_id,
+                    screenshot_queue,
+                    screenshot_semaphore,
+                    findings_count=findings_count,
+                    checked_total=checked_total,
+                    cancel_event=cancel_event,
+                    recovery=recovery,
+                )
+
+            if cancel_event and cancel_event.is_set():
+                self.db.update_run(run_id, status="canceled", finished_at=utc_now(), finding_count=findings_count)
+                self.db.add_log(run_id, "warning", "Проверка остановлена пользователем", {"findings": findings_count})
+                return
+
+            if not await flush_screenshots(recovery=True):
+                return
+
+            if findings_count >= max_candidates:
+                self.db.update_run(run_id, status="completed", finished_at=utc_now(), finding_count=findings_count)
+                self.db.add_log(
+                    run_id,
+                    "info",
+                    "Поиск завершен: выбранная цель набрана",
+                    {"findings": findings_count, "target": max_candidates},
+                )
+                return
+
+            discovery_kwargs: dict[str, Any] = {
+                "excluded_domains": attempted_domains,
+                "discovery_round": discovery_round,
+                "use_groq": True,
+            }
+            if cancel_event is not None:
+                discovery_kwargs["cancel_event"] = cancel_event
+            candidates = await self._discover_candidates(
+                run_id,
+                seed_query,
+                max_candidates,
+                search_mode,
+                **discovery_kwargs,
+            )
+            if cancel_event and cancel_event.is_set():
+                self.db.update_run(
+                    run_id,
+                    status="canceled",
+                    finished_at=utc_now(),
+                    finding_count=findings_count,
+                    candidate_count=checked_total,
+                )
+                self.db.add_log(run_id, "warning", "Проверка остановлена пользователем", {"findings": findings_count})
+                return
+            fresh_candidates = [candidate for candidate in candidates if candidate.key()]
+            candidate_check_limit = self._candidate_check_limit(
+                max(1, max_candidates - findings_count),
+                len(fresh_candidates),
+                search_mode,
+            )
+            candidate_pool = fresh_candidates[:candidate_check_limit]
+            candidate_total = len(candidate_pool)
+            self.db.update_run(run_id, candidate_count=checked_total)
+            self.db.add_log(
+                run_id,
+                "info",
+                "Пул сайтов для прохода зафиксирован",
+                {
+                    "discovery_pass": discovery_round + 1,
+                    "candidates": candidate_total,
+                    "target_findings": max_candidates,
+                    "already_saved": findings_count,
+                    "gemini_used": False,
+                },
+            )
+
+            if not candidate_pool:
+                self.db.add_log(
+                    run_id,
+                    "warning",
+                    "Текущий проход не дал новых доменов для проверки",
+                    {"findings": findings_count, "target": max_candidates},
+                )
+
+            concurrency = max(1, min(self.settings.scan_concurrency, len(candidate_pool) or 1))
+            batch_size = max(12, min(36, concurrency * 8))
+            semaphore = asyncio.Semaphore(concurrency)
+
+            for batch_start in range(0, candidate_total, batch_size):
+                if cancel_event and cancel_event.is_set():
+                    self.db.update_run(run_id, status="canceled", finished_at=utc_now(), finding_count=findings_count)
+                    self.db.add_log(run_id, "warning", "Проверка остановлена пользователем", {"findings": findings_count})
+                    return
+                if findings_count >= max_candidates:
+                    break
+
+                candidates_to_check = candidate_pool[batch_start : batch_start + batch_size]
+                mirror_groups = await self._discover_mirrors(run_id, candidates_to_check, search_mode)
+                self.db.add_log(
+                    run_id,
+                    "info",
+                    "Пакетная проверка кандидатов запущена",
+                    {
+                        "batch": (batch_start // batch_size) + 1,
+                        "checking": len(candidates_to_check),
+                        "checked_total": checked_total,
+                        "candidate_total": candidate_total,
+                        "target_findings": max_candidates,
+                        "already_saved": findings_count,
+                        "concurrency": concurrency,
+                    },
+                )
+
+                if concurrency <= 1:
+                    for batch_index, candidate in enumerate(candidates_to_check, start=1):
+                        if cancel_event and cancel_event.is_set():
+                            self.db.update_run(
+                                run_id,
+                                status="canceled",
+                                finished_at=utc_now(),
+                                finding_count=findings_count,
+                                candidate_count=checked_total,
+                            )
+                            self.db.add_log(run_id, "warning", "Проверка остановлена пользователем", {"findings": findings_count})
+                            return
+                        if findings_count >= max_candidates:
+                            break
+                        key = candidate.key()
+                        if key:
+                            self.db.mark_run_attempted_domains(run_id, {key})
+                            attempted_domains.add(key)
+                        finding = await self._inspect_candidate(
+                            run_id,
+                            batch_start + batch_index,
+                            candidate_total,
+                            candidate,
+                            candidates_to_check,
+                            mirror_groups,
+                            take_screenshots,
+                            semaphore,
+                            cancel_event,
+                            search_mode,
+                        )
+                        checked_total += 1
+                        handle_inspection_result(finding)
+                    self.db.update_run(run_id, candidate_count=checked_total)
+                    if not await flush_screenshots():
+                        return
+                    continue
+
+                batch_domains = {candidate.key() for candidate in candidates_to_check if candidate.key()}
+                self.db.mark_run_attempted_domains(run_id, batch_domains)
+                attempted_domains.update(batch_domains)
+                tasks = [
+                    asyncio.create_task(
+                        self._inspect_candidate(
+                            run_id,
+                            batch_start + batch_index,
+                            candidate_total,
+                            candidate,
+                            candidates_to_check,
+                            mirror_groups,
+                            take_screenshots,
+                            semaphore,
+                            cancel_event,
+                            search_mode,
+                        )
+                    )
+                    for batch_index, candidate in enumerate(candidates_to_check, start=1)
+                ]
+
+                try:
+                    for task in asyncio.as_completed(tasks):
+                        if cancel_event and cancel_event.is_set():
+                            self.db.update_run(
+                                run_id,
+                                status="canceled",
+                                finished_at=utc_now(),
+                                finding_count=findings_count,
+                                candidate_count=checked_total,
+                            )
+                            self.db.add_log(run_id, "warning", "Проверка остановлена пользователем", {"findings": findings_count})
+                            return
+                        if findings_count >= max_candidates:
+                            break
+                        finding = await task
+                        checked_total += 1
+                        handle_inspection_result(finding)
+                finally:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                self.db.update_run(run_id, candidate_count=checked_total)
+                if not await flush_screenshots():
+                    return
+
+            if findings_count < max_candidates and candidate_total:
+                self.db.add_log(
+                    run_id,
+                    "info",
+                    "Пул прохода исчерпан: автоматически ищу следующую партию",
+                    {
+                        "findings": findings_count,
+                        "target": max_candidates,
+                        "attempted": len(attempted_domains),
+                        "candidate_total": candidate_total,
+                    },
+                )
+
+            target_reached = findings_count >= max_candidates
+            if not await flush_screenshots():
+                return
+
+            if target_reached:
+                self.db.update_run(run_id, status="completed", finished_at=utc_now(), finding_count=findings_count)
+                self.db.add_log(
+                    run_id,
+                    "info",
+                    "Поиск завершен: выбранная цель набрана",
+                    {"findings": findings_count, "target": max_candidates},
+                )
+                return
+
+            self.db.update_run(
+                run_id,
+                status="running",
+                finished_at=None,
+                error=None,
+                finding_count=findings_count,
+                candidate_count=checked_total,
+            )
+            self.db.add_log(
+                run_id,
+                "info",
+                "Цель еще не набрана: запуск остается активным",
+                {
+                    "findings": findings_count,
+                    "target": max_candidates,
+                    "attempted": len(attempted_domains),
+                    "next_discovery_pass": discovery_round + 2,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.db.update_run(run_id, status="failed", finished_at=utc_now(), error=f"{type(exc).__name__}: {exc}")
+            self.db.add_log(run_id, "error", "Поиск завершился ошибкой", {"error": str(exc)})
+
+    async def _run(
+        self,
+        run_id: int,
+        seed_query: str | None,
+        max_candidates: int,
+        take_screenshots: bool,
+        cancel_event: Event | None = None,
+        search_mode: str = "auto",
+    ) -> None:
+        discovery_round = 0
+        empty_rounds = 0
+        while True:
+            before = self.db.get_run(run_id) or {}
+            before_checked = int(before.get("candidate_count") or 0)
+            before_findings = self.db.count_findings(run_id)
+            await self._run_discovery_pass(
+                run_id,
+                seed_query,
+                max_candidates,
+                take_screenshots,
+                cancel_event,
+                search_mode,
+                discovery_round,
+            )
+            current = self.db.get_run(run_id) or {}
+            status = str(current.get("status") or "")
+            findings_count = self.db.count_findings(run_id)
+            if status in {"completed", "canceled", "failed", "interrupted"}:
+                return
+
+            checked_total = int(current.get("candidate_count") or 0)
+            progressed = checked_total > before_checked or findings_count > before_findings
+            discovery_round += 1
+            if progressed:
+                empty_rounds = 0
+                continue
+
+            empty_rounds += 1
+            retry_delay = self._discovery_retry_delay(empty_rounds)
+            self.db.add_log(
+                run_id,
+                "warning",
+                "Новых доменов пока нет: запуск остается активным и повторит поиск",
+                {
+                    "findings": findings_count,
+                    "target": max_candidates,
+                    "attempted": len(self.db.list_run_attempted_domains(run_id)),
+                    "retry_seconds": retry_delay,
+                },
+            )
+            if await self._wait_for_discovery_retry(cancel_event, retry_delay):
+                self.db.update_run(
+                    run_id,
+                    status="canceled",
+                    finished_at=utc_now(),
+                    finding_count=findings_count,
+                    candidate_count=checked_total,
+                )
+                self.db.add_log(run_id, "warning", "Проверка остановлена пользователем", {"findings": findings_count})
+                return
+
+    def _candidate_check_limit(self, target_findings: int, available_candidates: int, search_mode: str) -> int:
+        if available_candidates <= 0:
+            return 0
+        target_findings = max(1, int(target_findings))
+        multiplier = 10 if self.normalize_search_mode(search_mode) == "casino" else 2
+        desired = max(target_findings, target_findings * multiplier)
+        return min(available_candidates, self.settings.max_candidates_per_run, desired)
+
+    @staticmethod
+    def _should_refresh_external_discovery(discovery_round: int) -> bool:
+        return max(0, int(discovery_round)) % EXTERNAL_DISCOVERY_REFRESH_INTERVAL == 0
+
+    @staticmethod
+    def _discovery_retry_delay(empty_rounds: int) -> int:
+        exponent = min(max(0, int(empty_rounds) - 1), 4)
+        return min(300, 30 * (2**exponent))
+
+    @staticmethod
+    async def _wait_for_discovery_retry(cancel_event: Event | None, delay_seconds: int) -> bool:
+        deadline = time.monotonic() + max(0, int(delay_seconds))
+        while time.monotonic() < deadline:
+            if cancel_event and cancel_event.is_set():
+                return True
+            await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+        return bool(cancel_event and cancel_event.is_set())
+
+    async def _inspect_candidate(
+        self,
+        run_id: int,
+        index: int,
+        total: int,
+        candidate: Candidate,
+        all_candidates: list[Candidate],
+        mirror_groups: list[dict[str, Any]],
+        take_screenshots: bool,
+        semaphore: asyncio.Semaphore,
+        cancel_event: Event | None = None,
+        search_mode: str = "auto",
+    ) -> dict[str, Any]:
+        async with semaphore:
+            if cancel_event and cancel_event.is_set():
+                return {
+                    "_skip": True,
+                    "_skip_reason": "проверка остановлена пользователем",
+                    "_candidate_index": index,
+                    "_candidate_total": total,
+                    "url": candidate.url,
+                    "domain": candidate.domain,
+                }
+
+            self.db.add_log(
+                run_id,
+                "info",
+                "Открываю сайт-кандидат",
+                {"index": index, "total": total, "domain": candidate.domain, "url": candidate.url},
+            )
+            mirror_group = self._mirror_group_for(candidate, all_candidates, mirror_groups)
+            try:
+                finding = await asyncio.wait_for(
+                    self._build_finding(
+                        run_id,
+                        candidate,
+                        mirror_group,
+                        take_screenshots,
+                        search_mode,
+                        defer_screenshot=True,
+                    ),
+                    timeout=self.settings.candidate_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                return {
+                    "_skip": True,
+                    "_skip_reason": f"таймаут проверки сайта {self.settings.candidate_timeout_seconds} сек.",
+                    "_candidate_index": index,
+                    "_candidate_total": total,
+                    "url": candidate.url,
+                    "domain": candidate.domain,
+                }
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "_skip": True,
+                    "_skip_reason": f"{type(exc).__name__}: {exc}",
+                    "_candidate_index": index,
+                    "_candidate_total": total,
+                    "url": candidate.url,
+                    "domain": candidate.domain,
+                }
+
+            finding.setdefault("_candidate_index", index)
+            finding.setdefault("_candidate_total", total)
+            finding.setdefault("domain", candidate.domain)
+            finding.setdefault("url", candidate.url)
+            return finding
+
+    async def _discover_candidates(
+        self,
+        run_id: int,
+        seed_query: str | None,
+        max_candidates: int,
+        search_mode: str = "auto",
+        excluded_domains: set[str] | None = None,
+        discovery_round: int = 0,
+        use_groq: bool = True,
+        cancel_event: Event | None = None,
+    ) -> list[Candidate]:
+        if cancel_event and cancel_event.is_set():
+            return []
+        search_mode = self._effective_search_mode(seed_query, search_mode)
+        excluded_domains = {
+            registered_domain(domain)
+            for domain in (excluded_domains or set())
+            if registered_domain(domain)
+        }
+        discovery_limit = min(
+            self.settings.max_candidates_per_run,
+            max(max_candidates * 10, 5000, self.settings.osint_candidate_pool_size),
+        )
+        candidate_target = max_candidates
+        if search_mode == "casino" and max_candidates >= 100:
+            candidate_target = min(
+                discovery_limit,
+                self.settings.max_candidates_per_run,
+                max_candidates * 50,
+            )
+        discovered: list[Candidate] = []
+        cancel_kwargs = {"cancel_event": cancel_event} if cancel_event is not None else {}
+        user_search_mode = self._user_search_mode(seed_query, search_mode)
+        refresh_external = self._should_refresh_external_discovery(discovery_round)
+        external_discovery_round = max(0, int(discovery_round)) // EXTERNAL_DISCOVERY_REFRESH_INTERVAL
+
+        if user_search_mode and refresh_external:
+            groq = getattr(self, "groq", None)
+            if use_groq and groq is not None and groq.available:
+                try:
+                    discovered.extend(
+                        self._discover_with_groq(
+                            run_id,
+                            seed_query,
+                            min(120, candidate_target),
+                            search_mode,
+                            query_offset=external_discovery_round * self.settings.groq_requests_per_discovery,
+                            **cancel_kwargs,
+                        )
+                    )
+                except httpx.HTTPStatusError as exc:
+                    self.db.add_log(
+                        run_id,
+                        "warning",
+                        "Groq Compound недоступен, продолжаю без него",
+                        {"status_code": exc.response.status_code, "gemini_used": False},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.db.add_log(
+                        run_id,
+                        "warning",
+                        "Groq Compound не дал кандидатов, продолжаю алгоритмический поиск",
+                        {"error": f"{type(exc).__name__}: {exc}", "gemini_used": False},
+                    )
+            if cancel_event and cancel_event.is_set():
+                return []
+            try:
+                query_count = max(1, len(self._user_search_queries(seed_query, search_mode)))
+                engine_limit = max(20, min(64, 16 + (max_candidates // 10)))
+                queries_per_pass = max(1, engine_limit // max(1, len(USER_SEARCH_ENGINES)))
+                rotations_per_page = max(1, (query_count + queries_per_pass - 1) // queries_per_pass)
+                page_offset = external_discovery_round // rotations_per_page
+                query_offset = (external_discovery_round % rotations_per_page) * queries_per_pass
+                if page_offset or query_offset:
+                    search_candidates = self._discover_with_user_search(
+                        run_id,
+                        seed_query,
+                        discovery_limit,
+                        max_candidates,
+                        search_mode,
+                        page_offset=page_offset,
+                        query_offset=query_offset,
+                        **cancel_kwargs,
+                    )
+                else:
+                    search_candidates = self._discover_with_user_search(
+                        run_id,
+                        seed_query,
+                        discovery_limit,
+                        max_candidates,
+                        search_mode,
+                        **cancel_kwargs,
+                    )
+                discovered.extend(search_candidates)
+            except Exception as exc:  # noqa: BLE001
+                self.db.add_log(run_id, "warning", "Пользовательский поиск недоступен", {"error": str(exc)})
+            if cancel_event and cancel_event.is_set():
+                return []
+            if self.settings.osint_feeds_enabled and len(discovered) < candidate_target:
+                feed_candidates = await self._discover_from_feeds(
+                    run_id,
+                    discovery_limit,
+                    search_mode,
+                    feed_page=external_discovery_round,
+                    **cancel_kwargs,
+                )
+                matched_feeds = [
+                    candidate
+                    for candidate in feed_candidates
+                    if self._candidate_matches_user_search(candidate, seed_query or "онлайн казино", search_mode)
+                ]
+                if matched_feeds:
+                    discovered.extend(matched_feeds)
+                    self.db.add_log(
+                        run_id,
+                        "warning",
+                        "OSINT fallback добавил кандидатов после недоступного поискового поиска",
+                        {"added": len(matched_feeds), "reason": "Search pages unavailable or returned too few casino domains"},
+                    )
+        elif user_search_mode:
+            self.db.add_log(
+                run_id,
+                "info",
+                "Продолжаю проверку локально расширенного пула без повторного запроса к поисковикам",
+                {
+                    "discovery_pass": discovery_round + 1,
+                    "next_external_refresh_pass": (
+                        ((discovery_round // EXTERNAL_DISCOVERY_REFRESH_INTERVAL) + 1)
+                        * EXTERNAL_DISCOVERY_REFRESH_INTERVAL
+                        + 1
+                    ),
+                },
+            )
+        else:
+            if refresh_external and self.settings.osint_feeds_enabled:
+                feed_candidates = await self._discover_from_feeds(
+                    run_id,
+                    discovery_limit,
+                    search_mode,
+                    feed_page=external_discovery_round,
+                    **cancel_kwargs,
+                )
+                discovered.extend(feed_candidates)
+            if refresh_external:
+                self.db.add_log(
+                    run_id,
+                    "info",
+                    "Автопоиск работает без Gemini",
+                    {"mode": "search-pages-and-osint", "gemini_used": False},
+                )
+
+        if cancel_event and cancel_event.is_set():
+            return []
+
+        if seed_query:
+            for domain in find_domains(seed_query):
+                if not is_candidate_domain(domain):
+                    continue
+                discovered.append(
+                    Candidate(
+                        url=normalize_url(domain),
+                        domain=domain,
+                        category=self._category_from_domain_context(domain, seed_query, "manual"),
+                        why="Домен указан оператором вручную.",
+                        search_query=seed_query,
+                    )
+                )
+
+        seed_domains = set(find_domains(seed_query or ""))
+        allow_bootstrap_refill = not seed_domains and (not user_search_mode or search_mode == "casino")
+
+        if allow_bootstrap_refill and len(discovered) < candidate_target:
+            bootstrap = self._discover_from_bootstrap(seed_query, candidate_target - len(discovered), search_mode)
+            if bootstrap:
+                discovered.extend(bootstrap)
+                self.db.add_log(
+                    run_id,
+                    "info",
+                    "Discovery bootstrap добавил кандидатов для проверки",
+                    {"added": len(bootstrap), "reason": "Поисковая выдача и OSINT дали мало доменов"},
+                )
+
+        candidates = self._sort_candidates_for_search_mode(
+            self._dedupe_candidates(discovered, discovery_limit),
+            search_mode,
+        )
+        known_domains = self.db.known_domains()
+        fresh_after_known, skipped_known = self._exclude_known_candidates(candidates, known_domains)
+        fresh_candidates, skipped_attempted = self._exclude_known_candidates(fresh_after_known, excluded_domains)
+        self.db.add_log(
+            run_id,
+            "info",
+            "Discovery candidates deduplicated",
+            {
+                "raw": len(discovered),
+                "deduped": len(candidates),
+                "skipped_known": skipped_known,
+                "skipped_attempted": skipped_attempted,
+                "algorithmic_added": 0,
+                "known_rechecked": 0,
+                "external_refresh": refresh_external,
+                "ready": len(fresh_candidates),
+            },
+        )
+        return self._sort_candidates_for_search_mode(fresh_candidates, search_mode)[:discovery_limit]
+
+    def _discover_with_groq(
+        self,
+        run_id: int,
+        seed_query: str | None,
+        limit: int,
+        search_mode: str,
+        query_offset: int = 0,
+        cancel_event: Event | None = None,
+    ) -> list[Candidate]:
+        queries = self._user_search_queries(seed_query, search_mode)
+        if not queries:
+            queries = [(seed_query or "онлайн казино играть").strip()]
+        rotation = max(0, int(query_offset)) % len(queries)
+        queries = queries[rotation:] + queries[:rotation]
+        request_limit = min(
+            self.settings.groq_requests_per_discovery,
+            len(queries),
+            max(1, (max(1, int(limit)) + 4) // 5),
+        )
+        selected_queries = queries[:request_limit]
+        self.db.add_log(
+            run_id,
+            "info",
+            "Groq Compound запускает серию реальных веб-поисков",
+            {
+                "model": self.groq.model,
+                "limit": limit,
+                "requests": request_limit,
+                "query_offset": max(0, int(query_offset)),
+            },
+        )
+        candidates: list[Candidate] = []
+        requests_made = 0
+        last_remaining: str | None = None
+        for query in selected_queries:
+            if len(candidates) >= limit or (cancel_event and cancel_event.is_set()):
+                break
+            request_started = time.monotonic()
+            requests_made += 1
+            try:
+                items, meta = self.groq.discover(query, min(5, limit - len(candidates)), search_mode)
+            except httpx.HTTPStatusError as exc:
+                self.db.add_log(
+                    run_id,
+                    "warning",
+                    "Groq Web Search временно недоступен",
+                    {"query": query, "status_code": exc.response.status_code, "requests": requests_made},
+                )
+                if exc.response.status_code in {413, 429}:
+                    break
+                continue
+            if cancel_event and cancel_event.is_set():
+                break
+            last_remaining = meta.get("rate_limit_remaining_requests")
+            added_before = len(candidates)
+            for item in items:
+                candidate = self._candidate_from_item(item, default_sources=meta.get("sources") or [])
+                if not candidate:
+                    continue
+                candidate.search_query = query
+                context = f"{candidate.domain} {candidate.url} {candidate.why}"
+                if self._is_informational_search_result(candidate.url, context, search_mode):
+                    continue
+                if not self._candidate_matches_user_search(candidate, query, search_mode):
+                    continue
+                if "search page" not in candidate.why.lower():
+                    candidate.why = f"Domain found in Groq Web Search page results. {candidate.why}".strip()
+                candidates.append(candidate)
+            candidates = self._dedupe_candidates(candidates, limit)
+            self.db.add_log(
+                run_id,
+                "info",
+                "Groq Web Search обработал запрос",
+                {
+                    "query": query,
+                    "added": len(candidates) - added_before,
+                    "requests": requests_made,
+                    "backend": meta.get("backend") or "compound",
+                    "compound_status_code": meta.get("compound_status_code"),
+                },
+            )
+            remaining_delay = 2.05 - (time.monotonic() - request_started)
+            if remaining_delay > 0 and requests_made < request_limit:
+                if cancel_event:
+                    if cancel_event.wait(remaining_delay):
+                        break
+                else:
+                    time.sleep(remaining_delay)
+        candidates = self._sort_candidates_for_search_mode(
+            self._dedupe_candidates(candidates, limit),
+            search_mode,
+        )
+        self.db.add_log(
+            run_id,
+            "info",
+            "Groq Compound discovery завершен",
+            {
+                "model": self.groq.model,
+                "candidates": len(candidates),
+                "requests": requests_made,
+                "remaining_daily_requests": last_remaining,
+                "gemini_used": False,
+            },
+        )
+        return candidates
+
+    def _discover_with_user_search(
+        self,
+        run_id: int,
+        seed_query: str | None,
+        discovery_limit: int,
+        max_candidates: int,
+        search_mode: str = "auto",
+        page_offset: int = 0,
+        query_offset: int = 0,
+        cancel_event: Event | None = None,
+    ) -> list[Candidate]:
+        if cancel_event and cancel_event.is_set():
+            return []
+        search_mode = self._effective_search_mode(seed_query, search_mode)
+        queries = self._user_search_queries(seed_query, search_mode)
+        if queries and query_offset:
+            rotation = max(0, query_offset) % len(queries)
+            queries = queries[rotation:] + queries[:rotation]
+        per_page_limit = 40
+        target_candidates = min(discovery_limit, max(100, max_candidates))
+        candidates: list[Candidate] = []
+        seen: set[str] = set()
+        search_issues: list[dict[str, Any]] = []
+        engine_request_limit = max(20, min(64, 16 + (max_candidates // 10)))
+        source_request_limit = max(4, min(16, max_candidates // 25))
+        search_time_limit = max(60, min(120, 50 + (max_candidates // 5)))
+        search_budget = SearchRequestBudget(
+            engine_limit=engine_request_limit,
+            source_limit=source_request_limit,
+            deadline_at=time.monotonic() + search_time_limit,
+        )
+        cancel_kwargs = {"cancel_event": cancel_event} if cancel_event is not None else {}
+        self.db.add_log(
+            run_id,
+            "info",
+            "User-search discovery started",
+            {
+                "queries": queries,
+                "mode": "search-page-user-results",
+                "search_mode": search_mode,
+                "pages": self.settings.search_result_pages,
+                "page_offset": max(0, page_offset),
+                "query_offset": max(0, query_offset),
+                "target_candidates": target_candidates,
+                "engine_request_limit": engine_request_limit,
+                "source_request_limit": source_request_limit,
+                "time_limit_seconds": search_time_limit,
+                "search_pages_enabled": self.settings.search_pages_enabled,
+                "gemini_used": False,
+            },
+        )
+        empty_pages = 0
+        for page_index in range(self.settings.search_result_pages):
+            if (
+                (cancel_event and cancel_event.is_set())
+                or search_budget.expired
+                or search_budget.engine_used >= search_budget.engine_limit
+            ):
+                break
+            page_added = 0
+            for query in queries:
+                if (
+                    len(candidates) >= target_candidates
+                    or (cancel_event and cancel_event.is_set())
+                    or search_budget.expired
+                    or search_budget.engine_used >= search_budget.engine_limit
+                ):
+                    break
+                batch: list[Candidate] = []
+                if self.settings.search_pages_enabled:
+                    batch.extend(
+                        self._discover_from_search_pages(
+                            run_id,
+                            query,
+                            per_page_limit,
+                            search_mode,
+                            search_issues,
+                            page_index=max(0, page_offset) + page_index,
+                            search_budget=search_budget,
+                            **cancel_kwargs,
+                        )
+                    )
+                for candidate in batch:
+                    key = candidate.key()
+                    if not key or key in seen:
+                        continue
+                    if not self._candidate_matches_user_search(candidate, query, search_mode):
+                        continue
+                    seen.add(key)
+                    if not candidate.search_query:
+                        candidate.search_query = query
+                    candidates.append(candidate)
+                    page_added += 1
+                    if len(candidates) >= target_candidates:
+                        break
+            if len(candidates) >= target_candidates:
+                break
+            empty_pages = empty_pages + 1 if page_added == 0 else 0
+            if empty_pages >= 2:
+                break
+        self._log_search_page_issues(run_id, search_issues, len(queries), len(candidates))
+        self.db.add_log(
+            run_id,
+            "info",
+            "User-search discovery finished",
+            {
+                "queries": len(queries),
+                "candidates": len(candidates),
+                "engine_requests": search_budget.engine_used,
+                "source_requests": search_budget.source_used,
+                "budget_exhausted": search_budget.expired
+                or search_budget.engine_used >= search_budget.engine_limit,
+                "gemini_used": False,
+            },
+        )
+        return self._sort_candidates_for_search_mode(candidates, search_mode)
+
+    def _discover_from_search_pages(
+        self,
+        run_id: int,
+        query: str,
+        limit: int,
+        search_mode: str = "auto",
+        search_issues: list[dict[str, Any]] | None = None,
+        *,
+        page_index: int = 0,
+        search_budget: SearchRequestBudget | None = None,
+        cancel_event: Event | None = None,
+    ) -> list[Candidate]:
+        if limit <= 0 or (cancel_event and cancel_event.is_set()):
+            return []
+        timeout = min(max(self.settings.request_timeout_seconds, 8), 14)
+        headers = {
+            "User-Agent": SEARCH_PAGE_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "ru-KZ,ru;q=0.9,en;q=0.6",
+        }
+        candidates: list[Candidate] = []
+        seen: set[str] = set()
+        seen_source_pages: set[str] = set()
+        search_issues = search_issues if search_issues is not None else []
+        with httpx.Client(
+            timeout=timeout,
+            headers=headers,
+            follow_redirects=True,
+            proxy=self.settings.kz_proxy_url,
+        ) as client:
+            for engine in USER_SEARCH_ENGINES:
+                if len(candidates) >= limit or (cancel_event and cancel_event.is_set()):
+                    break
+                engine_name = str(engine["name"])
+                if search_budget is not None and not search_budget.claim_engine():
+                    break
+                url = self._search_engine_url(engine, query, page_index=page_index)
+                try:
+                    self._throttle_search_request()
+                    response = client.get(url)
+                    response.raise_for_status()
+                except Exception as exc:  # noqa: BLE001
+                    error, status_code = self._search_error_summary(exc)
+                    issue: dict[str, Any] = {"engine": engine_name, "query": query, "error": error}
+                    if status_code is not None:
+                        issue["status_code"] = status_code
+                    search_issues.append(issue)
+                    continue
+                parsed = self._candidates_from_search_html(
+                    query=query,
+                    html=response.text,
+                    source_url=str(response.url),
+                    engine=engine_name,
+                    limit=limit - len(candidates),
+                    search_mode=search_mode,
+                )
+                added = 0
+                for candidate in parsed:
+                    key = candidate.key()
+                    if not key or key in seen:
+                        continue
+                    seen.add(key)
+                    candidates.append(candidate)
+                    added += 1
+                    if len(candidates) >= limit:
+                        break
+                source_added = 0
+                if len(candidates) < limit:
+                    source_pages = self._source_pages_from_search_html(
+                        query=query,
+                        html=response.text,
+                        source_url=str(response.url),
+                        search_mode=search_mode,
+                        limit=2,
+                    )
+                    for source_page in source_pages:
+                        if len(candidates) >= limit or (cancel_event and cancel_event.is_set()):
+                            break
+                        if search_budget is not None and not search_budget.claim_source():
+                            break
+                        if source_page in seen_source_pages:
+                            continue
+                        seen_source_pages.add(source_page)
+                        try:
+                            self._throttle_search_request()
+                            source_response = client.get(source_page)
+                            source_response.raise_for_status()
+                            content_type = str(source_response.headers.get("content-type") or "").lower()
+                            if content_type and "html" not in content_type:
+                                continue
+                        except Exception:  # noqa: BLE001
+                            continue
+                        source_candidates = self._candidates_from_source_html(
+                            query=query,
+                            html=source_response.text,
+                            source_url=str(source_response.url),
+                            limit=limit - len(candidates),
+                            search_mode=search_mode,
+                        )
+                        page_source_added = 0
+                        for candidate in source_candidates:
+                            key = candidate.key()
+                            if not key or key in seen:
+                                continue
+                            seen.add(key)
+                            candidates.append(candidate)
+                            source_added += 1
+                            page_source_added += 1
+                            if len(candidates) >= limit:
+                                break
+                        if page_source_added:
+                            self.db.add_log(
+                                run_id,
+                                "info",
+                                "Страница-источник обработана",
+                                {
+                                    "query": query,
+                                    "source": str(source_response.url),
+                                    "added": page_source_added,
+                                },
+                            )
+                if added or source_added:
+                    self.db.add_log(
+                        run_id,
+                        "info",
+                        "Search page processed",
+                        {
+                            "engine": engine_name,
+                            "query": query,
+                            "page": page_index + 1,
+                            "added": added + source_added,
+                            "from_sources": source_added,
+                        },
+                    )
+        return candidates
+
+    @staticmethod
+    def _search_engine_url(engine: dict[str, Any], query: str, *, page_index: int = 0) -> str:
+        query_param = str(engine.get("query_param") or "q")
+        params = {**dict(engine.get("params") or {}), query_param: query}
+        page_param = str(engine.get("page_param") or "").strip()
+        if page_param and page_index > 0:
+            page_origin = int(engine.get("page_origin") or 0)
+            page_step = max(1, int(engine.get("page_step") or 1))
+            params[page_param] = page_origin + (page_index * page_step)
+        return f"{engine['url']}?{urlencode(params)}"
+
+    def _throttle_search_request(self) -> None:
+        delay = max(0.0, float(self.settings.search_page_delay_seconds or 0.0))
+        if delay <= 0:
+            return
+        with self._search_request_lock:
+            elapsed = time.monotonic() - self._last_search_request_at
+            remaining = delay - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
+            self._last_search_request_at = time.monotonic()
+
+    def _log_search_page_issues(self, run_id: int, issues: list[dict[str, Any]], queries: int, candidates: int) -> None:
+        if not issues:
+            return
+        summary: dict[tuple[str, str, int | None], int] = {}
+        for issue in issues:
+            key = (
+                str(issue.get("engine") or "unknown"),
+                str(issue.get("error") or "error"),
+                issue.get("status_code") if isinstance(issue.get("status_code"), int) else None,
+            )
+            summary[key] = summary.get(key, 0) + 1
+        failures = [
+            {
+                "engine": engine,
+                "error": error,
+                "count": count,
+                **({"status_code": status_code} if status_code is not None else {}),
+            }
+            for (engine, error, status_code), count in sorted(summary.items(), key=lambda item: (-item[1], item[0][0]))
+        ]
+        self.db.add_log(
+            run_id,
+            "warning" if candidates == 0 else "info",
+            "Search pages degraded" if candidates else "Search pages unavailable",
+            {"queries": queries, "candidates": candidates, "failures": failures[:5]},
+        )
+
+    @staticmethod
+    def _search_error_summary(exc: Exception) -> tuple[str, int | None]:
+        if isinstance(exc, httpx.HTTPStatusError):
+            response = exc.response
+            status_code = response.status_code
+            if status_code == 429:
+                return "HTTP 429 Too Many Requests", status_code
+            reason = response.reason_phrase or "HTTP error"
+            return f"HTTP {status_code} {reason}", status_code
+        if isinstance(exc, httpx.TimeoutException):
+            return "timed out", None
+        if isinstance(exc, httpx.RequestError):
+            return exc.__class__.__name__, None
+        return exc.__class__.__name__, None
+
+    def _candidates_from_search_html(
+        self,
+        *,
+        query: str,
+        html: str,
+        source_url: str,
+        engine: str,
+        limit: int,
+        search_mode: str = "auto",
+    ) -> list[Candidate]:
+        search_mode = self._effective_search_mode(query, search_mode)
+        candidates: list[Candidate] = []
+        soup = BeautifulSoup(html or "", "html.parser")
+        for anchor in soup.find_all("a", href=True):
+            if len(candidates) >= limit:
+                break
+            href = str(anchor.get("href") or "").strip()
+            if not href or href.startswith(("#", "javascript:", "mailto:")):
+                continue
+            target_url = unwrap_known_redirect_url(urljoin(source_url, href))
+            title = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True))
+            parent = anchor.find_parent(["article", "li", "div"])
+            snippet = re.sub(r"\s+", " ", parent.get_text(" ", strip=True)) if parent else title
+            if not title and not target_url:
+                continue
+            source_context = f"{title} {snippet} {target_url}"
+            query_context = f"{query} {source_context}"
+            if self._is_informational_search_result(target_url, query_context, search_mode):
+                continue
+            category = self._category_from_search_result(source_context)
+            if (
+                search_mode == "casino"
+                and category == "suspicious"
+                and self._looks_like_kz_search_landing(extract_domain(target_url))
+                and has_casino_context(query)
+            ):
+                category = "casino"
+            domain_signals = gambling_domain_signals(target_url, query_context if search_mode == "casino" else source_context)
+            if category == "suspicious" and not domain_signals:
+                continue
+            candidate = self._candidate_from_item(
+                {
+                    "url": target_url,
+                    "title": title,
+                    "snippet": snippet,
+                    "category": category,
+                    "why": f"Домен найден в поисковой выдаче {engine} по пользовательскому запросу.",
+                    "search_query": query,
+                    "source_urls": [source_url],
+                },
+                default_sources=[],
+            )
+            if not candidate or not self._candidate_matches_user_search(candidate, query, search_mode):
+                continue
+            candidates.append(candidate)
+        return self._sort_candidates_for_search_mode(self._dedupe_candidates(candidates, limit), search_mode)
+
+    def _source_pages_from_search_html(
+        self,
+        *,
+        query: str,
+        html: str,
+        source_url: str,
+        search_mode: str,
+        limit: int,
+    ) -> list[str]:
+        pages: list[str] = []
+        soup = BeautifulSoup(html or "", "html.parser")
+        for anchor in soup.find_all("a", href=True):
+            href = str(anchor.get("href") or "").strip()
+            if not href or href.startswith(("#", "javascript:", "mailto:")):
+                continue
+            target_url = unwrap_known_redirect_url(urljoin(source_url, href))
+            domain = extract_domain(target_url)
+            if not is_candidate_url(target_url) or not domain or is_technical_url(target_url):
+                continue
+            title = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True))
+            parent = anchor.find_parent(["article", "li", "div"])
+            snippet = re.sub(r"\s+", " ", parent.get_text(" ", strip=True)) if parent else title
+            context = f"{query} {title} {snippet} {target_url}"
+            if not self._is_informational_search_result(target_url, context, search_mode):
+                continue
+            clean_url = normalize_url(target_url)
+            if clean_url not in pages:
+                pages.append(clean_url)
+            if len(pages) >= limit:
+                break
+        return pages
+
+    def _candidates_from_source_html(
+        self,
+        *,
+        query: str,
+        html: str,
+        source_url: str,
+        limit: int,
+        search_mode: str,
+    ) -> list[Candidate]:
+        if limit <= 0:
+            return []
+        source_domain = registered_domain(extract_domain(source_url))
+        soup = BeautifulSoup(html or "", "html.parser")
+        candidates: list[Candidate] = []
+        seen: set[str] = set()
+
+        for anchor in soup.find_all("a", href=True):
+            if len(candidates) >= limit:
+                break
+            href = str(anchor.get("href") or "").strip()
+            if not href or href.startswith(("#", "javascript:", "mailto:")):
+                continue
+            target_url = unwrap_known_redirect_url(urljoin(source_url, href))
+            domain = extract_domain(target_url)
+            key = registered_domain(domain)
+            if (
+                not key
+                or key == source_domain
+                or key in seen
+                or not is_candidate_url(target_url)
+                or is_technical_url(target_url)
+                or self._is_non_target_source_domain(domain)
+            ):
+                continue
+            title = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True))
+            parent = anchor.find_parent(["article", "li", "p", "div"])
+            context = re.sub(r"\s+", " ", parent.get_text(" ", strip=True)) if parent else title
+            item_context = f"{title} {context} {target_url}"
+            category = self._category_from_search_result(item_context)
+            if category == "suspicious" and not gambling_domain_signals(domain, item_context):
+                continue
+            candidate = self._candidate_from_item(
+                {
+                    "url": target_url,
+                    "title": title,
+                    "snippet": context,
+                    "category": category,
+                    "why": "Домен извлечен из публичной страницы жалоб, форума или обзора и отправлен на живую проверку.",
+                    "search_query": query,
+                    "source_urls": [source_url],
+                },
+                default_sources=[],
+            )
+            if not candidate or not self._candidate_matches_user_search(candidate, query, search_mode):
+                continue
+            seen.add(key)
+            candidates.append(candidate)
+
+        if len(candidates) < limit:
+            visible_text = soup.get_text(" ", strip=True)
+            for domain in find_domains(visible_text):
+                key = registered_domain(domain)
+                if (
+                    len(candidates) >= limit
+                    or not key
+                    or key == source_domain
+                    or key in seen
+                    or self._is_non_target_source_domain(domain)
+                ):
+                    continue
+                context = f"{query} {domain} {visible_text[:4000]}"
+                if not gambling_domain_signals(domain, context):
+                    continue
+                candidate = Candidate(
+                    url=normalize_url(domain),
+                    domain=domain,
+                    category=self._category_from_search_result(context),
+                    why="Домен упомянут на публичной странице-источнике и отправлен на живую проверку.",
+                    search_query=query,
+                    source_urls=[source_url],
+                )
+                if not self._candidate_matches_user_search(candidate, query, search_mode):
+                    continue
+                seen.add(key)
+                candidates.append(candidate)
+
+        return self._sort_candidates_for_search_mode(
+            self._dedupe_candidates(candidates, limit),
+            search_mode,
+        )
+
+    def _is_informational_search_result(self, url: str, context: str, search_mode: str = "auto") -> bool:
+        domain = extract_domain(url)
+        if self._is_non_target_source_domain(domain):
+            return True
+        search_mode = self.normalize_search_mode(search_mode)
+        direct_target = self._has_direct_user_target_signal(url, context)
+        strong_direct_target = self._has_strong_direct_user_target_signal(url, context)
+        stem = registered_domain(domain).split(".", 1)[0]
+        if INFORMATIONAL_DOMAIN_LABEL_RE.search(stem) and not strong_direct_target:
+            return True
+        if gambling_domain_signals(domain, context):
+            return False
+        text = f"{url} {context}"
+        if INFORMATIONAL_SEARCH_URL_RE.search(url or "") or INFORMATIONAL_SEARCH_CONTEXT_RE.search(text):
+            return not strong_direct_target
+        if search_mode == "casino":
+            return not direct_target
+        return False
+
+    @staticmethod
+    def _has_direct_user_target_signal(url: str, context: str) -> bool:
+        text = f"{url} {context}"
+        return bool(DIRECT_USER_TARGET_RE.search(text) or gambling_domain_signals(extract_domain(url), text))
+
+    @staticmethod
+    def _has_strong_direct_user_target_signal(url: str, context: str) -> bool:
+        return bool(STRONG_DIRECT_USER_TARGET_RE.search(f"{url} {context}"))
+
+    @staticmethod
+    def _category_from_search_result(text: str) -> str:
+        if has_casino_context(text):
+            return "casino"
+        if has_user_risk_search_context(text):
+            return "scam"
+        return "suspicious"
+
+    @staticmethod
+    def normalize_search_mode(search_mode: str | None) -> str:
+        normalized = re.sub(r"[^a-z_]+", "", (search_mode or "auto").strip().lower())
+        return normalized if normalized in SEARCH_MODES else "auto"
+
+    @staticmethod
+    def _effective_search_mode(seed_query: str | None, search_mode: str | None = "auto") -> str:
+        normalized = Investigator.normalize_search_mode(search_mode)
+        if normalized != "auto":
+            return normalized
+        text = seed_query or ""
+        if PHISHING_SEARCH_RE.search(text):
+            return "phishing"
+        if SCAM_SEARCH_RE.search(text) and not has_casino_context(text):
+            return "scam"
+        if has_casino_context(text):
+            return "casino"
+        return "auto"
+
+    @staticmethod
+    def _user_search_mode(seed_query: str | None, search_mode: str | None = "auto") -> bool:
+        effective_mode = Investigator._effective_search_mode(seed_query, search_mode)
+        return bool((seed_query or "").strip()) or effective_mode in {"casino", "phishing", "scam", "all"}
+
+    @staticmethod
+    def _user_search_queries(seed_query: str | None, search_mode: str | None = "auto") -> list[str]:
+        effective_mode = Investigator._effective_search_mode(seed_query, search_mode)
+        queries: list[str] = []
+        if seed_query and seed_query.strip():
+            queries.append(seed_query.strip())
+        if effective_mode == "casino":
+            queries.extend(CASINO_SEARCH_QUERIES)
+        elif effective_mode == "phishing":
+            queries.extend(PHISHING_SEARCH_QUERIES)
+        elif effective_mode == "scam":
+            queries.extend(SCAM_SEARCH_QUERIES)
+        elif effective_mode == "all" or not seed_query or has_user_risk_search_context(seed_query):
+            queries.extend(USER_SEARCH_QUERIES)
+        clean: list[str] = []
+        for query in queries:
+            normalized = re.sub(r"\s+", " ", query).strip()
+            if normalized and normalized not in clean:
+                clean.append(normalized)
+        if effective_mode == "casino":
+            return clean[:24]
+        if effective_mode in {"phishing", "scam"}:
+            return clean[:8]
+        return clean[:10]
+
+    @staticmethod
+    def _looks_like_kz_search_landing(domain: str) -> bool:
+        domain = extract_domain(domain)
+        if not domain or not registered_domain(domain).endswith(".kz"):
+            return False
+        labels = [re.sub(r"[^a-z0-9]+", "", label.lower()) for label in domain.split(".") if label]
+        registered_labels = registered_domain(domain).split(".")
+        sub_labels = labels[: max(0, len(labels) - len(registered_labels))]
+        return any(label in {"top", "go", "play", "app", "start", "lk", "m", "win", "vip", "club", "bonus", "online"} for label in sub_labels) or any(
+            re.fullmatch(r"[a-z]{2,12}\d{1,4}", label) for label in sub_labels
+        )
+
+    @staticmethod
+    def _casino_kz_relevance_score(url: str, context: str) -> int:
+        domain = extract_domain(url)
+        text = f"{url} {context}"
+        score = 0
+        if Investigator._has_kazakhstan_domain_hint(domain):
+            score += 120
+        if Investigator._looks_like_kz_search_landing(domain):
+            score += 60
+        if KZ_RELEVANCE_RE.search(text):
+            score += 60
+        return score
+
+    @staticmethod
+    def _has_kazakhstan_domain_hint(domain_or_url: str | None) -> bool:
+        domain = extract_domain(str(domain_or_url or ""))
+        registered = registered_domain(domain)
+        labels = [re.sub(r"[^a-z0-9]+", "", label.lower()) for label in domain.split(".") if label]
+        return bool(
+            registered
+            and (
+                registered.endswith(".kz")
+                or KZ_RELEVANCE_RE.search(domain)
+                or any(KZ_CASINO_LABEL_HINT_RE.search(label) for label in labels)
+            )
+        )
+
+    @staticmethod
+    def _has_cis_domain_hint(domain_or_url: str | None) -> bool:
+        domain = extract_domain(str(domain_or_url or ""))
+        registered = registered_domain(domain)
+        labels = [re.sub(r"[^a-z0-9]+", "", label.lower()) for label in domain.split(".") if label]
+        return bool(
+            registered
+            and (
+                registered.endswith(CIS_DOMAIN_TLDS)
+                or CIS_DOMAIN_HINT_RE.search(domain)
+                or any(CIS_CASINO_LABEL_HINT_RE.search(label) for label in labels)
+            )
+        )
+
+    @staticmethod
+    def _has_casino_product_signal(text: str | None) -> bool:
+        return bool(CASINO_PRODUCT_SIGNAL_RE.search(text or ""))
+
+    @staticmethod
+    def _is_bookmaker_first_context(text: str | None) -> bool:
+        return bool(BOOKMAKER_FIRST_RE.search(text or ""))
+
+    @staticmethod
+    def _is_official_bookmaker_domain(domain_or_url: str | None) -> bool:
+        domain = extract_domain(str(domain_or_url or ""))
+        registered = registered_domain(domain)
+        return bool(registered and registered in OFFICIAL_BOOKMAKER_DOMAINS)
+
+    @staticmethod
+    def _looks_like_blocked_page(content_ai: dict[str, Any], evidence: Any) -> bool:
+        quality = content_ai.get("site_quality") or {}
+        text = " ".join(
+            [
+                str(getattr(evidence, "title", "") or ""),
+                str(getattr(evidence, "description", "") or ""),
+                str(getattr(evidence, "text_excerpt", "") or ""),
+                " ".join(str(marker) for marker in quality.get("markers") or []),
+                " ".join(str(signal) for signal in content_ai.get("signals") or []),
+            ]
+        )
+        return bool(BLOCKED_PAGE_SIGNAL_RE.search(text))
+
+    @staticmethod
+    def _bootstrap_item_category(item: dict[str, Any]) -> str:
+        raw_values = [
+            str(item.get("brand") or ""),
+            extract_domain(str(item.get("domain") or "")).split(".", 1)[0],
+            *[str(alias) for alias in item.get("aliases", [])],
+        ]
+        for value in raw_values:
+            clean = re.sub(r"[^a-z0-9]+", "", value.lower())
+            if clean in BOOKMAKER_FIRST_BRANDS:
+                return "betting"
+        return str(item.get("category") or "suspicious")
+
+    def _sort_candidates_for_search_mode(self, candidates: list[Candidate], search_mode: str | None) -> list[Candidate]:
+        effective_mode = self.normalize_search_mode(search_mode)
+        if effective_mode == "auto":
+            return candidates
+        return sorted(
+            candidates,
+            key=lambda candidate: (
+                -self._candidate_search_rank(candidate, effective_mode),
+                self._stable_candidate_tie_breaker(candidate),
+                candidate.key(),
+            ),
+        )
+
+    @staticmethod
+    def _stable_candidate_tie_breaker(candidate: Candidate) -> str:
+        return hashlib.sha256(candidate.key().encode("utf-8", errors="ignore")).hexdigest()
+
+    @staticmethod
+    def _candidate_search_rank(candidate: Candidate, search_mode: str) -> int:
+        context = " ".join([candidate.domain, candidate.url, candidate.category, candidate.why])
+        product_context = " ".join([candidate.domain, candidate.url, candidate.why])
+        category_tokens = set(re.split(r"[^a-z_]+", candidate.category.lower()))
+        why_lower = candidate.why.lower()
+        source_score = 0
+        if candidate.source_urls:
+            source_score += 220
+        if "поисковой выдаче" in why_lower or "search page" in why_lower:
+            source_score += 180
+        if "algorithmic" in why_lower or "алгоритми" in why_lower:
+            source_score -= 320
+        elif "bootstrap" in why_lower:
+            source_score -= 120
+        if search_mode == "casino":
+            score = source_score
+            has_casino_product = Investigator._has_casino_product_signal(product_context)
+            bookmaker_first = Investigator._is_bookmaker_first_context(product_context)
+            score += max(0, Investigator._casino_kz_relevance_score(candidate.url, context))
+            if Investigator._has_cis_domain_hint(candidate.domain):
+                score += 70
+            if Investigator._is_official_bookmaker_domain(candidate.domain):
+                score -= 500
+            if bookmaker_first:
+                score -= 500
+            if category_tokens & {"casino", "online_casino"}:
+                score += 120
+            if has_casino_product:
+                score += 90
+            if re.search(r"(?i)(/casino|casino|slots?|slot|roulette|blackjack|jackpot|vulkan|joycasino|pinco|pin[-_]?up)", candidate.url):
+                score += 70
+            if Investigator._looks_like_kz_search_landing(candidate.domain):
+                score += 45
+            if category_tokens & {"betting", "gambling"} and not has_casino_product:
+                score -= 80
+            if bookmaker_first and not has_casino_product:
+                score -= 160
+            if BETTING_ONLY_RE.search(context) and not has_casino_product:
+                score -= 60
+            if category_tokens & {"phishing", "scam", "pyramid", "investment_pyramid"}:
+                score -= 100
+            return score
+        if search_mode == "phishing":
+            return (120 if "phishing" in category_tokens else 0) + (60 if PHISHING_SEARCH_RE.search(context) else 0)
+        if search_mode == "scam":
+            return (120 if category_tokens & {"scam", "pyramid", "investment_pyramid"} else 0) + (60 if SCAM_SEARCH_RE.search(context) else 0)
+        return 0
+
+    @staticmethod
+    def _candidate_matches_user_search(candidate: Candidate, query: str, search_mode: str | None = "auto") -> bool:
+        effective_mode = Investigator._effective_search_mode(query, search_mode)
+        candidate_context = " ".join(
+            [
+                candidate.domain,
+                candidate.url,
+                candidate.category,
+                candidate.why,
+            ]
+        )
+        category_tokens = set(re.split(r"[^a-z_]+", candidate.category.lower()))
+        if effective_mode == "casino":
+            if Investigator._is_official_bookmaker_domain(candidate.domain) or Investigator._is_official_bookmaker_domain(candidate.url):
+                return False
+            product_context = " ".join([candidate.domain, candidate.url, candidate.why])
+            has_casino_product = Investigator._has_casino_product_signal(product_context)
+            bookmaker_first = Investigator._is_bookmaker_first_context(product_context)
+            if bookmaker_first:
+                return False
+            if category_tokens & {"casino", "online_casino"}:
+                return not bookmaker_first or has_casino_product
+            if has_casino_product:
+                return True
+            if Investigator._looks_like_kz_search_landing(candidate.domain) and has_casino_context(query):
+                return True
+            return False
+        if effective_mode == "phishing":
+            return bool(category_tokens & {"phishing"} or PHISHING_SEARCH_RE.search(candidate_context))
+        if effective_mode == "scam":
+            return bool(
+                category_tokens & {"scam", "pyramid", "investment_pyramid"}
+                or (SCAM_SEARCH_RE.search(candidate_context) and not has_casino_context(candidate_context))
+            )
+        if category_tokens & {"casino", "gambling", "betting", "online_casino", "pyramid", "investment_pyramid", "scam"}:
+            return True
+        return bool(
+            gambling_domain_signals(candidate.domain, candidate_context)
+            or has_user_risk_search_context(candidate_context)
+        )
+
+    def _discover_from_bootstrap(self, seed_query: str | None, limit: int, search_mode: str = "auto") -> list[Candidate]:
+        if limit <= 0:
+            return []
+        effective_mode = self._effective_search_mode(seed_query, search_mode)
+        focus = (seed_query or " ".join(self.settings.seed_queries)).lower()
+        normalized_focus = re.sub(r"[^a-zа-я0-9]+", " ", focus)
+        wants_gambling = bool(re.search(r"(casino|казино|bet|бет|букмекер|ставк|зеркал|mirror)", normalized_focus))
+        use_all = not seed_query or wants_gambling
+
+        candidates: list[Candidate] = []
+        for item in BOOTSTRAP_CANDIDATES:
+            aliases = [str(alias).lower() for alias in item.get("aliases", [])]
+            matched = use_all or any(alias in normalized_focus for alias in aliases)
+            if not matched:
+                continue
+            domain = extract_domain(str(item["domain"]))
+            if not is_candidate_domain(domain):
+                continue
+            item_category = self._bootstrap_item_category(item)
+            if effective_mode == "casino" and item_category == "betting":
+                continue
+            candidates.append(
+                Candidate(
+                    url=normalize_url(domain),
+                    domain=domain,
+                    category=item_category,
+                    why=(
+                        "Bootstrap-кандидат: внешний поиск не дал достаточно доменов, "
+                        "поэтому известный бренд/домен отправлен на техническую проверку."
+                    ),
+                    search_query=seed_query or "bootstrap brand candidates",
+                    brand=str(item.get("brand") or "") or None,
+                )
+            )
+            if len(candidates) >= limit:
+                break
+        return candidates
+
+    def _discover_from_algorithmic_mirrors(
+        self,
+        seed_query: str | None,
+        limit: int,
+        excluded_domains: set[str],
+        search_mode: str = "auto",
+    ) -> list[Candidate]:
+        if limit <= 0:
+            return []
+        effective_mode = self._effective_search_mode(seed_query, search_mode)
+        focus = (seed_query or " ".join(self.settings.seed_queries)).lower()
+        normalized_focus = re.sub(r"[^a-zа-я0-9]+", " ", focus)
+        wants_gambling = bool(re.search(r"(casino|казино|bet|бет|букмекер|ставк|зеркал|mirror)", normalized_focus))
+        use_all = not seed_query or wants_gambling
+        seen = set(excluded_domains)
+        candidates: list[Candidate] = []
+
+        for item in BOOTSTRAP_CANDIDATES:
+            aliases = [str(alias).lower() for alias in item.get("aliases", [])]
+            matched = use_all or any(alias in normalized_focus for alias in aliases)
+            if not matched:
+                continue
+
+            item_category = self._bootstrap_item_category(item)
+            if effective_mode == "casino" and item_category == "betting":
+                continue
+            roots = self._brand_roots(item)
+            for root in roots:
+                for domain in self._mirror_domain_variants(root):
+                    key = registered_domain(domain)
+                    if not key or key in seen or not is_candidate_domain(key):
+                        continue
+                    seen.add(key)
+                    candidates.append(
+                        Candidate(
+                            url=normalize_url(key),
+                            domain=key,
+                            category=item_category,
+                            why=(
+                                "Algorithmic-кандидат: домен похож на зеркало или региональную "
+                                "вариацию известного risky-бренда и отправлен на живую проверку."
+                            ),
+                            search_query=seed_query or "algorithmic mirror expansion",
+                            brand=str(item.get("brand") or "") or None,
+                        )
+                    )
+                    if len(candidates) >= limit:
+                        return candidates
+        return candidates
+
+    @staticmethod
+    def _brand_roots(item: dict[str, Any]) -> list[str]:
+        raw_values = [
+            str(item.get("brand") or ""),
+            extract_domain(str(item.get("domain") or "")).split(".", 1)[0],
+            *[str(alias) for alias in item.get("aliases", [])],
+        ]
+        roots: list[str] = []
+        for value in raw_values:
+            clean = re.sub(r"[^a-z0-9]+", "", value.lower())
+            if len(clean) < 3 or clean in roots:
+                continue
+            roots.append(clean)
+        return roots[:4]
+
+    @staticmethod
+    def _mirror_domain_variants(root: str) -> list[str]:
+        domains: list[str] = []
+        for tld in MIRROR_TLDS:
+            domains.append(f"{root}.{tld}")
+            for modifier in MIRROR_MODIFIERS:
+                domains.append(f"{root}-{modifier}.{tld}")
+                domains.append(f"{root}{modifier}.{tld}")
+                domains.append(f"{modifier}-{root}.{tld}")
+        return domains[:180]
+
+    def _discover_with_gemini(
+        self,
+        run_id: int,
+        seed_query: str | None,
+        max_candidates: int,
+        search_mode: str = "auto",
+    ) -> list[Candidate]:
+        focus = seed_query.strip() if seed_query else " ; ".join(self.settings.seed_queries)
+        prompt = f"""
+Critical local-search behavior:
+- Treat domains like pinco4.aktif.kz and top.45minut.kz only as examples of direct search-result patterns; do not hardcode them or filter by Kazakhstan.
+- If Google/Gemini returns a redirect URL, unwrap it and return the real target domain, not google.com or vertexaisearch.cloud.google.com.
+- Do not discard plain-looking .kz subdomains when the title/snippet/query context is casino, slots, mirror, or gambling.
+- Primary task: reproduce what an ordinary browser user sees in search after typing the query. Prefer direct casino/pyramid sites from organic/ad-like search results over blacklist feeds, review articles, forums, and complaint databases.
+- In casino mode, reject official bookmaker home domains unless the page is clearly an illegal mirror or a real casino/slots product; casino and pyramid targets have priority over betting.
+- The target is the source website where a user can register, deposit, play, invest, or send money. A review, Telegram post, YouTube video, article, forum, catalog, or blacklist page is only a source_url, never the candidate.
+
+Ты OSINT-следователь и имитируешь обычный пользовательский поиск в браузере. Нужно найти прямые домены сайтов, которые обычный человек реально увидит, если ищет онлайн-казино, слоты, рабочие зеркала, фишинг или инвестиционные пирамиды.
+Используй Google Search grounding как браузерный поиск. Начинай с пользовательских запросов: "онлайн казино Казахстан", "казино онлайн играть", "слоты на деньги Казахстан", "рабочее зеркало казино", "казино зеркало вход", "инвестиции быстрый доход USDT", "Kaspi фишинг вход". Смотри прежде всего прямые результаты поиска, где пользователь может зайти, зарегистрироваться, внести деньги, играть или отправить деньги.
+Ищи не только по названию бренда, но и по шаблонам "site scam", "withdraw problem", "не выводят деньги", "жалоба", "отзывы", "обман", "blacklist", "complaint", "report".
+Полезные источники для расширения пула: поисковая выдача по пользовательским запросам. Публичные страницы жалоб, ScamAdviser/Trustpilot-style обзоры, форумы пострадавших и blacklist reports используй только как вспомогательные источники для извлечения прямого домена сайта-источника.
+Важно: форум, новость, Telegram, YouTube, соцсеть или каталог не является кандидатом. Из таких страниц извлекай прямой домен подозрительного сайта и сохраняй страницу жалобы в source_urls.
+1) онлайн-казино/беттинг без очевидной лицензии,
+2) рабочие зеркала казино/беттинга,
+3) инвестиционные лохотроны или фишинговые страницы.
+
+Очень важно:
+- Фокус: глобальный поиск, не только Казахстан. Нужны домены, которые реально открываются в браузере, включая рабочие зеркала.
+- Не возвращай официальные банки, госуслуги, маркетплейсы и крупные легитимные сервисы: kaspi.kz, halykbank.kz, homebank.kz, egov.kz, gov.kz и похожие официальные домены.
+- Если это букмекер без признаков casino/slots/roulette и без подтверждения нелегальности, ставь category="betting", а не "casino".
+- Если это онлайн-казино, должны быть признаки реального игрового продукта: slots, roulette, blackjack, jackpot, live casino, регистрация/депозит/игровое лобби.
+- Не возвращай домены, которые публично описаны как заблокированные и не имеют рабочего зеркала.
+- НЕ возвращай IP-адреса.
+- НЕ возвращай служебные URL Gemini/Google Search вроде vertexaisearch.cloud.google.com/grounding-api-redirect, google.com/url или google.com/search.
+- НЕ возвращай статьи, новости, форумы, Telegram, YouTube, соцсети, GitHub, каталоги и справочники.
+- Возвращай только прямой домен или URL подозрительного сайта, который можно открыть в браузере и зафиксировать скриншотом.
+- Если уверен только частично, все равно объясни сигнал, но не обвиняй окончательно.
+- Нужны живые домены, а не threat-feed строки.
+- Верни не меньше {max_candidates} разных доменов, если они есть. Лучше дать запас кандидатов, потому что часть сайтов может не открыться.
+
+Фокус поиска:
+{focus}
+
+Верни только JSON без Markdown:
+{{
+  "methodology": ["какие запросы использовал"],
+  "candidates": [
+    {{
+      "url": "https://domain.example",
+      "domain": "domain.example",
+      "category": "casino|gambling|phishing|scam|pyramid|suspicious",
+      "why": "коротко: почему домен выглядит подозрительно",
+      "search_query": "поисковый запрос, которым найдено",
+      "source_urls": ["https://public-source.example/page"],
+      "mirror_hints": ["other-domain.example"],
+      "brand": "название бренда если понятно"
+    }}
+  ]
+}}
+"""
+        self.db.add_log(run_id, "info", "Ищу сайты через Gemini Search", {"limit": max_candidates})
+        data, meta = self.gemini.generate_json(
+            prompt,
+            use_search=True,
+            temperature=0.2,
+            max_attempts=max(1, len(self.settings.gemini_api_keys) * len(self.settings.gemini_models)),
+            retry_sleep=False,
+        )
+        grounding_sources = meta.get("grounding_sources", [])
+        raw_items = data.get("candidates", []) or []
+        self.db.add_log(
+            run_id,
+            "info",
+            "Gemini вернул список для проверки",
+            {"items": len(raw_items), "sources": len(grounding_sources), "model": meta.get("model"), "key_hash": meta.get("key_hash")},
+        )
+
+        candidates: list[Candidate] = []
+        skipped_technical = 0
+        for item in raw_items:
+            candidate = self._candidate_from_item(item, default_sources=grounding_sources)
+            if candidate:
+                candidates.append(candidate)
+            else:
+                skipped_technical += 1
+        candidates.extend(self._candidates_from_grounding_sources(grounding_sources, focus, search_mode))
+        if skipped_technical:
+            self.db.add_log(
+                run_id,
+                "warning",
+                "Технические или неподходящие URL от Gemini пропущены",
+                {"count": skipped_technical},
+            )
+        return candidates
+
+    def _candidates_from_grounding_sources(
+        self,
+        grounding_sources: list[dict[str, str]],
+        focus: str,
+        search_mode: str = "auto",
+    ) -> list[Candidate]:
+        candidates: list[Candidate] = []
+        context = f"{focus} " + " ".join(
+            f"{source.get('title', '')} {source.get('url', '')}" for source in grounding_sources
+        )
+        if not has_user_risk_search_context(context):
+            return candidates
+        search_mode = self._effective_search_mode(focus, search_mode)
+        for source in grounding_sources:
+            url = str(source.get("url") or "")
+            title = str(source.get("title") or "")
+            source_context = f"{title} {url}"
+            category = self._category_from_search_result(source_context)
+            candidate = self._candidate_from_item(
+                {
+                    "url": url,
+                    "title": title,
+                    "category": category,
+                    "why": "Домен найден как прямой результат пользовательского Google-поиска через Gemini Search grounding.",
+                    "search_query": focus,
+                    "source_urls": [url],
+                },
+                default_sources=[],
+            )
+            if not candidate:
+                continue
+            if self._is_informational_search_result(candidate.url, f"{focus} {source_context}", search_mode):
+                continue
+            if not gambling_domain_signals(candidate.domain, f"{focus} {source_context}") and candidate.category in {"casino", "gambling"}:
+                candidate.category = "suspicious"
+            if not self._candidate_matches_user_search(candidate, focus, search_mode):
+                continue
+            candidates.append(candidate)
+        return self._sort_candidates_for_search_mode(candidates, search_mode)
+
+    async def _discover_from_plain_feeds_legacy(self, run_id: int, max_candidates: int) -> list[Candidate]:
+        candidates: list[Candidate] = []
+        timeout = min(self.settings.request_timeout_seconds, 15)
+        headers = {"User-Agent": self.settings.user_agent}
+        async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True) as client:
+            for feed_url in self.settings.osint_feeds:
+                if len(candidates) >= max_candidates:
+                    break
+                try:
+                    response = await client.get(feed_url)
+                    response.raise_for_status()
+                except Exception as exc:  # noqa: BLE001
+                    self.db.add_log(run_id, "warning", "OSINT feed недоступен", {"url": feed_url, "error": str(exc)})
+                    continue
+
+                added = 0
+                skipped = 0
+                for line in response.text.splitlines():
+                    if len(candidates) >= max_candidates:
+                        break
+                    text = line.strip()
+                    if not text or text.startswith("#"):
+                        continue
+                    domain = extract_domain(text)
+                    if not is_candidate_domain(domain):
+                        skipped += 1
+                        continue
+                    candidates.append(
+                        Candidate(
+                            url=normalize_url(text),
+                            domain=domain,
+                            category="phishing" if "phish" in feed_url.lower() else "suspicious",
+                            why=f"Домен найден в публичном OSINT feed: {feed_url}",
+                            search_query="public OSINT feed",
+                            source_urls=[feed_url],
+                        )
+                    )
+                    added += 1
+                self.db.add_log(run_id, "info", "OSINT feed обработан", {"url": feed_url, "added": added, "skipped": skipped})
+        return candidates
+
+    async def _discover_from_feeds(
+        self,
+        run_id: int,
+        max_candidates: int,
+        search_mode: str = "auto",
+        *,
+        feed_page: int = 0,
+        cancel_event: Event | None = None,
+    ) -> list[Candidate]:
+        if cancel_event and cancel_event.is_set():
+            return []
+        candidates: list[Candidate] = []
+        seen: set[str] = set()
+        timeout = min(self.settings.request_timeout_seconds, 15)
+        headers = {"User-Agent": self.settings.user_agent}
+        effective_mode = self._effective_search_mode(None, search_mode)
+        sources = self._osint_sources(effective_mode)
+
+        self.db.add_log(
+            run_id,
+            "info",
+            "OSINT discovery started",
+            {"sources": len(sources), "limit": max_candidates, "search_mode": effective_mode, "page": feed_page},
+        )
+        async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True) as client:
+            for source in sources:
+                if len(candidates) >= max_candidates or (cancel_event and cancel_event.is_set()):
+                    break
+                remaining = max_candidates - len(candidates)
+                try:
+                    response = await self._fetch_osint_source(client, source["url"], timeout, cancel_event)
+                    if response is None:
+                        break
+                    response.raise_for_status()
+                except Exception as exc:  # noqa: BLE001
+                    self.db.add_log(
+                        run_id,
+                        "warning",
+                        "OSINT source unavailable",
+                        {"name": source["name"], "url": source["url"], "error": str(exc)},
+                    )
+                    continue
+
+                if cancel_event and cancel_event.is_set():
+                    break
+
+                selected, matching, skipped = self._bounded_feed_sample(
+                    self._iter_feed_tokens(
+                        response.text,
+                        source["parser"],
+                        page=feed_page,
+                        line_limit=20_000,
+                    ),
+                    source,
+                    effective_mode,
+                    remaining,
+                    feed_page,
+                    cancel_event=cancel_event,
+                )
+                del response
+                if cancel_event and cancel_event.is_set():
+                    return []
+
+                added = 0
+                for token in selected:
+                    if cancel_event and cancel_event.is_set():
+                        return []
+                    if len(candidates) >= max_candidates:
+                        break
+                    domain = extract_domain(token)
+                    if not is_candidate_domain(domain):
+                        skipped += 1
+                        continue
+                    key = registered_domain(domain)
+                    if not key or key in seen:
+                        skipped += 1
+                        continue
+                    seen.add(key)
+                    candidates.append(
+                        Candidate(
+                            url=normalize_url(token or domain),
+                            domain=domain,
+                            category=source["category"],
+                            why=f"Domain found in CyberScan-style OSINT source: {source['name']}.",
+                            search_query=f"OSINT feed: {source['name']}",
+                            source_urls=[source["url"]],
+                        )
+                    )
+                    added += 1
+                self.db.add_log(
+                    run_id,
+                    "info",
+                    "OSINT source processed",
+                    {
+                        "name": source["name"],
+                        "category": source["category"],
+                        "matching": matching,
+                        "selected": len(selected),
+                        "added": added,
+                        "skipped": skipped,
+                        "feed_page": feed_page,
+                        "line_limit": 20_000,
+                    },
+                )
+        return [] if cancel_event and cancel_event.is_set() else candidates
+
+    @staticmethod
+    async def _fetch_osint_source(
+        client: httpx.AsyncClient,
+        url: str,
+        timeout: float,
+        cancel_event: Event | None,
+    ) -> httpx.Response | None:
+        task = asyncio.create_task(client.get(url))
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.01, float(timeout))
+        try:
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    return None
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError(f"OSINT source exceeded total download limit ({timeout:g} sec.)")
+                done, _ = await asyncio.wait({task}, timeout=min(0.1, remaining))
+                if done:
+                    return task.result()
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.wait({task}, timeout=0.1)
+            if task.done():
+                if not task.cancelled():
+                    task.exception()
+            else:
+                task.add_done_callback(lambda finished: None if finished.cancelled() else finished.exception())
+
+    def _bounded_feed_sample(
+        self,
+        tokens: Iterable[str],
+        source: dict[str, str],
+        effective_mode: str,
+        limit: int,
+        page: int = 0,
+        *,
+        cancel_event: Event | None = None,
+    ) -> tuple[list[str], int, int]:
+        if limit <= 0:
+            return [], 0, 0
+
+        rng = random.Random(f"{source['url']}:{max(0, int(page))}")
+        regional_rng = random.Random(f"{source['url']}:{max(0, int(page))}:cis")
+        selected: list[str] = []
+        selected_keys: set[str] = set()
+        regional_limit = min(limit, max(1, limit // 5))
+        regional_selected: list[str] = []
+        regional_keys: set[str] = set()
+        matching = 0
+        skipped = 0
+        eligible_seen = 0
+        regional_seen = 0
+
+        for token in tokens:
+            if cancel_event and cancel_event.is_set():
+                break
+            domain = extract_domain(token)
+            key = registered_domain(domain)
+            if not is_candidate_domain(domain) or not key:
+                skipped += 1
+                continue
+            if source["category"] == "casino" and effective_mode == "casino":
+                if (
+                    not self._has_casino_product_signal(domain)
+                    or self._is_official_bookmaker_domain(domain)
+                    or self._is_bookmaker_first_context(domain)
+                ):
+                    skipped += 1
+                    continue
+
+            matching += 1
+            if self._has_cis_domain_hint(domain) and key not in regional_keys:
+                regional_seen += 1
+                if len(regional_selected) < regional_limit:
+                    regional_selected.append(domain)
+                    regional_keys.add(key)
+                else:
+                    regional_index = regional_rng.randrange(regional_seen)
+                    if regional_index < regional_limit:
+                        old_regional_key = registered_domain(regional_selected[regional_index])
+                        if old_regional_key:
+                            regional_keys.discard(old_regional_key)
+                        regional_selected[regional_index] = domain
+                        regional_keys.add(key)
+
+            if key in selected_keys:
+                skipped += 1
+                continue
+
+            eligible_seen += 1
+            if len(selected) < limit:
+                selected.append(domain)
+                selected_keys.add(key)
+                continue
+
+            replacement_index = rng.randrange(eligible_seen)
+            if replacement_index >= limit:
+                continue
+            old_key = registered_domain(selected[replacement_index])
+            if old_key:
+                selected_keys.discard(old_key)
+            selected[replacement_index] = domain
+            selected_keys.add(key)
+
+        combined = list(regional_selected)
+        combined_keys = {registered_domain(domain) for domain in combined}
+        combined.extend(
+            domain
+            for domain in selected
+            if registered_domain(domain) not in combined_keys
+        )
+        return combined[:limit], matching, skipped
+
+    @staticmethod
+    def _sample_feed_tokens(tokens: list[str], limit: int, page: int = 0) -> list[str]:
+        if limit <= 0 or not tokens:
+            return []
+        if len(tokens) <= limit:
+            return list(tokens)
+        bucket_width = len(tokens) / limit
+        phase_options = max(1, int(bucket_width))
+        phase = max(0, int(page)) % phase_options
+        return [tokens[min(len(tokens) - 1, int((index * bucket_width) + phase))] for index in range(limit)]
+
+    def _osint_sources(self, search_mode: str = "auto") -> list[dict[str, str]]:
+        sources = [dict(item) for item in CYBERSCAN_OSINT_SOURCES]
+        known_urls = {item["url"] for item in sources}
+        for feed_url in self.settings.osint_feeds:
+            if feed_url in known_urls:
+                continue
+            known_urls.add(feed_url)
+            sources.append(
+                {
+                    "name": extract_domain(feed_url) or "custom_feed",
+                    "url": feed_url,
+                    "category": (
+                        "casino"
+                        if re.search(r"(?i)(gambling|casino)", feed_url)
+                        else "phishing"
+                        if "phish" in feed_url.lower()
+                        else "suspicious"
+                    ),
+                    "parser": "plain_list",
+                }
+            )
+        effective_mode = self.normalize_search_mode(search_mode)
+        if effective_mode == "casino":
+            return [source for source in sources if source["category"] == "casino"]
+        if effective_mode == "phishing":
+            return [source for source in sources if source["category"] in {"phishing", "malware"}]
+        if effective_mode == "scam":
+            return [source for source in sources if source["category"] == "suspicious"]
+        return sources
+
+    def _feed_tokens(self, text: str, parser: str) -> list[str]:
+        return list(self._iter_feed_tokens(text, parser))
+
+    def _iter_feed_tokens(
+        self,
+        text: str,
+        parser: str,
+        *,
+        page: int = 0,
+        line_limit: int | None = None,
+    ) -> Iterator[str]:
+        def window(rows):
+            if line_limit is None:
+                return rows
+            limit = max(1, int(line_limit))
+            line_count = text.count("\n") + int(bool(text) and not text.endswith("\n"))
+            windows = max(1, (line_count + limit - 1) // limit)
+            offset = (max(0, int(page)) % windows) * limit
+            return islice(rows, offset, offset + limit)
+
+        if parser == "csv":
+            rows = window(csv.reader(StringIO(text)))
+            for row in rows:
+                if not row or str(row[0]).lstrip().startswith("#"):
+                    continue
+                for cell in row:
+                    yield from self._domains_or_urls_from_text(cell)
+            return
+
+        for raw_line in window(StringIO(text)):
+            line = raw_line.strip()
+            if not line or line.startswith(("#", "!", "//")):
+                continue
+            line = line.split("#", 1)[0].strip()
+            if parser == "hosts_file":
+                parts = [part.strip() for part in line.split() if part.strip()]
+                line_tokens = [part for part in parts[1:] if "." in part] if len(parts) > 1 else parts
+            else:
+                line_tokens = [line]
+            for token in line_tokens:
+                yield from self._domains_or_urls_from_text(token)
+
+    @staticmethod
+    def _domains_or_urls_from_text(text: str) -> list[str]:
+        cleaned = text.strip().strip('"').strip("'").strip(",")
+        if not cleaned:
+            return []
+        urls = [
+            normalize_url(unwrap_known_redirect_url(url) or url)
+            for url in re.findall(r"(?i)https?://[^\s,\"'<>]+", cleaned)
+            if is_candidate_url(unwrap_known_redirect_url(url) or url)
+        ]
+        if urls:
+            return urls
+        domains = [
+            domain
+            for domain in re.findall(r"(?i)(?:[a-z0-9-]+\.)+[a-z]{2,24}", cleaned)
+            if is_candidate_domain(domain)
+        ]
+        if cleaned.startswith("||"):
+            domains.append(cleaned[2:].strip("^/"))
+        if not urls and not domains and is_candidate_domain(extract_domain(cleaned)):
+            domains.append(cleaned)
+        return [*urls, *domains]
+
+    async def _discover_mirrors(
+        self,
+        run_id: int,
+        candidates: list[Candidate],
+        search_mode: str = "auto",
+    ) -> list[dict[str, Any]]:
+        effective_mode = self.normalize_search_mode(search_mode)
+        casino_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.category.lower() in {"casino", "gambling", "betting", "suspicious"}
+            and (
+                effective_mode != "casino"
+                or (
+                    candidate.category.lower() != "betting"
+                    and not self._is_bookmaker_first_context(" ".join([candidate.domain, candidate.url, candidate.why]))
+                )
+            )
+        ]
+
+        groups: list[dict[str, Any]] = []
+        assigned: set[str] = set()
+        for candidate in casino_candidates:
+            key = candidate.key()
+            if not key or key in assigned:
+                continue
+            related = sorted(
+                {
+                    other.key()
+                    for other in casino_candidates
+                    if other.key() and likely_related_domains(candidate.domain, other.domain)
+                }
+            )
+            if len(related) < 2:
+                continue
+            assigned.update(related)
+            groups.append(
+                {
+                    "brand": candidate.brand or registered_domain(candidate.domain).split(".", 1)[0],
+                    "domains": related,
+                    "why": "Домены сгруппированы локально по сходству имени без обращения к Gemini.",
+                    "source_urls": self._clean_sources(
+                        [source for item in casino_candidates if item.key() in related for source in item.source_urls]
+                    ),
+                }
+            )
+        if groups:
+            self.db.add_log(
+                run_id,
+                "info",
+                "Зеркальные группы определены локальным алгоритмом",
+                {"count": len(groups), "gemini_used": False},
+            )
+        return groups
+
+    @staticmethod
+    def _screenshot_queue_item(finding: dict[str, Any]) -> tuple[int, dict[str, Any]] | None:
+        finding_id = int(finding.get("id") or 0)
+        final_url = str(finding.get("final_url") or "").strip()
+        if finding_id <= 0 or not final_url:
+            return None
+        return (
+            finding_id,
+            {
+                "domain": finding.get("domain"),
+                "final_url": final_url,
+                "url": finding.get("url"),
+                "title": finding.get("title"),
+                "html_path": finding.get("html_path"),
+                "status_code": finding.get("status_code"),
+            },
+        )
+
+    def _pending_screenshot_queue(self, run_id: int, limit: int) -> list[tuple[int, dict[str, Any]]]:
+        queue: list[tuple[int, dict[str, Any]]] = []
+        requested = max(1, min(int(limit), 500))
+        for finding in self.db.list_findings(run_id=run_id, limit=500):
+            screenshot_path = str(finding.get("screenshot_path") or "").strip()
+            # Older deployments could mark a failed screenshot as no longer
+            # pending.  A screenshot-enabled run still needs every finding
+            # without a real file, regardless of that stale flag.
+            is_pending = not screenshot_path
+            is_missing = bool(screenshot_path) and not self._screenshot_file_exists(screenshot_path)
+            if not is_pending and not is_missing:
+                continue
+            item = self._screenshot_queue_item(finding)
+            if item:
+                queue.append(item)
+            if len(queue) >= requested:
+                break
+        return queue
+
+    def has_recoverable_screenshots(self, run_id: int) -> bool:
+        return bool(self._pending_screenshot_queue(run_id, 1))
+
+    def _other_automatic_run_is_active(self, run_id: int) -> bool:
+        return any(
+            int(run.get("id") or 0) != run_id and int(run.get("max_candidates") or 0) > 1
+            for run in self.db.list_active_runs()
+        )
+
+    def _screenshot_file_exists(self, screenshot_path: str) -> bool:
+        normalized = str(screenshot_path or "").strip().replace("\\", "/")
+        if not normalized:
+            return False
+        path = Path(normalized)
+        if not path.is_absolute():
+            if normalized == "evidence" or normalized.startswith("evidence/"):
+                normalized = normalized.removeprefix("evidence").lstrip("/")
+            path = self.settings.evidence_dir / normalized
+        try:
+            return path.is_file() and path.stat().st_size > 0
+        except OSError:
+            return False
+
+    async def _drain_screenshot_queue(
+        self,
+        run_id: int,
+        screenshot_queue: list[tuple[int, dict[str, Any]]],
+        screenshot_semaphore: asyncio.Semaphore,
+        *,
+        findings_count: int,
+        checked_total: int,
+        cancel_event: Event | None = None,
+        recovery: bool = False,
+    ) -> bool:
+        if not screenshot_queue:
+            return True
+
+        gc.collect()
+        self.db.add_log(
+            run_id,
+            "info",
+            (
+                "Восстанавливаю незавершенные скриншоты после перезапуска"
+                if recovery
+                else "Проверка сайтов завершена: последовательно сохраняю скриншоты"
+            ),
+            {
+                "screenshots": len(screenshot_queue),
+                "pending": len(screenshot_queue),
+                "findings": findings_count,
+            },
+        )
+        for queue_index, (finding_id, finding) in enumerate(screenshot_queue, start=1):
+            run_status = str((self.db.get_run(run_id) or {}).get("status") or "")
+            if recovery and run_status == "completed" and self._other_automatic_run_is_active(run_id):
+                self.db.add_log(
+                    run_id,
+                    "info",
+                    "Восстановление скриншотов приостановлено: ресурсы отданы активному поиску",
+                    {"pending": len(screenshot_queue) - queue_index + 1},
+                )
+                return False
+            if cancel_event and cancel_event.is_set():
+                self.db.update_run(
+                    run_id,
+                    status="canceled",
+                    finished_at=utc_now(),
+                    finding_count=findings_count,
+                    candidate_count=checked_total,
+                )
+                self.db.add_log(
+                    run_id,
+                    "warning",
+                    "Проверка остановлена пользователем во время сохранения скриншотов",
+                    {"findings": findings_count, "screenshots_saved": queue_index - 1},
+                )
+                return False
+            captured = await self._capture_screenshot_with_stop(
+                run_id,
+                finding_id,
+                finding,
+                screenshot_semaphore,
+                cancel_event,
+            )
+            if not captured:
+                self.db.update_run(
+                    run_id,
+                    status="canceled",
+                    finished_at=utc_now(),
+                    finding_count=findings_count,
+                    candidate_count=checked_total,
+                )
+                self.db.add_log(
+                    run_id,
+                    "warning",
+                    "Проверка остановлена пользователем во время сохранения скриншотов",
+                    {"findings": findings_count, "screenshots_saved": queue_index - 1},
+                )
+                return False
+            if queue_index < len(screenshot_queue):
+                await asyncio.sleep(0.1)
+        screenshot_queue.clear()
+        gc.collect()
+        return True
+
+    async def _capture_screenshot_with_stop(
+        self,
+        run_id: int,
+        finding_id: int,
+        finding: dict[str, Any],
+        semaphore: asyncio.Semaphore,
+        cancel_event: Event | None,
+    ) -> bool:
+        task = asyncio.create_task(
+            self._capture_and_store_screenshot(run_id, finding_id, finding, semaphore)
+        )
+        loop = asyncio.get_running_loop()
+        # Allow the screenshot service a short cleanup margin after its own deadline.
+        deadline = loop.time() + max(0.01, float(self.settings.screenshot_timeout_seconds)) + 0.25
+        timed_out = False
+        try:
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    return False
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                done, _ = await asyncio.wait({task}, timeout=min(0.1, remaining))
+                if done:
+                    await task
+                    return not (cancel_event and cancel_event.is_set())
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.wait({task}, timeout=0.25)
+            if task.done():
+                if not task.cancelled():
+                    task.exception()
+            else:
+                # Retrieve a delayed cleanup error without blocking the search worker.
+                task.add_done_callback(lambda finished: None if finished.cancelled() else finished.exception())
+        if timed_out:
+            message = f"Таймаут сохранения скриншота ({self.settings.screenshot_timeout_seconds} сек.)"
+            self.db.update_finding_screenshot(finding_id, None, message)
+            self.db.add_log(
+                run_id,
+                "warning",
+                "Скриншот не завершился вовремя: продолжаю поиск",
+                {"finding_id": finding_id, "domain": finding.get("domain"), "error": message},
+            )
+        return not (cancel_event and cancel_event.is_set())
+
+    def repair_pending_screenshots(self, run_id: int) -> bool:
+        return asyncio.run(self._repair_pending_screenshots(run_id))
+
+    async def _repair_pending_screenshots(self, run_id: int) -> bool:
+        run = self.db.get_run(run_id)
+        if not run or not bool(run.get("take_screenshots")):
+            return True
+        screenshot_queue = self._pending_screenshot_queue(
+            run_id,
+            max(1, int(run.get("max_candidates") or 500)),
+        )
+        if not screenshot_queue:
+            return True
+        return await self._drain_screenshot_queue(
+            run_id,
+            screenshot_queue,
+            asyncio.Semaphore(1),
+            findings_count=self.db.count_findings(run_id),
+            checked_total=int(run.get("candidate_count") or 0),
+            recovery=True,
+        )
+
+    def repair_completed_screenshot_backlog(self, run_limit: int = 25) -> int:
+        return asyncio.run(self._repair_completed_screenshot_backlog(run_limit))
+
+    async def _repair_completed_screenshot_backlog(self, run_limit: int) -> int:
+        repaired_runs = 0
+        for run in self.db.list_runs(limit=max(1, min(int(run_limit), 100))):
+            if run.get("status") != "completed" or not bool(run.get("take_screenshots")):
+                continue
+            run_id = int(run["id"])
+            if self._other_automatic_run_is_active(run_id):
+                break
+            if not self.has_recoverable_screenshots(run_id):
+                continue
+            self.db.add_log(
+                run_id,
+                "info",
+                "Найдены отсутствующие скриншоты завершенного запуска",
+            )
+            completed = await self._repair_pending_screenshots(run_id)
+            self.db.finish_run_logs(run_id)
+            if not completed:
+                break
+            repaired_runs += 1
+        return repaired_runs
+
+    async def _capture_and_store_screenshot(
+        self,
+        run_id: int,
+        finding_id: int,
+        finding: dict[str, Any],
+        semaphore: asyncio.Semaphore,
+    ) -> None:
+        async with semaphore:
+            domain = str(finding.get("domain") or extract_domain(str(finding.get("final_url") or finding.get("url") or "")) or "")
+            final_url = str(finding.get("final_url") or finding.get("url") or "")
+            if not final_url:
+                return
+            self.db.add_log(
+                run_id,
+                "info",
+                "Делаю скриншот сайта",
+                {"domain": domain, "url": final_url, "finding_id": finding_id},
+            )
+            try:
+                screenshot = await self.screenshots.capture(
+                    final_url,
+                    run_id,
+                    title=finding.get("title"),
+                    html_path=finding.get("html_path"),
+                    status_code=finding.get("status_code"),
+                )
+                updated = self.db.update_finding_screenshot(finding_id, screenshot.path, screenshot.error)
+                if screenshot.path:
+                    if screenshot.error:
+                        self.db.add_log(
+                            run_id,
+                            "warning",
+                            "Скриншот сохранен с предупреждением",
+                            {"domain": domain, "path": screenshot.path, "warning": screenshot.error, "finding_id": finding_id},
+                        )
+                    else:
+                        self.db.add_log(
+                            run_id,
+                            "info",
+                            "Скриншот сохранен",
+                            {"domain": domain, "path": screenshot.path, "finding_id": finding_id},
+                        )
+                else:
+                    self.db.add_log(
+                        run_id,
+                        "warning",
+                        "Скриншот не сохранен",
+                        {"domain": domain, "error": screenshot.error, "finding_id": finding_id},
+                    )
+                if not updated:
+                    self.db.add_log(
+                        run_id,
+                        "warning",
+                        "Скриншот сделан, но запись находки уже не найдена",
+                        {"domain": domain, "finding_id": finding_id},
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self.db.update_finding_screenshot(finding_id, None, f"{type(exc).__name__}: {exc}")
+                self.db.add_log(
+                    run_id,
+                    "warning",
+                    "Скриншот не сохранен",
+                    {"domain": domain, "error": f"{type(exc).__name__}: {exc}", "finding_id": finding_id},
+                )
+
+    async def _build_finding(
+        self,
+        run_id: int,
+        candidate: Candidate,
+        mirror_group: str | None,
+        take_screenshots: bool,
+        search_mode: str = "auto",
+        defer_screenshot: bool = False,
+    ) -> dict[str, Any]:
+        evidence = await self.evidence.collect(candidate.url, run_id)
+        domain = evidence.domain or candidate.domain
+        if not is_candidate_domain(domain):
+            return {
+                "_skip": True,
+                "_skip_reason": "это IP, непубличный или технический домен",
+                "url": candidate.url,
+                "domain": domain,
+                "status_code": evidence.status_code,
+            }
+        status_code = int(evidence.status_code or 0)
+        if not evidence.active or not evidence.final_url or status_code < 200 or status_code >= 400:
+            skip_reason = "сайт не открылся с нормальным HTTP 2xx/3xx"
+            if evidence.blocked_by_policy:
+                skip_reason = "blocked/restricted access page; site is not treated as reachable"
+            return {
+                "_skip": True,
+                "_skip_reason": skip_reason,
+                "url": candidate.url,
+                "domain": domain,
+                "status_code": evidence.status_code,
+            }
+        if not evidence.html_path:
+            self.db.add_log(
+                run_id,
+                "warning",
+                "HTML не сохранен, продолжаю проверку по HTTP/DNS/TLS данным",
+                {"domain": domain, "status_code": evidence.status_code, "page_size_bytes": evidence.page_size_bytes},
+            )
+
+        source_urls = self._clean_sources(candidate.source_urls)
+        content_ai = self.content_ai.analyze(candidate.url, evidence)
+        content_skip = self._content_skip_reason(content_ai, evidence, candidate, search_mode)
+        if content_skip:
+            self.db.add_log(
+                run_id,
+                "warning",
+                "Сайт пропущен после контентной проверки",
+                {"domain": domain, "reason": content_skip, "category": content_ai.get("category_hint")},
+            )
+            return {
+                "_skip": True,
+                "_skip_reason": content_skip,
+                "url": candidate.url,
+                "domain": domain,
+                "status_code": evidence.status_code,
+            }
+
+        screenshot_path = None
+        screenshot_error = None
+        screenshot_pending = bool(take_screenshots and evidence.final_url and defer_screenshot)
+        if take_screenshots and evidence.final_url and not defer_screenshot:
+            self.db.add_log(run_id, "info", "Делаю скриншот сайта", {"domain": domain, "url": evidence.final_url})
+            screenshot = await self.screenshots.capture(
+                evidence.final_url,
+                run_id,
+                title=evidence.title,
+                html_path=evidence.html_path,
+                status_code=evidence.status_code,
+            )
+            screenshot_path = screenshot.path
+            screenshot_error = screenshot.error
+            if screenshot_path:
+                if screenshot_error:
+                    self.db.add_log(
+                        run_id,
+                        "warning",
+                        "Скриншот сохранен с предупреждением",
+                        {"domain": domain, "path": screenshot_path, "warning": screenshot_error},
+                    )
+                else:
+                    self.db.add_log(run_id, "info", "Скриншот сохранен", {"domain": domain, "path": screenshot_path})
+            elif screenshot_error:
+                self.db.add_log(run_id, "warning", "Скриншот не сохранен", {"domain": domain, "error": screenshot_error})
+        elif screenshot_pending:
+            self.db.add_log(run_id, "info", "Скриншот поставлен в фоновую очередь", {"domain": domain, "url": evidence.final_url})
+        elif not take_screenshots:
+            self.db.add_log(run_id, "info", "Скриншот пропущен: выключен в запуске", {"domain": domain})
+
+        cyberscan_result = self.cyberscan.classify(candidate.url, evidence, content_ai)
+        if cyberscan_result.get("available"):
+            self.db.add_log(
+                run_id,
+                "info",
+                "CyberScan ML classification completed",
+                {
+                    "domain": domain,
+                    "label": cyberscan_result.get("label"),
+                    "suspicious_probability": cyberscan_result.get("suspicious_probability"),
+                },
+            )
+        elif cyberscan_result.get("error"):
+            self.db.add_log(
+                run_id,
+                "warning",
+                "CyberScan ML unavailable",
+                {"domain": domain, "error": cyberscan_result.get("error")},
+            )
+
+        ml_result = self.ml.classify(candidate.url, evidence)
+        if ml_result.get("available"):
+            self.db.add_log(
+                run_id,
+                "info",
+                "ML классификация сайта завершена",
+                {
+                    "domain": domain,
+                    "label": ml_result.get("label"),
+                    "confidence": ml_result.get("confidence"),
+                    "model": ml_result.get("model"),
+                },
+            )
+        elif ml_result.get("error"):
+            self.db.add_log(
+                run_id,
+                "warning",
+                "ML классификация недоступна",
+                {"domain": domain, "error": ml_result.get("error")},
+            )
+
+        category = self._category_with_ai(candidate.category or "suspicious", ml_result, cyberscan_result, content_ai)
+        risk, verdict, reasons = score_finding(
+            category=category,
+            active=evidence.active,
+            status_code=evidence.status_code,
+            keyword_hits=evidence.keyword_hits,
+            has_sources=bool(source_urls),
+            domain=domain,
+            mirror_group=mirror_group,
+        )
+        risk = min(
+            100,
+            risk
+            + int(content_ai.get("risk_delta") or 0)
+            + self._ml_risk_delta(ml_result)
+            + self._cyberscan_risk_delta(cyberscan_result),
+        )
+        technical_delta, technical_reasons = self._technical_risk_signals(evidence)
+        risk = max(0, min(100, risk + technical_delta))
+        risk = self._apply_policy_caps(risk, category, content_ai)
+        risk = min(95, risk)
+        verdict = self._verdict_for_risk(risk)
+        if candidate.why:
+            reasons.insert(0, candidate.why)
+        for signal in reversed(technical_reasons):
+            reasons.insert(1 if candidate.why else 0, signal)
+        for signal in reversed(content_ai.get("signals") or []):
+            reasons.insert(1 if candidate.why else 0, str(signal))
+        cyberscan_reason = self._cyberscan_reason(cyberscan_result)
+        if cyberscan_reason:
+            reasons.insert(1 if candidate.why else 0, cyberscan_reason)
+        ml_reason = self._ml_reason(ml_result)
+        if ml_reason:
+            reasons.insert(1 if candidate.why else 0, ml_reason)
+        if screenshot_error:
+            if screenshot_path:
+                reasons.append(f"Screenshot saved with warning: {screenshot_error}")
+            else:
+                reasons.append(f"Screenshot not saved: {screenshot_error}")
+        if not evidence.html_path:
+            reasons.append("HTML не сохранен, но сайт ответил нормальным HTTP-кодом; DNS/TLS/скорость/редиректы зафиксированы.")
+        if evidence.tls and not evidence.tls.get("valid"):
+            reasons.append("SSL/TLS сертификат отсутствует или недействителен; сайт все равно зафиксирован как рабочий по HTTP-доступности.")
+        reasons = self._compact_reasons(reasons)
+
+        return {
+            "url": candidate.url,
+            "final_url": evidence.final_url,
+            "domain": domain,
+            "normalized_domain": registered_domain(domain),
+            "title": evidence.title,
+            "category": category,
+            "verdict": verdict,
+            "risk_score": risk,
+            "active": evidence.active,
+            "status_code": evidence.status_code,
+            "mirror_group": mirror_group,
+            "screenshot_path": screenshot_path,
+            "html_path": evidence.html_path,
+            "html_sha256": evidence.html_sha256,
+            "dns_json": evidence.dns,
+            "tls_json": evidence.tls,
+            "evidence_json": {
+                **evidence.as_evidence(),
+                "search_query": candidate.search_query,
+                "brand": candidate.brand,
+                "mirror_hints": candidate.mirror_hints,
+                "ml": ml_result,
+                "cyberscan_ml": cyberscan_result,
+                "content_ai": content_ai,
+                "screenshot_error": screenshot_error,
+                "screenshot_pending": screenshot_pending,
+            },
+            "sources_json": [{"url": url} for url in source_urls],
+            "reasons_json": reasons,
+        }
+
+    @staticmethod
+    def _content_skip_reason(
+        content_ai: dict[str, Any],
+        evidence: Any,
+        candidate: Candidate | None = None,
+        search_mode: str | None = "auto",
+    ) -> str | None:
+        search_mode = Investigator.normalize_search_mode(search_mode)
+        quality = content_ai.get("site_quality") or {}
+        has_domain_signals = bool(
+            content_ai.get("casino_keywords")
+            or content_ai.get("betting_keywords")
+            or content_ai.get("pyramid_keywords")
+            or content_ai.get("brand_impersonation")
+            or content_ai.get("domain_gambling_signals")
+        )
+        candidate_category = (candidate.category if candidate else "").lower()
+        candidate_context = " ".join(
+            [
+                candidate.domain if candidate else "",
+                candidate.search_query if candidate else "",
+                candidate.why if candidate else "",
+            ]
+        )
+        source_supports_gambling = bool(
+            candidate
+            and (
+                set(re.split(r"[^a-z_]+", candidate_category)) & {"casino", "gambling", "betting"}
+                or gambling_domain_signals(candidate.domain, candidate_context)
+            )
+        )
+        if getattr(evidence, "blocked_by_policy", False) or quality.get("is_blocked_or_restricted") or Investigator._looks_like_blocked_page(content_ai, evidence):
+            return "blocked/restricted access page; not a reachable user-facing target"
+        if quality.get("is_empty_or_parked") and (quality.get("markers") or not has_domain_signals):
+            return "страница пустая, parking/placeholder или не содержит полезного контента"
+        if search_mode == "casino":
+            final_url = str(getattr(evidence, "final_url", "") or "")
+            if candidate and (
+                Investigator._is_official_bookmaker_domain(candidate.domain)
+                or Investigator._is_official_bookmaker_domain(final_url or candidate.url)
+            ):
+                return "casino mode: official bookmaker domain, not a casino/mirror target"
+            if candidate and Investigator._is_bookmaker_first_context(
+                " ".join([candidate.domain, candidate.url, candidate.why, final_url])
+            ):
+                return "casino mode: betting-first brand, not a pure casino target"
+            content_label = str(content_ai.get("category_hint") or "").lower()
+            casino_hits = content_ai.get("casino_keywords") or []
+            betting_hits = content_ai.get("betting_keywords") or []
+            pyramid_hits = content_ai.get("pyramid_keywords") or []
+            casino_context = " ".join(
+                [
+                    candidate.url if candidate else "",
+                    candidate.domain if candidate else "",
+                    str(getattr(evidence, "final_url", "") or ""),
+                    " ".join(str(hit) for hit in casino_hits),
+                ]
+            )
+            has_casino_product = bool(
+                content_label == "online_casino"
+                or casino_hits
+                or Investigator._has_casino_product_signal(casino_context)
+            )
+            if not has_casino_product and (content_label == "investment_pyramid" or pyramid_hits):
+                return None
+            if not has_casino_product and (content_label == "sports_betting_review" or betting_hits):
+                return "режим casino: букмекерская/ставочная страница без признаков онлайн-казино"
+            if not has_casino_product and candidate and candidate.category in {"betting", "gambling"}:
+                return "режим casino: кандидат похож на betting, но не на casino/slots"
+            if not has_casino_product:
+                return "режим casino: на странице нет признаков онлайн-казино, слотов или игрового лобби"
+        if source_supports_gambling:
+            return None
+        if quality.get("quality") == "thin_content" and not has_domain_signals:
+            return "страница слишком пустая для реестра: нет контента и нет сильных признаков риска"
+        if not getattr(evidence, "html_path", None) and int(getattr(evidence, "page_size_bytes", 0) or 0) < 1500 and not has_domain_signals:
+            return "ответ сайта слишком мал и HTML не сохранен; кандидат похож на пустышку"
+        return None
+
+    @staticmethod
+    def _technical_risk_signals(evidence: Any) -> tuple[int, list[str]]:
+        delta = 0
+        reasons: list[str] = []
+        domain_info = evidence.domain_info or {}
+        dns = evidence.dns or {}
+        tls = evidence.tls or {}
+
+        age = domain_info.get("age_days")
+        try:
+            age_days = int(age) if age is not None else None
+        except (TypeError, ValueError):
+            age_days = None
+        if age_days is not None:
+            if age_days >= 0 and age_days <= 30:
+                delta += 15
+                reasons.append(f"Домен очень молодой: {age_days} дн.; это сильный признак одноразовой инфраструктуры.")
+            elif age_days <= 180:
+                delta += 8
+                reasons.append(f"Домен зарегистрирован недавно: {age_days} дн.; требуется повышенная проверка.")
+
+        registrar = str(domain_info.get("registrar") or "")
+        privacy_text = " ".join(
+            str(domain_info.get(key) or "")
+            for key in ("privacy", "is_private", "registrant", "org", "organization")
+        ).lower()
+        if any(token in privacy_text for token in ("privacy", "redacted", "private", "whoisguard")):
+            delta += 5
+            reasons.append("WHOIS выглядит скрытым или редактированным; владелец домена не прозрачен.")
+        if registrar:
+            reasons.append(f"WHOIS registrar: {registrar}.")
+
+        mx_records = dns.get("mx_records") or []
+        if not mx_records:
+            delta += 3
+            reasons.append("MX-записи не найдены; для одноразовых доменов это частый технический паттерн.")
+
+        if tls:
+            issuer = str(tls.get("issuer") or "").lower()
+            subject = str(tls.get("subject") or "").lower()
+            if not tls.get("valid"):
+                delta += 8
+                reasons.append("SSL/TLS не подтвержден или отсутствует; это не доказывает фишинг, но усиливает технический риск.")
+            if issuer and subject and issuer == subject:
+                delta += 10
+                reasons.append("SSL/TLS самоподписанный; это сильный технический сигнал риска.")
+            try:
+                days_left = int(tls.get("expires_in_days"))
+            except (TypeError, ValueError):
+                days_left = None
+            if days_left is not None and 0 <= days_left <= 7:
+                delta += 4
+                reasons.append(f"SSL/TLS истекает очень скоро: {days_left} дн.; фиксируется как технический риск.")
+
+        return delta, reasons
+
+    @staticmethod
+    def _apply_policy_caps(risk: int, category: str, content_ai: dict[str, Any]) -> int:
+        policy = content_ai.get("domain_policy") or {}
+        credential_risk = bool(content_ai.get("credential_risk"))
+        category_lower = (category or "").lower()
+        if policy.get("trusted") and category_lower != "phishing" and not credential_risk:
+            return max(0, min(35, risk))
+        if category_lower == "sports_betting_review":
+            return max(0, min(72, risk))
+        if category_lower == "empty_or_parked":
+            return max(0, min(25, risk))
+        return risk
+
+    def _category_with_ai(
+        self,
+        category: str,
+        ml_result: dict[str, Any],
+        cyberscan_result: dict[str, Any],
+        content_ai: dict[str, Any],
+    ) -> str:
+        content_label = str(content_ai.get("category_hint") or "").lower()
+        content_confidence = str(content_ai.get("category_confidence") or "low").lower()
+        policy = content_ai.get("domain_policy") or {}
+        if policy.get("trusted") and content_label != "phishing":
+            return "legit"
+        strong_content_labels = {
+            "online_casino",
+            "sports_betting_review",
+            "investment_pyramid",
+            "phishing",
+            "suspicious",
+            "empty_or_parked",
+            "legit",
+        }
+        if content_label in strong_content_labels and content_confidence in {"medium", "high"}:
+            return content_label
+
+        ml_label = str(ml_result.get("label") or "").lower()
+        ml_confidence = float(ml_result.get("confidence") or 0)
+        if ml_label == "legit" and ml_confidence >= 0.75 and content_confidence == "low":
+            return "legit"
+
+        ml_category = self._category_with_ml(category, ml_result)
+        if ml_category != category:
+            return ml_category
+
+        cyber_label = str(cyberscan_result.get("label") or "").lower()
+        cyber_probability = float(cyberscan_result.get("suspicious_probability") or 0)
+        weak_category = category.lower() in {"", "manual", "unknown", "suspicious"}
+        if cyber_label == "suspicious" and cyber_probability >= 0.68 and weak_category:
+            return "suspicious"
+        return category
+
+    def _category_with_ml(self, category: str, ml_result: dict[str, Any]) -> str:
+        label = str(ml_result.get("label") or "").lower()
+        confidence = float(ml_result.get("confidence") or 0)
+        if label not in {"phishing", "casino", "pyramid", "suspicious"}:
+            return category
+        weak_category = category.lower() in {"", "manual", "unknown", "suspicious"}
+        label_map = {"casino": "online_casino", "pyramid": "investment_pyramid"}
+        mapped_label = label_map.get(label, label)
+        if confidence >= self.settings.ml_min_confidence and (weak_category or confidence >= 0.65):
+            return mapped_label
+        return category
+
+    @staticmethod
+    def _ml_risk_delta(ml_result: dict[str, Any]) -> int:
+        if not ml_result.get("available"):
+            return 0
+        label = str(ml_result.get("label") or "").lower()
+        confidence = float(ml_result.get("confidence") or 0)
+        if label == "legit":
+            if confidence >= 0.85:
+                return -24
+            if confidence >= 0.70:
+                return -16
+            if confidence >= 0.58:
+                return -8
+            return 0
+        if label in {"phishing", "casino", "pyramid"}:
+            if confidence >= 0.85:
+                return 16
+            if confidence >= 0.68:
+                return 10
+            if confidence >= 0.55:
+                return 5
+        if label == "suspicious" and confidence >= 0.70:
+            return 8
+        return 0
+
+    @staticmethod
+    def _cyberscan_risk_delta(cyberscan_result: dict[str, Any]) -> int:
+        if not cyberscan_result.get("available"):
+            return 0
+        label = str(cyberscan_result.get("label") or "").lower()
+        probability = float(cyberscan_result.get("suspicious_probability") or 0)
+        if label == "legit" or probability <= 0.30:
+            return -8 if probability <= 0.22 else -4
+        if probability >= 0.85:
+            return 18
+        if probability >= 0.68:
+            return 12
+        if probability >= 0.55:
+            return 6
+        return 0
+
+    @classmethod
+    def _cyberscan_reason(cls, cyberscan_result: dict[str, Any]) -> str | None:
+        if not cyberscan_result.get("available"):
+            return None
+        label = str(cyberscan_result.get("label") or "").lower()
+        probability = float(cyberscan_result.get("suspicious_probability") or 0)
+        top = cls._readable_feature_list(cyberscan_result.get("top_features", []), limit=4)
+        details = f"; главные сигналы: {', '.join(top)}" if top else ""
+        if label == "legit" or probability <= 0.30:
+            return f"CyberScan ML не видит сильных признаков мошенничества: подозрительность {probability:.0%}{details}."
+        return f"CyberScan ML оценил подозрительность сайта как {probability:.0%}{details}."
+
+    @staticmethod
+    def _verdict_for_risk(risk: int) -> str:
+        if risk >= 80:
+            return "suspected_fraud_or_illegal"
+        if risk >= 60:
+            return "suspicious"
+        if risk >= 40:
+            return "needs_review"
+        return "low_signal"
+
+    @classmethod
+    def _ml_reason(cls, ml_result: dict[str, Any]) -> str | None:
+        if not ml_result.get("available"):
+            return None
+        label = str(ml_result.get("label") or "unknown")
+        confidence = float(ml_result.get("confidence") or 0)
+        display_label = CATEGORY_DISPLAY.get(label.lower(), label)
+        top = cls._readable_feature_list(ml_result.get("top_features", []), limit=4)
+        details = f"; главные сигналы: {', '.join(top)}" if top else ""
+        if label.lower() == "legit":
+            return f"CatBoost считает сайт похожим на обычный: уверенность {confidence:.0%}{details}."
+        return f"CatBoost относит сайт к категории «{display_label}»: уверенность {confidence:.0%}{details}."
+
+    @staticmethod
+    def _readable_feature_list(features: Any, *, limit: int = 4) -> list[str]:
+        if not isinstance(features, list):
+            return []
+        readable: list[str] = []
+        for item in features:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("label") or FEATURE_DISPLAY.get(str(item.get("feature") or ""), item.get("feature") or ""))
+            if not name or name in readable:
+                continue
+            readable.append(name)
+            if len(readable) >= limit:
+                break
+        return readable
+
+    @staticmethod
+    def _compact_reasons(reasons: list[Any], *, limit: int = 14) -> list[str]:
+        compact: list[str] = []
+        seen: set[str] = set()
+        for reason in reasons:
+            text = str(reason or "").strip()
+            if not text:
+                continue
+            key = re.sub(r"\s+", " ", text).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            compact.append(text)
+            if len(compact) >= limit:
+                break
+        return compact
+
+    def _candidate_from_item(
+        self,
+        item: dict[str, Any],
+        default_sources: list[Any],
+    ) -> Candidate | None:
+        text_blob = self._item_text_blob(item, default_sources)
+        category_item = {key: value for key, value in item.items() if key != "search_query"}
+        category_text_blob = self._item_text_blob(category_item, default_sources)
+        url = unwrap_known_redirect_url(str(item.get("url") or item.get("domain") or "").strip())
+        domain = extract_domain(item.get("domain") or url)
+        domain_candidates = self._candidate_domains_from_text(text_blob)
+        if self._is_non_target_source_domain(domain):
+            domain = next((candidate for candidate in domain_candidates if not self._is_non_target_source_domain(candidate)), "")
+        if not is_candidate_domain(domain):
+            domain = next((candidate for candidate in domain_candidates if not self._is_non_target_source_domain(candidate)), "")
+        if not is_candidate_domain(domain):
+            return None
+        normalized_url = normalize_url(url or domain)
+        normalized_url_domain = extract_domain(normalized_url)
+        if (
+            not is_candidate_url(normalized_url)
+            or normalized_url_domain != domain
+            or self._is_non_target_source_domain(normalized_url_domain)
+        ):
+            if is_candidate_domain(domain):
+                normalized_url = normalize_url(domain)
+            else:
+                return None
+        sources = item.get("source_urls") or []
+        if isinstance(sources, str):
+            sources = [sources]
+        if not sources:
+            sources = [
+                str(source.get("url") or "") if isinstance(source, dict) else str(source or "")
+                for source in default_sources
+            ]
+            sources = [source for source in sources if source.startswith(("http://", "https://"))]
+        mirrors = item.get("mirror_hints") or []
+        if isinstance(mirrors, str):
+            mirrors = [mirrors]
+        mirror_hints = [extract_domain(str(mirror)) for mirror in mirrors]
+        mirror_hints = [domain for domain in [*mirror_hints, *domain_candidates] if is_candidate_domain(domain)]
+        mirror_hints = sorted({hint for hint in mirror_hints if hint != domain})
+        category = self._category_from_domain_context(domain, category_text_blob, str(item.get("category") or "suspicious").lower())
+        why = str(item.get("why") or "")
+        domain_signals = gambling_domain_signals(domain, category_text_blob)
+        if domain_signals and not why:
+            why = "Домен похож на casino/mirror результат поисковой выдачи: " + "; ".join(domain_signals[:3])
+        return Candidate(
+            url=normalized_url,
+            domain=domain,
+            category=category,
+            why=why,
+            search_query=str(item.get("search_query") or ""),
+            source_urls=self._clean_sources(sources),
+            mirror_hints=mirror_hints,
+            brand=str(item.get("brand") or "") or None,
+        )
+
+    @staticmethod
+    def _item_text_blob(item: dict[str, Any], default_sources: list[Any]) -> str:
+        parts: list[str] = []
+
+        def collect(value: Any) -> None:
+            if isinstance(value, dict):
+                for nested in value.values():
+                    collect(nested)
+            elif isinstance(value, (list, tuple, set)):
+                for nested in value:
+                    collect(nested)
+            elif value is not None:
+                parts.append(str(value))
+
+        collect(item)
+        collect(default_sources)
+        return " ".join(parts)
+
+    @staticmethod
+    def _candidate_domains_from_text(text: str) -> list[str]:
+        domains: list[str] = []
+        for raw_url in re.findall(r"(?i)https?://[^\s,\"'<>]+", text or ""):
+            domain = extract_domain(unwrap_known_redirect_url(raw_url) or raw_url)
+            if is_candidate_domain(domain):
+                domains.append(domain)
+        for raw_domain in re.findall(r"(?i)(?:[a-z0-9-]+\.)+[a-z]{2,24}", text or ""):
+            domain = extract_domain(raw_domain)
+            if is_candidate_domain(domain):
+                domains.append(domain)
+        return list(dict.fromkeys(domains))
+
+    @staticmethod
+    def _category_from_domain_context(domain: str, context: str, fallback: str) -> str:
+        fallback = (fallback or "suspicious").lower()
+        if fallback not in {"suspicious", "manual", "unknown", ""}:
+            return fallback
+        if not gambling_domain_signals(domain, context):
+            return fallback or "suspicious"
+        return "casino" if has_casino_context(context) else "gambling"
+
+    @staticmethod
+    def _is_non_target_source_domain(domain: str) -> bool:
+        domain = extract_domain(domain)
+        if not domain:
+            return False
+        return registered_domain(domain) in NON_TARGET_REGISTERED_DOMAINS
+
+    def _dedupe_candidates(self, candidates: list[Candidate], limit: int) -> list[Candidate]:
+        by_key: dict[str, Candidate] = {}
+        for candidate in candidates:
+            if not is_candidate_domain(candidate.domain) or not is_candidate_url(candidate.url):
+                continue
+            key = candidate.key()
+            if not key:
+                continue
+            if key not in by_key:
+                by_key[key] = candidate
+                continue
+            existing = by_key[key]
+            existing.source_urls = self._clean_sources([*existing.source_urls, *candidate.source_urls])
+            existing.mirror_hints = sorted(set([*existing.mirror_hints, *candidate.mirror_hints]))
+            if not existing.why and candidate.why:
+                existing.why = candidate.why
+            if existing.category == "suspicious" and candidate.category != "suspicious":
+                existing.category = candidate.category
+        return list(by_key.values())[:limit]
+
+    @staticmethod
+    def _exclude_known_candidates(
+        candidates: list[Candidate],
+        known_domains: set[str],
+    ) -> tuple[list[Candidate], int]:
+        if not known_domains:
+            return candidates, 0
+        fresh: list[Candidate] = []
+        skipped = 0
+        for candidate in candidates:
+            key = candidate.key()
+            if key in known_domains:
+                skipped += 1
+                continue
+            fresh.append(candidate)
+        return fresh, skipped
+
+    def _mirror_group_for(
+        self,
+        candidate: Candidate,
+        all_candidates: list[Candidate],
+        mirror_groups: list[dict[str, Any]],
+    ) -> str | None:
+        for group in mirror_groups:
+            domains = [domain for domain in group.get("domains", []) if is_candidate_domain(domain)]
+            registered = {registered_domain(domain) for domain in domains}
+            if candidate.domain in domains or registered_domain(candidate.domain) in registered:
+                return str(group.get("brand") or candidate.domain)
+
+        related = [
+            other.domain
+            for other in all_candidates
+            if other.domain != candidate.domain and likely_related_domains(candidate.domain, other.domain)
+        ]
+        if related:
+            return f"похожий домен: {registered_domain(candidate.domain)}"
+        return None
+
+    @staticmethod
+    def _clean_sources(sources: list[Any]) -> list[str]:
+        cleaned: list[str] = []
+        for source in sources:
+            url = str(source).strip()
+            if not url or url in cleaned:
+                continue
+            if is_technical_url(url):
+                continue
+            if url.startswith("http://") or url.startswith("https://"):
+                cleaned.append(url)
+        return cleaned[:20]
+
+
+
+
+

@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+import os
+import unittest
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+os.environ["DATABASE_URL"] = ""
+os.environ.setdefault("DATABASE_PATH", "data/test_api_auth.db")
+
+from app import main
+from app.services.kz_access import KzAccessCheck
+
+
+def set_auth(*, required: bool = True, token: str | None = "test-secret") -> None:
+    object.__setattr__(main.settings, "auth_required", required)
+    object.__setattr__(main.settings, "admin_token", token)
+
+
+def set_kz_proxy(*, required: bool = True, url: str | None = "http://proxy.kz:8080") -> None:
+    object.__setattr__(main.settings, "require_kz_proxy", required)
+    object.__setattr__(main.settings, "kz_proxy_url", url)
+
+
+class ApiAuthTests(unittest.TestCase):
+    def setUp(self) -> None:
+        set_auth(required=True, token="test-secret")
+        set_kz_proxy(required=True, url="http://proxy.kz:8080")
+        self.client = TestClient(main.app)
+
+    def tearDown(self) -> None:
+        set_auth(required=True, token=None)
+        set_kz_proxy(required=True, url=None)
+
+    def test_health_is_public(self) -> None:
+        response = self.client.get("/api/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["auth_required"])
+        self.assertIn("ml_available", response.json())
+
+    def test_frontend_pages_are_public_and_separate(self) -> None:
+        pages = {
+            "/monitor": "monitor",
+            "/registry": "registry",
+            "/runs": "runs",
+        }
+
+        for path, page in pages.items():
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(f'data-page="{page}"', response.text)
+
+        redirects = {
+            "/dynamics": "/monitor#trendPanel",
+            "/journal": "/monitor#auditPanel",
+        }
+        for path, location in redirects.items():
+            with self.subTest(path=path):
+                response = self.client.get(path, follow_redirects=False)
+                self.assertEqual(response.status_code, 307)
+                self.assertEqual(response.headers["location"], location)
+
+        monitor = self.client.get("/monitor")
+        self.assertIn('id="runHistoryToggle"', monitor.text)
+        self.assertIn('id="runHistoryContent"', monitor.text)
+        self.assertIn('<nav class="topnav"', monitor.text)
+        self.assertIn('href="/monitor" aria-current="page">Поиск</a>', monitor.text)
+        self.assertIn('href="#trendPanel">Динамика</a>', monitor.text)
+        self.assertIn('href="#auditPanel">Журнал</a>', monitor.text)
+        self.assertIn('href="/registry">Реестр</a>', monitor.text)
+        self.assertIn('href="/runs">Запуски</a>', monitor.text)
+        self.assertIn('id="activityFound"', monitor.text)
+        self.assertIn('id="activityFindingsList"', monitor.text)
+        self.assertIn('id="journalRunContext"', monitor.text)
+        self.assertIn('<option value="100" selected>100 находок</option>', monitor.text)
+        self.assertIn('<option value="500">500 находок</option>', monitor.text)
+        self.assertNotIn('id="searchMode"', monitor.text)
+
+    def test_automatic_run_targets_keep_100_and_500_modes(self) -> None:
+        self.assertEqual(main._normalize_run_target(100), 100)
+        self.assertEqual(main._normalize_run_target(500), 500)
+
+    def test_protected_api_rejects_missing_token(self) -> None:
+        response = self.client.get("/api/runs")
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_manual_check_rejects_missing_token(self) -> None:
+        response = self.client.post("/api/manual-check", json={"target": "example.com"})
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_protected_api_accepts_bearer_token(self) -> None:
+        response = self.client.get("/api/runs", headers={"Authorization": "Bearer test-secret"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("runs", response.json())
+
+    def test_run_detail_omits_findings_until_requested(self) -> None:
+        run_id = main.db.create_run(seed_query="api test", max_candidates=1, take_screenshots=False)
+        main.db.insert_finding(
+            run_id,
+            {
+                "url": "https://example.kz/login",
+                "final_url": "https://example.kz/login",
+                "domain": "example.kz",
+                "normalized_domain": "example.kz",
+                "title": "Example",
+                "category": "phishing",
+                "verdict": "suspicious",
+                "risk_score": 82,
+                "active": True,
+                "status_code": 200,
+                "dns_json": {"records": ["192.0.2.10"]},
+                "tls_json": {"valid": True},
+                "evidence_json": {"response_time_ms": 120},
+                "sources_json": ["unit-test"],
+                "reasons_json": ["unit-test reason"],
+            },
+        )
+
+        response = self.client.get(f"/api/runs/{run_id}", headers={"Authorization": "Bearer test-secret"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("logs", response.json())
+        self.assertNotIn("findings", response.json())
+
+        response = self.client.get(
+            f"/api/runs/{run_id}?include_findings=true",
+            headers={"Authorization": "Bearer test-secret"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("findings", response.json())
+        self.assertEqual(len(response.json()["findings"]), 1)
+        self.assertIn("case_id", response.json()["findings"][0])
+        self.assertEqual(response.json()["findings"][0]["normalized_domain"], "example.kz")
+
+        response = self.client.get(
+            f"/api/runs/{run_id}?include_findings=true&compact_findings=true&finding_limit=8",
+            headers={"Authorization": "Bearer test-secret"},
+        )
+        compact = response.json()["findings"][0]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(compact["normalized_domain"], "example.kz")
+        self.assertNotIn("dns", compact)
+        self.assertNotIn("evidence", compact)
+        self.assertNotIn("reasons", compact)
+
+    def test_run_detail_returns_only_logs_after_cursor(self) -> None:
+        run_id = main.db.create_run(seed_query="log cursor", max_candidates=1, take_screenshots=False)
+        main.db.add_log(run_id, "info", "first")
+        main.db.add_log(run_id, "info", "second")
+
+        response = self.client.get(
+            f"/api/runs/{run_id}",
+            headers={"Authorization": "Bearer test-secret"},
+        )
+        self.assertEqual(response.status_code, 200)
+        cursor = response.json()["log_cursor"]
+
+        main.db.add_log(run_id, "info", "third")
+        response = self.client.get(
+            f"/api/runs/{run_id}?after_log_id={cursor}",
+            headers={"Authorization": "Bearer test-secret"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["message"] for item in response.json()["logs"]], ["third"])
+        self.assertGreater(response.json()["log_cursor"], cursor)
+
+    def test_finished_thread_clears_live_logs(self) -> None:
+        run_id = main.db.create_run(seed_query="live logs", max_candidates=1, take_screenshots=False)
+
+        def finish_run() -> None:
+            main.db.add_log(run_id, "info", "visible while running")
+            main.db.add_log(run_id, "error", "stored after completion")
+            main.db.update_run(run_id, status="completed")
+
+        main._thread_entry(run_id, finish_run, ())
+
+        self.assertEqual(
+            [item["message"] for item in main.db.list_logs(run_id)],
+            ["stored after completion"],
+        )
+        self.assertEqual(main.db.get_run(run_id)["status"], "completed")
+
+    def test_missing_server_token_blocks_protected_api(self) -> None:
+        set_auth(required=True, token=None)
+
+        response = self.client.get("/api/runs", headers={"Authorization": "Bearer anything"})
+
+        self.assertEqual(response.status_code, 503)
+
+    def test_missing_kz_proxy_blocks_launch(self) -> None:
+        set_kz_proxy(required=True, url=None)
+
+        response = self.client.post(
+            "/api/runs",
+            headers={"Authorization": "Bearer test-secret"},
+            json={"max_candidates": 1, "take_screenshots": False},
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("Kazakhstan proxy is required", response.text)
+
+    def test_missing_kz_proxy_is_allowed_when_not_required(self) -> None:
+        set_kz_proxy(required=False, url=None)
+
+        main._ensure_kz_proxy_ready()
+
+    def test_second_automatic_run_is_rejected(self) -> None:
+        active_run = {
+            "id": 107,
+            "status": "running",
+            "max_candidates": 500,
+        }
+
+        with (
+            patch("app.main._ensure_kz_proxy_ready"),
+            patch.object(main.db, "list_active_runs", return_value=[active_run]),
+        ):
+            response = self.client.post(
+                "/api/runs",
+                headers={"Authorization": "Bearer test-secret"},
+                json={"max_candidates": 500, "take_screenshots": True},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("#107", response.json()["detail"])
+
+    def test_failed_optional_kz_proxy_falls_back_to_direct(self) -> None:
+        set_kz_proxy(required=False, url="http://dead-proxy.kz:8080")
+        object.__setattr__(main.settings, "kz_access_label", "Kazakhstan proxy")
+
+        with patch(
+            "app.main.check_kz_proxy",
+            return_value=KzAccessCheck(ok=False, message="KZ proxy check failed"),
+        ):
+            main._ensure_kz_proxy_ready()
+
+        self.assertIsNone(main.settings.kz_proxy_url)
+        self.assertIn("server direct network", main.settings.kz_access_label)
+
+
+if __name__ == "__main__":
+    unittest.main()

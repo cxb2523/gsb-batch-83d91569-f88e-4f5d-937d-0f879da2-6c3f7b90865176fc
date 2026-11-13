@@ -1,0 +1,171 @@
+#  Qalqan
+
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Status](https://img.shields.io/badge/status-active-success)
+![Last commit](https://img.shields.io/github/last-commit/shadowuneed/sfilter)
+![Repo size](https://img.shields.io/github/repo-size/shadowuneed/sfilter)
+![Top language](https://img.shields.io/github/languages/top/shadowuneed/sfilter)
+
+<img width="246" height="395" alt="image" src="https://github.com/user-attachments/assets/0939f3f6-8aa2-4a1f-ad41-c8164f89725b" /> <img width="459" height="267" alt="image" src="https://github.com/user-attachments/assets/8e689118-617f-41a1-8ac5-880ac3b46653" />
+
+
+
+> OSINT-платформа для расследования подозрительных казино, беттинг, фишинг и мошеннических сайтов — с автосбором доказательств.
+
+## What It Does
+
+- Starts an investigation from the browser with one button. A normal run checks up to `50` candidates; the optional context box only adds extra hints.
+- Builds the candidate pool from CyberScan-style OSINT feeds first: OpenPhish, URLHaus, Phishing.Database, and gambling blocklists. Gemini is used only to enrich focused searches and mirror hints.
+- Runs local ML on every opened site: CatBoost from `models/domain_classifier.cbm` plus CyberScan RandomForest from `models/cyberscan_model.pkl` over 34 URL/domain/HTTP/DNS/TLS/content features.
+- Rotates multiple Gemini API keys and tracks local limits per key: `10 RPM` and `250 RPD` by default.
+- Skips IP-only results, localhost/test domains, social/video/catalog noise, and domains already known in the database.
+- Opens candidate sites, follows redirects, records HTTP status, DNS, TLS, title/meta/text, HTML, SHA-256, and sources.
+- Saves Playwright screenshots as evidence when the page can be opened.
+- Detects mirror groups through Gemini hints and simple domain similarity.
+- Keeps a global case list with filters, statuses, saved flags, archive, notes, and latest evidence.
+- Lets you stop a running investigation from the UI.
+- Exports run reports and selected cases to CSV/XLSX.
+
+## Evidence Exports
+
+CSV is a short presentation report: domain, address, risk, category, HTTP, mirror group, title, reasons, sources, screenshot path, and check date. It intentionally does not show internal IDs, archive flags, HTML paths, or SHA hashes.
+
+XLSX has two sheets:
+
+- `Отчет`: the same simplified report plus embedded screenshot thumbnails when the screenshot file exists.
+- `Доказательства`: technical audit fields such as run/finding IDs, saved HTML file, and SHA-256.
+
+How to explain HTML and SHA-256 to non-technical people: DOFilter saves a copy of the page HTML at the moment of inspection. SHA-256 is a digital fingerprint of that saved HTML file. If the website changes later, the fingerprint helps prove which exact page copy was captured and that the evidence file was not silently changed.
+
+## Case Workflow
+
+- `uninvestigated`: new item that needs review.
+- `investigating`: actively being checked.
+- `investigated`: review is complete.
+- `saved`: important case kept for quick export.
+- `archived`: hidden from the active suspicion list while still preventing duplicate future searches for that domain.
+
+## Local Start
+
+Use the one-command launcher:
+
+```powershell
+cd C:\Users\profm\Desktop\work
+.\RUN_ARGUS.bat
+```
+
+Manual start:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Open:
+
+```text
+http://127.0.0.1:8000
+```
+
+## Environment
+
+Create `.env` from `.env.example` and set keys locally or in Render environment variables:
+
+```env
+GEMINI_API_KEYS=your_primary_key,your_backup_key
+GEMINI_MODEL=gemini-2.5-flash
+GEMINI_FALLBACK_MODELS=gemini-2.0-flash
+GROQ_API_KEY=your_groq_key
+GROQ_MODEL=groq/compound-mini
+GROQ_MODEL_VERSION=latest
+GROQ_REQUESTS_PER_DISCOVERY=8
+ADMIN_TOKEN=use-a-long-random-secret
+AUTH_REQUIRED=true
+DATABASE_URL=postgresql://postgres:password@host:5432/postgres?sslmode=require
+REQUIRE_POSTGRES=false
+ML_ENABLED=false
+ML_MODEL_PATH=models/domain_classifier.cbm
+CYBERSCAN_MODEL_PATH=models/cyberscan_model.pkl
+SCAN_CONCURRENCY=1
+CANDIDATE_TIMEOUT_SECONDS=15
+REQUEST_TIMEOUT_SECONDS=6
+FAST_EVIDENCE_MODE=true
+SCREENSHOT_CONCURRENCY=1
+SCREENSHOT_TIMEOUT_SECONDS=5
+BROWSER_SCREENSHOTS_ENABLED=true
+SCREENSHOT_FALLBACK_ENABLED=true
+OSINT_FEEDS_ENABLED=true
+MAX_CANDIDATES_PER_RUN=15000
+OSINT_CANDIDATE_POOL_SIZE=15000
+SEARCH_PAGE_DELAY_SECONDS=2.5
+ML_MIN_CONFIDENCE=0.45
+```
+
+Do not commit real API keys. Keys pasted into chat should be treated as sensitive; prefer rotating them later and storing only in `.env` or deployment secrets.
+
+`ADMIN_TOKEN` protects all `/api/*` endpoints except `/api/health`. The browser UI asks for this token and sends it as `Authorization: Bearer <token>`, preventing anonymous users from starting runs and spending Gemini quota.
+Set `ADMIN_TOKEN` in the deployment environment. If it is missing, the UI no longer blocks the whole page with a login modal, but protected API actions cannot run correctly until the variable exists.
+
+`DATABASE_URL` enables persistent Postgres storage and takes priority over `DATABASE_PATH`. Use the Supabase connection string with SSL enabled. For `*.supabase.com` hosts DOFilter also adds `sslmode=require` automatically if it is missing. If `DATABASE_URL` is empty, DOFilter falls back to local SQLite at `DATABASE_PATH`, which is useful only for local development.
+
+`REQUIRE_POSTGRES=true` disables silent SQLite fallback. The Render blueprint sets it to `true`, so production fails fast if Supabase `DATABASE_URL` is missing instead of creating a temporary local database.
+
+`GROQ_REQUESTS_PER_DISCOVERY` controls how many distinct web-search queries are sent in one external discovery pass. Casino mode also uses category-specific public domain lists; every candidate still has to open successfully and pass content checks before it reaches the registry.
+
+`ML_MODEL_PATH` points to the trained CatBoost artifact. `CYBERSCAN_MODEL_PATH` points to the bundled CyberScan RandomForest artifact copied from the reference project. DOFilter collects candidates from OSINT feeds first, optionally enriches the pool with Gemini, opens each reachable site, extracts evidence, and stores CatBoost, CyberScan ML, and content-analysis signals inside each finding's evidence JSON.
+
+## Docker
+
+```powershell
+docker build -t argus-investigator .
+docker run --rm -p 8000:8000 --env-file .env argus-investigator
+```
+
+The Docker image installs Playwright Chromium for real page screenshots and runs as a non-root `argus` user.
+
+## Tests
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+## Northflank
+
+Use the isolated `northflank-production` branch and follow [NORTHFLANK.md](NORTHFLANK.md)
+for the service, PostgreSQL addon, persistent volume, health check, and migration
+procedure. The stable `main` branch remains the rollback source.
+
+## Render
+
+`render.yaml` is ready for a Docker web service. Add `GEMINI_API_KEYS` as a secret environment variable in Render.
+Persistent disks are available only on paid Render services, so the blueprint uses the `starter` plan instead of `free`.
+For an existing Render service, add `ADMIN_TOKEN` manually in the service's Environment page because `sync: false` variables are prompted only during initial Blueprint creation.
+
+For durable history on Render, set `DATABASE_URL` to the Supabase Postgres connection string in the service Environment page. When `DATABASE_URL` is present, the app creates and uses Postgres tables for runs, findings, cases, retained error logs, and Gemini usage counters. Informational and warning logs are live-only and stay in process memory. The app disables psycopg prepared statements for the Supabase pooler on port `6543`, which avoids transaction-pooler issues.
+
+The blueprint still mounts a persistent disk at `/var/data` for file evidence:
+
+- HTML and screenshots at `/var/data/evidence`
+- exports at `/var/data/exports`
+
+Render starter has limited memory, so the blueprint uses `SCAN_CONCURRENCY=1`, disables browser-based Chromium screenshots, and saves fallback PNG evidence files instead of leaving broken screenshot links. This keeps overnight casino runs inside the 512 MB RAM limit. For larger overnight casino runs, the selected run size is treated as the target number of findings; DOFilter may check a larger candidate pool to reach that target.
+
+Open `/api/health` after deploy and check `screenshot_runtime.browser_enabled`. On Render starter it should be `false`, with `screenshot_runtime.fallback_enabled=true`.
+
+Local SQLite files and evidence files are not durable across rebuilds/restarts unless persistent storage or an external database/storage service is attached. Postgres fixes the run/history database; screenshots and saved HTML still need durable file storage if the host filesystem is ephemeral.
+
+For a real Kazakhstan-only accessibility check, set `KZ_PROXY_URL` in Render/Vercel to an HTTP/SOCKS proxy located in Kazakhstan. `KZ_HTTP_PROXY`, `KZ_HTTPS_PROXY`, and `KZ_PROXY` are accepted aliases. By default `REQUIRE_KZ_PROXY=false`, so DOFilter can still run without a proxy and marks evidence as checked from the server network. Set `REQUIRE_KZ_PROXY=true` only for strict mode: DOFilter will then block automatic and manual launches until the proxy exists and `KZ_PROXY_CHECK_URL` confirms country `KZ`.
+
+If the journal shows `Gemini API 401 Unauthorized`, Google rejected the specific key used for that attempt. Check that the deployed `GEMINI_API_KEYS` value contains every key, has no literal quotes or `Bearer ` prefix, and that old standard keys are restricted or migrated to Gemini auth keys. Google notes that from June 19, 2026 the Gemini API rejects unrestricted standard keys: https://ai.google.dev/gemini-api/docs/api-key
+
+## API Docs Used
+
+- Gemini API models: https://ai.google.dev/gemini-api/docs/models/gemini
+- Gemini API rate limits: https://ai.google.dev/gemini-api/docs/rate-limits
+- Google Search grounding: https://ai.google.dev/gemini-api/docs/google-search
+- URL context: https://ai.google.dev/gemini-api/docs/url-context
+- Structured output: https://ai.google.dev/gemini-api/docs/structured-output

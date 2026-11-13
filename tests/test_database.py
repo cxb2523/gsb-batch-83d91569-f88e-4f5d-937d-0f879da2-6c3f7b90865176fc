@@ -1,0 +1,398 @@
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from app.database import Database
+
+
+class DatabaseBackendTests(unittest.TestCase):
+    def test_postgres_url_selects_postgres_backend_and_redacts_label(self) -> None:
+        db = Database("postgres://user:secret@db.example.com:5432/appdb")
+
+        self.assertEqual(db.backend, "postgres")
+        self.assertIn("[redacted]@db.example.com:5432", db.label)
+        self.assertNotIn("secret", db.label)
+
+    def test_path_selects_sqlite_backend(self) -> None:
+        db = Database("data/test.db")
+
+        self.assertEqual(db.backend, "sqlite")
+        self.assertEqual(db.label, "data\\test.db" if "\\" in db.label else "data/test.db")
+
+    def test_supabase_url_gets_required_sslmode(self) -> None:
+        db = Database("postgresql://user:secret@aws-1.pooler.supabase.com:6543/postgres")
+
+        self.assertIn("sslmode=require", db.dsn)
+        self.assertNotIn("secret", db.label)
+
+    def test_explicit_sslmode_is_preserved(self) -> None:
+        db = Database("postgresql://user:secret@aws-1.pooler.supabase.com:6543/postgres?sslmode=verify-full")
+
+        self.assertIn("sslmode=verify-full", db.dsn)
+
+    def test_finding_insert_values_store_active_as_integer(self) -> None:
+        db = Database("data/test.db")
+
+        columns, values = db._finding_insert_values(
+            1,
+            {
+                "url": "https://example.com",
+                "normalized_domain": "example.com",
+                "risk_score": 70,
+                "active": True,
+            },
+        )
+
+        active_index = columns.index("active")
+        self.assertEqual(values[active_index], 1)
+        self.assertIs(type(values[active_index]), int)
+
+    def test_finding_insert_values_remove_postgres_nul_bytes(self) -> None:
+        db = Database("data/test.db")
+
+        columns, values = db._finding_insert_values(
+            1,
+            {
+                "url": "https://example.com",
+                "normalized_domain": "example.com",
+                "title": "Casino\x00 title",
+                "risk_score": 70,
+                "active": True,
+                "evidence_json": {"html_title": "Casino\x00 title"},
+            },
+        )
+
+        self.assertEqual(values[columns.index("title")], "Casino title")
+        self.assertNotIn("\\u0000", values[columns.index("evidence_json")])
+
+    def test_run_attempts_are_persisted_without_duplicates(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "argus.db")
+            db.init()
+            run_id = db.create_run(seed_query="casino", max_candidates=100, take_screenshots=False)
+
+            first = db.mark_run_attempted_domains(run_id, {"alpha.example", "beta.example"})
+            second = db.mark_run_attempted_domains(run_id, {"alpha.example"})
+
+            self.assertEqual(first, 2)
+            self.assertEqual(second, 0)
+            self.assertEqual(db.list_run_attempted_domains(run_id), {"alpha.example", "beta.example"})
+
+    def test_case_lookup_is_direct_and_finding_history_is_limited(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "argus.db")
+            db.init()
+            run_id = db.create_run(seed_query="test", max_candidates=3, take_screenshots=False)
+            for index in range(3):
+                db.insert_finding(
+                    run_id,
+                    {
+                        "url": f"https://example.com/path-{index}",
+                        "final_url": f"https://example.com/path-{index}",
+                        "domain": "example.com",
+                        "normalized_domain": "example.com",
+                        "title": f"Example {index}",
+                        "category": "phishing",
+                        "verdict": "high",
+                        "risk_score": 70 + index,
+                        "active": True,
+                        "status_code": 200,
+                    },
+                )
+
+            case = db.get_case(1)
+            self.assertIsNotNone(case)
+            self.assertEqual(case["normalized_domain"], "example.com")
+            self.assertEqual(case["finding_total"], 3)
+
+            history = db.list_case_findings(1, limit=2)
+            self.assertEqual(len(history), 2)
+            self.assertEqual([item["title"] for item in history], ["Example 2", "Example 1"])
+
+    def test_active_http_finding_without_html_stays_in_registry_after_backfill(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "argus.db"
+            db = Database(path)
+            db.init()
+            run_id = db.create_run(seed_query="no ssl", max_candidates=1, take_screenshots=True)
+            db.insert_finding(
+                run_id,
+                {
+                    "url": "http://no-ssl.example",
+                    "final_url": "http://no-ssl.example",
+                    "domain": "no-ssl.example",
+                    "normalized_domain": "no-ssl.example",
+                    "title": None,
+                    "category": "suspicious",
+                    "verdict": "suspicious",
+                    "risk_score": 72,
+                    "active": True,
+                    "status_code": 200,
+                    "html_path": None,
+                    "screenshot_path": None,
+                },
+            )
+
+            reopened = Database(path)
+            reopened.init()
+            cases = reopened.list_cases(archived=False)
+
+            self.assertEqual(len(cases), 1)
+            self.assertEqual(cases[0]["normalized_domain"], "no-ssl.example")
+
+    def test_finding_screenshot_can_be_updated_after_insert(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "argus.db")
+            db.init()
+            run_id = db.create_run(seed_query="casino", max_candidates=1, take_screenshots=True)
+            finding_id = db.insert_finding(
+                run_id,
+                {
+                    "url": "https://casino.example",
+                    "final_url": "https://casino.example",
+                    "domain": "casino.example",
+                    "normalized_domain": "casino.example",
+                    "category": "casino",
+                    "verdict": "suspicious",
+                    "risk_score": 95,
+                    "active": True,
+                    "status_code": 200,
+                    "evidence_json": {"screenshot_pending": True},
+                    "reasons_json": ["initial reason"],
+                },
+            )
+            pending_before = db.list_pending_screenshot_findings(run_id)
+
+            updated = db.update_finding_screenshot(
+                finding_id,
+                "evidence/screenshots/run_1_casino.example.png",
+                "navigation warning",
+            )
+            finding = db.list_findings(run_id=run_id)[0]
+
+            self.assertTrue(updated)
+            self.assertEqual([finding["id"] for finding in pending_before], [finding_id])
+            self.assertEqual(db.list_pending_screenshot_findings(run_id), [])
+            self.assertEqual(finding["screenshot_path"], "evidence/screenshots/run_1_casino.example.png")
+            self.assertFalse(finding["evidence"]["screenshot_pending"])
+            self.assertEqual(finding["evidence"]["screenshot_error"], "navigation warning")
+            self.assertIn("Screenshot saved with warning: navigation warning", finding["reasons"])
+
+    def test_failed_screenshot_remains_pending_for_recovery(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "argus.db")
+            db.init()
+            run_id = db.create_run(seed_query="casino", max_candidates=1, take_screenshots=True)
+            finding_id = db.insert_finding(
+                run_id,
+                {
+                    "url": "https://casino.example",
+                    "final_url": "https://casino.example",
+                    "domain": "casino.example",
+                    "normalized_domain": "casino.example",
+                    "category": "casino",
+                    "verdict": "suspicious",
+                    "risk_score": 95,
+                    "active": True,
+                    "status_code": 200,
+                    "evidence_json": {"screenshot_pending": True},
+                },
+            )
+
+            db.update_finding_screenshot(finding_id, None, "temporary browser failure")
+            finding = db.list_findings(run_id=run_id)[0]
+
+            self.assertTrue(finding["evidence"]["screenshot_pending"])
+            self.assertEqual([item["id"] for item in db.list_pending_screenshot_findings(run_id)], [finding_id])
+
+    def test_run_findings_summary_is_compact_and_latest_first(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "argus.db")
+            db.init()
+            run_id = db.create_run(seed_query="casino", max_candidates=2, take_screenshots=True)
+            for index in range(2):
+                db.insert_finding(
+                    run_id,
+                    {
+                        "url": f"https://casino-{index}.example",
+                        "final_url": f"https://casino-{index}.example",
+                        "domain": f"casino-{index}.example",
+                        "normalized_domain": f"casino-{index}.example",
+                        "title": f"Casino {index}",
+                        "category": "casino",
+                        "verdict": "suspicious",
+                        "risk_score": 90 + index,
+                        "active": True,
+                        "status_code": 200,
+                        "dns_json": {"records": ["192.0.2.1"]},
+                        "evidence_json": {"html": "large payload"},
+                        "reasons_json": ["reason"],
+                    },
+                )
+
+            findings = db.list_run_findings_summary(run_id, limit=1)
+
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0]["domain"], "casino-1.example")
+            self.assertTrue(findings[0]["active"])
+            self.assertIn("case_id", findings[0])
+            self.assertNotIn("dns", findings[0])
+            self.assertNotIn("evidence", findings[0])
+            self.assertNotIn("reasons", findings[0])
+
+    def test_registry_lists_latest_seen_cases_first(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "argus.db")
+            db.init()
+            run_id = db.create_run(seed_query="order", max_candidates=2, take_screenshots=False)
+            db.insert_finding(
+                run_id,
+                {
+                    "url": "https://older-risk.example",
+                    "final_url": "https://older-risk.example",
+                    "domain": "older-risk.example",
+                    "normalized_domain": "older-risk.example",
+                    "title": "Older high risk",
+                    "category": "phishing",
+                    "verdict": "high",
+                    "risk_score": 99,
+                    "active": True,
+                    "status_code": 200,
+                },
+            )
+            db.insert_finding(
+                run_id,
+                {
+                    "url": "https://latest.example",
+                    "final_url": "https://latest.example",
+                    "domain": "latest.example",
+                    "normalized_domain": "latest.example",
+                    "title": "Latest lower risk",
+                    "category": "suspicious",
+                    "verdict": "suspicious",
+                    "risk_score": 55,
+                    "active": True,
+                    "status_code": 200,
+                },
+            )
+            with db.connect() as conn:
+                conn.execute(
+                    "UPDATE cases SET saved=1, last_seen=?, updated_at=? WHERE normalized_domain=?",
+                    ("2026-07-02T00:00:00+00:00", "2026-07-02T00:00:00+00:00", "older-risk.example"),
+                )
+                conn.execute(
+                    "UPDATE cases SET last_seen=?, updated_at=? WHERE normalized_domain=?",
+                    ("2026-07-03T00:00:00+00:00", "2026-07-03T00:00:00+00:00", "latest.example"),
+                )
+
+            cases = db.list_cases(archived=False)
+
+            self.assertEqual([case["normalized_domain"] for case in cases], ["latest.example", "older-risk.example"])
+
+    def test_registry_summary_omits_heavy_finding_json(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "argus.db")
+            db.init()
+            run_id = db.create_run(seed_query="casino", max_candidates=1, take_screenshots=False)
+            db.insert_finding(
+                run_id,
+                {
+                    "url": "https://summary.example",
+                    "final_url": "https://summary.example",
+                    "domain": "summary.example",
+                    "normalized_domain": "summary.example",
+                    "title": "Summary",
+                    "category": "casino",
+                    "verdict": "suspicious",
+                    "risk_score": 95,
+                    "active": True,
+                    "status_code": 200,
+                    "evidence_json": {"large": "payload"},
+                    "sources_json": [{"url": "https://search.example"}],
+                    "reasons_json": ["reason"],
+                },
+            )
+
+            summary = db.list_cases(archived=False)[0]
+            detail = db.get_case(summary["id"])
+
+            self.assertNotIn("evidence", summary)
+            self.assertNotIn("sources", summary)
+            self.assertNotIn("reasons", summary)
+            self.assertEqual(summary["title"], "Summary")
+            assert detail is not None
+            self.assertEqual(detail["evidence"], {"large": "payload"})
+
+    def test_logs_support_incremental_reads_and_finished_run_cleanup(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "argus.db")
+            db.init()
+            run_id = db.create_run(seed_query="casino", max_candidates=1, take_screenshots=False)
+            db.add_log(run_id, "error", "old error")
+            for index in range(5):
+                db.add_log(run_id, "info", f"progress {index}")
+
+            initial = db.list_logs(run_id, limit=10)
+            delta = db.list_logs(run_id, limit=10, after_id=initial[-3]["id"])
+            with db.connect() as conn:
+                stored_count = conn.execute(
+                    "SELECT COUNT(*) AS count FROM logs WHERE run_id=?",
+                    (run_id,),
+                ).fetchone()["count"]
+            active_removed = db.delete_finished_run_logs()
+            db.update_run(run_id, status="completed")
+            removed = db.finish_run_logs(run_id)
+            finished_logs = db.list_logs(run_id, limit=10)
+
+            self.assertEqual([item["message"] for item in delta], ["progress 3", "progress 4"])
+            self.assertEqual(stored_count, 1)
+            self.assertEqual(active_removed, 0)
+            self.assertEqual(removed, 0)
+            self.assertEqual([item["message"] for item in finished_logs], ["old error"])
+
+    def test_stale_running_runs_are_marked_interrupted_not_failed(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "argus.db")
+            db.init()
+            run_id = db.create_run(seed_query="test", max_candidates=1, take_screenshots=False)
+            db.update_run(run_id, status="running")
+
+            changed = db.mark_stale_runs_interrupted()
+            run = db.get_run(run_id)
+
+            self.assertEqual(changed, 1)
+            assert run is not None
+            self.assertEqual(run["status"], "interrupted")
+            self.assertIn("прерван", run["error"])
+
+    def test_active_runs_and_existing_findings_can_be_counted_for_resume(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "argus.db")
+            db.init()
+            run_id = db.create_run(seed_query="casino", max_candidates=150, take_screenshots=True)
+            db.update_run(run_id, status="running")
+            db.insert_finding(
+                run_id,
+                {
+                    "url": "https://casino-resume.example",
+                    "final_url": "https://casino-resume.example",
+                    "domain": "casino-resume.example",
+                    "normalized_domain": "casino-resume.example",
+                    "category": "casino",
+                    "verdict": "suspicious",
+                    "risk_score": 95,
+                    "active": True,
+                    "status_code": 200,
+                },
+            )
+
+            active_runs = db.list_active_runs()
+
+            self.assertEqual([run["id"] for run in active_runs], [run_id])
+            self.assertEqual(db.count_findings(run_id), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
