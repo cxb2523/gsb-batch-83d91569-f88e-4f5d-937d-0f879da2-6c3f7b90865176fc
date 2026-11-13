@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for stru
 
 ## [Unreleased]
 
+### Changed
+
+- RSS items the feed marks as full are now checked against the linked article page before being reported as `full`: the link must be an http(s) URL the generic reader handles (a video, post, feed or non-web link is never opened cross-platform), the page must pass as a readable article on its own (login, paywall, consent, challenge and thin-shell reads do not), and the feed body and the page must each carry most of the other's text (80 % of the page in the feed body, 70 % of the feed body on the page, in six-word runs). An article the page carries only in part is downgraded to `summary`, and a link that cannot be checked is `unverified` (`feed_body_unverified`), with a warning logged and the feed read still returned. The checked kind is written back before conversion, so the CLI `--json` payload, the inbox and the receipt agree.
+
 ## [0.5.0] - 2026-10-14
 
 ### Added

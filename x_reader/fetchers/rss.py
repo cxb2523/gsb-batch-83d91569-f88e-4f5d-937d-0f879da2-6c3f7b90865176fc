@@ -9,6 +9,7 @@ or follows redirects itself.
 import asyncio
 import re
 from typing import Any, Dict, List
+from urllib.parse import urlparse
 
 import feedparser
 from loguru import logger
@@ -50,46 +51,99 @@ def _is_full_body(html_body: str) -> bool:
 FULL_BODY_COVERAGE = 0.8
 # ...and when this share of the feed body actually appears on the page.
 FEED_ON_PAGE_SHARE = 0.7
+
+
+def _fetch_article_page(url: str, hop_guard) -> dict:
+    """Open the linked article page over pinned, per-hop validated hops.
+
+    A seam tests replace to judge feed bodies without a network.
+    """
+    from x_reader.fetchers.jina import fetch_html_page
+
+    return fetch_html_page(url, hop_guard=hop_guard)
+
+
+def _classify_page(payload: dict) -> dict:
+    """Judge the article page with the generic-page evidence rules (a test seam)."""
+    from x_reader.evidence import classify_payload
+
+    return classify_payload(payload)
+
+
 async def verify_full_body(article: Dict[str, Any]) -> str:
     """Check a "full" feed body against the article page it links to.
 
     An unmarked excerpt looks like a full body until it is set against the
-    article. The page itself must pass as a readable article (no login,
-    paywall or thin shell); then the feed body must share most of its text.
-    Returns "full", "summary" (an excerpt of the page) or "unverified".
+    article. The item link must lead to a generic web article (a video, a post
+    or a feed is not opened cross-platform); the page itself must pass as a
+    readable article (no login, paywall or thin shell); then the feed body must
+    appear on the page and the page's text must mostly appear in the feed body.
+    Returns "full", "summary" (an excerpt of the page) or "unverified"; every
+    failed check is logged as a warning and never raises, so one bad item
+    cannot fail the whole feed read.
     """
-    if article.get("content_kind") != "full":
-        return article.get("content_kind", "summary")
-    from x_reader.evidence import PASS, classify_payload, visible_text
-    from x_reader.utils.textmatch import overlap
-    from x_reader.fetchers.jina import CrossPlatformRedirect, fetch_html_page
+    from x_reader.evidence import PASS, visible_text
+    from x_reader.fetchers.jina import CrossPlatformRedirect
     from x_reader.routing import detect_platform
+    from x_reader.utils.textmatch import overlap
+
+    kind = article.get("content_kind", "summary")
+    if kind != "full":
+        return kind
 
     def article_pages_only(hop: str) -> None:
-        if detect_platform(hop) != "generic":
-            raise CrossPlatformRedirect(hop, detect_platform(hop))
+        platform = detect_platform(hop)
+        if platform != "generic":
+            raise CrossPlatformRedirect(hop, platform)
 
-    link = str(article.get("url") or "")
-    if not link.startswith(("http://", "https://")) or detect_platform(link) != "generic":
-        return "unverified"  # no article page to compare with (a video, a post, ...)
+    link = str(article.get("url") or article.get("link") or "")
+    # Only an http(s) URL the generic reader handles has an article page to
+    # compare with; videos, posts and non-web links must not be crawled.
     try:
-        page = await asyncio.to_thread(fetch_html_page, link, hop_guard=article_pages_only)
+        web_link = urlparse(link).scheme.lower() in ("http", "https") and detect_platform(link) == "generic"
+    except ValueError:
+        web_link = False
+    if not web_link:
+        logger.warning(f"RSS item link is not a readable web article ({link[:80] or 'empty'}); body unverified")
+        return "unverified"
+    try:
+        page = await asyncio.to_thread(_fetch_article_page, link, article_pages_only)
     except Exception as exc:
         logger.warning(f"RSS article page not readable ({type(exc).__name__}); body unverified")
         return "unverified"
-    page_receipt = classify_payload({
-        "source_type": "manual", "title": page["title"], "content": page["content"], "url": page["url"],
-        "extra": {"fetch_method": "direct_html_pinned", "redirects_verified": True, "body_verified": True,
-                  "embedded_media": page["embedded_media"], "page_signals": page.get("page_signals", [])},
-    })
-    if page_receipt["status"] != PASS:
+
+    try:
+        page_receipt = _classify_page({
+            "source_type": "manual",
+            "title": page["title"],
+            "content": page["content"],
+            "url": page.get("url") or link,
+            # A missing media count is not treated as "none found": the generic
+            # rules then leave the page unverified instead of passing it.
+            "extra": {"fetch_method": "direct_html_pinned", "redirects_verified": True, "body_verified": True,
+                      "embedded_media": page.get("embedded_media"),
+                      "page_signals": page.get("page_signals") or []},
+        })
+    except Exception as exc:  # a malformed page read must not fail the whole feed
+        logger.warning(f"RSS article page could not be judged ({type(exc).__name__}); body unverified")
+        return "unverified"
+    if not isinstance(page_receipt, dict) or page_receipt.get("status") != PASS:
+        reason = page_receipt.get("reason_code") if isinstance(page_receipt, dict) else "unclassified"
+        logger.warning(f"RSS article page is not a readable article ({reason}); body unverified")
         return "unverified"  # gated, thin or media-carrying article: nothing solid to compare
+
     # (the page read directly is the words it shows: nothing in it is markup)
-    shares = overlap(visible_text(article.get("summary") or ""), visible_text(page["content"], markup=False))
+    try:
+        shares = overlap(visible_text(article.get("summary") or ""), visible_text(page["content"], markup=False))
+    except Exception as exc:
+        logger.warning(f"RSS feed body could not be compared with the page ({type(exc).__name__}); body unverified")
+        return "unverified"
     if shares is None:
+        logger.warning("RSS feed body or article page is too short to compare; body unverified")
         return "unverified"
     feed_on_page, page_in_feed = shares
     if feed_on_page < FEED_ON_PAGE_SHARE:
+        logger.warning("RSS feed body is not the article page's text; body unverified")
         return "unverified"  # the feed body is not this page's text
     return "full" if page_in_feed >= FULL_BODY_COVERAGE else "summary"
 

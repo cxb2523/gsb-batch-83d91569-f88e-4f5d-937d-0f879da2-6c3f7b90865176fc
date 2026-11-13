@@ -149,7 +149,13 @@ class UniversalReader:
             articles = await fetch_rss(url, limit=1)
             if articles:
                 article = articles[0]
-                article["content_kind"] = await verify_full_body(article)
+                # The verified kind is written back before conversion, so the CLI
+                # --json payload, the inbox and the evidence receipt agree.
+                try:
+                    article["content_kind"] = await verify_full_body(article)
+                except Exception as exc:  # a check failure must never fail the feed read
+                    logger.warning(f"RSS body check failed ({type(exc).__name__}); body unverified")
+                    article["content_kind"] = "unverified"
                 return from_rss(article)
             raise ValueError(f"No articles found in RSS feed: {url}")
 
