@@ -352,7 +352,8 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
              duplicate_pages: Optional[List[int]] = None,
              total_results_first: Optional[int] = None,
              total_results_last: Optional[int] = None,
-             catalog_mutated: Optional[bool] = None) -> dict:
+             catalog_mutated: Optional[bool] = None,
+             pages_manifest: Optional[List[dict]] = None) -> dict:
     """Build the metadata dict for a finished run.
 
     `status` is the field a consumer branches on:
@@ -399,8 +400,17 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
     page. Together they are how a reader judges whether the catalogue was
     being edited underneath the run — see merge_pages for why the duplicate
     count alone cannot answer that.
+
+    `pages_manifest` is the per-page record of a run whose pages 3..N were
+    fetched by several workers (see playwright_scraper._page_manifest): one
+    entry per requested page, ascending, each page exactly once, with a
+    `status` of `success` (plus `products`), `failed` (plus `stop_reason`),
+    or `not_attempted` (plus `reason`: `listing_exhausted` past the end of the
+    listing, `gap` for a page that was skipped although rows may exist there).
+    The key is present ONLY when such a manifest exists; a sequential run or
+    one requesting 1-2 pages writes exactly the fields it always did.
     """
-    return {
+    meta = {
         "source": SOURCE,
         "status": status,
         "stop_reason": stop_reason,
@@ -422,6 +432,9 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
         "final_url": final_url,
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
+    if pages_manifest is not None:
+        meta["pages_manifest"] = pages_manifest
+    return meta
 
 
 def save(products: List[Product], out_prefix: str, fmt: str,
@@ -491,7 +504,8 @@ def finish_run(products: List[Product], out_prefix: str, fmt: str,
                pages_missing: Optional[List[int]] = None,
                merge_stats: Optional[MergeStats] = None,
                total_results_first: Optional[int] = None,
-               total_results_last: Optional[int] = None) -> int:
+               total_results_last: Optional[int] = None,
+               pages_manifest: Optional[List[dict]] = None) -> int:
     """Write output + the run-metadata sidecar; return the exit code.
 
     Shared by all engines so the status/exit-code mapping cannot drift between
@@ -522,6 +536,23 @@ def finish_run(products: List[Product], out_prefix: str, fmt: str,
               + ". Reporting a PARTIAL run.")
         if stop_reason in COMPLETE_STOP_REASONS:
             stop_reason = "pages_missing"
+
+    # A manifest gap outranks every stop reason: a page that was never
+    # attempted although rows could exist there is a hole in the run by
+    # itself, whatever reason the dispatcher happened to record. This is the
+    # second independent check (the engine already maps a gap to
+    # `pages_unattempted`) and it is deliberately not redundant: no run may
+    # publish a complete-looking sidecar next to a manifest that says pages
+    # are missing.
+    manifest_gaps = sorted(entry["page"] for entry in (pages_manifest or [])
+                           if entry.get("status") == "not_attempted"
+                           and entry.get("reason") != "listing_exhausted")
+    if manifest_gaps and stop_reason in COMPLETE_STOP_REASONS:
+        print(f"[!] The per-page manifest says page(s) "
+              f"{', '.join(str(n) for n in manifest_gaps)} were never attempted "
+              f"and are not past the end of the listing. Reporting a PARTIAL "
+              f"run.")
+        stop_reason = "pages_unattempted"
 
     complete = (stop_reason in COMPLETE_STOP_REASONS
                 and not missing and not unaccounted)
@@ -558,6 +589,7 @@ def finish_run(products: List[Product], out_prefix: str, fmt: str,
             total_results_first=total_results_first,
             total_results_last=total_results_last,
             catalog_mutated=catalog_mutated,
+            pages_manifest=pages_manifest,
             start_url=start_url, final_url=final_url, products=len(products))
         # Housekeeping goes UNDER the run's own fields: a name collision must
         # never let a write statistic overwrite something the run reported.

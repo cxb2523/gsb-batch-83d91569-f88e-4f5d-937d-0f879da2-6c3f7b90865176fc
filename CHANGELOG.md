@@ -9,6 +9,20 @@ a bill.
 
 ## [Unreleased]
 
+### Added
+
+- **`pages_manifest` in `<out>.meta.json` for concurrent runs.** A run of more
+  than two pages with `--concurrency N` (N > 1) now writes one entry per
+  requested page, ascending and each page exactly once: `success` with the
+  page's row count, `failed` with that page's own `stop_reason`, or
+  `not_attempted` with a `reason`. The reason distinguishes
+  `listing_exhausted` (the page lies past the empty page that ended the
+  listing — nothing exists there) from `gap` (the page was skipped although
+  rows may exist there). A gap also keeps the run from reporting `complete`
+  even if the dispatcher's single stop reason said otherwise — checked both
+  when the manifest is built and again in `finish_run`. Sequential runs and
+  1-2 page runs write exactly the metadata they wrote before.
+
 ### Changed
 
 - CI only: the canary now runs weekly (Mondays 06:23 UTC) and on a manual dispatch, with its optional secret `FLIPPA_PROXY` passed on every run; the daily schedule is removed.

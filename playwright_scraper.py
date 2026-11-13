@@ -692,6 +692,104 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
             min(empty_pages) if empty_pages else None)
 
 
+def _page_manifest(pages_requested: int, outcomes, unattempted,
+                   empty_at: Optional[int]) -> List[dict]:
+    """One entry per REQUESTED page, ascending — the per-page record of a
+    concurrent run.
+
+    A concurrent finish previously reported only one stop reason, which said
+    nothing about which pages were fetched, which failed and which were never
+    dispatched. This turns the three lists the dispatcher already maintains
+    into one list keyed by page number, and every requested page appears in it
+    exactly once:
+
+      success        fetched and parsed; `products` is the row count (a page
+                     that legitimately holds no listings reports 0)
+      failed         fetched but yielded no data; `stop_reason` is the same
+                     reason the run-level stop reason is drawn from
+      not_attempted  never dispatched. `reason` distinguishes the two cases
+                     that must not be conflated:
+                       listing_exhausted — the page lies AFTER the empty page
+                         that ended the listing. Nothing exists there.
+                       gap — the page lies BEFORE that empty page, or was
+                         still queued when dispatch stopped for another
+                         reason. It holds rows that were never fetched, so the
+                         run must not report itself complete.
+
+    Built from `outcomes` (which already includes pages 1 and 2, fetched
+    sequentially) and `unattempted` (pages 3..N still in the queue at the end
+    of the concurrent stage). A requested page in neither list is recorded as
+    a gap rather than omitted: the one outcome this manifest must never
+    produce is a page that silently disappears from it.
+    """
+    by_page = {}
+    for outcome in outcomes:
+        if outcome.page_num in by_page:
+            logger.error("Page %d has two outcomes in the concurrent stage — "
+                         "keeping the first and dropping the duplicate.",
+                         outcome.page_num)
+            continue
+        by_page[outcome.page_num] = outcome
+    skipped = set(unattempted)
+
+    entries: List[dict] = []
+    for page_num in range(1, pages_requested + 1):
+        outcome = by_page.get(page_num)
+        if outcome is not None:
+            if outcome.ok:
+                entries.append({"page": page_num, "status": "success",
+                                "products": len(outcome.products)})
+            else:
+                entries.append({"page": page_num, "status": "failed",
+                                "stop_reason": failure_stop_reason(outcome)})
+            continue
+
+        if page_num in skipped:
+            reason = ("listing_exhausted"
+                      if empty_at is not None and page_num > empty_at
+                      else "gap")
+            entries.append({"page": page_num, "status": "not_attempted",
+                            "reason": reason})
+            continue
+
+        # Reconciliation in _fetch_pages_concurrently should have made this
+        # unreachable; if it ever is, saying "not attempted" is the honest
+        # answer, and calling it a gap keeps the run from looking complete.
+        logger.error("Page %d is in the requested range but in neither the "
+                     "results nor the unattempted list — recording it as a "
+                     "gap.", page_num)
+        entries.append({"page": page_num, "status": "not_attempted",
+                        "reason": "gap"})
+    return entries
+
+
+def _log_page_manifest(entries: List[dict]) -> None:
+    """Print the per-page manifest once, at the level its content deserves.
+
+    The run still reports ONE stop reason; this is the sentence underneath it
+    that says which pages that reason is about. Failures and gaps are logged
+    as errors — an operator scanning the log must not have to open the
+    sidecar to learn that pages are missing.
+    """
+    parts = []
+    for entry in entries:
+        page = entry["page"]
+        if entry["status"] == "success":
+            parts.append(f"{page}:ok({entry['products']})")
+        elif entry["status"] == "failed":
+            parts.append(f"{page}:failed({entry['stop_reason']})")
+        else:
+            parts.append(f"{page}:not_attempted({entry['reason']})")
+    gaps = [e["page"] for e in entries
+            if e["status"] == "not_attempted" and e["reason"] == "gap"]
+    log = logger.error if gaps else logger.info
+    log("Per-page result: %s", ", ".join(parts))
+    if gaps:
+        logger.error("Page(s) %s were never attempted and are NOT past the end "
+                     "of the listing — this run is not complete.",
+                     ", ".join(str(n) for n in gaps))
+
+
 def _addressable(first: PageOutcome, second: PageOutcome) -> bool:
     """Did the constructed page-2 URL actually reach page 2?
 
@@ -715,6 +813,10 @@ def scrape(args) -> int:
     stop_reason = "completed"
     total_results = None
     addressable = None
+    # The per-page manifest of a concurrent run: written only when pages 3..N
+    # were actually spread across workers. The sequential path and 1-2 page
+    # runs leave it None, and the metadata then carries no new field at all.
+    pages_manifest = None
 
     pool = proxy_pool_from_args(args)
     if pool and args.cdp_endpoint:
@@ -826,6 +928,14 @@ def scrape(args) -> int:
                                 stop_reason = "listing_exhausted"
                         elif unattempted:
                             stop_reason = "pages_unattempted"
+                        # One entry per requested page, whatever the run's
+                        # single stop reason ended up being. Built from the
+                        # SAME three lists the stop reason above was decided
+                        # from, so the manifest and the status cannot
+                        # disagree about which pages are a gap.
+                        pages_manifest = _page_manifest(
+                            args.pages, outcomes, unattempted, empty_at)
+                        _log_page_manifest(pages_manifest)
                     else:
                         seen = {p.sku for o in outcomes for p in o.products if p.sku}
                         for page_num, url in specs:
@@ -888,6 +998,7 @@ def scrape(args) -> int:
                       merge_stats=merge_stats,
                       total_results_first=counted[0] if counted else None,
                       total_results_last=counted[-1] if counted else None,
+                      pages_manifest=pages_manifest,
                       start_url=args.url, final_url=final_url)
 
 

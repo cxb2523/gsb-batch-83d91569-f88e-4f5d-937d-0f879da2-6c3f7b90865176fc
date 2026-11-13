@@ -237,6 +237,17 @@ for pages that were requested and never came back at all, the site's own
 those differ, `rows_before_dedupe` and `duplicate_skus_across_pages`, and
 whether pagination was addressable.
 
+A run of more than two pages with `--concurrency N` (N > 1) also writes
+`pages_manifest`: one entry per requested page, ascending, each page exactly
+once. `status` is `success` (with `products`, the row count for that page),
+`failed` (with that page's own `stop_reason`), or `not_attempted`. A
+`not_attempted` entry says why in `reason`: `listing_exhausted` when the page
+lies past the empty page that ended the listing — nothing exists there — and
+`gap` when the page was skipped although rows may exist there (it came before
+the empty page, or a worker died holding the queue). A `gap` keeps the run
+from reporting `complete`, independently of the stop reason. Sequential runs
+and 1-2 page runs write no manifest at all.
+
 A run is `complete` only when its stop reason says so **and** every requested
 page is accounted for. The page count is checked independently of the stop
 reason: an engine that loses a page without noticing still cannot publish a
