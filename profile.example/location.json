@@ -1,0 +1,8 @@
+{
+	"_nota": "Dónde puedes trabajar. Remoto: se aceptan las vacantes remotas abiertas a 'country'. Presencial o híbrido: solo en 'city'. 'languages': idiomas en los que aceptas vacantes (códigos ISO, ej. es, en).",
+	"country": "Colombia",
+	"city": "Bogotá",
+	"languages": [
+		"es"
+	]
+}

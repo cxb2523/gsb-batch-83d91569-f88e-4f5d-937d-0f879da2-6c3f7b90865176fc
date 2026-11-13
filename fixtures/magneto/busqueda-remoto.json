@@ -1,0 +1,2771 @@
+{
+ "totalRows": 21,
+ "totalHits": 47,
+ "counters": [
+  {
+   "field": "work_modality",
+   "counts": [
+    {
+     "id": "remote",
+     "total": 47
+    }
+   ]
+  },
+  {
+   "field": "salary_show",
+   "counts": [
+    {
+     "id": "BK-01",
+     "total": 45
+    },
+    {
+     "id": "BK-02",
+     "total": 45
+    },
+    {
+     "id": "BK-03",
+     "total": 45
+    },
+    {
+     "id": "BK-04",
+     "total": 24
+    },
+    {
+     "id": "BK-05",
+     "total": 22
+    },
+    {
+     "id": "BK-06",
+     "total": 20
+    },
+    {
+     "id": "BK-07",
+     "total": 18
+    },
+    {
+     "id": "BK-08",
+     "total": 16
+    },
+    {
+     "id": "BK-09",
+     "total": 12
+    },
+    {
+     "id": "null",
+     "total": 47
+    }
+   ]
+  },
+  {
+   "field": "is_internal",
+   "counts": [
+    {
+     "id": "false",
+     "total": 47
+    }
+   ]
+  },
+  {
+   "field": "internship_types_id",
+   "counts": [
+    {
+     "id": 0,
+     "total": 47
+    }
+   ]
+  },
+  {
+   "field": "sectors_ids",
+   "counts": [
+    {
+     "id": 23,
+     "total": 25
+    },
+    {
+     "id": 1,
+     "total": 34
+    },
+    {
+     "id": 3,
+     "total": 22
+    },
+    {
+     "id": 14,
+     "total": 22
+    },
+    {
+     "id": 25,
+     "total": 2
+    },
+    {
+     "id": 26,
+     "total": 1
+    }
+   ]
+  },
+  {
+   "field": "experience_months_number",
+   "counts": [
+    {
+     "id": "BK-01",
+     "total": 2
+    },
+    {
+     "id": "BK-02",
+     "total": 4
+    },
+    {
+     "id": "BK-03",
+     "total": 3
+    },
+    {
+     "id": "BK-04",
+     "total": 13
+    },
+    {
+     "id": "BK-05",
+     "total": 19
+    },
+    {
+     "id": "BK-06",
+     "total": 7
+    },
+    {
+     "id": "BK-07",
+     "total": 22
+    },
+    {
+     "id": "BK-08",
+     "total": 22
+    },
+    {
+     "id": "null",
+     "total": 47
+    }
+   ]
+  },
+  {
+   "field": "contract_type_id",
+   "counts": [
+    {
+     "id": 2,
+     "total": 40
+    },
+    {
+     "id": 1,
+     "total": 2
+    },
+    {
+     "id": 4,
+     "total": 2
+    },
+    {
+     "id": 5,
+     "total": 2
+    },
+    {
+     "id": 6,
+     "total": 1
+    }
+   ]
+  },
+  {
+   "field": "aditional_information",
+   "counts": [
+    {
+     "id": "disabledPeople",
+     "total": 14
+    }
+   ]
+  },
+  {
+   "field": "publish_date",
+   "counts": [
+    {
+     "id": "",
+     "total": 47
+    },
+    {
+     "id": "BK-01",
+     "total": 0
+    },
+    {
+     "id": "BK-02",
+     "total": 2
+    },
+    {
+     "id": "BK-03",
+     "total": 22
+    },
+    {
+     "id": "BK-04",
+     "total": 23
+    },
+    {
+     "id": "BK-05",
+     "total": 27
+    }
+   ]
+  },
+  {
+   "field": "company_show_slug",
+   "counts": [
+    {
+     "id": "agencia-empleo-comfama",
+     "total": 20
+    },
+    {
+     "id": "magneto",
+     "total": 4
+    },
+    {
+     "id": "poder-humano",
+     "total": 22
+    },
+    {
+     "id": "marketing-magneto",
+     "total": 1
+    }
+   ]
+  },
+  {
+   "field": "vacant_position_id",
+   "counts": [
+    {
+     "id": 146,
+     "total": 12
+    },
+    {
+     "id": 169,
+     "total": 22
+    },
+    {
+     "id": 283,
+     "total": 8
+    },
+    {
+     "id": 17,
+     "total": 1
+    },
+    {
+     "id": 113,
+     "total": 1
+    },
+    {
+     "id": 310,
+     "total": 3
+    }
+   ]
+  }
+ ],
+ "algorithm": "wenesday-v1.0.0",
+ "rows": [
+  {
+   "id": 1110101,
+   "title": "Desarrollador Backend (.NET Core) Middle",
+   "jobSlug": "desarrollador-backend-net-core-middle-1110101",
+   "status": "published",
+   "cities": [
+    "Bogotá, D.C.",
+    "Pereira",
+    "Manizales",
+    "Medellín",
+    "Bucaramanga"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-bogota",
+    "ofertas-empleo-en-pereira",
+    "ofertas-empleo-en-manizales",
+    "ofertas-empleo-en-medellin",
+    "ofertas-empleo-en-bucaramanga"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<h6 style=\"margin-bottom: 1rem; font-size: 1rem; font-weight: 700\"> Desarrollador Backend (.NET Core) Middle </h6> <div class=\"description-generate__items\"> <strong>Palabras clave: </strong> <ul><li>Desarrollador Backend</li><li>Desarrollador .NET Core</li><li>Backend Developer</li><li>APIs REST</li><li>SQL Server</li><li>Azure DevOps</li><li>C#</li><li>CI/CD</li><li>Angular</li><li>React</li></ul> </div> <p style=\"margin-bottom: 10px\">Se requiere <b>Desarrollador Backend .NET Core Middle</b> para diseñar, desarrollar y optimizar soluciones con <b>SQL Server</b> y <b>APIs REST</b>, con impacto directo en la calidad, el rendimiento y la estabilidad del proyecto tecnológico. El cargo tiene como propósito construir y mantener soluciones escalables, con participación en integraciones mediante Angular y React.</p> <div class=\"description-generate__items\"> <strong>Responsabilidades: </strong> <ul><li>Desarrollar y mantener APIs REST en .NET Core</li><li>Optimizar consultas y procedimientos almacenados en SQL Server</li><li>Gestionar tareas versiones y despliegues mediante Azure DevOps</li><li>Diagnosticar y solucionar incidencias técnicas</li><li>Apoyar integraciones frontend con Angular y React</li></ul> </div> <div class=\"description-generate__items\"> <strong>Requerimientos: </strong> <ul><li>Título profesional en Ingeniería de Sistemas Ingeniería de Software Computación o carreras afines</li><li>Experiencia avanzada en desarrollo backend con .NET Core y C#</li><li>Conocimientos avanzados en SQL Server optimización de consultas índices procedimientos almacenados y transacciones</li><li>Experiencia diseñando y consumiendo APIs REST</li><li>Aplicación de principios SOLID validaciones DTOs y manejo de errores</li><li>Manejo de Azure DevOps Git Pull Requests y procesos CI/CD</li><li>Conocimientos básicos en Angular y React</li><li>Capacidad de diagnóstico de errores análisis de logs y solución de problemas de rendimiento</li></ul> </div> <div class=\"description-generate__items\"> <strong>Nivel de educación: </strong> <ul><li>Profesional, Tecnologo</li></ul> </div> <div class=\"description-generate__items\"> <strong>Sectores laborales: </strong> <ul><li>Software informática y telecomunicaciones</li></ul> </div> <div class=\"description-generate__items\"> <strong>Cargo: </strong> <ul><li>Analista</li></ul> </div> <h6 style=\"margin-bottom: 5px; font-size: 15px; font-weight: 700\"> Otras habilidades: </h6> <div class=\"description-generate__items\"> <strong>Habilidades técnicas: </strong> <ul><li>.NET Core</li><li>SQL Server</li><li>APIs REST</li><li>Azure DevOps</li><li>Git</li></ul> </div> <div class=\"description-generate__items\"> <strong>Habilidades interpersonales: </strong> <ul><li>Resolucion problemas</li><li>Trabajo en equipo</li><li>Analisis tecnico</li></ul> </div>",
+   "companyName": "Confidencial",
+   "publishDate": "2026-10-22T17:13:47.254Z",
+   "confidential": true,
+   "departments": [
+    "Bogotá D.C.",
+    "Risaralda",
+    "Caldas",
+    "Antioquia",
+    "Santander"
+   ],
+   "currencyCode": "COP",
+   "contractType": 1,
+   "contractOrder": {
+    "id": 1,
+    "name": "Término fijo",
+    "order": 1
+   },
+   "isRemote": true,
+   "publicId": "c82642bd-1863-4be1-8439-d6393b51ec18",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-10-31T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [
+    {
+     "id": 1627281,
+     "name": ".NET Core",
+     "score": 4
+    },
+    {
+     "id": 1627282,
+     "name": "SQL Server",
+     "score": 4
+    },
+    {
+     "id": 1627283,
+     "name": "APIs REST",
+     "score": 4
+    },
+    {
+     "id": 1627284,
+     "name": "Azure DevOps",
+     "score": 3
+    },
+    {
+     "id": 1627285,
+     "name": "Git",
+     "score": 3
+    },
+    {
+     "id": 1627286,
+     "name": "Resolucion problemas",
+     "score": 4
+    },
+    {
+     "id": 1627287,
+     "name": "Trabajo en equipo",
+     "score": 3
+    },
+    {
+     "id": 1627288,
+     "name": "Analisis tecnico",
+     "score": 4
+    }
+   ],
+   "experienceMonthsNumber": 36,
+   "educationLevel": [
+    {
+     "id": 2034193,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 2034192,
+     "name": "Profesional",
+     "order": 4
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "magneto",
+   "mainCompanySlug": "magneto",
+   "companySlugs": [
+    "magneto",
+    "magneto"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador Backend",
+    "Desarrollador .NET Core",
+    "Backend Developer",
+    "APIs REST",
+    "SQL Server"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 3,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1109948,
+   "title": "Ejecutivo Comercial B2b –sector Iluminación",
+   "jobSlug": "ejecutivo-comercial-b2b-sector-iluminacion-1109948",
+   "status": "published",
+   "cities": [
+    "Bogotá, D.C."
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-bogota"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<h6 style=\"margin-bottom: 1rem; font-size: 1rem; font-weight: 700\"><span style=\"color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\">🌟 ¡Estamos contratando Asesor Comercial / Desarrollador de Negocio! 🌟</span><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\">¿Te apasionan las&nbsp;<span style=\"font-weight: bolder;\">ventas, los grandes proyectos y el crecimiento profesional</span>?</p><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\">Empresa líder en el diseño, desarrollo y comercialización de luminarias con tecnología LED de calidad certificada, buscamos talentos que quieran brillar con nosotros. 💡✨</p></h6><h2 style=\"margin-bottom: 0.5rem; font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 500; line-height: 1.2; color: rgb(53, 64, 82); font-size: 2rem;\">🚀 Lo que ofrecemos</h2><h6 style=\"margin-bottom: 1rem; font-size: 1rem;\"><ul style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\"><li><span style=\"font-weight: bolder;\">Contrato a término indefinido</span>&nbsp;con estabilidad laboral.</li><li><span style=\"font-weight: bolder;\">Salario base + auxilio legal de transporte + auxilio extra $350.000</span>.</li><li><span style=\"font-weight: bolder;\">Comisiones sin techo</span>: ¡puedes ganar en promedio&nbsp;<span style=\"font-weight: bolder;\">$10.000.000 o más</span>!</li><li><span style=\"font-weight: bolder;\">Garantía de $400.000 en comisiones los primeros 3 meses</span>.</li><li>Trabajo&nbsp;<span style=\"font-weight: bolder;\">remoto</span>&nbsp;de lunes a viernes 7:30 a.m. – 5:30 p.m. y sábados hasta 11:45 a.m. (se entrega computador y celular).</li><li>Oportunidad de crecer en una empresa innovadora con clientes de alto nivel (concesiones, contratistas y entidades estatales).</li></ul></h6><h2 style=\"margin-bottom: 0.5rem; font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 500; line-height: 1.2; color: rgb(53, 64, 82); font-size: 2rem;\">🛠️ Requisitos</h2><h6 style=\"margin-bottom: 1rem; font-size: 1rem;\"><ul style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\"><li>Técnico, tecnólogo o profesional en áreas comerciales, administrativas o ingeniería eléctrica/electrónica.</li><li>Experiencia mínima de&nbsp;<span style=\"font-weight: bolder;\">10 años en el mercado de iluminación pública o industrial</span>&nbsp;(parques, bodegas, concesiones).</li><li>Manejo de herramientas ofimáticas.</li><li>Disponibilidad para viajar a nivel nacional.</li></ul></h6><h2 style=\"margin-bottom: 0.5rem; font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 500; line-height: 1.2; color: rgb(53, 64, 82); font-size: 2rem;\">💡 Tu perfil</h2><h6 style=\"margin-bottom: 1rem; font-size: 1rem;\"><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\">Buscamos personas con&nbsp;<span style=\"font-weight: bolder;\">visión estratégica, habilidades comerciales, disciplina y pasión por los resultados</span>.</p><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\">Un profesional con la capacidad de abrir puertas, generar confianza y construir relaciones sólidas en el mercado de la iluminación.</p></h6><h2 style=\"margin-bottom: 0.5rem; font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 500; line-height: 1.2; color: rgb(53, 64, 82); font-size: 2rem;\">📍 Lugar de trabajo</h2><h6 style=\"margin-bottom: 1rem; font-size: 1rem;\"><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\">Bogotá – con alcance a nivel nacional.</p><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\">👉 Si estás listo para llevar tu carrera al siguiente nivel,&nbsp;<span style=\"font-weight: bolder;\">postúlate ahora con tu hoja de vida actualizada</span>&nbsp;y sé parte del futuro de la iluminación LED en Colombia.</p></h6><div class=\"description-generate__items\"> </div>",
+   "companyName": "Poder humano",
+   "publishDate": "2026-10-22T16:25:48.897Z",
+   "confidential": false,
+   "departments": [
+    "Bogotá D.C."
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "4db550ea-69e2-43f9-8a54-2e598f57cd82",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 3,
+     "name": "Mercadeo y Publicidad"
+    },
+    {
+     "id": 14,
+     "name": "Ingenierías"
+    },
+    {
+     "id": 25,
+     "name": "Ventas"
+    }
+   ],
+   "expirationDate": "2026-11-29T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [
+    {
+     "id": 1626929,
+     "name": "CRM y ERP",
+     "score": 3
+    },
+    {
+     "id": 1626930,
+     "name": "Propuestas técnicas",
+     "score": 3
+    },
+    {
+     "id": 1626931,
+     "name": "Análisis de mercado",
+     "score": 4
+    },
+    {
+     "id": 1626932,
+     "name": "Comunicación efectiva",
+     "score": 4
+    },
+    {
+     "id": 1626933,
+     "name": "Negociación estratégica",
+     "score": 4
+    },
+    {
+     "id": 1626934,
+     "name": "Orientación a resultados",
+     "score": 4
+    }
+   ],
+   "experienceMonthsNumber": 120,
+   "educationLevel": [
+    {
+     "id": 2033694,
+     "name": "Tecnólogo",
+     "order": 3
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "poder-humano",
+   "mainCompanySlug": "soluciones-inmediatas",
+   "companySlugs": [
+    "poder-humano",
+    "poder-humano"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Ejecutivo Comercial",
+    "Asesor Comercial",
+    "Representante de Ventas",
+    "Desarrollador de Negocio",
+    "Sector Iluminación"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1106804,
+   "title": "Ejecutivo Comercial Sector Iluminación",
+   "jobSlug": "ejecutivo-comercial-sector-iluminacion-1106804",
+   "status": "published",
+   "cities": [
+    "Bogotá, D.C."
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-bogota"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 1750905,
+   "minSalary": 1750905,
+   "maxSalary": 11623500,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">🌟 ¡Estamos contratando Asesor Comercial / Desarrollador de Negocio! 🌟</p><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">¿Te apasionan las <span style=\"font-weight: bolder;\">ventas, los grandes proyectos y el crecimiento profesional</span>?</p><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">Empresa líder en el diseño, desarrollo y comercialización de luminarias con tecnología LED de calidad certificada, buscamos talentos que quieran brillar con nosotros. 💡✨</p><h2 style=\"margin-bottom: 0.5rem; font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 500; line-height: 1.2; color: rgb(53, 64, 82); font-size: 2rem;\">🚀 Lo que ofrecemos</h2><ul style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><li><span style=\"font-weight: bolder;\">Contrato a término indefinido</span> con estabilidad laboral.</li><li><span style=\"font-weight: bolder;\">Salario: A convenir según tu experiencia</span>.</li><li><span style=\"font-weight: bolder;\">Comisiones sin techo</span>: ¡puedes ganar en promedio <span style=\"font-weight: bolder;\">$10.000.000 o más</span>!</li><li><span style=\"font-weight: bolder;\">GARANTIZADO LOS PRIMEROS 4 MESES por 1750905</span></li><li>Trabajo <span style=\"font-weight: bolder;\">remoto</span> de Lunes a Viernes de 8:00-12:15 pm; 2:00-5:15 pm. Sábado: 8:00 a 11:30 am.</li><li>Oportunidad de crecer en una empresa innovadora con clientes de alto nivel (concesiones, contratistas y entidades estatales).</li></ul><h2 style=\"margin-bottom: 0.5rem; font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 500; line-height: 1.2; color: rgb(53, 64, 82); font-size: 2rem;\">🛠️ Requisitos</h2><ul style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><li>Técnico, tecnólogo o profesional en áreas comerciales, administrativas o ingeniería eléctrica/electrónica.</li><li>Experiencia mínima de <span style=\"font-weight: bolder;\">10 años en el mercado de iluminación pública o industrial</span> (parques, bodegas, concesiones).</li><li>Manejo de herramientas ofimáticas.</li><li>Disponibilidad para viajar a nivel nacional.</li></ul><h2 style=\"margin-bottom: 0.5rem; font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 500; line-height: 1.2; color: rgb(53, 64, 82); font-size: 2rem;\">💡 Tu perfil</h2><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">Buscamos personas con <span style=\"font-weight: bolder;\">visión estratégica, habilidades comerciales, disciplina y pasión por los resultados</span>.</p><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">Un profesional con la capacidad de abrir puertas, generar confianza y construir relaciones sólidas en el mercado de la iluminación.</p><h2 style=\"margin-bottom: 0.5rem; font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 500; line-height: 1.2; color: rgb(53, 64, 82); font-size: 2rem;\">📍 Lugar de trabajo</h2><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">Bogotá – con alcance a nivel nacional.</p><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">👉 Si estás listo para llevar tu carrera al siguiente nivel, <span style=\"font-weight: bolder;\">postúlate ahora con tu hoja de vida actualizada</span> y sé parte del futuro de la iluminación LED en Colombia.</p>",
+   "companyName": "Poder humano",
+   "publishDate": "2026-10-20T17:19:38.667Z",
+   "confidential": false,
+   "departments": [
+    "Bogotá D.C."
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "63e43798-e882-43f0-a9d3-504d973e5ebe",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 1,
+     "name": "Administración y oficina"
+    },
+    {
+     "id": 3,
+     "name": "Mercadeo y Publicidad"
+    },
+    {
+     "id": 14,
+     "name": "Ingenierías"
+    }
+   ],
+   "expirationDate": "2026-11-30T05:00:00.000Z",
+   "numberOfQuotas": 20,
+   "skills": [
+    {
+     "id": 1620141,
+     "name": "Manejo de CRM",
+     "score": 3
+    },
+    {
+     "id": 1620142,
+     "name": "Visión estratégica",
+     "score": 4
+    },
+    {
+     "id": 1620143,
+     "name": "Habilidades comerciales",
+     "score": 4
+    },
+    {
+     "id": 1620144,
+     "name": "Disciplina y organización",
+     "score": 4
+    }
+   ],
+   "experienceMonthsNumber": 120,
+   "educationLevel": [
+    {
+     "id": 2023803,
+     "name": "Técnico",
+     "order": 2
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "poder-humano",
+   "mainCompanySlug": "soluciones-inmediatas",
+   "companySlugs": [
+    "poder-humano",
+    "poder-humano"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Ejecutivo Comercial",
+    "Asesor Comercial",
+    "Desarrollador de Negocio",
+    "Iluminación",
+    "LED"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1098536,
+   "title": "Desarrollador/a Fullstack con o sin discapacidad 1626040293-370",
+   "jobSlug": "desarrolladora-fullstack-con-o-sin-discapacidad-1626040293-370-1098536",
+   "status": "published",
+   "cities": [
+    "Medellín"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 6000000,
+   "minSalary": 6000000,
+   "maxSalary": 8000000,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p>Importante empresa busca talento para desempeñarse como Desarrollador/a Fullstack, con mínimo tres (3) años de experiencia en Angular, .NET, Azure, inteligencia artificial y metodologías ágiles, para diseñar, desarrollar e implementar soluciones de software integrales que cumplan con los requerimientos y estándares de calidad establecidos.</p><p><strong>Formación académica</strong>: Profesional en Ingeniería de Sistemas, Ingeniería Electrónica, Ingeniería de Telecomunicaciones, Ingeniería Industrial o Ingeniería Eléctrica.</p><p><strong>Requerimientos para el cargo</strong>:</p><p>- Experiencia en desarrollo frontend y backend.</p><p>- Manejo de Angular, .NET y Azure.</p><p>- Experiencia en inteligencia artificial y metodologías ágiles.</p><p><strong>Misión del cargo</strong>: Diseñar, desarrollar e implementar soluciones de software de principio a fin, integrando funcionalidades frontend y backend, garantizando el cumplimiento de los requerimientos y estándares de calidad, y promoviendo las mejores prácticas de ingeniería de software y la mejora continua de las soluciones tecnológicas.</p><p><strong>Funciones</strong>:</p><p>- Construir soluciones técnicas integrales que cumplan con los requerimientos funcionales y los atributos de calidad de arquitectura desde una perspectiva de principio a fin.</p><p>- Promover las mejores prácticas de ingeniería de software e identificar nuevos tipos de desarrollo.</p><p>- Integrar las responsabilidades y actividades propias del desarrollo frontend y backend para implementar soluciones completas de software.</p><p><strong>Conocimiento</strong>:</p><p>- Angular, .NET y Azure.</p><p>- Inteligencia artificial.</p><p>- Metodologías ágiles.</p><p>- Conceptos básicos del sector de energía y mercados eléctricos.</p><p><strong>Salario</strong>: Entre $6.000.000 a $8.000.000 + prestaciones legales vigentes.</p><p><strong>Tipo de contrato</strong>: Término indefinido.</p><p><strong>Horario</strong>: Flexible, de 7:00 am a 5:00 pm.</p><p><strong>Lugar de trabajo</strong>: Antioquia. Modalidad: Virtual.&nbsp;</p> <div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"process\"> Proceso de <span class=\"color-company color-company-on-white\"\n>Selección</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p>Tu próxima oportunidad laboral puede estar a pocos pasos. Para postularte:</p>\n<ol>\n<li>Haz clic en el botón \"Postularme\".</li>\n<li>Inicia sesión o crea tu cuenta en Magneto, registra tu hoja de vida y responde las preguntas del proceso.</li>\n<li>Revisa tu correo electrónico para conocer el estado de tu postulación.</li>\n<li>Si avanzas, completa las pruebas y/o entrevistas solicitadas.</li>\n</ol> <p>El equipo del Servicio de Empleo Comfama evaluará tu perfil, si se ajusta a la vacante y pasas los filtros, lo enviará a la empresa y ellos te contactarán para continuar el proceso. Recuerda que no debes pagar para participar de procesos de selección. Así dirás #MeProtejodelfraude\n</p>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"company_description\"> Sobre\n<span class=\"color-company-on-white\"\n>Nosotros</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p> El Servicio de Empleo Comfama es la plataforma de intermediación que conecta el talento de las personas y las necesidades de las empresas. Como agencia transnacional, presta el servicio para empresas ubicadas en Antioquia, y en el extranjero que requieren talento colombiano. Somos prestador autorizado Resolución 0017 del 14 de enero de 2026 del Servicio Público de Empleo.\n</p>\n</div>\n</div>\n<style> .color-company { color: #ed2b7b !important; } .color-company-on-white { color: #ed2b7b !important; }\n</style>",
+   "companyName": "Servicio de Empleo Comfama",
+   "publishDate": "2026-10-14T20:12:00.356Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "5a82f045-dd6a-4153-a78f-6d385f0664de",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-12-14T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [],
+   "experienceMonthsNumber": 36,
+   "educationLevel": [
+    {
+     "id": 2002608,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 2002607,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 2000548,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 2002606,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 2002605,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 2002604,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "agencia-empleo-comfama",
+   "mainCompanySlug": "agencia-empleo-comfama",
+   "companySlugs": [
+    "agencia-empleo-comfama",
+    "agencia-empleo-comfama"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador",
+    "1626040293-370"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": true,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1094634,
+   "title": "Ejecutivo Comercial B2B exp en mercado de iluminación pública o industrial",
+   "jobSlug": "ejecutivo-comercial-b2b-exp-en-mercado-de-iluminacion-publica-o-industrial-1094634",
+   "status": "published",
+   "cities": [
+    "Bogotá, D.C."
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-bogota"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 2100000,
+   "minSalary": 2100000,
+   "maxSalary": 10000000,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<h6 style=\"margin-bottom: 1rem; font-size: 1rem; font-weight: 700\"><span style=\"color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\">🌟 ¡Estamos contratando Asesor Comercial / Desarrollador de Negocio! 🌟</span><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\">¿Te apasionan las&nbsp;<span style=\"font-weight: bolder;\">ventas, los grandes proyectos y el crecimiento profesional</span>?</p><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\">Empresa líder en el diseño, desarrollo y comercialización de luminarias con tecnología LED de calidad certificada, buscamos talentos que quieran brillar con nosotros. 💡✨</p></h6><h2 style=\"margin-bottom: 0.5rem; font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 500; line-height: 1.2; color: rgb(53, 64, 82); font-size: 2rem;\">🚀 Lo que ofrecemos</h2><h6 style=\"margin-bottom: 1rem; font-size: 1rem;\"><ul style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\"><li><span style=\"font-weight: bolder;\">Contrato a término indefinido</span>&nbsp;con estabilidad laboral.</li><li><span style=\"font-weight: bolder;\">Salario base + auxilio legal de transporte + auxilio extra $350.000</span>.</li><li><span style=\"font-weight: bolder;\">Comisiones sin techo</span>: ¡puedes ganar en promedio&nbsp;<span style=\"font-weight: bolder;\">$10.000.000 o más</span>!</li><li><span style=\"font-weight: bolder;\">Garantía de $400.000 en comisiones los primeros 3 meses</span>.</li><li>Trabajo&nbsp;<span style=\"font-weight: bolder;\">remoto</span>&nbsp;de lunes a viernes 7:30 a.m. – 5:30 p.m. y sábados hasta 11:45 a.m. (se entrega computador y celular).</li><li>Oportunidad de crecer en una empresa innovadora con clientes de alto nivel (concesiones, contratistas y entidades estatales).</li></ul></h6><h2 style=\"margin-bottom: 0.5rem; font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 500; line-height: 1.2; color: rgb(53, 64, 82); font-size: 2rem;\">🛠️ Requisitos</h2><h6 style=\"margin-bottom: 1rem; font-size: 1rem;\"><ul style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\"><li>Técnico, tecnólogo o profesional en áreas comerciales, administrativas o ingeniería eléctrica/electrónica.</li><li>Experiencia mínima de 3<span style=\"font-weight: bolder;\"> años en el mercado de iluminación pública o industrial</span>&nbsp;(parques, bodegas, concesiones).</li><li>Manejo de herramientas ofimáticas.</li><li>Disponibilidad para viajar a nivel nacional.</li></ul></h6><h2 style=\"margin-bottom: 0.5rem; font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 500; line-height: 1.2; color: rgb(53, 64, 82); font-size: 2rem;\">💡 Tu perfil</h2><h6 style=\"margin-bottom: 1rem; font-size: 1rem;\"><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\">Buscamos personas con&nbsp;<span style=\"font-weight: bolder;\">visión estratégica, habilidades comerciales, disciplina y pasión por los resultados</span>.</p><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\">Un profesional con la capacidad de abrir puertas, generar confianza y construir relaciones sólidas en el mercado de la iluminación.</p></h6><h2 style=\"margin-bottom: 0.5rem; font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 500; line-height: 1.2; color: rgb(53, 64, 82); font-size: 2rem;\">📍 Lugar de trabajo</h2><h6 style=\"margin-bottom: 1rem; font-size: 1rem;\"><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\">Bogotá – con alcance a nivel nacional.</p><p style=\"margin-bottom: 1rem; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-weight: 400;\">👉 Si estás listo para llevar tu carrera al siguiente nivel,&nbsp;<span style=\"font-weight: bolder;\">postúlate ahora con tu hoja de vida actualizada</span>&nbsp;y sé parte del futuro de la iluminación LED en Colombia.</p></h6><div class=\"description-generate__items\"> </div>",
+   "companyName": "Poder humano",
+   "publishDate": "2026-10-08T20:16:41.273Z",
+   "confidential": false,
+   "departments": [
+    "Bogotá D.C."
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "29641bff-0e44-4083-85dc-41f1c951d7ee",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 3,
+     "name": "Mercadeo y Publicidad"
+    },
+    {
+     "id": 14,
+     "name": "Ingenierías"
+    },
+    {
+     "id": 25,
+     "name": "Ventas"
+    }
+   ],
+   "expirationDate": "2026-11-24T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [
+    {
+     "id": 1596886,
+     "name": "CRM y ERP",
+     "score": 3
+    },
+    {
+     "id": 1596887,
+     "name": "Propuestas técnicas",
+     "score": 3
+    },
+    {
+     "id": 1596888,
+     "name": "Análisis de mercado",
+     "score": 4
+    },
+    {
+     "id": 1596889,
+     "name": "Comunicación efectiva",
+     "score": 4
+    },
+    {
+     "id": 1596890,
+     "name": "Negociación estratégica",
+     "score": 4
+    },
+    {
+     "id": 1596891,
+     "name": "Orientación a resultados",
+     "score": 4
+    }
+   ],
+   "experienceMonthsNumber": 120,
+   "educationLevel": [
+    {
+     "id": 1989952,
+     "name": "Tecnólogo",
+     "order": 3
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "poder-humano",
+   "mainCompanySlug": "soluciones-inmediatas",
+   "companySlugs": [
+    "poder-humano",
+    "poder-humano"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Ejecutivo Comercial",
+    "Asesor Comercial",
+    "Representante de Ventas",
+    "Desarrollador de Negocio",
+    "Sector Iluminación"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1094241,
+   "title": "Desarrollador de Software",
+   "jobSlug": "desarrollador-de-software-1094241",
+   "status": "published",
+   "cities": [
+    "Medellín",
+    "Bogotá, D.C.",
+    "Cali",
+    "Barranquilla",
+    "Pereira",
+    "Manizales",
+    "Pasto",
+    "Villavicencio",
+    "Bucaramanga",
+    "Cúcuta"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin",
+    "ofertas-empleo-en-bogota",
+    "ofertas-empleo-en-cali",
+    "ofertas-empleo-en-barranquilla",
+    "ofertas-empleo-en-pereira",
+    "ofertas-empleo-en-manizales",
+    "ofertas-empleo-en-pasto",
+    "ofertas-empleo-en-villavicencio",
+    "ofertas-empleo-en-bucaramanga",
+    "ofertas-empleo-en-cucuta"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<h6 style=\"margin-bottom: 1rem; font-size: 1rem; font-weight: 700\"> Desarrollador de Software </h6> <div class=\"description-generate__items\"> <strong>Palabras clave: </strong> <ul><li>Desarrollador de Software</li><li>Programador</li><li>Software Developer</li><li>Desarrollador Web</li><li>Full Stack Developer</li><li>programación</li><li>desarrollo de software</li><li>soluciones tecnológicas</li></ul> </div> <p style=\"margin-bottom: 10px\">🚀 Impulsa tu crecimiento profesional como <b>Desarrollador de Software</b> y conecta con nuevas oportunidades en tecnología. Tu talento en <b>programación</b> puede abrirte el camino hacia nuevos retos profesionales mientras formas parte de nuestro banco de talentos. 🌟 Queremos que encuentres una oportunidad alineada con tus habilidades como <b>Programador</b> y <b>Software Developer</b>. Regístra tu perfil como <b>Desarrollador Web</b> o <b>Full Stack Developer</b> y da el siguiente paso en tu carrera.</p> <div class=\"description-generate__items\"> <strong>Responsabilidades: </strong> <ul><li>Diseñar e implementar soluciones de software eficientes y escalables.</li><li>Participar en la creación mejora y evolución de aplicaciones tecnológicas.</li><li>Colaborar en equipos multidisciplinarios para el desarrollo de proyectos digitales.</li></ul> </div> <div class=\"description-generate__items\"> <strong>Requerimientos: </strong> <ul><li>Título técnico tecnólogo o profesional en sistemas desarrollo de software o áreas afines.</li><li>Experiencia comprobable en proyectos de programación y desarrollo de software.</li><li>Capacidad analítica para la resolución de problemas tecnológicos.</li></ul> </div> <div class=\"description-generate__items\"> <strong>Nivel de educación: </strong> <ul><li>Tecnólogo</li></ul> </div> <div class=\"description-generate__items\"> <strong>Sectores laborales: </strong> <ul><li>Software informática y telecomunicaciones</li></ul> </div> <div class=\"description-generate__items\"> <strong>Cargo: </strong> <ul><li>Analista</li></ul> </div> <h6 style=\"margin-bottom: 5px; font-size: 15px; font-weight: 700\"> Otras habilidades: </h6> <div class=\"description-generate__items\"> <strong>Habilidades técnicas: </strong> <ul><li>Programación</li><li>Desarrollo Web</li><li>Bases de datos</li></ul> </div> <div class=\"description-generate__items\"> <strong>Habilidades interpersonales: </strong> <ul><li>Trabajo en equipo</li><li>Adaptabilidad</li></ul> </div>",
+   "companyName": "MARKETING MAGNETO",
+   "publishDate": "2026-10-08T17:00:27.482Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia",
+    "Bogotá D.C.",
+    "Valle del Cauca",
+    "Atlantico",
+    "Risaralda",
+    "Caldas",
+    "Narino",
+    "Meta",
+    "Santander",
+    "Norte de Santander"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "713f5115-4232-4975-a85d-7aa72b410a1c",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2027-04-08T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [
+    {
+     "id": 1595934,
+     "name": "Programación",
+     "score": 4
+    },
+    {
+     "id": 1595935,
+     "name": "Desarrollo Web",
+     "score": 3
+    },
+    {
+     "id": 1595936,
+     "name": "Bases de datos",
+     "score": 3
+    },
+    {
+     "id": 1595937,
+     "name": "Trabajo en equipo",
+     "score": 4
+    },
+    {
+     "id": 1595938,
+     "name": "Adaptabilidad",
+     "score": 3
+    }
+   ],
+   "experienceMonthsNumber": 0,
+   "educationLevel": [
+    {
+     "id": 1988795,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 1988794,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1988793,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1988792,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": true,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "marketing-magneto",
+   "mainCompanySlug": "marketing-magneto",
+   "companySlugs": [
+    "marketing-magneto",
+    "marketing-magneto"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador de Software",
+    "Programador",
+    "Software Developer",
+    "Desarrollador Web",
+    "Full Stack Developer"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1090260,
+   "title": "Desarrollador/a Backend con o sin discapacidad 1626040293-368",
+   "jobSlug": "desarrolladora-backend-con-o-sin-discapacidad-1626040293-368-1090260",
+   "status": "published",
+   "cities": [
+    "Medellín"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 4000000,
+   "minSalary": 4000000,
+   "maxSalary": 6000000,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p>Importante empresa del sector energía busca talento para desempeñarse como Desarrollador/a Backend, con tres (3) años de experiencia en desarrollo de software y conocimientos en tecnologías Backend, bases de datos, integración de servicios y soluciones en la nube, para contribuir al desarrollo de soluciones eficientes, seguras, confiables y escalables.</p><p><strong>Formación académica:</strong> Técnico/a, tecnólogo/a o profesional graduado/a en Ingeniería Eléctrica, Ingeniería Electrónica, Ingeniería de Telecomunicaciones, Ingeniería Industrial o Ingeniería de Sistemas.</p><p><strong>Requerimientos para el cargo:</strong></p><p>- Conocimientos en lenguajes de programación Backend.</p><p>- Conocimientos en frameworks de desarrollo, microservicios, arquitecturas orientadas a servicios (SOA), APIs y ORM.</p><p>- Conocimientos en mecanismos de integración e intercambio de datos.</p><p>- Conocimientos en frameworks de seguridad y protocolos de autorización.</p><p>- Conocimientos en prácticas DevOps y gestión de código fuente.</p><p>- Conocimientos en bases de datos relacionales (RDBMS).</p><p>- Conocimientos en contenerización.</p><p>- Manejo de herramientas IDE.</p><p>- Conocimientos en computación en la nube.</p><p>- Conocimientos en programación, algoritmos y bases de datos.</p><p>- Conocimientos en metodologías ágiles.</p><p>- Conceptos básicos del sector energía y mercados eléctricos.</p><p><strong>Funciones:</strong></p><p>- Implementar componentes, funciones, bases de datos y servicios de las aplicaciones desde el lado del servidor, diseñando la lógica y las soluciones de acuerdo con los criterios de calidad.</p><p>- Garantizar el transporte de la información, los tiempos de respuesta óptimos, la fiabilidad, resiliencia, mantenibilidad, compatibilidad y seguridad de las soluciones.</p><p>- Asegurar la adherencia a las arquitecturas de referencia y el cumplimiento de los lineamientos definidos para cada tipo de solución.</p><p><strong>Misión del cargo</strong>: Diseñar, desarrollar y mantener la lógica del lado del servidor, mediante la implementación de componentes, servicios y bases de datos que permitan el correcto funcionamiento de las aplicaciones, garantizando soluciones eficientes, seguras, confiables y escalables, de acuerdo con las arquitecturas y lineamientos técnicos definidos por la organización.</p><p><strong>Salario:</strong> $4.000.000 + prestaciones legales vigentes.</p><p><strong>Tipo de contrato</strong>: Indefinido.</p><p><strong>Horario</strong>: Flexible 7-5.</p><p><strong>Lugar de trabajo:</strong> Antioquia. Modalidad. Virtual.</p> <div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"process\"> Proceso de <span class=\"color-company color-company-on-white\"\n>Selección</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p>Tu próxima oportunidad laboral puede estar a pocos pasos. Para postularte:</p>\n<ol>\n<li>Haz clic en el botón \"Postularme\".</li>\n<li>Inicia sesión o crea tu cuenta en Magneto, registra tu hoja de vida y responde las preguntas del proceso.</li>\n<li>Revisa tu correo electrónico para conocer el estado de tu postulación.</li>\n<li>Si avanzas, completa las pruebas y/o entrevistas solicitadas.</li>\n</ol> <p>El equipo del Servicio de Empleo Comfama evaluará tu perfil, si se ajusta a la vacante y pasas los filtros, lo enviará a la empresa y ellos te contactarán para continuar el proceso. Recuerda que no debes pagar para participar de procesos de selección. Así dirás #MeProtejodelfraude\n</p>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"company_description\"> Sobre\n<span class=\"color-company-on-white\"\n>Nosotros</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p> El Servicio de Empleo Comfama es la plataforma de intermediación que conecta el talento de las personas y las necesidades de las empresas. Como agencia transnacional, presta el servicio para empresas ubicadas en Antioquia, y en el extranjero que requieren talento colombiano. Somos prestador autorizado Resolución 0017 del 14 de enero de 2026 del Servicio Público de Empleo.\n</p>\n</div>\n</div>\n<style> .color-company { color: #ed2b7b !important; } .color-company-on-white { color: #ed2b7b !important; }\n</style>",
+   "companyName": "Servicio de Empleo Comfama",
+   "publishDate": "2026-10-07T22:11:05.601Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "978b4b8d-f5e4-4af5-a0b0-4661210ff1ef",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 1,
+     "name": "Administración y oficina"
+    },
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-12-05T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [],
+   "experienceMonthsNumber": 36,
+   "educationLevel": [
+    {
+     "id": 1978027,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 1978026,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1978025,
+     "name": "Profesional",
+     "order": 4
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "agencia-empleo-comfama",
+   "mainCompanySlug": "agencia-empleo-comfama",
+   "companySlugs": [
+    "agencia-empleo-comfama",
+    "agencia-empleo-comfama"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador",
+    "1626040293-368"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": true,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1091308,
+   "title": "Ingeniero/a de Datos con o sin discapacidad 1626040293-369",
+   "jobSlug": "ingenieroa-de-datos-con-o-sin-discapacidad-1626040293-369-1091308",
+   "status": "published",
+   "cities": [
+    "Medellín"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 8000000,
+   "minSalary": 8000000,
+   "maxSalary": 10000000,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p>Importante empresa del sector busca talento para desempeñarse como Ingeniero/a de Datos, con dos (2) años de experiencia en trabajos relacionados con bases de datos, analítica o similares, para contribuir al diseño, construcción y mantenimiento de flujos, pipelines e infraestructura de datos que soporten las necesidades de la organización.</p><p><strong>Formación académica</strong>: Profesional graduado/a en Ingeniería Eléctrica, Ingeniería Electrónica, Ingeniería de Telecomunicaciones, Ingeniería Industrial o Ingeniería de Sistemas.</p><p><strong>Requerimientos para el cargo</strong>:</p><p>- Conocimientos específicos en Teradata.</p><p>- Conocimientos en modelado, diseño y construcción de procesos de extracción, transformación y carga de datos.</p><p>- Conocimientos en datos relacionales y no relacionales, SQL y NoSQL.</p><p>- Conocimientos en almacenamiento y procesamiento de datos.</p><p>- Conocimientos en integración de datos y servicios web.</p><p>- Dominio de herramientas ETL como SSIS, Data Factory, Azure Synapse y Power Query.</p><p><strong>Misión del cargo</strong>: Diseñar, construir y mantener flujos, pipelines e infraestructura de datos, asegurando la disponibilidad, organización y correcto funcionamiento de las bases y arquitecturas de datos para soportar las necesidades de la organización.</p><p><strong>Funciones</strong>:</p><p>- Crear y mantener flujos e infraestructura de datos.</p><p>- Construir y mantener pipelines, bases de datos y arquitecturas de datos.</p><p><strong>Conocimiento</strong>:</p><p>- Teradata.</p><p>- Modelado, diseño y construcción de procesos de extracción, transformación y carga de datos.</p><p>- Datos relacionales y no relacionales, SQL y NoSQL.</p><p>- Almacenamiento y procesamiento de datos.</p><p>- Calidad de datos.</p><p>- Metodologías ágiles.</p><p>- Integración de datos y servicios web.</p><p>- Herramientas ETL como SSIS, Data Factory, Azure Synapse y Power Query.</p><p>- Topologías de red y autenticación.</p><p>- Conceptos básicos del sector energía y mercados eléctricos.</p><p><strong>Salario</strong>: $8.000.000 + prestaciones legales vigentes.</p><p><strong>Tipo de contrato</strong>: Indefinido.</p><p><strong>Horario</strong>: Flexible 7-5.</p><p><strong>Lugar de trabajo</strong>: Antioquia. Modalidad: Virtual.</p> <div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"process\"> Proceso de <span class=\"color-company color-company-on-white\"\n>Selección</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p>Tu próxima oportunidad laboral puede estar a pocos pasos. Para postularte:</p>\n<ol>\n<li>Haz clic en el botón \"Postularme\".</li>\n<li>Inicia sesión o crea tu cuenta en Magneto, registra tu hoja de vida y responde las preguntas del proceso.</li>\n<li>Revisa tu correo electrónico para conocer el estado de tu postulación.</li>\n<li>Si avanzas, completa las pruebas y/o entrevistas solicitadas.</li>\n</ol> <p>El equipo del Servicio de Empleo Comfama evaluará tu perfil, si se ajusta a la vacante y pasas los filtros, lo enviará a la empresa y ellos te contactarán para continuar el proceso. Recuerda que no debes pagar para participar de procesos de selección. Así dirás #MeProtejodelfraude\n</p>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"company_description\"> Sobre\n<span class=\"color-company-on-white\"\n>Nosotros</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p> El Servicio de Empleo Comfama es la plataforma de intermediación que conecta el talento de las personas y las necesidades de las empresas. Como agencia transnacional, presta el servicio para empresas ubicadas en Antioquia, y en el extranjero que requieren talento colombiano. Somos prestador autorizado Resolución 0017 del 14 de enero de 2026 del Servicio Público de Empleo.\n</p>\n</div>\n</div>\n<style> .color-company { color: #ed2b7b !important; } .color-company-on-white { color: #ed2b7b !important; }\n</style>",
+   "companyName": "Servicio de Empleo Comfama",
+   "publishDate": "2026-10-07T20:59:43.279Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "0175b8b4-a916-40dd-bd43-fcf79fb21bd6",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 1,
+     "name": "Administración y oficina"
+    },
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-12-06T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [],
+   "experienceMonthsNumber": 24,
+   "educationLevel": [
+    {
+     "id": 1986321,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1980732,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1986320,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 1986319,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 1986318,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "agencia-empleo-comfama",
+   "mainCompanySlug": "agencia-empleo-comfama",
+   "companySlugs": [
+    "agencia-empleo-comfama",
+    "agencia-empleo-comfama"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador",
+    "1626040293-369"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": true,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1078645,
+   "title": "Desarrollador/a de software full stack senior 1626436242-82",
+   "jobSlug": "desarrolladora-de-software-full-stack-senior-1626436242-82-1078645",
+   "status": "published",
+   "cities": [
+    "Medellín"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 13000000,
+   "minSalary": 13000000,
+   "maxSalary": 0,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p><span style=\"text-align: initial;\">Importante empresa aliada está en búsqueda de un/a desarrollador/a de software full stack senior con cuatro (4) años de experiencia en desarrollo full stack y liderazgo técnico.</span></p><p><br></p><p>Formación académica: Profesional en ingeniería de sistemas o carreras afines.</p><p><br></p><p>Funciones:</p><p>- Desarrollar en las plataformas Frontend aplicaciones web y móviles e implementar las historias de usuario priorizadas y definidas por el Product Owner.</p><p>- Analizar y diseñar programas y módulos bajo metodologías ágiles, aplicando tecnologías de nube en AWS.</p><p>- Acompañar la implementación de pruebas unitarias para la validación del código.</p><p>- Diagnosticar y solucionar bugs relacionados con las implementaciones a cargo y documentar adecuadamente los desarrollos.</p><p>- Codificar e implementar software en Backend, trabajando conjuntamente con el equipo de desarrollo.</p><p><br></p><p>Conocimientos:</p><p>- TypeScript (NestJS), Go y Ruby.</p><p>- MQTT y gRPC.</p><p>- AWS y tecnologías Serverless.</p><p>- PostgreSQL, DynamoDB, Firestore y RDS.</p><p>- React y Next.js.</p><p>- AWS Lambda, Docker, Kubernetes y S3.</p><p>- Azure DevOps, Ruby y Node.js.</p><p>- Metodologías de desarrollo ágiles.</p><p>- Prácticas de DevOps y ciclos de vida automatizados de desarrollo.</p><p>- Sistemas transaccionales, especialmente en pagos, fintech o sector financiero.</p><p><br></p><p>Competencias laborales: Liderazgo técnico, trabajo en equipo, pensamiento analítico, resolución de problemas, adaptación al cambio, comunicación efectiva y orientación al logro.</p><p><br></p><p>Salario. $13.200.000 + beneficios legales y extralegales.</p><p>Tipo de contrato. Término indefinido.</p><p>Horario. Lunes a viernes de 8:00 a. m. a 5:00 p. m.</p><p><span style=\"text-align: initial;\">Lugar de trabajo. Colombia, modalidad virtual</span></p> <div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"process\"> Proceso de <span class=\"color-company color-company-on-white\"\n>Selección</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p>Tu próxima oportunidad laboral puede estar a pocos pasos. Para postularte:</p>\n<ol>\n<li>Haz clic en el botón \"Postularme\".</li>\n<li>Inicia sesión o crea tu cuenta en Magneto, registra tu hoja de vida y responde las preguntas del proceso.</li>\n<li>Revisa tu correo electrónico para conocer el estado de tu postulación.</li>\n<li>Si avanzas, completa las pruebas y/o entrevistas solicitadas.</li>\n</ol> <p>El equipo del Servicio de Empleo Comfama evaluará tu perfil, si se ajusta a la vacante y pasas los filtros, lo enviará a la empresa y ellos te contactarán para continuar el proceso. Recuerda que no debes pagar para participar de procesos de selección. Así dirás #MeProtejodelfraude\n</p>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"company_description\"> Sobre\n<span class=\"color-company-on-white\"\n>Nosotros</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p> El Servicio de Empleo Comfama es la plataforma de intermediación que conecta el talento de las personas y las necesidades de las empresas. Como agencia transnacional, presta el servicio para empresas ubicadas en Antioquia, y en el extranjero que requieren talento colombiano. Somos prestador autorizado Resolución 0017 del 14 de enero de 2026 del Servicio Público de Empleo.\n</p>\n</div>\n</div>\n<style> .color-company { color: #ed2b7b !important; } .color-company-on-white { color: #ed2b7b !important; }\n</style>",
+   "companyName": "Confidencial",
+   "publishDate": "2026-09-24T21:45:37.140Z",
+   "confidential": true,
+   "departments": [
+    "Antioquia"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "39f13ec8-f2c0-4912-8eb5-320823c0600e",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-12-30T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [],
+   "experienceMonthsNumber": 48,
+   "educationLevel": [
+    {
+     "id": 1947749,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 1947748,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1944227,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1947747,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 1947746,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 1947745,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "magneto",
+   "mainCompanySlug": "magneto",
+   "companySlugs": [
+    "magneto",
+    "magneto"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "1626436242-82"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1073368,
+   "title": "Desarrollador/a backend con o sin discapacidad 1626040293-366",
+   "jobSlug": "desarrolladora-backend-con-o-sin-discapacidad-1626040293-366-1073368",
+   "status": "published",
+   "cities": [
+    "Medellín"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 6000000,
+   "minSalary": 6000000,
+   "maxSalary": 0,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p>Importante empresa del sector de tecnología y energía busca Desarrollador/a backend con seis (6) meses de experiencia en proyectos de desarrollo de software, desempeñando roles similares y trabajando con tecnologías backend y bases de datos relacionales. La persona será responsable de desarrollar y mantener soluciones del lado del servidor, contribuyendo a aplicaciones eficientes, seguras, confiables y escalables.</p><p><strong>Formación académica</strong>: Técnico/a, tecnólogo/a o profesional graduado/a en Ingeniería Eléctrica, Ingeniería Electrónica, Ingeniería de Telecomunicaciones, Ingeniería Industrial, Ingeniería de Sistemas o áreas afines.</p><p><strong>Requerimientos para el cargo</strong>:</p><p>- Conocimientos en Python, programación, algoritmos y bases de datos relacionales.</p><p>- Manejo de frameworks y arquitecturas como microservicios, SOA, APIs y ORM.</p><p>- Conocimientos en integración de servicios, intercambio de datos, seguridad, DevOps y gestión de código fuente.</p><p>- Conocimientos en contenerización, herramientas IDE y computación en la nube.</p><p>- Manejo de metodologías ágiles y conocimientos básicos del sector energético y mercados eléctricos.</p><p>- Experiencia en proyectos de inteligencia artificial.</p><p><strong>Misión del cargo</strong>: Diseñar, desarrollar y mantener la lógica del lado del servidor, implementando componentes, servicios y bases de datos que permitan el correcto funcionamiento de las aplicaciones y garantizando soluciones eficientes, seguras, confiables y escalables, de acuerdo con las arquitecturas y lineamientos técnicos definidos por la organización.</p><p><strong>Funciones</strong>:</p><p>- Implementar componentes, funciones, bases de datos y servicios del lado del servidor, diseñando la lógica y las soluciones necesarias para responder correctamente a las necesidades de los usuarios.</p><p>- Garantizar el transporte adecuado de la información, tiempos de respuesta óptimos, fiabilidad, resiliencia, mantenibilidad, compatibilidad y seguridad de las soluciones.</p><p>- Asegurar la adherencia a las arquitecturas de referencia y el cumplimiento de los lineamientos técnicos definidos para cada tipo de solución.</p><p>- Aplicar buenas prácticas de desarrollo, integración, gestión de código y metodologías ágiles durante la construcción y mantenimiento de las soluciones.</p><p>- Participar en el desarrollo de soluciones relacionadas con aplicaciones, inteligencia artificial, bases de datos e integración de servicios.</p><p><strong>Competencias laborales</strong>: Comunicación efectiva, pensamiento analítico, orientación al logro, trabajo en equipo, atención al detalle, adaptación al cambio, solución de problemas y orientación a la calidad.</p><p><strong>Salario</strong>: $6.000.000 + prestaciones legales vigentes.</p><p><strong>Tipo de contrato</strong>: Término indefinido.</p><p><strong>Horario</strong>: Horario flexible de 7:00 am a 5:00 pm.</p><p><strong>Lugar de trabajo</strong>: Antioquia. Modalidad virtual.</p> <div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"process\"> Proceso de <span class=\"color-company color-company-on-white\"\n>Selección</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p>Tu próxima oportunidad laboral puede estar a pocos pasos. Para postularte:</p>\n<ol>\n<li>Haz clic en el botón \"Postularme\".</li>\n<li>Inicia sesión o crea tu cuenta en Magneto, registra tu hoja de vida y responde las preguntas del proceso.</li>\n<li>Revisa tu correo electrónico para conocer el estado de tu postulación.</li>\n<li>Si avanzas, completa las pruebas y/o entrevistas solicitadas.</li>\n</ol> <p>El equipo del Servicio de Empleo Comfama evaluará tu perfil, si se ajusta a la vacante y pasas los filtros, lo enviará a la empresa y ellos te contactarán para continuar el proceso. Recuerda que no debes pagar para participar de procesos de selección. Así dirás #MeProtejodelfraude\n</p>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"company_description\"> Sobre\n<span class=\"color-company-on-white\"\n>Nosotros</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p> El Servicio de Empleo Comfama es la plataforma de intermediación que conecta el talento de las personas y las necesidades de las empresas. Como agencia transnacional, presta el servicio para empresas ubicadas en Antioquia, y en el extranjero que requieren talento colombiano. Somos prestador autorizado Resolución 0017 del 14 de enero de 2026 del Servicio Público de Empleo.\n</p>\n</div>\n</div>\n<style> .color-company { color: #ed2b7b !important; } .color-company-on-white { color: #ed2b7b !important; }\n</style>",
+   "companyName": "Servicio de Empleo Comfama",
+   "publishDate": "2026-09-21T19:41:24.639Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "3753202e-74d8-41d2-9330-b2d6e54f36d1",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-11-21T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [],
+   "experienceMonthsNumber": 6,
+   "educationLevel": [
+    {
+     "id": 1932578,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 1932577,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1932576,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1933131,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 1933130,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 1933129,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "agencia-empleo-comfama",
+   "mainCompanySlug": "agencia-empleo-comfama",
+   "companySlugs": [
+    "agencia-empleo-comfama",
+    "agencia-empleo-comfama"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador",
+    "Software",
+    "1626040293-366"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": true,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1059179,
+   "title": "Aprendiz De Desarrollo De Software Con O Sin Discapacidad 1626040293-365",
+   "jobSlug": "aprendiz-de-desarrollo-de-software-con-o-sin-discapacidad-1626040293-365-1059179",
+   "status": "published",
+   "cities": [
+    "Medellín"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 1800000,
+   "minSalary": 1800000,
+   "maxSalary": 0,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p>Importante empresa del sector de desarrollo de software y tecnologías de la información busca Aprendiz de Desarrollo de Software, que desee fortalecer sus conocimientos y potenciar su crecimiento profesional apoyando el desarrollo y mantenimiento de soluciones tecnológicas, contribuyendo a la calidad y correcto funcionamiento de las aplicaciones.</p><p><strong>Formación académica</strong>: Estudiante de Tecnología en Desarrollo de Software o carreras afines.</p><p><strong>Requerimientos para el cargo</strong>:</p><p>- Conocimientos en programación funcional.</p><p>- Conocimientos en programación orientada a objetos.</p><p>- Lógica de programación y algoritmos.</p><p>- Conocimientos básicos en pruebas unitarias.</p><p><strong>Misión del cargo</strong>: Apoyar el desarrollo, mantenimiento y validación de soluciones de software, siguiendo los lineamientos y buenas prácticas de la organización.</p><p><strong>Funciones</strong>:</p><p>- Desarrollar funcionalidades en la línea técnica asignada (Frontend, Backend, RPA, BI, PL/SQL, entre otras).</p><p>- Seguir los lineamientos y las buenas prácticas definidas por la organización.</p><p>- Realizar pruebas funcionales o unitarias de software.</p><p>- Ejecutar consultas a bases de datos para apoyar la validación de las soluciones.</p><p><strong>Salario</strong>: $1.800.000 + prestaciones legales vigentes.</p><p><strong>Tipo de contrato</strong>: Contrato de aprendizaje.</p><p><strong>Horario</strong>: Horario flexible (6-7).</p><p><strong>Lugar de trabajo</strong>: Modalidad virtual, Antioquia.</p> <div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"process\"> Proceso de <span class=\"color-company color-company-on-white\"\n>Selección</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p>Tu próxima oportunidad laboral puede estar a pocos pasos. Para postularte:</p>\n<ol>\n<li>Haz clic en el botón \"Postularme\".</li>\n<li>Inicia sesión o crea tu cuenta en Magneto, registra tu hoja de vida y responde las preguntas del proceso.</li>\n<li>Revisa tu correo electrónico para conocer el estado de tu postulación.</li>\n<li>Si avanzas, completa las pruebas y/o entrevistas solicitadas.</li>\n</ol> <p>El equipo del Servicio de Empleo Comfama evaluará tu perfil, si se ajusta a la vacante y pasas los filtros, lo enviará a la empresa y ellos te contactarán para continuar el proceso. Recuerda que no debes pagar para participar de procesos de selección. Así dirás #MeProtejodelfraude\n</p>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"company_description\"> Sobre\n<span class=\"color-company-on-white\"\n>Nosotros</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p> El Servicio de Empleo Comfama es la plataforma de intermediación que conecta el talento de las personas y las necesidades de las empresas. Como agencia transnacional, presta el servicio para empresas ubicadas en Antioquia, y en el extranjero que requieren talento colombiano. Somos prestador autorizado Resolución 0017 del 14 de enero de 2026 del Servicio Público de Empleo.\n</p>\n</div>\n</div>\n<style> .color-company { color: #ed2b7b !important; } .color-company-on-white { color: #ed2b7b !important; }\n</style>",
+   "companyName": "Servicio de Empleo Comfama",
+   "publishDate": "2026-09-11T17:02:05.326Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia"
+   ],
+   "currencyCode": "COP",
+   "contractType": 6,
+   "contractOrder": {
+    "id": 6,
+    "name": "Contrato de aprendizaje",
+    "order": 6
+   },
+   "isRemote": true,
+   "publicId": "e94c85b8-e85f-4fc5-a092-5f0c25a6067a",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 1,
+     "name": "Administración y oficina"
+    },
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-10-31T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [],
+   "experienceMonthsNumber": 0,
+   "educationLevel": [
+    {
+     "id": 1901605,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 1901600,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1901604,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1901603,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 1901602,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 1901601,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "agencia-empleo-comfama",
+   "mainCompanySlug": "agencia-empleo-comfama",
+   "companySlugs": [
+    "agencia-empleo-comfama",
+    "agencia-empleo-comfama"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "desarrollador"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": true,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1042233,
+   "title": "Desarrollador/a PHP 1626256994-158",
+   "jobSlug": "desarrolladora-php-1626256994-158-1042233",
+   "status": "published",
+   "cities": [
+    "Medellín"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 6000000,
+   "minSalary": 6000000,
+   "maxSalary": 0,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p><span style=\"text-align: initial;\">Importante empresa del sector de tecnología y desarrollo de software busca talento profesional para desarrollar, mantener y optimizar soluciones tecnológicas utilizando PHP. Se requieren tres (3) años de experiencia en desarrollo de software, especialmente en PHP, con capacidad para analizar requerimientos, solucionar incidencias, optimizar aplicaciones y participar en la implementación de nuevas funcionalidades.</span><br></p><p><strong>Formación académica</strong>: Profesional en Ingeniería de Sistemas, Ingeniería Electrónica, Ingeniería de Telecomunicaciones, Ingeniería Industrial, Economía, Matemáticas, Física o carreras afines.</p><p><strong>Requerimientos para el cargo</strong>:</p><p>- Desarrollo de software en PHP, indispensable.</p><p>- Conocimientos en Java, BPM (Business Process Management) y .NET, deseables.</p><p>-- Experiencia en mantenimiento, optimización y solución de incidencias en aplicaciones.</p><p>- Capacidad para realizar análisis de requerimientos, desarrollo, pruebas y validación de soluciones de software.</p><p>- Manejo de herramientas y metodologías propias del desarrollo de software.</p><p>- Deseable contar con certificaciones o cursos relacionados con PHP, Java, BPM, .NET o desarrollo de software.</p><p>. Disponibilidad para atender eventualidades operativas bajo el esquema de rotación establecido por el equipo.</p><p><strong>Misión del cargo</strong>: Desarrollar, mantener y optimizar soluciones de software utilizando PHP, garantizando la calidad, funcionalidad y continuidad de las aplicaciones requeridas por el proyecto.</p><p><strong>Funciones</strong>:</p><p>- Desarrollar y mantener aplicaciones y soluciones de software utilizando PHP.</p><p>- Analizar requerimientos y realizar los ajustes o desarrollos necesarios en las aplicaciones.</p><p>- Ejecutar pruebas y validaciones para garantizar el correcto funcionamiento de las soluciones.</p><p>- Identificar y solucionar errores o incidencias, realizando mantenimiento y optimización del código existente.</p><p>- Documentar los desarrollos, implementar mejoras y apoyar, cuando sea requerido, actividades relacionadas con Java, BPM y .NET.</p><p><strong>Competencias laborales</strong>: Autonomía, autogestión, pensamiento analítico, resolución de problemas, proactividad, orientación a resultados, trabajo en equipo, adaptabilidad, aprendizaje continuo, atención al detalle, comunicación efectiva y organización.</p><p><strong>Salario</strong>: $6.000.000 + prestaciones legales vigentes.</p><p><strong>Tipo de contrato</strong>: Obra o labor.</p><p><strong>Horario</strong>: Lunes a viernes de 7:45 am a 4:45 pm.</p><p><strong>Lugar de trabajo</strong>: Cualquier municipio. Modalidad virtual.</p> <div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"process\"> Proceso de <span class=\"color-company color-company-on-white\"\n>Selección</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p>Tu próxima oportunidad laboral puede estar a pocos pasos. Para postularte:</p>\n<ol>\n<li>Haz clic en el botón \"Postularme\".</li>\n<li>Inicia sesión o crea tu cuenta en Magneto, registra tu hoja de vida y responde las preguntas del proceso.</li>\n<li>Revisa tu correo electrónico para conocer el estado de tu postulación.</li>\n<li>Si avanzas, completa las pruebas y/o entrevistas solicitadas.</li>\n</ol> <p>El equipo del Servicio de Empleo Comfama evaluará tu perfil, si se ajusta a la vacante y pasas los filtros, lo enviará a la empresa y ellos te contactarán para continuar el proceso. Recuerda que no debes pagar para participar de procesos de selección. Así dirás #MeProtejodelfraude\n</p>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"company_description\"> Sobre\n<span class=\"color-company-on-white\"\n>Nosotros</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p> El Servicio de Empleo Comfama es la plataforma de intermediación que conecta el talento de las personas y las necesidades de las empresas. Como agencia transnacional, presta el servicio para empresas ubicadas en Antioquia, y en el extranjero que requieren talento colombiano. Somos prestador autorizado Resolución 0017 del 14 de enero de 2026 del Servicio Público de Empleo.\n</p>\n</div>\n</div>\n<style> .color-company { color: #ed2b7b !important; } .color-company-on-white { color: #ed2b7b !important; }\n</style>",
+   "companyName": "Servicio de Empleo Comfama",
+   "publishDate": "2026-09-03T19:35:56.859Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia"
+   ],
+   "currencyCode": "COP",
+   "contractType": 4,
+   "contractOrder": {
+    "id": 4,
+    "name": "Por obra o labor",
+    "order": 4
+   },
+   "isRemote": true,
+   "publicId": "0438e340-89d5-4da9-8c60-bdd56697292c",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-10-31T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [],
+   "experienceMonthsNumber": 36,
+   "educationLevel": [
+    {
+     "id": 1871851,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 1871850,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1870390,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1871849,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 1871848,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 1871847,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "agencia-empleo-comfama",
+   "mainCompanySlug": "agencia-empleo-comfama",
+   "companySlugs": [
+    "agencia-empleo-comfama",
+    "agencia-empleo-comfama"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador",
+    "1626256994-158"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1032174,
+   "title": "Desarrollador Fullstack Senior (ReactJS/NestJS/NextJS) [Remoto]",
+   "jobSlug": "desarrollador-fullstack-senior-reactjsnestjsnextjs-remoto-1032174",
+   "status": "published",
+   "cities": [
+    "Bogotá, D.C.",
+    "Medellín",
+    "Cali",
+    "Bucaramanga",
+    "Pereira"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-bogota",
+    "ofertas-empleo-en-medellin",
+    "ofertas-empleo-en-cali",
+    "ofertas-empleo-en-bucaramanga",
+    "ofertas-empleo-en-pereira"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<h6 style=\"margin-bottom: 1rem; font-size: 1rem; font-weight: 700\"> Desarrollador Fullstack Senior (ReactJS/NestJS/NextJS) [Remoto] </h6> <div class=\"description-generate__items\"> <strong>Palabras clave: </strong> <ul><li>Desarrollador Fullstack Senior</li><li>Senior Full Stack Developer</li><li>Desarrollador ReactJS</li><li>Desarrollador NestJS</li><li>Desarrollador NextJS</li><li>Ingeniero de Software Fullstack</li><li>ReactJS</li><li>NestJS</li><li>NextJS</li><li>TypeScript</li><li>SQL</li><li>PostgreSQL</li><li>APIs REST</li><li>Docker</li><li>Azure DevOps</li></ul> </div> <p style=\"margin-bottom: 10px\">Se requiere un <b>Desarrollador Fullstack Senior</b> para un proyecto remoto freelance. Se busca experiencia senior en <b>ReactJS</b>, <b>NestJS</b> y <b>NextJS</b> para construir aplicaciones web escalables, APIs REST, interfaces accesibles y soluciones backend robustas con PostgreSQL. Se incorpora un perfil <b>Full Stack Developer</b> con dominio de TypeScript, PostgreSQL y APIs REST. El candidato ideal posee más de 5 años de experiencia, formación tecnológica o profesional y experiencia deseable en Cajas de Compensación. Este rol es fundamental para el desarrollo y mantenimiento de aplicaciones web de alto rendimiento. Se ofrece la oportunidad de trabajar de forma remota en un entorno dinámico y desafiante. Se busca un <b>Ingeniero de Software Fullstack</b> con habilidades probadas en el stack tecnológico especificado.</p> <div class=\"description-generate__items\"> <strong>Responsabilidades: </strong> <ul><li>Desarrollar y mantener aplicaciones web escalables utilizando ReactJS NextJS y NestJS.</li><li>Diseñar e implementar APIs RESTful robustas y seguras.</li><li>Escribir código limpio eficiente y mantenible en TypeScript.</li><li>Gestionar y optimizar bases de datos PostgreSQL incluyendo migraciones y consultas SQL complejas.</li><li>Colaborar en el diseño y la implementación de interfaces de usuario responsivas y accesibles.</li><li>Integrar soluciones backend con servicios externos y bases de datos.</li><li>Implementar y mantener pruebas unitarias de integración y FAT para asegurar la calidad del software.</li><li>Utilizar Docker para la contenerización de aplicaciones y Azure DevOps para la integración y despliegue continuo.</li><li>Participar activamente en la planificación y seguimiento de proyectos utilizando Jira y Azure Boards.</li><li>Colaborar estrechamente con equipos multifuncionales para definir diseñar y lanzar nuevas funcionalidades.</li><li>Identificar y solucionar cuellos de botella de rendimiento y errores en el código.</li><li>Mantenerse actualizado con las últimas tendencias y tecnologías en el desarrollo fullstack.</li></ul> </div> <div class=\"description-generate__items\"> <strong>Requerimientos: </strong> <ul><li>Más de 5 años de experiencia como Desarrollador Fullstack Senior.</li><li>Dominio avanzado de ReactJS NextJS y NestJS.</li><li>Experiencia sólida en TypeScript SQL y PostgreSQL.</li><li>Experiencia en el desarrollo y consumo de APIs REST.</li><li>Conocimiento en Docker y herramientas de CI/CD como Azure DevOps.</li><li>Experiencia en la implementación de pruebas unitarias y de integración.</li><li>Familiaridad con Prisma y Azure Boards.</li><li>Experiencia deseable en Cajas de Compensación.</li><li>Formación profesional o tecnólogo en sistemas tecnología ingeniería de software o áreas relacionadas.</li><li>Habilidad para trabajar de forma remota y autónoma.</li><li>Capacidad para desarrollar interfaces responsivas y lógica backend eficiente.</li><li>Experiencia en migraciones de bases de datos y optimización de consultas SQL.</li><li>Conocimiento en metodologías ágiles y gestión de proyectos con Jira.</li></ul> </div> <div class=\"description-generate__items\"> <strong>Nivel de educación: </strong> <ul><li>Profesional</li></ul> </div> <div class=\"description-generate__items\"> <strong>Sectores laborales: </strong> <ul><li>Software informática y telecomunicaciones</li><li>Servicios generales Aseo y Seguridad</li><li>Servicio al cliente y afines</li></ul> </div> <div class=\"description-generate__items\"> <strong>Cargo: </strong> <ul><li>Analista</li></ul> </div> <h6 style=\"margin-bottom: 5px; font-size: 15px; font-weight: 700\"> Otras habilidades: </h6> <div class=\"description-generate__items\"> <strong>Habilidades técnicas: </strong> <ul><li>ReactJS</li><li>NextJS</li><li>NestJS</li><li>TypeScript</li><li>SQL</li><li>PostgreSQL</li><li>APIs REST</li><li>Docker</li><li>Prisma</li><li>Azure DevOps</li><li>Pruebas unitarias</li><li>Pruebas de integración</li></ul> </div> <div class=\"description-generate__items\"> <strong>Habilidades interpersonales: </strong> <ul><li>Resolución de problemas</li><li>Trabajo en equipo</li><li>Comunicación</li></ul> </div>",
+   "companyName": "Confidencial",
+   "publishDate": "2026-08-25T20:44:10.791Z",
+   "confidential": true,
+   "departments": [
+    "Bogotá D.C.",
+    "Antioquia",
+    "Valle del Cauca",
+    "Santander",
+    "Risaralda"
+   ],
+   "currencyCode": "COP",
+   "contractType": 5,
+   "contractOrder": {
+    "id": 5,
+    "name": "Prestación de servicios",
+    "order": 5
+   },
+   "isRemote": true,
+   "publicId": "d80aec6f-cc46-4e26-88db-ed3de999bac3",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-10-30T05:00:00.000Z",
+   "numberOfQuotas": 2,
+   "skills": [
+    {
+     "id": 1470647,
+     "name": "ReactJS",
+     "score": 4
+    },
+    {
+     "id": 1470648,
+     "name": "NextJS",
+     "score": 4
+    },
+    {
+     "id": 1470649,
+     "name": "NestJS",
+     "score": 4
+    },
+    {
+     "id": 1470650,
+     "name": "TypeScript",
+     "score": 3
+    },
+    {
+     "id": 1470651,
+     "name": "SQL",
+     "score": 3
+    },
+    {
+     "id": 1470652,
+     "name": "PostgreSQL",
+     "score": 3
+    },
+    {
+     "id": 1470653,
+     "name": "APIs REST",
+     "score": 3
+    },
+    {
+     "id": 1470654,
+     "name": "Docker",
+     "score": 3
+    },
+    {
+     "id": 1470655,
+     "name": "Prisma",
+     "score": 3
+    },
+    {
+     "id": 1470656,
+     "name": "Azure DevOps",
+     "score": 3
+    }
+   ],
+   "experienceMonthsNumber": 60,
+   "educationLevel": [
+    {
+     "id": 1842744,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1842743,
+     "name": "Profesional",
+     "order": 4
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "magneto",
+   "mainCompanySlug": "magneto",
+   "companySlugs": [
+    "magneto",
+    "magneto"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador Fullstack Senior",
+    "Senior Full Stack Developer",
+    "Desarrollador ReactJS",
+    "Desarrollador NestJS",
+    "Desarrollador NextJS"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 3,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1018956,
+   "title": "Especialista en Optimización con o sin discapacidad 1626040293-360",
+   "jobSlug": "especialista-en-optimizacion-con-o-sin-discapacidad-1626040293-360-1018956",
+   "status": "published",
+   "cities": [
+    "Medellín"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 4000000,
+   "minSalary": 4000000,
+   "maxSalary": 0,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p>Importante empresa del sector tecnológico busca talento para fortalecer sus procesos de transformación y eficiencia organizacional. Se requiere profesional con cinco (5) años de experiencia, con trayectoria en seguimiento y control de proyectos de desarrollo de software, PMO, eficiencia operacional, mejoramiento continuo y áreas afines, para impulsar iniciativas de productividad, innovación y mejora continua.</p><p><strong>Formación académica</strong>: Profesional en Ingeniería de Sistemas o carreras afines.</p><p><strong>Requerimientos para el cargo</strong>:</p><p>- Experiencia mínima de seis (6) años en seguimiento y control de proyectos de desarrollo de software, en roles de PMO, eficiencia operacional, mejoramiento continuo y/o afines.</p><p>- Conocimiento en arquitectura empresarial de procesos.</p><p>- Manejo de marcos de trabajo ágiles como Scrum y Kanban.</p><p>- Conocimientos en Lean Management y método Kaizen.</p><p>- Conocimiento del ciclo de desarrollo de software.</p><p>- Manejo de Azure DevOps.</p><p>- Manejo avanzado de Power BI.</p><p>- Conocimientos en modelos de datos.</p><p>- Gestión financiera y operativa de proyectos.</p><p>- Manejo de Office 365.</p><p>- Conocimientos deseables en Six Sigma, ITIL, Python, Prompt Engineering y automatización con inteligencia artificial.</p><p><strong>Misión del cargo</strong>: Diseñar, evolucionar y gobernar el modelo de gestión organizacional, promoviendo la mejora continua, la eficiencia, la productividad y la toma de decisiones basada en datos, automatización e inteligencia artificial.</p><p><strong>Funciones</strong>:</p><p>- Diseñar y evolucionar el modelo de gobierno de procesos y prácticas organizacionales, definiendo estándares, políticas y lineamientos para la operación.</p><p>- Diseñar indicadores organizacionales, modelos de medición y herramientas para apoyar la toma de decisiones ejecutivas.</p><p>- Liderar iniciativas transversales de eficiencia, transformación cultural y nuevos modelos operativos.</p><p>- Identificar oportunidades de mejora mediante análisis estadístico, minería de datos y automatización.</p><p>- Identificar e implementar oportunidades de inteligencia artificial y automatización para incrementar la productividad y reducir actividades de bajo valor.</p><p><strong>Competencias laborales</strong>: Liderazgo, orientación a resultados, comunicación asertiva, pensamiento analítico, adaptabilidad, colaboración, innovación, negociación y aprendizaje continuo.</p><p><strong>Salario</strong>: $4.000.000 + prestaciones legales vigentes.</p><p><strong>Tipo de contrato</strong>: Término indefinido.</p><p><strong>Horario</strong>: Lunes a viernes, cuatro días de 8.5 horas y un día de 8 horas.</p><p><strong>Lugar de trabajo</strong>: Medellín, con modalidad virtual.</p> <div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"process\"> Proceso de <span class=\"color-company color-company-on-white\"\n>Selección</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p>Tu próxima oportunidad laboral puede estar a pocos pasos. Para postularte:</p>\n<ol>\n<li>Haz clic en el botón \"Postularme\".</li>\n<li>Inicia sesión o crea tu cuenta en Magneto, registra tu hoja de vida y responde las preguntas del proceso.</li>\n<li>Revisa tu correo electrónico para conocer el estado de tu postulación.</li>\n<li>Si avanzas, completa las pruebas y/o entrevistas solicitadas.</li>\n</ol> <p>El equipo del Servicio de Empleo Comfama evaluará tu perfil, si se ajusta a la vacante y pasas los filtros, lo enviará a la empresa y ellos te contactarán para continuar el proceso. Recuerda que no debes pagar para participar de procesos de selección. Así dirás #MeProtejodelfraude\n</p>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"company_description\"> Sobre\n<span class=\"color-company-on-white\"\n>Nosotros</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p> El Servicio de Empleo Comfama es la plataforma de intermediación que conecta el talento de las personas y las necesidades de las empresas. Como agencia transnacional, presta el servicio para empresas ubicadas en Antioquia, y en el extranjero que requieren talento colombiano. Somos prestador autorizado Resolución 0017 del 14 de enero de 2026 del Servicio Público de Empleo.\n</p>\n</div>\n</div>\n<style> .color-company { color: #ed2b7b !important; } .color-company-on-white { color: #ed2b7b !important; }\n</style>",
+   "companyName": "Servicio de Empleo Comfama",
+   "publishDate": "2026-08-11T20:34:22.471Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "c13d6507-f9db-4f7b-b84f-3c2f50f72349",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 1,
+     "name": "Administración y oficina"
+    },
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-11-10T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [],
+   "experienceMonthsNumber": 60,
+   "educationLevel": [
+    {
+     "id": 1810383,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 1810382,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1806813,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1810381,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 1810380,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 1810379,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "agencia-empleo-comfama",
+   "mainCompanySlug": "agencia-empleo-comfama",
+   "companySlugs": [
+    "agencia-empleo-comfama",
+    "agencia-empleo-comfama"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador",
+    "1626040293-360"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": true,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1013462,
+   "title": "Desarrollador/a Java/PHP 1626256994-142",
+   "jobSlug": "desarrolladora-javaphp-1626256994-142-1013462",
+   "status": "published",
+   "cities": [
+    "Medellín"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 6000000,
+   "minSalary": 6000000,
+   "maxSalary": 0,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p>Importante empresa del sector tecnología y desarrollo de software requiere Desarrollador/a Java/PHP con tres (3) años de experiencia en desarrollo de software utilizando Java y PHP.&nbsp;</p><p><strong>Formación académica</strong>: Profesional en Ingeniería de Sistemas, Ingeniería Electrónica, Ingeniería de Telecomunicaciones, Ingeniería Industrial, Economía, Matemáticas, Física o carreras afines al área tecnológica y administrativa.</p><p><strong>Requerimientos para el cargo</strong>:</p><p>- Experiencia en desarrollo de software con Java.</p><p>- Experiencia en desarrollo de software con PHP.</p><p>- Deseable contar con al menos una certificación en Java u Oracle.</p><p>- Disponibilidad para atender eventualidades operativas 24/7 cuando se presenten (aproximadamente un día al mes, con compensación en tiempo de descanso).</p><p>- El desarrollo se realiza sobre una nube privada; no se requiere experiencia en administración de infraestructura.</p><p><strong>Misión del cargo</strong>: Desarrollar, mantener y optimizar soluciones de software en Java y PHP, garantizando la calidad, estabilidad y continuidad de los aplicativos del proyecto, mediante la implementación de mejoras, la resolución de incidentes y el trabajo colaborativo con el equipo técnico.</p><p><strong>Funciones</strong>:</p><p>- Desarrollar, mantener y optimizar aplicaciones de software utilizando Java y PHP, garantizando la calidad y el cumplimiento de los requerimientos del proyecto.</p><p>- Analizar, diagnosticar y solucionar incidentes técnicos, implementando mejoras que aseguren la estabilidad, continuidad y disponibilidad de las aplicaciones.</p><p>- Participar en el diseño, desarrollo, pruebas e implementación de nuevas funcionalidades.</p><p>- Colaborar con el equipo técnico para cumplir los objetivos y cronogramas establecidos en el proyecto.</p><p>Implementar mejoras continuas que optimicen el rendimiento y la calidad de las aplicaciones.</p><p><strong>Competencias laborales</strong>: Autonomía, autogestión, proactividad, trabajo en equipo, orientación a resultados, pensamiento analítico, resolución de problemas, adaptabilidad al cambio, comunicación efectiva y compromiso con la calidad.</p><p><strong>Salario</strong>: $6.000.000 + prestaciones legales vigentes.</p><p><strong>Tipo de contrato</strong>: Obra o labor.</p><p><strong>Horario</strong>: Lunes a viernes de 7:45 am a 4:45 pm.</p><p><strong>Lugar de trabajo</strong>: Medellín. Modalidad virtual.</p> <div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"process\"> Proceso de <span class=\"color-company color-company-on-white\"\n>Selección</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p>Tu próxima oportunidad laboral puede estar a pocos pasos. Para postularte:</p>\n<ol>\n<li>Haz clic en el botón \"Postularme\".</li>\n<li>Inicia sesión o crea tu cuenta en Magneto, registra tu hoja de vida y responde las preguntas del proceso.</li>\n<li>Revisa tu correo electrónico para conocer el estado de tu postulación.</li>\n<li>Si avanzas, completa las pruebas y/o entrevistas solicitadas.</li>\n</ol> <p>El equipo del Servicio de Empleo Comfama evaluará tu perfil, si se ajusta a la vacante y pasas los filtros, lo enviará a la empresa y ellos te contactarán para continuar el proceso. Recuerda que no debes pagar para participar de procesos de selección. Así dirás #MeProtejodelfraude\n</p>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"company_description\"> Sobre\n<span class=\"color-company-on-white\"\n>Nosotros</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p> El Servicio de Empleo Comfama es la plataforma de intermediación que conecta el talento de las personas y las necesidades de las empresas. Como agencia transnacional, presta el servicio para empresas ubicadas en Antioquia, y en el extranjero que requieren talento colombiano. Somos prestador autorizado Resolución 0017 del 14 de enero de 2026 del Servicio Público de Empleo.\n</p>\n</div>\n</div>\n<style> .color-company { color: #ed2b7b !important; } .color-company-on-white { color: #ed2b7b !important; }\n</style>",
+   "companyName": "Servicio de Empleo Comfama",
+   "publishDate": "2026-08-04T20:31:30.820Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia"
+   ],
+   "currencyCode": "COP",
+   "contractType": 4,
+   "contractOrder": {
+    "id": 4,
+    "name": "Por obra o labor",
+    "order": 4
+   },
+   "isRemote": true,
+   "publicId": "6f20665e-2da7-4cc0-9904-7e57255848f4",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-10-30T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [],
+   "experienceMonthsNumber": 36,
+   "educationLevel": [
+    {
+     "id": 1797712,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 1797711,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1793125,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1797710,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 1797709,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 1797708,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "agencia-empleo-comfama",
+   "mainCompanySlug": "agencia-empleo-comfama",
+   "companySlugs": [
+    "agencia-empleo-comfama",
+    "agencia-empleo-comfama"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador",
+    "1626256994-142"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1005257,
+   "title": "Responsable de proyectos de datos con o sin discapacidad 312654-47943",
+   "jobSlug": "responsable-de-proyectos-de-datos-con-o-sin-discapacidad-312654-47943-1005257",
+   "status": "published",
+   "cities": [
+    "Itagui"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-itagui"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 22000000,
+   "minSalary": 22000000,
+   "maxSalary": 0,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p>Importante empresa del sector tecnología e ingeniería de datos requiere Data Project Manager con cinco (5) años o más de experiencia en ingeniería de datos, analítica, arquitectura de datos y liderazgo de equipos técnicos. Buscamos profesionales con visión estratégica, capacidad de gestión y orientación a resultados, que deseen aportar su talento en la dirección de proyectos de datos para entornos de salud y plataformas analíticas de alto impacto.</p><p><strong>Formación académica</strong>: Profesional en Ingeniería de Software, Ingeniería de Sistemas o carreras afines. Se valoran estudios de posgrado, maestría o doctorado relacionados con datos, analítica, arquitectura empresarial o gestión de proyectos.</p><p><strong>Requerimientos para el cargo</strong>:</p><p>- Nivel de inglés C1.</p><p>- Experiencia práctica en Snowflake, dbt, Azure Data Factory, Azure Synapse, ADLS Gen2 y Databricks.</p><p>- Dominio de SQL y Python.</p><p>- Experiencia en CI/CD, Git y prácticas de DataOps.</p><p>- Conocimiento en modelado de datos y comunicación con audiencias técnicas y no técnicas.</p><p>- Experiencia en diseño de arquitecturas de datos para entornos de salud.</p><p>- Conocimiento de estándares y modelos de datos clínicos como EHR/EMR, HL7, FHIR, claims, laboratorio y farmacia.</p><p>- Conocimiento en regulación, privacidad y seguridad de datos.</p><p>- Manejo de herramientas de IA/Copilot aplicadas al desarrollo, documentación y gobierno de datos.</p><p><strong>Misión del cargo</strong>: Gestionar integralmente la organización y ejecución de proyectos de datos, garantizando la correcta definición de requerimientos, la coordinación entre equipos técnicos y de negocio, y la entrega oportuna de soluciones analíticas y arquitecturas de datos seguras, escalables y alineadas con los objetivos de la compañía y de los clientes.</p><p><strong>Funciones</strong>:</p><p>- Diseñar arquitecturas de datos de extremo a extremo para entornos de salud utilizando Snowflake, dbt, ADLS Gen2 y servicios de Azure.</p><p>- Gestionar cronogramas, hitos y entregables del proyecto, asegurando la comunicación efectiva con líderes de producto, cuentas y clientes.</p><p>- Liderar la entrega del proyecto durante todo el ciclo de vida: descubrimiento, diseño, construcción, pruebas, salida a producción y soporte.</p><p>- Facilitar talleres y alinear requerimientos entre áreas clínicas, aseguradoras, investigación y tecnología.</p><p>- Construir y optimizar pipelines de datos, asegurando calidad, trazabilidad, cumplimiento regulatorio y estándares de seguridad.</p><p>- Competencias laborales: Liderazgo, comunicación efectiva, orientación a resultados, pensamiento analítico, gestión de proyectos, trabajo en equipo, adaptabilidad al cambio y toma de decisiones.</p><p><strong>Salario</strong>: $22.000.000 + prestaciones legales vigentes.</p><p><strong>Tipo de contrato</strong>: Término indefinido.</p><p><strong>Horario</strong>: Lunes a viernes de 8:00 a. m. a 5:00 p. m.</p><p><strong>Lugar de trabajo</strong>: Modalidad virtual. Base operativa en Itagüí.</p> <div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"process\"> Proceso de <span class=\"color-company color-company-on-white\"\n>Selección</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p>Tu próxima oportunidad laboral puede estar a pocos pasos. Para postularte:</p>\n<ol>\n<li>Haz clic en el botón \"Postularme\".</li>\n<li>Inicia sesión o crea tu cuenta en Magneto, registra tu hoja de vida y responde las preguntas del proceso.</li>\n<li>Revisa tu correo electrónico para conocer el estado de tu postulación.</li>\n<li>Si avanzas, completa las pruebas y/o entrevistas solicitadas.</li>\n</ol> <p>El equipo del Servicio de Empleo Comfama evaluará tu perfil, si se ajusta a la vacante y pasas los filtros, lo enviará a la empresa y ellos te contactarán para continuar el proceso. Recuerda que no debes pagar para participar de procesos de selección. Así dirás #MeProtejodelfraude\n</p>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"company_description\"> Sobre\n<span class=\"color-company-on-white\"\n>Nosotros</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p> El Servicio de Empleo Comfama es la plataforma de intermediación que conecta el talento de las personas y las necesidades de las empresas. Como agencia transnacional, presta el servicio para empresas ubicadas en Antioquia, y en el extranjero que requieren talento colombiano. Somos prestador autorizado Resolución 0017 del 14 de enero de 2026 del Servicio Público de Empleo.\n</p>\n</div>\n</div>\n<style> .color-company { color: #ed2b7b !important; } .color-company-on-white { color: #ed2b7b !important; }\n</style>",
+   "companyName": "Servicio de Empleo Comfama",
+   "publishDate": "2026-07-28T14:02:28.929Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "3dce0db3-577f-4f63-badb-906b975483cc",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 1,
+     "name": "Administración y oficina"
+    },
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-10-30T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [],
+   "experienceMonthsNumber": 60,
+   "educationLevel": [
+    {
+     "id": 1777856,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 1777855,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1771387,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1777854,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 1777853,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 1777852,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "agencia-empleo-comfama",
+   "mainCompanySlug": "agencia-empleo-comfama",
+   "companySlugs": [
+    "agencia-empleo-comfama",
+    "agencia-empleo-comfama"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1005276,
+   "title": "Ingeniero/a de datos senior con o sin discapacidad 312654-47944",
+   "jobSlug": "ingenieroa-de-datos-senior-con-o-sin-discapacidad-312654-47944-1005276",
+   "status": "published",
+   "cities": [
+    "Itagui"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-itagui"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 15000000,
+   "minSalary": 15000000,
+   "maxSalary": 0,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p>Importante empresa del sector tecnología e ingeniería de datos requiere Ingeniero/a de datos senior con tres (3) años de experiencia en ingeniería de datos, analítica o arquitectura de datos. Buscamos profesionales con pensamiento analítico, orientación a resultados y capacidad para desarrollar soluciones de datos escalables, que deseen aportar su talento en proyectos del sector salud utilizando tecnologías de vanguardia.</p><p><strong>Formación académica</strong>: Profesional en Ingeniería de Software, Ingeniería de Sistemas o carreras afines. Se valoran estudios de posgrado, maestría o doctorado relacionados con ingeniería de datos, analítica o arquitectura de datos.</p><p><strong>Requerimientos para el cargo</strong>:</p><p>- Nivel de inglés C1.</p><p>- Experiencia práctica en Snowflake, dbt, Azure Data Factory, Azure Synapse, ADLS Gen2 y Databricks.</p><p>- Dominio de SQL y Python.</p><p>- Experiencia en CI/CD, Git y prácticas de DataOps.</p><p>- Conocimiento en modelado de datos.</p><p>- Capacidad para comunicarse con equipos técnicos y no técnicos.</p><p>- Experiencia en diseño de arquitecturas de datos para entornos de salud.</p><p>- Conocimiento de modelos de datos clínicos como EHR/EMR, HL7, FHIR, claims, laboratorio, farmacia y datos operacionales.</p><p>- Conocimiento en regulación, privacidad y seguridad de la información.</p><p>- Manejo de herramientas de IA/Copilot para acelerar el desarrollo, las pruebas, la documentación y el gobierno de datos.</p><p><strong>Misión del cargo</strong>: Diseñar, desarrollar y optimizar soluciones de ingeniería de datos para entornos de salud, garantizando la construcción de arquitecturas escalables, la calidad de la información y el cumplimiento de los estándares de seguridad, privacidad y gobierno de datos.</p><p><strong>Funciones</strong>:</p><p>- Diseñar arquitecturas de datos de extremo a extremo utilizando Snowflake, dbt, ADLS Gen2 y herramientas de Azure.</p><p>- Modelar conjuntos de datos complejos del sector salud, incluyendo información clínica, administrativa y operativa.</p><p>- Construir y optimizar pipelines de datos mediante Snowflake, dbt, SQL, Python y servicios de Azure.</p><p>- Garantizar que las soluciones cumplan con los estándares regulatorios, de privacidad, seguridad y calidad de los datos.</p><p>- Facilitar sesiones de levantamiento de requerimientos y colaborar con equipos clínicos, tecnológicos y de negocio para la implementación de soluciones de datos.</p><p><strong>Competencias laborales</strong>: Trabajo en equipo, comunicación efectiva, pensamiento analítico, orientación a resultados, adaptabilidad al cambio, resolución de problemas y orientación al detalle.</p><p><strong>Salario</strong>: $15.000.000 + prestaciones legales vigentes.</p><p><strong>Tipo de contrato</strong>: Término indefinido.</p><p><strong>Horario</strong>: Lunes a viernes de 8:00 a. m. a 5:00 p. m.</p><p><strong>Lugar de trabajo</strong>: Modalidad virtual. Base operativa en Itagüí.</p> <div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"process\"> Proceso de <span class=\"color-company color-company-on-white\"\n>Selección</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p>Tu próxima oportunidad laboral puede estar a pocos pasos. Para postularte:</p>\n<ol>\n<li>Haz clic en el botón \"Postularme\".</li>\n<li>Inicia sesión o crea tu cuenta en Magneto, registra tu hoja de vida y responde las preguntas del proceso.</li>\n<li>Revisa tu correo electrónico para conocer el estado de tu postulación.</li>\n<li>Si avanzas, completa las pruebas y/o entrevistas solicitadas.</li>\n</ol> <p>El equipo del Servicio de Empleo Comfama evaluará tu perfil, si se ajusta a la vacante y pasas los filtros, lo enviará a la empresa y ellos te contactarán para continuar el proceso. Recuerda que no debes pagar para participar de procesos de selección. Así dirás #MeProtejodelfraude\n</p>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"company_description\"> Sobre\n<span class=\"color-company-on-white\"\n>Nosotros</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p> El Servicio de Empleo Comfama es la plataforma de intermediación que conecta el talento de las personas y las necesidades de las empresas. Como agencia transnacional, presta el servicio para empresas ubicadas en Antioquia, y en el extranjero que requieren talento colombiano. Somos prestador autorizado Resolución 0017 del 14 de enero de 2026 del Servicio Público de Empleo.\n</p>\n</div>\n</div>\n<style> .color-company { color: #ed2b7b !important; } .color-company-on-white { color: #ed2b7b !important; }\n</style>",
+   "companyName": "Servicio de Empleo Comfama",
+   "publishDate": "2026-07-28T13:59:10.958Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "8c8cdb9a-a073-4f65-b539-bbc5618577df",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 1,
+     "name": "Administración y oficina"
+    },
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-10-30T05:00:00.000Z",
+   "numberOfQuotas": 5,
+   "skills": [],
+   "experienceMonthsNumber": 36,
+   "educationLevel": [
+    {
+     "id": 1777836,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 1777835,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1771425,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1771424,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 1777834,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 1777833,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "agencia-empleo-comfama",
+   "mainCompanySlug": "agencia-empleo-comfama",
+   "companySlugs": [
+    "agencia-empleo-comfama",
+    "agencia-empleo-comfama"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": true,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1005289,
+   "title": "Líder de ingeniería de datos con o sin discapacidad 312654-47945",
+   "jobSlug": "lider-de-ingenieria-de-datos-con-o-sin-discapacidad-312654-47945-1005289",
+   "status": "published",
+   "cities": [
+    "Itagui"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-itagui"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 22000000,
+   "minSalary": 22000000,
+   "maxSalary": 0,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p>Importante empresa del sector tecnología e ingeniería de datos requiere Líder de ingeniería de datos con cinco (5) años o más de experiencia en ingeniería de datos, analítica o arquitectura de datos, y liderazgo de equipos técnicos. Buscamos profesionales con visión estratégica, liderazgo y orientación a resultados, que deseen aportar su talento en el diseño e implementación de soluciones de datos para el sector salud utilizando tecnologías de última generación.</p><p><strong>Formación académica</strong>: Profesional en Ingeniería de Software, Ingeniería de Sistemas o carreras afines. Se valoran estudios de posgrado, maestría o doctorado relacionados con ingeniería de datos, analítica, arquitectura de datos o áreas afines.</p><p><strong>Requerimientos para el cargo</strong>:</p><p>- Nivel de inglés C1.</p><p>- Experiencia práctica en Snowflake, dbt, Azure Data Factory, Azure Synapse, ADLS Gen2 y Databricks.</p><p>- Dominio de SQL y Python.</p><p>- Experiencia en CI/CD, Git y prácticas de DataOps.</p><p>- Conocimiento en modelado de datos.</p><p>- Capacidad para comunicarse con equipos técnicos y no técnicos.</p><p>- Experiencia en diseño de arquitecturas de datos para entornos de salud.</p><p>- Conocimiento de modelos de datos clínicos como EHR/EMR, HL7, FHIR, claims, laboratorio, farmacia y datos operacionales.</p><p>- Conocimiento en regulación, privacidad y seguridad de la información.</p><p>- Manejo de herramientas de IA/Copilot para acelerar el desarrollo, las pruebas, la documentación y el gobierno de datos.</p><p><strong>Misión del cargo</strong>: Liderar el diseño, desarrollo e implementación de soluciones de ingeniería de datos, garantizando la entrega de proyectos de extremo a extremo, la calidad de la información y el cumplimiento de los estándares de seguridad, privacidad y gobierno de datos, alineados con las necesidades del negocio y del sector salud.</p><p><strong>Funciones</strong>:</p><p>- Diseñar arquitecturas de datos de extremo a extremo utilizando Snowflake, dbt, ADLS Gen2 y herramientas de Azure.</p><p>- Liderar la ejecución de proyectos durante todo su ciclo de vida, desde el levantamiento de requerimientos hasta la salida a producción y el soporte.</p><p>- Modelar conjuntos de datos complejos del sector salud y facilitar el alineamiento de requerimientos con equipos clínicos, de investigación, aseguradoras y tecnología.</p><p>- Construir y optimizar pipelines de datos utilizando Snowflake, dbt, SQL, Python y servicios de Azure.</p><p>- Garantizar el cumplimiento de los estándares de calidad, seguridad, privacidad y gobierno de datos mediante la aplicación de buenas prácticas y herramientas de inteligencia artificial.</p><p><strong>Competencias laborales</strong>: Liderazgo, comunicación efectiva, trabajo en equipo, orientación a resultados, pensamiento analítico, toma de decisiones, adaptabilidad al cambio y planificación.</p><p><strong>Salario</strong>: $22.000.000 + prestaciones legales vigentes.</p><p><strong>Tipo de contrato</strong>: Término indefinido.</p><p><strong>Horario</strong>: Lunes a viernes de 8:00 a. m. a 5:00 p. m.</p><p><strong>Lugar de trabajo</strong>: Modalidad virtual. Base operativa en Itagüí.</p> <div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"process\"> Proceso de <span class=\"color-company color-company-on-white\"\n>Selección</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p>Tu próxima oportunidad laboral puede estar a pocos pasos. Para postularte:</p>\n<ol>\n<li>Haz clic en el botón \"Postularme\".</li>\n<li>Inicia sesión o crea tu cuenta en Magneto, registra tu hoja de vida y responde las preguntas del proceso.</li>\n<li>Revisa tu correo electrónico para conocer el estado de tu postulación.</li>\n<li>Si avanzas, completa las pruebas y/o entrevistas solicitadas.</li>\n</ol> <p>El equipo del Servicio de Empleo Comfama evaluará tu perfil, si se ajusta a la vacante y pasas los filtros, lo enviará a la empresa y ellos te contactarán para continuar el proceso. Recuerda que no debes pagar para participar de procesos de selección. Así dirás #MeProtejodelfraude\n</p>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"company_description\"> Sobre\n<span class=\"color-company-on-white\"\n>Nosotros</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p> El Servicio de Empleo Comfama es la plataforma de intermediación que conecta el talento de las personas y las necesidades de las empresas. Como agencia transnacional, presta el servicio para empresas ubicadas en Antioquia, y en el extranjero que requieren talento colombiano. Somos prestador autorizado Resolución 0017 del 14 de enero de 2026 del Servicio Público de Empleo.\n</p>\n</div>\n</div>\n<style> .color-company { color: #ed2b7b !important; } .color-company-on-white { color: #ed2b7b !important; }\n</style>",
+   "companyName": "Servicio de Empleo Comfama",
+   "publishDate": "2026-07-28T13:55:31.549Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "af9411f5-a520-4494-b594-3b8516a0c03e",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 1,
+     "name": "Administración y oficina"
+    },
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-10-30T05:00:00.000Z",
+   "numberOfQuotas": 3,
+   "skills": [],
+   "experienceMonthsNumber": 60,
+   "educationLevel": [
+    {
+     "id": 1777814,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 1777813,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1771452,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1777812,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 1777811,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 1777810,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "agencia-empleo-comfama",
+   "mainCompanySlug": "agencia-empleo-comfama",
+   "companySlugs": [
+    "agencia-empleo-comfama",
+    "agencia-empleo-comfama"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": true,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 998803,
+   "title": "Líder de soporte técnico 1626504674-5",
+   "jobSlug": "lider-de-soporte-tecnico-1626504674-5-998803",
+   "status": "published",
+   "cities": [
+    "Medellín"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 3000000,
+   "minSalary": 3000000,
+   "maxSalary": 0,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p>Empresa del sector tecnológico, se encuentra en búsqueda de personal profesional en ingeniería de sistemas, tecnología o telecomunicaciones, con experiencia de dos (2) años mínimo en cargos similares.</p><p><br></p><p>Misión:</p><p>Liderar la operación del soporte técnico, garantizando la administración de los activos tecnológicos, usuarios, licencias y herramientas de seguridad informática, asegurando la continuidad de los servicios de TI, la atención oportuna de incidentes y el cumplimiento de las políticas de ciberseguridad de la organización.</p><p><br></p><p>Funciones:</p><p>- Administrar el ciclo de vida de los activos tecnológicos, incluyendo entrega, devolución, mantenimiento, inventario y control de equipos.&nbsp;</p><p>- Gestionar la creación, modificación, eliminación y seguimiento de usuarios, perfiles y accesos de acuerdo con los cargos y políticas de la organización.&nbsp;</p><p>- Implementar, administrar y monitorear las herramientas de protección de endpoints, DLP y demás controles de seguridad informática.&nbsp;</p><p>- Gestionar la atención y resolución de incidentes, vulnerabilidades y eventos relacionados con las plataformas y herramientas bajo su responsabilidad.&nbsp;</p><p>- Administrar y controlar el licenciamiento de software, garantizando su correcta asignación, renovación y cumplimiento.&nbsp;</p><p>- Coordinar y atender los tickets de soporte técnico y seguridad, asegurando el cumplimiento de los niveles de servicio establecidos.&nbsp;</p><p>- Supervisar la correcta asignación de perfiles y permisos de acceso, garantizando su alineación con las funciones de cada cargo.&nbsp;</p><p>- Realizar seguimiento al cumplimiento de las políticas de seguridad tecnológica y proponer acciones de mejora para fortalecer la infraestructura de TI.&nbsp;</p><p>- Elaborar informes e indicadores sobre la gestión de soporte, inventarios, incidentes, activos y cumplimiento de los controles tecnológicos.&nbsp;</p><p>- Liderar las actividades del equipo de soporte técnico y ejecutar las demás funciones asignadas por el jefe inmediato para garantizar la continuidad y seguridad de los servicios tecnológicos.</p><p><br></p><p>Conocimientos:</p><p>- Ciberseguridad y ms65.</p><p>- Administración avanzada de plataformas ITSM y gestión de riesgos cibernéticos.</p><p><br></p><p>Competencias:</p><p>- Comunicación efectiva.&nbsp;</p><p>- Capacidad de análisis.&nbsp;</p><p>- Autonomía.&nbsp;</p><p>- Organización.&nbsp;</p><p>- Atención al detalle y enfoque de mejora continua.</p><p><br></p><p>Salario: $ 3.000.000 + prestaciones.</p><p>Horario: lunes a viernes 8:00 a.m. a 5:00 p.m.</p><p>Tipo de contrato: indefinido.</p><p>Modalidad de trabajo: virtual.</p> <div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"process\"> Proceso de <span class=\"color-company color-company-on-white\"\n>Selección</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p>Tu próxima oportunidad laboral puede estar a pocos pasos. Para postularte:</p>\n<ol>\n<li>Haz clic en el botón \"Postularme\".</li>\n<li>Inicia sesión o crea tu cuenta en Magneto, registra tu hoja de vida y responde las preguntas del proceso.</li>\n<li>Revisa tu correo electrónico para conocer el estado de tu postulación.</li>\n<li>Si avanzas, completa las pruebas y/o entrevistas solicitadas.</li>\n</ol> <p>El equipo del Servicio de Empleo Comfama evaluará tu perfil, si se ajusta a la vacante y pasas los filtros, lo enviará a la empresa y ellos te contactarán para continuar el proceso. Recuerda que no debes pagar para participar de procesos de selección. Así dirás #MeProtejodelfraude\n</p>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"company_description\"> Sobre\n<span class=\"color-company-on-white\"\n>Nosotros</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p> El Servicio de Empleo Comfama es la plataforma de intermediación que conecta el talento de las personas y las necesidades de las empresas. Como agencia transnacional, presta el servicio para empresas ubicadas en Antioquia, y en el extranjero que requieren talento colombiano. Somos prestador autorizado Resolución 0017 del 14 de enero de 2026 del Servicio Público de Empleo.\n</p>\n</div>\n</div>\n<style> .color-company { color: #ed2b7b !important; } .color-company-on-white { color: #ed2b7b !important; }\n</style>",
+   "companyName": "Servicio de Empleo Comfama",
+   "publishDate": "2026-07-22T17:48:52.327Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "f354dc88-aabb-4fb9-83ce-cce0e9486df1",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2027-01-16T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [],
+   "experienceMonthsNumber": 24,
+   "educationLevel": [
+    {
+     "id": 1753727,
+     "name": "Profesional",
+     "order": 4
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "agencia-empleo-comfama",
+   "mainCompanySlug": "agencia-empleo-comfama",
+   "companySlugs": [
+    "agencia-empleo-comfama",
+    "agencia-empleo-comfama"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "sistemas",
+    "tecnología",
+    "telecomunicaciones"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 985132,
+   "title": "Desarrollador/a de Software Full Stack 1626436242-58",
+   "jobSlug": "desarrolladora-de-software-full-stack-1626436242-58-985132",
+   "status": "published",
+   "cities": [
+    "Medellín"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 9000000,
+   "minSalary": 9000000,
+   "maxSalary": 0,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p>Importante empresa del sector servicios se encuentra en búsqueda de un/a Desarrollador/a de Software Full Stack con una experiencia de tres (3) años, con cargos relacionados.</p><p><br></p><p>Formación académica: Profesional, Especialista o Magíster en Ingeniería de Sistemas o carreras afines. Se aceptan candidatos/as graduados/as o con estudios en curso.</p><p><br></p><p>Requerimientos y/o conocimientos para el cargo:</p><p>- Profesional en Ingeniería de Sistemas o carreras afines.</p><p>- Experiencia en codificación, documentación e implementación de software Full Stack para aplicaciones web y móviles.</p><p>- Conocimiento en metodologías ágiles, pruebas unitarias y herramientas para el ciclo de vida del desarrollo de software con prácticas DevOps.</p><p>- Conocimientos en tecnologías de nube AWS.</p><p>- Manejo de tecnologías de desarrollo Back End: JavaScript, Node.js, TypeScript, NestJS y Ruby (deseable).</p><p>- Manejo de tecnologías de desarrollo Front End: React y Next.js (deseable Vue.js y Nuxt).</p><p>- Experiencia en desarrollo móvil con React Native para Android e iOS (deseable Flutter).</p><p><br></p><p>Misión del cargo: Desarrollar e implementar soluciones de software Full Stack para aplicaciones web y móviles, garantizando la calidad del código, el cumplimiento de los requerimientos funcionales y la aplicación de buenas prácticas de desarrollo, contribuyendo a la evolución de los productos tecnológicos de la organización.</p><p><br></p><p>Funciones:</p><p>- Desarrollar aplicaciones web y móviles en las plataformas Front End.</p><p>- Implementar las historias de usuario priorizadas y definidas por el Product Owner.</p><p>- Analizar y diseñar programas o módulos bajo metodologías ágiles utilizando tecnologías en la nube AWS.</p><p>- Acompañar la implementación de pruebas unitarias para validar la calidad del código.</p><p>- Diagnosticar y solucionar errores de software, documentando adecuadamente los desarrollos realizados.</p><p><br></p><p>Salario: $9.000.000 + beneficios legales y extralegales.</p><p>Tipo de contrato: Término indefinido.</p><p>Horario: lunes a viernes de 8:00 a. m. a 5:00 p. m.</p><p><span style=\"text-align: initial;\">Lugar de trabajo: Modalidad virtual, Colombia.</span><br></p> <div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"process\"> Proceso de <span class=\"color-company color-company-on-white\"\n>Selección</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p>Tu próxima oportunidad laboral puede estar a pocos pasos. Para postularte:</p>\n<ol>\n<li>Haz clic en el botón \"Postularme\".</li>\n<li>Inicia sesión o crea tu cuenta en Magneto, registra tu hoja de vida y responde las preguntas del proceso.</li>\n<li>Revisa tu correo electrónico para conocer el estado de tu postulación.</li>\n<li>Si avanzas, completa las pruebas y/o entrevistas solicitadas.</li>\n</ol> <p>El equipo del Servicio de Empleo Comfama evaluará tu perfil, si se ajusta a la vacante y pasas los filtros, lo enviará a la empresa y ellos te contactarán para continuar el proceso. Recuerda que no debes pagar para participar de procesos de selección. Así dirás #MeProtejodelfraude\n</p>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"company_description\"> Sobre\n<span class=\"color-company-on-white\"\n>Nosotros</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p> El Servicio de Empleo Comfama es la plataforma de intermediación que conecta el talento de las personas y las necesidades de las empresas. Como agencia transnacional, presta el servicio para empresas ubicadas en Antioquia, y en el extranjero que requieren talento colombiano. Somos prestador autorizado Resolución 0017 del 14 de enero de 2026 del Servicio Público de Empleo.\n</p>\n</div>\n</div>\n<style> .color-company { color: #ed2b7b !important; } .color-company-on-white { color: #ed2b7b !important; }\n</style>",
+   "companyName": "Servicio de Empleo Comfama",
+   "publishDate": "2026-07-09T19:07:44.026Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "97455080-c2df-4138-81cd-1260bbe102b4",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-10-31T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [],
+   "experienceMonthsNumber": 36,
+   "educationLevel": [
+    {
+     "id": 1737350,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 1737349,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1728007,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1728006,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 1728005,
+     "name": "Doctorado",
+     "order": 6
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "agencia-empleo-comfama",
+   "mainCompanySlug": "agencia-empleo-comfama",
+   "companySlugs": [
+    "agencia-empleo-comfama",
+    "agencia-empleo-comfama"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador",
+    "Sofware",
+    "stack"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 981935,
+   "title": "Desarrollador/a de software para personas con o sin discapacidad 1626520913-2",
+   "jobSlug": "desarrolladora-de-software-para-personas-con-o-sin-discapacidad-1626520913-2-981935",
+   "status": "published",
+   "cities": [
+    "Medellín"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 2803297,
+   "minSalary": 2803297,
+   "maxSalary": 0,
+   "toAgree": false,
+   "pageState": "to_post",
+   "description": "<p>¡Haz parte de nuestro equipo!</p><p>Buscamos Desarrollador/a de software para personas con o sin discapacidad, con experiencia de doce (12) meses en desarrollo de software o áreas de tecnologías de la información, contribuyendo al crecimiento y fortalecimiento de las soluciones tecnológicas de la organización.</p><p><br></p><p>Formación académica:</p><p>Profesional o tecnólogo/a en ingeniería de sistemas, ingeniería de software, ingeniería informática o carreras afines.</p><p><br></p><p>Misión del cargo:</p><p>Diseñar, desarrollar y mantener aplicaciones de software que respondan a las necesidades de la organización, garantizando soluciones seguras, escalables y de alta calidad mediante el análisis de requerimientos funcionales y técnicos.</p><p><br></p><p>Funciones:</p><p>- Diseñar, desarrollar y mantener aplicaciones de software.</p><p>- Analizar los requerimientos funcionales y técnicos de los proyectos.</p><p>- Garantizar la calidad del software desarrollado.</p><p>- Velar por la seguridad de las aplicaciones y la información.</p><p>- Asegurar la escalabilidad y el adecuado funcionamiento de las soluciones tecnológicas.</p><p><br></p><p>Conocimiento:</p><p>- Lenguajes de programación.</p><p>- Base de Datos SQL y NoSQL.</p><p>- Metodologías ágiles.</p><p>- Arquitectura de software.</p><p><br></p><p>Competencias laborales:</p><p>Pensamiento analítico, resolución de problemas, organización y gestión del tiempo, orientación a resultados.</p><p><br></p><p>Salario: $2.803.927 + prestaciones legales vigentes.</p><p>Tipo de contrato: término fijo.</p><p>Horario: lunes y martes de 07:00 am a 05:00 pm. Miércoles a viernes de 08:00 am a 05:00 pm.</p><p>Lugar de trabajo: Virtual, Medellín.</p> <div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"process\"> Proceso de <span class=\"color-company color-company-on-white\"\n>Selección</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p>Tu próxima oportunidad laboral puede estar a pocos pasos. Para postularte:</p>\n<ol>\n<li>Haz clic en el botón \"Postularme\".</li>\n<li>Inicia sesión o crea tu cuenta en Magneto, registra tu hoja de vida y responde las preguntas del proceso.</li>\n<li>Revisa tu correo electrónico para conocer el estado de tu postulación.</li>\n<li>Si avanzas, completa las pruebas y/o entrevistas solicitadas.</li>\n</ol> <p>El equipo del Servicio de Empleo Comfama evaluará tu perfil, si se ajusta a la vacante y pasas los filtros, lo enviará a la empresa y ellos te contactarán para continuar el proceso. Recuerda que no debes pagar para participar de procesos de selección. Así dirás #MeProtejodelfraude\n</p>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<div class=\"\">\n<h2 id=\"company_description\"> Sobre\n<span class=\"color-company-on-white\"\n>Nosotros</span\n>\n</h2>\n</div>\n</div>\n</div>\n<div class=\"\">\n<div class=\"\">\n<p> El Servicio de Empleo Comfama es la plataforma de intermediación que conecta el talento de las personas y las necesidades de las empresas. Como agencia transnacional, presta el servicio para empresas ubicadas en Antioquia, y en el extranjero que requieren talento colombiano. Somos prestador autorizado Resolución 0017 del 14 de enero de 2026 del Servicio Público de Empleo.\n</p>\n</div>\n</div>\n<style> .color-company { color: #ed2b7b !important; } .color-company-on-white { color: #ed2b7b !important; }\n</style>",
+   "companyName": "Servicio de Empleo Comfama",
+   "publishDate": "2026-07-03T19:04:22.418Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia"
+   ],
+   "currencyCode": "COP",
+   "contractType": 1,
+   "contractOrder": {
+    "id": 1,
+    "name": "Término fijo",
+    "order": 1
+   },
+   "isRemote": true,
+   "publicId": "fa089af1-bc68-4b13-a383-f1b033ac92ee",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 1,
+     "name": "Administración y oficina"
+    },
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    },
+    {
+     "id": 26,
+     "name": "Call center, tele mercadeo, BPO y afines"
+    }
+   ],
+   "expirationDate": "2026-12-30T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [],
+   "experienceMonthsNumber": 12,
+   "educationLevel": [
+    {
+     "id": 1722799,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 1722138,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1722137,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1722798,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 1722797,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 1722796,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "agencia-empleo-comfama",
+   "mainCompanySlug": "agencia-empleo-comfama",
+   "companySlugs": [
+    "agencia-empleo-comfama",
+    "agencia-empleo-comfama"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "ingeniero de sistemas",
+    "ingeniero de informática",
+    "desarrollo de software",
+    "desarrollador"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  }
+ ]
+}

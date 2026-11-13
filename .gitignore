@@ -1,0 +1,9 @@
+node_modules/
+.svelte-kit/
+build/
+.env
+.env.*
+
+# datos locales: tu base y tu perfil (para un perfil nuevo ver README.md)
+data/
+profile/

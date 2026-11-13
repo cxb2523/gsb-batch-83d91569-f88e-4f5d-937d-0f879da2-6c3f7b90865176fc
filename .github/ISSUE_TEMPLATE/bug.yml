@@ -1,0 +1,55 @@
+name: Reporte de bug
+description: Algo no funciona como debería.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: que-paso
+    attributes:
+      label: Qué pasó
+      description: Describe el problema. Si es visual, adjunta una captura.
+    validations:
+      required: true
+  - type: textarea
+    id: pasos
+    attributes:
+      label: Cómo reproducirlo
+      placeholder: |
+        1. Presiono Buscar con la palabra clave "..."
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: esperado
+    attributes:
+      label: Qué esperabas que pasara
+    validations:
+      required: true
+  - type: dropdown
+    id: plataforma
+    attributes:
+      label: Plataforma afectada
+      options:
+        - Ninguna en particular
+        - GetOnBoard
+        - Otra (indícala abajo)
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Cómo corres la app
+      options:
+        - bun run dev (Bun)
+        - bun run dev:node (Node)
+        - bun run buscar (terminal)
+    validations:
+      required: true
+  - type: input
+    id: versiones
+    attributes:
+      label: Versiones y sistema operativo
+      placeholder: "Bun 1.4.2 / Node 24.21, Arch Linux"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Errores de la terminal
+      description: Pega lo que muestre la terminal donde corre la app. No incluyas datos de tu profile/.
+      render: text

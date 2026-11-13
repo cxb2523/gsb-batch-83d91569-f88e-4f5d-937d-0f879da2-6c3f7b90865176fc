@@ -1,0 +1,52 @@
+{
+	"name": "jobfilter",
+	"version": "0.10.0",
+	"description": "Busca vacantes en portales de empleo de Latinoamérica, filtra las empresas que reciclan ofertas y pinta cada vacante según tu perfil. Local y sin login.",
+	"license": "MIT",
+	"author": "Sebastian Asprino (https://asprino.dev)",
+	"homepage": "https://github.com/SebastianAsprino/jobfilter#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/SebastianAsprino/jobfilter.git"
+	},
+	"bugs": {
+		"url": "https://github.com/SebastianAsprino/jobfilter/issues"
+	},
+	"keywords": [
+		"job-search",
+		"empleo",
+		"vacantes",
+		"latam",
+		"sveltekit",
+		"bun",
+		"drizzle-orm",
+		"sqlite",
+		"scraper"
+	],
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "bun --bun vite dev --open",
+		"dev:node": "vite dev --open",
+		"buscar": "bun scripts/buscar.ts",
+		"test": "bun test",
+		"db:generate": "drizzle-kit generate",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+	},
+	"devDependencies": {
+		"@sveltejs/kit": "^2.70.3",
+		"@sveltejs/vite-plugin-svelte": "^6.2.4",
+		"@types/better-sqlite3": "^9.6.0",
+		"@types/bun": "^1.4.3",
+		"drizzle-kit": "^0.31.11",
+		"svelte": "^5.57.2",
+		"svelte-adapter-bun": "^1.0.1",
+		"svelte-check": "^4.7.6",
+		"typescript": "^5.9.3",
+		"vite": "^7.3.7"
+	},
+	"dependencies": {
+		"better-sqlite3": "^12.11.1",
+		"drizzle-orm": "^0.45.4"
+	}
+}

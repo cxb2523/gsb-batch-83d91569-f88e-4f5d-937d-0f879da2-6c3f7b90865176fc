@@ -1,0 +1,45 @@
+name: Nueva plataforma
+description: Proponer o coordinar la integración de un portal de empleo.
+labels: ["plataforma"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Antes de empezar, revisa [docs/plataformas.md](https://github.com/SebastianAsprino/jobfilter/blob/main/docs/plataformas.md): ahí está el estado de cada plataforma y la guía para escribir un adapter.
+  - type: input
+    id: plataforma
+    attributes:
+      label: Plataforma
+      placeholder: "Computrabajo (co.computrabajo.com)"
+    validations:
+      required: true
+  - type: input
+    id: paises
+    attributes:
+      label: Países que cubre
+      placeholder: "Colombia, México, Perú…"
+  - type: dropdown
+    id: estrategia
+    attributes:
+      label: Cómo trae las vacantes sin iniciar sesión
+      options:
+        - API pública o interna (JSON)
+        - HTML renderizado en el servidor
+        - Estado embebido (__NEXT_DATA__, __NUXT__…)
+        - Solo con navegador (JavaScript del lado del cliente)
+        - Todavía no lo sé
+    validations:
+      required: true
+  - type: textarea
+    id: hallazgos
+    attributes:
+      label: Lo que encontraste
+      description: URL de búsqueda, parámetros, paginación, filtro de fecha, qué campos trae (empresa, fecha, ubicación, idioma).
+  - type: checkboxes
+    id: compromiso
+    attributes:
+      label: Participación
+      options:
+        - label: Quiero escribir el adapter yo
+        - label: Las vacantes se ven sin iniciar sesión
+          required: true

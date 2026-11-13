@@ -1,0 +1,850 @@
+[
+ {
+  "last_activated_at": "2026-09-09T19:16:21.340030Z",
+  "all_cities": [],
+  "all_countries": [],
+  "has_applied": false,
+  "city": {
+   "pk": 0,
+   "name": "Remote",
+   "alias": null,
+   "is_home": false,
+   "country_id": null,
+   "country": null,
+   "department": null,
+   "linkedin_region": false,
+   "geo_urn": null,
+   "salary_yearly_gross_usd": null
+  },
+  "company": {
+   "name": "Somos Makers",
+   "confidential": false,
+   "logo_url": "https://s3-us-west-2.amazonaws.com/peaku-public/business/Company/logo_url/935422/Sin_titulo_(940_x_940_px).png",
+   "my_perks": []
+  },
+  "created_at": "2026-09-09T19:10:20.498489Z",
+  "external": false,
+  "linkedin_url": "https://www.linkedin.com/jobs/view/None/",
+  "location_type": {
+   "pk": 1,
+   "name": "Remote - Anywhere",
+   "generic_name": "Remote",
+   "generic_code": "R",
+   "code": "RA"
+  },
+  "main_skills": [
+   {
+    "pk": 63,
+    "name": "SQL",
+    "count": 79888,
+    "difficulty": null
+   },
+   {
+    "pk": 81,
+    "name": "Java",
+    "count": 80518,
+    "difficulty": null
+   },
+   {
+    "pk": 935,
+    "name": "Angular",
+    "count": 17519,
+    "difficulty": null
+   }
+  ],
+  "salary": {
+   "low": 5500000,
+   "high": 6500000,
+   "currency": {
+    "pk": 1,
+    "name": "Peso Colombiano",
+    "title": "$ COP - Peso Colombiano",
+    "symbol": "$",
+    "code": "COP",
+    "step": 500000
+   },
+   "confidential": false,
+   "is_annual": false,
+   "is_gross": false,
+   "has_commissions": false,
+   "commissions_average": null,
+   "vesting": false,
+   "stock_options": false,
+   "vesting_low": null,
+   "vesting_high": null,
+   "vesting_low_percentage": null,
+   "vesting_high_percentage": null
+  },
+  "title": "Full-Stack Java Developer - Angular",
+  "url": "57921-full-stack-java-developer---angular"
+ },
+ {
+  "last_activated_at": "2026-09-08T22:49:18.422018Z",
+  "all_cities": [],
+  "all_countries": [],
+  "has_applied": false,
+  "city": {
+   "pk": 0,
+   "name": "Remote",
+   "alias": null,
+   "is_home": false,
+   "country_id": null,
+   "country": null,
+   "department": null,
+   "linkedin_region": false,
+   "geo_urn": null,
+   "salary_yearly_gross_usd": null
+  },
+  "company": {
+   "name": "DRIVIN",
+   "confidential": false,
+   "logo_url": "https://s3-us-west-2.amazonaws.com/peaku-public/business/Company/logo_url/679647/Media_Kit_-_Logo_Drivin_fondo_Azul.webp",
+   "my_perks": [
+    {
+     "pk": 5,
+     "name": "Remote job",
+     "icon": "geo-alt"
+    },
+    {
+     "pk": 6,
+     "name": "Flexible schedule",
+     "icon": "watch"
+    },
+    {
+     "pk": 17,
+     "name": "Extra days-off",
+     "icon": null
+    },
+    {
+     "pk": 29,
+     "name": "Friendly work environment",
+     "icon": "people"
+    },
+    {
+     "pk": 32,
+     "name": "Dynamic workspaces",
+     "icon": null
+    },
+    {
+     "pk": 39,
+     "name": "Full day or half day birthday",
+     "icon": "watch"
+    }
+   ]
+  },
+  "created_at": "2026-09-08T22:45:05.446170Z",
+  "external": false,
+  "linkedin_url": "https://www.linkedin.com/jobs/view/None/",
+  "location_type": {
+   "pk": 1,
+   "name": "Remote - Anywhere",
+   "generic_name": "Remote",
+   "generic_code": "R",
+   "code": "RA"
+  },
+  "main_skills": [
+   {
+    "pk": 66,
+    "name": "JavaScript",
+    "count": 110148,
+    "difficulty": null
+   },
+   {
+    "pk": 769,
+    "name": "Python",
+    "count": 26520,
+    "difficulty": null
+   },
+   {
+    "pk": 4701,
+    "name": "Ruby on rails",
+    "count": 4995,
+    "difficulty": null
+   }
+  ],
+  "salary": {
+   "low": null,
+   "high": null,
+   "currency": null,
+   "confidential": true,
+   "is_annual": false,
+   "is_gross": false,
+   "has_commissions": null,
+   "commissions_average": null,
+   "vesting": null,
+   "stock_options": null,
+   "vesting_low": null,
+   "vesting_high": null,
+   "vesting_low_percentage": null,
+   "vesting_high_percentage": null
+  },
+  "title": "Backend Developer - Latam",
+  "url": "57920-backend-developer---latam"
+ },
+ {
+  "last_activated_at": "2026-08-26T17:27:31.104301Z",
+  "all_cities": [],
+  "all_countries": [],
+  "has_applied": false,
+  "city": {
+   "pk": 0,
+   "name": "Remote",
+   "alias": null,
+   "is_home": false,
+   "country_id": null,
+   "country": null,
+   "department": null,
+   "linkedin_region": false,
+   "geo_urn": null,
+   "salary_yearly_gross_usd": null
+  },
+  "company": {
+   "name": "Genia Tecnologia S.A.S",
+   "confidential": false,
+   "logo_url": "https://s3-us-west-2.amazonaws.com/peaku-public/business/Company/logo_url/34404/genia.png",
+   "my_perks": []
+  },
+  "created_at": "2026-08-26T17:26:05.898863Z",
+  "external": false,
+  "linkedin_url": "https://www.linkedin.com/jobs/view/None/",
+  "location_type": {
+   "pk": 2,
+   "name": "Remote - in country",
+   "generic_name": "Remote",
+   "generic_code": "R",
+   "code": "RC"
+  },
+  "main_skills": [
+   {
+    "pk": 6788,
+    "name": "Mobile development",
+    "count": 1923,
+    "difficulty": null
+   }
+  ],
+  "salary": {
+   "low": 2500000,
+   "high": 2500000,
+   "currency": {
+    "pk": 1,
+    "name": "Peso Colombiano",
+    "title": "$ COP - Peso Colombiano",
+    "symbol": "$",
+    "code": "COP",
+    "step": 500000
+   },
+   "confidential": false,
+   "is_annual": false,
+   "is_gross": false,
+   "has_commissions": false,
+   "commissions_average": null,
+   "vesting": false,
+   "stock_options": false,
+   "vesting_low": null,
+   "vesting_high": null,
+   "vesting_low_percentage": null,
+   "vesting_high_percentage": null
+  },
+  "title": "MOBILE APPLICATION DEVELOPER - REMOTE",
+  "url": "57878-mobile-application-developer---remote"
+ },
+ {
+  "last_activated_at": "2026-08-26T17:18:51.799802Z",
+  "all_cities": [
+   {
+    "pk": 4,
+    "name": "Barranquilla",
+    "alias": null,
+    "is_home": false,
+    "country_id": 1,
+    "country": {
+     "pk": 1,
+     "name": "Colombia",
+     "calling_code": 57,
+     "lang": "es",
+     "ISO": "CO",
+     "currency": {
+      "pk": 1,
+      "name": "Peso Colombiano",
+      "title": "$ COP - Peso Colombiano",
+      "symbol": "$",
+      "code": "COP",
+      "step": 500000
+     },
+     "mobile_digit_count_min": 10,
+     "mobile_digit_count_max": 10
+    },
+    "department": "Atlántico",
+    "linkedin_region": false,
+    "geo_urn": null,
+    "salary_yearly_gross_usd": null
+   }
+  ],
+  "all_countries": [
+   {
+    "pk": 1,
+    "name": "Colombia",
+    "calling_code": 57,
+    "lang": "es",
+    "ISO": "CO",
+    "currency": {
+     "pk": 1,
+     "name": "Peso Colombiano",
+     "title": "$ COP - Peso Colombiano",
+     "symbol": "$",
+     "code": "COP",
+     "step": 500000
+    },
+    "mobile_digit_count_min": 10,
+    "mobile_digit_count_max": 10
+   }
+  ],
+  "has_applied": false,
+  "city": {
+   "pk": 4,
+   "name": "Barranquilla",
+   "alias": null,
+   "is_home": false,
+   "country_id": null,
+   "country": null,
+   "department": null,
+   "linkedin_region": false,
+   "geo_urn": null,
+   "salary_yearly_gross_usd": null
+  },
+  "company": {
+   "name": "Genia Tecnologia S.A.S",
+   "confidential": false,
+   "logo_url": "https://s3-us-west-2.amazonaws.com/peaku-public/business/Company/logo_url/34404/genia.png",
+   "my_perks": []
+  },
+  "created_at": "2026-08-26T15:54:13.504639Z",
+  "external": false,
+  "linkedin_url": "https://www.linkedin.com/jobs/view/None/",
+  "location_type": {
+   "pk": 3,
+   "name": "Hybrid - mix remote and in office",
+   "generic_name": "Hybrid - mix remote and in office",
+   "generic_code": "H",
+   "code": "H"
+  },
+  "main_skills": [
+   {
+    "pk": 6788,
+    "name": "Mobile development",
+    "count": 1923,
+    "difficulty": null
+   }
+  ],
+  "salary": {
+   "low": 2500000,
+   "high": 2500000,
+   "currency": {
+    "pk": 1,
+    "name": "Peso Colombiano",
+    "title": "$ COP - Peso Colombiano",
+    "symbol": "$",
+    "code": "COP",
+    "step": 500000
+   },
+   "confidential": false,
+   "is_annual": false,
+   "is_gross": false,
+   "has_commissions": false,
+   "commissions_average": null,
+   "vesting": false,
+   "stock_options": false,
+   "vesting_low": null,
+   "vesting_high": null,
+   "vesting_low_percentage": null,
+   "vesting_high_percentage": null
+  },
+  "title": "MOBILE APPLICATION DEVELOPER - BARRANQUILLA",
+  "url": "57876-mobile-application-developer---barranquilla"
+ },
+ {
+  "last_activated_at": "2026-10-19T14:31:18.237175Z",
+  "all_cities": [
+   {
+    "pk": 2,
+    "name": "Bogotá",
+    "alias": "Bogotá, D.C.",
+    "is_home": false,
+    "country_id": 1,
+    "country": {
+     "pk": 1,
+     "name": "Colombia",
+     "calling_code": 57,
+     "lang": "es",
+     "ISO": "CO",
+     "currency": {
+      "pk": 1,
+      "name": "Peso Colombiano",
+      "title": "$ COP - Peso Colombiano",
+      "symbol": "$",
+      "code": "COP",
+      "step": 500000
+     },
+     "mobile_digit_count_min": 10,
+     "mobile_digit_count_max": 10
+    },
+    "department": "Bogotá, D.C.",
+    "linkedin_region": false,
+    "geo_urn": null,
+    "salary_yearly_gross_usd": null
+   }
+  ],
+  "all_countries": [
+   {
+    "pk": 1,
+    "name": "Colombia",
+    "calling_code": 57,
+    "lang": "es",
+    "ISO": "CO",
+    "currency": {
+     "pk": 1,
+     "name": "Peso Colombiano",
+     "title": "$ COP - Peso Colombiano",
+     "symbol": "$",
+     "code": "COP",
+     "step": 500000
+    },
+    "mobile_digit_count_min": 10,
+    "mobile_digit_count_max": 10
+   }
+  ],
+  "has_applied": false,
+  "city": {
+   "pk": 2,
+   "name": "Bogotá",
+   "alias": null,
+   "is_home": false,
+   "country_id": null,
+   "country": null,
+   "department": null,
+   "linkedin_region": false,
+   "geo_urn": null,
+   "salary_yearly_gross_usd": null
+  },
+  "company": {
+   "name": "Gestar Innovacion",
+   "confidential": false,
+   "logo_url": "https://s3-us-west-2.amazonaws.com/peaku-public/business/Company/logo_url/475870/Gemini_Generated_Image_jfnvmqjfnvmqjfnv.jpeg",
+   "my_perks": []
+  },
+  "created_at": "2026-10-19T14:26:30.490844Z",
+  "external": false,
+  "linkedin_url": "https://www.linkedin.com/jobs/view/None/",
+  "location_type": {
+   "pk": 4,
+   "name": "On site",
+   "generic_name": "On site",
+   "generic_code": "OS",
+   "code": "OS"
+  },
+  "main_skills": [
+   {
+    "pk": 20252,
+    "name": "Advanced excel",
+    "count": 206,
+    "difficulty": null
+   }
+  ],
+  "salary": {
+   "low": 1750000,
+   "high": 2100000,
+   "currency": {
+    "pk": 1,
+    "name": "Peso Colombiano",
+    "title": "$ COP - Peso Colombiano",
+    "symbol": "$",
+    "code": "COP",
+    "step": 500000
+   },
+   "confidential": false,
+   "is_annual": false,
+   "is_gross": false,
+   "has_commissions": false,
+   "commissions_average": null,
+   "vesting": false,
+   "stock_options": false,
+   "vesting_low": null,
+   "vesting_high": null,
+   "vesting_low_percentage": null,
+   "vesting_high_percentage": null
+  },
+  "title": "Data Audit Analyst",
+  "url": "62862-data-audit-analyst"
+ },
+ {
+  "last_activated_at": "2026-10-15T15:27:57.471354Z",
+  "all_cities": [
+   {
+    "pk": 92,
+    "name": "Bucaramanga",
+    "alias": null,
+    "is_home": false,
+    "country_id": 1,
+    "country": {
+     "pk": 1,
+     "name": "Colombia",
+     "calling_code": 57,
+     "lang": "es",
+     "ISO": "CO",
+     "currency": {
+      "pk": 1,
+      "name": "Peso Colombiano",
+      "title": "$ COP - Peso Colombiano",
+      "symbol": "$",
+      "code": "COP",
+      "step": 500000
+     },
+     "mobile_digit_count_min": 10,
+     "mobile_digit_count_max": 10
+    },
+    "department": "Santander",
+    "linkedin_region": true,
+    "geo_urn": 90010134,
+    "salary_yearly_gross_usd": 18575
+   }
+  ],
+  "all_countries": [
+   {
+    "pk": 1,
+    "name": "Colombia",
+    "calling_code": 57,
+    "lang": "es",
+    "ISO": "CO",
+    "currency": {
+     "pk": 1,
+     "name": "Peso Colombiano",
+     "title": "$ COP - Peso Colombiano",
+     "symbol": "$",
+     "code": "COP",
+     "step": 500000
+    },
+    "mobile_digit_count_min": 10,
+    "mobile_digit_count_max": 10
+   }
+  ],
+  "has_applied": false,
+  "city": {
+   "pk": 92,
+   "name": "Bucaramanga",
+   "alias": null,
+   "is_home": false,
+   "country_id": null,
+   "country": null,
+   "department": null,
+   "linkedin_region": true,
+   "geo_urn": 90010134,
+   "salary_yearly_gross_usd": 18575
+  },
+  "company": {
+   "name": "Agencia publicitaria BRANDING SAS",
+   "confidential": false,
+   "logo_url": "https://s3-us-west-2.amazonaws.com/peaku-public/business/Company/logo_url/956986/Sin_titulo_(940_x_940_px).png",
+   "my_perks": []
+  },
+  "created_at": "2026-10-15T15:15:54.158456Z",
+  "external": false,
+  "linkedin_url": "https://www.linkedin.com/jobs/view/None/",
+  "location_type": {
+   "pk": 4,
+   "name": "On site",
+   "generic_name": "On site",
+   "generic_code": "OS",
+   "code": "OS"
+  },
+  "main_skills": [
+   {
+    "pk": 1091,
+    "name": "Corel draw",
+    "count": 297,
+    "difficulty": null
+   },
+   {
+    "pk": 9356,
+    "name": "Diseño gráfico",
+    "count": 435,
+    "difficulty": null
+   },
+   {
+    "pk": 19680,
+    "name": "Adobe illustrator",
+    "count": 134,
+    "difficulty": null
+   }
+  ],
+  "salary": {
+   "low": 1800000,
+   "high": 2400000,
+   "currency": {
+    "pk": 1,
+    "name": "Peso Colombiano",
+    "title": "$ COP - Peso Colombiano",
+    "symbol": "$",
+    "code": "COP",
+    "step": 500000
+   },
+   "confidential": false,
+   "is_annual": false,
+   "is_gross": false,
+   "has_commissions": false,
+   "commissions_average": null,
+   "vesting": false,
+   "stock_options": false,
+   "vesting_low": null,
+   "vesting_high": null,
+   "vesting_low_percentage": null,
+   "vesting_high_percentage": null
+  },
+  "title": "Graphic designer",
+  "url": "62860-graphic-designer"
+ },
+ {
+  "last_activated_at": "2026-09-24T22:26:08.655391Z",
+  "all_cities": [
+   {
+    "pk": 2,
+    "name": "Bogotá",
+    "alias": "Bogotá, D.C.",
+    "is_home": false,
+    "country_id": 1,
+    "country": {
+     "pk": 1,
+     "name": "Colombia",
+     "calling_code": 57,
+     "lang": "es",
+     "ISO": "CO",
+     "currency": {
+      "pk": 1,
+      "name": "Peso Colombiano",
+      "title": "$ COP - Peso Colombiano",
+      "symbol": "$",
+      "code": "COP",
+      "step": 500000
+     },
+     "mobile_digit_count_min": 10,
+     "mobile_digit_count_max": 10
+    },
+    "department": "Bogotá, D.C.",
+    "linkedin_region": false,
+    "geo_urn": null,
+    "salary_yearly_gross_usd": null
+   }
+  ],
+  "all_countries": [
+   {
+    "pk": 1,
+    "name": "Colombia",
+    "calling_code": 57,
+    "lang": "es",
+    "ISO": "CO",
+    "currency": {
+     "pk": 1,
+     "name": "Peso Colombiano",
+     "title": "$ COP - Peso Colombiano",
+     "symbol": "$",
+     "code": "COP",
+     "step": 500000
+    },
+    "mobile_digit_count_min": 10,
+    "mobile_digit_count_max": 10
+   }
+  ],
+  "has_applied": false,
+  "city": {
+   "pk": 2,
+   "name": "Bogotá",
+   "alias": null,
+   "is_home": false,
+   "country_id": null,
+   "country": null,
+   "department": null,
+   "linkedin_region": false,
+   "geo_urn": null,
+   "salary_yearly_gross_usd": null
+  },
+  "company": {
+   "name": "ATTmosféras Colombia",
+   "confidential": true,
+   "logo_url": "",
+   "my_perks": []
+  },
+  "created_at": "2026-09-24T22:19:17.058572Z",
+  "external": false,
+  "linkedin_url": "https://www.linkedin.com/jobs/view/None/",
+  "location_type": {
+   "pk": 4,
+   "name": "On site",
+   "generic_name": "On site",
+   "generic_code": "OS",
+   "code": "OS"
+  },
+  "main_skills": [
+   {
+    "pk": 3481,
+    "name": "Technology management",
+    "count": 603,
+    "difficulty": null
+   }
+  ],
+  "salary": {
+   "low": 2500000,
+   "high": 2500000,
+   "currency": {
+    "pk": 1,
+    "name": "Peso Colombiano",
+    "title": "$ COP - Peso Colombiano",
+    "symbol": "$",
+    "code": "COP",
+    "step": 500000
+   },
+   "confidential": false,
+   "is_annual": false,
+   "is_gross": false,
+   "has_commissions": false,
+   "commissions_average": null,
+   "vesting": false,
+   "stock_options": false,
+   "vesting_low": null,
+   "vesting_high": null,
+   "vesting_low_percentage": null,
+   "vesting_high_percentage": null
+  },
+  "title": "Technological Media Operator (Video Surveillance)",
+  "url": "60859-technological-media-operator-%28video-surveillance%29"
+ },
+ {
+  "last_activated_at": "2026-10-14T20:13:04.905298Z",
+  "all_cities": [],
+  "all_countries": [
+   {
+    "pk": 1,
+    "name": "Colombia",
+    "calling_code": 57,
+    "lang": "es",
+    "ISO": "CO",
+    "currency": {
+     "pk": 1,
+     "name": "Peso Colombiano",
+     "title": "$ COP - Peso Colombiano",
+     "symbol": "$",
+     "code": "COP",
+     "step": 500000
+    },
+    "mobile_digit_count_min": 10,
+    "mobile_digit_count_max": 10
+   },
+   {
+    "pk": 3,
+    "name": "Perú",
+    "calling_code": 51,
+    "lang": "es",
+    "ISO": "PE",
+    "currency": {
+     "pk": 3,
+     "name": "Nuevo Sol Peruano",
+     "title": "S/. PEN - Nuevo Sol Peruano",
+     "symbol": "S/.",
+     "code": "PEN",
+     "step": 250
+    },
+    "mobile_digit_count_min": 9,
+    "mobile_digit_count_max": 9
+   },
+   {
+    "pk": 14,
+    "name": "Guatemala",
+    "calling_code": 502,
+    "lang": "es",
+    "ISO": "GT",
+    "currency": {
+     "pk": 13,
+     "name": "Quetzal",
+     "title": "Q GTQ - Quetzal",
+     "symbol": "Q",
+     "code": "GTQ",
+     "step": 2500
+    },
+    "mobile_digit_count_min": 8,
+    "mobile_digit_count_max": 8
+   }
+  ],
+  "has_applied": false,
+  "city": {
+   "pk": 0,
+   "name": "Remote",
+   "alias": null,
+   "is_home": false,
+   "country_id": null,
+   "country": null,
+   "department": null,
+   "linkedin_region": false,
+   "geo_urn": null,
+   "salary_yearly_gross_usd": null
+  },
+  "company": {
+   "name": "LIBERTAT S.A.S BIC",
+   "confidential": false,
+   "logo_url": "https://s3-us-west-2.amazonaws.com/peaku-public/business/Company/logo_url/308204/IMAGEN_LIBERTAT.png",
+   "my_perks": []
+  },
+  "created_at": "2026-10-14T20:07:43.949531Z",
+  "external": false,
+  "linkedin_url": "https://www.linkedin.com/jobs/view/None/",
+  "location_type": {
+   "pk": 2,
+   "name": "Remote - in country",
+   "generic_name": "Remote",
+   "generic_code": "R",
+   "code": "RC"
+  },
+  "main_skills": [
+   {
+    "pk": 7196,
+    "name": "Salesforce",
+    "count": 184,
+    "difficulty": null
+   },
+   {
+    "pk": 16930,
+    "name": "Hubspot",
+    "count": 217,
+    "difficulty": null
+   },
+   {
+    "pk": 181577,
+    "name": "Crm management",
+    "count": 284,
+    "difficulty": null
+   }
+  ],
+  "salary": {
+   "low": 1000,
+   "high": 1200,
+   "currency": {
+    "pk": 2,
+    "name": "United States Dollar",
+    "title": "$ USD - United States Dollar",
+    "symbol": "$",
+    "code": "USD",
+    "step": 500
+   },
+   "confidential": false,
+   "is_annual": false,
+   "is_gross": false,
+   "has_commissions": true,
+   "commissions_average": null,
+   "vesting": false,
+   "stock_options": false,
+   "vesting_low": null,
+   "vesting_high": null,
+   "vesting_low_percentage": null,
+   "vesting_high_percentage": null
+  },
+  "title": "Account Executive – Central America, Caribbean and South America",
+  "url": "62859-account-executive-%e2%80%93-central-america%2c-caribbean-and-south-america"
+ }
+]

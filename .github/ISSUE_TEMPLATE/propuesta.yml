@@ -1,0 +1,25 @@
+name: Propuesta
+description: Una idea para mejorar JobFilter.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        JobFilter es intencionalmente simple: un botón, una lista y la lista negra. Cuéntanos el problema antes que la solución.
+  - type: textarea
+    id: problema
+    attributes:
+      label: Qué problema tienes
+      description: Qué te cuesta hoy al buscar empleo con JobFilter.
+    validations:
+      required: true
+  - type: textarea
+    id: propuesta
+    attributes:
+      label: Qué propones
+    validations:
+      required: true
+  - type: textarea
+    id: alternativas
+    attributes:
+      label: Alternativas que consideraste

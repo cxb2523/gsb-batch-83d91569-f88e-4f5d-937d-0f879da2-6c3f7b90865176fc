@@ -1,0 +1,2054 @@
+{
+ "totalRows": 12,
+ "totalHits": 16,
+ "counters": [
+  {
+   "field": "work_modality",
+   "counts": [
+    {
+     "id": "hybrid",
+     "total": 12
+    },
+    {
+     "id": "onSite",
+     "total": 4
+    }
+   ]
+  },
+  {
+   "field": "salary_show",
+   "counts": [
+    {
+     "id": "BK-01",
+     "total": 16
+    },
+    {
+     "id": "BK-02",
+     "total": 16
+    },
+    {
+     "id": "BK-03",
+     "total": 16
+    },
+    {
+     "id": "BK-04",
+     "total": 14
+    },
+    {
+     "id": "BK-05",
+     "total": 14
+    },
+    {
+     "id": "BK-06",
+     "total": 14
+    },
+    {
+     "id": "BK-07",
+     "total": 9
+    },
+    {
+     "id": "BK-08",
+     "total": 8
+    },
+    {
+     "id": "BK-09",
+     "total": 0
+    },
+    {
+     "id": "null",
+     "total": 16
+    }
+   ]
+  },
+  {
+   "field": "is_internal",
+   "counts": [
+    {
+     "id": "false",
+     "total": 16
+    }
+   ]
+  },
+  {
+   "field": "internship_types_id",
+   "counts": [
+    {
+     "id": 0,
+     "total": 16
+    }
+   ]
+  },
+  {
+   "field": "sectors_ids",
+   "counts": [
+    {
+     "id": 23,
+     "total": 13
+    },
+    {
+     "id": 14,
+     "total": 6
+    },
+    {
+     "id": 1,
+     "total": 1
+    },
+    {
+     "id": 18,
+     "total": 2
+    }
+   ]
+  },
+  {
+   "field": "experience_months_number",
+   "counts": [
+    {
+     "id": "BK-01",
+     "total": 0
+    },
+    {
+     "id": "BK-02",
+     "total": 3
+    },
+    {
+     "id": "BK-03",
+     "total": 9
+    },
+    {
+     "id": "BK-04",
+     "total": 12
+    },
+    {
+     "id": "BK-05",
+     "total": 6
+    },
+    {
+     "id": "BK-06",
+     "total": 1
+    },
+    {
+     "id": "BK-07",
+     "total": 0
+    },
+    {
+     "id": "BK-08",
+     "total": 0
+    },
+    {
+     "id": "null",
+     "total": 16
+    }
+   ]
+  },
+  {
+   "field": "contract_type_id",
+   "counts": [
+    {
+     "id": 2,
+     "total": 9
+    },
+    {
+     "id": 1,
+     "total": 4
+    },
+    {
+     "id": 4,
+     "total": 3
+    }
+   ]
+  },
+  {
+   "field": "aditional_information",
+   "counts": [
+    {
+     "id": "disabledPeople",
+     "total": 4
+    },
+    {
+     "id": "inmediateHiring",
+     "total": 3
+    }
+   ]
+  },
+  {
+   "field": "publish_date",
+   "counts": [
+    {
+     "id": "",
+     "total": 16
+    },
+    {
+     "id": "BK-01",
+     "total": 0
+    },
+    {
+     "id": "BK-02",
+     "total": 9
+    },
+    {
+     "id": "BK-03",
+     "total": 10
+    },
+    {
+     "id": "BK-04",
+     "total": 10
+    },
+    {
+     "id": "BK-05",
+     "total": 11
+    }
+   ]
+  },
+  {
+   "field": "company_show_slug",
+   "counts": [
+    {
+     "id": "accenture",
+     "total": 8
+    },
+    {
+     "id": "iq-outsourcing",
+     "total": 4
+    },
+    {
+     "id": "erco-energia",
+     "total": 1
+    },
+    {
+     "id": "magneto",
+     "total": 1
+    },
+    {
+     "id": "viva1a",
+     "total": 2
+    }
+   ]
+  },
+  {
+   "field": "vacant_position_id",
+   "counts": [
+    {
+     "id": 283,
+     "total": 12
+    },
+    {
+     "id": 146,
+     "total": 3
+    },
+    {
+     "id": 17,
+     "total": 1
+    }
+   ]
+  }
+ ],
+ "algorithm": "wenesday-v1.0.0",
+ "rows": [
+  {
+   "id": 1111607,
+   "title": "Desarrollador Cobol Mainframe - Altamira, Host y DB2",
+   "jobSlug": "desarrollador-cobol-mainframe-altamira-host-y-db2-1111607",
+   "status": "published",
+   "cities": [
+    "Medellín",
+    "Bogotá, D.C.",
+    "Barranquilla"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin",
+    "ofertas-empleo-en-bogota",
+    "ofertas-empleo-en-barranquilla"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<div style=\"margin-top: 0px; margin-right: 0px; margin-left: 0px; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px; margin-bottom: 35px !important;\" class=\"mb-20 mb-md-35\" id=\"description\"><div style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; display: flex !important;\" class=\"d-md-flex\"><div style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; -webkit-box-ordinal-group: 2; order: 1; max-width: 800px;\" class=\"order-1\"><div style=\"margin-top: 0px; margin-right: 0px; margin-left: 0px; padding: 0px; -webkit-font-smoothing: antialiased; margin-bottom: 20px !important;\" class=\"mb-20\"><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\">Accenture es una compañía global líder en servicios profesionales con una amplia gama de soluciones en estrategia y consultoría, tecnología, operaciones y capacidades digitales, brindando un servicio integral a nuestros clientes para que alcancen su máximo rendimiento.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\">En nuestro equipo de #Tecnología, trabajamos con nuestros clientes acompañándolos a afrontar los múltiples desafíos de la transformación digital. Ayudamos a aprovechar el poder de las tecnologías digitales para ser más efectivas, innovadoras y disruptivas.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\">Actualmente nos encontramos en la búsqueda de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Desarrollador COBOL.</span></p><h3 style=\"margin: 0px 0px 0.5rem; padding: 0px; -webkit-font-smoothing: antialiased; font-family: inherit; font-weight: 500; line-height: 1.2; color: inherit; font-size: 1.5rem;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">¿Por qué elegir Accenture?</span></h3><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\">Si buscas una carrera desafiante, aprendizaje continuo, hacer parte de una red global y tener distintas oportunidades de crecimiento y desarrollo, trabajando con personas excepcionales, este es el lugar para ti.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\">En Accenture contamos con cuatro áreas de negocio: Strategy &amp; Consulting, Technology, Operations y Song. Cada una de estas áreas ofrece una experiencia profesional única, manteniendo el foco hacia la innovación, colaboración y transformación de nuestros clientes.</p><h3 style=\"margin: 0px 0px 0.5rem; padding: 0px; -webkit-font-smoothing: antialiased; font-family: inherit; font-weight: 500; line-height: 1.2; color: inherit; font-size: 1.5rem;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Requerimientos del puesto:</span></h3><ul style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\"><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Conocimientos en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">COBOL y entornos HOST/Mainframe</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Conocimientos en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">ALTAMIRA</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Conocimientos básicos en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">DB2</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Conocimientos sólidos en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">patrones de diseño</span> y buenas prácticas de desarrollo.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Experiencia en la generación de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">código limpio, mantenible y bien documentado</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Experiencia trabajando bajo <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">metodologías ágiles Scrum</span> y manejo de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Jira</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Experiencia participando en el <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">ciclo de vida del desarrollo de software</span>, garantizando la calidad técnica y funcional de las soluciones.</li></ul><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\">¡Enfocamos nuestra búsqueda en profesionales proactivos, orientados a trabajar en equipo, con ganas de aprender y un espíritu innovador!</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\">En Accenture, estamos convencidos de que la diversidad es la fuente más importante de innovación y competitividad para las organizaciones y las economías que la promueven.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\"><em style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Todas las decisiones de Accenture se tomarán sin discriminar por motivos de raza, religión, color, sexo, edad, discapacidad, nacionalidad, orientación sexual, identidad o expresión de género, ni por ninguna otra razón cubierta por la legislación local.</em></p><p><em style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\"><br></em></p></div></div></div></div>",
+   "companyName": "ACCENTURE LTDA",
+   "publishDate": "2026-10-23T16:13:48.430Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia",
+    "Bogotá D.C.",
+    "Atlantico"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "9330ad66-59a6-4a24-8391-4dd0fca1d750",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 14,
+     "name": "Ingenierías"
+    }
+   ],
+   "expirationDate": "2026-12-31T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [
+    {
+     "id": 1629941,
+     "name": "COBOL",
+     "score": 2
+    },
+    {
+     "id": 1629942,
+     "name": "Entornos HOST/Mainframe.",
+     "score": 2
+    },
+    {
+     "id": 1629943,
+     "name": "ALTAMIRA",
+     "score": 2
+    },
+    {
+     "id": 1629944,
+     "name": "DB2",
+     "score": 2
+    },
+    {
+     "id": 1629945,
+     "name": "Patrones de diseño",
+     "score": 2
+    }
+   ],
+   "experienceMonthsNumber": 72,
+   "educationLevel": [
+    {
+     "id": 2038987,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 2038986,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 2038985,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 2038984,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 2038983,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 2038982,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "accenture",
+   "mainCompanySlug": "accenture",
+   "companySlugs": [
+    "accenture",
+    "accenture"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Cobol",
+    "Altamira",
+    "Mainframe",
+    "Host",
+    "DB2",
+    "Desarrollador"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 3,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1110934,
+   "title": "Ingeniero Senior Fullstack (Angular y .NET) [Remoto]",
+   "jobSlug": "ingeniero-senior-fullstack-angular-y-net-remoto-1110934",
+   "status": "published",
+   "cities": [
+    "Bogotá, D.C.",
+    "Medellín",
+    "Cali",
+    "Barranquilla",
+    "Bucaramanga"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-bogota",
+    "ofertas-empleo-en-medellin",
+    "ofertas-empleo-en-cali",
+    "ofertas-empleo-en-barranquilla",
+    "ofertas-empleo-en-bucaramanga"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<h6 style=\"margin-bottom: 1rem; font-size: 1rem; font-weight: 700\"> Ingeniero Senior&nbsp;<span style=\"text-align: initial;\">Fullstack</span><span style=\"text-align: initial;\">&nbsp;</span><span style=\"font-size: 1rem; text-align: initial;\">&nbsp;(Angular y .NET) [Remoto]</span></h6> <div class=\"description-generate__items\"> <strong>Palabras clave: </strong> <ul><li>Ingeniero Fullstack</li><li>Desarrollador Full Stack</li><li>Senior Fullstack Developer</li><li>Ingeniero de Software Senior</li><li>Angular 16+</li><li>C#</li><li>.NET</li><li>Clean Architecture</li><li>RabbitMQ</li><li>Docker</li><li>Microservicios</li></ul> </div> <p style=\"margin-bottom: 10px\">Se requiere un Ingeniero Fullstack Senior para diseñar y desarrollar APIs, microservicios e interfaces web con Angular 16+ y .NET, aplicando Clean Architecture, RabbitMQ, Docker y principios cloud-native. El cargo contribuye a la escalabilidad, integración, rendimiento y eficiencia de las soluciones digitales mediante prácticas de desarrollo frontend y backend.</p> <div class=\"description-generate__items\"> <strong>Responsabilidades: </strong> <ul><li>Diseñar y desarrollar la arquitectura End-to-End de la solución mediante la construcción de APIs y microservicios en el lado del servidor.</li><li>Crear e integrar interfaces web en el lado del cliente optimizando el rendimiento a alta escala.</li><li>Implementar código bajo los principios de Clean Architecture en C# y el ecosistema .NET.</li><li>Diseñar sistemas distribuidos altamente escalables.</li><li>Integrar brokers de mensajería como RabbitMQ para la comunicación asíncrona entre servicios.</li><li>Empaquetar aplicaciones y optimizar entornos de despliegue utilizando Docker.</li><li>Desarrollar soluciones bajo enfoques cloud-native.</li></ul> </div> <div class=\"description-generate__items\"> <strong>Requerimientos: </strong> <ul><li>Título profesional en Ingeniería de Sistemas Ingeniería de Software o áreas afines.</li><li>Experiencia comprobable en versiones recientes de Angular (v16+) utilizando Signals para reactividad avanzada arquitectura basada en Standalone Components sintaxis nativa de control de flujo y técnicas de renderizado y carga diferida.</li><li>Experiencia sólida en desarrollo backend con C# y .NET.</li><li>Conocimiento y experiencia en diseño de sistemas distribuidos altamente escalables.</li><li>Dominio en la integración de RabbitMQ.</li><li>Manejo avanzado de Docker.</li></ul> </div> <div class=\"description-generate__items\"> <strong>Nivel de educación: </strong> <ul><li>Profesional</li></ul> </div> <div class=\"description-generate__items\"> <strong>Sectores laborales: </strong> <ul><li>Software informática y telecomunicaciones</li><li>Ingenierías</li></ul> </div> <div class=\"description-generate__items\"> <strong>Cargo: </strong> <ul><li>Analista</li></ul> </div> <h6 style=\"margin-bottom: 5px; font-size: 15px; font-weight: 700\"> Otras habilidades: </h6> <div class=\"description-generate__items\"> <strong>Habilidades técnicas: </strong> <ul><li>Angular 16+</li><li>C# .NET</li><li>Docker</li><li>RabbitMQ</li><li>Clean Architecture</li></ul> </div> <div class=\"description-generate__items\"> <strong>Habilidades interpersonales: </strong> <ul><li>Resolución de problemas</li><li>Pensamiento analítico</li><li>Trabajo en equipo</li></ul> </div>",
+   "companyName": "IQ Outsourcing",
+   "publishDate": "2026-10-22T23:32:18.391Z",
+   "confidential": false,
+   "departments": [
+    "Bogotá D.C.",
+    "Antioquia",
+    "Valle del Cauca",
+    "Atlantico",
+    "Santander"
+   ],
+   "currencyCode": "COP",
+   "contractType": 1,
+   "contractOrder": {
+    "id": 1,
+    "name": "Término fijo",
+    "order": 1
+   },
+   "isRemote": true,
+   "publicId": "4bb8e3b8-8e08-4485-b4fc-9fa2064dbc2f",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 14,
+     "name": "Ingenierías"
+    },
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-12-22T05:00:00.000Z",
+   "numberOfQuotas": 2,
+   "skills": [
+    {
+     "id": 1628663,
+     "name": "Angular 16+",
+     "score": 4
+    },
+    {
+     "id": 1628664,
+     "name": "C# .NET",
+     "score": 4
+    },
+    {
+     "id": 1628665,
+     "name": "Docker",
+     "score": 4
+    },
+    {
+     "id": 1628666,
+     "name": "RabbitMQ",
+     "score": 4
+    },
+    {
+     "id": 1628667,
+     "name": "Clean Architecture",
+     "score": 4
+    },
+    {
+     "id": 1628668,
+     "name": "Resolución de problemas",
+     "score": 4
+    },
+    {
+     "id": 1628669,
+     "name": "Pensamiento analítico",
+     "score": 3
+    },
+    {
+     "id": 1628670,
+     "name": "Trabajo en equipo",
+     "score": 2
+    }
+   ],
+   "experienceMonthsNumber": 36,
+   "educationLevel": [
+    {
+     "id": 2036343,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 2036342,
+     "name": "Profesional",
+     "order": 4
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": false,
+   "companySlug": "iq-outsourcing",
+   "mainCompanySlug": "iq-outsourcing",
+   "companySlugs": [
+    "iq-outsourcing",
+    "iq-outsourcing"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Ingeniero Fullstack",
+    "Desarrollador Full Stack",
+    "Senior Fullstack Developer",
+    "Ingeniero de Software Senior",
+    "Angular 16+"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": true,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1110911,
+   "title": "Ingeniero Senior Backend .NET",
+   "jobSlug": "analista-backend-senior-net-1110911",
+   "status": "published",
+   "cities": [
+    "Bogotá, D.C.",
+    "Vijes",
+    "Medellín",
+    "Barranquilla"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-bogota",
+    null,
+    "ofertas-empleo-en-medellin",
+    "ofertas-empleo-en-barranquilla"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<h6 style=\"margin-bottom: 1rem; font-size: 1rem; font-weight: 700\"> Analista Backend Senior (.NET) </h6> <div class=\"description-generate__items\"> <strong>Palabras clave: </strong> <ul><li>Analista Backend Senior</li><li>Desarrollador Backend .NET</li><li>Ingeniero de Software Backend</li><li>Desarrollador C#</li><li>Backend Developer</li><li>C#</li><li>.NET 8+</li><li>Clean Architecture</li><li>Microservicios</li><li>Sistemas distribuidos</li><li>RabbitMQ</li><li>Docker</li><li>Cloud-Native</li><li>Procesamiento de eventos</li></ul> </div> <p style=\"margin-bottom: 10px\">Se requiere un Analista Backend Senior para construir servicios escalables y resilientes en entornos distribuidos, con experiencia avanzada en desarrollo con C# y <b>.NET 8+</b>. El cargo tiene como propósito diseñar la lógica de negocio mediante <b>microservicios</b>, procesamiento de eventos y <b>RabbitMQ</b>. Se busca optimizar la infraestructura a través de contenedores con <b>Docker</b> y soluciones <b>Cloud-Native</b> para fortalecer la disponibilidad y consistencia operativa de los sistemas en modalidad remota.</p> <div class=\"description-generate__items\"> <strong>Responsabilidades: </strong> <ul><li>Diseñar y desarrollar soluciones backend enfocadas en la lógica de negocio y arquitectura distribuida.</li><li>Implementar código bajo los principios de Clean Architecture en .NET.</li><li>Configurar y gestionar la comunicación asíncrona y procesamiento de eventos mediante RabbitMQ.</li><li>Empaquetar aplicaciones optimizar imágenes y garantizar consistencia operativa utilizando Docker.</li><li>Desplegar y operar soluciones técnicas diseñadas para ecosistemas Cloud-Native.</li></ul> </div> <div class=\"description-generate__items\"> <strong>Requerimientos: </strong> <ul><li>Título profesional preferiblemente en Ingeniería de Sistemas Ingeniería de Software o áreas afines.</li><li>Sólida experiencia comprobable en desarrollo con C# y el ecosistema .NET / .NET 8+.</li><li>Experiencia en el diseño y desarrollo de arquitectura de microservicios y sistemas distribuidos altamente escalables.</li><li>Dominio técnico en la integración de brokers de mensajería como RabbitMQ para la comunicación asíncrona.</li><li>Competencia avanzada en el uso de Docker para la contenedorización de aplicaciones y gestión de entornos.</li><li>Experiencia demostrable en despliegue de soluciones para ecosistemas Cloud-Native.</li></ul> </div> <div class=\"description-generate__items\"> <strong>Nivel de educación: </strong> <ul><li>Profesional</li></ul> </div> <div class=\"description-generate__items\"> <strong>Sectores laborales: </strong> <ul><li>Software informática y telecomunicaciones</li></ul> </div> <div class=\"description-generate__items\"> <strong>Cargo: </strong> <ul><li>Analista</li></ul> </div> <h6 style=\"margin-bottom: 5px; font-size: 15px; font-weight: 700\"> Otras habilidades: </h6> <div class=\"description-generate__items\"> <strong>Habilidades técnicas: </strong> <ul><li>C# .NET</li><li>Microservicios</li><li>Docker</li></ul> </div> <div class=\"description-generate__items\"> <strong>Habilidades interpersonales: </strong> <ul><li>Resolución problemas</li><li>Pensamiento analítico</li></ul> </div>",
+   "companyName": "IQ Outsourcing",
+   "publishDate": "2026-10-22T22:49:08.097Z",
+   "confidential": false,
+   "departments": [
+    "Bogotá D.C.",
+    "Valle del Cauca",
+    "Antioquia",
+    "Atlantico"
+   ],
+   "currencyCode": "COP",
+   "contractType": 1,
+   "contractOrder": {
+    "id": 1,
+    "name": "Término fijo",
+    "order": 1
+   },
+   "isRemote": true,
+   "publicId": "5af5b877-3ef5-489f-883c-3187e460f815",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-12-22T05:00:00.000Z",
+   "numberOfQuotas": 2,
+   "skills": [
+    {
+     "id": 1628594,
+     "name": "C# .NET",
+     "score": 4
+    },
+    {
+     "id": 1628595,
+     "name": "Microservicios",
+     "score": 4
+    },
+    {
+     "id": 1628596,
+     "name": "Docker",
+     "score": 4
+    },
+    {
+     "id": 1628597,
+     "name": "Resolución problemas",
+     "score": 3
+    },
+    {
+     "id": 1628598,
+     "name": "Pensamiento analítico",
+     "score": 3
+    }
+   ],
+   "experienceMonthsNumber": 36,
+   "educationLevel": [
+    {
+     "id": 2036266,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 2036265,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 2036264,
+     "name": "Profesional",
+     "order": 4
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": false,
+   "companySlug": "iq-outsourcing",
+   "mainCompanySlug": "iq-outsourcing",
+   "companySlugs": [
+    "iq-outsourcing",
+    "iq-outsourcing"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Analista Backend Senior",
+    "Desarrollador Backend .NET",
+    "Ingeniero de Software Backend",
+    "Desarrollador C#",
+    "Backend Developer"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": true,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1109708,
+   "title": "Desarrollador COBOL",
+   "jobSlug": "desarrollador-cobol-1109708",
+   "status": "published",
+   "cities": [
+    "Bogotá, D.C.",
+    "Medellín",
+    "Barranquilla"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-bogota",
+    "ofertas-empleo-en-medellin",
+    "ofertas-empleo-en-barranquilla"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<p><span style=\"color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px; text-align: initial;\">Accenture es una compañía global líder en servicios profesionales con una amplia gama de soluciones en estrategia y consultoría, tecnología, operaciones y capacidades digitales, brindando un servicio integral a nuestros clientes para que alcancen su máximo rendimiento.</span><br></p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">En nuestro equipo de #Tecnología, trabajamos con nuestros clientes acompañándolos a afrontar los múltiples desafíos de la transformación digital. Ayudamos a aprovechar el poder de las tecnologías digitales para ser más efectivas, innovadoras y disruptivas.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">Actualmente nos encontramos en la búsqueda de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Desarrollador Cobol.</span></p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">¿Por qué elegir Accenture?</span></p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">Si buscas una carrera desafiante, aprendizaje continuo, hacer parte de una red global, y tener distintas oportunidades de crecimiento y desarrollo, trabajar con personas excepcionales, este es el lugar para ti.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">En Accenture contamos con cuatro áreas de negocio: Strategy &amp; Consulting, Technology, Operations y Song. Cada una de estas áreas ofrece una experiencia profesional única, manteniendo el foco hacia la innovación, colaboración y transformación de nuestros clientes.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Requerimientos del puesto:</span></p><ul style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Más de 2 años de experiencia en Cobol.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Experiencia en Host Altamira, CICS, DB2, JCL y CHANGEMAN.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Deseable experiencia y/o conocimiento en Java.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Buenas habilidades de comunicación y relacionamiento</li></ul><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">¡Enfocamos nuestra búsqueda en profesionales proactivos, orientados a trabajar en equipo, con ganas de aprender y un espíritu innovador!</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">En Accenture, estamos convencidos de que la diversidad es la fuente más importante de innovación y competitividad para las organizaciones y las economías que la promueven.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><em style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Todas las decisiones de Accenture se tomarán sin discriminar por motivos de raza, religión, color, sexo, edad, discapacidad, nacionalidad, orientación sexual, identidad o expresión de género, ni por ninguna otra razón cubierta por la legislación local.</em></p>",
+   "companyName": "ACCENTURE LTDA",
+   "publishDate": "2026-10-22T15:24:18.651Z",
+   "confidential": false,
+   "departments": [
+    "Bogotá D.C.",
+    "Antioquia",
+    "Atlantico"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "b2be9cb3-2875-49da-84ec-71d9d2e2b11d",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-12-31T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [
+    {
+     "id": 1626492,
+     "name": "Cobol",
+     "score": 4
+    },
+    {
+     "id": 1626493,
+     "name": "Host Altamira",
+     "score": 4
+    },
+    {
+     "id": 1626494,
+     "name": "CICS",
+     "score": 4
+    },
+    {
+     "id": 1626495,
+     "name": "DB2",
+     "score": 4
+    },
+    {
+     "id": 1626496,
+     "name": "JCL",
+     "score": 4
+    },
+    {
+     "id": 1626497,
+     "name": "CHANGEMAN",
+     "score": 4
+    },
+    {
+     "id": 1626498,
+     "name": "Java",
+     "score": 4
+    }
+   ],
+   "experienceMonthsNumber": 24,
+   "educationLevel": [
+    {
+     "id": 2032720,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 2032719,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 2032718,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 2032717,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 2032716,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 2032715,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "accenture",
+   "mainCompanySlug": "accenture",
+   "companySlugs": [
+    "accenture",
+    "accenture"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador Cobol",
+    "Cobol"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 3,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1109685,
+   "title": "Desarrollador Frontend Glomo Cells",
+   "jobSlug": "desarrollador-frontend-glomo-cells-1109685",
+   "status": "published",
+   "cities": [
+    "Bogotá, D.C.",
+    "Medellín",
+    "Barranquilla"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-bogota",
+    "ofertas-empleo-en-medellin",
+    "ofertas-empleo-en-barranquilla"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<p><span style=\"text-align: initial;\">Accenture es una compañía global líder en servicios profesionales con una amplia gama de soluciones en estrategia y consultoría, tecnología, operaciones y capacidades digitales, brindando un servicio integral a nuestros clientes para que alcancen su máximo rendimiento.</span><br></p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\">En nuestro equipo de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">#Tecnología</span>, trabajamos con nuestros clientes acompañándolos a afrontar los múltiples desafíos de la transformación digital. Ayudamos a aprovechar el poder de las tecnologías digitales para ser más efectivas, innovadoras y disruptivas.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\">Actualmente nos encontramos en la búsqueda de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Frontend Developer Cells Glomo</span></p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">🌐 ¿Por qué elegir Accenture?</span></p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\">Si buscas una carrera desafiante, aprendizaje continuo, hacer parte de una red global, y tener distintas oportunidades de crecimiento y desarrollo, trabajar con personas excepcionales, este es el lugar para ti.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Responsabilidades</span></p><ul style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\"><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Diseñar, desarrollar y mantener interfaces web modernas y responsivas.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Participar en revisiones de código, implementación de buenas prácticas y mejora continua.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Garantizar la calidad del código mediante pruebas unitarias y automatizadas.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Integrar aplicaciones frontend con APIs RESTful y servicios backend.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Construir componentes reutilizables utilizando arquitecturas basadas en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Web Components</span>.</li></ul><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Requerimientos del puesto:</span></p><ul style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\"><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Experiencia de +3 años en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">JavaScript (ES6+)</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Experiencia trabajando con la tecnología <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Cells</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Conocimientos en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">pruebas End-to-End (E2E)</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Experiencia en implementación de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">pruebas unitarias</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Experiencia en integración de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">APIs RESTful</span> y consumo de servicios backend.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Manejo avanzado de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">HTML5 y CSS3</span> para el desarrollo de interfaces de usuario.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Experiencia en el ecosistema <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">GLOMO (Mandatorio)</span></li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Conocimientos y/o experiencia en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Polymer, LitElement y Web Components</span>.</li></ul><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\"><em style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">¡Enfocamos nuestra búsqueda en profesionales flexibles, proactivos, orientados a trabajar en equipo, con ganas de aprender y un espíritu innovador!💜</em></p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\">En Accenture, estamos convencidos de que la diversidad es la fuente más importante de innovación y competitividad para las organizaciones y las economías que la promueven.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\"><em style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Todas las decisiones de Accenture se tomarán sin discriminar por motivos de raza, religión, color, sexo, edad, discapacidad, nacionalidad, orientación sexual, identidad o expresión de género, ni por ninguna otra razón cubierta por la legislación local.</em></p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased;\"><br style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"></p>",
+   "companyName": "ACCENTURE LTDA",
+   "publishDate": "2026-10-22T15:17:52.217Z",
+   "confidential": false,
+   "departments": [
+    "Bogotá D.C.",
+    "Antioquia",
+    "Atlantico"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "b7c40588-bb92-4100-a914-631d89f78197",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-12-31T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [
+    {
+     "id": 1626466,
+     "name": "JavaScript",
+     "score": 4
+    },
+    {
+     "id": 1626467,
+     "name": "Cells",
+     "score": 4
+    },
+    {
+     "id": 1626468,
+     "name": "E2E",
+     "score": 4
+    },
+    {
+     "id": 1626469,
+     "name": "Pruebas unitarias",
+     "score": 4
+    },
+    {
+     "id": 1626470,
+     "name": "APIs RESTful",
+     "score": 4
+    },
+    {
+     "id": 1626471,
+     "name": "HTML5",
+     "score": 4
+    },
+    {
+     "id": 1626472,
+     "name": "CSS3",
+     "score": 4
+    },
+    {
+     "id": 1626473,
+     "name": "GLOMO",
+     "score": 4
+    },
+    {
+     "id": 1626474,
+     "name": "Polymer",
+     "score": 4
+    },
+    {
+     "id": 1626475,
+     "name": "LitElement",
+     "score": 4
+    },
+    {
+     "id": 1626476,
+     "name": "Web Components",
+     "score": 4
+    }
+   ],
+   "experienceMonthsNumber": 24,
+   "educationLevel": [
+    {
+     "id": 2032621,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 2032620,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 2032619,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 2032618,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 2032617,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 2032616,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "accenture",
+   "mainCompanySlug": "accenture",
+   "companySlugs": [
+    "accenture",
+    "accenture"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "JavaScript",
+    "Cells",
+    "Pruebas End-to-End",
+    "Pruebas unitarias",
+    "APIs RESTful",
+    "HTML5",
+    "CSS3",
+    "GLOMO",
+    "Desarrollador Frontend Cells",
+    "Cells GLOMO"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 3,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1109663,
+   "title": "Desarrollador Backend – ASO/APX",
+   "jobSlug": "desarrollador-backend-asoapx-1109663",
+   "status": "published",
+   "cities": [
+    "Bogotá, D.C.",
+    "Medellín",
+    "Barranquilla"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-bogota",
+    "ofertas-empleo-en-medellin",
+    "ofertas-empleo-en-barranquilla"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<p><span style=\"color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px; text-align: initial;\">Accenture es una compañía global líder en servicios profesionales con una amplia gama de soluciones en estrategia y consultoría, tecnología, operaciones y capacidades digitales, brindando un servicio integral a nuestros clientes para que alcancen su máximo rendimiento.</span><br></p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">En nuestro equipo de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">#Tecnología</span>, trabajamos con nuestros clientes acompañándolos a afrontar los múltiples desafíos de la transformación digital. Ayudamos a aprovechar el poder de las tecnologías digitales para ser más efectivas, innovadoras y disruptivas.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">Actualmente nos encontramos en la búsqueda de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Backend Developer Tecnologías ASO y APX</span></p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">🌐 ¿Por qué elegir Accenture?</span></p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">Si buscas una carrera desafiante, aprendizaje continuo, hacer parte de una red global, y tener distintas oportunidades de crecimiento y desarrollo, trabajar con personas excepcionales, este es el lugar para ti.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">En Accenture contamos con cuatro áreas de negocio: Strategy &amp; Consulting, Technology, Operations y Song. Cada una de estas áreas ofrece una experiencia profesional única, manteniendo el foco hacia la innovación, colaboración y transformación de nuestros clientes.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">¿Por qué te elegiremos?</span> ¡Porque los desafíos que enfrentas reflejan tus ambiciones!</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Responsabilidades</span></p><ul style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Participar en el ciclo completo de desarrollo de software, garantizando la <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">calidad técnica y funcional</span> de las soluciones.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Diseñar, desarrollar y mantener <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">servicios backend robustos y escalables</span> con <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Spring Boot</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Implementar <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">APIs RESTful</span>, manejando seguridad, integraciones y rendimiento.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Aplicar <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">principios SOLID y patrones de diseño</span> para asegurar código limpio y mantenible.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Desarrollar e implementar <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">pruebas unitarias con JUnit 5</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Gestionar versiones y despliegues mediante <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Bitbucket</span>, <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Jenkins</span> y <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">pipelines automatizados</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Colaborar en entornos <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Scrum</span> y dar seguimiento de tareas a través de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Jira</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Realizar <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">revisiones de código</span> y garantizar la seguridad en los desarrollos.</li></ul><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">✅ Requerimientos del puesto:</span></p><ul style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Experiencia en ASO/APX, LRA, LRBA, Control-M.</span></li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Experiencia en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">despliegues con tecnología OSGi</span></li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Lenguaje:</span> Java 11 o 17</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Frameworks:</span> Spring Boot, Spring Framework, Spring Batch.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Patrones de diseño:</span> Conocimiento sólido en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">principios SOLID</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Herramientas de calidad:</span> SonarQube (análisis estático de código)</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Bases de datos:</span> Conocimientos fuertes en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">PL/SQL</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Procesamiento de datos:</span> Conocimientos básicos en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Apache Spark</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Experiencia en Copilot Github (creación de agentes).</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Habilidades sólidas de resolución de problemas y capacidad para trabajar en equipo.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Buenas habilidades de comunicación y capacidad para trabajar en un entorno ágil.</li></ul><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><em style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">¡Enfocamos nuestra búsqueda en profesionales flexibles, proactivos, orientados a trabajar en equipo, con ganas de aprender y un espíritu innovador!💜</em></p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">En Accenture, estamos convencidos de que la diversidad es la fuente más importante de innovación y competitividad para las organizaciones y las economías que la promueven.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><em style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Todas las decisiones de Accenture se tomarán sin discriminar por motivos de raza, religión, color, sexo, edad, discapacidad, nacionalidad, orientación sexual, identidad o expresión de género, ni por ninguna otra razón cubierta por la legislación local.</em></p>",
+   "companyName": "ACCENTURE LTDA",
+   "publishDate": "2026-10-22T15:09:19.791Z",
+   "confidential": false,
+   "departments": [
+    "Bogotá D.C.",
+    "Antioquia",
+    "Atlantico"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "fa634b72-b5d0-406b-9d36-e543b629d4dd",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-12-31T05:00:00.000Z",
+   "numberOfQuotas": 2,
+   "skills": [
+    {
+     "id": 1626390,
+     "name": "jAVA",
+     "score": 4
+    },
+    {
+     "id": 1626391,
+     "name": "ASO",
+     "score": 4
+    },
+    {
+     "id": 1626392,
+     "name": "APX",
+     "score": 4
+    },
+    {
+     "id": 1626393,
+     "name": "SPRINGBOOT",
+     "score": 4
+    },
+    {
+     "id": 1626394,
+     "name": "LRA",
+     "score": 4
+    },
+    {
+     "id": 1626395,
+     "name": "LRBA",
+     "score": 4
+    },
+    {
+     "id": 1626396,
+     "name": "Control-M",
+     "score": 4
+    },
+    {
+     "id": 1626397,
+     "name": "Despliegues tecnología OSGi",
+     "score": 4
+    },
+    {
+     "id": 1626398,
+     "name": "Principios SOLID",
+     "score": 4
+    },
+    {
+     "id": 1626399,
+     "name": "SonarQube",
+     "score": 4
+    },
+    {
+     "id": 1626400,
+     "name": "PL/SQL",
+     "score": 4
+    },
+    {
+     "id": 1626401,
+     "name": "Apache Spark",
+     "score": 4
+    }
+   ],
+   "experienceMonthsNumber": 24,
+   "educationLevel": [
+    {
+     "id": 2032514,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 2032513,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 2032512,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 2032511,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 2032510,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 2032509,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "accenture",
+   "mainCompanySlug": "accenture",
+   "companySlugs": [
+    "accenture",
+    "accenture"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "ASO",
+    "APX",
+    "Desarrollador Backend"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 3,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1108588,
+   "title": "Desarrollador Frontend Cells",
+   "jobSlug": "desarrollador-frontend-cells-1108588",
+   "status": "published",
+   "cities": [
+    "Medellín",
+    "Bogotá, D.C.",
+    "Barranquilla"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin",
+    "ofertas-empleo-en-bogota",
+    "ofertas-empleo-en-barranquilla"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">Accenture es una compañía global líder en servicios profesionales con una amplia gama de soluciones en estrategia y consultoría, tecnología, operaciones y capacidades digitales, brindando un servicio integral a nuestros clientes para que alcancen su máximo rendimiento.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">En nuestro equipo de #Tecnología, trabajamos con nuestros clientes acompañándolos a afrontar los múltiples desafíos de la transformación digital. Ayudamos a aprovechar el poder de las tecnologías digitales para ser más efectivas, innovadoras y disruptivas.</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">Actualmente nos encontramos en la búsqueda de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Desarrolladores Frontend CELLS.</span></p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Responsabilidades:</span></p><ul style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Diseñar y desarrollar <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">interfaces de usuario dinámicas y responsivas</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Implementar <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Web Components</span> reutilizables utilizando <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Polymer o LitElement</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Integrar <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">APIs RESTful</span> y servicios backend.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Aplicar buenas prácticas de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">CSS</span> y estilos para mantener una experiencia de usuario consistente.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Desarrollar e implementar <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">pruebas unitarias y pruebas E2E</span> para asegurar la calidad del código.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Colaborar con equipos backend y de diseño para garantizar la correcta integración y rendimiento de las soluciones.</li></ul><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Requerimientos del puesto:✔️</span></p><ul style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Experiencia en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">JavaScript.</span></li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Experiencia en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Cells</span></li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Frameworks / Librerías:</span> Polymer o LitElement (deseable experiencia en ambos)</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Arquitectura:</span> Desarrollo con <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Web Components</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Integraciones:</span> Consumo de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">APIs RESTful</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Experiencia o conocimientos con <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">LitElement</span> y desarrollo con <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Web Components</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Manejo de <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">CSS</span> para el diseño de interfaces.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\"><span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Pruebas:</span> Experiencia en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">unit testing</span> y conocimientos en <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">E2E testing</span>.</li><li style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Experiencia en desarrollo móvil con <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Swift (iOS)</span> o <span style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased; font-weight: bolder;\">Kotlin (Android)</span>.</li></ul><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\">¡Enfocamos nuestra búsqueda en profesionales flexibles, proactivos, orientados a trabajar en equipo, con ganas de aprender y un espíritu innovador! 💜</p><p style=\"margin: 0px 0px 1rem; padding: 0px; -webkit-font-smoothing: antialiased; color: rgb(53, 64, 82); font-family: &quot;Source Sans Pro&quot;, sans-serif; font-size: 16px;\"><em style=\"margin: 0px; padding: 0px; -webkit-font-smoothing: antialiased;\">Todas las decisiones de Accenture se tomarán sin discriminar por motivos de raza, religión, color, sexo, edad, discapacidad, nacionalidad, orientación sexual, identidad o expresión de género, ni por ninguna otra razón cubierta por la legislación local.</em></p>",
+   "companyName": "ACCENTURE LTDA",
+   "publishDate": "2026-10-21T17:57:57.791Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia",
+    "Bogotá D.C.",
+    "Atlantico"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "ecbfe3f8-2453-4c5c-bb0d-3a3f63b022a6",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-12-31T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [
+    {
+     "id": 1623843,
+     "name": "JavaScript",
+     "score": 4
+    },
+    {
+     "id": 1623844,
+     "name": "Cells",
+     "score": 4
+    },
+    {
+     "id": 1623845,
+     "name": "Polymer",
+     "score": 4
+    },
+    {
+     "id": 1623846,
+     "name": "LitElement",
+     "score": 4
+    },
+    {
+     "id": 1623847,
+     "name": "Web Components",
+     "score": 4
+    },
+    {
+     "id": 1623848,
+     "name": "APIs RESTful",
+     "score": 4
+    },
+    {
+     "id": 1623849,
+     "name": "CSS",
+     "score": 4
+    },
+    {
+     "id": 1623850,
+     "name": "Unit testing",
+     "score": 4
+    },
+    {
+     "id": 1623851,
+     "name": "E2E testing",
+     "score": 4
+    },
+    {
+     "id": 1623852,
+     "name": "Swift (iOS)",
+     "score": 4
+    },
+    {
+     "id": 1623853,
+     "name": "Kotlin (Android)",
+     "score": 4
+    }
+   ],
+   "experienceMonthsNumber": 24,
+   "educationLevel": [
+    {
+     "id": 2029422,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 2029421,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 2029420,
+     "name": "Profesional",
+     "order": 4
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "accenture",
+   "mainCompanySlug": "accenture",
+   "companySlugs": [
+    "accenture",
+    "accenture"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador Frontend",
+    "Cells"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 3,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1082029,
+   "title": "Analista De Desarrollo De Software - Barranquilla",
+   "jobSlug": "analista-de-desarrollo-de-software-barranquilla-1082029",
+   "status": "published",
+   "cities": [
+    "Barranquilla"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-barranquilla"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<p>Importante empresa del sector salud requiere para su equipo de trabajo profesionales en <strong>Ingenieria de Sistemas, ingenieria de Software o de programas afines&nbsp;</strong>para integrarse a nuestro equipo de trabajo. Su rol principal será<span style=\"text-align: initial;\"> analizar requerimientos, diseñar soluciones técnicas y participar activamente en el de</span>sarrollaro de proyectos desde cero, análisis y estimación de tiempos y ejecución de actividades de desarrollo.</p><p><span style=\"text-align: initial;\"><strong>Requisitos:</strong></span></p><ul><li>Título en Ingeniería en Sistemas, Informática o carrera afín.</li><li>Experiencia mínima de 2 - 3+ años en desarrollo de software.</li><li>Conocimiento en:<br>- Desarrollo con lenguaje .NET ( .NET Core, .NET Framework ), C#., SQL Server, Angular, JavaScript, Bootstrap, jQuery.<br>- Versionamiento de proyectos (GIT, Azure devops) e implementación de servicios en SOAP y REST.</li><li>Capacidad analítica y orientación a resultados.</li></ul><p><strong>Información Vacante:&nbsp;</strong></p><p>Cargo: Analista de Desarrollo de Software<br>Salario:&nbsp; A convenir, según experiencia&nbsp;<br>Tipo de Contrato: Obra o labor + prestaciones de ley<br>Horario: Lunes a Viernes - Tiempo Completo<br>Ubicación de sede: Barranquilla, Atlántico</p><p>Si te apasiona la tecnología, disfrutas resolver problemas y quieres que tu trabajo genere impacto real, esta vacante es para ti. Estamos buscando personas con ganas de aprender, aportar ideas y asumir nuevos desafíos en un entorno dinámico y colaborativo.&nbsp;<b>¡Postúlate Ahora!&nbsp;</b><span style=\"text-align: initial; font-weight: bolder; color: rgb(80, 80, 80);\">&nbsp;</span><span style=\"text-align: initial; color: rgb(80, 80, 80);\">🚀</span><span style=\"white-space-collapse: preserve; text-align: initial;\">✨</span></p><p style=\"margin-right: 0px; margin-bottom: 0px; margin-left: 0px; color: rgb(80, 80, 80);\"></p>",
+   "companyName": "Confidencial",
+   "publishDate": "2026-09-28T15:27:47.289Z",
+   "confidential": true,
+   "departments": [
+    "Atlantico"
+   ],
+   "currencyCode": "COP",
+   "contractType": 4,
+   "contractOrder": {
+    "id": 4,
+    "name": "Por obra o labor",
+    "order": 4
+   },
+   "isRemote": false,
+   "publicId": "8e8aaadd-bf7f-4d1f-b039-80a55bffb698",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-11-08T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [
+    {
+     "id": 1565839,
+     "name": "Responsabilidad",
+     "score": 3
+    },
+    {
+     "id": 1565840,
+     "name": "Compromiso",
+     "score": 3
+    },
+    {
+     "id": 1565841,
+     "name": "Atención al detalle",
+     "score": 4
+    }
+   ],
+   "experienceMonthsNumber": 12,
+   "educationLevel": [
+    {
+     "id": 1953970,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1953969,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "magneto",
+   "mainCompanySlug": "magneto",
+   "companySlugs": [
+    "magneto",
+    "magneto"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador de Sotfware",
+    "Software",
+    "barranquilla",
+    "developer"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1069396,
+   "title": "Bdr (desarrollo De Negocios Energía Eléctrica) ID: 7694",
+   "jobSlug": "bdr-desarrollo-de-negocios-energia-electrica-id-7694-1069396",
+   "status": "published",
+   "cities": [
+    "Barranquilla"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-barranquilla"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<h6 style=\"margin-bottom: 1rem; font-size: 1rem; font-weight: 700\"> BDR (Desarrollo de Negocios Energía Eléctrica) - Medellín</h6> <div class=\"description-generate__items\"> <strong>Palabras clave: </strong> <ul><li>BDR</li><li>Business Development Representative</li><li>Desarrollador de Negocios</li><li>Asesor Comercial Energía Eléctrica</li><li>Sector Energético</li><li>Comercialización de Energía Eléctrica</li><li>Clientes Comerciales e Industriales</li><li>Mercado Regulado y No Regulado</li><li>Prospección Comercial</li><li>Negociación B2B</li></ul> </div> <p style=\"margin-bottom: 10px\">¿Buscas una oportunidad para impulsar tu carrera en el dinámico sector energético colombiano? ¡Esta posición es para ti! Como <b>BDR</b> (Business Development Representative) en el área de Energía Eléctrica, tendrás un impacto directo en el crecimiento de nuestro portafolio de proyectos y servicios, trabajando con clientes comerciales e industriales clave. Serás una pieza fundamental en la expansión de negocios B2B, con una valiosa exposición al mercado regulado y no regulado. En este rol, te enfocarás en desarrollar propuestas comerciales innovadoras y construir relaciones sólidas y duraderas, contribuyendo significativamente a nuestro posicionamiento en el mercado energético. Te ofrecemos aprendizaje continuo, acompañamiento de equipos expertos y oportunidades de crecimiento. ¡Únete a nuestro equipo colaborativo en Bogotá y hagamos historia juntos!</p> <div class=\"description-generate__items\"> <strong>Responsabilidades: </strong> <ul><li>Identificar y contactar potenciales clientes comerciales e industriales dentro del sector energético.</li><li>Desarrollar y presentar propuestas comerciales personalizadas para la comercialización de energía eléctrica y servicios relacionados.</li><li>Gestionar el ciclo de ventas desde la prospección hasta el cierre utilizando herramientas de prospección y CRM.</li><li>Construir y mantener relaciones sólidas a largo plazo con los clientes.</li><li>Colaborar con los equipos técnicos y comerciales para asegurar la satisfacción del cliente.</li><li>Mantenerse actualizado sobre las tendencias del mercado energético y la competencia.</li><li>Contribuir al crecimiento de ingresos y al posicionamiento de la empresa en el mercado.</li></ul> </div> <div class=\"description-generate__items\"> <strong>Requerimientos: </strong> <ul><li>Profesional universitario en Ingeniería en energía eléctrica mecánica industrial administración negocios o afines.</li><li>Experiencia en ventas B2B en el sector energético.</li><li>Habilidad para la prospección y negociación con clientes comerciales e industriales.</li><li>Conocimiento del mercado energético colombiano incluyendo el mercado regulado y no regulado.</li><li>Capacidad para desarrollar propuestas comerciales efectivas.</li></ul> </div> <div class=\"description-generate__items\"> <strong>Nivel de educación: </strong> <ul><li>Profesional</li></ul> </div> <div class=\"description-generate__items\"> <ul></ul> </div>",
+   "companyName": "ERCO ENERGÍA S.A.S",
+   "publishDate": "2026-09-17T17:01:51.757Z",
+   "confidential": false,
+   "departments": [
+    "Atlantico"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "69284fd0-45ce-4d5c-aa04-76ce69fb18b6",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 1,
+     "name": "Administración y oficina"
+    },
+    {
+     "id": 14,
+     "name": "Ingenierías"
+    }
+   ],
+   "expirationDate": "2026-10-31T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [
+    {
+     "id": 1539423,
+     "name": "CRM comercial",
+     "score": 4
+    },
+    {
+     "id": 1539424,
+     "name": "Suite Office",
+     "score": 4
+    },
+    {
+     "id": 1539425,
+     "name": "Herramientas de prospección",
+     "score": 3
+    },
+    {
+     "id": 1539426,
+     "name": "Desarrollo de negocios",
+     "score": 4
+    },
+    {
+     "id": 1539427,
+     "name": "Negociación B2B",
+     "score": 4
+    },
+    {
+     "id": 1539428,
+     "name": "Comunicación",
+     "score": 4
+    },
+    {
+     "id": 1539429,
+     "name": "Orientación a resultados",
+     "score": 4
+    }
+   ],
+   "videoInformative": {
+    "url": "https://www.youtube.com/embed/eCrAJsgD4nw",
+    "id": 440858,
+    "smallThumbnailUrl": "https://img.youtube.com/vi/eCrAJsgD4nw/maxresdefault.jpg",
+    "updatedAt": "2026-10-07T21:40:00.208Z"
+   },
+   "experienceMonthsNumber": 36,
+   "educationLevel": [
+    {
+     "id": 1921991,
+     "name": "Profesional",
+     "order": 4
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": true,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": false,
+   "companySlug": "erco-energia",
+   "mainCompanySlug": "erco-energia",
+   "companySlugs": [
+    "erco-energia",
+    "erco-energia"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "BDR",
+    "Business Development Representative",
+    "Desarrollador de Negocios",
+    "Ejecutivo Comercial B2B",
+    "Asesor Comercial Energía Eléctrica"
+   ],
+   "inmediateHiring": true,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 0,
+   "isAbandoned": false
+  },
+  {
+   "id": 1009047,
+   "title": "Desarrollador Backend IBM i / iSeries",
+   "jobSlug": "desarrollador-backend-ibm-i-iseries-1009047",
+   "status": "published",
+   "cities": [
+    "Medellín",
+    "Bogotá, D.C.",
+    "Barranquilla"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin",
+    "ofertas-empleo-en-bogota",
+    "ofertas-empleo-en-barranquilla"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<p><strong>Accenture</strong> es una compañía global líder en servicios profesionales, con soluciones en estrategia y consultoría, tecnología, operaciones y capacidades digitales que impulsan a nuestros clientes a alcanzar su máximo potencial.</p><p>En nuestro equipo de <strong>#Tecnología</strong>, acompañamos a organizaciones de diferentes industrias en su evolución digital, desarrollando soluciones robustas que generan impacto, eficiencia y valor para el negocio.</p><p>Actualmente nos encontramos en la búsqueda de un <strong>Desarrollador Backend</strong>.</p><p>&nbsp;</p><p>La persona seleccionada será responsable de diseñar, desarrollar y mantener soluciones backend de alta calidad, participando en iniciativas clave de modernización tecnológica, integración de sistemas y optimización de procesos sobre plataformas empresariales.</p><p>&nbsp;</p><p>📌 <strong>Responsabilidades del rol:</strong></p><ul><li>Desarrollar, mantener y optimizar aplicaciones backend utilizando <strong>RPG/ILE</strong> y <strong>Java</strong>.</li><li>Diseñar e implementar soluciones escalables siguiendo principios de desarrollo seguro y buenas prácticas de programación.</li><li>Gestionar y optimizar consultas, procesos e integraciones con bases de datos <strong>DB2</strong> y <strong>MySQL</strong>.</li><li>Realizar <strong>pruebas unitarias</strong> para garantizar la calidad, estabilidad y rendimiento de las aplicaciones.</li><li>Aplicar principios de diseño de software basados en <strong>SOLID</strong> para desarrollar código mantenible y escalable.</li><li>Administrar versiones de código y colaborar con equipos multidisciplinarios utilizando <strong>Git</strong>.</li><li>Participar en procesos de integración y despliegue continuo mediante herramientas como <strong>UrbanCode</strong>.</li><li>Identificar oportunidades de mejora técnica y contribuir activamente a la evolución de las soluciones existentes.</li></ul><p>✔️ <strong>Requerimientos del puesto:</strong></p><ul><li>Experiencia de <strong>más de 2 años trabajando con las tecnologías y herramientas requeridas para la posición (RPG/ILE, Java, DB2, MySQL, Git y UrbanCode)</strong>.</li><li>Experiencia en diseño y ejecución de <strong>pruebas unitarias</strong>.</li><li>Comprensión y aplicación de principios <strong>SOLID</strong> y buenas prácticas de desarrollo de software.</li><li>Conocimiento en integración, mantenimiento y optimización de aplicaciones backend.</li><li>Capacidad analítica, orientación a la solución de problemas y trabajo colaborativo.</li><li>Proactividad y enfoque en la mejora continua.</li></ul><p>🎁 <strong>Beneficios</strong></p><ul><li>Medicina prepagada 100% cubierta.</li><li>Cobertura médica internacional y póliza odontológica.</li><li>Auxilio de conectividad.</li><li>Auxilios y convenios corporativos.</li><li>Y muchos más.</li></ul><p>💜 <strong>Buscamos profesionales apasionados por la tecnología, con mentalidad innovadora, capacidad de adaptación y motivación para desarrollar soluciones que generen impacto real en nuestros clientes y equipos.</strong></p><p>&nbsp;</p><p><span data-teams=\"true\"></span></p><p>Todas las decisiones de Accenture se tomarán sin discriminar por motivos de raza, religión, color, sexo, edad, discapacidad, nacionalidad, orientación sexual, identidad o expresión de género, ni por ninguna otra razón cubierta por la legislación local.</p>",
+   "companyName": "ACCENTURE LTDA",
+   "publishDate": "2026-07-29T14:26:21.476Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia",
+    "Bogotá D.C.",
+    "Atlantico"
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": true,
+   "publicId": "c64fc709-42aa-4424-b165-dcbfafb92938",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 14,
+     "name": "Ingenierías"
+    }
+   ],
+   "expirationDate": "2026-12-01T06:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [
+    {
+     "id": 1406963,
+     "name": "RPG",
+     "score": 3
+    },
+    {
+     "id": 1406964,
+     "name": "Java",
+     "score": 3
+    },
+    {
+     "id": 1406965,
+     "name": "DB2",
+     "score": 3
+    },
+    {
+     "id": 1406966,
+     "name": "MySQL",
+     "score": 3
+    },
+    {
+     "id": 1406967,
+     "name": "Git",
+     "score": 3
+    },
+    {
+     "id": 1406968,
+     "name": "UrbanCode",
+     "score": 3
+    }
+   ],
+   "experienceMonthsNumber": 24,
+   "educationLevel": [
+    {
+     "id": 1781774,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1781773,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    },
+    {
+     "id": 1781772,
+     "name": "Doctorado",
+     "order": 6
+    },
+    {
+     "id": 1781771,
+     "name": "Otros",
+     "order": 8
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "accenture",
+   "mainCompanySlug": "accenture",
+   "companySlugs": [
+    "accenture",
+    "accenture"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador",
+    "Backend",
+    "IBM",
+    "iSeries"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 3,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 2,
+   "isAbandoned": false
+  },
+  {
+   "id": 996853,
+   "title": "Analista QA",
+   "jobSlug": "analista-qa-barranquilla-996853",
+   "status": "published",
+   "cities": [
+    "Barranquilla"
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-barranquilla"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<p style=\"margin-bottom: 10px\">Importante empresa del sector&nbsp;requiere Analista QA para asegurar la calidad de los productos y funcionalidades de los mismos,&nbsp;mediante la planificación y ejecución de pruebas estructuradas. </p><p style=\"margin-bottom: 10px\"> El cargo tiene como misión garantizar que las soluciones tecnológicas del sector salud cumplan los criterios de aceptación, los requisitos funcionales y los estándares de estabilidad definidos por la organización. </p><p style=\"margin-bottom: 10px\"> </p> <div class=\"description-generate__items\"> <strong>Responsabilidades: </strong> <ul><li>Planificar diseñar y ejecutar casos de prueba funcionales y de regresión.</li><li>Identificar documentar y dar seguimiento a defectos en Jira.</li><li>Validar la corrección de defectos y la implementación de soluciones.</li><li>Colaborar con los equipos de desarrollo y producto para asegurar la calidad.</li><li>Verificar el cumplimiento de requisitos funcionales y técnicos.</li><li>Generar reportes sobre el estado de las pruebas y la calidad del software.</li><li>Contribuir a la mejora continua de los procesos de QA.</li><li>Asegurar la trazabilidad de las pruebas y los defectos.</li><li>Realizar pruebas exploratorias y de usabilidad según sea necesario.</li></ul> </div> <div class=\"description-generate__items\"> <strong>Requerimientos: </strong> <ul><li> <span data-contrast=\"auto\" lang=\"ES-CO\" class=\"TextRun SCXW187362682 BCX0\" style=\"accent-color: auto; place-content: normal; place-items: normal; place-self: auto; alignment-baseline: auto; anchor-name: none; anchor-scope: none; animation: 0s ease 0s 1 normal none running none; animation-composition: replace; animation-trigger: none; app-region: none; appearance: none; aspect-ratio: auto; backdrop-filter: none; backface-visibility: visible; background: none 0% 0% / auto repeat scroll padding-box border-box rgba(0, 0, 0, 0); background-blend-mode: normal; baseline-shift: 0px; baseline-source: auto; border: 0px rgb(0, 0, 0); border-collapse: separate; border-end-end-radius: 0px; border-end-start-radius: 0px; border-shape: none; border-spacing: 0px; border-start-end-radius: 0px; border-start-start-radius: 0px; border-radius: 0px; inset: auto; box-decoration-break: slice; box-shadow: none; box-sizing: content-box; break-after: auto; break-before: auto; break-inside: auto; buffered-rendering: auto; caption-side: top; caret-animation: auto; caret-color: rgb(0, 0, 0); caret-shape: auto; clear: none; clip: auto; clip-path: none; clip-rule: nonzero; color-interpolation: srgb; color-interpolation-filters: linearrgb; color-rendering: auto; color-scheme: normal; columns: auto; column-fill: balance; gap: normal; rule: 4px rgb(0, 0, 0); rule-break: normal; rule-inset: 0px; rule-visibility-items: normal; column-span: none; contain: none; contain-intrinsic-block-size: none; contain-intrinsic-size: none; contain-intrinsic-inline-size: none; container: none; content: normal; content-visibility: visible; corner-block-end-shape: round; corner-shape: round; corner-block-start-shape: round; counter-increment: none; counter-reset: none; counter-set: none; cursor: auto; cx: 0px; cy: 0px; d: none; direction: ltr; display: inline; dominant-baseline: auto; dynamic-range-limit: no-limit; empty-cells: show; field-sizing: fixed; fill: rgb(0, 0, 0); fill-opacity: 1; fill-rule: nonzero; filter: none; flex: 0 1 auto; flex-flow: row; flex-line-count: 1; float: none; flood-color: rgb(0, 0, 0); flood-opacity: 1; font-family: WordVisi_MSFontService, Arial, Arial_EmbeddedFont, Arial_MSFontService, sans-serif; font-feature-settings: normal; font-kerning: none; font-language-override: normal; font-optical-sizing: auto; font-palette: normal; font-size-adjust: none; font-stretch: 100%; font-synthesis: weight style small-caps; font-variant: none; font-variation-settings: normal; forced-color-adjust: auto; grid-area: auto; grid: none; height: auto; hyphenate-character: auto; hyphenate-limit-chars: auto; hyphens: manual; image-orientation: from-image; image-rendering: auto; initial-letter: normal; inline-size: auto; inset-block: auto; inset-inline: auto; interactivity: auto; interest-delay: normal; interpolate-size: numeric-only; isolation: auto; lighting-color: rgb(255, 255, 255); line-break: auto; line-height: 16.1875px; list-style: outside none disc; margin: 0px; marker: none; mask: none; mask-type: luminance; math-depth: 0; math-shift: normal; math-style: normal; max-height: none; max-width: none; min-height: 0px; min-width: 0px; mix-blend-mode: normal; object-fit: fill; object-position: 50% 50%; object-view-box: none; offset: normal; opacity: 1; order: 0; outline: rgb(0, 0, 0) none 2.66667px; outline-offset: 0px; overflow-anchor: auto; overflow-block: visible; overflow-clip-margin: 0px; overflow-inline: visible; overflow-wrap: break-word; overflow: visible; overlay: none; overscroll-behavior-block: auto; overscroll-behavior-inline: auto; overscroll-behavior: auto; padding: 0px; page: auto; paint-order: normal; perspective: none; perspective-origin: 0px 0px; pointer-events: auto; position: static; position-anchor: none; position-area: none; position-try: none; position-visibility: anchors-visible; print-color-adjust: economy; quotes: auto; r: 0px; reading-flow: normal; reading-order: 0; resize: none; rotate: none; ruby-align: space-around; ruby-position: over; rule-overlap: row-over-column; rx: auto; ry: auto; scale: none; scroll-behavior: auto; scroll-initial-target: none; scroll-margin-block: 0px; scroll-margin: 0px; scroll-margin-inline: 0px; scroll-marker-group: none; scroll-padding-block: auto; scroll-padding: auto; scroll-padding-inline: auto; scroll-snap-align: none; scroll-snap-stop: normal; scroll-snap-type: none; scroll-target-group: none; scroll-timeline: none; scrollbar-color: auto; scrollbar-gutter: auto; scrollbar-width: auto; shape-image-threshold: 0; shape-margin: 0px; shape-outside: none; shape-rendering: auto; speak: normal; stop-color: rgb(0, 0, 0); stop-opacity: 1; stroke: none; stroke-dasharray: none; stroke-dashoffset: 0px; stroke-linecap: butt; stroke-linejoin: miter; stroke-miterlimit: 4; stroke-opacity: 1; stroke-width: 1px; tab-size: 8; table-layout: auto; text-align-last: auto; text-anchor: start; text-autospace: no-autospace; text-box: normal; text-combine-upright: none; text-decoration: rgb(0, 0, 0); text-decoration-skip-ink: auto; text-emphasis: none rgb(0, 0, 0); text-emphasis-position: over; text-fit: none; text-justify: auto; text-orientation: mixed; text-overflow: clip; text-rendering: auto; text-shadow: none; text-size-adjust: auto; text-spacing-trim: normal; text-underline-offset: auto; text-underline-position: auto; text-wrap: wrap; timeline-scope: none; timeline-trigger: none; touch-action: auto; transform: none; transform-box: view-box; transform-origin: 0px 0px; transform-style: flat; transition: all; translate: none; trigger-scope: none; unicode-bidi: normal; user-select: text; vector-effect: none; vertical-align: baseline; view-timeline: none; view-transition-class: none; view-transition-group: normal; view-transition-name: none; view-transition-scope: none; visibility: visible; border-block: 0px rgb(0, 0, 0); border-inline: 0px rgb(0, 0, 0); -webkit-border-image: none; -webkit-box-align: stretch; -webkit-box-decoration-break: slice; -webkit-box-direction: normal; -webkit-box-flex: 0; -webkit-box-ordinal-group: 1; -webkit-box-orient: horizontal; -webkit-box-pack: start; -webkit-font-smoothing: auto; -webkit-line-break: auto; -webkit-line-clamp: none; -webkit-locale: &quot;ES-CO&quot;; block-size: auto; margin-block: 0px; margin-inline: 0px; -webkit-mask-box-image-source: none; -webkit-mask-box-image-slice: 0 fill; -webkit-mask-box-image-width: auto; -webkit-mask-box-image-outset: 0; -webkit-mask-box-image-repeat: stretch; max-block-size: none; max-inline-size: none; min-block-size: 0px; min-inline-size: 0px; padding-block: 0px; padding-inline: 0px; -webkit-rtl-ordering: logical; -webkit-ruby-position: before; -webkit-text-combine: none; -webkit-text-fill-color: rgb(0, 0, 0); -webkit-text-orientation: vertical-right; -webkit-text-security: none; -webkit-text-stroke: 0px rgb(0, 0, 0); -webkit-user-drag: none; -webkit-user-modify: read-only; -webkit-writing-mode: horizontal-tb; white-space-collapse: preserve; width: auto; will-change: auto; word-break: normal; writing-mode: horizontal-tb; x: 0px; y: 0px; z-index: auto; zoom: 1; font-size: 13.3333px;\"><span class=\"NormalTextRun SCXW187362682 BCX0\">Técnico, tecnólogo o profesional</span></span><span>es en Ingeniería de Sistemas Ingeniería de Software o afines.</span></li><li><span>Excelentes habilidades de comunicación y atención al detalle.</span></li><li><span>Experiencia en control de calidad de software.</span></li></ul> </div> <p style=\"margin: 0px; color: rgb(80, 80, 80);\"><span style=\"font-weight: bolder;\">Condiciones Laborales:</span></p><p style=\"margin: 0px;\">📍 Ubicación: Barranquilla, Atlántico</p><p style=\"margin: 0px;\">📋Cargo: Analista QA</p><p style=\"margin: 0px;\">💰 Salario: A convenir según experiencia</p><p style=\"margin: 0px;\">🕒 Contrato: Obra o labor + prestaciones de ley</p><p style=\"margin: 0px;\">🕒 Horario: Lunes a Viernes – Tiempo Completo</p><p style=\"margin: 0px;\"><br></p><p style=\"margin: 0px;\"><br></p><p style=\"margin: 0px;\">Si te interesa ser parte de un equipo innovador y trabajar en proyectos desafiantes, <span style=\"font-weight: bolder;\">¡postúlate ahora! </span>🚀</p><div class=\"description-generate__items\"> <ul></ul> </div>",
+   "companyName": "VIVA1A",
+   "publishDate": "2026-07-15T21:18:05.068Z",
+   "confidential": false,
+   "departments": [
+    "Atlantico"
+   ],
+   "currencyCode": "COP",
+   "contractType": 4,
+   "contractOrder": {
+    "id": 4,
+    "name": "Por obra o labor",
+    "order": 4
+   },
+   "isRemote": false,
+   "publicId": "1d04a17f-5e4e-4140-a4e3-cc18074d911e",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 18,
+     "name": "Medicina, sector de la salud y Ciencias"
+    },
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-10-31T05:00:00.000Z",
+   "numberOfQuotas": 2,
+   "skills": [
+    {
+     "id": 1372959,
+     "name": "Pruebas funcionales",
+     "score": 4
+    },
+    {
+     "id": 1372960,
+     "name": "Pruebas de regresión",
+     "score": 4
+    },
+    {
+     "id": 1372961,
+     "name": "Metodologías QA",
+     "score": 4
+    },
+    {
+     "id": 1372962,
+     "name": "Gestión de defectos",
+     "score": 4
+    },
+    {
+     "id": 1372963,
+     "name": "Casos de prueba",
+     "score": 4
+    },
+    {
+     "id": 1372964,
+     "name": "Ejecución de pruebas",
+     "score": 4
+    },
+    {
+     "id": 1372965,
+     "name": "Atención al detalle",
+     "score": 3
+    },
+    {
+     "id": 1372966,
+     "name": "Pensamiento analítico",
+     "score": 3
+    },
+    {
+     "id": 1372967,
+     "name": "Comunicación asertiva",
+     "score": 3
+    },
+    {
+     "id": 1372765,
+     "name": "Jira",
+     "score": 4
+    }
+   ],
+   "experienceMonthsNumber": 12,
+   "educationLevel": [
+    {
+     "id": 1750140,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1750139,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "viva1a",
+   "mainCompanySlug": "viva1a",
+   "companySlugs": [
+    "viva1a",
+    "viva1a"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Desarrollador de Sotfware",
+    "Plataforma Everest",
+    "Jira",
+    "GLPI",
+    "SQL Server"
+   ],
+   "inmediateHiring": true,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 1,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 2,
+   "isAbandoned": false
+  },
+  {
+   "id": 979293,
+   "title": "Desarrollador Fullstack + 3 años de Experiencia",
+   "jobSlug": "desarrollador-fullstack-3-anos-de-experiencia-979293",
+   "status": "published",
+   "cities": [
+    "Medellín",
+    "Barranquilla",
+    "Bogotá, D.C."
+   ],
+   "citiesSlug": [
+    "ofertas-empleo-en-medellin",
+    "ofertas-empleo-en-barranquilla",
+    "ofertas-empleo-en-bogota"
+   ],
+   "countryIds": [
+    47
+   ],
+   "salary": 0,
+   "minSalary": 0,
+   "maxSalary": 0,
+   "toAgree": true,
+   "pageState": "to_post",
+   "description": "<p class=\"MsoNormal\" style=\"margin-bottom:0cm;line-height:normal\"><span style=\"font-family: Arial, Helvetica, sans-serif; font-size: 12px;\">Accenture\nes una compañía global líder en servicios profesionales con una amplia gama de\nsoluciones en estrategia y consultoría, tecnología, operaciones y capacidades\ndigitales, brindando un servicio integral a nuestros clientes para que alcancen\nsu máximo rendimiento.</span></p><p class=\"MsoNormal\" style=\"margin-bottom:0cm;line-height:normal\"><span style=\"font-family: Arial, Helvetica, sans-serif; font-size: 12px;\"><br>\nEn nuestro equipo de #Tecnología, trabajamos con nuestros clientes\nacompañándolos a afrontar los múltiples desafíos de la transformación digital.\nAyudamos a aprovechar el poder de las tecnologías digitales para ser más\nefectivas, innovadoras y disruptivas.</span></p><p class=\"MsoNormal\" style=\"margin-bottom:0cm;line-height:normal\"><span style=\"font-family: Arial, Helvetica, sans-serif; font-size: 12px;\"><span style=\"font-size: 8pt;\"><br>\nActualmente nos encontramos en la búsqueda de un/a Desarrollador/a Fullstack.&nbsp;La persona seleccionada será clave en la integración entre frontend y backend.<br>\n<br>\nResponsabilidades del rol </span><span style=\"font-size: 8pt;\">📌</span><span style=\"font-size: 8pt;\"><br>\n- Integrar frontend con backend.<br>\n- Implementar autenticación y manejo de sesiones.<br>\n- Optimizar experiencia en canales web/chat.<br>\n- Soportar despliegue y pruebas funcionales.<br>\n<br>\nRequerimientos del puesto </span><span style=\"font-size: 8pt;\">✔️</span><span style=\"font-size: 8pt;\"><br>\nBuscamos profesionales con dos años de experiencia en adelante en roles de\ndesarrollo y con experiencia en:<br>\n<br>\n- Diseño e implementación de APIs backend (Node.js o Python).\n<br>\n- Manejo de java, java script, spring boot, aws, angular, cordova e ionic.<br>\n- Consumo de APIs REST. <br></span></span></p> <p class=\"MsoNormal\" style=\"margin-bottom:0cm;line-height:normal\"><span style=\"font-family: &quot;Aptos Narrow&quot;, sans-serif; font-size: 8pt;\">&nbsp;</span></p> <p class=\"MsoNormal\" style=\"margin-bottom:0cm;line-height:normal\"><span style=\"font-family: Arial, Helvetica, sans-serif; font-size: 12px;\"><span style=\"font-size: 8pt;\">🎁</span><span style=\"font-size: 8pt;\"> Beneficios\ndestacados</span></span></p> <p class=\"MsoNormal\" style=\"margin-bottom:0cm;line-height:normal\"><span style=\"font-family: Arial, Helvetica, sans-serif; font-size: 12px;\">-Medicina\nprepagada </span></p> <p class=\"MsoNormal\" style=\"margin-bottom:0cm;line-height:normal\"><span style=\"font-family: Arial, Helvetica, sans-serif; font-size: 12px;\">-Póliza\nodontológica y médica internacional.</span></p> <p class=\"MsoNormal\" style=\"margin-bottom:0cm;line-height:normal\"><span style=\"font-family: Arial, Helvetica, sans-serif; font-size: 12px;\">Seguro de\nvida y póliza funeraria (incluye mascotas).</span></p> <p class=\"MsoNormal\" style=\"margin-bottom:0cm;line-height:normal\"><span style=\"font-family: Arial, Helvetica, sans-serif; font-size: 12px;\">-Auxilio\nóptico.</span></p> <p><span style=\"font-family: Arial, Helvetica, sans-serif; font-size: 12px;\"><span style=\"line-height: 115%;\">-Convenios con entidades\nfinancieras y gimnasios.<br>\n<br></span><span style=\"text-align: initial; line-height: 115%;\">Enfocamos nuestra búsqueda en profesionales flexibles, proactivos, orientados\nal trabajo en equipo, con ganas de aprender, crecer en entornos de IA y aportar\ncon un espíritu innovador. </span>💜<br></span></p>",
+   "companyName": "ACCENTURE LTDA",
+   "publishDate": "2026-07-01T17:43:25.660Z",
+   "confidential": false,
+   "departments": [
+    "Antioquia",
+    "Atlantico",
+    "Bogotá D.C."
+   ],
+   "currencyCode": "COP",
+   "contractType": 2,
+   "contractOrder": {
+    "id": 2,
+    "name": "Término indefinido",
+    "order": 2
+   },
+   "isRemote": false,
+   "publicId": "11b4ea31-cdb5-42d9-9b86-0ccaee21c8ab",
+   "currencyUnit": "$",
+   "sectors": [
+    {
+     "id": 14,
+     "name": "Ingenierías"
+    },
+    {
+     "id": 23,
+     "name": "Software, informática y telecomunicaciones"
+    }
+   ],
+   "expirationDate": "2026-10-31T05:00:00.000Z",
+   "numberOfQuotas": 1,
+   "skills": [
+    {
+     "id": 1334383,
+     "name": "APIs Backend",
+     "score": 4
+    },
+    {
+     "id": 1334384,
+     "name": "Java",
+     "score": 4
+    },
+    {
+     "id": 1334385,
+     "name": "Java Script",
+     "score": 4
+    },
+    {
+     "id": 1334386,
+     "name": "Spring Boot",
+     "score": 4
+    },
+    {
+     "id": 1334387,
+     "name": "Node",
+     "score": 4
+    },
+    {
+     "id": 1334388,
+     "name": "AWS",
+     "score": 4
+    },
+    {
+     "id": 1334389,
+     "name": "Angular",
+     "score": 4
+    },
+    {
+     "id": 1334390,
+     "name": "Ionic",
+     "score": 4
+    },
+    {
+     "id": 1334391,
+     "name": "Cordova",
+     "score": 4
+    }
+   ],
+   "experienceMonthsNumber": 36,
+   "educationLevel": [
+    {
+     "id": 1716044,
+     "name": "Técnico",
+     "order": 2
+    },
+    {
+     "id": 1716043,
+     "name": "Tecnólogo",
+     "order": 3
+    },
+    {
+     "id": 1716042,
+     "name": "Profesional",
+     "order": 4
+    },
+    {
+     "id": 1716041,
+     "name": "Especialización/ Maestría",
+     "order": 5
+    }
+   ],
+   "internshipTypesId": 0,
+   "isSaved": false,
+   "isLiked": false,
+   "isDislike": false,
+   "wasSeen": false,
+   "isPreApplied": false,
+   "isApplied": false,
+   "isUrgent": false,
+   "isInternal": false,
+   "hasPrefilterQuestionnaire": true,
+   "companySlug": "accenture",
+   "mainCompanySlug": "accenture",
+   "companySlugs": [
+    "accenture",
+    "accenture"
+   ],
+   "videoEmployerBranding": null,
+   "isLite": false,
+   "isPrivate": false,
+   "keywords": [
+    "Fullstack",
+    "Desarrollador",
+    "Fullstack Developer"
+   ],
+   "inmediateHiring": false,
+   "unpublishDate": null,
+   "canApply": true,
+   "templateId": null,
+   "companySegment": 3,
+   "disabledPeople": false,
+   "applyWithLinkedIn": false,
+   "faqs": [],
+   "publicationType": 2,
+   "isAbandoned": false
+  }
+ ]
+}

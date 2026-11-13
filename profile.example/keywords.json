@@ -1,0 +1,28 @@
+{
+	"_nota": "EJEMPLO. Búsquedas que el botón Buscar corre en cada plataforma (cargos y tecnologías, en español e inglés). Se generan desde el CV con el prompt de README.md. Las que agregues desde la app se guardan en la base, no aquí.",
+	"keywords": [
+		"fullstack",
+		"full stack developer",
+		"desarrollador fullstack",
+		"backend developer",
+		"desarrollador backend",
+		"typescript",
+		"node.js",
+		"next.js",
+		"react developer",
+		"devops",
+		"software engineer",
+		"ingeniero de software",
+		"desarrollador web",
+		"arquitecto de software",
+		"cloud engineer",
+		"aws developer",
+		"golang developer",
+		"desarrollador .net",
+		"serverless",
+		"angular developer",
+		"python developer",
+		"sveltekit",
+		"tech lead"
+	]
+}

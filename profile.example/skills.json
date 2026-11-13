@@ -1,0 +1,323 @@
+{
+	"_nota": "EJEMPLO (perfil fullstack TypeScript). Genera el tuyo con el prompt de README.md. 'tengo' = está en el CV; 'no_tengo' = tecnologías comunes en vacantes que no están en el CV. Cada entrada: nombre visible y sus variantes de escritura. Una variante con prefijo 'titulo:' solo cuenta si aparece en el título (para palabras ambiguas como 'go'). Las genéricas (SQL, Git, REST, CI/CD, HTML/CSS) no están a propósito: las piden casi todas y no dicen nada del cargo. Edítalo libremente: la app lo relee en cada carga.",
+	"tengo": {
+		"TypeScript": [
+			"typescript"
+		],
+		"JavaScript": [
+			"javascript",
+			"js",
+			"ecmascript"
+		],
+		"Python": [
+			"python"
+		],
+		"Go": [
+			"golang",
+			"go lang",
+			"titulo:go"
+		],
+		"Rust": [
+			"rust"
+		],
+		"C#": [
+			"c#",
+			"csharp"
+		],
+		".NET": [
+			".net",
+			"dotnet",
+			"asp.net",
+			"asp.net core",
+			"net core"
+		],
+		"React": [
+			"react",
+			"react.js",
+			"reactjs"
+		],
+		"Next.js": [
+			"next.js",
+			"nextjs",
+			"next js"
+		],
+		"Astro": [
+			"astro"
+		],
+		"Svelte": [
+			"svelte",
+			"sveltekit"
+		],
+		"Angular": [
+			"angular"
+		],
+		"Tailwind": [
+			"tailwind",
+			"tailwindcss"
+		],
+		"Node.js": [
+			"node.js",
+			"nodejs",
+			"node js"
+		],
+		"Bun": [
+			"bun"
+		],
+		"Hono": [
+			"hono"
+		],
+		"Elysia": [
+			"elysia"
+		],
+		"Express": [
+			"express",
+			"express.js",
+			"expressjs"
+		],
+		"Django": [
+			"django",
+			"drf",
+			"django rest framework"
+		],
+		"PostgreSQL": [
+			"postgresql",
+			"postgres"
+		],
+		"MySQL": [
+			"mysql"
+		],
+		"DynamoDB": [
+			"dynamodb"
+		],
+		"SQLite": [
+			"sqlite",
+			"libsql"
+		],
+		"Drizzle": [
+			"drizzle"
+		],
+		"Sequelize": [
+			"sequelize"
+		],
+		"AWS": [
+			"aws",
+			"amazon web services",
+			"lambda",
+			"s3",
+			"sqs",
+			"cognito",
+			"bedrock"
+		],
+		"Docker": [
+			"docker",
+			"docker compose"
+		],
+		"Terraform": [
+			"terraform"
+		],
+		"Cloudflare": [
+			"cloudflare",
+			"cloudflare workers"
+		],
+		"GitHub Actions": [
+			"github actions"
+		],
+		"Microservicios": [
+			"microservicios",
+			"microservices"
+		],
+		"Serverless": [
+			"serverless"
+		],
+		"Arquitectura hexagonal": [
+			"arquitectura hexagonal",
+			"hexagonal"
+		],
+		"Stripe": [
+			"stripe"
+		]
+	},
+	"no_tengo": {
+		"Java": [
+			"java"
+		],
+		"Spring": [
+			"spring",
+			"spring boot",
+			"springboot"
+		],
+		"Kotlin": [
+			"kotlin"
+		],
+		"Scala": [
+			"scala"
+		],
+		"PHP": [
+			"php"
+		],
+		"Laravel": [
+			"laravel"
+		],
+		"Symfony": [
+			"symfony"
+		],
+		"Ruby": [
+			"ruby"
+		],
+		"Rails": [
+			"rails",
+			"ruby on rails",
+			"ror"
+		],
+		"Vue": [
+			"vue",
+			"vue.js",
+			"vuejs"
+		],
+		"Nuxt": [
+			"nuxt"
+		],
+		"NestJS": [
+			"nestjs",
+			"nest.js"
+		],
+		"GraphQL": [
+			"graphql"
+		],
+		"React Native": [
+			"react native"
+		],
+		"Flutter": [
+			"flutter",
+			"dart"
+		],
+		"Swift / iOS": [
+			"swift",
+			"ios",
+			"objective-c"
+		],
+		"Android": [
+			"android"
+		],
+		"Elixir": [
+			"elixir"
+		],
+		"C++": [
+			"c++"
+		],
+		"COBOL": [
+			"cobol"
+		],
+		"Delphi": [
+			"delphi"
+		],
+		"Visual Basic": [
+			"visual basic",
+			"vb.net",
+			"vba"
+		],
+		"SAP / ABAP": [
+			"sap",
+			"abap"
+		],
+		"Salesforce": [
+			"salesforce",
+			"apex"
+		],
+		"OutSystems": [
+			"outsystems"
+		],
+		"Dynamics 365": [
+			"dynamics 365",
+			"dynamics"
+		],
+		"Power BI": [
+			"power bi",
+			"powerbi"
+		],
+		"Power Platform": [
+			"power apps",
+			"power automate"
+		],
+		"Tableau": [
+			"tableau"
+		],
+		"Databricks": [
+			"databricks"
+		],
+		"Spark": [
+			"spark",
+			"pyspark"
+		],
+		"Airflow": [
+			"airflow"
+		],
+		"Snowflake": [
+			"snowflake"
+		],
+		"Kafka": [
+			"kafka"
+		],
+		"Kubernetes": [
+			"kubernetes",
+			"k8s",
+			"eks",
+			"aks",
+			"gke"
+		],
+		"Azure": [
+			"azure"
+		],
+		"GCP": [
+			"gcp",
+			"google cloud"
+		],
+		"Oracle": [
+			"oracle",
+			"pl/sql",
+			"plsql"
+		],
+		"SQL Server": [
+			"sql server",
+			"t-sql",
+			"tsql"
+		],
+		"MongoDB": [
+			"mongodb",
+			"mongo"
+		],
+		"Redis": [
+			"redis"
+		],
+		"Elasticsearch": [
+			"elasticsearch",
+			"elastic search"
+		],
+		"Jenkins": [
+			"jenkins"
+		],
+		"Ansible": [
+			"ansible"
+		],
+		"Selenium / Cypress": [
+			"selenium",
+			"cypress"
+		],
+		"UiPath / RPA": [
+			"uipath",
+			"rpa"
+		],
+		"WordPress": [
+			"wordpress"
+		],
+		"Shopify": [
+			"shopify"
+		],
+		"Magento": [
+			"magento"
+		],
+		"Unity": [
+			"unity"
+		]
+	}
+}
