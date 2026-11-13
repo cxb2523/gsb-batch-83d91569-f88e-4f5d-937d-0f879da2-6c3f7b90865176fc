@@ -1,0 +1,568 @@
+# Instagram MCP Server
+
+<!-- mcp-name: com.hasdata/instagram -->
+
+A hosted [Instagram MCP server](https://hasdata.com/mcp/instagram?utm_source=github&utm_medium=syndication&utm_campaign=instagram-mcp&utm_content=readme-intro) that gives Claude, Cursor, Windsurf and any other MCP client read-only Instagram tools. Look up a public profile by handle, walk its public post feed and Reels tab, and read the comments on a public post or reel, as structured JSON.
+
+It reads public data about accounts. It does not act as an account. There is nothing to connect and no account of yours involved anywhere in the flow.
+
+**1,000 free credits every month, no card required**, which is 100 Instagram calls.
+
+```
+https://mcp.hasdata.com/mcp?apis=instagram
+```
+
+[![Glama score](https://glama.ai/mcp/servers/HasData/instagram-mcp/badges/score.svg)](https://glama.ai/mcp/servers/HasData/instagram-mcp)
+[![tool contract](https://github.com/HasData/instagram-mcp/actions/workflows/contract.yml/badge.svg)](https://github.com/HasData/instagram-mcp/actions/workflows/contract.yml)
+[![MCP](https://img.shields.io/badge/MCP-remote%20%7C%20streamable%20HTTP-6366f1?style=flat-square)](https://modelcontextprotocol.io)
+[![Tools](https://img.shields.io/badge/tools-4-10b981?style=flat-square)](#tools)
+- [Prompts and resources](#prompts-and-resources)
+[![npm](https://img.shields.io/npm/v/@hasdata/instagram-mcp?style=flat-square&logo=npm&label=npm&color=cb3837)](https://www.npmjs.com/package/@hasdata/instagram-mcp)
+[![PyPI](https://img.shields.io/pypi/v/hasdata-instagram-mcp?style=flat-square&logo=pypi&logoColor=white&label=PyPI&color=3775a9)](https://pypi.org/project/hasdata-instagram-mcp/)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+
+## Contents
+
+- [What you need](#what-you-need)
+- [Quick start](#quick-start)
+- [Example prompts](#example-prompts)
+- [Tools](#tools)
+- [Errors and failure paths](#errors-and-failure-paths)
+- [Pricing, free tier and limits](#pricing-free-tier-and-limits)
+- [Tool selection](#tool-selection)
+- [How it compares](#how-it-compares)
+- [FAQ](#faq)
+- [HasData links](#hasdata-links)
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
+
+## What you need
+
+An MCP client that speaks streamable HTTP with custom headers. A HasData API key from the [dashboard](https://app.hasdata.com/sign-up?utm_source=github&utm_medium=syndication&utm_campaign=instagram-mcp), free to create with no card, and the free tier covers 100 calls a month. Nothing else. This is a remote server, so the simplest path is a URL and a header, with no container to run. A stdio-only client can use the `@hasdata/instagram-mcp` (npm) or `hasdata-instagram-mcp` (PyPI) launcher instead.
+
+## Quick start
+
+| | |
+| :--- | :--- |
+| URL | `https://mcp.hasdata.com/mcp?apis=instagram` |
+| Transport | HTTP, streamable |
+| Auth header | `x-api-key: HASDATA_API_KEY` |
+
+The server URL is the same for every client. We run it hands-on in Claude Code and Claude Desktop. The other blocks follow each client's own documented format for a remote server.
+
+Clients with OAuth support can add the same URL as a connector and sign in without putting a key in a config file.
+
+<details>
+<summary><b>Claude Code</b></summary>
+
+```bash
+claude mcp add --transport http instagram "https://mcp.hasdata.com/mcp?apis=instagram" \
+  --header "x-api-key: HASDATA_API_KEY"
+```
+
+</details>
+
+<details>
+<summary><b>Claude Desktop</b></summary>
+
+Claude Desktop loads only local (stdio) servers from its config file, so it reaches a remote server through a stdio launcher. The `@hasdata/instagram-mcp` package is that launcher, and it reads the key from the environment.
+
+`claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "instagram": {
+      "command": "npx",
+      "args": ["-y", "@hasdata/instagram-mcp"],
+      "env": { "HASDATA_API_KEY": "YOUR_KEY" }
+    }
+  }
+}
+```
+
+Python instead of Node? Swap the launcher for the PyPI package, which `uvx` runs without a manual install:
+
+```json
+{
+  "mcpServers": {
+    "instagram": {
+      "command": "uvx",
+      "args": ["hasdata-instagram-mcp"],
+      "env": { "HASDATA_API_KEY": "YOUR_KEY" }
+    }
+  }
+}
+```
+
+A client with OAuth support can instead add the URL as a custom connector and skip the launcher.
+
+</details>
+
+<details>
+<summary><b>Cursor</b></summary>
+
+`.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "instagram": {
+      "url": "https://mcp.hasdata.com/mcp?apis=instagram",
+      "headers": { "x-api-key": "HASDATA_API_KEY" }
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Windsurf</b></summary>
+
+`~/.codeium/windsurf/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "instagram": {
+      "serverUrl": "https://mcp.hasdata.com/mcp?apis=instagram",
+      "headers": { "x-api-key": "HASDATA_API_KEY" }
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Cline</b></summary>
+
+```json
+{
+  "mcpServers": {
+    "instagram": {
+      "url": "https://mcp.hasdata.com/mcp?apis=instagram",
+      "type": "streamableHttp",
+      "headers": { "x-api-key": "HASDATA_API_KEY" },
+      "disabled": false
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>VS Code</b></summary>
+
+`.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "instagram": {
+      "type": "http",
+      "url": "https://mcp.hasdata.com/mcp?apis=instagram",
+      "headers": { "x-api-key": "HASDATA_API_KEY" }
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Gemini CLI</b></summary>
+
+`~/.gemini/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "instagram": {
+      "httpUrl": "https://mcp.hasdata.com/mcp?apis=instagram",
+      "headers": { "x-api-key": "HASDATA_API_KEY" }
+    }
+  }
+}
+```
+
+</details>
+
+## Example prompts
+
+Each of these is one tool call unless the count says otherwise.
+
+> Pull the profile for `@nasa` and tell me the follower count, whether it is verified, and every link in the bio.
+
+*One call, 10 credits. For a public account the profile response already carries the twelve most recent posts, so a follow-up about recent activity needs no second call.*
+
+> Compare `@nasa`, `@natgeo` and `@bbcearth` on followers, accounts followed and whether each is verified.
+
+*Three calls, 30 credits. One per handle.*
+
+> Walk the last fifty posts from `@nasa` and list every hashtag with how often it appears.
+
+*Five calls, 50 credits. Twelve posts arrive per call, and fifty takes five pages.*
+
+> For the last twelve posts on `@natgeo`, list the accounts mentioned in each caption and the type of each post.
+
+*One call, 10 credits. Mentions and hashtags arrive parsed out of the caption in the post objects.*
+
+> Rank the twelve most recent reels on `@natgeo` by plays and show likes and comments next to each.
+
+*One call, 10 credits. Plays, likes and comments arrive together on every reel.*
+
+Two things make these work. Hashtags and mentions arrive as arrays parsed out of the caption, and an agent counts them instead of running a regex over prose. And a profile lookup returns the recent feed in the same response. That is why so many research questions land in a single call.
+
+## Tools
+
+| Tool | What it returns |
+| --- | --- |
+| `hasdata_instagram_comments_getInstagramComments` | Fetches the comments on a public post or reel by its URL and returns the post itself with its caption, media, `likesCount`, `commentsCount` and `timestamp`, then each comment with its text, like count, timestamp and author. 10 credits a call |
+| `hasdata_instagram_posts_getInstagramPosts` | Fetches the latest posts of a public Instagram account by username (handle) and returns each post with its id, shortcode, caption, type, productType, permalink, media URLs and pixel size, like and comment counts, the posting time, plus hashtags, mentions, tagged users and carousel members. 10 credits a call |
+| `hasdata_instagram_profile_getInstagramProfile` | Fetches a public Instagram profile by username (handle) and returns id, full name, biography, bio links, profile picture URL, followers and following counts, the verified flag and the twelve most recent posts. 10 credits a call |
+| `hasdata_instagram_reels_getInstagramReels` | Fetches the Reels tab of a public Instagram account by username (handle), newest first with collab reels included, and returns each reel with play, like and comment counts, caption, hashtags, mentions, cover image, video URL, owner, tagged users and timestamp. 10 credits a call |
+
+All of them are read-only. The comments tool takes the URL of a single post, and the others take a public account handle. Samples below are trimmed from real calls, and the numbers in them move as accounts post. Read them as shapes. A tool name links to its endpoint reference where the docs publish one.
+
+The samples are the payload, not the whole response. A `tools/call` result carries one text block, and that text is itself JSON holding `url`, `status`, `text` and `json`, with the scraped data under `json`. From a raw JSON-RPC response the path is `result.content[0].text`, parsed, then `.json`. A chat client unwraps that for you and code talking to the endpoint directly does not.
+
+### Get an Instagram profile
+
+[`hasdata_instagram_profile_getInstagramProfile`](https://docs.hasdata.com/apis/instagram/profile?utm_source=github&utm_medium=syndication&utm_campaign=instagram-mcp)
+
+One public profile by handle.
+
+| Parameter | Type | Required | Notes |
+| :--- | :--- | :--- | :--- |
+| `handle` | string | yes | Username without the `@`, as it appears in the profile URL |
+
+Returns `id`, `username`, `fullName`, `biography`, `verified`, the counters `followersCount` and `followsCount`, `profilePicUrl`, the internal `fbid`, the `bioLinks` array and `latestPosts`.
+
+What is guaranteed and what is not, measured across twenty accounts: `id`, `username`, `followersCount`, `followsCount`, `profilePicUrl` and `fbid` came back every time. `fullName`, `biography`, `verified`, `bioLinks` and `latestPosts` came back for every public account and are the ones to read with a default.
+
+> A private account answers with `private: true` and little else. No bio, no counters beyond the follower numbers, no posts. Branch on that flag before you touch the rest of the payload.
+
+> `bioLinks` is an array of objects, not strings. Each entry carries `url`, `title`, Instagram's own `redirectUrl` wrapper and `linkType`. Read `.url` when you want the destination.
+
+```json
+{
+  "id": "528817151",
+  "username": "nasa",
+  "fullName": "NASA",
+  "biography": "Making the seemingly impossible, possible. ✨",
+  "verified": true,
+  "followersCount": 104345698,
+  "followsCount": 91,
+  "profilePicUrl": "https://scontent.cdninstagram.com/v/t51.2885-19/…",
+  "fbid": "17841401474538262",
+  "bioLinks": [
+    {
+      "url": "https://www.nasa.gov",
+      "title": "NASA.gov Homepage",
+      "redirectUrl": "https://l.instagram.com/?u=https%3A%2F%2Fwww.nasa.gov%2F&e=…",
+      "linkType": "external"
+    }
+  ],
+  "latestPosts": [ "…the most recent posts, same shape as the posts tool…" ]
+}
+```
+
+### Get Instagram posts
+
+[`hasdata_instagram_posts_getInstagramPosts`](https://docs.hasdata.com/apis/instagram/posts?utm_source=github&utm_medium=syndication&utm_campaign=instagram-mcp)
+
+The public post feed for one handle, page by page.
+
+| Parameter | Type | Required | Notes |
+| :--- | :--- | :--- | :--- |
+| `handle` | string | yes | Username without the `@` |
+| `limit` | number | | Approximate ceiling on posts in one response. Twelve is the real maximum, and larger values do not fetch more |
+| `nextPageToken` | string | | The `pagination.nextPageToken` from the previous response |
+
+> `limit` is a rough cap rather than an exact count. Twelve posts is one Instagram page and the hard ceiling for a single call, and `limit: 50` returns twelve. Below the ceiling the count lands near the number you asked for without always matching it, and how near depends on the account. Measured on `@nasa`, a limit of 2 returned 4 posts, 6 returned 6, 11 returned 10 and 13 returned 12. Treat it as "no more than roughly this many" and read the array length rather than assuming it.
+
+The response carries `posts` and `pagination`, and nothing else. Earlier versions repeated the account's identity fields alongside the feed, so code written against that shape needs a profile call for the name and avatar.
+
+Each post carries `id`, `shortcode`, `caption`, `type`, `productType`, `url`, `ownerUsername`, `ownerId`, `displayUrl` and `images`, the pixel size as `dimensionsWidth` and `dimensionsHeight`, and `hasdataLink`, a ready-made link to the comments endpoint for that post. `hashtags` and `mentions` appear only when the caption has them. A carousel carries its members in `childPosts`, and `taggedUsers` lists the accounts tagged in the media.
+
+> Engagement counters arrive with the feed. Each post carries `likesCount` and `commentsCount`, and the posting time twice: `timestamp` as a full ISO instant and `publishDate` as the calendar day. Ranking a feed by popularity or filtering it by date needs no second call. This changed on 2026-10-07; earlier versions of the payload carried none of the four.
+
+```json
+{
+  "posts": [
+    {
+      "id": "3983374110243288826",
+      "shortcode": "DdHyaYAifb6",
+      "caption": "Cementing their names in history.\n\nThe Artemis III crew is leaving their mark […] @NASAKennedy",
+      "type": "Carousel",
+      "productType": "carousel_container",
+      "mentions": ["@NASAKennedy", "@EuropeanSpaceAgency", "@Astro_Luca"],
+      "url": "https://www.instagram.com/p/DdHyaYAifb6/",
+      "hasdataLink": "https://api.hasdata.com/scrape/instagram/comments?url=…",
+      "commentsCount": 1053,
+      "likesCount": 121490,
+      "dimensionsWidth": 1440,
+      "dimensionsHeight": 1800,
+      "displayUrl": "https://scontent.cdninstagram.com/v/t51.…",
+      "images": ["https://scontent.cdninstagram.com/v/t51.…"],
+      "timestamp": "2026-09-10T21:20:24.000Z",
+      "publishDate": "2026-09-10",
+      "ownerUsername": "nasa",
+      "ownerId": "528817151",
+      "taggedUsers": [{ "id": "549403870", "username": "nasakennedy", "fullName": "NASA's Kennedy Space Center" }],
+      "childPosts": [{ "id": "3983374043612570267", "type": "Image", "productType": "carousel_item" }]
+    }
+  ],
+  "pagination": {
+    "morePostsAvailable": true,
+    "nextPageToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…",
+    "hasdataLink": "https://api.hasdata.com/scrape/instagram/posts?handle=nasa&nextPageToken=…"
+  }
+}
+```
+
+Hashtags and mentions keep their `#` and `@` prefixes, which matters if you are joining them against a list you built yourself. `morePostsAvailable` is the flag to branch on when paging, and `hasdataLink` is the same next page expressed as a REST URL, useful when you want to reproduce an agent's call by hand.
+
+### Get an account's reels
+
+`hasdata_instagram_reels_getInstagramReels`
+
+The Reels tab of one handle, newest first, page by page.
+
+| Parameter | Type | Required | Notes |
+| :--- | :--- | :--- | :--- |
+| `handle` | string | yes | Username without the `@` |
+| `limit` | number | | Reels in one response, up to 12. Defaults to 12 |
+| `nextPageToken` | string | | The `pagination.nextPageToken` from the previous response |
+
+The response carries `reels` and `pagination`. A reel has the same shape as a post from the feed and adds `playsCount` and `videoUrl`, so plays, likes and comments arrive together and ranking an account's reels by reach takes no second call. Each reel carries `hasdataLink` to its comment thread.
+
+> Collab reels are part of the tab. A reel the account co-posted with someone else shows up in its Reels, and `ownerUsername` and `ownerId` then name the account that published it, not the handle you asked for. Filter on `ownerUsername` when only the account's own reels count. In a call for `@nasa` on 2026-11-09, both reels returned were collabs published by other accounts.
+
+```json
+{
+  "reels": [
+    {
+      "id": "4026005540840053099",
+      "shortcode": "DffPrVthplr",
+      "caption": "Talk about a view! 🪂🇺🇸 Looking down on the historic Shuttle Landing Facility as the Army Golden Knights jump in to kick off Day 2 of MAX POWER! 🚀✈️",
+      "type": "Video",
+      "productType": "clips",
+      "url": "https://www.instagram.com/p/DffPrVthplr/",
+      "hasdataLink": "https://api.hasdata.com/scrape/instagram/comments?url=…",
+      "commentsCount": 473,
+      "likesCount": 30199,
+      "playsCount": 3468416,
+      "dimensionsWidth": 1080,
+      "dimensionsHeight": 1920,
+      "displayUrl": "https://instagram.fmex31-1.fna.fbcdn.net/v/t51.…",
+      "images": ["https://instagram.fmex31-1.fna.fbcdn.net/v/t51.…"],
+      "videoUrl": "https://instagram.fmex36-1.fna.fbcdn.net/o1/v/t2/f2/m86/….mp4",
+      "timestamp": "2026-11-08T17:02:53.000Z",
+      "publishDate": "2026-11-08",
+      "ownerUsername": "airdotshow",
+      "ownerId": "27179220808",
+      "taggedUsers": [{ "id": "528817151", "username": "nasa", "fullName": "NASA", "isVerified": true, "profilePicUrl": "https://…" }]
+    }
+  ],
+  "pagination": {
+    "moreReelsAvailable": true,
+    "nextPageToken": "AQHTZHNas4CpVqvVxNpO1eBpm4iB…",
+    "hasdataLink": "https://api.hasdata.com/scrape/instagram/reels?handle=nasa&limit=2&nextPageToken=…"
+  }
+}
+```
+
+`videoUrl` and the image links are signed CDN addresses that expire, so download the file you need soon after the call rather than storing the link. `moreReelsAvailable` is the flag to branch on when paging.
+
+### Get the comments on a post
+
+[`hasdata_instagram_comments_getInstagramComments`](https://docs.hasdata.com/apis/instagram/comments?utm_source=github&utm_medium=syndication&utm_campaign=instagram-mcp)
+
+The comment thread under one post or reel, and the post itself.
+
+| Parameter | Type | Required | Notes |
+| :--- | :--- | :--- | :--- |
+| `url` | string | yes | A `/p/`, `/reel/` or `/tv/` link, with or without the username segment |
+| `nextPageToken` | string | | Token from the previous response |
+| `includeMusic` | boolean | | Also return the sound of a reel in `post.music`, for licensed tracks and original audio alike |
+
+Use this when the comment thread itself is the point. The `post` object repeats the engagement figures the feed already carries, so ranking or dating a feed does not need this call, and spending one request per post to collect numbers that arrived with the feed is waste.
+
+Returns `post`, `comments` and `pagination`. A comment carries `id`, `text`, `timestamp`, `likesCount` and an `owner` with `id`, `username` and `profilePicUrl`. `pagination` reports `moreCommentsAvailable` beside `nextPageToken`, so a walk can stop without spending a request to discover the end.
+
+```json
+{
+  "post": {
+    "shortcode": "DdHyaYAifb6",
+    "type": "Carousel",
+    "productType": "carousel_container",
+    "ownerUsername": "nasa",
+    "timestamp": "2026-09-10T21:20:24.000Z",
+    "likesCount": 120648,
+    "commentsCount": 1020
+  },
+  "comments": [
+    {
+      "id": "18188486875408374",
+      "text": "I like to become a astronomer",
+      "timestamp": "2026-10-05T07:38:17.000Z",
+      "likesCount": 0,
+      "owner": { "id": "40744210101", "username": "nisha_karippolil" }
+    }
+  ],
+  "pagination": { "moreCommentsAvailable": true, "nextPageToken": "…" }
+}
+```
+
+## Prompts and resources
+
+The server ships one prompt, a ready-made workflow a client can offer instead of making the user compose a tool call.
+
+| Prompt | What it does |
+| --- | --- |
+| `instagram_profile` | Look up a public Instagram profile. |
+
+The list is served without an API key, so a client can read it before a user has signed up.
+
+## Errors and failure paths
+
+Your client almost never sees an HTTP error code from a tool call. The MCP layer answers 200 and puts the failure inside the result, with `isError` set to `true` and the reason as text. The agent reads a message where you might expect a status line.
+
+**A wrong key surfaces as tool output, not as a failed connection.** Listing tools accepts any non-empty key, and the client completes its handshake and shows green. The first tool call then comes back with `isError: true` and the text `HasData API error: 401 Unauthorized`. Watch for that string, because nothing earlier in the flow reports the problem.
+
+**A missing key is the one real HTTP error.** Authorization runs before any tool, and the connection itself fails with 401.
+
+**An argument that breaks the schema is rejected before it becomes a request.** The server answers with `isError: true` and the text `MCP error -32602: Input validation error`, naming the field. Nothing is fetched and nothing is charged.
+
+**A handle that does not resolve is a clean error, not empty data.** It returns `isError: true` with `HasData API error: 400 Bad Request` and `requestMetadata.status` set to `error`. This is the good case, because the failure is unambiguous. Test the flag rather than the array length.
+
+**An account whose data is not public returns no post feed.** The tools cover public accounts, and there is nothing to read on one that is not. Treat a missing `latestPosts` as out of scope and not as an empty feed.
+
+Results that carry data also carry a `requestMetadata.id` worth quoting in support, plus `html` and `json` links to the stored artifact of that exact call.
+
+## Pricing, free tier and limits
+
+Every Instagram tool costs **10 credits per successful call**. Response size does not change the price. A profile with twelve posts attached costs the same as one with none.
+
+The free tier is **1,000 credits every month with no card**, or 100 Instagram calls. It renews with the billing cycle, so a low-volume agent runs on the free tier indefinitely.
+
+Paid plans start at **$59 a month** for 200,000 credits, or 20,000 calls. The unit price falls with volume, from **$2.95 per 1,000 calls** on the entry plan to **$1.19** on Basic and **$0.83** across the Growth tiers. Current figures live on the [pricing page](https://hasdata.com/prices?utm_source=github&utm_medium=syndication&utm_campaign=instagram-mcp).
+
+Your plan also sets concurrency. The free tier allows 5 requests at a time, Startup 5, Basic 15, and the Growth tiers run from 50 to 500. Handle the overflow case defensively in anything unattended, because an agent that fans out across handles will reach the ceiling before you do.
+
+Paging costs a call each time. A prompt that walks a hundred posts across two accounts is eighteen calls and 180 credits. The free tier goes further on profile comparisons than on deep feed crawls.
+
+## Tool selection
+
+`?apis=instagram` exposes exactly these tools. The parameter takes a list, and `?apis=instagram,tiktok,youtube` gives your agent three social platforms at once. Drop the parameter and you get every tool HasData exposes.
+
+A narrow list is usually the better default. A model choosing among a few tools picks correctly more often than one choosing among the whole catalog, and the tool descriptions themselves cost context on every turn.
+
+Cross-platform comparison is the usual reason to widen the list. Ask the same question of an Instagram handle and a TikTok handle and it is one prompt once both are exposed.
+
+## How it compares
+
+Almost every Instagram MCP server does something different from this one, and that makes the choice unusually clear.
+
+The popular ones operate an account. Some wrap the Instagram Graph API to publish posts, read comments and manage the accounts you administer. Others handle direct messages. The engagement-analysis servers ask for `INSTAGRAM_USERNAME` and `INSTAGRAM_PASSWORD` in an env block, per their own setup instructions, because they sign in and browse as you. All of those are the right tool when the job is to run an account you control.
+
+This server never signs in as anyone, which is a different job. Every question it answers is about a handle you do not own, and the call is identical whichever handle that is.
+
+| | Account-operating server | This server |
+| :--- | :--- | :--- |
+| What it acts as | Your account, via a token or a session | Nothing, it reads public data |
+| What you configure | Credentials or a Graph API app, per account | One API key, once |
+| Which handles it covers | The accounts you administer | Any public handle |
+| Publishing and messaging | Yes, that is the point | Not offered |
+| Output | Scoped to the account you run | JSON for any public handle, hashtags and mentions parsed |
+| What you run | A Python or Node process locally | A URL and a header |
+| Cost | Free | 10 credits a call |
+
+Two rows decide it. If you need to post, comment or reply, this server cannot help you at all. If you need the same fields across a hundred handles you have no relationship with, a server built around your own credentials cannot help you either.
+
+The deciding axis is scope, not polish. A server built around your own login can only reach the accounts you administer, however good its output is. This one answers the same question for any public handle, and the fields come back as parsed arrays that cost nothing to aggregate.
+
+**What this server does not do.** No stories, no direct messages, no hashtag or location search, and nothing that writes. It reads profiles, feeds, reels and post comments well.
+
+## FAQ
+
+### What is an Instagram MCP server?
+
+A server that exposes Instagram data as tools an AI client can call. The client sends a tool call over the Model Context Protocol, the server fetches the data and returns structured JSON, and the model works with the result and never sees a page of HTML. This one exposes read-only tools and runs remotely. The client connects to a URL and starts no local process.
+
+### Is there an official Instagram MCP server?
+
+Meta publishes no general-purpose one. There is an official MCP for Meta advertising, and it covers ad accounts and campaigns, not profile and post data. Everything else in this space is built by somebody else.
+
+### What data is in scope?
+
+Public profile fields and the public post feed, for public accounts, by handle. A private account still returns its header, the follower and following counts and a `private: true` flag, but no biography and no posts, since there is no public feed to read. You are responsible for how you use the results, including compliance with Instagram's terms and with the law that applies to you.
+
+### Do I need to host or run anything?
+
+No. This is a remote MCP server on streamable HTTP. Nothing to install, no Python environment, no process to restart.
+
+### Is the data live or cached?
+
+Live. Each call fetches at request time and carries its own `requestMetadata.id`. Two identical calls are two separate fetches and not a replay of a stored copy. Counters like followers and likes track the account and move as it moves.
+
+### How many posts can I get?
+
+Twelve per call, one Instagram page, and further pages come from `pagination.nextPageToken`. For a public account the profile lookup includes the same twelve at no extra cost, so short feed questions often need no posts call at all.
+
+### What happens when Instagram changes its markup?
+
+Nothing on your side. We track the changes and keep the response schema stable, and field names and types stay put. A field with no value is absent from the item instead of present and null, and that is why optional fields should be read with a default.
+
+### Can I use one server for several platforms?
+
+Yes. The `apis` parameter takes a list, and `?apis=instagram,tiktok,youtube` gives your agent three platforms at once.
+
+### Which clients work?
+
+Any MCP client that supports streamable HTTP with custom headers. The configs above are tested. Clients with OAuth support can add the URL as a connector instead.
+
+## HasData links
+
+| | |
+| :--- | :--- |
+| Product pages and request builder | [Instagram Profile API](https://hasdata.com/apis/instagram-profile-api?utm_source=github&utm_medium=syndication&utm_campaign=instagram-mcp) and [Instagram Posts API](https://hasdata.com/apis/instagram-posts-api?utm_source=github&utm_medium=syndication&utm_campaign=instagram-mcp) |
+| Server documentation | [MCP server docs](https://docs.hasdata.com/mcp-server?utm_source=github&utm_medium=syndication&utm_campaign=instagram-mcp) |
+| Every HasData tool in one server | [HasData/hasdata-mcp](https://github.com/HasData/hasdata-mcp) |
+| Client walkthroughs | [MCP clients and integrations](https://hasdata.com/integrations/mcp?utm_source=github&utm_medium=syndication&utm_campaign=instagram-mcp) |
+| The other platforms we parse | [53 more scraper APIs](https://hasdata.com/apis/?utm_source=github&utm_medium=syndication&utm_campaign=instagram-mcp) |
+| Plans and credit costs | [Plans and credit costs](https://hasdata.com/prices?utm_source=github&utm_medium=syndication&utm_campaign=instagram-mcp) |
+| Keys and usage | [HasData dashboard](https://app.hasdata.com?utm_source=github&utm_medium=syndication&utm_campaign=instagram-mcp) |
+| Node launcher on npm | [@hasdata/instagram-mcp](https://www.npmjs.com/package/@hasdata/instagram-mcp) |
+| Python launcher on PyPI | [hasdata-instagram-mcp](https://pypi.org/project/hasdata-instagram-mcp/) |
+
+## Development
+
+This repository is configuration and documentation for a remote server. There is no build step and nothing to containerize.
+
+It does carry a contract test. The README promises its tools with specific parameters, and the upstream tool list can change without a commit here, and that would leave this file quietly lying to you. The test asserts the promise and runs weekly in CI as well as on every push.
+
+```bash
+HASDATA_API_KEY=your_key_here npm test
+```
+
+On PowerShell:
+
+```powershell
+$env:HASDATA_API_KEY = "your_key_here"; npm test
+```
+
+The last check makes a real call and costs 10 credits, which is the price of a canary that can fail for the right reason. Listing tools succeeds with any non-empty key, and a test that only lists tools stays green with a revoked one.
+
+## Contributing
+
+Corrections to the tool tables and the response samples are the most useful contribution, because those are the parts that drift. Include the call you made and the response you got. Pull requests from forks run the suite without a key, and the live checks skip instead of going red.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
