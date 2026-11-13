@@ -2807,6 +2807,175 @@ def check_a_lost_reply_thread_makes_the_run_partial():
           (True, 0, True))
 
 
+# Hand-built reply payloads, deliberately minimal rather than copied from a
+# capture: the three shapes the reply loop has to tell apart.
+#   * EMPTY — a continuation that appended nothing. The thread ended
+#     normally; that is a complete answer, not a failure.
+#   * UNPARSEABLE — a continuation that DID append a comment item whose
+#     renderer carries no entity the parser can join. The state classifier
+#     reads it as content and the parser loses it: our bug, a real failure.
+# A third failure shape is exercised below with STATE_ERROR directly.
+REPLY_EMPTY_PAYLOAD = {"onResponseReceivedEndpoints": [
+    {"appendContinuationItemsAction": {"continuationItems": []}}]}
+REPLY_UNPARSEABLE_PAYLOAD = {"onResponseReceivedEndpoints": [
+    {"appendContinuationItemsAction": {"continuationItems": [
+        {"commentThreadRenderer": {"commentViewModel": {}}}]}}]}
+
+
+def check_reply_threads_three_ways_failure_empty_and_clean():
+    """The reply contract on hand-built payloads, end to end.
+
+    Three outcomes, and only the first may degrade the run to partial /
+    exit 6:
+
+      1. a thread answers non-EMPTY with something unparseable — failed,
+         keyed by parent_id, and the whole run is partial with rc 6;
+      2. a thread answers STATE_EMPTY — the normal end of the thread,
+         counted completed and never as a failure;
+      3. every thread answers with rows — the run keeps the pagination
+         loop's own stop reason, with no reply verdict at all.
+
+    Plus the negative: with --replies off, no reply-shaped field may
+    appear in the sidecar, because a failure field on a run that could
+    not have failed a thread reads as an empty accounting rather than
+    as "replies were not requested".
+    """
+    engine = _import_engine("run_core")
+    if engine is None:
+        skip("run_core", "unreachable: run_core needs no driver")
+        return
+
+    watch, page, replies = (FIX["watch"], FIX["comments_top_p1"],
+                            FIX["replies_p1"])
+    parents = [parent for parent, _ in product_parser.reply_tokens(page)]
+    check("the fixture page names reply threads", len(parents) >= 3,
+          "the three scenarios each need a distinct thread")
+
+    # Sanity on the hand-built shapes: the test's expectations rest on the
+    # classifier and parser actually disagreeing about UNPARSEABLE.
+    equal("the empty shape classifies as empty",
+          product_parser.detect_page_state(REPLY_EMPTY_PAYLOAD, 200),
+          product_parser.STATE_EMPTY)
+    equal("the unparseable shape still classifies as content",
+          product_parser.detect_page_state(REPLY_UNPARSEABLE_PAYLOAD, 200),
+          product_parser.STATE_CONTENT)
+    equal("...and parses to zero rows",
+          product_parser.parse_comments(
+              REPLY_UNPARSEABLE_PAYLOAD, video_id=VIDEO_ID, row_cls=Comment),
+          [])
+
+    def run_with(reply_answer, replies_on=True):
+        """Drive _run_comments with one canned answer per reply label."""
+        def fetch(box, pw, args, pool, body, endpoint, label):
+            if label.startswith("replies "):
+                return reply_answer
+            if label.startswith("watch"):
+                return 200, watch, product_parser.STATE_CONTENT, False
+            return 200, page, product_parser.STATE_CONTENT, False
+
+        def body(FakeSession):
+            args = _fault_args(engine, replies=replies_on, pages=1)
+            box = {"session": FakeSession(), "prime_url": "u"}
+            return engine._run_comments(box, None, args, pool=None)
+
+        return _with_stubs(engine, fetch, body)
+
+    # --- 1. failure: non-EMPTY and unparseable must make the run partial --
+    with redirect_stdout(io.StringIO()):
+        rows, meta = run_with(
+            (200, REPLY_UNPARSEABLE_PAYLOAD, product_parser.STATE_CONTENT,
+             False))
+    check("rows gathered before the failed thread still come back", bool(rows))
+    equal("a lost thread sets the reply verdict as stop reason",
+          meta["stop_reason"], "reply_threads_failed")
+    equal("the pagination reason survives beside it",
+          meta["pagination_stop_reason"], "page_cap_reached")
+    failures = meta["reply_failures"]
+    check("the failure is recorded", bool(failures))
+    check("...keyed by parent_id, never a top-level page number",
+          all(set(f) >= {"parent_id", "depth", "state"} and
+              f["parent_id"] in parents and
+              not isinstance(f.get("parent_id"), int) for f in failures))
+    equal("...and says parse_error, the parser-failure name",
+          failures[0]["state"], "parse_error")
+    equal("reply failures never enter the top-level pages_failed list",
+          meta["pages_failed"], [])
+    equal("the three counts are self-consistent (requested = completed + "
+          "failed)",
+          (meta["reply_threads_requested"],
+           meta["reply_threads_completed"], meta["reply_threads_failed"]),
+          (len(parents), len(parents) - len(failures), len(failures)))
+    check("the arithmetic identity holds",
+          meta["reply_threads_requested"]
+          == meta["reply_threads_completed"] + meta["reply_threads_failed"])
+
+    # The same verdict through finish_run: the name must really map to
+    # status partial and exit 6, not just be recorded in the sidecar.
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "reply_failed")
+        extra = {k: v for k, v in meta.items()
+                 if k not in ("stop_reason", "pages_completed",
+                              "pages_failed", "blocked")}
+        with redirect_stdout(io.StringIO()):
+            rc = output_writer.finish_run(
+                rows, out, "json", False, blocked=False,
+                stop_reason=meta["stop_reason"], pages_requested=1,
+                pages_completed=meta["pages_completed"],
+                pages_failed=meta["pages_failed"], start_url="u",
+                final_url="u", mode="comments", extra=extra)
+        sidecar = json.load(open(out + ".meta.json", encoding="utf-8"))
+        equal("reply_threads_failed exits 6", rc, output_writer.EXIT_PARTIAL)
+        equal("...and the sidecar status is partial",
+              sidecar["status"], "partial")
+
+    # A transport-level failure is the other non-EMPTY failure shape.
+    with redirect_stdout(io.StringIO()):
+        rows, meta = run_with(
+            (None, None, product_parser.STATE_ERROR, False))
+    equal("a STATE_ERROR reply also fails its thread",
+          meta["stop_reason"], "reply_threads_failed")
+    equal("...keyed by parent_id with the classifier's state",
+          (meta["reply_failures"][0]["parent_id"],
+           meta["reply_failures"][0]["state"]),
+          (parents[0], product_parser.STATE_ERROR))
+
+    # --- 2. STATE_EMPTY: a thread that ended, not a thread that failed -----
+    with redirect_stdout(io.StringIO()):
+        rows, meta = run_with(
+            (200, REPLY_EMPTY_PAYLOAD, product_parser.STATE_EMPTY, False))
+    equal("an empty thread does not change the pagination stop reason",
+          meta["stop_reason"], "page_cap_reached")
+    equal("...and produces no failure entries", meta["reply_failures"], None)
+    equal("every requested thread counts as completed",
+          (meta["reply_threads_requested"],
+           meta["reply_threads_completed"], meta["reply_threads_failed"]),
+          (len(parents), len(parents), 0))
+
+    # --- 3. every thread served: keep the loop's own reason ----------------
+    with redirect_stdout(io.StringIO()):
+        rows, meta = run_with(
+            (200, replies, product_parser.STATE_CONTENT, False))
+    equal("a fully served run keeps the pagination stop reason",
+          meta["stop_reason"], "page_cap_reached")
+    check("it is not misreported as partial",
+          meta["stop_reason"] in output_writer.COMPLETE_STOP_REASONS)
+    equal("no thread failed",
+          (meta["reply_threads_failed"], meta["reply_failures"]), (0, None))
+    equal("all requested threads completed",
+          meta["reply_threads_completed"], len(parents))
+
+    # --- negative: --replies off carries no reply accounting at all --------
+    with redirect_stdout(io.StringIO()):
+        rows, meta = run_with(
+            (200, replies, product_parser.STATE_CONTENT, False),
+            replies_on=False)
+    reply_keys = [k for k in meta if "repl" in k and k != "replies"]
+    equal("no reply accounting fields exist without --replies",
+          reply_keys, [])
+    check("...and there is nothing for finish_run to call partial",
+          meta["stop_reason"] in output_writer.COMPLETE_STOP_REASONS)
+
+
 def check_a_failed_page_outranks_a_complete_stop_reason():
     """`finish_run` decides completeness from the reason AND the evidence.
 

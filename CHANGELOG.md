@@ -11,6 +11,24 @@ rather than leaving it to be discovered from a bill or a chart.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Reply accounting no longer appears on a run that did not request
+  replies.** With `--replies` off, `pending_replies` is empty by
+  construction, yet the sidecar still carried `reply_failures: null`,
+  `reply_threads_requested/completed/failed` (all zero) and
+  `pagination_stop_reason` — a failure-shaped field on a run that could
+  not have failed any thread. Those keys are now written only when
+  `--replies` was passed. The rest of the reply contract is pinned end to
+  end by an offline check on hand-built payloads: a non-`EMPTY` reply that
+  cannot be parsed records a failure keyed by `parent_id` (never a
+  top-level page number), forces `stop_reason: reply_threads_failed`,
+  keeps the counts self-consistent (`requested = completed + failed`) and
+  exits `6`; a `STATE_EMPTY` thread is the normal end of a thread and
+  counts as completed; when every thread succeeds the run keeps its
+  pagination stop reason (`page_cap_reached` / `pagination_exhausted`)
+  and is not reported partial.
+
 ## [0.4.1] — 2026-10-16
 
 > **A video row without its view count is now a parser failure.** A

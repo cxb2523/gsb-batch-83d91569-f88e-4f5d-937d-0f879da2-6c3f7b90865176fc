@@ -717,6 +717,29 @@ def _run_comments(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any
                            + ("…" if len(reply_failures) > 3 else ""))
             stop_reason = "reply_threads_failed"
 
+    # Reply-thread accounting exists only when the run asked for replies.
+    # With `--replies` off, `pending_replies` is empty by construction and
+    # emitting `reply_failures: null` plus three zero counters would put a
+    # failure-shaped field on a run that could not have failed any thread —
+    # a consumer branching on the field's presence would read a replies-less
+    # run as one whose reply accounting came back empty for a reason.
+    if args.replies:
+        meta.update({
+            # Requested, completed and failed, rather than one number that
+            # counted the threads we INTENDED to expand. `reply_threads_expanded`
+            # reported 20 whether all twenty came back or none did.
+            "reply_threads_requested": len(pending_replies),
+            "reply_threads_completed": len(pending_replies) - len(reply_failures),
+            "reply_threads_failed": len(reply_failures),
+            # None rather than an empty list on a clean run: the field says
+            # "something was lost", so its presence itself is the signal.
+            "reply_failures": reply_failures or None,
+            # The loop's own reason is kept beside the reply verdict because
+            # "we reached the page cap" and "three reply threads failed" are
+            # two different facts and a reader needs both.
+            "pagination_stop_reason": pagination_stop_reason,
+        })
+
     meta.update({
         "stop_reason": stop_reason,
         "pages_completed": completed,
@@ -725,14 +748,6 @@ def _run_comments(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any
         "total_comments": total_comments,
         "comments_collected": len(rows),
         "sample_share_pct": page_flow.sample_share(len(rows), total_comments),
-        # Requested, completed and failed, rather than one number that
-        # counted the threads we INTENDED to expand. `reply_threads_expanded`
-        # reported 20 whether all twenty came back or none did.
-        "reply_threads_requested": len(pending_replies),
-        "reply_threads_completed": len(pending_replies) - len(reply_failures),
-        "reply_threads_failed": len(reply_failures),
-        "reply_failures": reply_failures or None,
-        "pagination_stop_reason": pagination_stop_reason,
         "video": video_row.__dict__ if video_row else None,
     })
     return rows, meta
