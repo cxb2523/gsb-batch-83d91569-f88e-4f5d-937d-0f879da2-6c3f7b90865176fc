@@ -1,0 +1,2 @@
+recipient_locus	recipient_contig	recipient_domain_fraction	donor_domain_fraction	method
+host_locus	host_contig	0.85	0.15	diamond_blastx

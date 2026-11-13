@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bio-annotation artifact contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "genomes", "annotations", "families", "artifacts"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "genomes": {"type": "integer", "minimum": 2},
+    "annotations": {"type": "integer", "minimum": 1},
+    "families": {"type": "integer", "minimum": 1},
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "record_key"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "record_key": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

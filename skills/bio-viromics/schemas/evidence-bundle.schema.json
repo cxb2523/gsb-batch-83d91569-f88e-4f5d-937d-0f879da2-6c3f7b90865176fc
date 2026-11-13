@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Viromics evidence bundle",
+  "type": "object",
+  "required": ["schema_version", "resources", "hypothesis_count", "reflection_stages", "comparative_artifacts"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "hypothesis_count": {"type": "integer", "minimum": 5},
+    "reflection_stages": {"type": "array", "minItems": 4},
+    "comparative_artifacts": {"type": "array", "minItems": 4}
+  }
+}

@@ -1,0 +1,3 @@
+entity_id	entity_type	hit_domain	hit_lineage	bitscore	rank
+virus_gene	query_protein	eukaryota	EukFixture	300	1
+host_locus	recipient_locus	ncldv	VirusFixture	290	1

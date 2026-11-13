@@ -1,0 +1,346 @@
+"""Greyscale-first plotting defaults for matplotlib / seaborn.
+
+This module is the single source of the palette, the rcParams and the dpi values
+for every matplotlib figure of the pack: ``SCREEN_DPI`` (150) for on-screen
+figures and ``EXPORT_DPI`` (300) for saved files. Notebook templates and docs
+import it instead of copying values.
+
+Goal:
+- Publication-quality plots with readable labels, minimal whitespace, and sensible defaults.
+- Series default to neutral greys with distinct line styles; one colorblind-safe
+  accent (``VizConfig.accent``) marks the finding.
+- Works in Jupyter notebooks. Matplotlib-first; uses seaborn if available.
+
+References:
+- Seaborn aesthetics + palettes: https://seaborn.pydata.org/
+- Okabe-Ito colorblind-safe colors: https://jfly.uni-koeln.de/color/
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional, Sequence
+
+import matplotlib as mpl
+from cycler import cycler
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+
+
+SCREEN_DPI = 150  # figure.dpi: figures shown in a notebook or window
+EXPORT_DPI = 300  # savefig.dpi: figures written to PNG, PDF or SVG
+
+
+@dataclass(frozen=True)
+class VizConfig:
+    medium: str = "notebook"      # notebook | paper | slides
+    background: str = "light"     # light | dark
+    font_scale: float = 1.0
+    dpi: int = SCREEN_DPI
+    accent: str = "#D55E00"  # the one highlighted finding
+
+
+TUFTE_COLORS = {
+    "light_bg": "#ffffff",
+    "dark_bg": "#151515",
+    "light_text": "#111111",
+    "dark_text": "#dddddd",
+    "light_secondary": "#666666",
+    "dark_secondary": "#999999",
+    "light_axis": "#cccccc",
+    "dark_axis": "#444444",
+    "series_default": "#666666",
+    "series_default_dark": "#999999",
+    # Okabe-Ito vermillion / orange: colorblind-safe accent for the finding.
+    "highlight": "#D55E00",
+    "highlight_dark": "#E69F00",
+}
+
+# Neutral series cycle: grey steps plus line styles, so series stay
+# distinguishable in greyscale print without relying on color.
+GREY_SERIES = ["#333333", "#7a7a7a", "#a8a8a8", "#555555"]
+GREY_SERIES_DARK = ["#dddddd", "#999999", "#6e6e6e", "#bbbbbb"]
+LINE_STYLES = ["-", "--", ":", "-."]
+
+# seaborn has no "slides" context; "talk" is its presentation size.
+SEABORN_CONTEXTS = {"paper": "paper", "notebook": "notebook", "slides": "talk"}
+
+
+def _maybe_set_retina() -> None:
+    """Make notebook output crisper if running inside IPython."""
+    try:
+        from IPython import get_ipython  # type: ignore
+        ip = get_ipython()
+        if ip is not None:
+            ip.run_line_magic("config", "InlineBackend.figure_format = 'retina'")
+    except Exception:
+        pass
+
+
+def set_beautiful_style(
+    *,
+    medium: str = "notebook",
+    background: str = "light",
+    font_scale: float = 1.0,
+    dpi: int = SCREEN_DPI,
+) -> VizConfig:
+    """Set global plotting defaults.
+
+    Parameters
+    ----------
+    medium:
+        notebook | paper | slides
+    background:
+        light | dark
+    font_scale:
+        Additional scale factor applied to font sizes.
+    dpi:
+        Figure DPI for on-screen rendering (``SCREEN_DPI``). Saved files always use
+        ``EXPORT_DPI``.
+    """
+    _maybe_set_retina()
+
+    # Base size ladder (points)
+    base = {
+        "paper":   {"title": 11, "label": 9,  "tick": 8,  "legend": 8},
+        "notebook":{"title": 13, "label": 11, "tick": 10, "legend": 10},
+        "slides":  {"title": 18, "label": 14, "tick": 12, "legend": 12},
+    }.get(medium, {"title": 13, "label": 11, "tick": 10, "legend": 10})
+
+    title = base["title"] * font_scale
+    label = base["label"] * font_scale
+    tick = base["tick"] * font_scale
+    legend = base["legend"] * font_scale
+
+    is_dark = background.lower() == "dark"
+
+    # Tufte-inspired neutral ink colors (avoid pure black/white).
+    fg = TUFTE_COLORS["dark_text"] if is_dark else TUFTE_COLORS["light_text"]
+    grid = TUFTE_COLORS["dark_axis"] if is_dark else TUFTE_COLORS["light_axis"]
+    face = TUFTE_COLORS["dark_bg"] if is_dark else TUFTE_COLORS["light_bg"]
+    secondary = TUFTE_COLORS["dark_secondary"] if is_dark else TUFTE_COLORS["light_secondary"]
+    greys = GREY_SERIES_DARK if is_dark else GREY_SERIES
+    accent = TUFTE_COLORS["highlight_dark"] if is_dark else TUFTE_COLORS["highlight"]
+
+    rc = {
+        # Figure / save
+        "figure.dpi": dpi,
+        "savefig.dpi": EXPORT_DPI,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.02,
+        "figure.facecolor": face,
+        "axes.facecolor": face,
+        # Typography
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans", "Liberation Sans"],
+        "text.color": fg,
+        "axes.labelcolor": secondary,
+        "axes.titlecolor": fg,
+        "font.size": label,
+        "axes.titlesize": title,
+        "axes.labelsize": label,
+        "xtick.color": fg,
+        "ytick.color": fg,
+        "xtick.labelsize": tick,
+        "ytick.labelsize": tick,
+        # Lines / markers: neutral greys first; color only via the accent.
+        "axes.prop_cycle": cycler(color=greys) + cycler(linestyle=LINE_STYLES),
+        "lines.linewidth": 1.5,
+        "lines.markersize": 3,
+        # Axes / spines
+        "axes.edgecolor": grid,
+        "axes.linewidth": 0.5,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.grid": False,
+        "grid.color": grid,
+        "grid.linewidth": 0.5,
+        "grid.alpha": 0.12,
+        # Ticks
+        "xtick.direction": "in",
+        "ytick.direction": "in",
+        "xtick.major.size": 4,
+        "ytick.major.size": 4,
+        "xtick.major.width": 0.5,
+        "ytick.major.width": 0.5,
+        # Legend
+        "legend.frameon": False,
+        "legend.fontsize": legend,
+        "legend.title_fontsize": legend,
+    }
+
+    mpl.rcParams.update(rc)
+
+    # If seaborn is available, use it for coherent themes/palettes.
+    try:
+        import seaborn as sns  # type: ignore
+    except ImportError:
+        sns = None
+    if sns is not None:
+        context = SEABORN_CONTEXTS.get(medium, "notebook")
+        sns.set_theme(style="white", context=context)
+        sns.set_context(context, font_scale=font_scale)
+        mpl.rcParams.update(rc)
+
+    return VizConfig(
+        medium=medium,
+        background=background,
+        font_scale=font_scale,
+        dpi=dpi,
+        accent=accent,
+    )
+
+
+def despine(ax: Axes) -> Axes:
+    """Remove top/right spines and soften left/bottom."""
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_alpha(0.8)
+    ax.spines["bottom"].set_alpha(0.8)
+    return ax
+
+
+def apply_range_frame(ax: Axes, x_data: Sequence[float], y_data: Sequence[float]) -> Axes:
+    """Constrain visible axis lines to the observed data range."""
+    despine(ax)
+    x_values = list(x_data)
+    y_values = list(y_data)
+    if x_values:
+        ax.spines["bottom"].set_bounds(min(x_values), max(x_values))
+    if y_values:
+        ax.spines["left"].set_bounds(min(y_values), max(y_values))
+    ax.tick_params(direction="in", length=3, width=0.5)
+    return ax
+
+
+def direct_label(
+    ax: Axes,
+    x_data: Sequence[float],
+    y_data: Sequence[float],
+    label: str,
+    *,
+    color: Optional[str] = None,
+    offset: tuple[float, float] = (8, 0),
+) -> Axes:
+    """Label a series at its final point instead of using a legend."""
+    x_values = list(x_data)
+    y_values = list(y_data)
+    if not x_values or not y_values:
+        return ax
+    color = color or str(mpl.rcParams["text.color"])
+    ax.annotate(
+        label,
+        xy=(x_values[-1], y_values[-1]),
+        xytext=offset,
+        textcoords="offset points",
+        color=color,
+        fontsize=mpl.rcParams.get("axes.labelsize", 10),
+        va="center",
+    )
+    return ax
+
+
+def annotate_point(
+    ax: Axes,
+    x: float,
+    y: float,
+    text: str,
+    *,
+    color: Optional[str] = None,
+    offset: tuple[float, float] = (0, 24),
+) -> Axes:
+    """Annotate one notable point with a restrained leader line."""
+    color = color or str(mpl.rcParams["text.color"])
+    ax.annotate(
+        text,
+        xy=(x, y),
+        xytext=offset,
+        textcoords="offset points",
+        color=color,
+        fontsize=mpl.rcParams.get("xtick.labelsize", 9),
+        fontstyle="italic",
+        ha="center",
+        arrowprops={"arrowstyle": "-", "color": mpl.rcParams["axes.edgecolor"], "lw": 0.5},
+    )
+    return ax
+
+
+def sparkline(
+    ax: Axes,
+    values: Sequence[float],
+    *,
+    color: Optional[str] = None,
+    accent: str = TUFTE_COLORS["highlight"],
+    mark_min_max: bool = True,
+    mark_endpoint: bool = True,
+) -> Axes:
+    """Draw a compact trend with no axes or grid.
+
+    The minimum and maximum are marked in the secondary grey; the last point
+    takes the one accent colour (pass ``cfg.accent`` for a dark background).
+    """
+    color = color or str(mpl.rcParams["text.color"])
+    data = list(values)
+    if not data:
+        return ax
+    x = list(range(len(data)))
+    ax.plot(x, data, color=color, linewidth=1)
+    if mark_min_max:
+        mark_color = str(mpl.rcParams["axes.labelcolor"])
+        min_i = min(range(len(data)), key=data.__getitem__)
+        max_i = max(range(len(data)), key=data.__getitem__)
+        ax.plot(min_i, data[min_i], "o", color=mark_color, markersize=2)
+        ax.plot(max_i, data[max_i], "o", color=mark_color, markersize=2)
+    if mark_endpoint:
+        ax.plot(x[-1], data[-1], "o", color=accent, markersize=2)
+    ax.set_xlim(0, len(data) - 1)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.grid(False)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    return ax
+
+
+def minimize_whitespace(ax: Axes, *, x: float = 0.02, y: float = 0.05) -> Axes:
+    """Reduce default margins while keeping slight breathing room."""
+    ax.margins(x=x, y=y)
+    return ax
+
+
+def finalize_axes(
+    ax: Axes,
+    *,
+    title: Optional[str] = None,
+    subtitle: Optional[str] = None,
+    xlabel: Optional[str] = None,
+    ylabel: Optional[str] = None,
+    tight: bool = True,
+) -> Axes:
+    """Apply final presentation tweaks."""
+    despine(ax)
+    minimize_whitespace(ax)
+
+    if xlabel is not None:
+        ax.set_xlabel(xlabel)
+    if ylabel is not None:
+        ax.set_ylabel(ylabel)
+
+    if title:
+        ax.set_title(title, loc="left", pad=10, weight="semibold")
+    if subtitle:
+        ax.text(0, 1.02, subtitle, transform=ax.transAxes, ha="left", va="bottom")
+
+    # Prefer y-grid only for most charts
+    ax.xaxis.grid(False)
+
+    if tight:
+        fig = ax.figure
+        # A figure with its own layout engine (constrained_layout=True) keeps it.
+        if isinstance(fig, Figure) and fig.get_layout_engine() is None:
+            try:
+                fig.tight_layout()
+            except Exception:
+                pass
+
+    return ax

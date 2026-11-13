@@ -1,0 +1,6 @@
+hypothesis_id	hypothesis	type	status	evidence	revision_stage
+H1	host to virus transfer	biological	supported	all evidence gates	final
+H2	virus to host transfer	biological	weakened	direction evidence	reciprocal
+H3	assembly contamination	technical	weakened	recipient-dominated context	context
+H4	deep homology	null	weakened	high identity and topology	phylogeny
+H5	reference sampling bias	null	unresolved	normalized lineage counts	final

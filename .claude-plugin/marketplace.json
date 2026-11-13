@@ -1,0 +1,22 @@
+{
+  "name": "omics-skills",
+  "owner": {
+    "name": "Frederik Schulz"
+  },
+  "description": "Omics-focused skills for Claude Code and Cowork.",
+  "plugins": [
+    {
+      "name": "omics-skills",
+      "source": "./",
+      "description": "Skills for omics pipelines, literature discovery, and data visualization.",
+      "category": "Science",
+      "tags": [
+        "bioinformatics",
+        "omics",
+        "genomics",
+        "literature",
+        "data-visualization"
+      ]
+    }
+  ]
+}

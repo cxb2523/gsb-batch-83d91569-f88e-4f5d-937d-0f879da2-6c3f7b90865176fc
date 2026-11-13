@@ -1,0 +1,4 @@
+genome	role	group	genome_size	gene_count	literature_min	literature_max	literature_doi
+query	query	fixturevirus	1200	12	800	2000	10.0000/fixture
+relative_a	reference	fixturevirus	1000	10	800	2000	10.0000/fixture
+relative_b	reference	fixturevirus	1100	11	800	2000	10.0000/fixture

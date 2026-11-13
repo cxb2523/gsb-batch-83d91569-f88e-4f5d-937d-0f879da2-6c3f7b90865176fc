@@ -1,0 +1,6 @@
+stage	observed	qc_status	hypotheses_gained	hypotheses_lost	alternatives	next_check	literature_id
+initial	viral signal detected	conditional	H1		contamination	run CheckV	10.0000/fixture
+detection	marker recovered	passed	H1		shared ancient marker	compare relatives	10.0000/fixture
+qc	assembly passes fixture QC	passed		H4	undetected contamination	inspect context	10.0000/fixture
+comparison	family outlier observed	conditional	H2		sampling bias	expand references	10.0000/fixture
+final	leading hypotheses retained	passed	H1	H4	reference bias	validate H2/H3	10.0000/fixture

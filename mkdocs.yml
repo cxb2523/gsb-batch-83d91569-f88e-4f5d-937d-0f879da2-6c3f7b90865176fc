@@ -1,0 +1,91 @@
+site_name: omics-skills
+site_description: A small skill pack for omics pipelines, literature discovery, notebooks, and data visualization.
+site_url: https://fmschulz.github.io/omics-skills/
+repo_url: https://github.com/fmschulz/omics-skills
+repo_name: fmschulz/omics-skills
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  locale: en
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: grey
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: grey
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+nav:
+  - Home: index.md
+  - Install: INSTALL.md
+  - Skills: skills.md
+  - Agent: agents.md
+  - Validation: biological-validation.md
+  - Tooling: tooling-survey-2026.md
+  - Contributing: CONTRIBUTING.md
+
+# Session handoffs are working notes, not site pages.
+exclude_docs: |
+  handoffs/
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/fmschulz/omics-skills
+
+strict: true

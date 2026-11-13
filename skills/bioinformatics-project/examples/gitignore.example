@@ -1,0 +1,47 @@
+# .gitignore for a bioinformatics project — copy to the project root as `.gitignore`.
+#
+# Principle (Noble 2009, Wilson 2017): version-control ONLY hand-edited files.
+# Generated outputs live in stage subdirectories of each results/ experiment dir and
+# are regenerable by `runall`, so they are ignored. Hand-written files directly in an
+# experiment dir (driver, README, Snakefile, config.yaml, main.nf, one-off scripts)
+# and the lab notebook stay tracked.
+#
+# NOTE: git only treats `#` as a comment at the START of a line. Never put a comment
+# on the same line as a pattern — it becomes part of the pattern and silently breaks.
+
+# --- Raw data: large, immutable, deposited to a repository; never in git ---------
+data/raw/
+*.fastq
+*.fastq.gz
+*.fq.gz
+*.fasta.gz
+*.bam
+*.bai
+*.sam
+*.cram
+
+# --- Environments / caches -------------------------------------------------------
+.pixi/
+.venv/
+__pycache__/
+*.pyc
+
+# --- results/: ignore generated outputs, keep hand-written files ---------------
+# Layout: results/<date>_<name>/<stage>/. The files directly inside an experiment
+# dir are hand-written (driver, README, workflow and config files, one-off scripts)
+# and stay tracked. Everything inside a stage subdirectory is generated.
+#
+# Ignore every stage subdirectory of every experiment dir ...
+results/*/*/
+# ... the provenance file that runall regenerates ...
+results/*/provenance.txt
+# ... and the shared taxonomy output (fixed path, written by the taxonomy stage).
+results/taxonomy/*
+
+# --- Working notes stay local; tasks/METHODS.md is analysis provenance ---------
+tasks/*
+!tasks/METHODS.md
+
+# --- Compiled third-party tools in bin/ (track only your own wrappers) -----------
+bin/checkm
+bin/*.bin

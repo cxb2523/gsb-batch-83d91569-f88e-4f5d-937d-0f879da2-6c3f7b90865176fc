@@ -1,0 +1,78 @@
+arctic_metagenome_2026/                  # one self-contained, project-named dir
+│
+├── README.md                            # study description, setup, how to reproduce
+├── LICENSE                              # MIT for the pipeline code
+├── CITATION.cff                         # authors, version, Zenodo DOI
+├── pixi.toml                            # pinned tool stack (conda-forge + bioconda)
+├── pixi.lock                            # exact resolved versions  [COMMITTED]
+├── .gitignore                           # excludes data blobs + all results/ outputs
+│
+├── tasks/                               # working records; facts have one home
+│   ├── todo.md                          # active, verifiable outcomes
+│   ├── METHODS.md                       # commands, versions, parameters, databases, seeds
+│   └── hypotheses.md                    # >=5 active hypotheses during exploration
+│
+├── data/                                # fixed inputs + metadata; read-only
+│   ├── README.md                        # provenance for every dataset below
+│   ├── raw/                             # immutable; chmod 444; NEVER edited in place
+│   │   ├── stationA_R1.fastq.gz
+│   │   ├── stationA_R2.fastq.gz
+│   │   ├── stationB_R1.fastq.gz
+│   │   └── stationB_R2.fastq.gz
+│   └── samples.tsv                      # tidy sample sheet, key = sample_id
+│
+├── results/                             # all computed experiments (regenerable)
+│   ├── lab_notebook.md                  # dated decision log at the root of results/
+│   │
+│   ├── 2026-03-30_qc_trim_assemble_bin/ # experiment dir: YYYY-MM-DD[_topic]
+│   │   ├── runall                       # driver: reproduces THIS experiment alone
+│   │   ├── README.md                    # what / why for this experiment
+│   │   ├── provenance.txt               # tool versions + seed, written by runall
+│   │   ├── logs/                        # per-stage logs (logical, below the date)
+│   │   │   ├── fastqc.log
+│   │   │   ├── fastp.log
+│   │   │   ├── metaspades.log
+│   │   │   ├── map.log
+│   │   │   └── quickbin.log
+│   │   ├── qc/                          # FastQC + MultiQC outputs   [gitignored]
+│   │   │   └── multiqc_report.html      # top-level summary, drills down per sample
+│   │   ├── trimmed/                     # fastp outputs              [gitignored]
+│   │   │   └── stationA_R1.trim.fastq.gz
+│   │   ├── assembly/                    # metaSPAdes output          [gitignored]
+│   │   │   └── contigs.fasta            # the assembly reads are mapped back onto
+│   │   ├── aligned/                     # standard-format intermediates [gitignored]
+│   │   │   ├── stationA.sorted.bam
+│   │   │   └── stationA.sorted.bam.bai
+│   │   ├── bins/                        # QuickBin bins, container digest in provenance.txt
+│   │   │   ├── bin1.fa                  # quickbin.sh out=bins/bin%.fa  [gitignored]
+│   │   │   └── bin2.fa
+│   │   └── figures/
+│   │       ├── bin_sizes.png
+│   │       └── bin_sizes_data.tsv       # RAW DATA behind the plot (Sandve rule 7)
+│   │
+│   └── 2026-04-10_drep/                 # next experiment, sorts after the first
+│       ├── runall
+│       ├── summarize.py                 # reads partial experiment -> summary.html
+│       ├── README.md
+│       ├── provenance.txt
+│       ├── logs/
+│       ├── derep/                       # dRep dereplication outputs
+│       │   └── Cdb.csv                  # 95% ANI clustering table  [gitignored]
+│       └── figures/
+│           ├── mag_quality.png
+│           └── mag_quality_data.tsv
+│
+├── doc/                                 # one subdir per manuscript + notes
+│   ├── 2026_arctic_mag_paper/
+│   │   ├── manuscript.qmd               # literate doc: numbers knit from results/
+│   │   ├── figures/
+│   │   └── references.bib
+│   └── changelog.md
+│
+├── src/                                 # YOUR own analysis code
+│   ├── parse_checkm.py                  # importable, tested, prints usage statement
+│   └── plot_bin_sizes.py               # reads figures/*_data.tsv, never live state
+│
+└── bin/                                 # third-party / compiled tools + wrappers
+    ├── filter_contigs.py                # project-specific, reused across experiments
+    └── checkm                           # compiled third-party binary  [gitignored]

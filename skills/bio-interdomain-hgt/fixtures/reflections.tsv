@@ -1,0 +1,7 @@
+gate	observed	qc_status	hypotheses_gained	hypotheses_lost	alternatives	next_check	literature_id
+database	all domains represented	passed			sampling bias	run forward search	10.0000/fixture
+forward	high coverage hit	passed	H1		deep homology	run reciprocity	10.0000/fixture
+reciprocal	mutual rank one	passed	H1	H2	tied hit	inspect context	10.0000/fixture
+context	recipient dominated flank	passed	H1	H3	local contamination	build tree	10.0000/fixture
+phylogeny	query nests in donor clade	passed	H1	H4	poor sampling	normalize counts	10.0000/fixture
+final	one confirmed transfer	conditional	H1	H2,H3,H4	reference bias	expand sampling	10.0000/fixture

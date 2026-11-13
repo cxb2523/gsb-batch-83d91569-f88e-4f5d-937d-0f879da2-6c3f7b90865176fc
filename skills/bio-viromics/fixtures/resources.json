@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "resources": {
+    "genomad": {"version": "1.8.0", "sha256": "fixture-tool-pin-genomad"},
+    "checkv": {"version": "1.0.1", "sha256": "fixture-tool-pin-checkv"},
+    "gvclass": {"version": "1.0.0", "sha256": "fixture-tool-pin-gvclass"},
+    "vcontact3": {"version": "3.0.0", "sha256": "fixture-tool-pin-vcontact3"},
+    "genomad_db": {"version": "fixture", "path": "database.fixture", "sha256": "0a14033f218482a76f4e0d8a991b120b45f9edbe27ece7d8f457b8127137532c"},
+    "checkv_db": {"version": "fixture", "path": "database.fixture", "sha256": "0a14033f218482a76f4e0d8a991b120b45f9edbe27ece7d8f457b8127137532c"},
+    "gvclass_db": {"version": "fixture", "path": "database.fixture", "sha256": "0a14033f218482a76f4e0d8a991b120b45f9edbe27ece7d8f457b8127137532c"},
+    "vcontact3_db": {"version": "fixture", "path": "database.fixture", "sha256": "0a14033f218482a76f4e0d8a991b120b45f9edbe27ece7d8f457b8127137532c"}
+  }
+}

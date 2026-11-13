@@ -1,0 +1,2013 @@
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["polars>=1.37.1"]
+# ///
+"""Small helper for grouped polars-dovmed literature queries."""
+
+import argparse
+import concurrent.futures
+import copy
+import csv
+import difflib
+import fcntl
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+# The hosted API is open without a key. The client keeps anonymous callers to
+# this rate on its own; a key lifts the limit. The server enforces its own.
+ANONYMOUS_REQUESTS_PER_MINUTE = 20
+ANONYMOUS_WINDOW_S = 60.0
+HTTP_503_RETRY_DELAYS = (2, 4, 8, 16, 30)
+ASYNC_ENDPOINTS = {
+    "/api/search_literature": "search_literature",
+    "/api/scan_literature_advanced": "scan_literature_advanced",
+}
+SUPPORT_CONCEPT_TOKENS = (
+    "host",
+    "hosts",
+    "infect",
+    "infection",
+    "interact",
+    "interaction",
+    "symbio",
+    "pathway",
+    "metab",
+    "association",
+    "range",
+)
+GENERIC_SUPPORT_TERMS = {
+    "host",
+    "hosts",
+    "infect",
+    "infects",
+    "infected",
+    "infection",
+    "infections",
+    "amoeba",
+    "amoebae",
+    "protist",
+    "protists",
+    "microeukaryote",
+    "microeukaryotes",
+    "symbiont",
+    "symbionts",
+    "association",
+    "associations",
+    "range",
+}
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?;:])\s+|\n+")
+MAX_SENTENCE_CONTEXT_CHARS = 450
+WINDOW_WORDS = 80
+WINDOW_STRIDE = 40
+FULLTEXT_CONTEXT_RADIUS = 260
+MAX_TERM_SPANS_PER_TERM = 4
+MAX_FULLTEXT_CONTEXTS = 36
+CONTEXT_SNIPPET_CHARS = 240
+DEFAULT_LOCAL_REPO = str(Path("~/dev/polars-dovmed").expanduser())
+DEFAULT_LOCAL_SCAN_TIMEOUT = 900
+LOCAL_CORPUS_ENV = {
+    "pmc": "DOVMED_PMC_PARQUET",
+    "biorxiv": "DOVMED_BIORXIV_PARQUET",
+}
+CLEAN_YEAR_BANDS = ("2024_plus", "2021_2023", "2010_2020", "pre_2010")
+RECENT_YEAR_BANDS = ("2024_plus", "2021_2023")
+YEAR_BAND_ALIASES = {
+    "pre_2010": "pre_2010",
+    "pre-2010": "pre_2010",
+    "pre2010": "pre_2010",
+    "before_2010": "pre_2010",
+    "before-2010": "pre_2010",
+    "2010_2020": "2010_2020",
+    "2010-2020": "2010_2020",
+    "2010_to_2020": "2010_2020",
+    "2010to2020": "2010_2020",
+    "2021_2023": "2021_2023",
+    "2021-2023": "2021_2023",
+    "2021_to_2023": "2021_2023",
+    "2021to2023": "2021_2023",
+    "2024_plus": "2024_plus",
+    "2024+": "2024_plus",
+    "post_2023": "2024_plus",
+    "post-2023": "2024_plus",
+    "after_2023": "2024_plus",
+    "after-2023": "2024_plus",
+    "since_2024": "2024_plus",
+    "post_2020": "post_2020",
+    "post-2020": "post_2020",
+    "post2020": "post_2020",
+    "after_2020": "post_2020",
+    "after-2020": "post_2020",
+    "recent": "post_2020",
+}
+
+
+def load_env_file(path):
+    env_path = Path(path).expanduser()
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
+
+def normalize_year_band(value):
+    normalized = str(value).strip().lower()
+    if not normalized or normalized == "all":
+        return None
+    if normalized == "clean_split":
+        return "clean_split"
+    if normalized == "recent_split":
+        return "recent_split"
+    if normalized not in YEAR_BAND_ALIASES:
+        allowed = ", ".join(sorted(set(YEAR_BAND_ALIASES.values()) | {"clean_split", "recent_split"}))
+        raise ValueError(f"unsupported year band '{value}'. Use one of: {allowed}")
+    return YEAR_BAND_ALIASES[normalized]
+
+
+def parse_year_bands(values):
+    bands = []
+    for raw_value in values or []:
+        for item in str(raw_value).split(","):
+            normalized = normalize_year_band(item)
+            if normalized == "clean_split":
+                bands.extend(CLEAN_YEAR_BANDS)
+            elif normalized == "recent_split":
+                bands.extend(RECENT_YEAR_BANDS)
+            elif normalized:
+                bands.append(normalized)
+    deduped = []
+    for band in bands:
+        if band not in deduped:
+            deduped.append(band)
+    return deduped
+
+
+def parse_args():
+    load_env_file("~/.config/polars-dovmed/.env")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--query")
+    parser.add_argument(
+        "--allow-flat-query",
+        action="store_true",
+        help="Explicitly allow exploratory free-text search via /api/search_literature",
+    )
+    parser.add_argument("--queries-file")
+    parser.add_argument("--group", action="append", default=[])
+    parser.add_argument("--details", nargs="+")
+    parser.add_argument(
+        "--mode",
+        choices=["advanced", "discovery"],
+        default="discovery",
+        help="Structured-search mode for --queries-file/--group. Default is discovery for fast candidate retrieval.",
+    )
+    parser.add_argument("--max-results", type=int, default=25)
+    parser.add_argument("--fast-mode", action="store_true")
+    parser.add_argument(
+        "--search-columns",
+        default="title,abstract_text,full_text",
+        help="Comma-separated columns for advanced structured search",
+    )
+    parser.add_argument(
+        "--extract-matches",
+        choices=["primary", "secondary", "both", "none"],
+        default="none",
+        help="Extraction mode for advanced structured search",
+    )
+    parser.add_argument(
+        "--add-group-counts",
+        choices=["primary", "secondary", "both"],
+        default="primary",
+        help="Group-count mode for advanced structured search",
+    )
+    parser.add_argument("--year", type=int)
+    parser.add_argument(
+        "--year-band",
+        choices=[
+            "all",
+            "pre_2010",
+            "2010_2020",
+            "post_2020",
+            "2021_2023",
+            "2024_plus",
+        ],
+        default="all",
+        help="Restrict hosted API search to a materialized publication-year band.",
+    )
+    parser.add_argument(
+        "--year-bands",
+        action="append",
+        default=[],
+        help=(
+            "Fan one API query out over multiple materialized year bands in parallel. "
+            "Use a comma-separated list such as 2024_plus,2021_2023 or the presets "
+            "recent_split and clean_split."
+        ),
+    )
+    parser.add_argument(
+        "--year-band-workers",
+        type=int,
+        default=2,
+        help="Maximum concurrent hosted API jobs for --year-bands.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        help="HTTP timeout, or maximum local scan runtime in seconds (local default: 900)",
+    )
+    parser.add_argument("--base-url", default="https://api.newlineages.com")
+    parser.add_argument(
+        "--corpus",
+        choices=["pmc", "biorxiv", "both"],
+        help="Corpus for API requests and local scans: pmc or biorxiv, one per call.",
+    )
+    parser.add_argument(
+        "--execution-mode",
+        choices=["auto", "api", "local"],
+        default="auto",
+        help="Use the hosted API or force a local parquet-backed scan.",
+    )
+    parser.add_argument(
+        "--local-corpus",
+        choices=["pmc", "biorxiv", "both"],
+        default="pmc",
+        help="Which local corpus alias to use when execution mode resolves to local.",
+    )
+    parser.add_argument(
+        "--local-repo-dir",
+        default=DEFAULT_LOCAL_REPO,
+        help="Path to the local polars-dovmed repo used for local scans.",
+    )
+    parser.add_argument(
+        "--local-parquet-pattern",
+        help=(
+            "Glob pattern or file path for local dovmed scan. Overrides "
+            "DOVMED_PMC_PARQUET/DOVMED_BIORXIV_PARQUET."
+        ),
+    )
+    parser.add_argument(
+        "--local-output-dir",
+        help="Optional output directory for local dovmed scan results.",
+    )
+    parser.add_argument("--corpus-revision", default=os.environ.get("DOVMED_CORPUS_REVISION"), help="Upstream corpus snapshot/revision identifier recorded in local results")
+    parser.add_argument("--save-payload")
+    parser.add_argument("--save-response")
+    parser.add_argument("--save-discovery-payload")
+    parser.add_argument("--save-discovery-response")
+    parser.add_argument(
+        "--details-rerank-limit",
+        type=int,
+        default=8,
+        help="How many discovery candidates to fetch with get_paper_details for second-pass reranking",
+    )
+    parser.add_argument(
+        "--skip-details-rerank",
+        action="store_true",
+        help="Skip the automatic discovery -> details -> rerank second pass",
+    )
+    parser.add_argument(
+        "--force-details-rerank",
+        action="store_true",
+        help=(
+            "Run automatic discovery -> details reranking even for PMC year-band "
+            "searches where details lookups can dominate wall time"
+        ),
+    )
+    parser.add_argument(
+        "--crossref-metadata",
+        action="store_true",
+        help=(
+            "Use bounded Crossref title lookups to fill missing DOI/year/journal "
+            "metadata in the compact summary"
+        ),
+    )
+    parser.add_argument(
+        "--crossref-limit",
+        type=int,
+        default=10,
+        help="Maximum number of incomplete compact records to query in Crossref",
+    )
+    parser.add_argument(
+        "--crossref-email",
+        default="",
+        help=(
+            "Contact address for the Crossref polite pool. Pass it only when the user "
+            "gave one for this purpose; no environment variable supplies it."
+        ),
+    )
+    parser.add_argument(
+        "--auto-advanced-refinement",
+        action="store_true",
+        help="Run an additional advanced structured scan after discovery when the first pass is still too loose",
+    )
+    parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="Use the legacy synchronous request path instead of async jobs",
+    )
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--poll-timeout",
+        type=int,
+        default=900,
+        help="Maximum seconds to wait for async job completion",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=int,
+        default=2,
+        help="Fallback poll interval in seconds when the API does not specify one",
+    )
+    parser.add_argument(
+        "--discovery-fallback",
+        action="store_true",
+        help="If a structured advanced query fails or times out, retry a simplified flat discovery query built from query-group names",
+    )
+    parser.add_argument("--raw", action="store_true")
+    args = parser.parse_args()
+    chosen = sum(
+        bool(value) for value in (args.query, args.queries_file, args.group, args.details)
+    )
+    if chosen != 1:
+        parser.error(
+            "provide exactly one of --query, --queries-file, --group, or --details"
+        )
+    if args.query and not args.allow_flat_query:
+        parser.error(
+            "--query is exploratory free-text search only; use --queries-file/--group with a structured JSON query, "
+            "or pass --allow-flat-query to opt in explicitly"
+        )
+    if args.corpus == "both":
+        parser.error(
+            "--corpus both is not supported (the hosted API answers HTTP 502); "
+            "run --corpus pmc and --corpus biorxiv as separate calls "
+            "and merge the results"
+        )
+    try:
+        args.year_bands = parse_year_bands(args.year_bands)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.year_bands and args.year_band != "all":
+        parser.error("use either --year-band for a single band or --year-bands for parallel fan-out")
+    if args.year_bands and args.details:
+        parser.error("--year-bands applies to search requests, not paper-details lookups")
+    if args.year_band_workers < 1:
+        parser.error("--year-band-workers must be at least 1")
+    if args.timeout is not None and args.timeout < 1:
+        parser.error("--timeout must be at least 1 second")
+    return args
+
+
+def load_api_key():
+    """Return the API key from the environment, or None for anonymous access."""
+    return os.environ.get("POLARS_DOVMED_API_KEY") or None
+
+
+def determine_execution_mode(args):
+    if args.execution_mode != "auto":
+        return args.execution_mode
+    corpus = effective_corpus(args)
+    # --query and --details are only supported by the API path.
+    if args.query or args.details:
+        return "api"
+    if os.environ.get("POLARS_DOVMED_API_KEY"):
+        return "api"
+    # The hosted API answers without a key, so go local only when a local
+    # corpus is configured.
+    env_var = LOCAL_CORPUS_ENV.get(corpus)
+    if args.local_parquet_pattern or (env_var and os.environ.get(env_var)):
+        return "local"
+    return "api"
+
+
+def effective_corpus(args):
+    return args.corpus or args.local_corpus
+
+
+def local_parquet_pattern(args):
+    if args.local_parquet_pattern:
+        return args.local_parquet_pattern
+
+    corpus = effective_corpus(args)
+    env_var = LOCAL_CORPUS_ENV.get(corpus)
+    if not env_var:
+        raise SystemExit(
+            "local corpus 'both' requires --local-parquet-pattern covering both corpora, "
+            "or separate local scans for pmc and biorxiv"
+        )
+    value = os.environ.get(env_var)
+    if value:
+        return value
+    raise SystemExit(
+        f"missing local parquet pattern for {corpus}; set {env_var} or pass "
+        "--local-parquet-pattern. Prepare PMC parquet files with "
+        "https://github.com/UriNeri/polars-dovmed"
+    )
+
+
+def parse_group(spec):
+    if "=" not in spec:
+        raise SystemExit(f"invalid group '{spec}', expected name=term1,term2")
+    name, raw_terms = spec.split("=", 1)
+    terms = [term.strip() for term in raw_terms.split(",") if term.strip()]
+    if not name or not terms:
+        raise SystemExit(f"invalid group '{spec}', expected name=term1,term2")
+    return name, [[term] for term in terms]
+
+
+def load_queries_file(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError as exc:
+        raise SystemExit(f"queries file not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid queries file '{path}': {exc}") from exc
+    if not isinstance(data, dict):
+        raise SystemExit(f"invalid queries file '{path}', expected a JSON object")
+    return data
+
+
+def resolve_year(paper):
+    year = paper.get("year")
+    if isinstance(year, int):
+        return year
+    if isinstance(year, str) and year.isdigit():
+        return int(year)
+    match = re.match(r"(\d{4})", paper.get("publication_date") or "")
+    return int(match.group(1)) if match else None
+
+
+def compact_paper(paper):
+    ranking = paper.get("ranking") or {}
+    triage = paper.get("triage") or {}
+    return {
+        "pmc_id": paper.get("pmc_id"),
+        "pmid": paper.get("pmid"),
+        "corpus": paper.get("corpus"),
+        "source": paper.get("source"),
+        "title": paper.get("title"),
+        "journal": paper.get("journal"),
+        "year": resolve_year(paper),
+        "publication_date": paper.get("publication_date"),
+        "doi": paper.get("doi"),
+        "ranking_score": ranking.get("score"),
+        "title_signal_hits": ranking.get("title_signal_hits"),
+        "abstract_signal_hits": ranking.get("abstract_signal_hits"),
+        "group_count_total": ranking.get("group_count_total"),
+        "total_matches": ranking.get("total_matches"),
+        "triage_score": triage.get("score"),
+        "concept_coverage": triage.get("concept_coverage"),
+        "support_concept_coverage": triage.get("support_concept_coverage"),
+        "support_specificity_score": triage.get("support_specificity_score"),
+        "specific_support_group_hits": triage.get("specific_support_group_hits"),
+        "best_local_context_score": triage.get("best_local_context_score"),
+        "best_local_concept_coverage": triage.get("best_local_concept_coverage"),
+        "local_joint_contexts": triage.get("local_joint_contexts"),
+        "anchor_support_contexts": triage.get("anchor_support_contexts"),
+        "best_local_context_source": triage.get("best_local_context_source"),
+        "best_local_context_snippet": triage.get("best_local_context_snippet"),
+        "matched_concepts": triage.get("matched_concepts"),
+    }
+
+
+def crossref_user_agent(email):
+    contact = f" mailto:{email}" if email else ""
+    return f"omics-skills-polars-dovmed/1.0{contact}"
+
+
+def normalize_title_for_match(title):
+    title = re.sub(r"<[^>]+>", " ", title or "")
+    title = re.sub(r"[^a-z0-9]+", " ", title.lower())
+    return re.sub(r"\s+", " ", title).strip()
+
+
+def title_similarity(left, right):
+    left_norm = normalize_title_for_match(left)
+    right_norm = normalize_title_for_match(right)
+    if not left_norm or not right_norm:
+        return 0.0
+    return difflib.SequenceMatcher(None, left_norm, right_norm).ratio()
+
+
+def first_crossref_value(value):
+    if isinstance(value, list):
+        return str(value[0]) if value else None
+    if value is None:
+        return None
+    return str(value)
+
+
+def crossref_year(item):
+    for field in ("published-print", "published-online", "published", "issued"):
+        parts = item.get(field, {}).get("date-parts", [[]])
+        if parts and parts[0]:
+            try:
+                return int(parts[0][0])
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+# Crossref asks for 1 request/s from anonymous callers and 3/s from polite ones
+# that identify themselves with a mailto. 0.05s would have been 20/s.
+CROSSREF_MIN_INTERVAL = 1.0
+CROSSREF_POLITE_MIN_INTERVAL = 0.34
+_crossref_last_request = 0.0
+
+
+def pace_crossref(email=""):
+    """Space Crossref requests. The enrichment loop fires up to --crossref-limit
+    title lookups back to back; retry backoff only reacts after a refusal."""
+    global _crossref_last_request
+    interval = CROSSREF_POLITE_MIN_INTERVAL if email else CROSSREF_MIN_INTERVAL
+    remaining = interval - (time.monotonic() - _crossref_last_request)
+    if remaining > 0:
+        time.sleep(remaining)
+    _crossref_last_request = time.monotonic()
+
+
+def crossref_title_lookup(title, *, email="", rows=3, timeout=10):
+    pace_crossref(email)
+    params = urllib.parse.urlencode({"query.title": title, "rows": rows})
+    request = urllib.request.Request(
+        f"https://api.crossref.org/works?{params}",
+        headers={"User-Agent": crossref_user_agent(email)},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if payload.get("status") != "ok":
+        return []
+    return payload.get("message", {}).get("items", [])
+
+
+def best_crossref_match(title, *, email="", min_similarity=0.86):
+    candidates = crossref_title_lookup(title, email=email)
+    best = None
+    best_score = 0.0
+    for item in candidates:
+        candidate_title = first_crossref_value(item.get("title")) or ""
+        score = title_similarity(title, candidate_title)
+        if score > best_score:
+            best = item
+            best_score = score
+    if not best or best_score < min_similarity:
+        return None, best_score
+    return best, best_score
+
+
+def apply_crossref_metadata(paper, item, score):
+    enriched = dict(paper)
+    enriched["crossref_match_score"] = round(score, 3)
+    enriched["crossref_title"] = first_crossref_value(item.get("title"))
+    if not enriched.get("doi") and item.get("DOI"):
+        enriched["doi"] = item.get("DOI")
+        enriched["doi_source"] = "crossref"
+    if enriched.get("year") is None:
+        year = crossref_year(item)
+        if year is not None:
+            enriched["year"] = year
+            enriched["year_source"] = "crossref"
+    if not enriched.get("journal"):
+        journal = first_crossref_value(item.get("container-title"))
+        if journal:
+            enriched["journal"] = journal
+            enriched["journal_source"] = "crossref"
+    return enriched
+
+
+def enrich_compact_with_crossref(papers, *, limit=10, email=""):
+    enriched = []
+    lookups = 0
+    matches = 0
+    errors = []
+    for paper in papers:
+        current = dict(paper)
+        needs_lookup = (
+            current.get("title")
+            and (not current.get("doi") or current.get("year") is None or not current.get("journal"))
+        )
+        if needs_lookup and lookups < max(0, limit):
+            lookups += 1
+            try:
+                item, score = best_crossref_match(current["title"], email=email)
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                errors.append({"title": current["title"], "error": str(exc)})
+            else:
+                if item:
+                    matches += 1
+                    current = apply_crossref_metadata(current, item, score)
+                else:
+                    current["crossref_match_score"] = round(score, 3)
+                    current["crossref_status"] = "no_confident_match"
+        enriched.append(current)
+    return enriched, {
+        "enabled": True,
+        "lookups": lookups,
+        "matches": matches,
+        "errors": errors,
+    }
+
+
+def build_structured_request(primary_queries, args):
+    payload = {
+        "primary_queries": primary_queries,
+        "corpus": effective_corpus(args),
+        "year_band": None if args.year_band == "all" else args.year_band,
+        "search_columns": [col.strip() for col in args.search_columns.split(",") if col.strip()],
+        "extract_matches": args.extract_matches,
+        "add_group_counts": args.add_group_counts,
+        "max_results": args.max_results,
+        "mode": args.mode,
+    }
+    return "/api/scan_literature_advanced", payload
+
+
+def build_request(args):
+    if args.details:
+        corpus = effective_corpus(args)
+        if corpus == "biorxiv":
+            return "/api/get_paper_details", {"corpus": corpus, "dois": args.details}
+        return "/api/get_paper_details", {"corpus": corpus, "pmc_ids": args.details}
+    if args.queries_file:
+        return build_structured_request(load_queries_file(args.queries_file), args)
+    if args.group:
+        return build_structured_request(dict(parse_group(spec) for spec in args.group), args)
+    payload = {
+        "query": args.query,
+        "corpus": effective_corpus(args),
+        "year_band": None if args.year_band == "all" else args.year_band,
+        "max_results": args.max_results,
+        "extract_matches": False,
+        "fast_mode": args.fast_mode,
+    }
+    return "/api/search_literature", payload
+
+
+def build_discovery_request(args):
+    if not args.queries_file:
+        raise SystemExit("--discovery-fallback requires --queries-file")
+    original_mode = args.mode
+    args.mode = "discovery"
+    try:
+        return build_structured_request(load_queries_file(args.queries_file), args)
+    finally:
+        args.mode = original_mode
+
+
+def maybe_save_json(path, payload):
+    if not path:
+        return
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def local_output_dir(args):
+    if args.local_output_dir:
+        return Path(args.local_output_dir).expanduser().resolve()
+    if args.save_response:
+        response_path = Path(args.save_response).expanduser()
+        return response_path.with_suffix("").resolve()
+    return Path(tempfile.mkdtemp(prefix="dovmed_local_scan_"))
+
+
+def compact_local_paper(row):
+    publication_date = row.get("publication_date") or ""
+    year = None
+    match = re.match(r"(\d{4})", publication_date)
+    if match:
+        year = int(match.group(1))
+    return {
+        "pmc_id": row.get("pmc_id") or None,
+        "doi": row.get("doi") or None,
+        "title": row.get("title") or None,
+        "journal": row.get("journal") or None,
+        "year": year,
+        "publication_date": publication_date or None,
+        "source": row.get("source") or "pmc",
+        "version": row.get("version"),
+        "total_matches": row.get("total_matches"),
+    }
+
+
+def resolve_pixi_executable():
+    """Resolve pixi from PATH, with the standard user install as a fallback."""
+    executable = shutil.which("pixi")
+    if executable:
+        return executable
+    fallback = Path("~/.pixi/bin/pixi").expanduser()
+    if fallback.is_file() and os.access(fallback, os.X_OK):
+        return str(fallback)
+    raise SystemExit(
+        "pixi is required for local dovmed scans but was not found on PATH or at ~/.pixi/bin/pixi"
+    )
+
+
+def read_flattened_papers(path, max_results):
+    """Read compact scan results without requiring polars in this helper's environment."""
+    if not path.exists():
+        return []
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        papers = []
+        for row in reader:
+            papers.append(compact_local_paper(row))
+            if len(papers) >= max_results:
+                break
+    return papers
+
+
+def read_processed_papers(path, max_results):
+    """Fallback to the upstream processed Parquet when flattened.csv is absent."""
+    if not path.exists():
+        return []
+    import polars as pl
+
+    rows = pl.read_parquet(path).head(max_results).to_dicts()
+    return [compact_local_paper(row) for row in rows]
+
+
+def execute_local_scan(args):
+    if args.query or args.details:
+        raise SystemExit(
+            "local mode currently supports --queries-file or --group, not --query or --details"
+        )
+    if args.year_band != "all":
+        raise SystemExit(
+            "local --year-band is not supported by upstream dovmed; pass a "
+            "year-specific --local-parquet-pattern instead"
+        )
+    if args.group:
+        queries = dict(parse_group(spec) for spec in args.group)
+        query_file = Path(tempfile.mkdtemp(prefix="dovmed_query_")) / "query.json"
+        query_file.write_text(json.dumps(queries, indent=2) + "\n", encoding="utf-8")
+    else:
+        queries = load_queries_file(args.queries_file)
+        query_file = Path(args.queries_file).expanduser().resolve()
+
+    repo_dir = Path(args.local_repo_dir).expanduser().resolve()
+    if not repo_dir.is_dir():
+        raise SystemExit(
+            f"local repo directory not found: {repo_dir}; "
+            "pass --local-repo-dir with a polars-dovmed checkout"
+        )
+    output_dir = local_output_dir(args)
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    parquet_pattern = local_parquet_pattern(args)
+    local_timeout = getattr(args, "timeout", None) or DEFAULT_LOCAL_SCAN_TIMEOUT
+
+    command = [
+        resolve_pixi_executable(),
+        "run",
+        "dovmed",
+        "scan",
+        "--parquet-pattern",
+        parquet_pattern,
+        "--queries-file",
+        str(query_file),
+        "--search-columns",
+        args.search_columns,
+        "--extract-matches",
+        args.extract_matches,
+        "--add-group-counts",
+        args.add_group_counts,
+        "--output-path",
+        str(output_dir),
+    ]
+    if args.verbose:
+        command.append("--verbose")
+
+    payload = {
+        "execution_mode": "local",
+        "corpus": effective_corpus(args),
+        "repo_dir": str(repo_dir),
+        "parquet_pattern": parquet_pattern,
+        "command": command,
+        "primary_queries": queries,
+    }
+    maybe_save_json(args.save_payload, payload)
+
+    try:
+        result = subprocess.run(
+            command,
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=local_timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(
+            f"local dovmed scan timed out after {local_timeout} seconds"
+        ) from exc
+
+    if result.returncode != 0:
+        raise SystemExit(result.stderr.strip() or result.stdout.strip() or "local dovmed scan failed")
+
+    processed_path = output_dir / "processed.parquet"
+    legacy_processed_path = output_dir / "prcoessed.parquet"
+    readable_processed_path = processed_path if processed_path.exists() else legacy_processed_path
+    flattened_path = output_dir / "flattened.csv"
+    papers = read_flattened_papers(flattened_path, args.max_results)
+    source_artifact = "flattened_csv" if papers else None
+    if not papers and readable_processed_path.exists():
+        papers = read_processed_papers(readable_processed_path, args.max_results)
+        source_artifact = "processed_parquet" if papers else None
+
+    response = {
+        "execution_mode": "local",
+        "corpus": effective_corpus(args),
+        "repo_dir": str(repo_dir),
+        "parquet_pattern": parquet_pattern,
+        "command": command,
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "output_dir": str(output_dir),
+        "processed_parquet": str(readable_processed_path)
+        if readable_processed_path.exists()
+        else None,
+        "flattened_csv": str(flattened_path)
+        if flattened_path.exists()
+        else None,
+        "paper_source_artifact": source_artifact,
+        "corpus_revision": getattr(args, "corpus_revision", None) or "unrecorded",
+        "papers": papers,
+    }
+    maybe_save_json(args.save_response, response)
+    return response
+
+
+def companion_json_path(path, suffix):
+    if not path:
+        return None
+    output = Path(path)
+    ext = output.suffix or ".json"
+    return str(output.with_name(f"{output.stem}_{suffix}{ext}"))
+
+
+def validate_authenticated_base_url(base_url):
+    parsed = urllib.parse.urlparse(base_url)
+    hostname = (parsed.hostname or "").lower()
+    if parsed.scheme == "https":
+        return
+    if parsed.scheme == "http" and hostname in {"127.0.0.1", "localhost", "::1"}:
+        return
+    raise ValueError("authenticated API requests require HTTPS or a loopback HTTP URL")
+
+
+def make_request(base_url, endpoint, api_key, *, method="GET", payload=None):
+    validate_authenticated_base_url(base_url)
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+    return urllib.request.Request(
+        f"{base_url}{endpoint}",
+        data=data,
+        headers={
+            **headers,
+        },
+        method=method,
+    )
+
+
+def default_state_dir() -> Path:
+    """Return the directory that holds the cross-process pacer state."""
+    return Path(
+        os.environ.get(
+            "POLARS_DOVMED_STATE_DIR",
+            Path.home() / ".cache" / "omics-skills" / "polars-dovmed",
+        )
+    )
+
+
+class RateLimitStateError(RuntimeError):
+    """The shared anonymous rate-limit state cannot be locked, read or written."""
+
+
+def wait_for_anonymous_slot(
+    state_dir: Path | str | None = None,
+    *,
+    limit: int = ANONYMOUS_REQUESTS_PER_MINUTE,
+    window_s: float = ANONYMOUS_WINDOW_S,
+) -> None:
+    """Block until fewer than `limit` requests started in the last `window_s`.
+
+    The start times are wall-clock seconds in a file under an exclusive lock,
+    so concurrent CLI runs and the year-band threads share one budget.
+
+    Raises:
+        RateLimitStateError: The state cannot be locked, read or written. The
+            request is refused rather than sent unpaced.
+    """
+    state_dir = Path(state_dir) if state_dir else default_state_dir()
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        with (state_dir / "anonymous-requests.lock").open(
+            "a+", encoding="utf-8"
+        ) as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            state_path = state_dir / "anonymous-requests.json"
+            now = time.time()
+            recent = [
+                t
+                for t in read_request_times(state_path)
+                if now - t < window_s and t - now <= window_s
+            ]
+            if len(recent) >= limit:
+                time.sleep(max(0.0, recent[-limit] + window_s - now))
+                now = time.time()
+                recent = [t for t in recent if now - t < window_s]
+            recent.append(now)
+            write_request_times(state_path, recent[-limit:])
+    except OSError as err:
+        raise RateLimitStateError(
+            f"cannot use the anonymous rate-limit state in {state_dir}: {err}. "
+            "Fix the directory (set POLARS_DOVMED_STATE_DIR to a writable one) "
+            "or use an API key (POLARS_DOVMED_API_KEY), which removes the limit."
+        ) from err
+
+
+def read_request_times(state_path: Path) -> list[float]:
+    """Return the recorded request start times, oldest first.
+
+    A missing file is an empty budget.
+
+    Raises:
+        RateLimitStateError: The file is not a JSON list of finite numbers.
+        OSError: The file exists but cannot be read.
+    """
+    try:
+        text = state_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    try:
+        times = json.loads(text)
+    except ValueError:
+        times = None
+    if not isinstance(times, list) or not all(
+        isinstance(t, (int, float)) and not isinstance(t, bool) and math.isfinite(t)
+        for t in times
+    ):
+        raise RateLimitStateError(
+            f"the anonymous rate-limit state file {state_path} is corrupt. "
+            f"Delete {state_path} to start a new budget, or use "
+            "an API key (POLARS_DOVMED_API_KEY), which removes the limit."
+        )
+    return sorted(times)
+
+
+def write_request_times(state_path: Path, times: list[float]) -> None:
+    """Replace the state file atomically; the caller holds the lock."""
+    handle, temp_name = tempfile.mkstemp(
+        dir=state_path.parent, prefix=f".{state_path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as temp_file:
+            json.dump(times, temp_file)
+        Path(temp_name).replace(state_path)
+    except BaseException:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+
+
+def request_json(base_url, endpoint, api_key, *, timeout, method="GET", payload=None):
+    request = make_request(
+        base_url,
+        endpoint,
+        api_key,
+        method=method,
+        payload=payload,
+    )
+    attempt = 0
+    while True:
+        if not api_key:
+            wait_for_anonymous_slot()
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as err:
+            if err.code != 503 or attempt == len(HTTP_503_RETRY_DELAYS):
+                raise
+            wait = HTTP_503_RETRY_DELAYS[attempt]
+            try:
+                retry_after = float((err.headers or {}).get("Retry-After", ""))
+            except (TypeError, ValueError):
+                retry_after = None
+            if (
+                retry_after is not None
+                and math.isfinite(retry_after)
+                and retry_after >= 0
+            ):
+                wait = min(retry_after, 60)
+            print(
+                f"HTTP 503; retry in {wait:g}s "
+                f"({attempt + 1}/{len(HTTP_503_RETRY_DELAYS)})",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+            attempt += 1
+
+
+def post_json(base_url, endpoint, api_key, payload, timeout):
+    return request_json(
+        base_url,
+        endpoint,
+        api_key,
+        timeout=timeout,
+        method="POST",
+        payload=payload,
+    )
+
+
+def build_submitted_request(endpoint, payload, use_async_jobs):
+    if not use_async_jobs:
+        return endpoint, payload
+    return "/api/jobs", {
+        "job_type": ASYNC_ENDPOINTS[endpoint],
+        "payload": payload,
+    }
+
+
+def build_parallel_submitted_request(endpoint, payload, year_bands, use_async_jobs):
+    requests = []
+    for band in year_bands:
+        band_payload = copy.deepcopy(payload)
+        band_payload["year_band"] = band
+        submitted_endpoint, submitted_payload = build_submitted_request(
+            endpoint,
+            band_payload,
+            use_async_jobs,
+        )
+        requests.append(
+            {
+                "year_band": band,
+                "endpoint": submitted_endpoint,
+                "payload": submitted_payload,
+                "target_endpoint": endpoint,
+                "target_payload": band_payload,
+            }
+        )
+    return {
+        "parallel_year_bands": year_bands,
+        "requests": requests,
+    }
+
+
+def run_async_job(
+    base_url,
+    endpoint,
+    api_key,
+    payload,
+    *,
+    poll_timeout,
+    poll_interval,
+):
+    submitted_endpoint, submitted_payload = build_submitted_request(
+        endpoint,
+        payload,
+        use_async_jobs=True,
+    )
+    job = post_json(
+        base_url,
+        submitted_endpoint,
+        api_key,
+        submitted_payload,
+        timeout=min(max(poll_timeout, 30), 120),
+    )
+    job_id = job.get("job_id")
+    if not job_id:
+        raise RuntimeError(f"async job submission failed: {job}")
+
+    deadline = time.monotonic() + poll_timeout
+    result_endpoint = f"/api/jobs/{job_id}/result"
+    while True:
+        result_wrapper = request_json(
+            base_url,
+            result_endpoint,
+            api_key,
+            timeout=60,
+        )
+        status = result_wrapper.get("status")
+        if status == "succeeded":
+            result = result_wrapper.get("result")
+            if isinstance(result, dict):
+                return result
+            raise RuntimeError(f"async job {job_id} succeeded without a JSON result")
+        if status == "failed":
+            result = result_wrapper.get("result") or {}
+            error = result_wrapper.get("error") or result.get("error") or "async job failed"
+            raise RuntimeError(f"async job {job_id} failed: {error}")
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"async job {job_id} timed out after {poll_timeout}s"
+            )
+        sleep_for = result_wrapper.get("poll_after_sec") or poll_interval
+        time.sleep(max(1, int(sleep_for)))
+
+
+def execute_request(
+    base_url,
+    endpoint,
+    api_key,
+    payload,
+    *,
+    timeout,
+    use_async_jobs,
+    poll_timeout,
+    poll_interval,
+):
+    try:
+        if use_async_jobs:
+            return run_async_job(
+                base_url,
+                endpoint,
+                api_key,
+                payload,
+                poll_timeout=poll_timeout,
+                poll_interval=poll_interval,
+            )
+        return post_json(base_url, endpoint, api_key, payload, timeout)
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(
+            f"http error {exc.code}: {exc.read().decode('utf-8')}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"request failed: {exc.reason}") from exc
+
+
+def should_use_async_jobs(args, endpoint, payload):
+    if args.sync or endpoint not in ASYNC_ENDPOINTS:
+        return False
+    if (
+        args.year_bands
+        and payload.get("corpus") == "pmc"
+        and payload.get("mode") == "discovery"
+    ):
+        return False
+    return True
+
+
+def should_run_details_rerank(args, endpoint, payload, result):
+    if (
+        args.skip_details_rerank
+        or not endpoint.endswith("advanced")
+        or payload.get("mode") != "discovery"
+        or not payload.get("primary_queries")
+        or not result.get("papers")
+    ):
+        return False
+    if (
+        args.year_bands
+        and payload.get("corpus") == "pmc"
+        and not args.force_details_rerank
+    ):
+        return False
+    return True
+
+
+def paper_identity(paper):
+    corpus = paper.get("corpus") or paper.get("source") or "pmc"
+    for key in ("pmc_id", "doi", "pmid"):
+        value = paper.get(key)
+        if value:
+            return corpus, key, str(value).lower()
+    return (
+        corpus,
+        "title_year",
+        str(paper.get("title") or "").strip().lower(),
+        resolve_year(paper),
+    )
+
+
+def merge_parallel_year_band_results(year_bands, band_results, elapsed_ms):
+    per_band_by_name = {item["year_band"]: item for item in band_results}
+    papers = []
+    seen = set()
+    total_found = 0
+    summaries = []
+    failures = []
+    for band in year_bands:
+        band_item = per_band_by_name.get(band)
+        if not band_item:
+            continue
+        if band_item.get("error"):
+            failures.append({"year_band": band, "error": band_item["error"]})
+            continue
+        result = band_item["result"]
+        total_found += result.get("total_found") or 0
+        band_papers = result.get("papers") or []
+        summaries.append(
+            {
+                "year_band": band,
+                "elapsed_ms": result.get("elapsed_ms"),
+                "total_found": result.get("total_found"),
+                "returned": len(band_papers),
+                "strategy_used": result.get("strategy_used"),
+            }
+        )
+        for paper in band_papers:
+            key = paper_identity(paper)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged_paper = dict(paper)
+            merged_paper.setdefault("search_year_band", band)
+            papers.append(merged_paper)
+    return {
+        "strategy_used": "parallel_year_bands",
+        "parallel_year_bands": list(year_bands),
+        "elapsed_ms": elapsed_ms,
+        "total_found": total_found,
+        "papers": papers,
+        "year_band_results": summaries,
+        "year_band_errors": failures,
+    }
+
+
+def execute_parallel_year_band_requests(
+    args,
+    endpoint,
+    api_key,
+    payload,
+    *,
+    timeout,
+    use_async_jobs,
+    poll_timeout,
+    poll_interval,
+):
+    if endpoint not in ASYNC_ENDPOINTS:
+        raise RuntimeError("--year-bands only supports search endpoints")
+    year_bands = list(args.year_bands)
+    max_workers = min(args.year_band_workers, len(year_bands))
+    started = time.monotonic()
+
+    def run_band(band):
+        band_payload = copy.deepcopy(payload)
+        band_payload["year_band"] = band
+        try:
+            result = execute_request(
+                args.base_url,
+                endpoint,
+                api_key,
+                band_payload,
+                timeout=timeout,
+                use_async_jobs=use_async_jobs,
+                poll_timeout=poll_timeout,
+                poll_interval=poll_interval,
+            )
+            return {"year_band": band, "result": result}
+        except Exception as exc:
+            return {"year_band": band, "error": str(exc)}
+
+    band_results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(run_band, band) for band in year_bands]
+        for future in concurrent.futures.as_completed(futures):
+            band_results.append(future.result())
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    merged = merge_parallel_year_band_results(year_bands, band_results, elapsed_ms)
+    if not merged["papers"] and merged["year_band_errors"]:
+        errors = "; ".join(
+            f"{item['year_band']}: {item['error']}" for item in merged["year_band_errors"]
+        )
+        raise RuntimeError(f"parallel year-band search failed: {errors}")
+    return merged
+
+
+def summarize_papers(papers, target_year):
+    kept = []
+    missing_year = 0
+    filtered_year = 0
+    for paper in papers:
+        compact = compact_paper(paper)
+        paper_year = compact["year"]
+        if target_year is None:
+            kept.append(compact)
+            continue
+        if paper_year is None:
+            missing_year += 1
+            continue
+        if paper_year == target_year:
+            kept.append(compact)
+        else:
+            filtered_year += 1
+    return kept, missing_year, filtered_year
+
+
+def has_incomplete_citation(papers):
+    for paper in papers:
+        if paper["year"] is None or not paper.get("doi"):
+            return True
+    return False
+
+
+def normalize_pattern(pattern):
+    return pattern.replace("(?i)", "")
+
+
+def pattern_matches_text(pattern, text):
+    if not text:
+        return False
+    cleaned = normalize_pattern(pattern)
+    try:
+        return re.search(cleaned, text, flags=re.IGNORECASE) is not None
+    except re.error:
+        return re.search(re.escape(cleaned), text, flags=re.IGNORECASE) is not None
+
+
+def field_texts(paper):
+    return {
+        "title": paper.get("title") or "",
+        "abstract": paper.get("abstract_text") or paper.get("abstract") or "",
+        "full_text": paper.get("full_text") or "",
+    }
+
+
+def normalize_space(text):
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def truncate_text(text, limit=CONTEXT_SNIPPET_CHARS):
+    normalized = normalize_space(text)
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3].rstrip() + "..."
+
+
+def is_support_concept(concept_name):
+    lower = concept_name.lower()
+    return any(token in lower for token in SUPPORT_CONCEPT_TOKENS)
+
+
+def term_specificity(term):
+    cleaned = normalize_pattern(term).strip().strip("\"'").lower()
+    if not cleaned:
+        return 0.0
+    score = 1.0
+    if cleaned in GENERIC_SUPPORT_TERMS:
+        score -= 0.6
+    if " " in cleaned:
+        score += 2.0
+    if "-" in cleaned or "/" in cleaned:
+        score += 0.5
+    if len(cleaned) >= 10:
+        score += 0.8
+    if any(char.isdigit() for char in cleaned):
+        score += 0.5
+    return max(score, 0.2)
+
+
+def group_specificity(group):
+    return max((term_specificity(term) for term in group if term), default=0.0)
+
+
+def split_into_word_windows(text, max_words=WINDOW_WORDS, stride=WINDOW_STRIDE):
+    words = normalize_space(text).split()
+    if not words:
+        return []
+    if len(words) <= max_words:
+        return [" ".join(words)]
+    windows = []
+    for start in range(0, len(words), stride):
+        chunk = words[start : start + max_words]
+        if not chunk:
+            break
+        windows.append(" ".join(chunk))
+        if start + max_words >= len(words):
+            break
+    return windows
+
+
+def split_into_sentence_contexts(text):
+    normalized = normalize_space(text)
+    if not normalized:
+        return []
+    pieces = [piece.strip() for piece in SENTENCE_SPLIT_RE.split(normalized) if piece.strip()]
+    contexts = []
+    for piece in pieces:
+        if len(piece) <= MAX_SENTENCE_CONTEXT_CHARS:
+            contexts.append(piece)
+        else:
+            contexts.extend(split_into_word_windows(piece))
+    return contexts
+
+
+def find_pattern_spans(pattern, text, max_hits=MAX_TERM_SPANS_PER_TERM):
+    if not text:
+        return []
+    cleaned = normalize_pattern(pattern)
+    try:
+        regex = re.compile(cleaned, flags=re.IGNORECASE)
+    except re.error:
+        regex = re.compile(re.escape(cleaned), flags=re.IGNORECASE)
+    spans = []
+    for match in regex.finditer(text):
+        spans.append(match.span())
+        if len(spans) >= max_hits:
+            break
+    return spans
+
+
+def merge_windows(windows):
+    if not windows:
+        return []
+    merged = []
+    for start, end in sorted(windows):
+        if not merged or start > merged[-1][1] + 40:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return [(start, end) for start, end in merged]
+
+
+def build_local_contexts(paper, primary_queries):
+    texts = field_texts(paper)
+    contexts = []
+    seen = set()
+
+    def add_context(source, text):
+        normalized = normalize_space(text)
+        if not normalized:
+            return
+        key = (source, normalized)
+        if key in seen:
+            return
+        seen.add(key)
+        contexts.append({"source": source, "text": normalized})
+
+    if texts["title"]:
+        add_context("title", texts["title"])
+    for sentence in split_into_sentence_contexts(texts["abstract"]):
+        add_context("abstract", sentence)
+
+    full_text = texts["full_text"]
+    if full_text:
+        windows = []
+        for concept, groups in primary_queries.items():
+            if concept == "disqualifying_terms":
+                continue
+            for group in groups:
+                for term in group:
+                    for start, end in find_pattern_spans(term, full_text):
+                        windows.append(
+                            (
+                                max(0, start - FULLTEXT_CONTEXT_RADIUS),
+                                min(len(full_text), end + FULLTEXT_CONTEXT_RADIUS),
+                            )
+                        )
+        for start, end in merge_windows(windows)[:MAX_FULLTEXT_CONTEXTS]:
+            for sentence in split_into_sentence_contexts(full_text[start:end]):
+                add_context("full_text", sentence)
+    return contexts
+
+
+def analyze_context_against_queries(text, primary_queries):
+    matched_group_counts = {}
+    matched_group_scores = {}
+    specific_support_group_hits = 0
+    support_specificity_score = 0.0
+    for concept, groups in primary_queries.items():
+        if concept == "disqualifying_terms":
+            continue
+        matched_groups = 0
+        matched_score = 0.0
+        for group in groups:
+            terms = [term for term in group if term]
+            if terms and all(pattern_matches_text(term, text) for term in terms):
+                matched_groups += 1
+                specificity = group_specificity(group)
+                matched_score += specificity
+                if is_support_concept(concept) and specificity >= 2.0:
+                    specific_support_group_hits += 1
+        matched_group_counts[concept] = matched_groups
+        matched_group_scores[concept] = round(matched_score, 3)
+        if is_support_concept(concept):
+            support_specificity_score += matched_score
+    matched_concepts = [concept for concept, count in matched_group_counts.items() if count > 0]
+    support_concepts = [concept for concept in matched_concepts if is_support_concept(concept)]
+    return {
+        "matched_group_counts": matched_group_counts,
+        "matched_group_scores": matched_group_scores,
+        "matched_concepts": matched_concepts,
+        "concept_coverage": len(matched_concepts),
+        "support_concept_coverage": len(support_concepts),
+        "support_specificity_score": round(support_specificity_score, 3),
+        "specific_support_group_hits": specific_support_group_hits,
+        "total_group_matches": sum(matched_group_counts.values()),
+    }
+
+
+def analyze_paper_against_queries(paper, primary_queries):
+    texts = field_texts(paper)
+    combined_text = " ".join(value for value in texts.values() if value)
+    analysis = analyze_context_against_queries(combined_text, primary_queries)
+    support_groups = [
+        groups
+        for concept, groups in primary_queries.items()
+        if concept != "disqualifying_terms"
+        and analysis["matched_group_counts"][concept] > 0
+        and is_support_concept(concept)
+    ]
+    for field, key in (
+        ("title", "title_support_hits"),
+        ("abstract", "abstract_support_hits"),
+        ("full_text", "full_text_support_hits"),
+    ):
+        analysis[key] = sum(
+            any(
+                group
+                and all(
+                    pattern_matches_text(term, texts[field]) for term in group if term
+                )
+                for group in groups
+            )
+            for groups in support_groups
+        )
+    return analysis
+
+
+def analyze_local_contexts(paper, primary_queries):
+    contexts = build_local_contexts(paper, primary_queries)
+    best = None
+    local_joint_contexts = 0
+    anchor_support_contexts = 0
+
+    for context in contexts:
+        analysis = analyze_context_against_queries(context["text"], primary_queries)
+        if analysis["concept_coverage"] == 0:
+            continue
+        local_score = (
+            analysis["concept_coverage"] * 220
+            + analysis["support_concept_coverage"] * 120
+            + int(analysis["support_specificity_score"] * 130)
+            + analysis["specific_support_group_hits"] * 95
+            + analysis["total_group_matches"] * 18
+        )
+        if analysis["concept_coverage"] >= 2:
+            local_joint_contexts += 1
+            local_score += 120
+        if analysis["support_concept_coverage"] > 0 and analysis["concept_coverage"] > analysis["support_concept_coverage"]:
+            anchor_support_contexts += 1
+            local_score += 110
+        if context["source"] == "title":
+            local_score += 40
+        elif context["source"] == "abstract":
+            local_score += 20
+
+        candidate = {
+            "score": local_score,
+            "source": context["source"],
+            "snippet": truncate_text(context["text"]),
+            **analysis,
+        }
+        if best is None or (
+            candidate["score"],
+            candidate["concept_coverage"],
+            candidate["support_concept_coverage"],
+        ) > (
+            best["score"],
+            best["concept_coverage"],
+            best["support_concept_coverage"],
+        ):
+            best = candidate
+
+    if best is None:
+        return {
+            "best_local_context_score": 0,
+            "best_local_concept_coverage": 0,
+            "best_local_context_source": None,
+            "best_local_context_snippet": None,
+            "local_joint_contexts": 0,
+            "anchor_support_contexts": 0,
+        }
+    return {
+        "best_local_context_score": best["score"],
+        "best_local_concept_coverage": best["concept_coverage"],
+        "best_local_context_source": best["source"],
+        "best_local_context_snippet": best["snippet"],
+        "local_joint_contexts": local_joint_contexts,
+        "anchor_support_contexts": anchor_support_contexts,
+    }
+
+
+def triage_score(paper, analysis):
+    discovery_ranking = paper.get("ranking") or {}
+    score = (
+        int(discovery_ranking.get("score") or 0)
+        + analysis["concept_coverage"] * 240
+        + analysis["support_concept_coverage"] * 120
+        + int(analysis["support_specificity_score"] * 110)
+        + analysis["specific_support_group_hits"] * 90
+        + analysis["title_support_hits"] * 120
+        + analysis["abstract_support_hits"] * 70
+        + analysis["full_text_support_hits"] * 25
+        + analysis["total_group_matches"] * 20
+        + analysis["best_local_context_score"] * 2
+        + analysis["local_joint_contexts"] * 90
+        + analysis["anchor_support_contexts"] * 110
+    )
+    if analysis["support_concept_coverage"] > 0 and analysis["specific_support_group_hits"] == 0:
+        score -= 80
+    if analysis["support_concept_coverage"] > 0 and analysis["best_local_concept_coverage"] < 2:
+        score -= 140
+    return score
+
+
+def paper_lookup_key(paper):
+    return paper.get("pmc_id") or (paper.get("doi") or "").strip().lower()
+
+
+def merge_and_rerank_details(discovery_result, details_result, primary_queries):
+    discovery_by_id = {
+        paper_lookup_key(paper): paper for paper in discovery_result.get("papers") or []
+    }
+    triaged = []
+    for paper in details_result.get("papers") or []:
+        discovery_paper = discovery_by_id.get(paper_lookup_key(paper), {})
+        analysis = analyze_paper_against_queries(paper, primary_queries)
+        analysis.update(analyze_local_contexts(paper, primary_queries))
+        triaged_paper = dict(paper)
+        triaged_paper["ranking"] = discovery_paper.get("ranking") or {}
+        triaged_paper["triage"] = {
+            "score": triage_score(discovery_paper, analysis),
+            **analysis,
+        }
+        triaged.append(triaged_paper)
+    triaged.sort(
+        key=lambda paper: (
+            paper["triage"]["score"],
+            paper["triage"]["best_local_context_score"],
+            paper["triage"]["support_concept_coverage"],
+            paper["triage"]["concept_coverage"],
+            (paper.get("ranking") or {}).get("score") or 0,
+        ),
+        reverse=True,
+    )
+    return triaged
+
+
+def recommended_next_step(triaged_papers, primary_queries):
+    concept_count = len([key for key in primary_queries if key != "disqualifying_terms"])
+    if not triaged_papers:
+        return "advanced_refinement_recommended"
+    top = triaged_papers[0].get("triage") or {}
+    if concept_count > 1 and top.get("concept_coverage", 0) < min(2, concept_count):
+        return "advanced_refinement_recommended"
+    if any(is_support_concept(key) for key in primary_queries if key != "disqualifying_terms"):
+        if top.get("support_concept_coverage", 0) == 0:
+            return "advanced_refinement_recommended"
+    return "details_triage_sufficient"
+
+
+def main():
+    args = parse_args()
+    execution_mode = determine_execution_mode(args)
+
+    if execution_mode == "local":
+        if args.year_bands:
+            raise SystemExit(
+                "--year-bands parallel fan-out is supported for hosted API mode; "
+                "pass a year-specific --local-parquet-pattern for local scans"
+            )
+        result = execute_local_scan(args)
+        if args.raw:
+            print(json.dumps(result, indent=2))
+            return
+        summary = {
+            "endpoint": "local_scan",
+            "execution_mode": "local",
+            "corpus": effective_corpus(args),
+            "returned": len(result.get("papers") or []),
+            "output_dir": result.get("output_dir"),
+            "processed_parquet": result.get("processed_parquet"),
+            "flattened_csv": result.get("flattened_csv"),
+            "papers": result.get("papers") or [],
+            "warnings": [],
+        }
+        print(json.dumps(summary, indent=2))
+        return
+
+    api_key = load_api_key()
+    endpoint, payload = build_request(args)
+    timeout = args.timeout or (600 if endpoint.endswith("advanced") else 120)
+    use_async_jobs = should_use_async_jobs(args, endpoint, payload)
+    if args.year_bands:
+        submitted_payload_info = build_parallel_submitted_request(
+            endpoint,
+            payload,
+            args.year_bands,
+            use_async_jobs,
+        )
+    else:
+        submitted_endpoint, submitted_payload = build_submitted_request(
+            endpoint,
+            payload,
+            use_async_jobs,
+        )
+        submitted_payload_info = {
+            "endpoint": submitted_endpoint,
+            "payload": submitted_payload,
+            "target_endpoint": endpoint,
+            "target_payload": payload,
+        }
+    maybe_save_json(args.save_payload, submitted_payload_info)
+    try:
+        if args.year_bands:
+            result = execute_parallel_year_band_requests(
+                args,
+                endpoint,
+                api_key,
+                payload,
+                timeout=timeout,
+                use_async_jobs=use_async_jobs,
+                poll_timeout=args.poll_timeout,
+                poll_interval=args.poll_interval,
+            )
+        else:
+            result = execute_request(
+                args.base_url,
+                endpoint,
+                api_key,
+                payload,
+                timeout=timeout,
+                use_async_jobs=use_async_jobs,
+                poll_timeout=args.poll_timeout,
+                poll_interval=args.poll_interval,
+            )
+    except RuntimeError as exc:
+        if args.discovery_fallback and endpoint.endswith("advanced"):
+            endpoint, payload = build_discovery_request(args)
+            use_async_jobs = should_use_async_jobs(args, endpoint, payload)
+            if args.year_bands:
+                submitted_payload_info = build_parallel_submitted_request(
+                    endpoint,
+                    payload,
+                    args.year_bands,
+                    use_async_jobs,
+                )
+            else:
+                submitted_endpoint, submitted_payload = build_submitted_request(
+                    endpoint,
+                    payload,
+                    use_async_jobs,
+                )
+                submitted_payload_info = {
+                    "endpoint": submitted_endpoint,
+                    "payload": submitted_payload,
+                    "target_endpoint": endpoint,
+                    "target_payload": payload,
+                }
+            maybe_save_json(
+                args.save_discovery_payload or args.save_payload,
+                {
+                    **submitted_payload_info,
+                    "note": f"discovery fallback after advanced query failure: {exc}",
+                },
+            )
+            if args.year_bands:
+                result = execute_parallel_year_band_requests(
+                    args,
+                    endpoint,
+                    api_key,
+                    payload,
+                    timeout=120,
+                    use_async_jobs=use_async_jobs,
+                    poll_timeout=args.poll_timeout,
+                    poll_interval=args.poll_interval,
+                )
+            else:
+                result = execute_request(
+                    args.base_url,
+                    endpoint,
+                    api_key,
+                    payload,
+                    timeout=120,
+                    use_async_jobs=use_async_jobs,
+                    poll_timeout=args.poll_timeout,
+                    poll_interval=args.poll_interval,
+                )
+        else:
+            raise SystemExit(str(exc)) from None
+    if should_run_details_rerank(args, endpoint, payload, result):
+        corpus = payload.get("corpus") or "pmc"
+        candidate_id_field = "pmc_id"
+        candidate_ids = []
+        if corpus == "biorxiv":
+            candidate_id_field = "doi"
+            candidate_ids = [
+                paper.get("doi")
+                for paper in (result.get("papers") or [])[: max(1, args.details_rerank_limit)]
+                if paper.get("doi")
+            ]
+        elif corpus == "pmc":
+            candidate_ids = [
+                paper.get("pmc_id")
+                for paper in (result.get("papers") or [])[: max(1, args.details_rerank_limit)]
+                if paper.get("pmc_id")
+            ]
+        if candidate_ids:
+            details_payload = (
+                {"corpus": "biorxiv", "dois": candidate_ids}
+                if corpus == "biorxiv"
+                else {"corpus": "pmc", "pmc_ids": candidate_ids}
+            )
+            details_result = execute_request(
+                args.base_url,
+                "/api/get_paper_details",
+                api_key,
+                details_payload,
+                timeout=120,
+                use_async_jobs=False,
+                poll_timeout=args.poll_timeout,
+                poll_interval=args.poll_interval,
+            )
+            maybe_save_json(
+                companion_json_path(args.save_payload, "details_payload"),
+                {
+                    "endpoint": "/api/get_paper_details",
+                    "payload": details_payload,
+                },
+            )
+            maybe_save_json(
+                companion_json_path(args.save_response, "details_response"),
+                details_result,
+            )
+            triaged_papers = merge_and_rerank_details(
+                result,
+                details_result,
+                payload["primary_queries"],
+            )
+            result["details_lookup"] = {
+                "requested": details_result.get("requested"),
+                "found": details_result.get("found"),
+                "missing_ids": details_result.get("missing_ids"),
+                f"candidate_{candidate_id_field}s": candidate_ids,
+            }
+            result["triaged_papers"] = triaged_papers
+            result["recommended_next_step"] = recommended_next_step(
+                triaged_papers,
+                payload["primary_queries"],
+            )
+    if (
+        args.auto_advanced_refinement
+        and endpoint.endswith("advanced")
+        and payload.get("mode") == "discovery"
+        and payload.get("primary_queries")
+        and (
+            result.get("strategy_used") == "discovery_fallback"
+            or result.get("recommended_next_step") == "advanced_refinement_recommended"
+        )
+    ):
+        advanced_payload = dict(payload)
+        advanced_payload["mode"] = "advanced"
+        advanced_payload["max_results"] = max(
+            args.max_results,
+            min(args.details_rerank_limit, args.max_results),
+        )
+        try:
+            if args.year_bands:
+                advanced_result = execute_parallel_year_band_requests(
+                    args,
+                    endpoint,
+                    api_key,
+                    advanced_payload,
+                    timeout=args.timeout or 600,
+                    use_async_jobs=use_async_jobs,
+                    poll_timeout=args.poll_timeout,
+                    poll_interval=args.poll_interval,
+                )
+            else:
+                advanced_result = execute_request(
+                    args.base_url,
+                    endpoint,
+                    api_key,
+                    advanced_payload,
+                    timeout=args.timeout or 600,
+                    use_async_jobs=use_async_jobs,
+                    poll_timeout=args.poll_timeout,
+                    poll_interval=args.poll_interval,
+                )
+            result["advanced_refinement"] = advanced_result
+            result["recommended_next_step"] = "advanced_refinement_completed"
+            maybe_save_json(
+                companion_json_path(args.save_payload, "advanced_payload"),
+                build_parallel_submitted_request(
+                    endpoint,
+                    advanced_payload,
+                    args.year_bands,
+                    use_async_jobs,
+                )
+                if args.year_bands
+                else {
+                    "endpoint": endpoint,
+                    "payload": advanced_payload,
+                },
+            )
+            maybe_save_json(
+                companion_json_path(args.save_response, "advanced_response"),
+                advanced_result,
+            )
+        except RuntimeError as exc:
+            result["advanced_refinement"] = {"error": str(exc)}
+            result["recommended_next_step"] = "advanced_refinement_failed"
+    if (
+        args.discovery_fallback
+        and endpoint.endswith("advanced")
+        and payload.get("mode") == "discovery"
+    ):
+        maybe_save_json(args.save_discovery_response or args.save_response, result)
+    else:
+        maybe_save_json(args.save_response, result)
+    if args.raw:
+        print(json.dumps(result, indent=2))
+        return
+    papers = (
+        (result.get("advanced_refinement") or {}).get("papers")
+        or result.get("triaged_papers")
+        or result.get("papers")
+        or []
+    )
+    compact, missing_year, filtered_year = summarize_papers(papers, args.year)
+    crossref_metadata = {"enabled": False}
+    if args.crossref_metadata:
+        compact, crossref_metadata = enrich_compact_with_crossref(
+            compact,
+            limit=args.crossref_limit,
+            email=args.crossref_email,
+        )
+    summary = {
+        "endpoint": endpoint,
+        "mode": args.mode if args.queries_file or args.group else None,
+        "strategy_used": result.get("strategy_used"),
+        "elapsed_ms": result.get("elapsed_ms"),
+        "parallel_year_bands": result.get("parallel_year_bands"),
+        "year_band_results": result.get("year_band_results"),
+        "year_band_errors": result.get("year_band_errors"),
+        "signal_terms": result.get("signal_terms"),
+        "discovery_query": result.get("discovery_query"),
+        "reported_total": result.get("total_found"),
+        "returned": len(papers),
+        "paper_source": (
+            "advanced_refinement"
+            if (result.get("advanced_refinement") or {}).get("papers")
+            else "details_triage"
+            if result.get("triaged_papers")
+            else "discovery"
+        ),
+        "details_lookup": result.get("details_lookup"),
+        "advanced_refinement": (
+            {
+                "strategy_used": (result.get("advanced_refinement") or {}).get("strategy_used"),
+                "elapsed_ms": (result.get("advanced_refinement") or {}).get("elapsed_ms"),
+                "returned": len((result.get("advanced_refinement") or {}).get("papers") or []),
+                "error": (result.get("advanced_refinement") or {}).get("error"),
+            }
+            if result.get("advanced_refinement") is not None
+            else None
+        ),
+        "crossref_metadata": crossref_metadata,
+        "recommended_next_step": result.get("recommended_next_step"),
+        "year_filter": args.year,
+        "excluded_missing_year": missing_year,
+        "excluded_nonmatching_year": filtered_year,
+        "papers": compact,
+        "warnings": [],
+    }
+    if missing_year:
+        summary["warnings"].append(
+            "Some papers lacked year metadata. Verify recent papers in PubMed or PMC."
+        )
+    if has_incomplete_citation(compact):
+        summary["warnings"].append(
+            "Some papers lacked complete citation metadata such as year or DOI."
+        )
+    if endpoint == "/api/scan_literature_advanced":
+        summary["warnings"].append(
+            "Grouped scans improve recall for multi-concept biology queries."
+        )
+    print(json.dumps(summary, indent=2))
+
+
+if __name__ == "__main__":
+    main()

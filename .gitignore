@@ -1,0 +1,67 @@
+# Backup files
+*.bak
+*.backup
+*~
+
+# Hidden files (except git)
+.DS_Store
+._.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.venv
+.venv/
+venv/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+!skills/**/fixtures/*.ipynb
+
+# Agent session worktrees (an untracked entry makes the checkout look dirty to installers)
+.claude/worktrees/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+site/
+
+# Local development
+.env
+.env.local
+*.local
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# AI scratch artifacts (task lists, session handoffs, agent memory, plans, reasoning)
+tasks/
+.memd/
+.planning/
+lessons.md
+MEMORY.md
+memory.md
+.codexloop/
+docs/handoffs/
+docs/plans/

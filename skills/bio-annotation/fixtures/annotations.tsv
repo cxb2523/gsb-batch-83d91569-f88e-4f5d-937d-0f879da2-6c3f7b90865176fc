@@ -1,0 +1,6 @@
+genome	protein_id	family_id	family_name	category	e_value	annotation	taxonomy	confidence
+query	q1	PF001	DNA polymerase	replication	1e-30	polymerase	Bacteria	0.99
+query	q2	PF003	unknown repeat	unknown	1e-8		Bacteria	0.60
+query	q3	PF003	unknown repeat	unknown	1e-7		Bacteria	0.55
+relative	r1	PF001	DNA polymerase	replication	1e-32	polymerase	Bacteria	0.99
+relative	r2	PF002	capsid protein	structural	1e-20	capsid	Bacteria	0.90

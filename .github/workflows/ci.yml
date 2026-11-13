@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - ".memd/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # The repository has no requirements or lock file to key a cache on.
+          enable-cache: false
+
+      - name: Validate shell scripts
+        run: find scripts skills -type f -name '*.sh' -print0 | xargs -0 -r -n 1 bash -n
+
+      - name: Validate skills
+        run: uv run --script scripts/validate-skills.py
+
+      - name: Validate supplementary docs
+        run: python3 scripts/validate-supplementary-docs.py
+
+      - name: Validate citations
+        run: python3 scripts/validate-citations.py
+
+      - name: Run unit tests
+        run: uv run --no-project --with pytest --with requests --with PyYAML python -m pytest tests -q
+
+      - name: Build documentation
+        run: uvx --from mkdocs --with 'mkdocs-material==9.5.*' --with pymdown-extensions mkdocs build --strict --site-dir site

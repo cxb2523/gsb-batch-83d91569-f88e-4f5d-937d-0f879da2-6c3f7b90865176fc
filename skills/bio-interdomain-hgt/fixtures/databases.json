@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0",
+  "arbiter_domains": ["eukaryota", "bacteria", "archaea", "ncldv", "phage", "organelle"],
+  "databases": [
+    {"name": "arbiter", "version": "fixture", "path": "arbiter.dmnd", "sha256": "09d59f6ab9738165d5e634ebe003a106712de0cf0a460cbe5249f51d3eb81395"},
+    {"name": "lineage_labels", "version": "fixture", "path": "labels.tsv", "sha256": "8dba7f3718e1394e66deae9496839e28ebfb942cc2037d88cf8477554a375b89"},
+    {"name": "comparison_collection", "version": "fixture", "path": "comparison.fna", "sha256": "7976bca8970d8560b18024033a618bd41bb88c23529e2f2667c04d54243222d8"}
+  ]
+}

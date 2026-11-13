@@ -1,0 +1,2 @@
+query_protein	recipient_locus	recipient_lineage	recipient_domain	identity	query_coverage	subject_coverage	e_value	bitscore
+virus_gene	host_locus	EukFixture	eukaryota	82	0.95	0.90	1e-40	300

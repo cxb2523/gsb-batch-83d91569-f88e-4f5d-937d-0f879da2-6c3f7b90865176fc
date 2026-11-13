@@ -1,0 +1,2 @@
+assembly	class	tool	model	threshold	count	notes
+query	tRNA	tRNAscan-SE	all	default	0	credible negative

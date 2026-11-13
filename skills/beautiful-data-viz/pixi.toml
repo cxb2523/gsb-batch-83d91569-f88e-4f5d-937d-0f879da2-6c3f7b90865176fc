@@ -1,0 +1,13 @@
+[workspace]
+channels = ["conda-forge"]
+name = "beautiful-data-viz"
+platforms = ["linux-64", "osx-arm64"]
+version = "1.0.0"
+
+[dependencies]
+python = "3.12.*"
+matplotlib = "3.11.*"
+seaborn = "0.13.*"
+
+[tasks]
+fixture = "python scripts/export_fixture.py fixtures/growth_curve.csv --out build/fixture"

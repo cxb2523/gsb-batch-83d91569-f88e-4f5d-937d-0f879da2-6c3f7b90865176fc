@@ -1,0 +1,6 @@
+hypothesis_id	hypothesis	type	status	evidence	revision_stage
+H1	query is a member of the inferred viral group	biological	supported	marker evidence	final
+H2	query has a lineage-specific family expansion	biological	unresolved	copy-number evidence	comparison
+H3	query acquired a host-derived gene	biological	unresolved	homology evidence	comparison
+H4	assembly fragmentation explains missing markers	technical	weakened	assembly is contiguous	qc
+H5	reference sampling explains the apparent outlier	null	unresolved	small reference fixture	final

@@ -1,0 +1,2 @@
+candidate_id	expected_clade	nesting_clade	support	tree_path
+virus_gene	EukFixture	EukFixture	0.97	phylogeny/virus_gene/tree.nwk
