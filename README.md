@@ -168,7 +168,17 @@ python data/download.py [OPTIONS]
   --data-type TYPE      Tardis data type (default: book_snapshot_25)
   --output-dir PATH     Output directory (default: data/raw/)
   --tardis-api-key KEY  Tardis.dev API key (or set TARDIS_API_KEY env var)
+  --max-retries N       Retries per day for network errors / HTTP 5xx (default: 3)
+  --retry-delay SECS    Wait between attempts (default: 1.0)
 ```
+
+Downloads are retried only for transient failures (network errors and HTTP
+5xx); 401/404 and other 4xx responses fail immediately. Each day's file is
+written to a temporary file and atomically renamed, so an interrupted write
+never leaves a partial file that a later run would mistake for a completed
+download. At the end of the run the CLI prints one line per date with its
+status (`existing`, `downloaded`, or `failed`), the number of attempts, and
+the failure reason.
 
 | Exchange | `--exchange` | Description |
 |----------|:--------:|-------------|
