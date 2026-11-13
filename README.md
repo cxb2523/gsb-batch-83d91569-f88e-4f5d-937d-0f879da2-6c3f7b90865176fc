@@ -144,6 +144,42 @@ if __name__ == "__main__":
     asyncio.run(run_scraper())
 ```
 
+### 3. Observable Solving (batch jobs and diagnostics)
+
+For bulk scraping you may want to know *how* a solve went — an immediate answer,
+a long polling session, a service error or a timeout — without inspecting
+exceptions. `solve_captcha_with_report` returns a `SolveReport` instead of
+raising on a failed task or a timeout:
+
+```python
+import asyncio
+from capmonstercloudclient import CapMonsterClient, ClientOptions, SolveStatus
+from capmonstercloudclient.requests import RecaptchaV2Request
+
+client = CapMonsterClient(options=ClientOptions(api_key="YOUR_CAPMONSTER_API_KEY"))
+
+async def main():
+    request = RecaptchaV2Request(websiteUrl="https://example.com", websiteKey="SITE_KEY")
+    report = await client.solve_captcha_with_report(request)
+
+    print(report.status)             # SolveStatus.SUCCESS / TASK_FAILED / TIMEOUT / CANCELLED
+    print(report.task_id)            # id returned by createTask
+    print(report.requests_count)     # getTaskResult requests actually issued
+    print(report.elapsed)            # seconds spent solving
+    print(report.solution)           # dict on success, otherwise None
+    print(report.error_id)           # errorId on task failure, otherwise None
+    print(report.error_code)         # e.g. "ERROR_CAPTCHA_UNSOLVABLE"
+    print(report.error_description)  # human readable description
+
+asyncio.run(main())
+```
+
+`solve_captcha` keeps its existing behaviour: it still returns the solution dict
+and still raises `UnknownRequestInstanceError`, `GetTaskError`, `GetResultError`
+and `TimeoutError`. If the calling coroutine is cancelled,
+`asyncio.CancelledError` propagates and the partial report is available on the
+exception as `exc.report`.
+
 ---
 
 ## 🔄 Migrating from 2Captcha or Capsolver
