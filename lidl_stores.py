@@ -193,3 +193,63 @@ def resolve_store(
         log.info("%d Lidl stores in zip %s — using %s; pass --store-id to choose another.",
                  len(candidates), zip_code, store.describe())
     return store
+
+
+@dataclass(frozen=True)
+class StoreResolution:
+    """One entry of a multi-store --store-ids resolution.
+
+    Exactly one of `store`/`error` is set. `requested` keeps the token as
+    typed on the command line (so the run conclusion can name it);
+    `object_number` is the normalised full number when the token itself
+    was valid. `error_kind` is "lookup" (a store that does not exist — a
+    usage mistake) or "api" (the site/store API could not be read)."""
+    requested: str
+    object_number: Optional[str]
+    store: Optional[Store]
+    error: Optional[str]
+    error_kind: Optional[str]
+
+
+def resolve_stores(store_ids: List[str], session: Optional[requests.Session] = None) -> List[StoreResolution]:
+    """Resolve several store numbers for one multi-store run.
+
+    Every requested number goes through the SAME path a single
+    --store-id run uses: normalise -> read the public x-apikey from the
+    site's own store-search bundle -> query the store API by
+    object_number. One session and one API-key fetch are shared across
+    the whole batch, but each store's own query/normalisation is
+    isolated: a number that does not exist, or a query that fails
+    halfway through the batch, is recorded on its own entry and never
+    aborts the remaining lookups. The API-key fetch itself is shared
+    infrastructure rather than per-store data, so if IT fails the
+    StoreApiError propagates (the engines already map that to exit 5).
+    """
+    if not store_ids:
+        return []
+    session = session or requests.Session()
+    api_key = fetch_api_key(session)
+    results: List[StoreResolution] = []
+    for requested in store_ids:
+        object_number: Optional[str] = None
+        try:
+            object_number = normalise_store_id(requested)
+            found = _query_stores(session, api_key, {"object_number": object_number})
+        except StoreLookupError as exc:
+            results.append(StoreResolution(
+                requested=requested, object_number=None, store=None, error=str(exc), error_kind="lookup"))
+            continue
+        except StoreApiError as exc:
+            results.append(StoreResolution(
+                requested=requested, object_number=object_number,
+                store=None, error=str(exc), error_kind="api"))
+            continue
+        if not found:
+            results.append(StoreResolution(
+                requested=requested, object_number=object_number, store=None,
+                error=f"no Lidl store {object_number}", error_kind="lookup"))
+        else:
+            results.append(StoreResolution(
+                requested=requested, object_number=object_number, store=found[0],
+                error=None, error_kind=None))
+    return results

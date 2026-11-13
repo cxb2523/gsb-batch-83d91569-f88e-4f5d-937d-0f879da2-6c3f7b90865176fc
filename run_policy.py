@@ -16,10 +16,19 @@ from __future__ import annotations
 
 import argparse
 import logging
-from typing import Optional, Tuple
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
 import lidl_parser as lp
 import lidl_stores
+from output_writer import (
+    EXIT_BLOCKED,
+    EXIT_OK,
+    EXIT_PARTIAL,
+    EXIT_REMOTE_API_ERROR,
+    EXIT_ZERO_PRODUCTS,
+    Product,
+)
 
 log = logging.getLogger("run_policy")
 
@@ -116,6 +125,299 @@ def resolve_store(args: argparse.Namespace) -> Optional[lidl_stores.Store]:
         args.store_id = store.object_number
         args.zip_code = store.zip5
     return store
+
+
+# --------------------------------------------------------------------------- #
+# Multi-store runs (--store-ids)
+# --------------------------------------------------------------------------- #
+# Per-store outcomes in the sidecar's `stores` list and the run conclusion.
+STORE_OUTCOME_SUCCESS = "success"   # the store was scraped and returned rows
+STORE_OUTCOME_EMPTY = "empty"       # scraped cleanly, but the page yielded no rows
+STORE_OUTCOME_FAILED = "failed"     # lookup, navigation/block or crash — no rows kept
+
+# stop_reason values only a multi-store run takes.
+STOP_ALL_STORES_EMPTY = "all_stores_empty"
+STOP_STORE_FAILURES = "store_failures"
+STOP_MIXED = "mixed"
+
+
+def parse_store_ids(values: Optional[List[str]]) -> List[str]:
+    """Flatten the repeatable --store-ids option. Each occurrence may hold
+    one store number or a comma-separated list ("US01449,1449"), so both
+    `--store-ids US01449 --store-ids 1450` and `--store-ids US01449,1450`
+    work. Tokens are trimmed, empties rejected, and repeats of the SAME
+    store (any spelling, e.g. "1449" then "US01449") collapse to one
+    request — scraping one store twice would only duplicate its rows."""
+    if not values:
+        return []
+    tokens: List[str] = []
+    for value in values:
+        for token in str(value).split(","):
+            token = token.strip()
+            if token:
+                tokens.append(token)
+    if not tokens:
+        raise UsageError("--store-ids needs at least one Lidl US store number, e.g. --store-ids US01449,1450")
+    # Validate every token's shape up front — a malformed number is a usage
+    # error (exit 2) before any network call, matching single --store-id.
+    for token in tokens:
+        try:
+            lidl_stores.normalise_store_id(token)
+        except lidl_stores.StoreLookupError as exc:
+            raise UsageError(str(exc)) from None
+    seen: dict = {}
+    unique: List[str] = []
+    for token in tokens:
+        normalised = lidl_stores.normalise_store_id(token)
+        if normalised not in seen:
+            seen[normalised] = True
+            unique.append(token)
+    return unique
+
+
+def validate_store_flags(args: argparse.Namespace) -> None:
+    """--store-ids is mutually exclusive with the single-store selectors:
+    honouring both would mean guessing which store set wins, the same
+    ambiguity --url vs --query already refuses."""
+    if not getattr(args, "store_ids", None):
+        return
+    if args.store_id:
+        raise UsageError("--store-ids cannot be combined with --store-id; pass one or the other")
+    if args.zip_code:
+        raise UsageError("--store-ids cannot be combined with --zip; --zip names only one store")
+
+
+@dataclass
+class StoreTarget:
+    """A store a multi-store run should price against, or the reason it
+    could not be resolved. Unresolved targets never reach a browser."""
+    requested: str
+    object_number: Optional[str] = None
+    store: Optional[lidl_stores.Store] = None
+    error: Optional[str] = None
+    error_kind: Optional[str] = None  # "lookup" | "api"
+
+    @property
+    def resolved(self) -> bool:
+        return self.store is not None
+
+
+@dataclass
+class StoreScrape:
+    """What happened when one resolved target was scraped. The engines
+    fill this from scrape_search()'s six-tuple, or mark a store that
+    raised out of the engine itself."""
+    target: StoreTarget
+    products: List[Product] = field(default_factory=list)
+    blocked: bool = False
+    remote_api_error: bool = False
+    scroll_error: bool = False
+    stop_reason: Optional[str] = None
+    crashed: bool = False
+    crash_detail: Optional[str] = None
+
+    @property
+    def outcome(self) -> str:
+        if self.products:
+            return STORE_OUTCOME_SUCCESS
+        if self.crashed or self.blocked or self.remote_api_error:
+            return STORE_OUTCOME_FAILED
+        return STORE_OUTCOME_EMPTY
+
+
+def resolve_store_targets(args: argparse.Namespace) -> List[StoreTarget]:
+    """Resolve every --store-ids token through the existing per-store
+    lookup/cookie path (see lidl_stores.resolve_stores). One store that
+    does not exist is a failed TARGET, not a fatal run error: the others
+    still get scraped and the failure is reported per store in the
+    conclusion. Only when EVERY token fails validation/lookup does the
+    caller treat the invocation itself as bad usage."""
+    validate_store_flags(args)
+    tokens = parse_store_ids(args.store_ids)
+    resolutions = lidl_stores.resolve_stores(tokens)
+    return [
+        StoreTarget(
+            requested=r.requested, object_number=r.object_number, store=r.store,
+            error=r.error, error_kind=r.error_kind,
+        )
+        for r in resolutions
+    ]
+
+
+def _scrape_entry(scrape: Optional[StoreScrape], target: StoreTarget) -> dict:
+    """One sidecar `stores` entry — the per-store success/failure/empty
+    conclusion a consumer reads without scraping logs."""
+    store = target.store
+    if not target.resolved:
+        return {
+            "requested": target.requested,
+            "store_id": target.object_number,
+            "zip_code": None,
+            "outcome": STORE_OUTCOME_FAILED,
+            "error_kind": target.error_kind,
+            "detail": target.error,
+            "product_count": 0,
+        }
+    entry = {
+        "requested": target.requested,
+        "store_id": store.object_number,
+        "zip_code": store.zip5,
+        "outcome": scrape.outcome if scrape is not None else STORE_OUTCOME_FAILED,
+        "product_count": len(scrape.products) if scrape is not None else 0,
+        "stop_reason": scrape.stop_reason if scrape is not None else None,
+    }
+    if scrape is not None and scrape.crashed:
+        entry["error_kind"] = "crash"
+        entry["detail"] = scrape.crash_detail
+    elif scrape is not None and scrape.remote_api_error:
+        entry["error_kind"] = "remote_api_error"
+    elif scrape is not None and scrape.blocked:
+        entry["error_kind"] = "blocked"
+    return entry
+
+
+def plan_multi_store_finish(
+    *, targets: List[StoreTarget], scrapes: List[Optional[StoreScrape]],
+    pages_requested: int,
+) -> dict:
+    """Aggregate one multi-store run into the inputs finish_run() needs,
+    keeping that function's precedence (and its never-overwrite-a-good-
+    output guarantee) as the single decider of status and exit code.
+
+    Returns a dict with products, blocked, remote_api_error,
+    failed_pages (1-based positions of stores that did not succeed, so
+    finish_run maps rows+failure to EXIT_PARTIAL exactly as a failed
+    scroll round already does), stop_reason, extra_meta and a log-ready
+    `summary` list. Rows from different stores are simply concatenated:
+    the engine-level seen-sku set is per store, so the same SKU at two
+    stores survives as two rows distinguished by store_id/zip_code."""
+    by_number = {id(s.target): s for s in scrapes if s is not None}
+    entries: List[dict] = []
+    products: List[Product] = []
+    blocked = remote_api_error = False
+    failed_positions: List[int] = []
+    n_success = n_empty = n_failed = 0
+
+    for position, target in enumerate(targets, start=1):
+        scrape = by_number.get(id(target))
+        entries.append(_scrape_entry(scrape, target))
+        if not target.resolved or scrape is None or not scrape.products:
+            failed_positions.append(position)
+        if target.resolved and scrape is not None:
+            products.extend(scrape.products)
+            blocked = blocked or scrape.blocked
+            remote_api_error = remote_api_error or scrape.remote_api_error or scrape.crashed
+        outcome = entries[-1]["outcome"]
+        if outcome == STORE_OUTCOME_SUCCESS:
+            n_success += 1
+        elif outcome == STORE_OUTCOME_EMPTY:
+            n_empty += 1
+        else:
+            n_failed += 1
+
+    if n_success == 0:
+        if n_empty and not n_failed:
+            stop_reason = STOP_ALL_STORES_EMPTY
+        else:
+            stop_reason = STOP_STORE_FAILURES
+    elif n_failed or n_empty:
+        stop_reason = STOP_MIXED
+    else:
+        stop_reason = "max_results"
+
+    pages_completed = sum(
+        1 for t, s in zip(targets, scrapes)
+        if t.resolved and s is not None
+    )
+    summary = [
+        f"store {e['store_id'] or e['requested']}: {e['outcome']}"
+        + (f" ({e['product_count']} rows)" if e["outcome"] == STORE_OUTCOME_SUCCESS else "")
+        + (f" — {e.get('detail') or e.get('error_kind')}" if e["outcome"] == STORE_OUTCOME_FAILED else "")
+        for e in entries
+    ]
+    extra_meta = {
+        "multi_store": True,
+        "stores": entries,
+        "store_summary": {
+            "requested": len(targets), "success": n_success,
+            "empty": n_empty, "failed": n_failed,
+        },
+    }
+    return {
+        "products": products,
+        "blocked": blocked,
+        "remote_api_error": remote_api_error,
+        "failed_pages": failed_positions,
+        "pages_requested": pages_requested,
+        "pages_completed": pages_completed,
+        "stop_reason": stop_reason,
+        "extra_meta": extra_meta,
+        "summary": summary,
+    }
+
+
+def all_targets_failed(targets: List[StoreTarget]) -> bool:
+    return bool(targets) and all(not t.resolved for t in targets)
+
+
+def bad_usage_from_targets(targets: List[StoreTarget]) -> str:
+    """The exit-2 message when no --store-ids token resolved: name each
+    bad store and why, without starting a browser or touching output."""
+    details = "; ".join(f"{t.requested}: {t.error}" for t in targets)
+    return f"none of the --store-ids stores could be used ({details})"
+
+
+def expected_exit_from_plan(plan: dict) -> int:
+    """The exit code finish_run() will return for a planned multi-store
+    run, exposed so engines and tests can state the contract directly."""
+    if plan["products"]:
+        if plan["blocked"] or plan["remote_api_error"] or plan["failed_pages"]:
+            return EXIT_PARTIAL
+        return EXIT_OK
+    if plan["remote_api_error"]:
+        return EXIT_REMOTE_API_ERROR
+    if plan["blocked"]:
+        return EXIT_BLOCKED
+    return EXIT_ZERO_PRODUCTS
+
+
+def finish_multi_store(*, args, start_url: str, targets, scrapes, started_at: float,
+                       engine: str, finish_run, logger) -> int:
+    """The shared tail of every engine's multi-store run. Aggregates the
+    per-store outcomes once, logs the per-store conclusion, and hands the
+    combined rows to ONE finish_run() call, so that function's exit-code
+    precedence and atomic-write/never-overwrite guarantees stay the single
+    decider — the three engines cannot drift on multi-store status.
+
+    `finish_run`/`engine` are passed in by the caller because output_writer
+    is engine-agnostic and run_policy must not import an engine."""
+    plan = plan_multi_store_finish(
+        targets=targets, scrapes=scrapes, pages_requested=args.max_scrolls)
+    for line in plan["summary"]:
+        logger.info("Multi-store result — %s", line)
+    products = plan["products"]
+    price_confirmed_pct = (
+        sum(1 for p in products if p.price is not None) / len(products)) if products else None
+    parser_failed = any(
+        s is not None and s.stop_reason == STOP_PARSER_FOUND_NOTHING for s in scrapes)
+    return finish_run(
+        products=products,
+        out_path=args.out,
+        fmt=args.format,
+        engine=engine,
+        url=start_url,
+        pages_requested=plan["pages_requested"],
+        pages_completed=plan["pages_completed"],
+        failed_pages=plan["failed_pages"],
+        blocked=plan["blocked"],
+        remote_api_error=plan["remote_api_error"],
+        allow_empty=args.allow_empty,
+        started_at=started_at,
+        price_confirmed_pct=price_confirmed_pct,
+        parser_failed=parser_failed,
+        stop_reason=plan["stop_reason"],
+        extra_meta=plan["extra_meta"],
+    )
 
 
 # --------------------------------------------------------------------------- #

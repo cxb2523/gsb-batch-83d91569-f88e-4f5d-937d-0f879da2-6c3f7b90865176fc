@@ -135,6 +135,12 @@ python3 playwright_scraper.py --query "whole milk" --format json --out lidl_resu
 python3 playwright_scraper.py --query "sourdough bread" --store-id US01449 --max-results 20
 python3 playwright_scraper.py --query "sourdough bread" --zip 07086
 
+# price ONE run against several stores at once: repeat the flag or pass a
+# comma-separated list; every row records the store (and zip) it came from,
+# and the same SKU is kept once per store so cross-store prices are comparable
+python3 playwright_scraper.py --query "whole milk" --store-ids US01449,US01450
+python3 playwright_scraper.py --query "whole milk" --store-ids 1449 --store-ids 1450
+
 # cheapest first (also: price_desc, newest)
 python3 playwright_scraper.py --query milk --sort price_asc
 
@@ -159,7 +165,7 @@ places they genuinely can't behave the same as Playwright.
 
 ### Flags
 
-`--url --query --category --zip --store-id --sort --max-results
+`--url --query --category --zip --store-id --store-ids --sort --max-results
 --max-scrolls --stall-rounds --scroll-delay --format --out --retries
 --retry-delay --proxy --proxy-file --proxy-shuffle --proxy-block-retries
 --twocaptcha-key --captcha-api --solve-captcha --min-score --cdp-endpoint
@@ -183,7 +189,20 @@ store API with the public key the site's own store search sends, read
 from the site at run time, and every row then records the store actually
 used. That lookup is made directly from this machine, not through
 `--proxy` or `--cdp-endpoint`. A store that does not exist is a usage error (exit 2); an
-unreachable store API is exit 5. `--category` takes a path from the
+unreachable store API is exit 5. `--store-ids` prices one run against
+several stores in a single invocation: it is repeatable and also accepts
+a comma-separated list (`--store-ids US01449,1450`), and is mutually
+exclusive with `--store-id`/`--zip` (combining them is a usage error,
+exit 2). Each store goes through the same lookup and cookie injection as
+a single-store run, but one store failing its lookup, erroring, or
+returning no products never aborts the others — the run finishes with a
+per-store success/failed/empty conclusion in the sidecar's `stores`
+list. Every product row carries its own `store_id`/`zip_code`, and the
+same SKU at two stores is kept as two rows (it is never deduped across
+stores). When at least one store returns rows the output is written and
+the run is marked `partial` (exit 6) if any other store did not
+complete; when every store fails or comes back empty the run is
+non-zero and a previous good output is left untouched. `--category` takes a path from the
 site's navigation: `h/…/h…` aisle listings, `…/a…` weekly-deals
 listings, or `…/s…` pages, which are often landing pages with no product
 grid. `--max-scrolls` defaults to `max(20, --max-results / 4 + 10)`.

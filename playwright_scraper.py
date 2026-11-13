@@ -74,6 +74,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--category", default=None, help="A listing path copied from Lidl navigation, e.g. h/cheese-dairy-eggs/h10095761 or aw42-fresh-deals/a10104750 (no leading h/ means /c/)")
     p.add_argument("--zip", dest="zip_code", default=None, help="Price against the Lidl store in (or nearest within the same area as) this US zip code")
     p.add_argument("--store-id", default=None, help="Price against this Lidl store, e.g. US01449 or 1449; wins over --zip")
+    p.add_argument("--store-ids", action="append", default=None,
+                   help="Price ONE run against several Lidl stores and keep a row per store on every product; repeatable, "
+                        "or a comma-separated list (e.g. --store-ids US01449,1450). Mutually exclusive with --store-id/--zip")
     p.add_argument("--sort", choices=lp.SORT_VALUES, default="relevance")
     p.add_argument("--max-results", type=rp.positive_int, default=30, help="Cap on number of products scraped")
     p.add_argument("--max-scrolls", type=rp.positive_int, default=None, help="Hard cap on scroll rounds, independent of --stall-rounds (default: max(20, max-results/4 + 10))")
@@ -113,6 +116,25 @@ def _resolve_start_url(args: argparse.Namespace) -> Optional[str]:
 def _dump_path(out_path: str) -> str:
     stem = Path(out_path).with_suffix("")
     return f"{stem}_debug.html"
+
+
+def _store_dump_path(out_path: str, store: Store) -> str:
+    """A --dump-html file per store in a multi-store run, so the last
+    store's page can't overwrite the previous one's debug capture."""
+    stem = Path(out_path).with_suffix("")
+    return f"{stem}_{store.object_number}_debug.html"
+
+
+def _args_for_store(args: argparse.Namespace, store: Store) -> argparse.Namespace:
+    """A shallow copy of the run args pinned to ONE store for one
+    scrape_search() call. The parser stamps store_id/zip_code onto every
+    row from these values, so each call's rows carry their own store's
+    identity even when two stores return the same SKU."""
+    store_args = argparse.Namespace(**vars(args))
+    store_args.store_id = store.object_number
+    store_args.zip_code = store.zip5
+    store_args.out = _store_dump_path(args.out, store) if args.dump_html else args.out
+    return store_args
 
 
 async def _new_context(browser: Browser, proxy: Optional[Proxy], user_agent: Optional[str]) -> BrowserContext:
@@ -341,6 +363,23 @@ async def run(args: argparse.Namespace) -> int:
         return EXIT_CRASH
     args.out = args.out or _default_out(args.format)
     rp.apply_scroll_default(args)
+
+    multi_store = bool(getattr(args, "store_ids", None))
+    if multi_store:
+        try:
+            rp.validate_store_flags(args)
+            targets = rp.resolve_store_targets(args)
+        except rp.UsageError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return EXIT_BAD_USAGE
+        except StoreApiError as exc:
+            log.error("Could not look up the Lidl stores to price against: %s", exc)
+            return EXIT_REMOTE_API_ERROR
+        if rp.all_targets_failed(targets):
+            print(f"Error: {rp.bad_usage_from_targets(targets)}", file=sys.stderr)
+            return EXIT_BAD_USAGE
+        return await _run_multi_store(args, start_url, targets, started_at)
+
     try:
         store = rp.resolve_store(args)
     except rp.UsageError as exc:
@@ -431,6 +470,94 @@ async def run(args: argparse.Namespace) -> int:
         parser_failed=stop_reason == rp.STOP_PARSER_FOUND_NOTHING,
         stop_reason=stop_reason,
     )
+
+
+async def _run_multi_store(
+    args: argparse.Namespace, start_url: str, targets: list, started_at: float,
+) -> int:
+    """Scrape the same search once per resolved store, each through the
+    existing cookie-injection scrape_search() path, then finish the WHOLE
+    run in one finish_run() call. One store failing or coming back empty
+    never aborts the others; rows carry their own store_id/zip_code and
+    are never deduped across stores."""
+    try:
+        proxies = load_proxies(args.proxy, args.proxy_file)
+    except ProxyParseError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_BAD_USAGE
+    proxy_pool = ProxyPool(proxies, shuffle=args.proxy_shuffle, block_retries=args.proxy_block_retries) if proxies else None
+
+    client = None
+    if args.twocaptcha_key and (args.solve_captcha != "off" or args.fingerprint):
+        client = TwoCaptchaClient(args.twocaptcha_key, api_base=args.captcha_api)
+
+    user_agent = None
+    cdp_refused_fingerprint = args.fingerprint and refuse_if_cdp(args.cdp_endpoint)
+    if args.fingerprint and not cdp_refused_fingerprint:
+        if client is None:
+            log.warning("--fingerprint requested but no --twocaptcha-key/TWOCAPTCHA_KEY set — continuing without one.")
+        else:
+            profile = fetch_fingerprint(client, tags=args.fp_tags, country=args.fp_country)
+            if profile:
+                user_agent = user_agent_from(profile)
+
+    scrapes: List[Optional[rp.StoreScrape]] = []
+    try:
+        async with async_playwright() as pw:
+            if args.cdp_endpoint:
+                if args.proxy or args.proxy_file:
+                    log.warning("Ignoring --proxy: a --cdp-endpoint session already carries its own exit IP.")
+                    proxy_pool = None
+                try:
+                    browser = await _connect_over_cdp(pw, args.cdp_endpoint)
+                except RuntimeError as exc:
+                    # A broken CDP session fails every store uniformly;
+                    # record it per store rather than crashing the run.
+                    log.error("CDP connection failed — treating as remote_api_error, not a crash: %s", exc)
+                    for target in targets:
+                        if target.resolved:
+                            scrapes.append(rp.StoreScrape(
+                                target=target, remote_api_error=True,
+                                stop_reason=rp.STOP_CDP_CONNECT_FAILED, crash_detail=str(exc)))
+                        else:
+                            scrapes.append(None)
+                    browser = None
+            else:
+                browser = await pw.chromium.launch(headless=args.headless)
+
+            if browser is not None:
+                autosolve = bool(args.cdp_endpoint) and args.solve_captcha != "off"
+                for target in targets:
+                    if not target.resolved:
+                        log.error("Store %s skipped — lookup failed: %s", target.requested, target.error)
+                        scrapes.append(None)
+                        continue
+                    store = target.store
+                    log.info("Pricing against Lidl store %s", store.describe())
+                    store_args = _args_for_store(args, store)
+                    try:
+                        products, blocked, remote_api_error, _rounds, _shortfall, stop_reason = await scrape_search(
+                            args=store_args, start_url=start_url, browser=browser, proxy_pool=proxy_pool,
+                            client=client, autosolve=autosolve, user_agent=user_agent, store=store,
+                        )
+                    except Exception as exc:  # noqa: BLE001 — one store's crash must not lose the others' rows
+                        log.exception("Scraping store %s crashed — continuing with the other stores",
+                                      store.object_number)
+                        scrapes.append(rp.StoreScrape(
+                            target=target, crashed=True, crash_detail=str(exc),
+                            stop_reason=rp.STOP_NAVIGATION_FAILED))
+                        continue
+                    scrapes.append(rp.StoreScrape(
+                        target=target, products=products, blocked=blocked,
+                        remote_api_error=remote_api_error, stop_reason=stop_reason))
+                await browser.close()
+    except Exception:
+        log.exception("Unhandled error — this is a crash, not a normal blocked/empty run")
+        return EXIT_CRASH
+
+    return rp.finish_multi_store(
+        args=args, start_url=start_url, targets=targets, scrapes=scrapes,
+        started_at=started_at, engine=ENGINE_NAME, finish_run=finish_run, logger=log)
 
 
 def main() -> int:

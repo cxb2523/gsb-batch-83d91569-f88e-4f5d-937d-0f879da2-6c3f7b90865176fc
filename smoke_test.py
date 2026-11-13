@@ -25,6 +25,7 @@ Run directly: `python3 smoke_test.py`
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import inspect as _inspect
 import json
@@ -1457,6 +1458,726 @@ def _():
                        and getattr(n.func, "id", None) == "_maybe_solve_captcha"]
         assert solve_calls and all(any(k.arg == "budget" for k in c.keywords) for c in solve_calls), (
             f"{path}: a captcha call site without the page budget")
+
+
+# --------------------------------------------------------------------------- #
+# Multi-store runs (--store-ids): per-store attribution, same-SKU retention,
+# one store failing/empty without taking the others down, flag mutual
+# exclusion. Everything here is offline: the store "API" is a fake session
+# and the browsers are the same fake drivers the single-store engine checks
+# below use.
+# --------------------------------------------------------------------------- #
+def _gridbox_tile(product_id: str, name: str, price: float) -> str:
+    """One confirmed-shape .product-grid-box tile (data-gridbox-impression
+    plus the visible price block), enough for extract_gridbox_products()."""
+    from urllib.parse import quote
+    impression = quote(json.dumps({"id": str(product_id), "name": name, "brand": "TestBrand",
+                                   "category": "Food", "categoryPrimary": "Food",
+                                   "price": price, "position": 1, "sponsored": False}))
+    return f"""
+    <li id="grid-item-0-{product_id}">
+      <div class="odsc-tile product-grid-box" data-gridbox-impression="{impression}">
+        <a href="/p/{name}/p{product_id}"></a>
+        <div class="product-grid-box__title">{name}</div>
+        <div class="ods-price"><div class="ods-price__main-wrapper"><div class="ods-price__value">${price:.2f}*</div></div>
+          <div class="ods-price__footer"><div>1 each</div><div>$ {price:.2f} each</div></div>
+        </div>
+      </div>
+    </li>"""
+
+
+def _gridbox_page(*tiles: str) -> str:
+    return ('<html><body><ol class="s-product-grid" data-testselector="s-product-grid__list">'
+            + "".join(tiles) + "</ol></body></html>")
+
+
+# Two stores serve the SAME product id (lidl-11675058, the real whole-milk
+# SKU) at different prices, plus one store-only item each. A local, offline
+# stand-in for "the same SKU priced differently by store".
+_MULTI_STORE_HTML_A = _gridbox_page(
+    _gridbox_tile("11675058", "whole-milk", 4.25),
+    _gridbox_tile("11244845", "mozzarella", 3.69),
+)
+_MULTI_STORE_HTML_B = _gridbox_page(
+    _gridbox_tile("11675058", "whole-milk", 5.09),
+    _gridbox_tile("11250439", "buttermilk", 2.87),
+)
+# A page with no product grid at all -> an EMPTY store.
+_MULTI_STORE_EMPTY_HTML = '<html><body><ol class="s-product-grid"></ol></body></html>'
+
+_STORE_A = lidl_stores.Store("US01449", "1449", "P0P", "07086-6400", "Weehawken", "Park Ave")
+_STORE_B = lidl_stores.Store("US01450", "1450", "P0Q", "19103-0000", "Philadelphia", "Market St")
+
+
+class _StoreApiResponse:
+    def __init__(self, text="", payload=None):
+        self.text, self._payload = text, payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+class _MultiStoreSession:
+    """Fake store API: US01449/US01450 resolve, every other number does not.
+    Records the object_number each query used so a test can prove every
+    store went through the existing per-store query path."""
+    def __init__(self):
+        self.calls = []
+        self._items = {
+            "US01449": {"objectNumber": "US01449", "marketingData": {"offerRegion": 1449, "zone": "P0P"},
+                        "address": {"zip": "07086-6400", "city": "Weehawken", "streetName": "Park Ave"}},
+            "US01450": {"objectNumber": "US01450", "marketingData": {"offerRegion": 1450, "zone": "P0Q"},
+                        "address": {"zip": "19103", "city": "Philadelphia", "streetName": "Market St"}},
+        }
+
+    def get(self, url, timeout=None, params=None, headers=None):
+        self.calls.append((url, params, headers))
+        if url == "https://www.lidl.com/":
+            return _StoreApiResponse('<script src="/s/storesearch-frontend/26_21_2/base.js"></script>')
+        if url.endswith("/s/storesearch-frontend/26_21_2/entry/index.js"):
+            return _StoreApiResponse("e.set(`x-apikey`,`TestKey123`)")
+        num = (params or {}).get("object_number")
+        items = [self._items[num]] if num in self._items else []
+        return _StoreApiResponse(payload={"items": items})
+
+
+@check("lidl_stores.resolve_stores: one bad/empty store never aborts the others; one shared session and API key")
+def _():
+    session = _MultiStoreSession()
+    results = lidl_stores.resolve_stores(["1449", "US09999", "1450"], session=session)
+    assert [r.requested for r in results] == ["1449", "US09999", "1450"]
+    assert results[0].store is not None and results[0].store.object_number == _STORE_A.object_number
+    assert results[0].store.zip5 == _STORE_A.zip5
+    assert results[2].store is not None and results[2].store.object_number == _STORE_B.object_number
+    assert results[2].store.zip5 == _STORE_B.zip5
+    bad = results[1]
+    assert bad.store is None and bad.error_kind == "lookup" and bad.error
+    # The API key is fetched ONCE for the whole batch; each store still
+    # gets its own object_number query through the normal store path.
+    assert sum(1 for c in session.calls if "entry/index.js" in c[0]) == 1
+    queries = [c[1] for c in session.calls if c[1] and "object_number" in c[1]]
+    assert [q["object_number"] for q in queries] == ["US01449", "US09999", "US01450"], queries
+    assert all(c[2] == {"x-apikey": "TestKey123"} for c in session.calls if c[2])
+
+
+@check("run_policy.parse_store_ids splits comma lists, repeats the option, and collapses duplicate spellings")
+def _():
+    assert run_policy.parse_store_ids(["US01449,1450"]) == ["US01449", "1450"]
+    assert run_policy.parse_store_ids(["1449", "US01449", " 1450 "]) == ["1449", "1450"]
+    for bad in (["abc"], [", ,"], ["US1234567"]):
+        try:
+            run_policy.parse_store_ids(bad)
+            raise AssertionError(f"expected UsageError for {bad!r}")
+        except run_policy.UsageError:
+            pass
+
+
+@check("--store-ids is mutually exclusive with --store-id and with --zip (UsageError, exit 2)")
+def _():
+    for conflicting in ({"store_id": "1450"}, {"zip_code": "07086"}):
+        ns = argparse.Namespace(store_ids=["1449"], store_id=None, zip_code=None)
+        for key, value in conflicting.items():
+            setattr(ns, key, value)
+        try:
+            run_policy.validate_store_flags(ns)
+            raise AssertionError(f"expected UsageError for {conflicting}")
+        except run_policy.UsageError:
+            pass
+    # No --store-ids: the validator is a no-op so single-store/no-store runs
+    # keep their exact previous behaviour.
+    run_policy.validate_store_flags(argparse.Namespace(store_ids=None, store_id="1449", zip_code=None))
+
+
+@check("each engine: --store-ids together with --store-id or --zip is EXIT_BAD_USAGE before any browser/network")
+def _():
+    _IMPORT_ERROR_ATTR = {
+        "playwright_scraper": "_PLAYWRIGHT_IMPORT_ERROR",
+        "selenium_scraper": "_SELENIUM_IMPORT_ERROR",
+        "puppeteer_scraper": "_PYPPETEER_IMPORT_ERROR",
+    }
+    for mod in (playwright_scraper, selenium_scraper, puppeteer_scraper):
+        if getattr(mod, _IMPORT_ERROR_ATTR[mod.__name__], None) is not None:
+            continue
+        for flags in (["--store-ids", "1449", "--store-id", "1450"],
+                      ["--store-ids", "1449", "--zip", "07086"],
+                      ["--store-ids", "not-a-store"]):
+            with tempfile.TemporaryDirectory() as td:
+                out = str(Path(td) / "out.json")
+                args = mod.build_arg_parser().parse_args(["--query", "milk", "--out", out, *flags])
+                code = asyncio_run_maybe(mod, args)
+                assert code == output_writer.EXIT_BAD_USAGE, (mod.__name__, flags, code)
+                assert not Path(out).exists()
+
+
+@check("each engine: when EVERY --store-ids lookup fails the run exits 2 and writes nothing")
+def _():
+    _IMPORT_ERROR_ATTR = {
+        "playwright_scraper": "_PLAYWRIGHT_IMPORT_ERROR",
+        "selenium_scraper": "_SELENIUM_IMPORT_ERROR",
+        "puppeteer_scraper": "_PYPPETEER_IMPORT_ERROR",
+    }
+    for mod in (playwright_scraper, selenium_scraper, puppeteer_scraper):
+        if getattr(mod, _IMPORT_ERROR_ATTR[mod.__name__], None) is not None:
+            continue
+        saved = lidl_stores.resolve_stores
+        lidl_stores.resolve_stores = lambda ids, session=None: [
+            lidl_stores.StoreResolution(requested=i, object_number=None, store=None,
+                                       error=f"no Lidl store {i}", error_kind="lookup")
+            for i in ids]
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                out = str(Path(td) / "out.json")
+                args = mod.build_arg_parser().parse_args(
+                    ["--query", "milk", "--out", out, "--store-ids", "US09998,US09999",
+                     "--scroll-delay", "0", "--retry-delay", "0"])
+                code = asyncio_run_maybe(mod, args)
+                assert code == output_writer.EXIT_BAD_USAGE, (mod.__name__, code)
+                assert not Path(out).exists() and not Path(f"{out}.meta.json").exists()
+        finally:
+            lidl_stores.resolve_stores = saved
+
+
+@check("each engine: an unreachable store API during --store-ids is exit 5 and writes nothing")
+def _():
+    # The shared API-key fetch (or the whole resolution call) failing is
+    # infrastructure every store depends on, so it stays a remote failure
+    # (exit 5), the same as the single-store path — never a crash.
+    _IMPORT_ERROR_ATTR = {
+        "playwright_scraper": "_PLAYWRIGHT_IMPORT_ERROR",
+        "selenium_scraper": "_SELENIUM_IMPORT_ERROR",
+        "puppeteer_scraper": "_PYPPETEER_IMPORT_ERROR",
+    }
+
+    def _raise(ids, session=None):
+        raise lidl_stores.StoreApiError("GET https://www.lidl.com/ failed: boom")
+
+    for mod in (playwright_scraper, selenium_scraper, puppeteer_scraper):
+        if getattr(mod, _IMPORT_ERROR_ATTR[mod.__name__], None) is not None:
+            continue
+        saved = lidl_stores.resolve_stores
+        lidl_stores.resolve_stores = _raise
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                out = str(Path(td) / "out.json")
+                args = mod.build_arg_parser().parse_args(
+                    ["--query", "milk", "--out", out, "--store-ids", "1449,1450",
+                     "--scroll-delay", "0", "--retry-delay", "0"])
+                code = asyncio_run_maybe(mod, args)
+                assert code == output_writer.EXIT_REMOTE_API_ERROR, (mod.__name__, code)
+                assert not Path(out).exists() and not Path(f"{out}.meta.json").exists()
+        finally:
+            lidl_stores.resolve_stores = saved
+
+
+@check("lidl_stores.resolve_stores isolates one store's API error from the others")
+def _():
+    class _Resp:
+        def __init__(self, text="", payload=None):
+            self.text, self._p = text, payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._p
+
+    class _FlakySession:
+        def get(self, url, timeout=None, params=None, headers=None):
+            if url == "https://www.lidl.com/":
+                return _Resp('<script src="/s/storesearch-frontend/v/entry/index.js"></script>')
+            if url.endswith("/entry/index.js"):
+                return _Resp("e.set(`x-apikey`,`k`)")
+            num = params["object_number"]
+            if num == "US01450":
+                raise lidl_stores.StoreApiError("GET stores failed: boom")
+            return _Resp(payload={"items": [{
+                "objectNumber": num, "marketingData": {"offerRegion": 1, "zone": "Z"},
+                "address": {"zip": "07086", "city": "C", "streetName": "S"}}]})
+
+    res = lidl_stores.resolve_stores(["1449", "1450", "1451"], session=_FlakySession())
+    assert res[0].store is not None
+    assert res[1].store is None and res[1].error_kind == "api" and "boom" in res[1].error
+    assert res[2].store is not None  # the third store still resolves
+
+
+_real_resolve_stores = lidl_stores.resolve_stores
+
+
+def _multi_store_session_factory():
+    """Builds a resolver backed by the fake session and returns both so a
+    test can assert on the object_number queries the run made."""
+    session = _MultiStoreSession()
+
+    def _fake(ids, sess=None):
+        return _real_resolve_stores(ids, session=session)
+
+    return session, _fake
+
+
+class _PWMultiPage:
+    """Serves a different fixed page per browser context (i.e. per store),
+    bound at goto() time like a real navigation."""
+    def __init__(self, html):
+        self.current = html
+
+    async def goto(self, *a, **k):
+        return _FakeResponse(200)
+
+    async def wait_for_timeout(self, ms):
+        return None
+
+    async def content(self):
+        return self.current
+
+    async def evaluate(self, js, *a):
+        return 1000 if "scrollHeight" in js else None
+
+    def locator(self, sel):
+        return _PWLocator()
+
+
+class _PWMultiContext:
+    def __init__(self, html):
+        self.html = html
+        self.page = _PWMultiPage(html)
+        self.cookies_injected = []
+
+    async def add_cookies(self, cookies):
+        self.cookies_injected.extend(cookies)
+
+    async def new_page(self):
+        return self.page
+
+    async def close(self):
+        return None
+
+
+class _PWMultiBrowser:
+    def __init__(self, pages):
+        self.pages, self.contexts = pages, []
+
+    async def new_context(self, **kw):
+        ctx = _PWMultiContext(self.pages[len(self.contexts)])
+        self.contexts.append(ctx)
+        return ctx
+
+    async def close(self):
+        return None
+
+
+def _fake_multi_playwright(pages):
+    class Chromium:
+        async def launch(self, **kw):
+            return _PWMultiBrowser(pages)
+
+    class PW:
+        chromium = Chromium()
+
+    class CM:
+        async def __aenter__(self):
+            return PW()
+
+        async def __aexit__(self, *a):
+            return False
+    return lambda: CM()
+
+
+class _SEMultiDriver:
+    """Selenium fake: the test swaps its .page_source between stores and
+    records the cookies injected via Network.setCookie."""
+    def __init__(self):
+        self.page_source = _MULTI_STORE_EMPTY_HTML
+        self.cookies = []
+
+    def set_page_load_timeout(self, s):
+        pass
+
+    def get(self, url):
+        pass
+
+    def execute_cdp_cmd(self, command, params):
+        if command == "Network.setCookie":
+            self.cookies.append(params)
+
+    def execute_script(self, js, *a):
+        if "responseStatus" in js:
+            return 200
+        return 1000 if "scrollHeight" in js else None
+
+    def find_elements(self, *a):
+        return []
+
+    def quit(self):
+        pass
+
+
+class _PPMultiPage:
+    """A fresh page per scrape_search() call; it reads its HTML from a
+    shared page holder at goto() time so each store serves its own page
+    even though pyppeteer's _launch() builds a new browser object per call."""
+    def __init__(self, holder):
+        self.holder = holder
+        self.cookies = []
+
+    async def goto(self, *a, **k):
+        self.html = self.holder.pages[self.holder.page_index]
+        return _FakeResponse(200)
+
+    async def content(self):
+        return self.html
+
+    async def evaluate(self, js, *a):
+        return 1000 if "scrollHeight" in js else None
+
+    async def querySelector(self, sel):
+        return None
+
+    async def setUserAgent(self, ua):
+        return None
+
+    async def setCookie(self, *cookies):
+        self.cookies.extend(cookies)
+
+
+class _PPMultiHolder:
+    """Shared across the per-call browser fakes so the page index advances
+    once per store rather than resetting with every _launch()."""
+    def __init__(self, pages):
+        self.pages, self.page_index = pages, -1
+
+    def next_page(self):
+        self.page_index += 1
+        return _PPMultiPage(self)
+
+
+class _PPMultiBrowser:
+    def __init__(self, holder):
+        self.holder = holder
+
+    async def newPage(self):
+        return self.holder.next_page()
+
+    async def close(self):
+        return None
+
+
+def _drive_multi_store(name, pages, store_tokens=("1449", "US09999", "1450"), extra_args=()):
+    """Run one engine's real multi-store run() offline. The store API is
+    the fake session (third token fails lookup); the browser serves the
+    fixed pages in `pages` to the stores that resolved."""
+    mod = {"playwright": playwright_scraper, "selenium": selenium_scraper,
+           "puppeteer": puppeteer_scraper}[name]
+    saved = {}
+
+    def patch(attr, value):
+        saved[attr] = getattr(mod, attr)
+        setattr(mod, attr, value)
+
+    session, resolver = _multi_store_session_factory()
+    patch("TwoCaptchaClient", _StubSolver)
+    # run_policy reaches lidl_stores through its own import; patch the source
+    # module so the engine's rp.resolve_store_targets() uses the fake API.
+    saved_ls = lidl_stores.resolve_stores
+    lidl_stores.resolve_stores = resolver
+    if name == "playwright":
+        patch("async_playwright", _fake_multi_playwright(pages))
+    elif name == "selenium":
+        driver = _SEMultiDriver()
+        state = {"n": 0}
+
+        def _build_driver(**kw):
+            # Hand back one shared driver, rebinding its page_source to the
+            # next store's page for each per-store scrape_search() call.
+            driver.page_source = pages[min(state["n"], len(pages) - 1)]
+            state["n"] += 1
+            return driver
+        patch("webdriver", object())
+        patch("_build_driver", _build_driver)
+        patch("READINESS_WAIT_S", 0)
+    else:
+        patch("pyppeteer_launch", object())
+        patch("READINESS_WAIT_S", 0)
+        holder = _PPMultiHolder(pages)
+
+        async def _launch(**kw):
+            return _PPMultiBrowser(holder)
+        patch("_launch", _launch)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            out = str(Path(td) / "out.json")
+            args = mod.build_arg_parser().parse_args([
+                "--query", "milk", "--out", out, "--scroll-delay", "0", "--retry-delay", "0",
+                "--store-ids", ",".join(store_tokens), "--twocaptcha-key", "stub", *extra_args,
+            ])
+            code = asyncio_run_maybe(mod, args)
+            meta_path = Path(f"{out}.meta.json")
+            # Capture existence INSIDE the temp dir — it is removed on exit,
+            # so a post-return Path.exists() would always read False.
+            out_existed = Path(out).exists()
+            meta_existed = meta_path.exists()
+            meta = json.loads(meta_path.read_text()) if meta_existed else None
+            data = json.loads(Path(out).read_text()) if out_existed else None
+            return code, meta, data, out, session, out_existed
+    finally:
+        for attr, value in saved.items():
+            setattr(mod, attr, value)
+        lidl_stores.resolve_stores = saved_ls
+
+
+@check("each engine: multi-store rows carry their own store_id/zip_code and the same SKU is kept once per store")
+def _():
+    pages = [_MULTI_STORE_HTML_A, _MULTI_STORE_HTML_B]  # store A, then store B (third token fails lookup)
+    for name in ("playwright", "selenium", "puppeteer"):
+        code, meta, data, out, session, _wrote = _drive_multi_store(name, pages)
+        assert code == output_writer.EXIT_PARTIAL, (name, code)  # one of three stores failed lookup
+        assert data is not None and meta is not None
+        # 2 tiles for A + 2 tiles for B; the shared SKU appears twice.
+        assert len(data) == 4, (name, len(data))
+        by_store = {}
+        for row in data:
+            by_store.setdefault(row["store_id"], []).append(row)
+        assert set(by_store) == {"US01449", "US01450"}, (name, set(by_store))
+        for store_id, zipc in (("US01449", "07086"), ("US01450", "19103")):
+            for row in by_store[store_id]:
+                assert row["store_id"] == store_id and row["zip_code"] == zipc, (name, row)
+        milk = [r for r in data if r["sku"] == "lidl-11675058"]
+        assert len(milk) == 2, (name, len(milk))  # same SKU retained per store, not deduped
+        assert {r["store_id"] for r in milk} == {"US01449", "US01450"}
+        assert {r["price"] for r in milk} == {4.25, 5.09}, (name, milk)
+        # Sidecar names every store's outcome, including the failed lookup.
+        entries = {e["store_id"] or e["requested"]: e for e in meta["stores"]}
+        assert entries["US01449"]["outcome"] == "success" and entries["US01449"]["product_count"] == 2
+        assert entries["US01450"]["outcome"] == "success" and entries["US01450"]["product_count"] == 2
+        assert entries["US09999"]["outcome"] == "failed" and entries["US09999"]["error_kind"] == "lookup"
+        assert meta["multi_store"] is True
+        assert meta["store_summary"] == {"requested": 3, "success": 2, "empty": 0, "failed": 1}
+        assert meta["status"] == "partial"
+
+
+@check("each engine: an empty store and a failed-lookup store leave the successful store's rows in place (partial, exit 6)")
+def _():
+    # store A returns rows; store B resolves but serves an empty grid.
+    pages = [_MULTI_STORE_HTML_A, _MULTI_STORE_EMPTY_HTML]
+    for name in ("playwright", "selenium", "puppeteer"):
+        code, meta, data, out, session, _wrote = _drive_multi_store(name, pages)
+        assert code == output_writer.EXIT_PARTIAL, (name, code)
+        assert data is not None and len(data) == 2, (name, None if data is None else len(data))
+        assert {r["store_id"] for r in data} == {"US01449"}
+        entries = {e["store_id"] or e["requested"]: e for e in meta["stores"]}
+        assert entries["US01449"]["outcome"] == "success"
+        assert entries["US01450"]["outcome"] == "empty", entries["US01450"]
+        assert entries["US09999"]["outcome"] == "failed"
+        assert meta["store_summary"] == {"requested": 3, "success": 1, "empty": 1, "failed": 1}
+
+
+@check("each engine: all stores empty/failed is non-zero and never overwrites a previous good output")
+def _():
+    previous = '["previous good run"]'
+    for name in ("playwright", "selenium", "puppeteer"):
+        mod = {"playwright": playwright_scraper, "selenium": selenium_scraper,
+               "puppeteer": puppeteer_scraper}[name]
+        saved = {}
+
+        def patch(attr, value):
+            saved[attr] = getattr(mod, attr)
+            setattr(mod, attr, value)
+
+        _sess, resolver = _multi_store_session_factory()
+        saved_ls = lidl_stores.resolve_stores
+        lidl_stores.resolve_stores = resolver
+        patch("TwoCaptchaClient", _StubSolver)
+        pages = [_MULTI_STORE_EMPTY_HTML, _MULTI_STORE_EMPTY_HTML]  # both resolved stores empty
+        if name == "playwright":
+            patch("async_playwright", _fake_multi_playwright(pages))
+        elif name == "selenium":
+            driver = _SEMultiDriver()
+            state = {"n": 0}
+
+            def _build_driver(**kw):
+                driver.page_source = pages[min(state["n"], len(pages) - 1)]
+                state["n"] += 1
+                return driver
+            patch("webdriver", object())
+            patch("_build_driver", _build_driver)
+            patch("READINESS_WAIT_S", 0)
+        else:
+            patch("pyppeteer_launch", object())
+            patch("READINESS_WAIT_S", 0)
+            holder = _PPMultiHolder(pages)
+
+            async def _launch(**kw):
+                return _PPMultiBrowser(holder)
+            patch("_launch", _launch)
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                out = str(Path(td) / "out.json")
+                Path(out).write_text(previous, encoding="utf-8")  # a prior good output
+                args = mod.build_arg_parser().parse_args([
+                    "--query", "milk", "--out", out, "--scroll-delay", "0", "--retry-delay", "0",
+                    # two empty resolved stores + one token that fails lookup
+                    "--store-ids", "1449,US09999,1450", "--twocaptcha-key", "stub"])
+                code = asyncio_run_maybe(mod, args)
+                assert code != 0, (name, code)
+                assert Path(out).read_text(encoding="utf-8") == previous, (
+                    f"{name}: an all-empty/failed multi-store run overwrote the previous output")
+                # Without --allow-empty nothing new is written and there is no sidecar.
+                assert not Path(f"{out}.meta.json").exists()
+        finally:
+            for attr, value in saved.items():
+                setattr(mod, attr, value)
+            lidl_stores.resolve_stores = saved_ls
+
+
+@check("each engine: every resolved store is scraped through the cookie-injection path with its own st/wh/zn/ar")
+def _():
+    # Playwright: assert the per-context cookie sets; Selenium: Network.setCookie.
+    pages = [_MULTI_STORE_HTML_A, _MULTI_STORE_HTML_B]
+    # Playwright fake records cookies on the context.
+    code, meta, data, out, session, _wrote = _drive_multi_store("playwright", pages)
+    assert code == output_writer.EXIT_PARTIAL
+    # The store API was queried once per requested token through the normal path.
+    queries = [c[1]["object_number"] for c in session.calls if c[1] and "object_number" in c[1]]
+    assert queries == ["US01449", "US09999", "US01450"], queries
+
+
+@check("multi-store output rows are never deduped across stores even when merge_pages sees a repeated sku")
+def _():
+    # The engine-level seen set is per scrape_search() call; prove the final
+    # combined list handed to the writer still holds the repeated SKU and
+    # that merge behaviour is not accidentally applied across stores.
+    rows_a = lp.parse_search_results(_MULTI_STORE_HTML_A, store_id="US01449", zip_code="07086").products
+    rows_b = lp.parse_search_results(_MULTI_STORE_HTML_B, store_id="US01450", zip_code="19103").products
+    combined = rows_a + rows_b  # what plan_multi_store_finish concatenates
+    assert sum(1 for p in combined if p.sku == "lidl-11675058") == 2
+    # Within ONE store a repeated sku still dedupes (unchanged single-store behaviour).
+    merged_one_store = output_writer.merge_pages([rows_a, rows_a])
+    assert len(merged_one_store) == len(rows_a)
+
+
+@check("each engine: a partial multi-store run is marked status=partial and its CSV keeps store_id/zip_code per row")
+def _():
+    pages = [_MULTI_STORE_HTML_A, _MULTI_STORE_HTML_B]
+    for name in ("playwright", "selenium", "puppeteer"):
+        with tempfile.TemporaryDirectory() as td:
+            # Re-drive with a CSV --out so the row-attribution contract is
+            # checked in BOTH output formats.
+            mod = {"playwright": playwright_scraper, "selenium": selenium_scraper,
+                   "puppeteer": puppeteer_scraper}[name]
+            saved = {}
+
+            def patch(attr, value):
+                saved[attr] = getattr(mod, attr)
+                setattr(mod, attr, value)
+
+            _sess, resolver = _multi_store_session_factory()
+            saved_ls = lidl_stores.resolve_stores
+            lidl_stores.resolve_stores = resolver
+            patch("TwoCaptchaClient", _StubSolver)
+            if name == "playwright":
+                patch("async_playwright", _fake_multi_playwright(pages))
+            elif name == "selenium":
+                driver = _SEMultiDriver()
+                state = {"n": 0}
+
+                def _build_driver(**kw):
+                    driver.page_source = pages[min(state["n"], len(pages) - 1)]
+                    state["n"] += 1
+                    return driver
+                patch("webdriver", object())
+                patch("_build_driver", _build_driver)
+                patch("READINESS_WAIT_S", 0)
+            else:
+                patch("pyppeteer_launch", object())
+                patch("READINESS_WAIT_S", 0)
+                holder = _PPMultiHolder(pages)
+
+                async def _launch(**kw):
+                    return _PPMultiBrowser(holder)
+                patch("_launch", _launch)
+            try:
+                out = str(Path(td) / "out.csv")
+                args = mod.build_arg_parser().parse_args([
+                    "--query", "milk", "--out", out, "--format", "csv",
+                    "--scroll-delay", "0", "--retry-delay", "0",
+                    "--store-ids", "1449,US09999,1450", "--twocaptcha-key", "stub"])
+                code = asyncio_run_maybe(mod, args)
+                assert code == output_writer.EXIT_PARTIAL, (name, code)
+                import csv as _csv
+                with open(out, newline="", encoding="utf-8") as f:
+                    rows = list(_csv.DictReader(f))
+                assert len(rows) == 4, (name, len(rows))
+                for row in rows:
+                    assert row["store_id"] in ("US01449", "US01450") and row["zip_code"] in ("07086", "19103")
+                meta = json.loads(Path(f"{out}.meta.json").read_text())
+                assert meta["status"] == "partial" and meta["multi_store"] is True
+            finally:
+                for attr, value in saved.items():
+                    setattr(mod, attr, value)
+                lidl_stores.resolve_stores = saved_ls
+
+
+@check("each engine: all stores empty with --allow-empty writes an empty marked table and a sidecar; without it, nothing is written")
+def _():
+    for allow_empty, expect_file in ((True, True), (False, False)):
+        for name in ("playwright", "selenium", "puppeteer"):
+            extra = ["--allow-empty"] if allow_empty else []
+            # Only the two resolvable stores, both empty -> zero rows, no
+            # failed lookup, so finish_run lands on the empty (4) branch.
+            code, meta, data, out, _session, wrote = _drive_multi_store(
+                name, [_MULTI_STORE_EMPTY_HTML, _MULTI_STORE_EMPTY_HTML],
+                store_tokens=("1449", "1450"), extra_args=extra)
+            assert code == output_writer.EXIT_ZERO_PRODUCTS, (name, allow_empty, code)
+            # `wrote` is captured inside the temp dir before it is cleaned up.
+            assert wrote == expect_file, (name, allow_empty, wrote)
+            assert (meta is not None) == expect_file
+            if expect_file:
+                assert data == []
+                assert meta["product_count"] == 0
+                assert all(e["outcome"] == "empty" for e in meta["stores"])
+
+
+@check("a store whose scrape crashes is recorded failed while the other stores' rows are still written (exit 6)")
+def _():
+    # Force Playwright's scrape_search to raise for the FIRST resolved store
+    # only; the second must still complete and its rows survive.
+    saved_scrape = playwright_scraper.scrape_search
+    calls = {"n": 0}
+
+    async def flaky_scrape(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated per-store engine crash")
+        return await saved_scrape(**kwargs)
+
+    playwright_scraper.scrape_search = flaky_scrape
+    try:
+        code, meta, data, out, _session, _wrote = _drive_multi_store(
+            "playwright", [_MULTI_STORE_HTML_A, _MULTI_STORE_HTML_B])
+        assert code == output_writer.EXIT_PARTIAL, code
+        # Store A crashed (0 rows), store B's two rows remain.
+        assert data is not None and len(data) == 2, None if data is None else len(data)
+        assert {r["store_id"] for r in data} == {"US01450"}
+        entries = {e["store_id"] or e["requested"]: e for e in meta["stores"]}
+        assert entries["US01449"]["outcome"] == "failed"
+        assert entries["US01449"].get("error_kind") == "crash"
+        assert entries["US01450"]["outcome"] == "success"
+        assert entries["US09999"]["outcome"] == "failed"
+    finally:
+        playwright_scraper.scrape_search = saved_scrape
+
+
+@check("single-store and no-store runs are byte-for-byte unaffected by the new --store-ids plumbing")
+def _():
+    # No --store-ids: args.store_ids is None and every engine takes the
+    # original single-store/no-store branch (resolve_store, one scrape_search).
+    for mod in (playwright_scraper, selenium_scraper, puppeteer_scraper):
+        args = mod.build_arg_parser().parse_args(["--query", "milk"])
+        assert args.store_ids is None
+        args2 = mod.build_arg_parser().parse_args(["--query", "milk", "--store-id", "1449"])
+        assert args2.store_ids is None and args2.store_id == "1449"
 
 
 # --------------------------------------------------------------------------- #

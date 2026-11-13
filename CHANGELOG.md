@@ -9,8 +9,13 @@ rather than being a silent violation of that.
 
 ## [Unreleased]
 
+### Added
+
+- New repeatable `--store-ids` flag prices one run against several Lidl stores in a single invocation (also accepts a comma-separated list, e.g. `--store-ids US01449,1450`). Each store goes through the existing store lookup and `st`/`wh`/`zn`/`ar` cookie-injection path; one shared session fetches the store API key once, then each store is queried on its own. A store whose lookup fails, whose scrape errors, or which returns no products is recorded per store (success/failed/empty in the sidecar's new `stores` list) without aborting the others. Every product row carries its own `store_id`/`zip_code`, and the same SKU at two stores is retained as two rows — rows are never deduped across stores. When some stores return rows the output is written and the run is marked `partial` (exit 6); when every store fails or is empty the run is non-zero and a previous good output is not overwritten.
+
 ### Changed
 
+- `--store-ids` is mutually exclusive with `--store-id` and `--zip`; combining them exits 2 (bad usage). With no `--store-ids` the single-store and no-store behaviour is unchanged, including the output and sidecar shape (the multi-store-only `multi_store`/`stores`/`store_summary` keys are absent).
 - CI only: the scheduled canary now starts at 08:07 UTC (Mondays) instead of 06:37, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.
 - README "Local-first" now records a dated live measurement of the no-proxy, no-key default (2026-11-05: complete runs from a Helsinki datacentre server and a GitHub Actions runner, no bot challenge) instead of saying the access conditions were never measured on this site.
 
