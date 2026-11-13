@@ -1,0 +1,28 @@
+{
+    "compilerOptions": {
+        "jsx": "react",
+        "strict": true,
+        "noImplicitAny": true,
+        "noEmitOnError": true,
+        "noUnusedParameters": true,
+        "noUnusedLocals": true,
+        "noImplicitReturns": true,
+        "noUncheckedIndexedAccess": true,
+        "allowUnreachableCode": false,
+        "forceConsistentCasingInFileNames": true,
+        "removeComments": false,
+        "esModuleInterop": true,
+        "sourceMap": false,
+        "baseUrl": "src/",
+        "target": "es2020",
+        "module": "esnext",
+        "moduleResolution": "node",
+        "outDir": "dist",
+        "lib": ["dom", "scripthost", "es2020"],
+        "paths": {
+            "react": ["../node_modules/preact/compat"],
+            "react-dom": ["../node_modules/preact/compat"]
+        }
+    },
+    "include": ["src/**/*", "test/**/*.ts"]
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>Sagargupta16/shared-workflows"
+  ],
+  "packageRules": [
+    {
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false,
+      "description": "Major updates are paused for this repo. TypeScript 7 is rejected by typescript-eslint (peer '>=4.8.4 <6.1.0'), and ESLint 10 leaves the lockfile unresolvable, so npm ci fails with \"lock file's eslint@9 does not satisfy eslint@10\". Every narrower hold tried before this one just surfaced the next blocked major in the same grouped PR, so the monthly major stream was pure noise: it could not go green and it held nothing useful. Security updates are unaffected -- vulnerabilityAlerts runs on its own schedule and ignores packageRules. Minor and patch updates continue normally. Delete this rule once typescript-eslint accepts TS 7 and the ESLint 10 upgrade is done deliberately."
+    }
+  ]
+}

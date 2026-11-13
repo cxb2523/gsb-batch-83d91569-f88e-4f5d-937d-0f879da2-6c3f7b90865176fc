@@ -1,0 +1,167 @@
+# Changelog
+
+## [2.4.0] - 2026-10-18
+
+### Added
+
+- Demo page (`demo.html`): the production app scans a deterministic 36-post sample account through an in-page mock of the posts, likers and friendships endpoints. No login, no network requests, and it works on phones. Only the transport and the request gap differ from a real run; the sample scan makes 43 requests.
+- Userscript build (`instagram-likes-leaderboard.user.js` and `.meta.js`) for Tampermonkey or Violentmonkey: an unminified bundle that adds a Likes Leaderboard button on instagram.com and runs the same guarded bootstrap on click
+- README screenshots (desktop and phone) and a scan animation captured from the demo by `scripts/capture-screenshots.py`
+- Social preview card (`og-card.png`) with `og:image` and `summary_large_image` tags on the landing and demo pages
+- Landing page links to the demo and the userscript
+
+### Changed
+
+- A rate-limit retry time is saved under `ill_rate_limit_until` in local storage, so the cooldown lock survives a reload or a fresh paste and clears itself once the time passes
+- `webpack.config.js` exports a `site` config (console and demo bundles) and an unminified `userscript` config; `npm run build` writes the demo bundle and userscript into `public/`
+
+### Removed
+
+- Unreferenced `assets/copy_code.png` and `assets/landing_page.png`, which showed a removed raw-bundle preview
+
+## [2.3.2] - 2026-10-18
+
+### Changed
+
+- README adds a How It Works flowchart, an Engineering Decisions list, a desktop-browser requirement, the shared 250-request budget, and an Acknowledgements credit to davidarroyo1234/InstagramUnfollowers (#52)
+- Landing page steps note that a desktop browser with developer tools is required
+- Results notice reads "N posts scanned (all returned by Instagram)" instead of naming the old feed endpoint
+- Dev dependency patch bumps: @typescript-eslint/eslint-plugin and @typescript-eslint/parser 8.71.1 to 8.71.2, sass 1.105.1 to 1.105.2, webpack 5.111.1 to 5.112.0
+
+### Fixed
+
+- Stale 2.2.1 version strings in the README badge, landing page footer, SECURITY.md, and CLAUDE.md
+- README described the rate-limit lock as lasting until the retry time; it only lasts for the open tab, and a reload clears it
+- Webpack ts-loader rule matched any path containing `.ts`; it now matches only `.ts` and `.tsx` files
+
+## [2.3.1] - 2026-10-13
+
+### Security
+
+- Bump transitive shell-quote (webpack-dev-server -> launch-editor, dev only) from 1.10.0 to 1.12.0 for a critical advisory (Dependabot alert #44).
+
+## [2.3.0] - 2026-10-13
+
+### Fixed
+
+- Pages deploy audits production dependencies only, matching CI; the full audit failed every deploy since 2026-10-06 on dev-only webpack-dev-server advisories, so the shared filters below never reached the live site.
+
+### Added
+
+- Shared result filters across Dashboard, Leaderboard, and Follower Analysis: hide verified, hide no profile photo, public/private, follows you, and identified-like thresholds
+- Dashboard audience breakdown and a top-likers list with a You follow / Everyone toggle and adjustable size
+- Follower Analysis sort, per-account hide, and CSV export
+- Captured optional `is_private` and `has_anonymous_profile_picture` fields from existing responses; no new requests
+
+## [2.2.2] - 2026-09-03
+
+### Security
+
+- Bump transitive browserslist and fast-uri past high-severity advisories (npm audit gate).
+
+### Fixed
+
+- Bumped transitive postcss-selector-parser from 7.1.1 to 7.1.5 to resolve a denial-of-service advisory (uncontrolled AST recursion, GitHub Dependabot alert #40)
+
+## [2.2.1] - 2026-08-08
+
+### Changed
+
+- Restored cursor-to-terminal post, following, and follower traversal while preserving the 150-post and global request/time safety bounds
+
+### Fixed
+
+- Removed the six-page and 40-page ceilings that truncated observed scans at 72 posts and 960 relationship accounts
+- Excluded bounded 2.2.0 snapshots from automatic 24-hour reuse while preserving reusable endpoint-complete and genuine 150-post snapshots
+
+## [2.2.0] - 2026-08-08
+
+### Added
+
+- Reused compatible same-account scans completed within 24 hours before creating an Instagram requester or sending any request
+
+### Changed
+
+- Persisted explicit following and follower completeness scopes in runtime-validated local storage schema v3
+- Qualified negative relationship categories when a relationship list is bounded so missing accounts are not presented as confirmed non-relationships
+
+### Fixed
+
+- Completed valid following and follower collection at the 40-page safety bound instead of aborting the entire scan
+
+## [2.1.1] - 2026-08-08
+
+### Fixed
+
+- Completed valid post collection at the six-page safety bound as a labeled recent scope instead of aborting the entire scan
+
+## [2.1.0] - 2026-08-08
+
+### Added
+
+- Sequential per-run request controller with abortable delays/fetches, strict response classification, request timeout, and hard request/time/page/post bounds
+- Explicit Stop control, rate-limit retry lock, owner/scope result notice, and saved-data deletion
+- Runtime-validated, owner-scoped local storage schema v2 with derived results rebuilt on load
+- Focused mocked tests for request behavior, bounded scanning, storage validation, defaults, and deterministic bundle embedding
+- Pull-request CI and automated GitHub Pages deployment using Node 24, script-disabled clean installs, least-privilege permissions, and immutable action SHAs
+- Repository governance, dependency automation, badges, cross-links, and development guidance accumulated since 2.0.0
+
+### Changed
+
+- Fixed request pacing at randomized 2-3 second gaps across Stop/restart boundaries; removed user-editable timing controls and automatic recovery loops
+- Limited transient failures to one retry and made auth, challenge, rate-limit, timeout, malformed-response, and bounds failures fatal
+- Moved host and login guards ahead of style/app initialization so unsupported pages remain untouched
+- Made scans all-or-nothing: required-request failures no longer display or save partial data
+- Bounded post collection at 150 unique recent posts and deduplicated posts, cursors, per-post liker identities, and user lists
+- Defaulted follower comparison off to avoid unnecessary follower-list requests
+- Corrected dashboard totals to use displayed post-like counts while labeling leaderboard values as identified likes
+- Reworked progress, responsive layout, accessibility targets, reduced motion, local search, export field names, and incomplete-data wording
+- Replaced manual bundle escaping with marker validation, safe serialization, deterministic `--check` parity, and streamlined npm scripts
+- Exact-pinned the current Preact, TypeScript, ESLint, Sass, Webpack, and test toolchain; enabled stricter index-access checks and related hygiene fixes
+- Corrected Node/deployment documentation and the request cooldown cadence
+
+### Removed
+
+- Google Analytics, external web fonts, raw bundle preview, modal copy confirmation, and deprecated clipboard fallback from the landing page
+- Babel tooling, obsolete timing/settings UI, dead wrapper/icon components, and unused helper styles
+- Vulnerable transitive dependency versions; `npm audit` reports zero known vulnerabilities for this release
+
+## [2.0.0] - 2026-04-04
+
+### Added
+
+- **Multi-mode scan selection** - choose which analyses to run before scanning (Leaderboard, Dashboard, Follower Analysis)
+- **Stats Dashboard** - engagement metrics, average likes per post, engagement rate, top 5 fans, most liked post
+- **Follower Analysis** - four tabs: Don't Follow Back, Not Following Back, Mutual, Ghost Followers
+- **localStorage persistence** - scan results saved automatically, load previous results without re-scanning
+- **Verified account filter** - toggle to hide verified/creator accounts from leaderboard
+- **Per-user hide button** - remove individual users from leaderboard view
+- **Followers API** - new Phase 4 fetches followers list (`/api/v1/friendships/{id}/followers/`)
+- Follower timing settings in Settings menu
+
+### Changed
+
+- Scanning logic extracted from main.tsx into `src/utils/scanner.ts` for maintainability
+- Initial screen replaced bare RUN button with mode selector UI
+- Results screen now has top-level view switcher (Dashboard / Leaderboard / Follower Analysis)
+- Scanning phase indicator supports 4 phases when Follower Analysis is enabled
+- Bundle size increased from ~72KB to ~98KB
+
+## [1.2.0] - 2026-03-06
+
+- Merge Renovate dependency updates
+- Migrate domain references to sagargupta.online
+
+## [1.1.0] - 2026-02-27
+
+- Add favicon, README badges, and screenshots
+- Rewrite README for non-technical users
+- Show 0-likes users in Following leaderboard
+
+## [1.0.0] - 2026-02-27
+
+- Initial release: browser bookmarklet for Instagram likes analysis
+- Preact + TypeScript + Webpack, minified to ~72KB
+- Three-phase scan: posts, likers, following list
+- Ranked leaderboards with sort/search/export (CSV/JSON)
+- Rate limiting, pause/resume support

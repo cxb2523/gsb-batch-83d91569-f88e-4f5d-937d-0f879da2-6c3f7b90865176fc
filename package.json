@@ -1,0 +1,41 @@
+{
+  "name": "instagram-likes-leaderboard",
+  "version": "2.4.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm run build && webpack serve --mode development",
+    "build:bundle": "webpack --mode production",
+    "embed": "node scripts/update-index.js public/index.html dist/dist.js",
+    "build": "npm run build:bundle && npm run embed && node scripts/build-pages-extras.js",
+    "check:generated": "npm run build:bundle && node scripts/update-index.js --check public/index.html dist/dist.js",
+    "lint": "eslint src/ \"test/**/*.ts\"",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test",
+    "check": "npm run lint && npm run typecheck && npm test && npm run check:generated"
+  },
+  "dependencies": {
+    "preact": "10.29.8"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@typescript-eslint/eslint-plugin": "8.72.1",
+    "@typescript-eslint/parser": "8.72.1",
+    "css-loader": "7.1.5",
+    "eslint": "9.39.5",
+    "eslint-plugin-react": "7.37.5",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "sass": "1.107.1",
+    "sass-loader": "17.1.0",
+    "style-loader": "4.0.0",
+    "ts-loader": "9.6.2",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "webpack": "5.112.2",
+    "webpack-cli": "7.3.1",
+    "webpack-dev-server": "6.1.0"
+  },
+  "overrides": {
+    "qs": "6.17.1",
+    "uuid": "14.0.3"
+  }
+}
