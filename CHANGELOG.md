@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `collect_trustpilot_reviews(base_url, ..., on_page=None)`: a resilient alternative to
+  `scrape_trustpilot_reviews` that keeps every review collected before a failure instead of
+  raising and losing them. `TrustpilotBlockedError`, `TrustpilotParseError` and other
+  `TrustpilotError`s are captured in the returned `TrustpilotCollectionResult` (reviews in page
+  order, successful pages, failed page, error message, exception type name, `stopped_early`
+  flag); a failure on the first page returns an empty review list with full failure details.
+  The optional `on_page(page, new_count, total_count)` callback fires after each successfully
+  parsed page; exceptions it raises are wrapped in `TrustpilotError` and propagated. Pagination,
+  de-duplication and stop rules are identical to `iter_trustpilot_reviews`, which is unchanged.
+
 ## [1.1.0] - 2026-10-31
 
 ### Fixed

@@ -4,8 +4,10 @@ from importlib.metadata import PackageNotFoundError, version
 
 from .scraper import (
     TrustpilotBlockedError,
+    TrustpilotCollectionResult,
     TrustpilotError,
     TrustpilotParseError,
+    collect_trustpilot_reviews,
     get_reviews_from_page,
     iter_trustpilot_reviews,
     normalize_review,
@@ -22,9 +24,11 @@ except PackageNotFoundError:  # pragma: no cover - running from a source checkou
 
 __all__ = [
     "TrustpilotBlockedError",
+    "TrustpilotCollectionResult",
     "TrustpilotError",
     "TrustpilotParseError",
     "__version__",
+    "collect_trustpilot_reviews",
     "get_reviews_from_page",
     "iter_trustpilot_reviews",
     "normalize_review",

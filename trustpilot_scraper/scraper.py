@@ -11,7 +11,8 @@ import json
 import logging
 import re
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
@@ -21,8 +22,10 @@ from bs4 import BeautifulSoup
 __all__ = [
     "DEFAULT_HEADERS",
     "TrustpilotBlockedError",
+    "TrustpilotCollectionResult",
     "TrustpilotError",
     "TrustpilotParseError",
+    "collect_trustpilot_reviews",
     "get_reviews_from_page",
     "iter_trustpilot_reviews",
     "normalize_review",
@@ -76,6 +79,56 @@ class TrustpilotBlockedError(TrustpilotError):
 
 class TrustpilotParseError(TrustpilotError):
     """The page was fetched but its review data could not be found or decoded."""
+
+
+@dataclass
+class TrustpilotCollectionResult:
+    """Outcome of a resilient :func:`collect_trustpilot_reviews` run.
+
+    A Trustpilot failure never escapes :func:`collect_trustpilot_reviews`; it is
+    recorded here instead, alongside every review collected before the failure.
+
+    Attributes:
+        reviews: Reviews collected in page order, de-duplicated by review id.
+        successful_pages: 1-based page numbers that were parsed successfully.
+        failed_page: 1-based page that ended the run, or ``None`` on full success.
+        error_message: Text of the failure (``str(exc)``), or ``None``.
+        error_type: Qualified class name of the failure exception (for example
+            ``"TrustpilotBlockedError"``), or ``None``.
+        stopped_early: ``True`` if an error ended the run before the last page.
+    """
+
+    reviews: list[dict[str, Any]] = field(default_factory=list)
+    successful_pages: list[int] = field(default_factory=list)
+    failed_page: int | None = None
+    error_message: str | None = None
+    error_type: str | None = None
+    stopped_early: bool = False
+
+    @property
+    def failed_pages(self) -> list[int] | None:
+        """The failed page as a one-item list, or ``None`` when nothing failed."""
+        return [self.failed_page] if self.failed_page is not None else None
+
+    @property
+    def error(self) -> str | None:
+        """Alias for :attr:`error_message`."""
+        return self.error_message
+
+    @property
+    def exception_type(self) -> str | None:
+        """Alias for :attr:`error_type`."""
+        return self.error_type
+
+    @property
+    def exception_type_name(self) -> str | None:
+        """Alias for :attr:`error_type`."""
+        return self.error_type
+
+    @property
+    def pages_succeeded(self) -> list[int]:
+        """Alias for :attr:`successful_pages`."""
+        return self.successful_pages
 
 
 def normalize_url(company: str) -> str:
@@ -333,3 +386,103 @@ def scrape_trustpilot_reviews(
             timeout=timeout,
         )
     )
+
+
+#: Optional per-page progress callback for :func:`collect_trustpilot_reviews`.
+#: Receives (page number, new reviews on that page, cumulative review count).
+PageCallback = Callable[[int, int, int], None]
+
+
+def collect_trustpilot_reviews(
+    base_url: str,
+    *,
+    max_pages: int | None = None,
+    delay: float = 2.0,
+    extended: bool = False,
+    session: requests.Session | None = None,
+    timeout: float = 30.0,
+    on_page: PageCallback | None = None,
+) -> TrustpilotCollectionResult:
+    """Collect reviews while keeping every page already fetched if a later page fails.
+
+    This mirrors :func:`iter_trustpilot_reviews` -- same arguments, same pagination,
+    de-duplication and stop rules (``filters.pagination.totalPages``, ``max_pages``
+    and an empty page) -- but turns failures into a :class:`TrustpilotCollectionResult`
+    instead of raising. A ``TrustpilotBlockedError``, ``TrustpilotParseError`` or any
+    other :class:`TrustpilotError` ends the run early with the reviews gathered so far
+    and a record of which page failed and why.
+
+    Args:
+        base_url: Trustpilot review URL or bare company domain.
+        max_pages: Stop after this many pages (``None`` means every page).
+        delay: Seconds to sleep between page requests.
+        extended: Include extra fields (see :func:`normalize_review`).
+        session: Optional ``requests.Session``.
+        timeout: Per-request timeout in seconds.
+        on_page: Called after each successfully parsed page with the 1-based page
+            number, the number of new (de-duplicated) reviews on that page and the
+            cumulative review count. An exception raised by the callback is wrapped in
+            a :class:`TrustpilotError` and propagated; it is not swallowed.
+
+    Returns:
+        A :class:`TrustpilotCollectionResult` with the collected reviews and a
+        page-by-page outcome. When the first page fails, ``reviews`` is empty but the
+        failure fields are fully populated.
+
+    Raises:
+        ValueError: If ``max_pages`` is smaller than 1.
+        TrustpilotError: If ``on_page`` raises (the original exception is attached as
+            the cause). Trustpilot fetch/parse failures are returned, not raised.
+    """
+    if max_pages is not None and max_pages < 1:
+        raise ValueError("max_pages must be >= 1 or None")
+    url = normalize_url(base_url)
+    result = TrustpilotCollectionResult()
+    seen: set[str] = set()
+    page = 1
+    total: int | None = None
+    while True:
+        try:
+            html = _fetch(f"{url}?page={page}", session, timeout)
+            data = parse_next_data(html)
+            if total is None:
+                total = _total_pages(data)
+            reviews = _page_props(data).get("reviews") or []
+        except TrustpilotError as exc:
+            result.failed_page = page
+            result.error_message = str(exc) or exc.__class__.__name__
+            result.error_type = type(exc).__name__
+            result.stopped_early = True
+            logger.warning("page %d failed: %s", page, result.error_message)
+            return result
+        result.successful_pages.append(page)
+        new_count = 0
+        for review in reviews:
+            key = review.get("id") or json.dumps(review, sort_keys=True, default=str)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.reviews.append(normalize_review(review, extended=extended))
+            new_count += 1
+        logger.debug(
+            "page %d: %d new reviews (%d total, total pages: %s)",
+            page,
+            new_count,
+            len(result.reviews),
+            total,
+        )
+        if on_page is not None:
+            try:
+                on_page(page, new_count, len(result.reviews))
+            except TrustpilotError:
+                raise
+            except Exception as exc:
+                # Caller bugs must surface: wrap, keep the cause, never swallow.
+                raise TrustpilotError(f"on_page callback failed on page {page}: {exc}") from exc
+        if not reviews:
+            return result
+        if (max_pages is not None and page >= max_pages) or (total is not None and page >= total):
+            return result
+        page += 1
+        if delay > 0:
+            time.sleep(delay)

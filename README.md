@@ -96,6 +96,40 @@ Blocked (HTTP 403); using a page saved from the browser
 
 When the live request does succeed, `reviews` has exactly the same shape.
 
+### Keep partial results when a later page fails
+
+`scrape_trustpilot_reviews` raises as soon as one page fails, which discards the pages already
+fetched. `collect_trustpilot_reviews` instead returns a `TrustpilotCollectionResult` that keeps
+those reviews and accounts for every page. Trustpilot errors (block, challenge, bad JSON,
+network) are recorded on the result, not raised; the optional `on_page` callback gives a
+per-page progress hook.
+
+```python
+from trustpilot_scraper import collect_trustpilot_reviews
+
+result = collect_trustpilot_reviews(
+    "www.example.com",
+    max_pages=5,
+    on_page=lambda page, new, total: print(f"page {page}: +{new} ({total} so far)"),
+)
+
+for review in result.reviews:  # page order, de-duplicated by review id
+    print(review["Author"], review["Rating"])
+
+if result.stopped_early:
+    print(
+        f"stopped at page {result.failed_page} "
+        f"({result.error_type}): {result.error_message}"
+    )
+    print(f"pages OK: {result.successful_pages}; reviews kept: {len(result.reviews)}")
+```
+
+If page 2 returns HTTP 403 after page 1 parsed, `result.reviews` still holds page 1's reviews,
+`successful_pages == [1]`, `failed_pages == [2]` and `error_type == "TrustpilotBlockedError"`.
+A failure on the first page returns an empty review list with the same failure details filled
+in. Exceptions raised by `on_page` are wrapped in `TrustpilotError` and propagated -- they are
+never swallowed. `max_pages < 1` still raises `ValueError`.
+
 ### Command line
 
 ```bash
@@ -224,7 +258,9 @@ There are no environment variables. Everything is a function argument or CLI fla
 | Name | Purpose |
 | --- | --- |
 | `scrape_trustpilot_reviews(base_url, *, max_pages=None, delay=2.0, extended=False, session=None, timeout=30.0)` | Fetch every page (or `max_pages`) and return a list of dicts |
+| `collect_trustpilot_reviews(..., on_page=None)` | Same pagination, but returns a `TrustpilotCollectionResult`: reviews plus successful/failed pages and failure details, keeping partial results instead of raising |
 | `iter_trustpilot_reviews(...)` | Same arguments, as a lazy generator that fetches page by page |
+| `TrustpilotCollectionResult` | `reviews`, `successful_pages`, `failed_page`/`failed_pages` (`None` on success), `error_message`, `error_type`, `stopped_early` |
 | `get_reviews_from_page(url, *, session=None, timeout=30.0)` | Fetch one page and return the raw Trustpilot review objects |
 | `parse_reviews_html(html)` | Raw review objects from an HTML string (for example a saved page) |
 | `parse_next_data(html)` | The whole decoded `__NEXT_DATA__` JSON |
