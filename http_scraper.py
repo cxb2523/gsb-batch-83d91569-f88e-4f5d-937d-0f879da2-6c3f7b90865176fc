@@ -417,6 +417,11 @@ def scrape(args) -> Tuple[List[Product], Dict[str, Any]]:
         "transport_error": None,
         "stop_reason": None,
         "rotations": 0,
+        # One entry per REQUESTED page, in order — the run's own account of
+        # what each page answered, so "which page failed and why did we stop"
+        # is read from the sidecar rather than reconstructed from the exit
+        # code. Written into the sidecar with the rest of `facts`.
+        "page_log": [],
         "start_url": url,
         "final_url": url,
     }
@@ -447,22 +452,66 @@ def scrape(args) -> Tuple[List[Product], Dict[str, Any]]:
         facts["rotations"] = state_box["rotations"]
         return state_box["session"], proxy_pool.mask(nxt)
 
-    def get(target: str, page: int) -> Optional[FetchResult]:
+    def _page_entry(page: int, target: str, *, state: str,
+                    http_status: Optional[int], attempts: int, rotated: bool,
+                    exit_used: Optional[str] = None,
+                    elapsed_ms: int = 0) -> Dict[str, Any]:
+        """Append one page's entry to the run log and return it, so the caller
+        can fill in `new_rows` once the page has been parsed.
+
+        `exit` is the MASKED exit the page was last fetched through — the
+        run-level `facts["exit"]` and `facts["rotations"]` carry the same for
+        the run as a whole.
+        """
+        entry = {
+            "page": page,
+            "url": target,
+            "state": state,
+            "http_status": http_status,
+            "attempts": attempts,
+            "rotated": bool(rotated),
+            "new_rows": 0,
+            "exit": exit_used or facts["exit"],
+            "elapsed_ms": elapsed_ms,
+        }
+        facts["page_log"].append(entry)
+        return entry
+
+    def get(target: str, page: int) -> Tuple[Optional[FetchResult], Dict[str, Any]]:
         """`fetch`, with a refused PROXY credential ending the run here rather
-        than unwinding past the rows already gathered."""
+        than unwinding past the rows already gathered — and with the page's
+        entry recorded either way: a page that was asked for is a fact of the
+        run, whatever it answered."""
+        rotations_before = state_box["rotations"]
         try:
-            return fetch(state_box["session"], target, args.timeout,
-                         retries=args.retries, retry_delay=args.retry_delay,
-                         log=log, rotate=rotate)
+            result = fetch(state_box["session"], target, args.timeout,
+                           retries=args.retries, retry_delay=args.retry_delay,
+                           log=log, rotate=rotate)
         except ProxyAuthError as exc:
             print(proxy_message(exc), file=sys.stderr)
             facts["transport_error"] = "proxy: %s" % exc
             facts["failed_pages"].append(page)
             facts["stop_reason"] = "proxy_auth_failed"
-            return None
+            entry = _page_entry(page, target, state="proxy_auth_failed",
+                                http_status=exc.status, attempts=1,
+                                rotated=False)
+            return None, entry
+        if result.status is not None:
+            page_state = result.state
+        elif result.error == proxy_meter.STOP_REASON:
+            page_state = proxy_meter.STOP_REASON  # budget spent mid-page
+        else:
+            page_state = "transport_failed"
+        entry = _page_entry(page, target, state=page_state,
+                            http_status=result.status,
+                            attempts=result.attempts,
+                            rotated=state_box["rotations"] > rotations_before,
+                            exit_used=result.exit_used,
+                            elapsed_ms=result.elapsed_ms)
+        return result, entry
 
     if mode == "product":
-        result = get(url, 1)
+        result, entry = get(url, 1)
         if result is None or _transport_failed(result, facts, 1):
             return rows, facts
         facts["states"].append(result.state)
@@ -473,6 +522,7 @@ def scrape(args) -> Tuple[List[Product], Dict[str, Any]]:
             return rows, facts
         rows = P.parse_product(result.html, url=result.final_url,
                                category=args.category)
+        entry["new_rows"] = len(rows)
         facts["pages_completed"] = 1
         if result.state == "product" and not rows:
             facts["stop_reason"] = "parser_found_nothing"
@@ -485,7 +535,7 @@ def scrape(args) -> Tuple[List[Product], Dict[str, Any]]:
             break
         page_target = P.page_url(url, page)
         log("page %d: %s" % (page, page_target))
-        result = get(page_target, page)
+        result, entry = get(page_target, page)
         if result is None or _transport_failed(result, facts, page):
             break
         state = result.state
@@ -525,6 +575,7 @@ def scrape(args) -> Tuple[List[Product], Dict[str, Any]]:
             row.page = page
         fresh = output_writer.dedupe_by_sku(page_rows, seen)
         rows.extend(fresh)
+        entry["new_rows"] = len(fresh)
         if state == "content" and not page_rows:
             # The classifier found listing products on this page and the
             # parser returned none: our bug, not an empty category.
