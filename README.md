@@ -129,10 +129,20 @@ as configured in `.env` (Scraping Browser, fresh sessions via
 
 Output goes through the same `finish_run()` as a single run: one merged file
 (deduped by sku) plus `<out>.meta.json`, whose `failed_pages` are the failed
-route numbers and whose `per_route` lists each route's exit code, path and
-attempts. A route with a genuinely empty search is not a failure. Exit `0`
-all routes ok (or empty), `6` some failed, `3` none produced a row and one
-was blocked; a batch with no rows writes nothing unless `--allow-empty`.
+route numbers and whose `per_route` holds one record per requested route —
+every route lands in exactly one checkable state, and routes the spent proxy
+budget kept from running are recorded as `not_run` rather than dropped. Each
+record carries the route identity (`origin`, `destination`, `depart_date`,
+`return_date`), a final `status`, the ordered `path` of attempts that
+actually ran (`local` and/or `2captcha`), `attempt_count`, the route's
+`exit_code`, and the `not_run` / `budget_exhausted` flags. `status` is always
+consistent with the exit code: `success` (0 with rows), `empty` (0/4 with no
+rows — a genuine answer, not a failure), `blocked` (3), `scrape_failed` (5;
+a crashed attempt, including one that raised on the 2Captcha fallback, is
+normalised to 5), `partial` (6), or `not_run` (never executed). A route with
+a genuinely empty search is not a failure. Exit `0` all routes ok (or
+empty), `6` some failed, `3` none produced a row and one was blocked; a
+batch with no rows writes nothing unless `--allow-empty`.
 
 Verified live 2026-09-29: 3/3 routes, 1690 itineraries via local Chrome with
 no challenge (LHR-JFK 385, LHR-BCN round trip 1000+, LON-PAR 305). The

@@ -36,6 +36,23 @@ rather than being a silent violation of that.
 
 ### Added
 
+- `batch_scraper.py`: `per_route` in `<out>.meta.json` now holds one record
+  per **requested** route with a checkable verdict. Each record carries the
+  route identity (`origin`, `destination`, `depart_date`, `return_date`), a
+  final `status` consistent with its exit code (`success` 0-with-rows,
+  `empty` 0/4-with-no-rows, `blocked` 3, `scrape_failed` 5, `partial` 6,
+  `not_run`), the ordered `path` actually taken (`local` and/or
+  `2captcha`), `attempt_count`, the route `exit_code`, and `not_run` /
+  `budget_exhausted` flags. Routes left unrun once the proxy budget was
+  spent are now written explicitly as `not_run` instead of disappearing
+  from the list, and `failed_pages` contains only routes that ran and
+  failed. A crash (exit 1), including an exception raised on the 2Captcha
+  fallback, is normalised to `scrape_failed` (5) at batch level with the
+  raw code preserved on the attempt; an exception on either path can no
+  longer abort the rest of the batch. New no-network test:
+  `tests/test_batch_per_route.py` (faked engine covering success, empty,
+  blocked, fallback exception and budget-exhausted).
+
 - `proxy_meter.py`: per-run proxy traffic meter and budget, in all three
   engines and `batch_scraper.py`, only through a local proxy. Playwright
   sums `request.sizes()`; pyppeteer and Selenium count CDP

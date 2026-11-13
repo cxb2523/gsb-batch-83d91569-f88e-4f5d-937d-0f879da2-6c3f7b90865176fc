@@ -22,9 +22,15 @@ does not count as a failed route.
 
 Output goes through the family's finish_run(): one merged file (deduped by
 sku, in route order) plus `<out>.meta.json`, whose `failed_pages` are the
-failed ROUTE numbers and whose `per_route` records each route's exit code,
-path and attempts. A batch where no route produced a row writes nothing
-(unless --allow-empty), exactly like a failed single run.
+failed ROUTE numbers and whose `per_route` holds ONE record per requested
+route — including routes the proxy budget stopped before they ran. Every
+record names the route (origin/destination/depart_date), a final `status`
+consistent with its exit code (`success` | `empty` | `blocked` |
+`scrape_failed` | `partial` | `not_run`), the ordered sequence of paths it
+actually took (`local` / `2captcha`), its attempt count and exit code, and
+whether it was skipped because the budget was spent. A batch where no route
+produced a row writes nothing (unless --allow-empty), exactly like a failed
+single run.
 `--scraper-api` is not used as a fallback: it returns HTML only, and the
 flight list arrives over the `web-unified-search` XHR it cannot see.
 
@@ -65,6 +71,48 @@ OPTIONAL_COLUMNS = ("return_date", "adults", "cabin_class", "stops", "sort", "cu
 # Outcomes worth a second attempt through 2Captcha. EXIT_ZERO_PRODUCTS is
 # deliberately absent: a genuinely empty search stays empty.
 FALLBACK_ON = (EXIT_BLOCKED, EXIT_REMOTE_API_ERROR, EXIT_CRASH)
+
+# Human-checkable final states used in each per_route record's `status`.
+# They are deliberately narrower than output_writer.STATUS_BY_EXIT: a batch
+# route can only ever land in one of these five answers plus `not_run`.
+STATUS_SUCCESS = "success"          # exit 0 with rows
+STATUS_EMPTY = "empty"              # exit 0 with no rows (a real answer)
+STATUS_BLOCKED = "blocked"          # exit 3 (PerimeterX / challenge)
+STATUS_SCRAPE_FAILED = "scrape_failed"  # exit 5 (content never obtained; a crash lands here too)
+STATUS_PARTIAL = "partial"          # exit 6 (some rows, then trouble)
+STATUS_NOT_RUN = "not_run"          # never attempted — the proxy budget was spent
+
+# A raw engine crash (1) is reported at batch level as a scrape failure (5):
+# the per-route status set above has no "crashed" member, and a crashed route
+# means exactly what 5 means — the content was not obtained. The raw code is
+# still preserved in the route's `attempts` list.
+TERMINAL_EXIT = {EXIT_CRASH: EXIT_REMOTE_API_ERROR}
+
+
+def terminal_exit(code: int) -> int:
+    """Map an engine exit code to the code the BATCH reports for the route."""
+    return TERMINAL_EXIT.get(code, code)
+
+
+def route_status(code: int, rows: int, not_run: bool = False) -> str:
+    """The per-route `status`, always consistent with its reported exit code.
+
+    0 with rows → success, 0 without rows (or exit 4, the engine's own
+    zero-products answer) → empty, 3 → blocked, 5 → scrape_failed,
+    6 → partial. A route never attempted (budget spent) is `not_run`
+    regardless of its (null) exit code."""
+    if not_run:
+        return STATUS_NOT_RUN
+    code = terminal_exit(code)
+    if code == EXIT_OK:
+        return STATUS_SUCCESS if rows else STATUS_EMPTY
+    if code == EXIT_ZERO_PRODUCTS:
+        return STATUS_EMPTY
+    if code == EXIT_BLOCKED:
+        return STATUS_BLOCKED
+    if code == EXIT_PARTIAL:
+        return STATUS_PARTIAL
+    return STATUS_SCRAPE_FAILED  # EXIT_REMOTE_API_ERROR (incl. a normalised crash)
 
 _CHROME_CANDIDATES = (
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -195,10 +243,36 @@ class BatchBudget:
 @dataclass
 class RouteOutcome:
     route: str
-    exit_code: int
+    exit_code: Optional[int]
     via: str  # "local" | "2captcha" | "none"
     rows: int
     attempts: List[Dict[str, object]] = field(default_factory=list)
+    # --- route identity (the same columns the routes-file row carried) ---
+    origin: Optional[str] = None
+    destination: Optional[str] = None
+    depart_date: Optional[str] = None
+    return_date: Optional[str] = None
+    # --- the checkable per-route verdict ---
+    status: str = STATUS_NOT_RUN
+    # Ordered paths actually taken, e.g. ["local", "2captcha"]; [] for a
+    # route that never ran (a skipped local Chrome is not a path taken).
+    path: List[str] = field(default_factory=list)
+    attempt_count: int = 0
+    # True exactly when the proxy budget was spent before this route ran.
+    not_run: bool = False
+    budget_exhausted: bool = False
+
+    @classmethod
+    def budget_skipped(cls, route: Dict[str, str]) -> "RouteOutcome":
+        """The explicit record for a route the spent budget kept from running:
+        it stays visible in per_route instead of vanishing from the list."""
+        return cls(
+            route=route_label(route), exit_code=None, via="none", rows=0,
+            origin=route.get("origin"), destination=route.get("destination"),
+            depart_date=route.get("depart_date"), return_date=route.get("return_date"),
+            status=STATUS_NOT_RUN, path=[], attempt_count=0,
+            not_run=True, budget_exhausted=True,
+        )
 
 
 def _run_engine(argv: List[str]) -> int:
@@ -215,7 +289,12 @@ def scrape_route(
     run_engine: Callable[[List[str]], int] = _run_engine,
     budget: Optional[BatchBudget] = None,
 ) -> tuple:
-    """Returns (RouteOutcome, products). `run_engine` is injectable for tests."""
+    """Returns (RouteOutcome, products). `run_engine` is injectable for tests.
+
+    An exception raised on EITHER path — including the 2Captcha fallback —
+    is contained here: the attempt is recorded as a crash (EXIT_CRASH) and
+    the route ends as a scrape failure, so one route's blow-up can never
+    abort the rest of the batch."""
     label = route_label(route)
     attempts: List[Dict[str, object]] = []
 
@@ -224,11 +303,19 @@ def scrape_route(
         argv = engine_argv(route, out=out, max_results=args.max_results) + extra
         if budget is not None:
             argv += budget.flag()
-        code = run_engine(argv)
+        try:
+            code = run_engine(argv)
+        except Exception as exc:  # noqa: BLE001 — one route crashing must not end the batch
+            log.error("[%s] %s attempt crashed: %s", label, via, exc)
+            code = EXIT_CRASH
         if budget is not None:
             budget.record(out)
         wrote = code in (EXIT_OK, EXIT_PARTIAL) and Path(out).exists()
-        rows = json.loads(Path(out).read_text(encoding="utf-8")) if wrote else []
+        try:
+            rows = json.loads(Path(out).read_text(encoding="utf-8")) if wrote else []
+        except (OSError, ValueError) as exc:  # noqa: BLE001 — a corrupt file is a failed attempt, not a dead batch
+            log.error("[%s] %s wrote an unreadable output: %s", label, via, exc)
+            code, rows = EXIT_CRASH, []
         attempts.append({"via": via, "exit_code": code, "rows": len(rows)})
         log.info("[%s] %s → exit %d, %d itineraries", label, via, code, len(rows))
         return code, rows
@@ -255,21 +342,39 @@ def scrape_route(
             log.warning("[%s] no 2Captcha fallback configured (SKYSCANNER_CDP_ENDPOINT / SKYSCANNER_PROXY).", label)
 
     products = [Product(**r) for r in rows]
-    return RouteOutcome(route=label, exit_code=code, via=via if rows else "none",
-                        rows=len(products), attempts=attempts), products
+    # Only attempts that actually ran name a path; a skipped local Chrome
+    # (exit_code None) is recorded in `attempts` but is not a path taken.
+    path = [a["via"] for a in attempts if a.get("exit_code") is not None]
+    exit_code = terminal_exit(code)
+    outcome = RouteOutcome(
+        route=label, exit_code=exit_code, via=via if rows else "none",
+        rows=len(products), attempts=attempts,
+        origin=route.get("origin"), destination=route.get("destination"),
+        depart_date=route.get("depart_date"), return_date=route.get("return_date"),
+        status=route_status(exit_code, len(products)),
+        path=path, attempt_count=len(path),
+        not_run=False, budget_exhausted=bool(budget is not None and budget.exceeded),
+    )
+    return outcome, products
 
 
 def batch_outcome(outcomes: List[RouteOutcome], have_rows: bool) -> dict:
     """finish_run() inputs for the whole batch. A route counts as FAILED
     (by its 1-based number, like a failed page) unless it succeeded or the
-    site genuinely had nothing (exit 4). Blocked / remote-error only decide
-    the batch's status when no route produced a row; otherwise failed routes
-    make it partial (6)."""
-    failed = [i for i, o in enumerate(outcomes, start=1) if o.exit_code not in (EXIT_OK, EXIT_ZERO_PRODUCTS)]
-    failed_codes = [outcomes[i - 1].exit_code for i in failed]
+    site genuinely had nothing (exit 4). A route the spent proxy budget kept
+    from running is `not_run`: it is NOT a failed page — failed_pages only
+    lists routes that actually ran and failed — but it is also not completed,
+    so the totals account for every requested route. Blocked / remote-error
+    only decide the batch's status when no route produced a row; otherwise
+    failed routes make it partial (6)."""
+    run_outcomes = [o for o in outcomes if not o.not_run]
+    failed = [i for i, o in enumerate(outcomes, start=1)
+              if not o.not_run and o.exit_code not in (EXIT_OK, EXIT_ZERO_PRODUCTS)]
+    failed_codes = [o.exit_code for o in run_outcomes
+                    if o.exit_code not in (EXIT_OK, EXIT_ZERO_PRODUCTS)]
     return {
         "pages_requested": len(outcomes),
-        "pages_completed": len(outcomes) - len(failed),
+        "pages_completed": len(run_outcomes) - len(failed),
         "failed_pages": failed,
         "blocked": not have_rows and EXIT_BLOCKED in failed_codes,
         "remote_api_error": not have_rows and bool(failed_codes) and EXIT_BLOCKED not in failed_codes,
@@ -324,14 +429,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     with tempfile.TemporaryDirectory(prefix="skyscanner_batch_") as workdir:
         for i, route in enumerate(routes):
             if budget.exceeded:
-                # Never carry on past the cap: the remaining routes are
-                # not attempted, and the batch reports proxy_budget_exceeded.
+                # Never carry on past the cap. Each remaining route gets an
+                # explicit `not_run` record (one per requested route, never
+                # omitted), and the batch reports proxy_budget_exceeded.
                 log.error("Proxy budget exceeded (%s used) — %d route(s) not attempted.",
                           proxy_meter.fmt_mb(budget.spent), len(routes) - i)
+                for skipped in routes[i:]:
+                    outcomes.append(RouteOutcome.budget_skipped(skipped))
+                    per_route.append([])
                 break
             if i:
                 time.sleep(args.route_delay)
-            outcome, rows = scrape_route(route, args=args, workdir=workdir, budget=budget)
+            try:
+                outcome, rows = scrape_route(route, args=args, workdir=workdir, budget=budget)
+            except Exception as exc:  # noqa: BLE001 — safety net: one route must never kill the batch
+                log.error("[%s] failed outside the engine attempt: %s", route_label(route), exc)
+                outcome = RouteOutcome(
+                    route=route_label(route), exit_code=EXIT_REMOTE_API_ERROR, via="none", rows=0,
+                    origin=route.get("origin"), destination=route.get("destination"),
+                    depart_date=route.get("depart_date"), return_date=route.get("return_date"),
+                    status=STATUS_SCRAPE_FAILED, path=[], attempt_count=0,
+                    budget_exhausted=budget.exceeded,
+                )
+                rows = []
             outcomes.append(outcome)
             per_route.append(rows)
 
@@ -349,9 +469,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         (log.warning if budget.exceeded else log.info)(
             "Proxy traffic: %s of %s", proxy_meter.fmt_mb(budget.spent), cap)
     for o in outcomes:
-        print(f"{o.route:32} exit {o.exit_code}  via {o.via:8}  {o.rows} itineraries", file=sys.stderr)
-    ok = sum(o.exit_code == EXIT_OK for o in outcomes)
-    print(f"{ok}/{len(outcomes)} routes ok, {len(products)} itineraries → "
+        extra = "  (not run: proxy budget spent)" if o.not_run else ""
+        print(f"{o.route:32} {o.status:14} exit {str(o.exit_code):>4}  via {o.via:8}  "
+              f"{o.rows} itineraries{extra}", file=sys.stderr)
+    ok = sum(o.status == STATUS_SUCCESS for o in outcomes)
+    skipped = sum(o.not_run for o in outcomes)
+    print(f"{ok}/{len(outcomes)} routes ok"
+          + (f", {skipped} not run (budget spent)" if skipped else "")
+          + f", {len(products)} itineraries → "
           f"{args.out if products or args.allow_empty else '(nothing written)'} (exit {code})", file=sys.stderr)
     return code
 
