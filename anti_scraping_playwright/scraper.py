@@ -7,7 +7,7 @@ Honeypot Detection, Anti-Fingerprinting, Stealth Mode, Tor Support
 import random
 import time
 import re
-from typing import List, Dict, Optional, Tuple, Callable
+from typing import Any, List, Dict, Optional, Set, Tuple, Callable
 try:
     from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page, Locator
 except ImportError:  # pragma: no cover - allows config/tests without playwright installed
@@ -28,13 +28,57 @@ class ProxyServer:
     server: str
     username: Optional[str] = None
     password: Optional[str] = None
-    
+
     def to_playwright_format(self) -> Dict:
         proxy_dict = {"server": self.server}
         if self.username and self.password:
             proxy_dict["username"] = self.username
             proxy_dict["password"] = self.password
         return proxy_dict
+
+
+# Status values for a single page in a paginated scrape
+PAGE_STATUS_SUCCESS = "success"
+PAGE_STATUS_FAILED = "failed"
+PAGE_STATUS_SKIPPED = "skipped"
+
+
+@dataclass
+class PageStatus:
+    """Outcome of a single page in a paginated scrape."""
+    page_number: int
+    url: Optional[str]
+    status: str  # "success" | "failed" | "skipped"
+    error: Optional[str] = None
+    item_count: int = 0
+
+    @property
+    def success(self) -> bool:
+        return self.status == PAGE_STATUS_SUCCESS
+
+
+@dataclass
+class ScrapedItem:
+    """A single extracted item, tagged with its source page number."""
+    page: int
+    data: Any
+
+
+@dataclass
+class PaginationResult:
+    """Result of AntiBlockingScraper.scrape_paginated.
+
+    items:           deduplicated items in page order, each tagged with its source page
+    pages:           per-page status (success / failed+reason / skipped)
+    duplicates:      item key -> number of times the key was seen again after its first occurrence
+    pages_completed: number of pages successfully scraped in this run
+    completed_pages: cumulative set of completed page numbers (pass back in to resume)
+    """
+    items: List[ScrapedItem] = field(default_factory=list)
+    pages: List[PageStatus] = field(default_factory=list)
+    duplicates: Dict[str, int] = field(default_factory=dict)
+    pages_completed: int = 0
+    completed_pages: Set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -518,35 +562,38 @@ class AntiBlockingScraper:
         if self.config.enable_human_behavior:
             time.sleep(random.uniform(*self.config.reading_delay_range))
     
-    def scrape_with_rotation(self, 
-                            urls: List[str], 
+    def _launch_browser(self, playwright, **browser_options):
+        if self.config.browser_type == "firefox":
+            return playwright.firefox.launch(headless=self.config.headless, **browser_options)
+        elif self.config.browser_type == "webkit":
+            return playwright.webkit.launch(headless=self.config.headless, **browser_options)
+        else:
+            return playwright.chromium.launch(
+                headless=self.config.headless,
+                args=['--disable-blink-features=AutomationControlled'],
+                **browser_options
+            )
+
+    def scrape_with_rotation(self,
+                            urls: List[str],
                             scrape_callback: Callable[[Page, str], any],
                             **browser_options) -> List[any]:
         """
         Scrape multiple URLs with automatic session rotation.
-        
+
         Args:
             urls: List of URLs to scrape
             scrape_callback: Function(page, url) that performs scraping
             **browser_options: Additional browser launch options
-        
+
         Returns:
             List of results from scrape_callback
         """
         results = []
-        
+
         with sync_playwright() as p:
             # Launch browser
-            if self.config.browser_type == "firefox":
-                browser = p.firefox.launch(headless=self.config.headless, **browser_options)
-            elif self.config.browser_type == "webkit":
-                browser = p.webkit.launch(headless=self.config.headless, **browser_options)
-            else:
-                browser = p.chromium.launch(
-                    headless=self.config.headless,
-                    args=['--disable-blink-features=AutomationControlled'],
-                    **browser_options
-                )
+            browser = self._launch_browser(p, **browser_options)
             
             context = None
             page = None
@@ -617,8 +664,143 @@ class AntiBlockingScraper:
             if context:
                 context.close()
             browser.close()
-        
+
         return results
+
+    def scrape_paginated(self,
+                         start_url: str,
+                         max_pages: int,
+                         extract_callback: Callable[[Page, str], List[Any]],
+                         next_page_callback: Callable[[Page], Optional[str]],
+                         item_key: Optional[Callable[[Any], str]] = None,
+                         completed_pages: Optional[Set[int]] = None,
+                         **browser_options) -> PaginationResult:
+        """
+        Scrape a multi-page listing with per-page bookkeeping and resume support.
+
+        Args:
+            start_url: URL of the first page to scrape in this run. When resuming,
+                pass the URL of the first page that has not been completed yet
+                (e.g. the URL recorded on the failed PageStatus of the previous run).
+            max_pages: Maximum number of pages to scrape in this run. If <= 0, no
+                browser is started and an empty result is returned immediately.
+            extract_callback: Function(page, current_url) -> list of items on the page.
+            next_page_callback: Function(page) -> URL of the next page, or None to stop.
+            item_key: Optional function mapping an item to its unique identifier.
+                Defaults to str(item). Items whose key was already seen on an earlier
+                page are dropped; each extra hit is counted in result.duplicates.
+            completed_pages: Page numbers already scraped by a previous run. These
+                pages are skipped entirely (no navigation) and their items do not
+                participate in dedup counting. Page numbering for this run starts at
+                max(completed_pages) + 1, so completed pages are expected to be a
+                prefix 1..k of the listing.
+            **browser_options: Additional browser launch options.
+
+        Returns:
+            PaginationResult with deduplicated items (tagged with source page),
+            per-page status, duplicate hit counts, the number of pages completed in
+            this run, and the cumulative completed-page set for the next resume.
+
+        Failure semantics: if navigation, extraction, or next-page resolution raises,
+        the offending page is recorded as failed (with the reason) and scraping stops;
+        pages already completed keep their results. If the very first page fails, the
+        item list is empty but the failure is visible in the page statuses.
+        """
+        completed_so_far = set(completed_pages or ())
+        result = PaginationResult(completed_pages=set(completed_so_far))
+
+        # Pages already done in a previous run are skipped: no navigation, no extraction.
+        for page_number in sorted(completed_so_far):
+            result.pages.append(PageStatus(
+                page_number=page_number,
+                url=None,
+                status=PAGE_STATUS_SKIPPED,
+            ))
+
+        if max_pages <= 0:
+            return result
+
+        if sync_playwright is None:
+            raise ImportError("playwright is required for scrape_paginated")
+
+        key_of = item_key if item_key is not None else (lambda item: str(item))
+        start_page = max(completed_so_far) + 1 if completed_so_far else 1
+
+        with sync_playwright() as p:
+            browser = self._launch_browser(p, **browser_options)
+            context = self.create_stealth_context(browser)
+            page = context.new_page()
+
+            seen_keys = set()
+            current_url = start_url
+            page_number = start_page
+            pages_this_run = 0
+
+            try:
+                while current_url and pages_this_run < max_pages:
+                    # Navigate and extract; any failure marks this page and stops the walk.
+                    try:
+                        self.navigate(page, current_url)
+                        page_items = extract_callback(page, current_url) or []
+                    except Exception as e:
+                        print(f"✗ Page {page_number} failed ({current_url}): {e}")
+                        result.pages.append(PageStatus(
+                            page_number=page_number,
+                            url=current_url,
+                            status=PAGE_STATUS_FAILED,
+                            error=str(e),
+                        ))
+                        self.recent_failures += 1
+                        break
+
+                    # Dedup by item key: keep first occurrence, count later hits.
+                    for item in page_items:
+                        key = key_of(item)
+                        if key in seen_keys:
+                            result.duplicates[key] = result.duplicates.get(key, 0) + 1
+                        else:
+                            seen_keys.add(key)
+                            result.items.append(ScrapedItem(page=page_number, data=item))
+
+                    print(f"✓ Page {page_number}: {len(page_items)} items ({current_url})")
+                    result.pages.append(PageStatus(
+                        page_number=page_number,
+                        url=current_url,
+                        status=PAGE_STATUS_SUCCESS,
+                        item_count=len(page_items),
+                    ))
+                    result.completed_pages.add(page_number)
+                    result.pages_completed += 1
+                    pages_this_run += 1
+                    self.recent_failures = 0
+
+                    if pages_this_run >= max_pages:
+                        break
+
+                    # Resolve the next page; a failure here fails the page we cannot reach.
+                    try:
+                        next_url = next_page_callback(page)
+                    except Exception as e:
+                        print(f"✗ Page {page_number + 1} failed (next-page resolution): {e}")
+                        result.pages.append(PageStatus(
+                            page_number=page_number + 1,
+                            url=None,
+                            status=PAGE_STATUS_FAILED,
+                            error=str(e),
+                        ))
+                        self.recent_failures += 1
+                        break
+
+                    if not next_url:
+                        break
+
+                    current_url = next_url
+                    page_number += 1
+            finally:
+                context.close()
+                browser.close()
+
+        return result
 
 
 
