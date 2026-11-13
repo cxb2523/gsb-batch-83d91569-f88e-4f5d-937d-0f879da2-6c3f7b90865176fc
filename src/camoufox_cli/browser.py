@@ -43,6 +43,19 @@ class TabState:
         self.history: list[str] = []
         self.history_index: int = -1
 
+    def reset_view(self) -> None:
+        """Drop all view state (refs + history) for a fresh page lifecycle.
+
+        A tab starts every page lifecycle — its first page, a page recreated
+        after ``close`` reuses the tab name, or a page adopted through
+        ``switch`` — with an empty ref registry and a blank history. Without
+        this, a reopened tab would back-navigate into pages from its previous,
+        already-closed life.
+        """
+        self.refs = RefRegistry()
+        self.history = []
+        self.history_index = -1
+
     def push_history(self, url: str) -> None:
         # Truncate forward history when navigating to a new page
         self.history = self.history[:self.history_index + 1]
@@ -164,6 +177,11 @@ class BrowserManager:
             if not create:
                 raise RuntimeError(f"Tab '{tab}' has no open page. Send 'open <url>' first.")
             st.page = ctx.new_page()
+            # A freshly created page starts a new lifecycle: the old refs and
+            # history belong to a page that no longer exists (e.g. the tab was
+            # closed and its name reused), so drop them instead of letting
+            # back/forward jump to addresses from the tab's previous life.
+            st.reset_view()
         return st.page
 
     def get_context(self) -> BrowserContext:
@@ -198,9 +216,11 @@ class BrowserManager:
         st.page = pages[index]
         # The refs and history describe the previous page, not this one — reset
         # them so a stale @ref can't resolve against the newly-adopted page.
-        st.refs = RefRegistry()
-        st.history = []
-        st.history_index = -1
+        st.reset_view()
+        # The adopted page already sits on a URL: that is the only entry in
+        # this tab's fresh history, so back/forward correctly report no
+        # previous/next page until this tab navigates somewhere new.
+        st.push_history(st.page.url)
         st.page.bring_to_front()
         return st.page
 
@@ -212,7 +232,9 @@ class BrowserManager:
         others: it closes only the caller's own page (never a neighbor's,
         which would hijack another agent's tab), and when no live tab
         remains the browser itself is closed. Idempotent: releasing a tab
-        that has no open page is a no-op, not an error.
+        that has no open page is a no-op, not an error. Reusing the tab
+        name afterwards starts a brand-new lifecycle — blank refs and
+        history — so nothing from the closed tab can leak into the new one.
         """
         st = self._tabs.pop(tab, None)
         if st is not None and st.page is not None and not st.page.is_closed():
@@ -255,8 +277,12 @@ class BrowserManager:
             except Exception:
                 pass
             self._camoufox = None
-            self._context = None
-            self._tabs.clear()
+        # Always drop the context and tab state, even if the camoufox object
+        # was never set (half-initialized manager, launch-rollback path):
+        # close() must leave the manager fully stopped so a later launch()
+        # starts from a clean slate instead of reusing dead pages/state.
+        self._context = None
+        self._tabs.clear()
 
     @property
     def is_running(self) -> bool:

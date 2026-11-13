@@ -381,6 +381,80 @@ class TestE2E:
         assert resp["success"] is True
         assert cmd(daemon, "url")["success"] is True
 
+    def test_close_one_tab_leaves_other_tabs_history_intact(self, daemon):
+        # Two agents, each with their own multi-page history.
+        first = "data:text/html,<title>LF-1</title>"
+        second = "data:text/html,<title>LF-2</title>"
+        cmd(daemon, "open", {"url": first}, tab="life-a")
+        cmd(daemon, "open", {"url": second}, tab="life-a")
+        cmd(daemon, "open", {"url": "data:text/html,<title>LF-B</title>"}, tab="life-b")
+
+        # One agent finishes and closes; the other's history must survive.
+        assert cmd(daemon, "close", tab="life-b")["success"] is True
+
+        # life-a still walks its own back stack and lands on its first page.
+        resp = cmd(daemon, "back", tab="life-a")
+        assert resp["success"] is True
+        assert resp["data"]["title"] == "LF-1"
+        # And forward still works for the surviving tab.
+        resp = cmd(daemon, "forward", tab="life-a")
+        assert resp["success"] is True
+        assert resp["data"]["title"] == "LF-2"
+        cmd(daemon, "close", tab="life-a")
+
+    def test_reopened_same_named_tab_has_blank_history(self, daemon):
+        old1 = "data:text/html,<title>RO-1</title>"
+        old2 = "data:text/html,<title>RO-2</title>"
+        cmd(daemon, "open", {"url": old1}, tab="reopen")
+        cmd(daemon, "open", {"url": old2}, tab="reopen")
+        assert cmd(daemon, "close", tab="reopen")["success"] is True
+
+        # Reuse the same tab name: it starts a brand-new lifecycle.
+        fresh = "data:text/html,<title>RO-FRESH</title>"
+        resp = cmd(daemon, "open", {"url": fresh}, tab="reopen")
+        assert resp["success"] is True
+
+        back = cmd(daemon, "back", tab="reopen")
+        assert back["success"] is False
+        assert "no previous page" in back["error"].lower()
+        forward = cmd(daemon, "forward", tab="reopen")
+        assert forward["success"] is False
+        assert "no next page" in forward["error"].lower()
+        cmd(daemon, "close", tab="reopen")
+
+    def test_switch_keeps_each_tabs_history_isolated(self, daemon):
+        # alpha builds a two-entry history on its own page.
+        cmd(daemon, "open", {"url": "data:text/html,<title>SW-A1</title>"}, tab="sw-alpha")
+        cmd(daemon, "open", {"url": "data:text/html,<title>SW-A2</title>"}, tab="sw-alpha")
+        # beta owns another page, also with two entries.
+        cmd(daemon, "open", {"url": "data:text/html,<title>SW-B1</title>"}, tab="sw-beta")
+        cmd(daemon, "open", {"url": "data:text/html,<title>SW-B2</title>"}, tab="sw-beta")
+
+        # Find beta's page index in the shared context.
+        tabs = cmd(daemon, "tabs", tab="sw-alpha")["data"]["tabs"]
+        beta_index = next(t["index"] for t in tabs if t["tab"] == "sw-beta")
+
+        # alpha adopts beta's page: its history must reset to that page alone.
+        resp = cmd(daemon, "switch", {"index": beta_index}, tab="sw-alpha")
+        assert resp["success"] is True
+        assert resp["data"]["title"] == "SW-B2"
+        assert cmd(daemon, "back", tab="sw-alpha")["success"] is False
+        assert cmd(daemon, "forward", tab="sw-alpha")["success"] is False
+
+        # beta's own history is untouched: it can still back through B2 -> B1.
+        resp = cmd(daemon, "back", tab="sw-beta")
+        assert resp["success"] is True
+        assert resp["data"]["title"] == "SW-B1"
+
+        # alpha's reset history was not polluted by beta's navigation.
+        assert cmd(daemon, "back", tab="sw-alpha")["success"] is False
+
+        # A new navigation on alpha gives it a fresh, independent stack.
+        cmd(daemon, "open", {"url": "data:text/html,<title>SW-A3</title>"}, tab="sw-alpha")
+        resp = cmd(daemon, "back", tab="sw-alpha")
+        assert resp["success"] is True
+        assert resp["data"]["title"] == "SW-B2"
+
     def test_command_on_pageless_tab_errors(self, daemon):
         # A read command on a tab that never opened a page fails loudly instead
         # of silently creating a blank page and returning garbage.

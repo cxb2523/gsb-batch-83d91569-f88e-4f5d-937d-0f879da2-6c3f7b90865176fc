@@ -54,6 +54,17 @@ export class TabState {
   history: string[] = [];
   historyIndex = -1;
 
+  resetView(): void {
+    // A tab starts every page lifecycle — its first page, a page recreated
+    // after `close` reuses the tab name, or a page adopted through `switch` —
+    // with an empty ref registry and a blank history. Without this, a
+    // reopened tab would back-navigate into pages from its previous,
+    // already-closed life.
+    this.refs = new RefRegistry();
+    this.history = [];
+    this.historyIndex = -1;
+  }
+
   pushHistory(url: string): void {
     this.history = this.history.slice(0, this.historyIndex + 1);
     this.history.push(url);
@@ -212,6 +223,11 @@ export class BrowserManager {
       // a page and one is orphaned in the context forever.
       st.pagePromise ??= ctx.newPage().finally(() => { st.pagePromise = undefined; });
       st.page = await st.pagePromise;
+      // A freshly created page starts a new lifecycle: the old refs and
+      // history belong to a page that no longer exists (e.g. the tab was
+      // closed and its name reused), so drop them instead of letting
+      // back/forward jump to addresses from the tab's previous life.
+      st.resetView();
     }
     return st.page;
   }
@@ -252,9 +268,11 @@ export class BrowserManager {
     st.page = pages[index];
     // The refs and history describe the previous page, not this one — reset
     // them so a stale @ref can't resolve against the newly-adopted page.
-    st.refs = new RefRegistry();
-    st.history = [];
-    st.historyIndex = -1;
+    st.resetView();
+    // The adopted page already sits on a URL: that is the only entry in this
+    // tab's fresh history, so back/forward correctly report no previous/next
+    // page until this tab navigates somewhere new.
+    st.pushHistory(st.page.url());
     await st.page.bringToFront();
     return st.page;
   }
@@ -267,7 +285,9 @@ export class BrowserManager {
    * others: it closes only the caller's own page (never a neighbor's,
    * which would hijack another agent's tab), and when no live tab remains
    * the browser itself is closed. Idempotent: releasing a tab that has no
-   * open page is a no-op, not an error.
+   * open page is a no-op, not an error. Reusing the tab name afterwards
+   * starts a brand-new lifecycle — blank refs and history — so nothing
+   * from the closed tab can leak into the new one.
    *
    * Releases are SERIALIZED through a promise chain. Without it, N
    * concurrent closes interleave at the awaits: every one deletes its own

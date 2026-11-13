@@ -341,6 +341,82 @@ describe("e2e", { timeout: 120_000 }, () => {
     expect((await cmd(SOCK_PATH, "url")).success).toBe(true);
   });
 
+  it("closing one tab leaves the other tab's history intact", async () => {
+    // Two agents, each with their own multi-page history.
+    const first = "data:text/html,<title>LF-1</title>";
+    const second = "data:text/html,<title>LF-2</title>";
+    await cmd(SOCK_PATH, "open", { url: first }, "r1", "life-a");
+    await cmd(SOCK_PATH, "open", { url: second }, "r1", "life-a");
+    await cmd(SOCK_PATH, "open", { url: "data:text/html,<title>LF-B</title>" }, "r1", "life-b");
+
+    // One agent finishes and closes; the other's history must survive.
+    expect((await cmd(SOCK_PATH, "close", {}, "r1", "life-b")).success).toBe(true);
+
+    // life-a still walks its own back stack and lands on its first page.
+    const backResp = await cmd(SOCK_PATH, "back", {}, "r1", "life-a");
+    expect(backResp.success).toBe(true);
+    expect(backResp.data.title).toBe("LF-1");
+    // And forward still works for the surviving tab.
+    const fwdResp = await cmd(SOCK_PATH, "forward", {}, "r1", "life-a");
+    expect(fwdResp.success).toBe(true);
+    expect(fwdResp.data.title).toBe("LF-2");
+    await cmd(SOCK_PATH, "close", {}, "r1", "life-a");
+  });
+
+  it("reopening a closed tab name starts with blank history", async () => {
+    await cmd(SOCK_PATH, "open", { url: "data:text/html,<title>RO-1</title>" }, "r1", "reopen");
+    await cmd(SOCK_PATH, "open", { url: "data:text/html,<title>RO-2</title>" }, "r1", "reopen");
+    expect((await cmd(SOCK_PATH, "close", {}, "r1", "reopen")).success).toBe(true);
+
+    // Reuse the same tab name: it starts a brand-new lifecycle.
+    const openResp = await cmd(
+      SOCK_PATH, "open", { url: "data:text/html,<title>RO-FRESH</title>" }, "r1", "reopen",
+    );
+    expect(openResp.success).toBe(true);
+
+    const backResp = await cmd(SOCK_PATH, "back", {}, "r1", "reopen");
+    expect(backResp.success).toBe(false);
+    expect(backResp.error.toLowerCase()).toContain("no previous page");
+    const fwdResp = await cmd(SOCK_PATH, "forward", {}, "r1", "reopen");
+    expect(fwdResp.success).toBe(false);
+    expect(fwdResp.error.toLowerCase()).toContain("no next page");
+    await cmd(SOCK_PATH, "close", {}, "r1", "reopen");
+  });
+
+  it("switch keeps each tab's history isolated", async () => {
+    // alpha builds a two-entry history on its own page.
+    await cmd(SOCK_PATH, "open", { url: "data:text/html,<title>SW-A1</title>" }, "r1", "sw-alpha");
+    await cmd(SOCK_PATH, "open", { url: "data:text/html,<title>SW-A2</title>" }, "r1", "sw-alpha");
+    // beta owns another page, also with two entries.
+    await cmd(SOCK_PATH, "open", { url: "data:text/html,<title>SW-B1</title>" }, "r1", "sw-beta");
+    await cmd(SOCK_PATH, "open", { url: "data:text/html,<title>SW-B2</title>" }, "r1", "sw-beta");
+
+    // Find beta's page index in the shared context.
+    const tabsResp = await cmd(SOCK_PATH, "tabs", {}, "r1", "sw-alpha");
+    const betaIndex = tabsResp.data.tabs.find((t: any) => t.tab === "sw-beta").index;
+
+    // alpha adopts beta's page: its history must reset to that page alone.
+    const switchResp = await cmd(SOCK_PATH, "switch", { index: betaIndex }, "r1", "sw-alpha");
+    expect(switchResp.success).toBe(true);
+    expect(switchResp.data.title).toBe("SW-B2");
+    expect((await cmd(SOCK_PATH, "back", {}, "r1", "sw-alpha")).success).toBe(false);
+    expect((await cmd(SOCK_PATH, "forward", {}, "r1", "sw-alpha")).success).toBe(false);
+
+    // beta's own history is untouched: it can still back through B2 -> B1.
+    const betaBack = await cmd(SOCK_PATH, "back", {}, "r1", "sw-beta");
+    expect(betaBack.success).toBe(true);
+    expect(betaBack.data.title).toBe("SW-B1");
+
+    // alpha's reset history was not polluted by beta's navigation.
+    expect((await cmd(SOCK_PATH, "back", {}, "r1", "sw-alpha")).success).toBe(false);
+
+    // A new navigation on alpha gives it a fresh, independent stack.
+    await cmd(SOCK_PATH, "open", { url: "data:text/html,<title>SW-A3</title>" }, "r1", "sw-alpha");
+    const alphaBack = await cmd(SOCK_PATH, "back", {}, "r1", "sw-alpha");
+    expect(alphaBack.success).toBe(true);
+    expect(alphaBack.data.title).toBe("SW-B2");
+  });
+
   it("a command on a page-less tab errors instead of returning a blank page", async () => {
     const resp = await cmd(SOCK_PATH, "title", {}, "r1", "never-opened-xyz");
     expect(resp.success).toBe(false);
