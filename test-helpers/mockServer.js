@@ -1,0 +1,419 @@
+'use strict';
+
+// A local mock CapSkip server exercising the full submit/poll round trip over
+// real HTTP, mirroring tests/conftest.py from the Python SDK.
+//
+// Started life as a verbatim copy of ../Node/test/helpers/mockServer.js and has
+// since diverged deliberately, to model behaviour this server needs and the
+// Node SDK's suite did not. Added here:
+//   - a realistic GeeTest answer payload (`request` carrying a JSON string of
+//     geetest_* fields), so the primary parse path is exercised rather than the
+//     raw-answer fallback;
+//   - `server.lastSubmit`, recording the exact field set that reached in.php, so
+//     tests can assert on parameter mapping rather than only on "was accepted";
+//   - `badkey` rejection on res.php as well as in.php, which real CapSkip does
+//     and which capskip_status's probe depends on.
+//   - a `rawanswer` pageurl trigger, keeping the raw-answer fallback covered
+//     now that GeeTest solves return parseable JSON by default.
+// Of what the sibling already modelled, tests in this repo actually exercise:
+// the `never` pageurl trigger (a poll that never resolves, so a timeout is
+// reached), `badkey` rejection on both in.php and res.php, the CAPCHA_NOT_READY
+// text/JSON not-ready response, the Turnstile `useragent` field, and (added
+// above) the GeeTest JSON payload and `server.lastSubmit`. The `slow` pageurl
+// trigger and the `empty` one (the literal empty-body-means-not-ready
+// response) are NOT referenced by any test here, and never were — they are
+// kept only for parity with the sibling SDK's mock, in case a future test
+// needs them. Removing them costs nothing either way, so they stay.
+
+const http = require('http');
+const { URL } = require('url');
+
+const CODE = 'SOLVED_TOKEN_abc123';
+const USER_AGENT = 'CapSkipUA/1.0';
+
+// Real CapSkip answers a GeeTest solve with a JSON *string* in `request`, keyed
+// with the geetest_ prefix the target site's own form fields use. The SDK's
+// applyGeetestSolution parses exactly this shape into challenge/validate/seccode.
+//
+// GEETEST_CHALLENGE is deliberately NOT the challenge value the tests submit as
+// a tool argument (see geetest.test.js) — it reads as "solved-payload", not as
+// a plausible request challenge. That way, a test asserting
+// structuredContent.challenge === GEETEST_CHALLENGE can only pass if the tool
+// actually parsed this value out of the solved payload; a tool that echoed the
+// request's own `challenge` argument back would fail it.
+const GEETEST_CHALLENGE = 'solved-payload-challenge-fedcba9876543210';
+const GEETEST_VALIDATE = 'd41d8cd98f00b204e9800998ecf8427e';
+const GEETEST_SECCODE = 'd41d8cd98f00b204e9800998ecf8427e|jordan';
+const GEETEST_ANSWER = JSON.stringify({
+  geetest_challenge: GEETEST_CHALLENGE,
+  geetest_validate: GEETEST_VALIDATE,
+  geetest_seccode: GEETEST_SECCODE,
+});
+
+// Real CapSkip answers an ALTCHA solve with a base64 payload in `request`: the
+// challenge document with the winning counter added. The SDK's
+// applyAltchaSolution decodes exactly this shape into token/number, so the mock
+// returns a real one — a made-up string would leave the decode path untested.
+//
+// ALTCHA_NUMBER is deliberately not a value any test passes in as an argument,
+// so a test asserting structuredContent.number === ALTCHA_NUMBER can only pass
+// if the tool decoded it out of the payload.
+const ALTCHA_NUMBER = 9661;
+// Capy answers are not a token: three values that together go into the target
+// form. `answer` is the drag path the widget would have recorded, so the mock
+// carries a realistic one — the expansion is only meaningful against a real shape.
+const CAPY_SOLUTION = {
+  captchakey: 'PUZZLE_Abc1dEFghIJKLM2no34P56q7rStu8v',
+  challengekey: 'BalY2gJaI8uA2SGVOZhqBQ3V0CYSNNGP',
+  answer: '0xax8ex0xax84x0xkx7qx0x18x76x0x1ix6sx0x26x68x0x2gx5kx0x34x50x',
+  respKey: '',
+};
+
+const CAPTCHAFOX_TOKEN = '177f50c25b845601e5c779cdb51b040d523e8ab69efb4d5b343e28df07d05076';
+
+// The UA the browser actually minted the token under — deliberately not one a
+// caller could have sent, so a test can tell the two apart.
+const CAPTCHAFOX_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+  + '(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
+
+// A v1 token: four dot-separated parts.
+const FRIENDLY_CAPTCHA_TOKEN = 'c62c4da36bbaf7f253873035832709ef.'
+  + 'aqwpWwdbzRWKY/UQAQwwpgAAAAAAAAAAM7hBvJOzqjc=.AAAAAArcCQABAAAAxv8QAAIAAACKYRgA.AgAB';
+
+// A v2 token is a single opaque string beginning AQQA. and runs to roughly six
+// kilobytes, which is what the tool reads to name the right form field.
+const FRIENDLY_CAPTCHA_V2_TOKEN = `AQQA.${'a'.repeat(6000)}`;
+
+// An AWS WAF answer is a pair that only works together, so like Capy's it is an
+// object: json=1 puts it straight into `request` (with no createTask `solution`),
+// and plain text sends it as one line of JSON after OK|.
+const AMAZON_WAF_SOLUTION = {
+  captcha_voucher: 'eyJ2b3VjaGVyIjoiRVhBTVBMRSJ9.9QwZcEXAMPLEvoucherJk4LmN0pQ',
+  existing_token: '7d4c2a91-EXAMPLE-4f0b-9e6d-3a1b5c8e2f70:EQoAeXAMPLEtokenAAAA:Wm9wc2E=',
+};
+
+// DataDome answers with a cookie, exactly as DataDome set it. Next to it CapSkip
+// names the User-Agent it was earned with (the caller's, else its browser's) and,
+// only when the task sent no proxy and the app's DataDome list supplied one, that
+// proxy as host:port.
+const DATADOME_COOKIE = 'datadome=FAPPpli4jkT1MZGtgF8ez7mjSz8MrJ9fGRNE51Gj79cq9fXp5xn~F1P5APWjqvJojf4U9dq0R81Xaj2hpYtjle95mkg; '
+  + 'Max-Age=31536000; Domain=.example.com; Path=/; Secure; SameSite=Lax';
+const DATADOME_BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+  + '(KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36';
+const DATADOME_LIST_PROXY = '203.0.113.10:8080';
+
+// hCaptcha, as CapSkip's res.php answers it with json=1: the token as `request`,
+// the widget's respKey, and the UA of the browser that earned the token.
+const HCAPTCHA_TOKEN = 'P1_eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.hadwYXNza2V5xQZ2f3Kq8nV2';
+const HCAPTCHA_RESP_KEY = 'E0_eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpZCI6IjA09wB1';
+const HCAPTCHA_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+  + '(KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36';
+
+// MTCaptcha, as CapSkip's res.php answers it: the verified token and nothing else.
+const MTCAPTCHA_TOKEN = 'v1(0f3c9e2a,7b1d4c88,MTPublic-KzqLY1cKH,5e0c2a9f61d84b37a0c1e9b2d6f4a873,'
+  + 'Qm9ndXNUb2tlbkZvclRlc3RzT25seV9fTm90QVJlYWxNVENhcHRjaGFUb2tlbi1BYkNkRWZHaA**)';
+
+const ALTCHA_TOKEN = 'eyJhbGdvcml0aG0iOiJTSEEtMjU2IiwiY2hhbGxlbmdlIjoiM2RkMjgyNTNiZTZjYzBjNTRkOTVmN2Y5OGM1MTdlNjgiLCJudW1iZXIiOjk2NjEsInNhbHQiOiI0NmQ1YjFjODg3MWU1MTUyZDkwMmVlM2Y/ZXhwaXJlcz0xODkzNDU2MDAwIiwic2lnbmF0dXJlIjoiNGIxY2YwZTBiZTBmNGU1MjQ3ZTUwYjBmOWE0NDk4MzAiLCJ0b29rIjoxNi41OH0=';
+
+// The other ALTCHA generation. A proof-of-work v2 answer has no top-level
+// `number` at all -- the counter lives at `solution.counter` inside the token,
+// and the server reports it as `solution.number` alongside. Captured from a real
+// PBKDF2/SHA-256 deployment, the scheme altcha.org documents today. Reached via
+// the `altchav2` pageurl trigger.
+const ALTCHA_V2_NUMBER = 47;
+const ALTCHA_V2_TOKEN = 'eyJjaGFsbGVuZ2UiOnsicGFyYW1ldGVycyI6eyJhbGdvcml0aG0iOiJQQktERjIvU0hBLTI1NiIsImNvc3QiOjUwMDAwLCJleHBpcmVzQXQiOjE3ODkyMjQwOTAsImtleUxlbmd0aCI6MzIsImtleVByZWZpeCI6IjAwIiwibm9uY2UiOiI2MzRjNGY1OTFmZDA4NmJlYjQwZDY3MzEyYjg1ODA4YSIsInNhbHQiOiI1MTFlMWM3NWVkYmYyOTUyNzhjOWJmYjY4MTkxMDUzYyJ9LCJzaWduYXR1cmUiOiI5MTk3ZTRhMzVlYmZmMzk5ZDY2OWU3NDdjN2M1ZTZhYjA3OWIzMGZlMzQzN2RmMjY4ZGM3Y2FmMzRjZjllMjgxIn0sInNvbHV0aW9uIjp7ImNvdW50ZXIiOjQ3LCJkZXJpdmVkS2V5IjoiMDA5OWRiN2NiMzY4NjRkODg3NWZmODMwNWM5YTNkMjY0OWIxZjcyY2I3NzRkZTFjIn19';
+
+// A minimal valid 1x1 PNG. The mock returns these bytes for /image.png and the
+// SDK never inspects the content, so exact pixels do not matter.
+const PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+function send(res, text, ctype = 'text/plain') {
+  const body = Buffer.from(text, 'utf-8');
+  res.writeHead(200, { 'Content-Type': ctype, 'Content-Length': body.length });
+  res.end(body);
+}
+
+function createMockServer() {
+  let ids = 0;
+  const idType = {};
+  const idFields = {};
+  const pollCount = {};
+
+  const handleRes = (res, query) => {
+    // Real CapSkip validates the key on res.php too, not only on in.php. The
+    // status probe never submits anything, so this is the only way it can learn
+    // the key is wrong.
+    if (query.key === 'badkey') {
+      send(res, 'ERROR_WRONG_USER_KEY');
+      return;
+    }
+
+    const cid = query.id || '';
+    const wantJson = String(query.json) === '1';
+    pollCount[cid] = (pollCount[cid] || 0) + 1;
+
+    // CapSkip returns an empty 200 body when no result is available yet
+    // (briefly right after submit, for an unknown id, or once a solved token
+    // has already been read). It must be treated as "not ready".
+    if (cid.startsWith('empty') && pollCount[cid] < 3) {
+      send(res, '');
+      return;
+    }
+
+    const notReady = cid.startsWith('never')
+      || (cid.startsWith('slow') && pollCount[cid] < 2);
+
+    if (notReady) {
+      send(
+        res,
+        wantJson ? '{"status":0,"request":"CAPCHA_NOT_READY"}' : 'CAPCHA_NOT_READY',
+        wantJson ? 'application/json' : 'text/plain',
+      );
+    } else if (idType[cid] === 'altcha' && cid.startsWith('altchav2')) {
+      if (wantJson) {
+        send(res, JSON.stringify({
+          status: 1,
+          request: ALTCHA_V2_TOKEN,
+          solution: { token: ALTCHA_V2_TOKEN, number: ALTCHA_V2_NUMBER },
+        }), 'application/json');
+      } else {
+        send(res, `OK|${ALTCHA_V2_TOKEN}`);
+      }
+    } else if (idType[cid] === 'altcha') {
+      // CapSkip emits a superset: the legacy status/request pair plus the
+      // createTask-shaped solution object.
+      if (wantJson) {
+        send(res, JSON.stringify({
+          status: 1,
+          request: ALTCHA_TOKEN,
+          solution: { token: ALTCHA_TOKEN, number: ALTCHA_NUMBER },
+        }), 'application/json');
+      } else {
+        send(res, `OK|${ALTCHA_TOKEN}`);
+      }
+    } else if (idType[cid] === 'datadome') {
+      const sent = idFields[cid] || {};
+      const userAgent = sent.userAgent || sent.useragent || DATADOME_BROWSER_USER_AGENT;
+      if (wantJson) {
+        send(res, JSON.stringify({
+          status: 1,
+          request: DATADOME_COOKIE,
+          userAgent,
+          ...(sent.proxy ? {} : { proxy: DATADOME_LIST_PROXY }),
+        }), 'application/json');
+      } else {
+        send(res, `OK|${DATADOME_COOKIE}`);
+      }
+    } else if (idType[cid] === 'amazon_waf') {
+      if (wantJson) {
+        send(res, JSON.stringify({ status: 1, request: AMAZON_WAF_SOLUTION }), 'application/json');
+      } else {
+        send(res, `OK|${JSON.stringify(AMAZON_WAF_SOLUTION)}`);
+      }
+    } else if (idType[cid] === 'capy') {
+      // The one method whose answer is an object rather than a string: json=1
+      // puts it straight into `request`, and plain text sends it as a single
+      // line of JSON after OK|.
+      if (wantJson) {
+        send(res, JSON.stringify({
+          status: 1,
+          request: CAPY_SOLUTION,
+          solution: CAPY_SOLUTION,
+        }), 'application/json');
+      } else {
+        send(res, `OK|${JSON.stringify(CAPY_SOLUTION)}`);
+      }
+    } else if (idType[cid] === 'hcaptcha') {
+      // Plain text carries the UA in X-HCaptcha-User-Agent instead.
+      if (wantJson) {
+        send(res, JSON.stringify({
+          status: 1,
+          request: HCAPTCHA_TOKEN,
+          respKey: HCAPTCHA_RESP_KEY,
+          useragent: HCAPTCHA_USER_AGENT,
+        }), 'application/json');
+      } else {
+        send(res, `OK|${HCAPTCHA_TOKEN}`);
+      }
+    } else if (idType[cid] === 'mt_captcha' || idType[cid] === 'mtcaptcha') {
+      if (wantJson) {
+        send(res, JSON.stringify({ status: 1, request: MTCAPTCHA_TOKEN }), 'application/json');
+      } else {
+        send(res, `OK|${MTCAPTCHA_TOKEN}`);
+      }
+    } else if (idType[cid] === 'captchafox') {
+      if (wantJson) {
+        send(res, JSON.stringify({
+          status: 1,
+          request: CAPTCHAFOX_TOKEN,
+          userAgent: CAPTCHAFOX_USER_AGENT,
+          solution: { token: CAPTCHAFOX_TOKEN, userAgent: CAPTCHAFOX_USER_AGENT },
+        }), 'application/json');
+      } else {
+        send(res, `OK|${CAPTCHAFOX_TOKEN}`);
+      }
+    } else if (idType[cid] === 'friendly_captcha') {
+      // A v2 solve is routed by the id prefix the submit handler assigns, so a
+      // test can exercise both token shapes against one mock.
+      const token = cid.startsWith('friendlyv2')
+        ? FRIENDLY_CAPTCHA_V2_TOKEN
+        : FRIENDLY_CAPTCHA_TOKEN;
+      if (wantJson) {
+        send(res, JSON.stringify({
+          status: 1,
+          request: token,
+          solution: { token },
+        }), 'application/json');
+      } else {
+        send(res, `OK|${token}`);
+      }
+    } else if (wantJson && idType[cid] === 'turnstile') {
+      send(res, `{"status":1,"request":"${CODE}","useragent":"${USER_AGENT}"}`, 'application/json');
+    } else if (wantJson && idType[cid] === 'geetest' && !cid.startsWith('raw')) {
+      send(res, JSON.stringify({ status: 1, request: GEETEST_ANSWER }), 'application/json');
+    } else if (wantJson) {
+      send(res, `{"status":1,"request":"${CODE}"}`, 'application/json');
+    } else {
+      send(res, `OK|${CODE}`);
+    }
+  };
+
+  const handleIn = (res, body, contentType) => {
+    let fields;
+    let key;
+    if (contentType.startsWith('multipart/form-data')) {
+      fields = { method: 'post' };
+      key = 'capskip';
+    } else {
+      fields = Object.fromEntries(new URLSearchParams(body.toString('utf-8')));
+      key = fields.key || 'capskip';
+    }
+
+    // Recorded before the badkey rejection so a test can inspect what was sent
+    // even on a request the server refuses.
+    server.lastSubmit = fields;
+
+    if (key === 'badkey') {
+      send(res, 'ERROR_WRONG_USER_KEY');
+      return;
+    }
+
+    // CapSkip reads hCaptcha's invisible as "1" or "true" only; anything else
+    // would silently mean "visible", so the mock refuses it outright.
+    if (fields.method === 'hcaptcha' && fields.invisible !== undefined
+        && !['1', 'true'].includes(fields.invisible)) {
+      send(res, 'ERROR_BAD_PARAMETERS');
+      return;
+    }
+
+    // CapSkip's own MTCaptcha sitekey test. The SDK refuses a bad key first, so
+    // reaching here with one means local validation slipped.
+    if ((fields.method === 'mt_captcha' || fields.method === 'mtcaptcha')
+        && !/^MTPublic-[A-Za-z0-9_-]{1,55}$/.test(fields.sitekey || '')) {
+      send(res, 'ERROR_BAD_PARAMETERS');
+      return;
+    }
+
+    const pageurl = fields.pageurl || '';
+    ids += 1;
+    let cid;
+    if (pageurl.includes('never')) {
+      cid = `never${ids}`;
+    } else if (pageurl.includes('slow')) {
+      cid = `slow${ids}`;
+    } else if (pageurl.includes('empty')) {
+      cid = `empty${ids}`;
+    } else if (pageurl.includes('altchav2')) {
+      cid = `altchav2${ids}`;
+    } else if (fields.method === 'friendly_captcha' && String(fields.version) === 'v2') {
+      // Routed off the submit's own version field, so the mock answers a v2
+      // request with a v2-shaped token — a single opaque AQQA. string of
+      // roughly six kilobytes rather than v1's four dot-separated parts.
+      cid = `friendlyv2${ids}`;
+    } else if (pageurl.includes('rawanswer')) {
+      cid = `raw${ids}`;
+    } else {
+      cid = String(ids);
+    }
+    idType[cid] = fields.method || '';
+    idFields[cid] = fields;
+    // in.php returns JSON when the submit carried json=1, mirroring real CapSkip.
+    if (String(fields.json) === '1') {
+      send(res, `{"status":1,"request":"${cid}"}`, 'application/json');
+    } else {
+      send(res, `OK|${cid}`);
+    }
+  };
+
+  const server = http.createServer((req, res) => {
+    const parsed = new URL(req.url, 'http://localhost');
+
+    if (req.method === 'GET' && parsed.pathname === '/image.png') {
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': PNG.length });
+      res.end(PNG);
+      return;
+    }
+
+    if (req.method === 'GET' && parsed.pathname === '/res.php') {
+      handleRes(res, Object.fromEntries(parsed.searchParams.entries()));
+      return;
+    }
+
+    if (req.method === 'POST' && parsed.pathname === '/in.php') {
+      const chunks = [];
+      req.on('data', (chunk) => chunks.push(chunk));
+      req.on('end', () => handleIn(res, Buffer.concat(chunks), req.headers['content-type'] || ''));
+      return;
+    }
+
+    send(res, 'ERROR_NOT_FOUND');
+  });
+
+  /** The field set of the most recent in.php submit, or null if none yet. */
+  server.lastSubmit = null;
+
+  return server;
+}
+
+/** Start the mock server on a random loopback port. */
+function startMockServer() {
+  const server = createMockServer();
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const { address, port } = server.address();
+      resolve({ server, host: address, port });
+    });
+  });
+}
+
+module.exports = {
+  CODE,
+  USER_AGENT,
+  GEETEST_CHALLENGE,
+  GEETEST_VALIDATE,
+  GEETEST_SECCODE,
+  GEETEST_ANSWER,
+  ALTCHA_TOKEN,
+  CAPY_SOLUTION,
+  AMAZON_WAF_SOLUTION,
+  DATADOME_COOKIE,
+  DATADOME_BROWSER_USER_AGENT,
+  DATADOME_LIST_PROXY,
+  HCAPTCHA_TOKEN,
+  MTCAPTCHA_TOKEN,
+  HCAPTCHA_RESP_KEY,
+  HCAPTCHA_USER_AGENT,
+  CAPTCHAFOX_TOKEN,
+  CAPTCHAFOX_USER_AGENT,
+  FRIENDLY_CAPTCHA_TOKEN,
+  FRIENDLY_CAPTCHA_V2_TOKEN,
+  ALTCHA_NUMBER,
+  ALTCHA_V2_TOKEN,
+  ALTCHA_V2_NUMBER,
+  PNG,
+  createMockServer,
+  startMockServer,
+};

@@ -1,0 +1,166 @@
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import {
+  ApiException,
+  NetworkException,
+  TimeoutException,
+  ValidationException,
+} from 'capskip';
+
+export interface ErrorContext {
+  host: string;
+  port: number;
+  captchaId?: string;
+  elapsedSeconds?: number;
+}
+
+/** Build a tool result the model can read and act on. */
+export function toolError(message: string): CallToolResult {
+  return { content: [{ type: 'text', text: message }], isError: true };
+}
+
+function messageOf(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message;
+  }
+  return String(err);
+}
+
+// CapSkip surfaces API failures as an error code inside the exception message.
+const API_CODES: Array<[RegExp, (ctx: ErrorContext) => string]> = [
+  [
+    /ERROR_(KEY_DOES_NOT_EXIST|WRONG_USER_KEY)/,
+    () =>
+      'CapSkip rejected the API key. Set CAPSKIP_API_KEY to the key shown in '
+      + 'CapSkip settings, or disable key validation there.',
+  ],
+  [
+    /ERROR_CAPTCHA_UNSOLVABLE/,
+    () =>
+      'CapSkip could not solve this captcha. Fetch a fresh sitekey or challenge '
+      + 'from the page and try again.',
+  ],
+  [
+    /ERROR_GOOGLEKEY/,
+    () => 'CapSkip rejected the sitekey. Re-read data-sitekey from the page and retry.',
+  ],
+  [
+    /ERROR_RECAPTCHA_INVALID_SITEKEY/,
+    () =>
+      'The sitekey was refused for that page. Re-read data-sitekey from the widget, '
+      + 'and check url is the page the widget is actually on.',
+  ],
+  [
+    /ERROR_RECAPTCHA_INVALID_DOMAIN/,
+    () =>
+      'The sitekey is not allowed on the domain of url. Pass the address of the page '
+      + 'the widget is actually on.',
+  ],
+  [
+    /ERROR_PAGEURL/,
+    () => 'CapSkip rejected the url. Pass the full page URL, including its scheme.',
+  ],
+  [
+    /ERROR_INVALID_IMAGE/,
+    () => 'CapSkip could not read that image. Check the file is a valid, uncorrupted PNG or JPEG.',
+  ],
+  [
+    /ERROR_WRONG_USERAGENT/,
+    () =>
+      'CapSkip refused the userAgent: it must be stock Chrome for Windows with the '
+      + 'same major version as the browser CapSkip solves with. Leave userAgent out '
+      + "and CapSkip uses its own browser's, which the result reports.",
+  ],
+  [
+    /ERROR_PROXY_BANNED/,
+    () =>
+      'The site has banned the IP address this solve came from. Nothing sent from '
+      + 'that address can pass: switch to a different proxy, request the page again '
+      + 'and solve the new challenge.',
+  ],
+  [
+    /ERROR_PROXY_CONNECT_REFUSED/,
+    () => 'The target could not be reached through the proxy. Check the proxy works, or use another.',
+  ],
+  [
+    /ERROR_PROXY_FORMAT/,
+    () => 'CapSkip could not read the proxy. Use host:port or login:password@host:port.',
+  ],
+  [
+    /ERROR_BAD_PARAMETERS/,
+    () => 'CapSkip rejected the parameters for this captcha type. Re-check the values supplied.',
+  ],
+];
+
+function unreachable(ctx: ErrorContext): string {
+  return (
+    `CapSkip is not reachable at ${ctx.host}:${ctx.port}. Confirm the CapSkip `
+    + 'desktop app is running and that its API port matches this setting '
+    + '(override with CAPSKIP_HOST / CAPSKIP_PORT).'
+  );
+}
+
+// The SDK reports a non-200 from in.php/res.php as `bad response: <code>`.
+// Something *is* listening on that port, so "not reachable" would send the model
+// looking for a process that is already running. This mirrors the wording
+// capskip_status uses for the same situation.
+const BAD_RESPONSE = /bad response: (\d{3})/;
+
+/**
+ * A connection-level failure, whether the SDK wrapped it or Node raised it raw.
+ * One function so both call sites cannot drift apart.
+ */
+function networkFailure(message: string, ctx: ErrorContext): CallToolResult {
+  const badResponse = BAD_RESPONSE.exec(message);
+  if (badResponse) {
+    return toolError(
+      `Something is listening on ${ctx.host}:${ctx.port} but it did not answer as `
+      + `CapSkip (HTTP ${badResponse[1]}). Check the API port in CapSkip settings, `
+      + 'and that nothing else has taken that port — override with CAPSKIP_HOST / '
+      + 'CAPSKIP_PORT.',
+    );
+  }
+  return toolError(`${unreachable(ctx)} (underlying error: ${message})`);
+}
+
+/** Translate anything thrown during a solve into an actionable tool error. */
+export function mapError(err: unknown, ctx: ErrorContext): CallToolResult {
+  const message = messageOf(err);
+
+  if (err instanceof TimeoutException) {
+    const elapsed = ctx.elapsedSeconds !== undefined
+      ? `${ctx.elapsedSeconds.toFixed(1)}s`
+      : 'the configured timeout';
+    const id = ctx.captchaId
+      ? ` CapSkip captcha id ${ctx.captchaId} may still complete — it can be read later `
+        + 'via res.php or any CapSkip SDK.'
+      : '';
+    return toolError(
+      `The solve did not finish within ${elapsed}. Raise the timeout parameter, or `
+      + `check CapSkip's own queue.${id}`,
+    );
+  }
+
+  if (err instanceof ApiException) {
+    for (const [pattern, build] of API_CODES) {
+      if (pattern.test(message)) {
+        return toolError(build(ctx));
+      }
+    }
+    return toolError(`CapSkip returned an error: ${message}`);
+  }
+
+  if (err instanceof NetworkException) {
+    return networkFailure(message, ctx);
+  }
+
+  if (err instanceof ValidationException) {
+    return toolError(message);
+  }
+
+  // Connection failures can surface as plain Node errors before the SDK wraps them.
+  if (/ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ETIMEDOUT|ENOTFOUND/.test(message)) {
+    return networkFailure(message, ctx);
+  }
+
+  return toolError(`Unexpected failure while solving: ${message}`);
+}

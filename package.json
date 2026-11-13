@@ -1,0 +1,43 @@
+{
+  "name": "capskip-mcp",
+  "version": "1.6.0",
+  "description": "Captcha solver MCP server for AI agents: solve reCAPTCHA v2/v3, Cloudflare Turnstile, GeeTest and image captchas via CapSkip, a local unlimited captcha solver with no per-solve fees.",
+  "main": "./dist/server.js",
+  "exports": {
+    ".": "./dist/server.js",
+    "./package.json": "./package.json"
+  },
+  "bin": { "capskip-mcp": "dist/index.js" },
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "tsc && node -e \"try{require('fs').chmodSync('dist/index.js',0o755)}catch(e){}\"",
+    "prepublishOnly": "npm run build",
+    "test": "npm run build && node --test"
+  },
+  "keywords": [
+    "mcp", "mcp-server", "model-context-protocol",
+    "captcha", "captcha-solver", "captcha-solving", "captcha-bypass",
+    "unlimited-captcha-solver", "local-captcha-solver", "free-captcha-solver",
+    "recaptcha", "recaptcha-solver", "recaptcha-v2", "recaptcha-v3", "recaptcha-enterprise",
+    "turnstile", "turnstile-solver", "cloudflare-turnstile",
+    "geetest", "geetest-solver", "hcaptcha", "hcaptcha-solver", "mtcaptcha", "mtcaptcha-solver", "image-captcha", "ocr",
+    "2captcha-alternative", "anti-captcha-alternative",
+    "ai-agent", "browser-automation", "web-scraping",
+    "claude", "cursor", "vscode", "capskip"
+  ],
+  "author": "CapSkip <support@capskip.com>",
+  "license": "MIT",
+  "homepage": "https://capskip.com",
+  "repository": { "type": "git", "url": "git+https://github.com/capskip/capskip-mcp.git" },
+  "bugs": { "url": "https://github.com/capskip/capskip-mcp/issues" },
+  "files": ["dist", "docs", "examples", "CHANGELOG.md", "SECURITY.md"],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "capskip": "^1.7.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

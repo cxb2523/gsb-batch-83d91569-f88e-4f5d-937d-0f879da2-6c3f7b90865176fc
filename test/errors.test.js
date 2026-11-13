@@ -1,0 +1,133 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert');
+
+const { mapError, toolError } = require('../dist/errors.js');
+const {
+  ValidationException, NetworkException, ApiException, TimeoutException,
+} = require('capskip');
+
+const CTX = { host: '127.0.0.1', port: 8080 };
+
+function textOf(result) {
+  return result.content[0].text;
+}
+
+test('toolError marks the result as an error', () => {
+  const result = toolError('boom');
+  assert.strictEqual(result.isError, true);
+  assert.strictEqual(textOf(result), 'boom');
+});
+
+test('connection refused explains that CapSkip may not be running', () => {
+  const err = new NetworkException('connect ECONNREFUSED 127.0.0.1:8080');
+  const text = textOf(mapError(err, CTX));
+  assert.match(text, /not reachable at 127\.0\.0\.1:8080/);
+  assert.match(text, /desktop app is running/);
+});
+
+test('a non-200 from the port says something else is listening, not "not reachable"', () => {
+  // The SDK reports a non-200 as `bad response: <code>`. Saying "not reachable"
+  // here contradicts capskip_status, which reports the same port as occupied by
+  // something that is not CapSkip.
+  const text = textOf(mapError(new NetworkException('bad response: 404'), CTX));
+  assert.match(text, /Something is listening on 127\.0\.0\.1:8080/);
+  assert.match(text, /HTTP 404/);
+  assert.doesNotMatch(text, /not reachable/);
+});
+
+test('a rejected API key points at CAPSKIP_API_KEY', () => {
+  const err = new ApiException('ERROR_KEY_DOES_NOT_EXIST');
+  const text = textOf(mapError(err, CTX));
+  assert.match(text, /rejected the API key/);
+  assert.match(text, /CAPSKIP_API_KEY/);
+});
+
+test('ERROR_WRONG_USER_KEY maps to the same key guidance', () => {
+  const text = textOf(mapError(new ApiException('ERROR_WRONG_USER_KEY'), CTX));
+  assert.match(text, /CAPSKIP_API_KEY/);
+});
+
+test('unsolvable captcha suggests a fresh challenge', () => {
+  const text = textOf(mapError(new ApiException('ERROR_CAPTCHA_UNSOLVABLE'), CTX));
+  assert.match(text, /could not solve/i);
+  assert.match(text, /fresh/i);
+});
+
+test('ERROR_GOOGLEKEY names the offending parameter', () => {
+  const text = textOf(mapError(new ApiException('ERROR_GOOGLEKEY'), CTX));
+  assert.match(text, /sitekey/);
+});
+
+test('ERROR_PAGEURL names the offending parameter', () => {
+  const text = textOf(mapError(new ApiException('ERROR_PAGEURL'), CTX));
+  assert.match(text, /url/);
+});
+
+test('ERROR_INVALID_IMAGE points at the image itself', () => {
+  const text = textOf(mapError(new ApiException('ERROR_INVALID_IMAGE'), CTX));
+  assert.match(text, /could not read that image/i);
+  assert.match(text, /PNG or JPEG/);
+});
+
+test('ERROR_BAD_PARAMETERS points at the supplied values', () => {
+  const text = textOf(mapError(new ApiException('ERROR_BAD_PARAMETERS'), CTX));
+  assert.match(text, /parameters/i);
+  assert.match(text, /Re-check the values/i);
+});
+
+test('ERROR_RECAPTCHA_INVALID_SITEKEY points at the sitekey and the page', () => {
+  const text = textOf(mapError(new ApiException('ERROR_RECAPTCHA_INVALID_SITEKEY'), CTX));
+  assert.match(text, /sitekey/);
+  assert.match(text, /url/);
+});
+
+test('ERROR_WRONG_USERAGENT says which User-Agent CapSkip takes', () => {
+  const text = textOf(mapError(new ApiException('ERROR_WRONG_USERAGENT'), CTX));
+  assert.match(text, /Chrome for Windows/);
+  assert.match(text, /Leave userAgent out/);
+});
+
+test('ERROR_PROXY_BANNED says to change the address', () => {
+  const text = textOf(mapError(new ApiException('ERROR_PROXY_BANNED'), CTX));
+  assert.match(text, /banned/);
+  assert.match(text, /different proxy/);
+});
+
+test('ERROR_PROXY_CONNECT_REFUSED points at the proxy', () => {
+  const text = textOf(mapError(new ApiException('ERROR_PROXY_CONNECT_REFUSED'), CTX));
+  assert.match(text, /through the proxy/);
+});
+
+test('an unmapped API error is passed through rather than swallowed', () => {
+  // The fallback matters most for codes added to CapSkip after this release: the
+  // model gets the raw code to reason about instead of a generic failure.
+  const text = textOf(mapError(new ApiException('ERROR_SOMETHING_NEW'), CTX));
+  assert.match(text, /CapSkip returned an error/);
+  assert.match(text, /ERROR_SOMETHING_NEW/);
+});
+
+test('validation errors are surfaced verbatim', () => {
+  const text = textOf(mapError(new ValidationException("'action' is only supported for reCAPTCHA v3."), CTX));
+  assert.match(text, /only supported for reCAPTCHA v3/);
+});
+
+test('timeout reports elapsed seconds and the captcha id', () => {
+  const err = new TimeoutException('timeout 300 exceeded');
+  const text = textOf(mapError(err, { ...CTX, captchaId: '9912', elapsedSeconds: 301.4 }));
+  assert.match(text, /301/);
+  assert.match(text, /9912/);
+});
+
+test('unknown throwables still produce an error result, not a throw', () => {
+  const result = mapError(new Error('something odd'), CTX);
+  assert.strictEqual(result.isError, true);
+  assert.match(textOf(result), /something odd/);
+});
+
+test('non-Error throwables are handled', () => {
+  const result = mapError('a bare string', CTX);
+  assert.strictEqual(result.isError, true);
+  assert.match(textOf(result), /a bare string/);
+});

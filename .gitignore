@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# Local design/planning artifacts. Kept on disk for reference, not published:
+# the four sibling SDK repos ship no equivalent, and the plan is written for
+# build tooling rather than for contributors.
+.superpowers/
