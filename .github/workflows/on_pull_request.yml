@@ -1,0 +1,25 @@
+name: PullRequest
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - name: npm ci
+        run: npm ci
+      - name: tsc
+        uses: icrawl/action-tsc@v1
+      - run: npm run build
+      - run: npm run test-integr

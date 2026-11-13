@@ -1,0 +1,9 @@
+dist/
+node_modules/
+
+.idea
+.vscode
+
+tools/self-verify/tmp/
+tools/self-verify/reports/latest.json
+tools/self-verify/reports/latest.md
