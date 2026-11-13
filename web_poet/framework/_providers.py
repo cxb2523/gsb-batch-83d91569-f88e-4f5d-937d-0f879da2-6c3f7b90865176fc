@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from functools import partial
 from typing import TYPE_CHECKING, Any, get_type_hints
 
 import aiohttp
@@ -25,6 +26,8 @@ from web_poet.page_inputs import (
 )
 from web_poet.page_inputs.stats import StatCollector
 
+from ._report import FetchReport
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -33,7 +36,11 @@ PROVIDERS: dict[type, Callable[..., Any]] = {}
 logger = logging.getLogger(__name__)
 
 
-async def _get_http_response_from_http_request(request: HttpRequest) -> HttpResponse:
+async def _get_http_response_from_http_request(
+    request: HttpRequest, report: FetchReport | None = None
+) -> HttpResponse:
+    if report is not None:
+        report._record_http_request()
     try:
         async with (
             aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session,
@@ -51,7 +58,9 @@ async def _get_http_response_from_http_request(request: HttpRequest) -> HttpResp
 
 
 async def _get_browser_response_from_http_request(
-    request: HttpRequest, playwright_engine: str | None = None
+    request: HttpRequest,
+    playwright_engine: str | None = None,
+    report: FetchReport | None = None,
 ) -> BrowserResponse:
     if request.method.upper() != "GET":
         raise HttpRequestError(
@@ -76,6 +85,8 @@ async def _get_browser_response_from_http_request(
     try:
         async with async_playwright() as playwright:
             engine = getattr(playwright, engine_name)
+            if report is not None:
+                report._record_browser_launch(engine_name)
             browser_obj = await engine.launch()
             try:
                 page = await browser_obj.new_page()
@@ -97,10 +108,12 @@ class ResponseFetcher:
         self,
         required_deps: set[type] | None = None,
         default_playwright_engine: str | None = None,
+        report: FetchReport | None = None,
     ) -> None:
         self.http_response: HttpResponse | None = None
         self._browser_responses: dict[str, BrowserResponse] = {}
         self.default_playwright_engine = default_playwright_engine
+        self.report = report if report is not None else FetchReport()
         required_deps = required_deps or set()
         self._needs_http_response = bool(
             required_deps & {HttpResponse, HttpResponseBody, HttpResponseHeaders}
@@ -109,9 +122,21 @@ class ResponseFetcher:
             required_deps & {BrowserResponse, BrowserHtml}
         )
 
+    @property
+    def needs_browser_response(self) -> bool:
+        """Whether the page object dependencies require a browser response."""
+        return self._needs_browser_response
+
+    @property
+    def default_engine_name(self) -> str:
+        """Playwright engine used when one is not explicitly requested."""
+        return self.default_playwright_engine or DEFAULT_PLAYWRIGHT_ENGINE
+
     async def get_http_response(self, request: HttpRequest) -> HttpResponse:
         if self.http_response is None:
-            self.http_response = await _get_http_response_from_http_request(request)
+            self.http_response = await _get_http_response_from_http_request(
+                request, report=self.report
+            )
         return self.http_response
 
     async def get_browser_response(
@@ -126,7 +151,7 @@ class ResponseFetcher:
             self._browser_responses[
                 engine_name
             ] = await _get_browser_response_from_http_request(
-                request, playwright_engine=engine_name
+                request, playwright_engine=engine_name, report=self.report
             )
         return self._browser_responses[engine_name]
 
@@ -243,5 +268,10 @@ def _get_stats(stats: StatCollector | None = None, **_kwargs) -> Stats:
 
 
 @_provider
-def _get_http_client(**_kwargs) -> HttpClient:
-    return HttpClient(request_downloader=_get_http_response_from_http_request)
+def _get_http_client(
+    response_fetcher: ResponseFetcher | None = None, **_kwargs
+) -> HttpClient:
+    report = None if response_fetcher is None else response_fetcher.report
+    return HttpClient(
+        request_downloader=partial(_get_http_response_from_http_request, report=report)
+    )

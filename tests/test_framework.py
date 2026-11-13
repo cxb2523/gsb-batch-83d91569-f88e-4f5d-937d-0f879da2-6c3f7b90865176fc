@@ -14,7 +14,12 @@ from multidict import CIMultiDict
 
 from web_poet import Injectable, ItemPage, field
 from web_poet.exceptions import HttpRequestError, HttpResponseError
-from web_poet.framework import Framework, _providers, playwright_engine
+from web_poet.framework import (
+    FetchSource,
+    Framework,
+    _providers,
+    playwright_engine,
+)
 from web_poet.framework._api import _normalize_request
 from web_poet.page_inputs import Stats
 from web_poet.page_inputs.browser import BrowserHtml, BrowserResponse
@@ -973,3 +978,407 @@ async def test_playwright_exceptions_are_wrapped(monkeypatch):
     assert isinstance(exc.value.request, HttpRequest)
     assert str(exc.value.request.url) == "https://a.example"
     assert "playwright boom" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_fetch_report_mixed_dependencies(monkeypatch):
+    http_state = patch_get(monkeypatch, response_url="https://b.example")
+    browser_state = patch_async_playwright(
+        monkeypatch, response_url="https://c.example"
+    )
+
+    @define
+    class Page(ItemPage[SampleItem]):
+        http_response: HttpResponse
+        browser_response: BrowserResponse
+
+        async def to_item(self):
+            return SAMPLE_ITEM
+
+    framework = Framework()
+    item = await framework.get_item("https://a.example", Page)
+    assert item == SAMPLE_ITEM
+    assert http_state["calls"] == 1
+    assert browser_state["calls"] == 1
+
+    report = framework.fetch_report
+    assert report.http_requests == 1
+    assert report.uses_http
+    assert report.browser_launches == {"chromium": 1}
+    assert report.uses_browser
+    assert report.sources == {
+        HttpResponse: FetchSource.HTTP,
+        BrowserResponse: FetchSource.BROWSER,
+    }
+    assert report.dependency_for(HttpResponse).playwright_engine is None
+    assert report.dependency_for(BrowserResponse).playwright_engine == "chromium"
+    assert report.dependency_for(BrowserResponse).fetched
+    assert not report.dependency_for(BrowserResponse).failed
+
+
+@pytest.mark.asyncio
+async def test_fetch_report_shared_sources_not_double_counted(monkeypatch):
+    http_state = patch_get(monkeypatch, response_url="https://b.example")
+    browser_state = patch_async_playwright(
+        monkeypatch, response_url="https://c.example"
+    )
+
+    @define
+    class Nested(Injectable):
+        url: ResponseUrl
+
+    @define
+    class Page(ItemPage[SampleItem]):
+        url: ResponseUrl
+        response: BrowserResponse
+        nested: Nested
+
+        async def to_item(self):
+            return SAMPLE_ITEM
+
+    framework = Framework()
+    item = await framework.get_item("https://a.example", Page)
+    assert item == SAMPLE_ITEM
+    assert http_state["calls"] == 0
+    assert browser_state["calls"] == 1
+
+    report = framework.fetch_report
+    assert report.http_requests == 0
+    assert not report.uses_http
+    assert report.browser_launches == {"chromium": 1}
+    assert report.sources == {
+        ResponseUrl: FetchSource.BROWSER,
+        BrowserResponse: FetchSource.BROWSER,
+        Nested: FetchSource.LOCAL,
+    }
+
+    # Many direct HTTP dependencies share a single cached response.
+    http_state2 = patch_get(monkeypatch, response_url="https://b.example")
+    browser_state2 = patch_async_playwright(monkeypatch)
+
+    @define
+    class Page2(ItemPage[SampleItem]):
+        url: ResponseUrl
+        response: HttpResponse
+        body: HttpResponseBody
+        headers: HttpResponseHeaders
+
+        async def to_item(self):
+            return SAMPLE_ITEM
+
+    framework2 = Framework()
+    item = await framework2.get_item("https://a.example", Page2)
+    assert item == SAMPLE_ITEM
+    assert http_state2["calls"] == 1
+    assert browser_state2["calls"] == 0
+
+    report = framework2.fetch_report
+    assert report.http_requests == 1
+    assert report.browser_launches == {}
+    assert not report.uses_browser
+    for dependency in (
+        ResponseUrl,
+        HttpResponse,
+        HttpResponseBody,
+        HttpResponseHeaders,
+    ):
+        assert report.sources[dependency] is FetchSource.HTTP
+
+
+@pytest.mark.asyncio
+async def test_fetch_report_local_dependencies_only(monkeypatch):
+    http_state = patch_get(monkeypatch)
+    browser_state = patch_async_playwright(monkeypatch)
+
+    @define
+    class Page(ItemPage[SampleItem]):
+        request_url: RequestUrl
+        page_params: PageParams
+
+        async def to_item(self):
+            return SAMPLE_ITEM
+
+    framework = Framework()
+    item = await framework.get_item(
+        "https://a.example", Page, page_params={"foo": "bar"}
+    )
+    assert item == SAMPLE_ITEM
+    assert http_state["calls"] == 0
+    assert browser_state["calls"] == 0
+
+    report = framework.fetch_report
+    assert report.http_requests == 0
+    assert not report.uses_http
+    assert report.browser_launches == {}
+    assert not report.uses_browser
+    assert report.sources == {
+        RequestUrl: FetchSource.LOCAL,
+        PageParams: FetchSource.LOCAL,
+    }
+
+
+@pytest.mark.asyncio
+async def test_fetch_report_http_request_error_keeps_records(monkeypatch):
+    def fake_get(_session, _url):
+        raise RuntimeError("aiohttp boom")
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
+    patch_async_playwright(monkeypatch)
+
+    @define
+    class Page(ItemPage[SampleItem]):
+        response: HttpResponse
+
+        async def to_item(self):
+            return SAMPLE_ITEM
+
+    framework = Framework()
+    with pytest.raises(HttpRequestError, match=r"aiohttp boom"):
+        await framework.get_item("https://a.example", Page)
+
+    report = framework.fetch_report
+    assert report.http_requests == 1
+    assert report.uses_http
+    assert report.browser_launches == {}
+    info = report.dependency_for(HttpResponse)
+    assert info is not None
+    assert info.source is FetchSource.HTTP
+    assert info.failed
+
+
+@pytest.mark.asyncio
+async def test_fetch_report_browser_request_error_keeps_records(monkeypatch):
+    browser_state = patch_async_playwright(monkeypatch)
+    request = HttpRequest(url="https://a.example", body=b"foo")
+
+    @define
+    class Page(ItemPage[SampleItem]):
+        response: BrowserResponse
+
+        async def to_item(self):
+            return SAMPLE_ITEM
+
+    framework = Framework()
+    with pytest.raises(
+        HttpRequestError, match=r"does not support requests with a body"
+    ):
+        await framework.get_item(request, Page)
+
+    assert browser_state["launches"] == {}
+    report = framework.fetch_report
+    assert report.browser_launches == {}
+    assert not report.uses_http
+    info = report.dependency_for(BrowserResponse)
+    assert info is not None
+    assert info.source is FetchSource.BROWSER
+    assert info.playwright_engine == "chromium"
+    assert info.failed
+
+
+@pytest.mark.asyncio
+async def test_fetch_report_http_response_error_keeps_records(monkeypatch):
+    http_state = patch_get(monkeypatch, status=404)
+    patch_async_playwright(monkeypatch)
+
+    @define
+    class Page(ItemPage[SampleItem]):
+        http_client: HttpClient
+
+        async def to_item(self):
+            await self.http_client.get("https://a.example")
+            return SAMPLE_ITEM
+
+    framework = Framework()
+    with pytest.raises(HttpResponseError):
+        await framework.get_item("https://a.example", Page)
+
+    assert http_state["calls"] == 1
+    report = framework.fetch_report
+    assert report.http_requests == 1
+    assert report.uses_http
+    info = report.dependency_for(HttpClient)
+    assert info is not None
+    assert info.source is FetchSource.LOCAL
+    assert not info.failed
+
+
+@pytest.mark.asyncio
+async def test_fetch_report_browser_engines(monkeypatch):
+    browser_state = patch_async_playwright(monkeypatch)
+
+    @define
+    class Page(ItemPage[SampleItem]):
+        firefox_response: Annotated[BrowserResponse, playwright_engine("firefox")]
+        chromium_response: Annotated[BrowserResponse, playwright_engine("chromium")]
+        html: Annotated[BrowserHtml, playwright_engine("firefox")]
+
+        async def to_item(self):
+            return SAMPLE_ITEM
+
+    framework = Framework()
+    item = await framework.get_item("https://a.example", Page)
+    assert item == SAMPLE_ITEM
+    assert browser_state["launches"] == {"chromium": 1, "firefox": 1}
+    assert browser_state["calls"] == 2
+
+    report = framework.fetch_report
+    assert report.http_requests == 0
+    assert report.browser_launches == {"chromium": 1, "firefox": 1}
+    assert (
+        report.dependency_for(
+            Annotated[BrowserResponse, playwright_engine("firefox")]
+        ).playwright_engine
+        == "firefox"
+    )
+    assert (
+        report.dependency_for(
+            Annotated[BrowserResponse, playwright_engine("chromium")]
+        ).playwright_engine
+        == "chromium"
+    )
+    assert (
+        report.dependency_for(
+            Annotated[BrowserHtml, playwright_engine("firefox")]
+        ).playwright_engine
+        == "firefox"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_report_replaced_between_calls(monkeypatch):
+    http_state = patch_get(monkeypatch)
+    browser_state = patch_async_playwright(monkeypatch)
+
+    @define
+    class HttpPage(ItemPage[SampleItem]):
+        response: HttpResponse
+
+        async def to_item(self):
+            return SAMPLE_ITEM
+
+    @define
+    class LocalPage(ItemPage[SampleItem]):
+        request_url: RequestUrl
+
+        async def to_item(self):
+            return SAMPLE_ITEM
+
+    framework = Framework()
+    await framework.get_item("https://a.example", HttpPage)
+    assert framework.fetch_report.http_requests == 1
+
+    await framework.get_item("https://a.example", LocalPage)
+    report = framework.fetch_report
+    assert report.http_requests == 0
+    assert not report.uses_http
+    assert report.browser_launches == {}
+    assert report.sources == {RequestUrl: FetchSource.LOCAL}
+
+    assert http_state["calls"] == 1
+    assert browser_state["calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_report_new_framework_is_empty():
+    report = Framework().fetch_report
+    assert report.http_requests == 0
+    assert not report.uses_http
+    assert report.browser_launches == {}
+    assert not report.uses_browser
+    assert report.dependencies == {}
+
+
+@pytest.mark.asyncio
+async def test_fetch_report_browser_launch_error_keeps_records(monkeypatch):
+    class BadEngine:
+        async def launch(self):
+            raise RuntimeError("playwright boom")
+
+    class DummyPlaywright:
+        chromium = BadEngine()
+        firefox = BadEngine()
+        webkit = BadEngine()
+
+    class DummyContext:
+        async def __aenter__(self):
+            return DummyPlaywright()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_async_playwright():
+        return DummyContext()
+
+    monkeypatch.setattr(_providers, "async_playwright", fake_async_playwright)
+
+    @define
+    class Page(ItemPage[SampleItem]):
+        response: Annotated[BrowserResponse, playwright_engine("firefox")]
+
+        async def to_item(self):
+            return SAMPLE_ITEM
+
+    framework = Framework()
+    with pytest.raises(HttpRequestError, match=r"playwright boom"):
+        await framework.get_item("https://a.example", Page)
+
+    report = framework.fetch_report
+    assert report.http_requests == 0
+    assert report.browser_launches == {"firefox": 1}
+    assert report.uses_browser
+    info = report.dependency_for(
+        Annotated[BrowserResponse, playwright_engine("firefox")]
+    )
+    assert info is not None
+    assert info.source is FetchSource.BROWSER
+    assert info.playwright_engine == "firefox"
+    assert info.failed
+
+
+@pytest.mark.asyncio
+async def test_fetch_report_after_get_page(monkeypatch):
+    http_state = patch_get(monkeypatch)
+    browser_state = patch_async_playwright(monkeypatch)
+
+    @define
+    class Page(ItemPage[SampleItem]):
+        response_url: ResponseUrl
+
+        async def to_item(self):
+            return SAMPLE_ITEM
+
+    framework = Framework()
+    page = await framework.get_page("https://a.example", Page)
+    assert page is not None
+
+    report = framework.fetch_report
+    assert report.http_requests == 1
+    assert report.browser_launches == {}
+    assert report.sources == {ResponseUrl: FetchSource.HTTP}
+    assert http_state["calls"] == 1
+    assert browser_state["calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_report_any_response_engine_matches_actual(monkeypatch):
+    browser_state = patch_async_playwright(monkeypatch)
+
+    @define
+    class Page(ItemPage[SampleItem]):
+        response: Annotated[BrowserResponse, playwright_engine("firefox")]
+        url: ResponseUrl
+
+        async def to_item(self):
+            return SAMPLE_ITEM
+
+    framework = Framework()
+    item = await framework.get_item("https://a.example", Page)
+    assert item == SAMPLE_ITEM
+
+    report = framework.fetch_report
+    assert report.browser_launches == browser_state["launches"]
+    assert report.uses_browser
+    url_info = report.dependency_for(ResponseUrl)
+    assert url_info is not None
+    assert url_info.source is FetchSource.BROWSER
+    assert url_info.playwright_engine in browser_state["launches"]

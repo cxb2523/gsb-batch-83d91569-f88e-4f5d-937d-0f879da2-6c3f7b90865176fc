@@ -9,9 +9,13 @@ from playwright.async_api import async_playwright
 from web_poet import default_registry
 from web_poet.annotated import annotation_encode
 from web_poet.page_inputs import (
+    AnyResponse,
     BrowserHtml,
     BrowserResponse,
     HttpRequest,
+    HttpResponse,
+    HttpResponseBody,
+    HttpResponseHeaders,
 )
 from web_poet.page_inputs.stats import DictStatCollector, StatCollector
 from web_poet.page_inputs.url import RequestUrl, ResponseUrl
@@ -20,8 +24,17 @@ from web_poet.rules import RulesRegistry
 from web_poet.utils import ensure_awaitable
 
 from ._providers import DEFAULT_PLAYWRIGHT_ENGINE, PROVIDERS, ResponseFetcher
+from ._report import FetchReport, FetchSource
 
 ANNOTATION_PREFIX = "playwright_engine."
+
+#: Dependencies that are always provided by a direct HTTP request.
+_HTTP_DEPENDENCIES = {HttpResponse, HttpResponseBody, HttpResponseHeaders}
+#: Dependencies that are always provided by a browser.
+_BROWSER_DEPENDENCIES = {BrowserResponse, BrowserHtml}
+#: Dependencies provided either directly or by a browser, depending on the
+#: other dependencies of the page object.
+_ANY_DEPENDENCIES = {AnyResponse, ResponseUrl}
 
 
 def playwright_engine(name: str) -> str:
@@ -63,6 +76,10 @@ class Framework:
     :class:`~web_poet.page_inputs.stats.DictStatCollector` is used. You can
     access the collector through the :attr:`stats` attribute, e.g. to read its
     data.
+
+    After each :meth:`get_page` or :meth:`get_item` call, the
+    :attr:`fetch_report` attribute holds a :class:`FetchReport` that describes
+    the data sources used for that call.
     """
 
     def __init__(
@@ -75,6 +92,39 @@ class Framework:
         self._registry = registry or default_registry
         self._default_playwright_engine = default_playwright_engine
         self.stats: StatCollector = stats or DictStatCollector()
+        self.fetch_report: FetchReport = FetchReport()
+
+    def _playwright_engine_for_dependency(self, fn_or_cls: Any, default: str) -> str:
+        base = strip_annotated(fn_or_cls)
+        if base not in _BROWSER_DEPENDENCIES:
+            return default
+        if get_origin(fn_or_cls) is Annotated:
+            meta = get_args(fn_or_cls)[1:]
+            if meta and isinstance(meta[0], str):
+                m = meta[0]
+                if m.startswith(ANNOTATION_PREFIX):
+                    return m.split(".", 1)[1]
+        return default
+
+    def _fetch_source(
+        self,
+        fn_or_cls: Any,
+        response_fetcher: ResponseFetcher,
+        engine_for_unannotated: str,
+    ) -> tuple[FetchSource, str | None]:
+        base = strip_annotated(fn_or_cls)
+        if base in _HTTP_DEPENDENCIES:
+            return FetchSource.HTTP, None
+        if base in _BROWSER_DEPENDENCIES:
+            engine = self._playwright_engine_for_dependency(
+                fn_or_cls, engine_for_unannotated
+            )
+            return FetchSource.BROWSER, engine
+        if base in _ANY_DEPENDENCIES:
+            if response_fetcher.needs_browser_response:
+                return FetchSource.BROWSER, response_fetcher.default_engine_name
+            return FetchSource.HTTP, None
+        return FetchSource.LOCAL, None
 
     async def get_page(
         self,
@@ -87,8 +137,13 @@ class Framework:
 
         *page_params* is a dict that the page object may access through the
         :class:`~web_poet.page_inputs.PageParams` dependency.
+
+        The :attr:`fetch_report` attribute is updated with the data sources
+        used to build the page object, also when an exception is raised.
         """
         request = _normalize_request(request)
+        report = FetchReport()
+        self.fetch_report = report
         plan = andi.plan(
             page_cls,
             is_injectable=is_injectable,
@@ -103,6 +158,7 @@ class Framework:
         response_fetcher = ResponseFetcher(
             required_deps=required_deps,
             default_playwright_engine=self._default_playwright_engine,
+            report=report,
         )
 
         # first pass: collect explicit Playwright engine names from Annotated
@@ -149,20 +205,18 @@ class Framework:
             base = strip_annotated(fn_or_cls)
             assert isinstance(base, type)
             playwright_engine_kw: str | None = None
-            if (
-                base in {BrowserResponse, BrowserHtml}
-                and get_origin(fn_or_cls) is Annotated
-            ):
-                meta = get_args(fn_or_cls)[1:]
-                if meta and isinstance(meta[0], str):
-                    m = meta[0]
-                    if m.startswith(ANNOTATION_PREFIX):
-                        playwright_engine_kw = m.split(".", 1)[1]
-            elif base in {BrowserResponse, BrowserHtml}:
-                playwright_engine_kw = chosen_engine_for_unannotated
+            if base in _BROWSER_DEPENDENCIES:
+                playwright_engine_kw = self._playwright_engine_for_dependency(
+                    fn_or_cls, chosen_engine_for_unannotated
+                )
 
             provider = PROVIDERS.get(base)
             if provider is not None:
+                source, engine = self._fetch_source(
+                    fn_or_cls, response_fetcher, chosen_engine_for_unannotated
+                )
+                if base is not page_cls:
+                    report._record_dependency(fn_or_cls, source, engine)
                 call_kwargs = {
                     "request": request,
                     "page_params": page_params,
@@ -174,9 +228,21 @@ class Framework:
                 }
                 if playwright_engine_kw is not None:
                     call_kwargs["playwright_engine"] = playwright_engine_kw
-                value = await ensure_awaitable(provider(**call_kwargs))
+                try:
+                    value = await ensure_awaitable(provider(**call_kwargs))
+                except Exception:
+                    if base is not page_cls:
+                        report._mark_dependency_failed(fn_or_cls)
+                    raise
             else:
-                value = await ensure_awaitable(base(**kwargs))
+                if base is not page_cls:
+                    report._record_dependency(fn_or_cls, FetchSource.LOCAL)
+                try:
+                    value = await ensure_awaitable(base(**kwargs))
+                except Exception:
+                    if base is not page_cls:
+                        report._mark_dependency_failed(fn_or_cls)
+                    raise
 
             instances[fn_or_cls] = value
         return instances[page_cls]
@@ -196,8 +262,12 @@ class Framework:
         :class:`~web_poet.framework.Framework`.
 
         *page_params* is a dict that the page object may access through the
-        :class:`~web_poet.page_inputs.PageParams` dependency
+        :class:`~web_poet.page_inputs.PageParams` dependency.
+
+        The :attr:`fetch_report` attribute is updated with the data sources
+        used to build the page object, also when an exception is raised.
         """
+        self.fetch_report = FetchReport()
         request = _normalize_request(request)
         if issubclass(item_or_page_cls, ItemPage):
             page_cls: type | None = item_or_page_cls

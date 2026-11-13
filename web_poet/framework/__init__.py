@@ -10,8 +10,12 @@ except ImportError as exception:
     raise ImportError(message) from exception
 
 from ._api import Framework, playwright_engine
+from ._report import DependencyFetch, FetchReport, FetchSource
 
 __all__ = [
+    "DependencyFetch",
+    "FetchReport",
+    "FetchSource",
     "Framework",
     "playwright_engine",
 ]

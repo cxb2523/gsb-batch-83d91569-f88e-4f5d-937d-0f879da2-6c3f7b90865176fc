@@ -189,3 +189,7 @@ Built-in framework
 
 .. automodule:: web_poet.framework
     :members:
+
+.. automodule:: web_poet.framework._report
+    :members:
+    :show-inheritance:

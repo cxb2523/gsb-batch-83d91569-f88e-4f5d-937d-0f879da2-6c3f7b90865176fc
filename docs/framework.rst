@@ -131,6 +131,57 @@ require. For example:
     class MyPageObject(WebPage[Item]):
         response = Annotated[BrowserResponse, playwright_engine("firefox")]
 
+.. _framework-fetch-report:
+
+Fetch report
+============
+
+After each :meth:`~web_poet.framework.Framework.get_page` or
+:meth:`~web_poet.framework.Framework.get_item` call, the
+:attr:`~web_poet.framework.Framework.fetch_report` attribute holds a
+:class:`~web_poet.framework.FetchReport` object that describes where the data
+of that page object came from:
+
+.. code-block:: python
+
+    framework = Framework()
+    page = await framework.get_page("https://books.example.com/book/1", BookPage)
+
+    report = framework.fetch_report
+    assert report.http_requests == 1
+    assert report.browser_launches == {}
+    print(report.sources)
+    # {<class 'web_poet.page_inputs.http.HttpResponse'>: <FetchSource.HTTP: 'http'>}
+
+The report includes:
+
+-   :attr:`~web_poet.framework.FetchReport.http_requests`, the number of
+    direct HTTP requests attempted, and
+    :attr:`~web_poet.framework.FetchReport.uses_http`.
+-   :attr:`~web_poet.framework.FetchReport.browser_launches`, the number of
+    browser launches attempted, per Playwright engine, and
+    :attr:`~web_poet.framework.FetchReport.uses_browser`.
+-   :attr:`~web_poet.framework.FetchReport.dependencies`, how each dependency,
+    including dependencies nested inside injectable page objects, was
+    obtained: :attr:`~web_poet.framework.FetchSource.HTTP`,
+    :attr:`~web_poet.framework.FetchSource.BROWSER` or
+    :attr:`~web_poet.framework.FetchSource.LOCAL`. For browser dependencies,
+    :attr:`~web_poet.framework.DependencyFetch.playwright_engine` is the
+    engine used. :attr:`~web_poet.framework.FetchReport.sources` is the same
+    information, without the Playwright engine details.
+
+Counts reflect the fetch operations that actually happen. For example, a
+page object that requests both :class:`~web_poet.page_inputs.HttpResponse` and
+:class:`~web_poet.page_inputs.ResponseUrl` reports a single direct HTTP
+request, because both dependencies share the same cached response. Likewise,
+dependencies that use the same Playwright engine report a single launch.
+
+The report is kept when the call raises an exception, so you can inspect the
+records of the fetches that were attempted, e.g. before an
+:exc:`~web_poet.exceptions.HttpRequestError` was raised. Dependencies whose
+fetch failed have :attr:`~web_poet.framework.DependencyFetch.failed` set to
+``True``.
+
 Stats
 =====
 

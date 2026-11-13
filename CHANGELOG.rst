@@ -2,6 +2,17 @@
 Changelog
 =========
 
+0.26.0 (unreleased)
+-------------------
+
+Improvements:
+
+* The :ref:`built-in framework <framework>` now exposes a
+  :ref:`fetch report <framework-fetch-report>` through
+  :attr:`~web_poet.framework.Framework.fetch_report`, with the number of
+  direct HTTP requests and browser launches, and the source of each page
+  object dependency.
+
 0.25.0 (2026-11-06)
 -------------------
 
