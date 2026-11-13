@@ -47,14 +47,23 @@ class AsyncEndpoints(BaseAsyncClient):
         )
 
     def iter_user_followers(
-        self, user_id: str, *, max_items: int | None = None
+        self,
+        user_id: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``user_followers``."""
 
         async def fetch(cursor: str | None) -> Page:
             return await self.user_followers(user_id, cursor=cursor)
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def user_following(
         self, user_id: str, *, cursor: str | None = None
@@ -70,14 +79,23 @@ class AsyncEndpoints(BaseAsyncClient):
         )
 
     def iter_user_following(
-        self, user_id: str, *, max_items: int | None = None
+        self,
+        user_id: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``user_following``."""
 
         async def fetch(cursor: str | None) -> Page:
             return await self.user_following(user_id, cursor=cursor)
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def user_posts(
         self, user_id: str, *, cursor: str | None = None
@@ -117,6 +135,7 @@ class AsyncEndpoints(BaseAsyncClient):
         *,
         sort_by_views: bool | None = None,
         max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``user_reels``."""
 
@@ -125,7 +144,12 @@ class AsyncEndpoints(BaseAsyncClient):
                 user_id, sort_by_views=sort_by_views, cursor=cursor
             )
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def user_tagged(
         self, user_id: str, *, cursor: str | None = None
@@ -141,14 +165,23 @@ class AsyncEndpoints(BaseAsyncClient):
         )
 
     def iter_user_tagged(
-        self, user_id: str, *, max_items: int | None = None
+        self,
+        user_id: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``user_tagged``."""
 
         async def fetch(cursor: str | None) -> Page:
             return await self.user_tagged(user_id, cursor=cursor)
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def user_stories(self, user_id: str) -> Any:
         """The user's currently-active story items (empty if none live).
@@ -182,14 +215,23 @@ class AsyncEndpoints(BaseAsyncClient):
         )
 
     def iter_user_reposts(
-        self, user_id: str, *, max_items: int | None = None
+        self,
+        user_id: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``user_reposts``."""
 
         async def fetch(cursor: str | None) -> Page:
             return await self.user_reposts(user_id, cursor=cursor)
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def user_about(self, user_id: str) -> Any:
         """The "About this account" panel (date joined, former usernames, …),
@@ -295,7 +337,12 @@ class AsyncEndpoints(BaseAsyncClient):
         )
 
     def iter_comment_replies(
-        self, comment_id: str, *, media_id: str, max_items: int | None = None
+        self,
+        comment_id: str,
+        *,
+        media_id: str,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``comment_replies``."""
 
@@ -304,7 +351,12 @@ class AsyncEndpoints(BaseAsyncClient):
                 comment_id, media_id=media_id, cursor=cursor
             )
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def comment_likers(self, comment_id: str) -> Any:
         """Accounts that liked a comment (single page).
@@ -349,6 +401,7 @@ class AsyncEndpoints(BaseAsyncClient):
         serp_session_id: str | None = None,
         query: str,
         max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``search_users``."""
         if search_session_id is None:
@@ -364,7 +417,12 @@ class AsyncEndpoints(BaseAsyncClient):
                 cursor=cursor,
             )
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def search_hashtags(
         self,
@@ -401,6 +459,7 @@ class AsyncEndpoints(BaseAsyncClient):
         serp_session_id: str | None = None,
         query: str,
         max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``search_hashtags``."""
         if search_session_id is None:
@@ -416,7 +475,12 @@ class AsyncEndpoints(BaseAsyncClient):
                 cursor=cursor,
             )
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def search_reels(
         self,
@@ -454,6 +518,7 @@ class AsyncEndpoints(BaseAsyncClient):
         serp_session_id: str | None = None,
         query: str,
         max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``search_reels``."""
         if search_session_id is None:
@@ -469,7 +534,12 @@ class AsyncEndpoints(BaseAsyncClient):
                 cursor=cursor,
             )
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def search_audio(
         self,
@@ -510,6 +580,7 @@ class AsyncEndpoints(BaseAsyncClient):
         browse_session_id: str | None = None,
         query: str,
         max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``search_audio``."""
         if search_session_id is None:
@@ -528,7 +599,12 @@ class AsyncEndpoints(BaseAsyncClient):
                 cursor=cursor,
             )
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def search_top(
         self,
@@ -565,6 +641,7 @@ class AsyncEndpoints(BaseAsyncClient):
         serp_session_id: str | None = None,
         query: str,
         max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``search_top``."""
         if search_session_id is None:
@@ -580,7 +657,12 @@ class AsyncEndpoints(BaseAsyncClient):
                 cursor=cursor,
             )
 
-        return apaginate(fetch, item_key="edges", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="edges",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def search_places(
         self, *, query: str, lat: float | None = None, lng: float | None = None
@@ -617,14 +699,23 @@ class AsyncEndpoints(BaseAsyncClient):
         )
 
     def iter_hashtag_top(
-        self, name: str, *, max_items: int | None = None
+        self,
+        name: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``hashtag_top``."""
 
         async def fetch(cursor: str | None) -> Page:
             return await self.hashtag_top(name, cursor=cursor)
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def hashtag_recent(
         self, name: str, *, cursor: str | None = None
@@ -640,14 +731,23 @@ class AsyncEndpoints(BaseAsyncClient):
         )
 
     def iter_hashtag_recent(
-        self, name: str, *, max_items: int | None = None
+        self,
+        name: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``hashtag_recent``."""
 
         async def fetch(cursor: str | None) -> Page:
             return await self.hashtag_recent(name, cursor=cursor)
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def hashtag_reels(
         self, name: str, *, cursor: str | None = None
@@ -663,14 +763,23 @@ class AsyncEndpoints(BaseAsyncClient):
         )
 
     def iter_hashtag_reels(
-        self, name: str, *, max_items: int | None = None
+        self,
+        name: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``hashtag_reels``."""
 
         async def fetch(cursor: str | None) -> Page:
             return await self.hashtag_reels(name, cursor=cursor)
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def location(self, location_id: str) -> Any:
         """Location / place metadata (name, category, city, hours).
@@ -695,14 +804,23 @@ class AsyncEndpoints(BaseAsyncClient):
         )
 
     def iter_location_top(
-        self, location_id: str, *, max_items: int | None = None
+        self,
+        location_id: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``location_top``."""
 
         async def fetch(cursor: str | None) -> Page:
             return await self.location_top(location_id, cursor=cursor)
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def location_recent(
         self, location_id: str, *, cursor: str | None = None
@@ -718,14 +836,23 @@ class AsyncEndpoints(BaseAsyncClient):
         )
 
     def iter_location_recent(
-        self, location_id: str, *, max_items: int | None = None
+        self,
+        location_id: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``location_recent``."""
 
         async def fetch(cursor: str | None) -> Page:
             return await self.location_recent(location_id, cursor=cursor)
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def highlight(self, highlight_id: str) -> Any:
         """The media items of a single highlight reel.
@@ -794,6 +921,7 @@ class AsyncEndpoints(BaseAsyncClient):
         *,
         media_id: str | None = None,
         max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of
         ``story_template_participants``."""
@@ -803,7 +931,12 @@ class AsyncEndpoints(BaseAsyncClient):
                 template_id, media_id=media_id, cursor=cursor
             )
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def story_template_stories(
         self, template_id: str, *, user_ids: str
@@ -829,14 +962,22 @@ class AsyncEndpoints(BaseAsyncClient):
         )
 
     def iter_audio_trending(
-        self, *, max_items: int | None = None
+        self,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``audio_trending``."""
 
         async def fetch(cursor: str | None) -> Page:
             return await self.audio_trending(cursor=cursor)
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def audio(self, audio_id: str) -> Any:
         """Audio (track / original sound) page metadata.
@@ -862,14 +1003,23 @@ class AsyncEndpoints(BaseAsyncClient):
         )
 
     def iter_audio_medias(
-        self, audio_id: str, *, max_items: int | None = None
+        self,
+        audio_id: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> AsyncIterator[Any]:
         """Lazily yield items from every page of ``audio_medias``."""
 
         async def fetch(cursor: str | None) -> Page:
             return await self.audio_medias(audio_id, cursor=cursor)
 
-        return apaginate(fetch, item_key="items", max_items=max_items)
+        return apaginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     async def resolve_media(
         self, *, pk: str | None = None, code: str | None = None

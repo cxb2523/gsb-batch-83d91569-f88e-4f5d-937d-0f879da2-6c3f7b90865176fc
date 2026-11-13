@@ -227,6 +227,7 @@ def _iter_method(ep: Endpoint, *, is_async: bool) -> list[str]:
     parts.append("*")
     parts += [_annot(p) for p in ep.query_params if p.name != "cursor"]
     parts.append("max_items: int | None = None")
+    parts.append("checkpoint_file: str | None = None")
     sig = f"({', '.join(parts)}) -> {iter_ret}[Any]:"
     out: list[str] = [f"    def iter_{ep.name}{sig}"]
     doc = f"Lazily yield items from every page of ``{ep.name}``."
@@ -250,7 +251,7 @@ def _iter_method(ep: Endpoint, *, is_async: bool) -> list[str]:
     out.append(f"            return {await_}{call}")
     out.append(
         f'        return {paginate_fn}(fetch, item_key="{ep.item_key}", '
-        "max_items=max_items)"
+        "max_items=max_items, checkpoint_file=checkpoint_file)"
     )
     return out
 

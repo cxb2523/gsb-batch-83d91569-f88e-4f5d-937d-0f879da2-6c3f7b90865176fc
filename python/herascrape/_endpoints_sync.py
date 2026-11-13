@@ -43,14 +43,23 @@ class SyncEndpoints(BaseSyncClient):
         )
 
     def iter_user_followers(
-        self, user_id: str, *, max_items: int | None = None
+        self,
+        user_id: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``user_followers``."""
 
         def fetch(cursor: str | None) -> Page:
             return self.user_followers(user_id, cursor=cursor)
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def user_following(self, user_id: str, *, cursor: str | None = None) -> Any:
         """A page of the accounts this user follows.
@@ -64,14 +73,23 @@ class SyncEndpoints(BaseSyncClient):
         )
 
     def iter_user_following(
-        self, user_id: str, *, max_items: int | None = None
+        self,
+        user_id: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``user_following``."""
 
         def fetch(cursor: str | None) -> Page:
             return self.user_following(user_id, cursor=cursor)
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def user_posts(self, user_id: str, *, cursor: str | None = None) -> Any:
         """The profile grid. Page with the opaque ``next_cursor`` from the
@@ -109,6 +127,7 @@ class SyncEndpoints(BaseSyncClient):
         *,
         sort_by_views: bool | None = None,
         max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``user_reels``."""
 
@@ -117,7 +136,12 @@ class SyncEndpoints(BaseSyncClient):
                 user_id, sort_by_views=sort_by_views, cursor=cursor
             )
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def user_tagged(self, user_id: str, *, cursor: str | None = None) -> Any:
         """A page of media the user is tagged in.
@@ -131,14 +155,23 @@ class SyncEndpoints(BaseSyncClient):
         )
 
     def iter_user_tagged(
-        self, user_id: str, *, max_items: int | None = None
+        self,
+        user_id: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``user_tagged``."""
 
         def fetch(cursor: str | None) -> Page:
             return self.user_tagged(user_id, cursor=cursor)
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def user_stories(self, user_id: str) -> Any:
         """The user's currently-active story items (empty if none live).
@@ -166,14 +199,23 @@ class SyncEndpoints(BaseSyncClient):
         )
 
     def iter_user_reposts(
-        self, user_id: str, *, max_items: int | None = None
+        self,
+        user_id: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``user_reposts``."""
 
         def fetch(cursor: str | None) -> Page:
             return self.user_reposts(user_id, cursor=cursor)
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def user_about(self, user_id: str) -> Any:
         """The "About this account" panel (date joined, former usernames, …),
@@ -273,7 +315,12 @@ class SyncEndpoints(BaseSyncClient):
         )
 
     def iter_comment_replies(
-        self, comment_id: str, *, media_id: str, max_items: int | None = None
+        self,
+        comment_id: str,
+        *,
+        media_id: str,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``comment_replies``."""
 
@@ -282,7 +329,12 @@ class SyncEndpoints(BaseSyncClient):
                 comment_id, media_id=media_id, cursor=cursor
             )
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def comment_likers(self, comment_id: str) -> Any:
         """Accounts that liked a comment (single page).
@@ -327,6 +379,7 @@ class SyncEndpoints(BaseSyncClient):
         serp_session_id: str | None = None,
         query: str,
         max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``search_users``."""
         if search_session_id is None:
@@ -342,7 +395,12 @@ class SyncEndpoints(BaseSyncClient):
                 cursor=cursor,
             )
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def search_hashtags(
         self,
@@ -379,6 +437,7 @@ class SyncEndpoints(BaseSyncClient):
         serp_session_id: str | None = None,
         query: str,
         max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``search_hashtags``."""
         if search_session_id is None:
@@ -394,7 +453,12 @@ class SyncEndpoints(BaseSyncClient):
                 cursor=cursor,
             )
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def search_reels(
         self,
@@ -432,6 +496,7 @@ class SyncEndpoints(BaseSyncClient):
         serp_session_id: str | None = None,
         query: str,
         max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``search_reels``."""
         if search_session_id is None:
@@ -447,7 +512,12 @@ class SyncEndpoints(BaseSyncClient):
                 cursor=cursor,
             )
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def search_audio(
         self,
@@ -488,6 +558,7 @@ class SyncEndpoints(BaseSyncClient):
         browse_session_id: str | None = None,
         query: str,
         max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``search_audio``."""
         if search_session_id is None:
@@ -506,7 +577,12 @@ class SyncEndpoints(BaseSyncClient):
                 cursor=cursor,
             )
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def search_top(
         self,
@@ -543,6 +619,7 @@ class SyncEndpoints(BaseSyncClient):
         serp_session_id: str | None = None,
         query: str,
         max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``search_top``."""
         if search_session_id is None:
@@ -558,7 +635,12 @@ class SyncEndpoints(BaseSyncClient):
                 cursor=cursor,
             )
 
-        return paginate(fetch, item_key="edges", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="edges",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def search_places(
         self, *, query: str, lat: float | None = None, lng: float | None = None
@@ -595,14 +677,23 @@ class SyncEndpoints(BaseSyncClient):
         )
 
     def iter_hashtag_top(
-        self, name: str, *, max_items: int | None = None
+        self,
+        name: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``hashtag_top``."""
 
         def fetch(cursor: str | None) -> Page:
             return self.hashtag_top(name, cursor=cursor)
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def hashtag_recent(self, name: str, *, cursor: str | None = None) -> Any:
         """Most-recent media for a hashtag.
@@ -616,14 +707,23 @@ class SyncEndpoints(BaseSyncClient):
         )
 
     def iter_hashtag_recent(
-        self, name: str, *, max_items: int | None = None
+        self,
+        name: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``hashtag_recent``."""
 
         def fetch(cursor: str | None) -> Page:
             return self.hashtag_recent(name, cursor=cursor)
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def hashtag_reels(self, name: str, *, cursor: str | None = None) -> Any:
         """Reels/clips for a hashtag.
@@ -637,14 +737,23 @@ class SyncEndpoints(BaseSyncClient):
         )
 
     def iter_hashtag_reels(
-        self, name: str, *, max_items: int | None = None
+        self,
+        name: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``hashtag_reels``."""
 
         def fetch(cursor: str | None) -> Page:
             return self.hashtag_reels(name, cursor=cursor)
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def location(self, location_id: str) -> Any:
         """Location / place metadata (name, category, city, hours).
@@ -667,14 +776,23 @@ class SyncEndpoints(BaseSyncClient):
         )
 
     def iter_location_top(
-        self, location_id: str, *, max_items: int | None = None
+        self,
+        location_id: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``location_top``."""
 
         def fetch(cursor: str | None) -> Page:
             return self.location_top(location_id, cursor=cursor)
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def location_recent(
         self, location_id: str, *, cursor: str | None = None
@@ -690,14 +808,23 @@ class SyncEndpoints(BaseSyncClient):
         )
 
     def iter_location_recent(
-        self, location_id: str, *, max_items: int | None = None
+        self,
+        location_id: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``location_recent``."""
 
         def fetch(cursor: str | None) -> Page:
             return self.location_recent(location_id, cursor=cursor)
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def highlight(self, highlight_id: str) -> Any:
         """The media items of a single highlight reel.
@@ -764,6 +891,7 @@ class SyncEndpoints(BaseSyncClient):
         *,
         media_id: str | None = None,
         max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of
         ``story_template_participants``."""
@@ -773,7 +901,12 @@ class SyncEndpoints(BaseSyncClient):
                 template_id, media_id=media_id, cursor=cursor
             )
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def story_template_stories(self, template_id: str, *, user_ids: str) -> Any:
         """Each listed participant's story that uses the template (up to 20
@@ -797,14 +930,22 @@ class SyncEndpoints(BaseSyncClient):
         )
 
     def iter_audio_trending(
-        self, *, max_items: int | None = None
+        self,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``audio_trending``."""
 
         def fetch(cursor: str | None) -> Page:
             return self.audio_trending(cursor=cursor)
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def audio(self, audio_id: str) -> Any:
         """Audio (track / original sound) page metadata.
@@ -828,14 +969,23 @@ class SyncEndpoints(BaseSyncClient):
         )
 
     def iter_audio_medias(
-        self, audio_id: str, *, max_items: int | None = None
+        self,
+        audio_id: str,
+        *,
+        max_items: int | None = None,
+        checkpoint_file: str | None = None,
     ) -> Iterator[Any]:
         """Lazily yield items from every page of ``audio_medias``."""
 
         def fetch(cursor: str | None) -> Page:
             return self.audio_medias(audio_id, cursor=cursor)
 
-        return paginate(fetch, item_key="items", max_items=max_items)
+        return paginate(
+            fetch,
+            item_key="items",
+            max_items=max_items,
+            checkpoint_file=checkpoint_file,
+        )
 
     def resolve_media(
         self, *, pk: str | None = None, code: str | None = None
