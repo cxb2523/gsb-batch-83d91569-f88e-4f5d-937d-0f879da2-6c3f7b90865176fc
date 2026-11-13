@@ -1,0 +1,864 @@
+# Changelog
+
+All notable changes to this project are documented here. Format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
+follows [SemVer](https://semver.org/) as closely as a CLI toolkit can
+manage. A patch release means "fixes" — not that every flag is frozen,
+so a behaviour-changing default landing in a patch is stated plainly
+here rather than treated as a violation of the format.
+
+## [Unreleased]
+
+> **Behaviour change.** A run through a proxy now makes one pre-check
+> request before starting a browser. A proxy that answers **HTTP 407** or
+> **402** ends the run with **exit 5** and `<out>.latest_attempt.meta.json`
+> (`status: failed`, `stop_reason: proxy_auth_failed` /
+> `proxy_balance_exhausted`) instead of timing out on every retry and
+> rotation. Runs without a proxy or over `--cdp-endpoint` are unchanged.
+>
+> **Behaviour change.** A run through a local proxy now **stops at 10 MB of
+> proxy traffic** by default (`--proxy-budget-mb`, `0` = no cap): it keeps
+> its rows and exits **6** (**5** with none) with `stop_reason:
+> proxy_budget_exceeded`, and it always writes
+> `<out>.latest_attempt.meta.json`.
+>
+> **Behaviour change (manual test report, 2026-10-28).** A served page with
+> no listing is now judged by the result count the page states: 0 is an
+> empty search (exit 4); more than 0, on a later page that also says "We
+> vonden helaas geen resultaten", is past the end of the listing (the run
+> stops, `complete`, `listing_exhausted: true`); anything else means the
+> page did not finish rendering (retried, then a failed page, never
+> "empty"). A proxy exit's failure count resets on a page that reached the
+> site, and when every exit is at `--proxy-block-retries` the least-failed
+> one is still used; only a pre-check refusal drops an exit for good.
+> The Scraper API path reports a page without listings as exit 5, not 4.
+> Ctrl-C writes the rows gathered so far as partial (exit 6,
+> `stop_reason: interrupted`), or exits 130 with none; it used to exit 1
+> and lose them. A bad `--url`, `--out`, `--proxy`/`--proxy-file`,
+> `--min-score`, `--concurrency` with `--cdp-endpoint`, or (Selenium) a
+> `--cdp-endpoint` with a login is refused before the first request, exit
+> 2. An explicitly empty `--cdp-endpoint ""` or `export ZIMMO_PROXY=` now
+> means "off" instead of falling back to `.env`. The Scraper API client no
+> longer reads `ZIMMO_PROXY`.
+
+### Added
+
+- `--fingerprint`, `--fp-tags`, `--fp-country`, `--fp-refresh`
+  (`playwright_scraper.py`, local browser only). Fetches a profile from the
+  2Captcha Fingerprint API with `TWOCAPTCHA_KEY` and applies it to every
+  browser the run launches: user agent with matching client hints
+  (`Sec-CH-UA*`, `navigator.userAgentData`), locale and `Accept-Language`,
+  timezone, screen, window and scale factor, navigator values and WebGL
+  strings. The values are read back from the page after the first navigation
+  and recorded under `fingerprint` in `<out>.meta.json`. Refused with a typed
+  `--cdp-endpoint` (exit 2); a `ZIMMO_CDP_ENDPOINT` from `.env` is ignored for
+  the run; refused without a key (exit 2). A Fingerprint API refusal (e.g.
+  `403 ERROR_FINGERPRINT_PLAN_REQUIRED`) exits 5 before any page is fetched.
+  Selenium and Puppeteer do not take the flag (exit 2).
+- `fingerprint_client.py` replaced by the client that reads a real
+  `format=chromium` response (`/fingerprint/random`, key as a query
+  parameter, responses cached in `~/.cache/2captcha-fingerprints/`, the key
+  redacted from every error). The previous module called an endpoint and
+  fields that had not been verified, and no engine used it.
+- Offline checks: field mapping against `fixtures/fingerprint_chromium.json`
+  (a trimmed real response), the refusal path with `HOME` isolated so no
+  cached profile can answer, the flag conflicts, the metadata record, and a
+  real local Chromium against a loopback server that checks the
+  `User-Agent`, `Sec-CH-UA` and `Accept-Language` headers. CI's Playwright
+  job runs these and fails if they skip.
+
+- `proxy_meter.py`: per-run proxy traffic meter and budget, in all three
+  engines, only through a local proxy. Playwright sums `request.sizes()`;
+  pyppeteer and Selenium count CDP `Network.loadingFinished.encodedDataLength`
+  plus each request's own size. Over budget, Playwright aborts new requests
+  in a route, pyppeteer/Selenium block every URL over CDP, and no further
+  page attempt starts a browser; `--concurrency` workers share one meter
+  and stop dispatching. `<out>.meta.json` and the attempt sidecar gain
+  `proxy_bytes`, `proxy_budget_bytes` and `proxy_budget_exceeded`; the log
+  ends with `Proxy traffic: X.X MB of Y MB budget`. `--proxy-budget-mb` and
+  `ZIMMO_PROXY_BUDGET_MB` (in `.env.example`).
+- CI only: the canary passes `--proxy-budget-mb 10`, writes the run's proxy
+  traffic to the step summary, and fails with
+  `::error::stopped: proxy budget 10 MB exceeded` when the cap was hit
+  (`.github/proxy_traffic.py`).
+- Offline checks: the meter against known CDP and Playwright sizes, an HTTP
+  client through a byte-counting stub proxy, the sidecars and exit codes
+  over budget, every engine driven past the budget (also with
+  `--concurrency 2`), the canary step and its summary script. An opt-in
+  real-browser check (`PROXY_METER_BROWSER=1`) compares each driver's count
+  with a stub proxy's.
+
+- `proxy_check.py`: the proxy pre-check (one CONNECT plus `HEAD /robots.txt`
+  on www.zimmo.be, no third-party service), wired into all three engines
+  before the first browser launch. The 407 message names `ZIMMO_PROXY` and
+  says the gateway refused the credential (or the traffic balance is
+  exhausted); a 402 says the proxy traffic/balance is exhausted. Neither
+  prints the credential. A proxy that does not answer keeps the existing
+  retry behaviour.
+- `--block-media` (opt-in, all three engines): through a local proxy, skip
+  images, video/audio and fonts. Off by default on this site because a
+  blocked run could not be compared with a normal one (zimmo.be refuses
+  datacentre addresses), and a strict bot manager may score it.
+  `--load-media` / `ZIMMO_LOAD_MEDIA=1` keeps them (the default).
+- Offline checks: a stub proxy answering 407/402/200 or nothing, each engine
+  driven to exit 5 without a browser on a 407, the attempt sidecar, the
+  Playwright route handler, the pyppeteer Fetch patterns, the Selenium
+  blocked-URL list, and when each engine installs blocking.
+
+### Changed
+
+- `pyproject.toml`'s `playwright` extra pins `playwright==1.44.0`, as
+  `requirements-playwright.txt` and the Docker image do; it said `>=1.44`.
+- README: Python 3.13+ install note for the 1.44 pin, how far the 10 MB
+  proxy budget goes (~2.6 MB per page measured), that `--block-media` saves
+  next to nothing here, the four always-null columns, project "Vanaf"
+  prices, and the canary's search (it has no filter).
+- CI: the canary no longer runs on a push that changes `canary.yml`; it runs weekly (Mondays) and on manual dispatch only, because every run bills the proxy.
+- `pyproject.toml` lists `proxy_check` (missing since it was added) and
+  `proxy_meter` among the installed modules.
+- CI only: the canary bills the `ZIMMO_PROXY` exit, so its schedule is now
+  weekly (Mondays 06:17 UTC) instead of daily; a manual dispatch, and a push that
+  changes the canary file, still run it.
+
+### Fixed
+
+Found in a manual test of `c4795bb` on 2026-10-27/28; numbers are that
+report's.
+
+- Brussels' minus energy grades (`epb_e_minus.svg`) read as `null`; now
+  `E-` (3 of 21 tiles on bruxelles-1000/a-vendre).
+- On a price-filtered search (`.../filter?price=200000-400000`) the filter
+  panel's price chip became two rows per page with no `sku`, a link to the
+  home page and the filter's lower bound as price. On a page with the tile
+  grid only `<zimmo-listing>` tiles are rows.
+- The page after the last one (now HTTP 200, the search's total and no
+  tile, not page 1 again) waited 45 s and finished `listing_exhausted:
+  false`, so `diff_runs.py` could never report a removal. It is recognised
+  by the result count, ends the listing, and a Dutch one ends the wait at
+  once; the run also stops once it holds every counted result on a short
+  page.
+- A page cut off mid-load (HTTP 200, nothing rendered) counted as a served
+  empty page, so a dying proxy read as the end of the listing.
+- The Scraper API's "0 resultaten" for a Gent search with 63+ listings was
+  reported as an empty search, exit 4.
+- Playwright looked for a Turnstile field straight after navigation, before
+  it existed, and said nothing about the challenge; every engine now waits
+  for the page first, then detects, then solves.
+- `--proxy-file`: only the first exit was pre-checked, and its 407 refused
+  the whole pool. Every exit is checked; a refused one is dropped.
+- Proxy rotation: a navigation that timed out through an exit did not count
+  as that exit failing, so a silent exit was retried while a working one
+  was never tried, and an exit retired by `--proxy-block-retries` ("will not
+  be re-selected") was selected again for the next page. A page now starts
+  on the exit with the fewest failures and never on a retired one; with
+  every exit retired the page fails instead of going out without a proxy.
+- A proxy written `host:port:user:pass` (the form the 2Captcha dashboard
+  gives) raised a traceback, exit 1, that printed the password. It is
+  accepted; no proxy parse error prints the value any more.
+- A missing or empty `--proxy-file`, `--out` in a missing directory or onto
+  a directory, a non-zimmo.be `--url`, a `--url` with `page=2` (fetched as
+  page 1 and again as page 2), `--min-score 5`, a SOCKS proxy with a login,
+  and `--concurrency 2` with `--cdp-endpoint` (exit 1) were found only
+  after fetching, or as a traceback. All are exit 2 before the first
+  request.
+- Selenium with a credentialled `--cdp-endpoint` spent ~3.5 minutes on
+  three attempts it knew would fail; refused up front.
+- A wrong Scraping Browser password: three attempts and a generic message
+  (Playwright, 36 s), three 60-second "did not answer" timeouts with the
+  401 only in a traceback (pyppeteer, 187 s). Now one attempt and a message
+  naming `ZIMMO_CDP_ENDPOINT`; pyppeteer watches the websocket handshake
+  itself.
+- Ctrl-C: exit 1 and the fetched pages lost on every engine; pyppeteer's
+  own signal handler and exit hook added tracebacks.
+- A local browser that failed to start (pyppeteer's x86 Chromium on Apple
+  Silicon, headless) was retried and reported as "Remote API error". It is
+  not retried, and the message says the local browser did not start; the
+  zero-row message no longer says "Remote API error" for causes that are
+  not a remote API.
+- Selenium's proxy budget was read only after a page had fully loaded and
+  its URL block was sent without `Network.enable`: a 0.1 MB budget stopped
+  at 4.6 MB. On a metered run it now navigates to DOMContentLoaded and
+  reads the meter while the page loads.
+- `diff_runs.py` could not compare a `--format csv` run (it looked for
+  `run.csv.meta.json`) and called a missing file a missing sidecar.
+- "Future/Task exception was never retrieved" tracebacks after a finished
+  run are one DEBUG line.
+- With `--no-proxy-rotate` every failure logged "rotating to a different
+  exit" and then "retrying the SAME exit"; one line now says what happens.
+- The pyppeteer and Selenium proxy meter counts only `http://` / `https://` requests and responses that came over the network. Chrome's own loads (the `chrome://` new-tab page, `data:`, `blob:`), cache hits (`requestServedFromCache`, `fromDiskCache`, `fromPrefetchCache`, `fromServiceWorker`) and Chrome's error page count nothing. A sibling repo's Selenium run had counted about 2.8 MB of new-tab scripts while its proxy carried about 6 KB. The pyppeteer block sent once the budget is spent now reaches the page's own event loop even when the budget runs out on another thread.
+
+## [2.0.0] — 2026-10-15
+
+> **Major version for a schema break.** 2.0.0 is the same code as 1.3.0,
+> re-released under a major version. 1.3.0 removed the `rating`,
+> `review_count` and `in_stock` output columns (and the unused
+> `--captcha-api` flag), which breaks the row schema that 1.0.0 declared a
+> public interface; such a change belongs in a major version. Anyone
+> pinned to 1.x should stay on 1.2.1 or adapt to the new row; see 1.3.0
+> below for the full list of changes.
+
+## [1.3.0] — 2026-10-15
+
+> **Exit codes.** A page whose listing grid rendered but parsed to zero
+> rows is now a parser failure: exit 5 when no row was recovered, exit 6
+> (`partial`, `parser_failed_pages` in the sidecar) when other pages had
+> rows. It used to be reported as an empty search, exit 4. A run with no
+> rows where one page was served empty and another failed is now exit 5,
+> not 4, and the Scraper API path now answers 4 for a served empty page
+> and 3 for a Cloudflare challenge (both were 5).
+>
+> **Rejected flag values (exit 2).** `--retries`, `--delay` and
+> `--retry-delay` below 0, and `--pages`, `--concurrency` and
+> `--proxy-block-retries` below 1, are argparse errors in all three
+> engines (`--retries -1` used to run no navigation at all and report exit
+> 5; `--retries 0` still means one attempt). `--proxy`/`--proxy-file`
+> together with `--cdp-endpoint` (from flags or `.env`) is refused instead
+> of the proxy being silently ignored. `--captcha-api` is removed: nothing
+> ever read it.
+>
+> **CSV cells and file modes.** In the CSV only, a text cell starting with
+> `=`, `+`, `-`, `@`, a tab, CR or LF gets a leading apostrophe so a
+> spreadsheet does not run it as a formula; numbers and the JSON are
+> unchanged, and the sidecar counts the escaped cells in
+> `csv_cells_escaped`. Output files keep an existing file's mode; a new one
+> gets what the umask allows, as before.
+
+> **Output change.** `rating`, `review_count` and `in_stock` are gone from
+> every JSON row and from the CSV header. A consumer that selects them by
+> name will now fail on a missing key; one that reads by position will see
+> every later column move left by up to three. They were shop columns
+> inherited with the family's row: nothing in this repo ever assigned them
+> (no write to any of the three in `product_parser.py`), and they were null
+> on 21 of 21 rows of the real 2026-09-23 capture. `brand`,
+> `original_price` and `discount_pct` stay: the embedded-JSON path still
+> fills them when a page serves that JSON, even though the Angular pages
+> served today leave them empty.
+
+### Fixed
+
+- Output files (`.json`, `.csv`, `.meta.json`) are written to a temporary
+  file in the same directory and moved into place only when complete, so a
+  failed or interrupted write leaves the previous good file intact instead
+  of truncated.
+- One page buys at most one paid captcha solve, however many attempts,
+  proxy rotations or challenge markers it goes through. The allowance is
+  checked before each purchase in all three engines; a missing key or an
+  unsolvable Managed Challenge costs nothing and does not use it up.
+- `currency` is null when nothing states one (it defaulted to `EUR` on the
+  embedded-JSON and JSON-LD paths, which today's pages do not use).
+- The credential scan now also reads `.json`, `.csv`, `.html` and `.cfg`
+  files, recognises a virtualenv by its `pyvenv.cfg` under any name,
+  judges the `sample_output` exemption by file name rather than by the
+  whole path, and refuses to report a tree clean when it read no file.
+- README: the Scraping Browser credential lifetime is no longer stated as
+  "about a day"; an HTTP 401 on connect is described as credentials no
+  longer accepted. The Docker image is documented as needing
+  `--cdp-endpoint` or a display, and the Dockerfile no longer claims a CI
+  step that did not exist (the offline suite now checks its COPY list).
+- Comments, docs and tests no longer cite private maintainer notes; each
+  rule is stated in place. The offline suite fails if such a citation
+  returns.
+
+### Changed
+
+- The canary no longer skips green: without a usable `ZIMMO_PROXY` secret
+  (missing or empty) it fails with an error naming it, because zimmo.be
+  refuses GitHub's runners and a run that never reached the site tested
+  nothing. Any nonzero exit (block, zero rows, parser failure, partial)
+  is red.
+- The canary is split into a `gate` job and the live job. With no
+  `ZIMMO_PROXY` secret the live job is SKIPPED with a notice, instead of
+  running, being refused by Cloudflare and exiting 0. Exit 3 with a proxy
+  is now a red run, as it should be. GitHub still colours the workflow
+  badge green when its only live job was skipped; the README says so.
+
+### Not changed
+
+- Challenge markers (`turnstile`, `cf-turnstile-response`) that a Scraping
+  Browser session may inject: changing them needs real served and refused
+  captures over `--cdp-endpoint`, which this change did not take.
+- The family flags `--fingerprint`, `--fp-*`, `--locale` and `--mode`, and
+  whether to keep `fingerprint_client.py`: an owner decision.
+- The three engines still carry their own page loop. Moving it into a
+  shared module is a refactor that needs a live run of all three.
+- Playwright stays pinned to 1.44.0 alongside the Docker base image.
+
+### Added
+
+- `product.schema.json`, a JSON Schema (draft 2020-12) for one row,
+  generated by `python3 output_writer.py` from the `Product` dataclass.
+  `smoke_test.py` fails if it drifts from the dataclass or if
+  `sample_output.{json,csv}` stop matching it. `x-schema-version` is 2.
+- canary assertions on the data itself: unique non-empty `sku`s, prices in
+  a plausible range, no `original_price` at or below its `price`, every
+  URL on zimmo.be.
+
+## [1.2.1] — one CDP connection per run (2026-10-07)
+
+### Fixed
+
+- **`--cdp-endpoint` reconnected for every page, and the Scraping Browser
+  refused the reconnects.** The API allows one live connection per
+  profile; a connect made a moment after the previous page let go was
+  answered with HTTP 500 on the websocket upgrade. Measured on a 3-page
+  run of v1.2.0: Playwright opened five connections and retried twice;
+  pyppeteer opened four and spent a 60 s connect timeout. Both engines
+  now hold one connection for the run and open each page in a fresh tab;
+  a failed attempt drops the connection so its retry starts clean. The
+  same runs after the fix: one connection, no errors, 39 s and 31 s.
+  The log's last line reports how many connections a run opened.
+- With `--cdp-endpoint`, the Playwright engine fetches pages 2+ in the
+  main thread instead of a one-worker pool: a Playwright sync object
+  belongs to the thread that created it, and `--concurrency` above 1 is
+  refused over CDP anyway. Pagination, exhaustion and failure bookkeeping
+  are the same code as the pool's.
+
+### Not changed
+
+- The Selenium engine: it cannot authenticate to a Scraping Browser
+  endpoint at all (README, Engines), so it never met this.
+
+## [1.2.0] — honest page verdicts, diffable runs, a scanner that keeps secrets (2026-10-07)
+
+> **Behaviour changes for an existing user:**
+> - A blocked or failed page now makes the run `partial`, exit 6 (it was
+>   `complete`, exit 0, with that page's listings silently missing). A
+>   blocked page 1 now ends the run with exit 3 instead of moving on.
+> - An HTTP error or 404 on every page is exit 5, "never obtained" (it was
+>   exit 4, "zero listings").
+> - A listing that ends before `--pages` is `complete`, exit 0 (it was
+>   `partial`, exit 6).
+> - `diff_runs.py` refuses two runs of different searches, and reports a
+>   listing missing from a window-limited run as `left_selection`, which
+>   `--fail-on-change` ignores, instead of `removed`.
+> - Running the offline suite no longer prints the keys in your `.env`.
+
+### Fixed
+
+From an external audit of v1.1.1 (2026-10-07), each reproduced before it
+was fixed, plus three found while verifying it.
+
+- **`check_no_credentials.py` printed the keys in the user's `.env`.** It
+  walked the whole directory, the git-ignored `.env` included, and printed
+  every match verbatim — so every local `python3 smoke_test.py` reported
+  the user's real configuration as a "committed credential" and wrote it
+  to the terminal. Inside a git work tree it now scans what git could
+  commit (a force-added `.env` is still caught), and a finding is reported
+  as `file:line` and the kind of match, never the text. Not in the audit;
+  found by running the suite with a real `.env` in place.
+- **A blocked page counted as a completed one** (audit P1), in all three
+  engines: a Cloudflare 403 on page 2 behind a good page 1 finished
+  `complete`, exit 0. Worse than the audit stated: a blocked page 1
+  followed by a good page 2 did the same. Every engine now reads the
+  HTTP status (Playwright and pyppeteer from the navigation response,
+  Selenium from Navigation Timing) and takes its verdict from one shared
+  `output_writer.classify_page()`.
+- **An HTTP 500 read as an empty catalogue** (audit P2): exit 4. 429 and
+  5xx are now retried within `--retries`, then count as failed; 404 is
+  not retried. Pages whose status rules out a grid skip the 45 s
+  readiness wait.
+- **`diff_runs.py` compared different searches** (audit P2): two
+  `complete` runs for Gent and Antwerpen diffed as market movement. The
+  sidecar now records `selection`; sidecars from before 1.2.0 have none
+  and are warned about, not refused.
+- **A listing that moved past `--pages` read as removed from the site**
+  (audit P2). Now `left_selection` unless the newer run read the listing
+  to its end (`listing_exhausted`).
+- **An exhausted listing finished `partial`, exit 6** — so `diff_runs.py`
+  refused every such run. Not in the audit. Exhausted pages are now
+  `exhausted_pages`, and the run is `complete`.
+- **The pyppeteer engine could hang forever over `--cdp-endpoint`.** A
+  Scraping Browser profile still busy from the previous page answers the
+  websocket upgrade with HTTP 500; pyppeteer loses that in a background
+  task and `connect()` never returns (measured live: page 1 done, page 2
+  still connecting after ten minutes). Every CDP call is now bounded at
+  60 s and a timeout is retried like any other fetch error — the same
+  live run then finished all three pages. Not in the audit.
+- The Playwright engine's docstring still described the inline JSON array
+  zimmo.be dropped in September.
+
+Measured live on 2026-10-07 through a residential exit, and written into
+`classify_page()`: a served page is 200, Cloudflare's challenge 403, an
+unserved route 404 ("Pagina niet gevonden"), and `?page=999` is 200
+carrying page 1 again.
+
+### Not changed
+
+- One shared page loop instead of three engine copies, separate
+  namespaces for the family's same-named modules, detail-page enrichment,
+  coordinates, agency, URL batches, checkpoint/resume — product and
+  architecture decisions, not defects; raised for discussion.
+- An empty search: zimmo.be answered every empty search tried with 404,
+  so a "confirmed empty" page could not be told apart from a wrong URL.
+  Both now end with exit 5 rather than claiming the catalogue was empty.
+
+## [1.1.1] — pyppeteer proxy auth, .gitignore by shape (2026-09-29)
+
+> **Behaviour change for an existing user:** with the pyppeteer engine, an
+> authenticated `--proxy` now works on current Chrome; before this release it
+> stopped with exit 5 before the first request.
+
+### Fixed
+
+Found by a family-wide probe over a fresh clone of every repo in the
+organisation on 2026-09-29.
+
+- **The pyppeteer engine could not authenticate a proxy on current Chrome.**
+  `page.authenticate()` uses `Network.setRequestInterception`, which current
+  Chrome no longer has ("wasn't found", exit 5 before the first request —
+  measured 2026-09-29 in rosreestr-scraper). Proxy 407s are now answered
+  through the CDP Fetch domain; `tests/test_family_sync.py` pins that the
+  old call stays gone.
+- **`.gitignore` let a renamed `.env` through** (`.env.bak`, `.env.local`),
+  and any run directory other than `live_results/`, and paged dumps
+  (`X.page3`). Now ignored by shape, with a test per shape.
+
+## [1.1.0] — Measured against today's site (2026-09-23)
+
+> **Output changes for existing users.** Listings whose price reads
+> "Prijs op aanvraag" / "Prix sur demande" are now ROWS, with `price`
+> and `currency` both null — before, they were silently dropped. And
+> `bedrooms`, `epc_label` and `property_type`, which were null on every
+> row of every run since zimmo.be's Angular redesign, are now filled.
+> No flag and no column changed.
+
+> **Correction to 1.0.0's "no account needed" promise.** It is still
+> true that no 2Captcha key is required. It is not true that nothing is:
+> measured 2026-09-23, zimmo.be serves listings to a **residential exit
+> with a headful browser**, and refuses headless Chromium (even from a
+> Belgian home address) and any datacentre address. The README now says
+> so, with the measurements. The 2Captcha Scraping Browser API also
+> works (Belgian exit, 3 of 3 pages).
+
+> **The "daily canary" 1.0.0 cited never ran.** It was gated on a
+> `TWOCAPTCHA_KEY` secret that was never set, so every run took the
+> skip branch and the badge read green without touching the site.
+
+### Fixed
+- **Parser, on the markup the site serves today** (NL and FR, sale and
+  rent; checked field by field against the tiles' own labels on 105
+  tiles over 7 live pages, 0 mismatches):
+  - each listing is scoped by its own `<zimmo-listing>` element instead
+    of by walking up until a price appears, which is what dropped
+    price-on-request listings;
+  - `bedrooms`, living area and the energy grade are read from the
+    tile's feature ICONS, which are the same in both languages — EPC
+    (Flanders, Wallonia) and Brussels' EPB alike; `epc_x.svg` (no grade)
+    stays null rather than becoming a letter;
+  - areas are read the Belgian way: "2.578 vierkante meter" is 2,578 m²,
+    not 2.578;
+  - `surface_m2` is the LIVING area only — a shop's commercial surface
+    or a plot area is no longer written into it;
+  - `property_type` and `listing_type` come from the URL segment
+    (`/te-koop/huis/…`, `/a-louer/…`), so a new-build project whose
+    title carries no sale word is no longer `listing_type: null`.
+- **Selenium never started on a machine whose Chromium was not the newest
+  Chrome.** `webdriver-manager` downloaded the latest chromedriver for
+  Google Chrome (154) against an installed Chromium 152, and every
+  session died with "session not created" — reported as exit 5. Replaced
+  by Selenium Manager, built into `selenium>=4.6`, which matches the
+  installed browser; the `webdriver-manager` dependency is gone.
+- **The Scraper API path failed on every call, and was billed for it.**
+  The live API now requires `waitFor` as an object and answered the
+  JSON-encoded string this client sent with HTTP 422 "params.waitFor must
+  be an object" ($0.0005 each). It also reports the target's status in
+  `http_code`, while `status` is its own "success" — which the client
+  compared with 400 and would have raised `TypeError` on. Both fixed;
+  measured after the fix: 21 rows, exit 0.
+- **Exit 5 for a run that never obtained a page.** Zero rows with every
+  attempted page failed (a dead proxy, a load timeout) reported exit 4,
+  "the catalogue is empty". It is now 5, "the content was never
+  obtained", as across the family since 2026-09-21.
+- **The banned-wording check read only `.py` files**, so the README
+  tagline and the package description both used a phrase it bans. It
+  now scans the published text files too (README, pyproject, workflows,
+  `.env.example`, Dockerfile, CONTRIBUTING, SECURITY).
+
+### Changed
+- `canary.yml` runs headful under xvfb, takes its proxy from a
+  `ZIMMO_PROXY` secret when one is set, and asserts column shares
+  (living area, bedrooms, EPC, property type), not only a row count.
+  Dispatched once on this branch with no secret: GitHub's runner was
+  refused (exit 3) and the job ended in its `::notice::`, as designed —
+  so until a `ZIMMO_PROXY` secret exists, green means "refused as
+  documented", not "tested".
+- The README's "What you need" section replaces the old "Honesty"
+  section, which contradicted itself on the Scraper API and still
+  described an embedded-JSON path the site removed on 2026-09-15.
+- The Scraping Browser example keeps its endpoint in `.env`; it used to
+  put a password on the command line.
+
+## [1.0.0] — Stable public interface (2026-09-18)
+
+No change to what the scraper does. This release is a commitment about
+what will NOT change: from here on the CLI flags and the output schema
+are a public interface, and anything that breaks them is a 2.0.0, not
+a patch. 0.4.0 earned that -- it was the release where a series of
+real runs against the live site replaced guesses with confirmed
+behaviour, and nothing has had to move since.
+
+What is now covered by that promise:
+
+- **The CLI flags of all three engines.** Including the 0.4.0 fix that
+  made `--no-proxy-rotate` a real, working opt-out. Renaming or
+  removing a flag now requires a major bump.
+- **The output schema.** The `Product` dataclass field order, which is
+  also the JSON key order and the CSV header, plus the `.meta.json`
+  run-metadata keys. CI already asserts `sample_output.{json,csv}`
+  match the dataclass exactly, so drift fails the build rather than
+  reaching a consumer.
+- **The "no account needed" promise.** The scraper keeps running with
+  no proxy and no captcha key; those stay opt-in.
+
+What is explicitly NOT covered, because it is not ours to promise:
+zimmo.be's own markup. The parsing paths behind these flags will keep
+moving as the site does -- that is the whole point of the daily canary
+-- and such a change is a patch, not a break, as long as the flags and
+the columns above stay put.
+
+### Added
+- `release.yml`: pushing a `v*` tag cuts a GitHub Release with notes
+  taken from this file's matching section, and refuses the tag unless
+  the tag, `pyproject.toml` and this CHANGELOG agree on the version.
+  A release tagged v1.0.0 against a pyproject still saying 0.4.0 is
+  the kind of mismatch nobody notices until a bug is filed against a
+  version that never existed. It runs on the workflow's own
+  `GITHUB_TOKEN`, so publishing needs no personal token anywhere.
+- The canary now also runs when `canary.yml` itself is edited. It is
+  the one workflow that can sit broken for a full day unnoticed --
+  a typo in it would otherwise surface at 06:17 UTC the next day, to
+  whoever happened to read the log.
+
+### Fixed
+- **The offline CI job could never have been green.** It installed
+  `requirements.txt` alone and then ran `--help` for all three engine
+  scrapers, each of which imports its driver at module level, so every
+  one died with `ModuleNotFoundError`. The module-level import is
+  deliberate -- `engine-smoke` asserts it by `ast` walk precisely so a
+  real `ImportError` cannot decay into a silent skip -- and the three
+  engine requirement files are mutually unsatisfiable in one
+  environment, so the engine CLIs simply do not belong in that job.
+  Their `--help` is covered per engine in `engine-smoke`'s own venv.
+- **`playwright install --with-deps` failed on `ubuntu-latest`.** The
+  pinned `playwright==1.44.0` predates Ubuntu 24.04 and cannot resolve
+  its system packages; support for it landed in playwright 1.45. The
+  Playwright jobs now pin `ubuntu-22.04`, matching the Dockerfile's
+  own `v1.44.0-jammy` base image, so the two pins stay in sync.
+- **A red engine hid the others.** `fail-fast: false` on the engine
+  matrix -- selenium was once cancelled mid-flight by playwright's
+  failure, so its real status was never reported at all.
+
+## [0.4.0] — Live-run fixes against the real site (2026-09-15/16)
+
+The 0.3.0 audit (below) was static/external and found real bugs; this
+release is what a series of ACTUAL runs against the live site, the
+same week, found on top of it -- six further confirmed defects, none
+of them visible from code review or the offline test suite alone.
+Every item was independently reproduced against zimmo.be before being
+fixed, and each has its own regression test in `smoke_test.py`.
+
+### Fixed
+- **Pagination silently did nothing.** `page_url()` built `?p=N`,
+  confirmed live in an earlier, unrelated MCP-tooling session against
+  the site at an earlier point in time. A live run against the CURRENT
+  site found `?p=N` is ignored outright -- page 2 returned page 1's
+  own listings verbatim, which this project's own data-based
+  termination correctly (but wrongly, given the stale parameter) read
+  as "the listing is exhausted" after just one page, on every
+  multi-page run. The real parameter, found by inspecting the site's
+  own pagination link directly, is `page` (`?page=2`). Every multi-page
+  run before this fix silently returned only page 1's own listings,
+  repeated, regardless of `--pages`.
+- **The CSS fallback returned 0 products on the live site.** zimmo.be
+  has moved to an Angular-rendered listing grid since the properties-
+  JSON path was confirmed (2026-08-22) -- that path and a real-estate
+  JSON-LD path are both now absent entirely (a live capture's only
+  JSON-LD block is a `BreadcrumbList`, navigation only). The CSS
+  fallback is therefore the path actually in use today, and it had its
+  own bug: a widening search correctly found the tile's price-
+  containing ancestor (the price lives in a sibling `<div class="price">`,
+  not inside the `<a>` around the title), but that widened scope was
+  discarded and silently recomputed narrower in a second pass, missing
+  the price on every real listing.
+- **Prices came back as billions.** The price parser (already
+  rewritten once for the 0.3.0 audit's own thousands-separator bug)
+  allowed a bare SPACE as an additional grouping character inside the
+  price digits. Real tile text is flattened to one string with single
+  spaces between every element (`get_text(" ", strip=True)`), so a
+  real price such as "€ 385.000" followed anywhere later in the same
+  text by an unrelated number -- a bedroom count, a surface area --
+  was greedily swallowed as a continuation of the price's own
+  thousands grouping: "€ 385.000 2 slaapkamers 120 m²" parsed as
+  3,850,002 instead of 385,000, live, on a real page. A bare space is
+  no longer treated as a grouping character; `.` (the site's own
+  confirmed separator) still is.
+- **`--solve-captcha=when-blocked` (the default) skipped solving on a
+  genuinely blocked page.** `SELECTORS["item_link"]` was a loose
+  pre-confirmation guess (`a[href*="/"]`) matching any relative link at
+  all -- including a blocked/shell page's own 91 navigation, cookie-
+  consent, language-switcher and footer-legal links, none of them a
+  real listing. `when-blocked`'s own "does this page already have
+  real content" check counted those 91 links as "already rendered" and
+  skipped solving on a page that was still genuinely gated. Replaced
+  with `.zimmo-code`, a marker confirmed present only on a real listing
+  tile, never on nav/cookie/footer chrome -- this selector feeds both
+  this check and the pre-existing render-detection wait, across all
+  three engines.
+- **An EPC label followed by a word failed to parse at all.**
+  `"EPC label C"`, `"EPC label: A+"` and similar natural-language
+  phrasing did not match the EPC regex, which required ONLY non-letter
+  characters between "EPC" and the grade letter -- leaking the raw EPC
+  text into the CSS fallback's own title field instead of being
+  recognised and stripped. Widened to allow up to 20 characters
+  (non-greedy) before the grade letter; the grade letter itself is
+  matched case-SENSITIVE (uppercase only) specifically to avoid a
+  case-insensitive match snagging a random lowercase a/b/c/d/e/f/g out
+  of an ordinary nearby English word -- confirmed as a real risk when
+  an earlier, all-case-insensitive version of this same fix matched
+  "a" out of "available" in unrelated text near the word "EPC".
+- **`scraper_api_client.py`'s wait condition could never succeed.**
+  `DEFAULT_WAIT_FOR_TEXT` was `"properties: ["`, confirmed live
+  2026-08-22 but removed from the site entirely by the same Angular
+  rewrite noted above -- every call using the default timed out
+  unconditionally, regardless of whether Cloudflare would have let the
+  request through. Changed to `"€"`, confirmed live to appear as
+  genuine rendered price text on every real listing tile.
+
+### Repo-readiness fixes (found during final pre-push review, not live testing)
+- **`canary.yml` required every page to complete and `status ==
+  "complete"` on a single attempt** -- given the run-to-run
+  inconsistency documented above (found the SAME day this canary was
+  written), this made the canary likely to fail on the site's own
+  normal instability rather than a real scraper regression, exactly
+  the "always red, so everyone ignores it" failure mode this repo's
+  own CI philosophy warns against. Now retries the whole run up to 3
+  times and accepts `partial` (not just `complete`) as long as a
+  reasonable number of priced listings came through.
+- **`.gitignore` did not cover ad-hoc, one-off diagnostic scripts**
+  written during a live-testing session -- confirmed as a real gap:
+  none of `reliability_test.sh`, `check_quality.py`, `check_context.py`
+  or `analyze_reliability.py` were excluded automatically, and all had
+  to be removed by hand before this repo's own first commit. Added a
+  `scratch_*` naming convention (and the specific names above) so a
+  future one-off script is excluded automatically.
+- The default branch was `master` (this environment's `git init`
+  default); renamed to `main` to match the push instructions actually
+  given alongside this repo.
+
+### Also documented (not code changes, but confirmed live findings)
+- Whether a plain Scraper API call, a `--cdp-url`-routed call, or the
+  Playwright engine's own `Captcha.setAutoSolve` gets through zimmo.be's
+  Managed Challenge is **inconsistent run to run** -- the identical
+  configuration succeeded and failed on different attempts across
+  every one of these three paths during live testing. See
+  `scraper_api_client.py`'s own module docstring and
+  `playwright_scraper.py`'s reliability-testing notes for the full,
+  dated history; budget for retries in production regardless of which
+  path is used.
+- The 2Captcha proxy field on `scraper_api_client.py`'s `--proxy` flag
+  was added this release (previously unsupported) and independently
+  confirmed live via the proxy provider's own usage dashboard, not
+  just this project's own output.
+
+## [0.3.0] — External audit fixes (2026-09-14)
+
+An independent audit ran this project against the live site and its own
+test suite and found ten confirmed defects, several severe. Every
+finding below was independently REPRODUCED before being fixed, not
+patched on the audit's word alone — see each item for how.
+
+> **Behaviour change:** `--delay` now actually sleeps between
+> successful page fetches (previously "reserved" but silently unused).
+> Its default changed from 2.0 to **0.0** specifically because it now
+> does something — keeping the old default would have added a real,
+> new 2-second-per-page slowdown nobody asked for. Set `--delay 2` back
+> explicitly if you want the old de facto pacing.
+
+> **Behaviour change:** `--proxy-rotate` alone could never actually be
+> turned off (`action="store_true", default=True` has no CLI-reachable
+> False state) — this was a decorative flag. `--no-proxy-rotate` is the
+> new, real opt-out.
+
+### Fixed — critical
+- **Playwright broke on every `--pages > 1` run, including
+  `--concurrency 1`.** A single `sync_playwright()` context created in
+  the main thread was shared into worker threads via
+  `ThreadPoolExecutor`; Playwright's sync API is explicitly documented
+  as unsafe across threads this way. Reproduced directly:
+  `greenlet.error: Cannot switch to a different thread` from a
+  two-line repro, at any concurrency. Fixed by having `_fetch_page`
+  open and tear down its OWN `sync_playwright()` context every call,
+  in the main thread and in every worker alike. Re-verified end-to-end
+  with the real dispatcher (`_fetch_pages_concurrently`) and 3
+  concurrent real browser launches — no failures.
+
+### Fixed — data correctness
+- **CSS-fallback price parsing was wrong for any price without a
+  thousands separator.** `"€ 1250"` parsed as 125.0, `"1250 €"` as
+  250.0, `"€10000"` as 100.0; Belgian-grouped `"325.000"` (meaning
+  325,000) parsed as 325. Root cause: the old regex bounded its
+  leading digit group to a fixed 1–3 characters, silently truncating
+  anything longer with no separator present. Replaced with a parser
+  that captures the full digit run and classifies `,` as the Belgian
+  decimal separator (not `.` or a bare space, which are always
+  thousands grouping) — locked in place by a regression test covering
+  all of the audit's own failing inputs plus the previously-passing
+  ones. The primary embedded-JSON path was independently confirmed
+  unaffected (already-numeric JSON fields, never regex-parsed as
+  display text).
+- **A run's own `.meta.json` could report `status=complete` while
+  having deliberately never attempted several requested pages** (e.g.
+  after page 1 came back blocked). `unattempted_pages` was computed by
+  every engine but never actually passed into `finish_run()`.
+  `finish_run()` now accepts and acts on it; all three engines now
+  pass it through.
+- **A `Product` with no `sku`** (common from the JSON-LD/CSS fallback
+  paths) previously bypassed deduplication and diff entirely — two
+  identical rows for the same URL both survived. Both `dedupe_by_sku()`
+  and `diff_runs.py`'s own indexing now fall back to the listing's URL
+  when `sku` is absent.
+- **`diff_runs --fail-on-change`** only failed on changed EXISTING
+  rows, contradicting its own help text ("if anything actually
+  changed"); a run where every listing was replaced by different ones
+  passed silently. Now fails on additions and removals too.
+
+### Fixed — reliability
+- **A dead/rejected proxy exit stayed a retry candidate until its
+  failure count crossed `--proxy-block-retries`** (default 3). With
+  the default 2 retries, a good next exit could only be selected on
+  the LAST attempt of a page that had already burned its other
+  retries on the bad one — with no attempts left to use it.
+  `rotate_away_from()` is now called on every single failure;
+  `--proxy-block-retries` now only controls permanent retirement from
+  the pool, a separate, slower-moving concern.
+- **`--solve-captcha=never` did not prevent the solver from being
+  called.** Detection and solving were unconditional regardless of
+  this flag. Now: `never` detects but never solves; `always` solves on
+  every detection; `when-blocked` (default) solves only when the page
+  doesn't already show usable listing content.
+- **The live Cloudflare challenge on zimmo.be is a Managed Challenge**
+  (a hidden `cf-turnstile-response` field, no `.cf-turnstile[data-
+  sitekey]` widget element) — the previous detector required that
+  specific widget markup and missed it. Detection is broadened to any
+  `data-sitekey` attribute on the page; when Cloudflare markers are
+  present but genuinely no sitekey is extractable, the code now
+  returns an explicit "blocked, unsolvable via this path" signal
+  (rather than either a false negative or a fabricated sitekey) and
+  points at `--cdp-endpoint` with a real Scraping Browser API session
+  as the correct path for this specific challenge type.
+
+### Fixed — security
+- `parse_proxy_url()`'s own `ValueError` on a malformed proxy URL
+  previously embedded the raw URL VERBATIM, including any real
+  `username:password` — an exception message is a log, and this one
+  printed a credential the first time a proxy URL was malformed.
+  Redacted before raising, like every other exception path in this
+  family.
+- `check_no_credentials.py` had two confirmed blind spots: `.env`
+  itself was never scanned (only the literal `.env.example` filename
+  was special-cased), and ANY path containing `test_` was blanket-
+  exempted — meaning a real secret committed as e.g. `test_secret.py`
+  was invisible to the tool whose entire job is to catch exactly that.
+  Both fixed; re-verified against the audit's own two reproduction
+  cases, and against this repo's own real fixtures to confirm no new
+  false positives.
+
+### Fixed — delivery / packaging
+- `requirements-playwright.txt` allowed `playwright>=1.44` while the
+  Dockerfile pins a `v1.44.0`-tagged base image with a matching
+  browser revision baked in — an unpinned range could install a newer
+  client library on top of an older browser. Both now pin `1.44.0`
+  exactly, with an automated check (`smoke_test.py`) asserting the two
+  never drift apart silently again.
+- `pyproject.toml` said version `0.1.0` while this CHANGELOG already
+  claimed `0.2.0` — one had been bumped without the other. Now `0.3.0`
+  in both, with an automated check preventing the same drift again.
+- Added the previously-missing `LICENSE` file (README already claimed
+  MIT).
+
+## [0.2.0] — Rewrite to the 2scraper family template
+
+> **Behaviour change:** secrets now belong in `.env` (see `.env.example`
+> and `env_config.py`), not on the command line. An explicit flag
+> always wins over `.env`.
+
+> **Behaviour change:** a run that finds zero products now writes
+> **nothing** by default, instead of overwriting previous output with
+> an empty file. Pass `--allow-empty` to restore the old behaviour.
+
+### Added
+- `env_config.py`, `proxy_pool.py`, `fingerprint_client.py`,
+  `diff_runs.py`, `scraper_api_client.py`, `check_no_credentials.py` —
+  new shared, site-knowledge-free modules per the family template.
+- Full output contract in `output_writer.py`: exit codes 0–6,
+  `finish_run()`, a `.meta.json` sidecar, an empty CSV that still
+  carries its header, `dedupe_by_sku()` preserving page order.
+- Real pagination: `page_url()` reconstructs zimmo.be's own confirmed
+  `?p=N` parameter, plus data-based termination — a page that adds no
+  new `sku` stops further dispatch — implemented identically across
+  all three engines and tested with a stubbed browser
+  (`tests/test_concurrency.py`, `test_concurrency_async.py`).
+- Concurrency (`--concurrency`), with page 1 always fetched alone and
+  each worker owning one proxy exit for its lifetime.
+- Full flag set per the family standard, verified identical across all
+  three engines by an automated test rather than by inspection.
+- `.github/workflows/tests.yml` (offline matrix, per-engine venvs, and
+  a `docker-build` job that actually builds and runs the image — not
+  just a manual review of its COPY list) and `canary.yml` (daily live
+  run, with a skip guard so a missing secret goes green with a notice
+  instead of red).
+- `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue templates.
+- `smoke_test.py` gained: a banned-wording scan, an `.env.example`
+  round-trip through the real loader, a check that every engine's
+  driver import is at module level, a coarse AST name-resolution walk,
+  an engine flag-set consistency check (against the contract and
+  against each other), and a shared-function call-signature binding
+  check across all engines (`inspect.signature(fn).bind()` over an AST
+  walk of every call site) — this last one caught nothing wrong on this
+  repo, which is itself the point of having it before it does.
+
+### Changed
+- `product_parser.py`: tile-widening cap raised from 3 to 8 levels to
+  match the family default. JSON-LD parsing now also handles `@graph`
+  and an `image` field shaped as an `ImageObject` dict. `SELECTORS`'
+  key renamed from an ad-hoc `item_link_css_approx` to the family's own
+  `item_link` convention.
+- `env_config.py`: a value containing `{...}` (a vendor's own braced
+  placeholder, e.g. `ws://{login}-zone-...`) is now treated as unset,
+  not just a fixed literal list — a copied `.env.example` following the
+  vendor's own documented format previously read as configured.
+- `fingerprint_client.py`: hardened against six specific, previously-
+  documented bugs found repeatedly across sibling repos (an API key
+  leaking via an unredacted exception, a single guessed field name for
+  the user agent, a malformed `en-{country}` locale, an unapplied
+  timezone) — see the module's own docstring for which of the six
+  apply here and how each is addressed. Honestly notes it is not yet
+  wired into any engine's browser-launch path.
+- `captcha_solver.py`: `min_score` is now reachable from the public
+  `solve_recaptcha_v3()` entry point. Both 2captcha polling calls now
+  redact the API key from any exception they raise — `requests` puts
+  the full URL, including the `key=` query parameter, into that text
+  otherwise.
+- Puppeteer and Selenium: a proxy's credential no longer reaches the
+  browser's own launch argv (visible to `ps`) — Puppeteer authenticates
+  via `page.authenticate()`; Selenium (which cannot authenticate a
+  proxy at all) strips the credential and warns instead of silently
+  connecting unauthenticated.
+- The credential-detection check that used to live only as an inline
+  `git grep` in `tests.yml` is now `check_no_credentials.py`, one
+  implementation invoked from both CI and the offline suite.
+
+### Removed
+- The local "auto-solve" placeholder integration (`--antidetect` flag
+  and its local endpoint) — never backed by a real product. The
+  engines' own `Captcha.setAutoSolve` (over `--cdp-endpoint`, on a
+  genuine Scraping Browser API session) is the real, confirmed path.
+- Every reference to `gate.2prx.com` as if it were a distinct proxy
+  host — 2prx.com is 2captcha.com's own proxy product.
+
+## [0.1.0] — Initial release
+
+Three engines (Playwright primary, Selenium and Puppeteer for parity),
+single-page scraping via zimmo.be's embedded `properties` JSON array,
+JSON-LD and price-anchored CSS fallbacks, Cloudflare Turnstile and
+reCAPTCHA v3 detection/solving via 2captcha.com.

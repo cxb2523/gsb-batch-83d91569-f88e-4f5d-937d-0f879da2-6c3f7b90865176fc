@@ -1,0 +1,139 @@
+name: canary
+
+# One real run weekly (Mondays; every run bills the proxy) against a known-good search URL, >=3 pages, so
+# pagination is exercised and not only page 1. Artefacts are uploaded on
+# every run, so a red canary can be diagnosed from the run alone.
+#
+# This canary ends green ONLY when the scraper read real listings from
+# zimmo.be. zimmo.be refuses GitHub's datacentre addresses (Cloudflare
+# 403, measured 2026-09-23 and 2026-10-13) and serves only a residential
+# exit (Belgian or German worked; a US exit was refused) with a headful
+# browser, so the run needs the ZIMMO_PROXY repository secret. Without
+# it the job FAILS with an error naming the secret: a skipped or
+# "refused, as expected" run is not a test of the site.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"  # Mondays (weekly: every run bills the proxy), off the hour to avoid the top-of-hour GitHub Actions crush
+  workflow_dispatch: {}
+  # No push trigger: every run bills the proxy, so a change to this file is
+  # verified by dispatching it by hand, not by merging it.
+
+jobs:
+  canary:
+    # jammy, pinned, for the same reason tests.yml's engine-smoke job
+    # pins it: playwright==1.44.0 cannot install its system deps on
+    # Ubuntu 24.04, and the Dockerfile's base image is v1.44.0-jammy.
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require the ZIMMO_PROXY secret
+        env:
+          ZIMMO_PROXY: ${{ secrets.ZIMMO_PROXY }}
+        run: |
+          if [ -z "$ZIMMO_PROXY" ]; then
+            echo "::error::ZIMMO_PROXY is missing or empty, so this canary cannot reach zimmo.be (it refuses GitHub runners' addresses). Set the ZIMMO_PROXY repository secret to a residential proxy URL (credentials, host and port) with a Belgian or German exit. This run tested nothing."
+            exit 1
+          fi
+          echo "[canary] ZIMMO_PROXY is set (value masked)."
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install core + Playwright
+        run: |
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+          sudo apt-get install -y xvfb
+
+      - name: Run against a known-good search URL, >=3 pages (headful, under xvfb)
+        env:
+          # The proxy goes through the ENVIRONMENT, never a command line,
+          # so it cannot appear in the process list or the job log.
+          ZIMMO_PROXY: ${{ secrets.ZIMMO_PROXY }}
+        run: |
+          set +e
+          echo "[canary] route: headful Chromium under xvfb, through ZIMMO_PROXY"
+          xvfb-run -a python playwright_scraper.py \
+            --url "https://www.zimmo.be/nl/gent-9000/te-koop/" \
+            --pages 3 \
+            --headful \
+            --format both \
+            --proxy-budget-mb 10 \
+            --out canary_run \
+            --dump-html
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_ENV"
+          echo "[canary] engine exit code: $code"
+
+      - name: Proxy traffic of the run
+        # The run meters what it sends through ZIMMO_PROXY and stops at
+        # --proxy-budget-mb 10. This puts the figure in the step summary and
+        # fails the job when the cap was hit, so a page that has grown heavy
+        # is a red run rather than a quietly larger bill.
+        if: ${{ !cancelled() }}
+        run: python3 .github/proxy_traffic.py "canary" canary_run
+
+      - name: Assert the run actually succeeded
+        run: |
+          python - <<'EOF'
+          import json, os, sys
+
+          code = int(os.environ.get("exit_code", "1"))
+          if code != 0:
+              print(f"::error::engine exit code {code} (0 ok, 3 blocked, 4 zero rows, 5 content never obtained or parser found nothing on a rendered page, 6 partial)")
+              sys.exit(1)
+
+          meta = json.load(open("canary_run.meta.json"))
+          rows = json.load(open("canary_run.json"))
+          n = len(rows)
+          def share(key):
+              return sum(1 for r in rows if r.get(key) is not None) / n
+
+          print("status:", meta["status"], "| pages:", meta["pages_completed"], "/", meta["pages_requested"], "| rows:", n)
+          for key in ("price", "location", "property_type", "listing_type", "surface_m2", "bedrooms", "epc_label"):
+              print(f"  {key:14} {share(key):.0%}")
+
+          # Floors from the 2026-09-23 runs (63 rows over 3 pages, every
+          # engine): price 100%, property/listing type 100%, living area
+          # 92%, bedrooms 76%, EPC 72%. Set below them, since a few
+          # listings legitimately state no area, no bedrooms or no grade.
+          assert meta["status"] == "complete", meta["status"]
+          assert meta["pages_completed"] == 3, meta["pages_completed"]
+          assert n >= 50, f"product floor not met: {n} < 50"
+          assert share("price") >= 0.9, "price share"
+          assert share("property_type") >= 0.95, "property_type share"
+          assert share("listing_type") >= 0.95, "listing_type share"
+          assert share("surface_m2") >= 0.6, "surface_m2 share"
+          assert share("bedrooms") >= 0.4, "bedrooms share"
+          assert share("epc_label") >= 0.4, "epc_label share"
+          # A page that answers 200 and parses to rows can still be a
+          # parser that has drifted. These are the arithmetic of the data.
+          skus = [r["sku"] for r in rows if r.get("sku")]
+          assert len(skus) == n, f"{n - len(skus)} rows have no sku"
+          assert len(set(skus)) == n, f"{n - len(set(skus))} duplicate skus"
+          bad_price = [r["sku"] for r in rows
+                       if r.get("price") is not None and not (10_000 <= r["price"] <= 50_000_000)]
+          assert not bad_price, f"implausible price on {bad_price[:5]}"
+          assert all(r.get("price") is None or r.get("original_price") is None
+                     or r["original_price"] > r["price"] for r in rows), \
+              "an original_price at or below its price"
+          assert all((r.get("url") or "").startswith("https://www.zimmo.be/") for r in rows), "foreign url"
+          print("Canary: PASS")
+          EOF
+
+      - name: Upload artefacts (every run, pass or fail)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-run-${{ github.run_id }}
+          path: |
+            canary_run.json
+            canary_run.csv
+            canary_run.meta.json
+            canary_run_page*_debug.html
+            canary_run_page*_debug.png
+          retention-days: 14
+          if-no-files-found: ignore

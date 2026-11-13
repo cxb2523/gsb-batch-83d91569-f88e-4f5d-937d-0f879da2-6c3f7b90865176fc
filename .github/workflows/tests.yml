@@ -1,0 +1,207 @@
+name: tests
+
+# Offline only — nothing here touches zimmo.be or a
+# credential. See canary.yml for the one real live run.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Oldest and newest supported Python — claiming 3.9 without
+        # testing it is how a walrus operator ships.
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install core requirements
+        run: pip install -r requirements.txt
+
+      - name: Byte-compile every module
+        run: python -m compileall -q .
+
+      # Only the engine-INDEPENDENT CLIs belong here. The three
+      # *_scraper.py entry points import their driver at module level
+      # on purpose -- the engine-smoke job below asserts exactly that,
+      # because a lazily-imported driver turns a real ImportError into
+      # a silent skip. That deliberate choice means their --help cannot
+      # run in this job, which installs requirements.txt only (the
+      # three engine requirement files are mutually unsatisfiable in
+      # one environment; see requirements.txt's own header). Their
+      # --help IS covered, per engine, in engine-smoke's own venv; the
+      # compileall step above is what covers their syntax on 3.9.
+      - name: --help works for every engine-independent CLI
+        run: |
+          for script in scraper_api_client.py diff_runs.py; do
+            echo "=== $script --help ==="
+            python "$script" --help
+          done
+          python env_config.py
+
+      - name: Smoke test (banned wording, .env.example, flag/signature consistency, parser/output logic)
+        run: python smoke_test.py
+
+      - name: pytest entry point
+        run: |
+          pip install pytest
+          python -m pytest tests/ -v
+
+      - name: sample_output columns match the Product dataclass
+        run: |
+          python -c "
+          import json, csv
+          from dataclasses import fields
+          from output_writer import Product
+
+          expected = [f.name for f in fields(Product)]
+
+          with open('sample_output.json') as f:
+              rows = json.load(f)
+          assert rows, 'sample_output.json must have at least one row'
+          for row in rows:
+              assert list(row.keys()) == expected, f'sample_output.json field order mismatch: {list(row.keys())} != {expected}'
+
+          with open('sample_output.csv', newline='') as f:
+              header = next(csv.reader(f))
+          assert header == expected, f'sample_output.csv header mismatch: {header} != {expected}'
+          print('sample_output.{json,csv} match the Product dataclass exactly.')
+          "
+
+      - name: No committed credentials (one implementation, shared with the offline suite)
+        run: python3 check_no_credentials.py
+
+  engine-smoke:
+    # Playwright alone runs on jammy, pinned, NOT on ubuntu-latest.
+    # requirements-playwright.txt pins playwright==1.44.0 (May 2024),
+    # which predates Ubuntu 24.04 and cannot resolve its system
+    # packages -- `playwright install --with-deps chromium` bails out
+    # on the distro check in seconds, long before it downloads a
+    # browser (observed: run 35385039220, step failed in 8s). noble
+    # support landed in playwright 1.45. This repo's own Dockerfile
+    # already pins the matching base image, v1.44.0-JAMMY, so jammy is
+    # the OS this pin is actually built against -- these two stay in
+    # sync. Bumping the pin instead would mean moving that base image
+    # too; that is a dependency decision, not a CI fix.
+    # The other two engines are pure-Python and stay on ubuntu-latest.
+    runs-on: ${{ matrix.engine == 'playwright' && 'ubuntu-22.04' || 'ubuntu-latest' }}
+    strategy:
+      # One broken engine must not cancel the other two: the run that
+      # prompted this had selenium CANCELLED mid-flight by playwright's
+      # failure, so its real status stayed unknown. A matrix that hides
+      # the status of everything after the first red is the same
+      # "check nobody can read" problem canary.yml warns about.
+      fail-fast: false
+      matrix:
+        engine: [playwright, puppeteer, selenium]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # One venv per engine, installed from its OWN requirements file
+      # — a single shared environment lets pip silently
+      # resolve the family's mutually-unsatisfiable pins by reaching
+      # for whatever it can, which stays green against a version
+      # nobody ships.
+      - name: Create venv and install this engine only
+        run: |
+          python -m venv .venv-${{ matrix.engine }}
+          source .venv-${{ matrix.engine }}/bin/activate
+          pip install -r requirements.txt -r requirements-${{ matrix.engine }}.txt
+          pip check
+
+      - name: Install browser (Playwright only)
+        if: matrix.engine == 'playwright'
+        run: |
+          source .venv-playwright/bin/activate
+          playwright install --with-deps chromium
+
+      - name: Confirm THIS engine's module-level driver import does not skip
+        run: |
+          source .venv-${{ matrix.engine }}/bin/activate
+          python -c "
+          import ast
+          script_name = '${{ matrix.engine }}_scraper.py'
+          driver_name = {'playwright': 'playwright', 'puppeteer': 'pyppeteer', 'selenium': 'selenium'}['${{ matrix.engine }}']
+          tree = ast.parse(open(script_name).read())
+          found = any(driver_name in ast.dump(n) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)))
+          assert found, f'{driver_name} is not imported at module level -- a real ImportError would be silently swallowed'
+          print(f'{driver_name} imported at module level: confirmed.')
+          "
+          python ${{ matrix.engine }}_scraper.py --help
+
+      # --fingerprint exists in the Playwright engine only. These checks
+      # import it and launch the installed Chromium against a loopback
+      # server; in the offline job they can only skip, so here a skip is
+      # a failure (FINGERPRINT_REQUIRE_PLAYWRIGHT).
+      - name: Fingerprint checks on a real Chromium (Playwright only)
+        if: matrix.engine == 'playwright'
+        env:
+          FINGERPRINT_REQUIRE_PLAYWRIGHT: "1"
+        run: |
+          source .venv-playwright/bin/activate
+          python -c "
+          import sys, smoke_test as s
+          sys.exit(0 if all([
+              s.check_fingerprint_flags_never_stack_on_the_scraping_browser(),
+              s.check_fingerprint_facts_reach_the_run_metadata(),
+              s.check_fingerprint_is_applied_to_a_real_local_chromium(),
+          ]) else 1)
+          "
+
+  docker-build:
+    runs-on: ubuntu-latest
+    # "Build the Docker image in CI. Nothing else does, which is how
+    # all three [sibling] repos shipped a broken one."
+    # Four steps, each catching a DISTINCT failure a manual COPY-list
+    # review cannot: the image builds; its entrypoint actually runs;
+    # Chromium actually launches (not just `playwright install
+    # --with-deps` exiting 0); and the image is free of anything that
+    # should never leave a developer's machine.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t zimmo-scraper:ci .
+
+      - name: Entrypoint runs (the CMD is --help, the exact invocation a missing module breaks)
+        run: docker run --rm zimmo-scraper:ci --help
+
+      - name: Chromium really launches inside the image
+        run: |
+          docker run --rm zimmo-scraper:ci --url "https://example.invalid/" --pages 1 2>&1 | tee /tmp/launch_check.log || true
+          # A real Chromium launch failure prints its own distinctive
+          # error text; a DNS failure on the bogus URL above (expected
+          # and fine) proves Chromium got far enough to attempt
+          # navigation, which is the thing this step exists to prove.
+          if grep -qi "Executable doesn't exist\|Host system is missing dependencies" /tmp/launch_check.log; then
+            echo "Chromium failed to launch inside the image -- see log above."
+            exit 1
+          fi
+          echo "Chromium launched (reached a navigation attempt) inside the image."
+
+      - name: Image contains no .env, no test suite, no fixtures
+        run: |
+          docker create --name zimmo-check zimmo-scraper:ci --help
+          FOUND=0
+          for forbidden in .env tests sample_output.json sample_output.csv README.md CHANGELOG.md CONTRIBUTING.md; do
+            if docker cp zimmo-check:/app/$forbidden /tmp/should-not-exist 2>/dev/null; then
+              echo "FORBIDDEN: /app/$forbidden exists inside the image"
+              rm -rf /tmp/should-not-exist
+              FOUND=1
+            fi
+          done
+          docker rm zimmo-check
+          if [ "$FOUND" = "1" ]; then
+            echo "A .env baked into an image is a credential published to everyone who can pull it."
+            exit 1
+          fi
+          echo "Confirmed: no .env, test suite, or fixtures inside the image."
