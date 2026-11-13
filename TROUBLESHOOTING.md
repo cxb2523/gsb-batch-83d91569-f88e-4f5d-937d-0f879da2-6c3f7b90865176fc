@@ -52,7 +52,14 @@ good file is left alone; `--allow-empty` writes the empty file.
   pricing zone — under HTTP 200). The same request would be rejected again,
   so it is not retried. If the query looks right, the API changed: open a
   "Site changed" issue with `--dump-html` output.
-* **"Gave up on …"** — a timeout or a dead proxy. The log names which.
+* **"Gave up on …"** — the request never completed, and the log line names
+  the class in parentheses, as does the sidecar's `stop_reason`:
+  `proxy_connection_failed` (the proxy exit itself could not be used — with
+  `--proxy-file` the run already switched exits and rebuilt the browser on
+  each, up to `--proxy-block-retries`, so all of them being dead means the
+  provider or the list), `page_load_timeout` (the request took too long and
+  was retried in place), or `transport_error` (the connection was reset or
+  the page went away — also how Akamai refused local Chromium in testing).
 
 ## Exit 6 — partial
 

@@ -259,6 +259,36 @@ def target_gone(error: Optional[str]) -> bool:
 _TIMEOUT_WORDS = ("Timeout", "timed out", "did not return within", "TimeoutError")
 
 
+# The three classes a fetch() transport failure falls into. They want three
+# different responses, so the loop, the log and the stop reason all name
+# them rather than quoting only the driver's error text:
+#   proxy    the exit itself could not be used (ERR_PROXY_CONNECTION_FAILED
+#            and kin) — switch to another exit and rebuild the browser there;
+#            retrying the SAME exit in place fails identically every time
+#   timeout  the request simply took too long — retried in place
+#   reset    the connection was reset or closed — retried in place, and on
+#            this site also how Akamai refused whole clients (transport_hint)
+def transport_kind(error: Optional[str], proxy_marker: str = "") -> str:
+    """Which of the three failure classes a transport error belongs to.
+
+    `proxy_marker` is the engine's own verdict (ops.proxy_failure): the
+    Chromium error names live in the engines, not here.
+    """
+    if proxy_marker:
+        return "proxy"
+    if any(w in (error or "") for w in _TIMEOUT_WORDS):
+        return "timeout"
+    return "reset"
+
+
+# How each class is named in the "Gave up" log line, so the final error says
+# WHICH failure ended the run instead of leaving the reader to recognise the
+# driver's wording.
+TRANSPORT_KIND_NAMES = {"proxy": "proxy-connection failure",
+                        "timeout": "timeout",
+                        "reset": "connection reset/closed"}
+
+
 def stop_reason_for(outcome) -> str:
     """The run's stop_reason when `outcome` is the page that ended it."""
     if getattr(outcome, "unread", False):
@@ -267,6 +297,11 @@ def stop_reason_for(outcome) -> str:
         return "api_rejected"
     if getattr(outcome, "blocked_by", None):
         return "blocked_%s" % outcome.blocked_by
+    if getattr(outcome, "proxy_error", None):
+        # A dead exit is not a timeout and not a refusal by the site — the
+        # request never reached the site — so it gets its own reason rather
+        # than borrowing either of theirs.
+        return "proxy_connection_failed"
     if getattr(outcome, "state", None) == "throttled":
         return "throttled"
     if getattr(outcome, "state", None) == "unavailable":
@@ -464,6 +499,11 @@ class PageOutcome:
     unread: bool = False
     # The last transport error's text, for stop_reason_for.
     error: Optional[str] = None
+    # The driver's proxy-error name when the EXIT itself failed
+    # (ERR_PROXY_CONNECTION_FAILED and kin), as the engine's proxy_failure
+    # reported it. Set instead of `blocked_by`: the request never reached
+    # the site, so a dead exit is not a refusal and is not reported as one.
+    proxy_error: Optional[str] = None
 
     @property
     def ok(self) -> bool:
@@ -621,6 +661,10 @@ def fetch_one_page(ops, args, pool, query: Query, page_num: int,
                 status, text, waf, last_error = ops.fetch(req)
                 state = ("load_failed" if last_error
                          else classify_fn(text, status, req.url, waf))
+                if last_error:
+                    # The same triage as a failed landing: a dead exit is
+                    # switched away from, not retried in place.
+                    exit_failed = ops.proxy_failure(last_error) or None
                 if last_error and target_gone(last_error):
                     # The same request into the same dead page fails the same
                     # way every time; the next attempt needs a new page.
@@ -631,6 +675,13 @@ def fetch_one_page(ops, args, pool, query: Query, page_num: int,
                 if counts_as_blocked(state):
                     # A refusal of the session: the next attempt lands again.
                     ops.landed = False
+            if exit_failed:
+                # A proxy-connection failure is a property of the EXIT, not
+                # of the request: the same request through the same exit
+                # fails identically, so the retry budget is not spent on it.
+                # The block loop below switches exits and rebuilds the
+                # browser; with no other exit left, the failure is recorded.
+                break
             if state == "throttled" and throttles < THROTTLE_RETRIES:
                 throttles += 1
                 attempt -= 1  # a throttle wait spends its own budget
@@ -667,7 +718,9 @@ def fetch_one_page(ops, args, pool, query: Query, page_num: int,
     if state == "load_failed" or exit_failed:
         outcome.load_failed = True
         outcome.error = last_error
-        log.error("Gave up on %s: %s%s", req.label,
+        outcome.proxy_error = exit_failed or None
+        kind = TRANSPORT_KIND_NAMES[transport_kind(last_error, exit_failed or "")]
+        log.error("Gave up on %s (%s): %s%s", req.label, kind,
                   mask(last_error or "the request never completed"),
                   transport_hint(last_error))
     elif state == "rejected":

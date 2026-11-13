@@ -10,8 +10,9 @@ said so at the top of its release notes.
 ## [Unreleased]
 
 > **Behaviour change:** `stop_reason` no longer says `page_load_timeout`
-> for a failure that was not a timeout. A closed page, a reset connection or
-> a dead proxy is now `transport_error`, and a backend that kept answering
+> for a failure that was not a timeout. A closed page or a reset connection
+> is now `transport_error`, a proxy exit that could not be used is
+> `proxy_connection_failed`, and a backend that kept answering
 > `CircuitBreakerFallbackException` is `backend_unavailable`. Exit codes are
 > unchanged.
 
@@ -21,6 +22,19 @@ said so at the top of its release notes.
 
 ### Fixed
 
+- **A proxy that dies mid-run now switches exits instead of retrying in
+  place.** A proxy-connection failure (`ERR_PROXY_CONNECTION_FAILED`,
+  `ERR_TUNNEL_CONNECTION_FAILED`, …) during a fetch() was retried at the
+  same dead exit until the retry budget ran out — only a failed homepage
+  landing rotated. The fetch loop now treats it like the landing case: with
+  `--proxy-file` it moves to the next exit and rebuilds the browser there
+  (up to `--proxy-block-retries`), and with no other exit left it stops.
+  Over `--cdp-endpoint` nothing is switched (the remote exit is not ours to
+  change) and no proxy is layered on, but the failure is still attributed.
+  The "Gave up" log line and the sidecar's `stop_reason` name the failure
+  class — proxy-connection failure, timeout, or connection reset — so a
+  dead exit reads as `proxy_connection_failed` (exit 5), distinct from
+  `blocked_akamai` (exit 3, the site refused) and `page_load_timeout`.
 - **Category pages in the site's new build resolve again.** The site now
   serves a category page in one of two builds, chosen per browser profile:
   the older one with `__NEXT_DATA__`, and an App Router one whose data sits

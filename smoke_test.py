@@ -570,7 +570,7 @@ class _FakeOps:
         pass
 
 
-def _run(ops, query=None, pages=3, **extra):
+def _run(ops, query=None, pages=3, pool=None, **extra):
     import page_flow
     import product_parser as P
     with tempfile.TemporaryDirectory() as tmp:
@@ -583,7 +583,7 @@ def _run(ops, query=None, pages=3, **extra):
             setattr(args, k, v)
         q = query or P.Query("category", slug="3-point-sprayers", page_size=24)
         rc = page_flow.run_pages(lambda: ops, lambda o: None,
-                                 lambda pages: ([], [], False), args, None, q, 1)
+                                 lambda pages: ([], [], False), args, pool, q, 1)
         meta_path = args.out + ".meta.json"
         meta = json.load(open(meta_path)) if os.path.exists(meta_path) else None
         rows = (json.load(open(args.out + ".json"))
@@ -1759,6 +1759,328 @@ def check_a_transport_error_is_not_called_a_timeout():
     equal("a timeout is still a page_load_timeout", F.stop_reason_for(o), "page_load_timeout")
     o.error = "net::ERR_HTTP2_PROTOCOL_ERROR at https://www.tractorsupply.com/"
     equal("a reset connection is a transport_error", F.stop_reason_for(o), "transport_error")
+
+
+# ---------------------------------------------------------------------------
+# fetch() failure attribution: proxy exit / refused / timeout-or-reset
+# ---------------------------------------------------------------------------
+#
+# The three classes want three different responses — switch the exit, switch
+# the identity, retry in place — so the loop must say WHICH one a failure
+# was, in the log and in the sidecar's stop_reason. Driven here with fake
+# drivers and fake page objects; nothing in this section touches the
+# network or reads a real credential.
+
+# A proxy-connection failure as Playwright reports it, injected by the fakes.
+PROXY_ERR = "Page.evaluate: net::ERR_PROXY_CONNECTION_FAILED"
+
+
+def _proxy_pool(n=3):
+    from proxy_pool import ProxyPool
+    return ProxyPool(["http://exit-%d:800%d" % (i, i) for i in range(1, n + 1)])
+
+
+class _TransportFailingOps(_FakeOps):
+    """A fake driver whose SEARCH fetches fail with one transport error.
+
+    The store lookup and the category page are served normally, so the run
+    reaches page 1 and the failure is exercised exactly there. `recovers`
+    is the number of relaunches after which the failure stops (None = the
+    exit never comes back).
+    """
+
+    _PROXY_MARKERS = ("ERR_PROXY_CONNECTION_FAILED", "ERR_TUNNEL_CONNECTION_FAILED")
+
+    def __init__(self, error, recovers=None, **kw):
+        super().__init__(**kw)
+        self.error = error
+        self.recovers = recovers
+
+    def proxy_failure(self, text):
+        for marker in self._PROXY_MARKERS:
+            if marker in (text or ""):
+                return marker
+        return ""
+
+    def fetch(self, req):
+        search = req.path != self.P.STORE_PATH and not req.path.startswith("/tsc/")
+        if search and (self.recovers is None or self.relaunches < self.recovers):
+            self.fetches.append("error:%d" % req.page)
+            return None, "", None, self.error
+        return super().fetch(req)
+
+
+def check_transport_failure_classes_are_named():
+    import page_flow as F
+    equal("a proxy error is its own class",
+          F.transport_kind("net::ERR_PROXY_CONNECTION_FAILED",
+                           "ERR_PROXY_CONNECTION_FAILED"), "proxy")
+    equal("a timeout is a timeout",
+          F.transport_kind("Page.evaluate: Timeout 45000ms exceeded."), "timeout")
+    equal("a reset is the third class",
+          F.transport_kind("net::ERR_CONNECTION_RESET"), "reset")
+    o = F.PageOutcome(page_num=1, url="u", load_failed=True,
+                      error=PROXY_ERR, proxy_error="ERR_PROXY_CONNECTION_FAILED")
+    equal("a dead exit gets its own stop reason",
+          F.stop_reason_for(o), "proxy_connection_failed")
+    o = F.PageOutcome(page_num=1, url="u", load_failed=True,
+                      error="net::ERR_CONNECTION_RESET")
+    equal("a reset stays transport_error", F.stop_reason_for(o), "transport_error")
+
+
+def check_a_proxy_failure_on_fetch_switches_exits_not_retries():
+    pool = _proxy_pool()
+    ops = _TransportFailingOps(PROXY_ERR, recovers=1,
+                               search={1: [(200, fx("cat_p1"))]})
+    rc, meta, rows, ops = _run(ops, pages=1, pool=pool)
+    equal("the exit dies once, the next exit serves: exit 0", rc, 0)
+    equal("...exactly one exit switch", pool.rotations, 1)
+    equal("...and the browser was rebuilt for it", ops.relaunches, 1)
+    equal("...the dead exit was NOT retried in place",
+          [f for f in ops.fetches if f == "error:1"], ["error:1"])
+
+    pool = _proxy_pool()
+    rc, meta, rows, ops = _run(_TransportFailingOps(PROXY_ERR), pages=1,
+                               pool=pool, allow_empty=True)
+    equal("every exit dead: exit 5, not a claimed block and not a timeout", rc, 5)
+    equal("...the stop reason names the proxy",
+          meta and meta.get("stop_reason"), "proxy_connection_failed")
+    equal("...two exit switches (the --proxy-block-retries budget), then it stops",
+          pool.rotations, 2)
+    equal("...one failed fetch per exit, never a retry into a dead one",
+          [f for f in ops.fetches if f == "error:1"], ["error:1"] * 3)
+
+    rc, meta, rows, ops = _run(_TransportFailingOps(PROXY_ERR), pages=1,
+                               allow_empty=True)
+    equal("no pool: exit 5 after ONE attempt — nothing to switch to, and "
+          "still no in-place retry",
+          (rc, [f for f in ops.fetches if f == "error:1"], ops.relaunches),
+          (5, ["error:1"], 0))
+    equal("...and the proxy is still named",
+          meta and meta.get("stop_reason"), "proxy_connection_failed")
+
+
+def check_a_timeout_or_reset_is_retried_in_place_not_rotated():
+    pool = _proxy_pool()
+    ops = _TransportFailingOps("Page.evaluate: Timeout 45000ms exceeded.")
+    rc, meta, rows, ops = _run(ops, pages=1, pool=pool, allow_empty=True)
+    equal("a timeout spends the --retries budget at the SAME exit",
+          ([f for f in ops.fetches if f == "error:1"], pool.rotations),
+          (["error:1", "error:1"], 0))
+    equal("...exit 5, stop_reason page_load_timeout",
+          (rc, meta and meta.get("stop_reason")), (5, "page_load_timeout"))
+
+    pool = _proxy_pool()
+    ops = _TransportFailingOps("Page.evaluate: net::ERR_CONNECTION_RESET")
+    rc, meta, rows, ops = _run(ops, pages=1, pool=pool, allow_empty=True)
+    equal("a reset is retried in place too, not rotated",
+          ([f for f in ops.fetches if f == "error:1"], pool.rotations),
+          (["error:1", "error:1"], 0))
+    equal("...exit 5, stop_reason transport_error",
+          (rc, meta and meta.get("stop_reason")), (5, "transport_error"))
+
+
+def check_a_refusal_switches_exits_up_to_the_budget_then_exit_3():
+    pool = _proxy_pool()
+    ops = _FakeOps(search={1: [(403, fx("akamai_raw"))]})
+    rc, meta, rows, ops = _run(ops, pages=1, pool=pool, allow_empty=True)
+    equal("refused at every exit: exit 3", rc, 3)
+    equal("...one exit switch per --proxy-block-retries, then it stops",
+          pool.rotations, 2)
+    equal("...a fresh browser per exit tried", ops.relaunches, 2)
+    equal("...the stop reason names the refusal, not the proxy",
+          meta and meta.get("stop_reason"), "blocked_akamai")
+
+
+def check_over_cdp_a_proxy_failure_switches_nothing_but_is_named():
+    ops = _TransportFailingOps(PROXY_ERR)
+    ops.remote = True
+    rc, meta, rows, ops = _run(ops, pages=1, cdp_endpoint="ws://x",
+                               allow_empty=True)
+    equal("over --cdp-endpoint: exit 5, and NO exit switch is attempted "
+          "(the remote exit is not ours to change)",
+          (rc, ops.relaunches), (5, 0))
+    equal("...the failure is still attributed to the proxy class",
+          meta and meta.get("stop_reason"), "proxy_connection_failed")
+
+
+def _engine_page_answers(search_answer):
+    """A url -> fetch() result for the stub page below: the store lookup and
+    the category page are served from fixtures, and a search request gets
+    `search_answer` (a dict, or a callable producing one per call)."""
+    def answer(url):
+        if "fetchstoredetails" in url:
+            return {"status": 200, "text": fx("stores_75001"), "waf": None}
+        if "/tsc/catalog/" in url:
+            return {"status": 200, "text": fx("page_category"), "waf": None}
+        return search_answer(url) if callable(search_answer) else search_answer
+    return answer
+
+
+def _run_engine_ops(engine, answers, pool=None, **overrides):
+    """Drive the shared run through a REAL playwright_scraper._Ops whose
+    browser is stubbed: _launch_local hands out fake page objects and
+    records each launch (= each browser built) with the exit it was built
+    on. No browser is started and nothing touches the network."""
+    import page_flow
+    import product_parser as P
+    launches, pages = [], []
+
+    class StubPage:
+        def __init__(self):
+            self.search_calls = 0
+            self.closed = False
+
+        def goto(self, url, wait_until=None, timeout=None):
+            return types.SimpleNamespace(status=200)
+
+        def content(self):
+            return fx("landing_cdp")
+
+        def evaluate(self, js, arg):
+            url = arg[0]
+            if "fetchstoredetails" not in url and "/tsc/catalog/" not in url:
+                self.search_calls += 1
+            got = answers(url)
+            if isinstance(got, Exception):
+                raise got
+            return got
+
+        def close(self):
+            self.closed = True
+
+    def fake_launch(pw, args, pool_):
+        launches.append(pool_.current if pool_ else None)
+        page = StubPage()
+        pages.append(page)
+        browser = types.SimpleNamespace(version="130.0.0.0", close=lambda: None)
+        context = types.SimpleNamespace(new_page=lambda: page,
+                                        add_init_script=lambda script: None)
+        return browser, context, page
+
+    with tempfile.TemporaryDirectory() as tmp:
+        args = types.SimpleNamespace(
+            pages=1, retries=2, retry_delay=0, delay=0, proxy_block_retries=2,
+            out=os.path.join(tmp, "out"), format="json", allow_empty=True,
+            dump_html=None, url=None, cdp_endpoint=None, concurrency=1,
+            headless=True, locale="en-US", fingerprint=False)
+        for k, v in overrides.items():
+            setattr(args, k, v)
+        query = P.Query("category", slug="3-point-sprayers", page_size=24)
+        real_launch = engine._launch_local
+        engine._launch_local = fake_launch
+        try:
+            rc = page_flow.run_pages(
+                lambda: engine._Ops(None, args, pool).open(),
+                lambda ops: ops.close(),
+                lambda page_nums: ([], [], False),
+                args, pool, query, 1, engine._mask_credentials)
+        finally:
+            engine._launch_local = real_launch
+        meta_path = args.out + ".meta.json"
+        meta = json.load(open(meta_path)) if os.path.exists(meta_path) else None
+    return rc, meta, launches, pages
+
+
+def check_playwright_fetch_failures_with_fake_pages():
+    """The Playwright engine itself, offline: fake page objects inject the
+    three failure classes, and the classification, the exit switches and the
+    exit code are asserted on the other side."""
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+
+    for marker in ("ERR_PROXY_CONNECTION_FAILED", "ERR_TUNNEL_CONNECTION_FAILED"):
+        equal("the engine names %s a proxy failure" % marker,
+              engine._proxy_failure("Page.goto: net::%s at https://x/" % marker),
+              marker)
+    equal("...a timeout is NOT one",
+          engine._proxy_failure("Page.evaluate: Timeout 45000ms exceeded."), "")
+    equal("...a reset is NOT one",
+          engine._proxy_failure("net::ERR_CONNECTION_RESET"), "")
+
+    # The proxy dies on the first exit; the browser built on the next is served.
+    pool = _proxy_pool()
+    calls = {"search": 0}
+
+    def dead_then_served(url):
+        calls["search"] += 1
+        if calls["search"] == 1:
+            return {"status": 0, "text": "", "waf": None, "error": PROXY_ERR}
+        return {"status": 200, "text": fx("cat_p1"), "waf": None}
+
+    rc, meta, launches, pages = _run_engine_ops(
+        engine, _engine_page_answers(dead_then_served), pool=pool)
+    equal("a dead exit on fetch(): the run completes from the next one", rc, 0)
+    equal("...the browser was rebuilt exactly once", len(launches), 2)
+    check("...on a DIFFERENT exit", launches[0] != launches[1], repr(launches))
+    equal("...and the dead exit saw ONE fetch, not a retry",
+          pages[0].search_calls, 1)
+
+    pool = _proxy_pool()
+    dead = {"status": 0, "text": "", "waf": None,
+            "error": "Page.evaluate: net::ERR_TUNNEL_CONNECTION_FAILED"}
+    rc, meta, launches, pages = _run_engine_ops(
+        engine, _engine_page_answers(dead), pool=pool)
+    equal("every exit dead: exit 5", rc, 5)
+    equal("...stop_reason proxy_connection_failed",
+          meta and meta.get("stop_reason"), "proxy_connection_failed")
+    equal("...three exits tried (the initial one + the budget), one fetch each",
+          (len(launches), [p.search_calls for p in pages]), (3, [1, 1, 1]))
+
+    pool = _proxy_pool()
+    timeout = {"status": 0, "text": "", "waf": None,
+               "error": "TimeoutError: Timeout 45000ms exceeded."}
+    rc, meta, launches, pages = _run_engine_ops(
+        engine, _engine_page_answers(timeout), pool=pool)
+    equal("a timeout: retried in place, NO exit switch",
+          (len(launches), pages[0].search_calls), (1, 2))
+    equal("...exit 5, stop_reason page_load_timeout",
+          (rc, meta and meta.get("stop_reason")), (5, "page_load_timeout"))
+
+    pool = _proxy_pool()
+    refused = {"status": 403, "text": fx("akamai_raw"), "waf": None}
+    rc, meta, launches, pages = _run_engine_ops(
+        engine, _engine_page_answers(refused), pool=pool)
+    equal("refused at every exit: exit 3", rc, 3)
+    equal("...a rebuilt browser per other exit tried", len(launches), 3)
+    equal("...stop_reason blocked_akamai",
+          meta and meta.get("stop_reason"), "blocked_akamai")
+
+
+def check_cdp_endpoint_stacks_no_proxy_and_switches_no_exit():
+    """scrape() drops the pool when --cdp-endpoint is given: the remote
+    browser has its own exit, and a second proxy must not be layered on."""
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    captured = {}
+
+    class FakePW:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *a):
+            return False
+
+    def recording_run(open_ops, close_ops, run_concurrently, args, pool,
+                      query, concurrency, mask=None):
+        captured["pool"] = pool
+        return 0
+
+    real_pw, real_run = engine.sync_playwright, engine.page_flow.run_pages
+    engine.sync_playwright = lambda: FakePW()
+    engine.page_flow.run_pages = recording_run
+    try:
+        args = types.SimpleNamespace(
+            cdp_endpoint="ws://u:p@host:9222", proxy="http://exit-a:8001",
+            proxy_file=None, proxy_rotate="per-run", proxy_shuffle=False,
+            concurrency=1, query=None)
+        engine.scrape(args)
+    finally:
+        engine.sync_playwright, engine.page_flow.run_pages = real_pw, real_run
+    equal("with --cdp-endpoint the proxy is dropped, never stacked",
+          captured.get("pool"), None)
 
 
 def check_connect_failures_are_told_apart():
