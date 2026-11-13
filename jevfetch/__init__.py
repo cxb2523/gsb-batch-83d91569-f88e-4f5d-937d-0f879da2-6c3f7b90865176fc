@@ -10,15 +10,20 @@ from jevfetch.pipeline import (
     select_relevant,
     select_relevant_async,
 )
+from jevfetch.web import FetchResult, RenderResult, fetch_page_result, fetch_rendered_result
 
 __all__ = [
     "Block",
     "Config",
+    "FetchResult",
     "Jev",
     "JevError",
+    "RenderResult",
     "Result",
+    "fetch_page_result",
     "fetch_relevant",
     "fetch_relevant_async",
+    "fetch_rendered_result",
     "parse",
     "render",
     "select_relevant",

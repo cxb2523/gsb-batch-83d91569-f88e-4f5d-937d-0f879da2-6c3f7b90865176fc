@@ -38,7 +38,7 @@ from jevfetch.pipeline import Config, fetch_relevant_async
 
 REPO = Path(__file__).resolve().parent.parent
 WORD = re.compile(r"[A-Za-z0-9]+")
-HEADER_LINE = re.compile(r"^# (jevfetch: |status: |error: |\d+/\d+ blocks, )")
+HEADER_LINE = re.compile(r"^# (jevfetch: |status: |error: |render failed: |\d+/\d+ blocks, )")
 WEBFETCH_FAILED = re.compile(r"returned HTTP [45]\d\d|failed to fetch|unable to fetch|could not (be )?fetch", re.I)
 BLOCK_PAGE = re.compile(r"\b(403|429)\b|forbidden|access denied|just a moment|captcha|verify you are human", re.I)
 JUDGE = """Below is a QUESTION, its REFERENCE ANSWER, and a TEXT that a page reader returned for the question.

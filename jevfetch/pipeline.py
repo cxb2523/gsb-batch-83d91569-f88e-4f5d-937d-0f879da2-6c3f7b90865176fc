@@ -9,15 +9,13 @@
    stage-1 score, until it is long enough."""
 
 import asyncio
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Literal
-
-import httpx
 
 from jevfetch import scoring, tokens
 from jevfetch.blocks import PLAIN_TYPES, Block, merge_fragments, parse, render
 from jevfetch.jev import Jev
-from jevfetch.web import UnsupportedContent, fetch_page, fetch_rendered, save_file
+from jevfetch.web import FetchResult, fetch_page_result, fetch_rendered_result
 
 Status = Literal["filtered", "passthrough", "no_match", "empty", "fetch_error"]
 
@@ -49,12 +47,16 @@ class Result:
     blocks_total: int = 0
     blocks_kept: int = 0
     rendered: bool = False
+    render_error: str = ""
     jev_input_tokens: int = 0
     jev_cached_input_tokens: int = 0
     jev_requests: int = 0
     model: str = ""
     error: str = ""
     saved: str = ""
+    # The fetch that produced `text`, as its own verifiable record: URL, type, success or failure category, and
+    # the saved file. `rendered` and `render_error` on it say how the headless-browser fallback went.
+    fetch: FetchResult | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -181,33 +183,39 @@ async def select_relevant_async(
 
 
 async def fetch_relevant_async(url: str, query: str, cfg: Config | None = None, jev: Jev | None = None) -> Result:
-    """Fetch `url` and keep the blocks relevant to `query`, re-rendering the page if its static HTML is nearly empty."""
+    """Fetch `url` and keep the blocks relevant to `query`, re-rendering the page if its static HTML is nearly empty.
+
+    The fetch's own record is `res.fetch`: when the fetch failed, `res.status` is "fetch_error" and the fetch
+    result holds the error category, message, and the path of a saved binary file. When Chrome is missing or
+    times out, `res.fetch.render_error` says so and the static HTML is kept."""
     cfg = cfg or Config()
-    try:
-        html, final_url, media_type = await asyncio.to_thread(fetch_page, url)
-    except UnsupportedContent as e:
-        error = f"{type(e).__name__}: {e}"
-        try:
-            saved = await asyncio.to_thread(save_file, url, e.kind, e.content)
-        except OSError as save_error:
-            return Result("fetch_error", "", url=url, error=f"{error}; could not save it: {save_error}")
-        return Result("fetch_error", "", url=url, error=error, saved=saved)
-    except httpx.HTTPError as e:
-        return Result("fetch_error", "", url=url, error=f"{type(e).__name__}: {e}")
-    blocks, rendered = parse(html, final_url, media_type), False
+    fetched = await asyncio.to_thread(fetch_page_result, url)
+    # An empty body is reported by the fetch result; the page is still parsed (nothing comes of it) and the
+    # pipeline's long-standing "empty" status is kept, as fetch_page's empty string produced it before this result
+    # object existed. The fetch record still says ok is False and why.
+    if not fetched.ok and fetched.error_kind != "empty_content":
+        return Result("fetch_error", "", url=url, error=fetched.error, saved=fetched.saved, fetch=fetched)
+    html, final_url, media_type = fetched.text, fetched.url, fetched.media_type
+    blocks = parse(html, final_url, media_type)
+    rendered, render_error = False, ""
 
     def size(bs: list[Block]) -> int:  # the page without its notes, as rendering was decided without them
         return tokens.count(render([b for b in bs if not b.note]))
 
     # A browser shows a plain-text type as source, so rendering adds nothing and turns the text into HTML.
     if cfg.render_fallback and media_type not in PLAIN_TYPES and size(blocks) < cfg.render_below_tokens:
-        dom = await asyncio.to_thread(fetch_rendered, url)
-        if dom:
-            again = parse(dom, final_url)
+        rendered_page = await asyncio.to_thread(fetch_rendered_result, url)
+        render_error = rendered_page.error  # only set when no DOM came back; the static page is kept then
+        if rendered_page.dom:
+            again = parse(rendered_page.dom, final_url)
             if size(again) > size(blocks):
                 blocks, rendered = again, True
+            else:
+                render_error = "the rendered page had no more text than the static HTML"
     res = await select_relevant_async(blocks, query, cfg, jev)
-    res.url, res.rendered = url, rendered
+    render_status = "rendered" if rendered else "render_failed" if render_error else ""
+    res.url, res.rendered, res.render_error = url, rendered, render_error
+    res.fetch = replace(fetched, render_status=render_status, render_error=render_error)
     return res
 
 

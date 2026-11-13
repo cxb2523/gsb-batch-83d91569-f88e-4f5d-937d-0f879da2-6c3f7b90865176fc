@@ -1,5 +1,6 @@
 import re
 import subprocess
+from pathlib import Path
 
 import httpx
 import pytest
@@ -9,11 +10,11 @@ from jevfetch import web
 PDF = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n"
 
 
-def serve(monkeypatch, body: bytes, content_type: str | None, status: int = 200):
+def serve(monkeypatch, body: bytes, content_type: str | None, status: int = 200, final_url: str | None = None):
     headers = {"Content-Type": content_type} if content_type else {}
 
     def fake_get(url, **kwargs):
-        return httpx.Response(status, content=body, headers=headers, request=httpx.Request("GET", url))
+        return httpx.Response(status, content=body, headers=headers, request=httpx.Request("GET", final_url or url))
 
     monkeypatch.setattr(web.httpx, "get", fake_get)
 
@@ -158,3 +159,127 @@ def test_rendering_without_chrome_or_after_timeout_returns_none(monkeypatch):
     monkeypatch.setattr(web, "find_chrome", lambda: "/bin/chrome")
     monkeypatch.setattr(web.subprocess, "run", timeout)
     assert web.fetch_rendered("https://example.com") is None
+
+
+# The fetch result object (fetch_page_result), exercised on stub responses only.
+
+
+@pytest.fixture
+def files_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("JEVFETCH_FILES_DIR", str(tmp_path))
+    return tmp_path
+
+
+def test_a_text_page_is_a_successful_result_with_the_final_url_and_type(monkeypatch):
+    serve(
+        monkeypatch,
+        b"<html><body><p>The policy took effect on 1 January.</p></body></html>",
+        "Text/HTML; charset=utf-8",
+        final_url="https://example.com/moved/",
+    )
+    res = web.fetch_page_result("https://example.com/start")
+    assert res.ok and res.success and res.error_kind == "" and res.error == ""
+    assert res.url == res.final_url == "https://example.com/moved/"
+    assert res.media_type == "text/html" and res.kind == "text/html"
+    assert res.text.startswith("<html>") and res.saved == ""
+    assert res.to_dict() == {
+        "url": "https://example.com/moved/",
+        "media_type": "text/html",
+        "kind": "text/html",
+        "ok": True,
+        "error_kind": "",
+        "error": "",
+        "status_code": 200,
+        "text": res.text,
+        "saved": "",
+        "render_status": "",
+        "render_error": "",
+    }
+
+
+def test_a_pdf_signature_wins_over_a_declared_text_type(monkeypatch, files_dir):
+    serve(monkeypatch, PDF, "text/plain")
+    res = web.fetch_page_result("https://example.com/download")
+    assert not res.ok and res.error_kind == "unsupported_content" and res.kind == "application/pdf"
+    assert res.text == "" and "application/pdf" in res.error
+    saved = Path(res.saved)
+    assert saved.exists() and saved.parent == files_dir and saved.suffix == ".pdf"
+    assert saved.read_bytes() == PDF
+
+
+def test_an_unlabeled_binary_body_is_a_saved_file(monkeypatch, files_dir):
+    serve(monkeypatch, b"IDX\x00\x00\x00\x10" * 200, None)
+    res = web.fetch_page_result("https://example.com/blob")
+    assert not res.ok and res.error_kind == "unsupported_content" and "binary" in res.error
+    saved = Path(res.saved)
+    assert saved.exists() and saved.parent == files_dir and saved.suffix == ".bin"
+    assert saved.read_bytes() == b"IDX\x00\x00\x00\x10" * 200
+
+
+def test_a_declared_binary_type_is_a_saved_file_with_its_extension(monkeypatch, files_dir):
+    serve(monkeypatch, b"PK\x03\x04" + b"\x00" * 100, "application/zip")
+    res = web.fetch_page_result("https://example.com/a.zip")
+    assert res.error_kind == "unsupported_content" and res.kind == "application/zip"
+    assert Path(res.saved).suffix == ".zip" and Path(res.saved).parent == files_dir
+
+
+def test_a_404_is_an_http_error_before_any_content_type_decision(monkeypatch, files_dir):
+    serve(monkeypatch, b'{"error": "gone"}', "application/json", status=404)
+    res = web.fetch_page_result("https://example.com/missing")
+    assert not res.ok and res.error_kind == "http_error" and res.status_code == 404
+    assert res.media_type == "application/json" and res.text == "" and res.saved == ""
+    assert "404" in res.error and not list(files_dir.iterdir())
+
+
+def test_a_network_error_keeps_the_requested_url(monkeypatch):
+    def fail(url, **kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(web.httpx, "get", fail)
+    res = web.fetch_page_result("https://example.com/start")
+    assert not res.ok and res.error_kind == "network_error" and res.url == "https://example.com/start"
+    assert "ConnectError" in res.error and res.saved == "" and res.status_code == 0
+
+
+def test_an_empty_body_is_an_empty_content_result(monkeypatch):
+    serve(monkeypatch, b"", "text/html")
+    res = web.fetch_page_result("https://example.com/blank")
+    assert not res.ok and res.error_kind == "empty_content" and res.media_type == "text/html"
+    assert res.text == "" and res.saved == "" and "empty" in res.error
+
+
+def test_a_file_that_cannot_be_saved_is_unsupported_without_a_path(monkeypatch, tmp_path):
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    monkeypatch.setenv("JEVFETCH_FILES_DIR", str(blocker))
+    serve(monkeypatch, PDF, "application/pdf")
+    res = web.fetch_page_result("https://example.com/a.pdf")
+    assert res.error_kind == "unsupported_content" and res.saved == "" and "could not save" in res.error
+
+
+def test_rendering_without_chrome_is_a_failed_render_not_a_success(monkeypatch):
+    monkeypatch.setattr(web, "find_chrome", lambda: None)
+    res = web.fetch_rendered_result("https://example.com")
+    assert not res.ok and res.dom == "" and "Chrome" in res.error
+
+
+def test_rendering_after_timeout_is_a_failed_render_not_a_success(monkeypatch):
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired("chrome", 60)
+
+    monkeypatch.setattr(web, "find_chrome", lambda: "/bin/chrome")
+    monkeypatch.setattr(web.subprocess, "run", timeout)
+    res = web.fetch_rendered_result("https://example.com")
+    assert not res.ok and res.dom == "" and "timed out" in res.error
+
+
+def test_a_rendered_page_is_a_successful_render(monkeypatch):
+    monkeypatch.setattr(web, "find_chrome", lambda: "/bin/chrome")
+    monkeypatch.setattr(
+        web.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="<html><body><p>ready</p></body></html>", stderr=""),
+    )
+    res = web.fetch_rendered_result("https://example.com")
+    assert res.ok and res.error == "" and res.dom.startswith("<html>")
+    assert web.fetch_rendered("https://example.com") == res.dom

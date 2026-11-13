@@ -128,7 +128,7 @@ If a Jev request fails (missing key, no credits), jevfetch exits with code 2.
 
 Options:
 
-- `--json`: print the result as JSON, with token counts and Jev usage
+- `--json`: print the result as JSON, with token counts, Jev usage, and a `fetch` object recording the page fetch: its final URL, media type, success, error category, and the saved-file path for a binary. A failed render is marked there with `render_status: "render_failed"` and its reason, while the static text is kept
 - `--no-render`: don't fall back to a headless browser
 - `--model`: set the Jev model
 - `--no-notes`: on pages too long to return whole, drop notes instead of judging them, which saves their Jev requests (see [How it works](#how-it-works))
@@ -230,15 +230,22 @@ The default model is the alias `jev-latest`, and the cache is keyed by that name
 ## Python API
 
 ```python
-from jevfetch import Config, fetch_relevant, select_relevant
+from jevfetch import Config, fetch_page_result, fetch_relevant, select_relevant
 
 res = fetch_relevant(url, "question")  # fetch, then select
 res = select_relevant(html_or_text, "question")  # a document you already have
 res = select_relevant(html, "question", base_url="https://example.com/")  # resolve relative links against the page URL
 print(res.status, res.text, res.jev_input_tokens)
+
+page = fetch_page_result(url)  # the fetch alone, as a record instead of a tuple or an exception
+if not page.ok:
+    print(page.error_kind, page.error)  # e.g. "http_error" and "HTTP 404 Not Found for ..."
+print(page.url, page.media_type, page.saved)
 ```
 
 The async versions are `fetch_relevant_async` and `select_relevant_async`. Use `Config` to set the thresholds, window size, and Jev model. When the URL is a PDF or other file, `res.saved` holds the path where it was saved.
+
+`fetch_page_result` returns a `FetchResult` with the final URL after redirects, the media type, whether the fetch succeeded, a failure category (`"network_error"`, `"http_error"`, `"unsupported_content"`, or `"empty_content"`, empty on success), a readable error, and the saved path of a binary file. Its `render_status` is `"rendered"` when the headless browser's DOM was used, `"render_failed"` when Chrome was missing or timed out (the static text is kept), and `""` when no render was needed; `render_error` explains a failed render. `fetch_relevant`'s result carries the same object in `res.fetch`. `fetch_page` and `fetch` are unchanged.
 
 ## Development
 

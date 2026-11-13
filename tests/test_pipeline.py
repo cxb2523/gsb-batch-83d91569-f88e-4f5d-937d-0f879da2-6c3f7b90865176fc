@@ -205,34 +205,43 @@ async def test_empty_document():
 
 
 async def test_fetch_error_is_reported_not_raised(monkeypatch):
-    def fail(url):
+    def fail(url, **kwargs):
         raise httpx.ConnectError("down")
 
-    monkeypatch.setattr(pipeline, "fetch_page", fail)
+    monkeypatch.setattr(web.httpx, "get", fail)
     res = await fetch_relevant_async("https://example.com", "q", Config(), FakeJev())
     assert res.status == "fetch_error" and "ConnectError" in res.error and res.saved == ""
+    assert res.fetch.error_kind == "network_error" and res.fetch.ok is False
 
 
 PDF_BODY = b"%PDF-1.4\n" + b"stream x\x9c\xed\x01 endstream\n" * 2000
 
 
-def serve(monkeypatch, body: bytes, content_type: str):
+def serve(monkeypatch, body: bytes, content_type: str | None):
+    headers = {"Content-Type": content_type} if content_type else {}
+
     def fake_get(url, **kwargs):
-        headers = {"Content-Type": content_type}
         return httpx.Response(200, content=body, headers=headers, request=httpx.Request("GET", url))
 
     monkeypatch.setattr(web.httpx, "get", fake_get)
 
 
+def render_as(monkeypatch, dom: str):
+    monkeypatch.setattr(pipeline, "fetch_rendered_result", lambda url: web.RenderResult(dom=dom))
+
+
+def render_fails(monkeypatch, error: str):
+    monkeypatch.setattr(pipeline, "fetch_rendered_result", lambda url: web.RenderResult(error=error))
+
+
 async def test_pdf_is_a_fetch_error_naming_its_type_without_jev(monkeypatch, tmp_path):
     fake_scores(monkeypatch, {}, {})
     serve(monkeypatch, PDF_BODY, "application/pdf")
-    monkeypatch.setattr(pipeline, "fetch_rendered", lambda url: None)
     monkeypatch.setenv("JEVFETCH_FILES_DIR", str(tmp_path))
     jev = FakeJev()
     res = await fetch_relevant_async("https://example.com/a.pdf", "q", Config(), jev)
     assert res.status == "fetch_error" and "application/pdf" in res.error
-    assert jev.requests == 0 and res.text == ""
+    assert jev.requests == 0 and res.text == "" and res.fetch.error_kind == "unsupported_content"
 
 
 async def test_a_refused_file_is_saved_for_another_reader(monkeypatch, tmp_path):
@@ -269,21 +278,50 @@ async def test_a_file_that_cannot_be_saved_is_still_a_fetch_error(monkeypatch, t
 
 async def test_nearly_empty_page_is_rendered_with_a_browser(monkeypatch):
     fake_scores(monkeypatch, {}, {})
-    monkeypatch.setattr(
-        pipeline, "fetch_page", lambda url: ("<html><body><div id='app'></div></body></html>", url, "text/html")
-    )
-    monkeypatch.setattr(
-        pipeline, "fetch_rendered", lambda url: "<html><body><p>" + "rendered text " * 40 + "</p></body></html>"
-    )
+    serve(monkeypatch, b"<html><body><div id='app'></div></body></html>", "text/html")
+    render_as(monkeypatch, "<html><body><p>" + "rendered text " * 40 + "</p></body></html>")
     res = await fetch_relevant_async("https://example.com", "q", Config(), FakeJev())
     assert res.rendered and "rendered text" in res.text
+    assert res.fetch.rendered and res.fetch.render_error == "" and res.fetch.render_status == "rendered"
+
+
+async def test_a_render_timeout_keeps_the_static_page_and_marks_rendering_failed(monkeypatch):
+    fake_scores(monkeypatch, {}, {})
+    serve(monkeypatch, b"<html><body><p>Loading...</p></body></html>", "text/html")
+    render_fails(monkeypatch, "rendering timed out after 60 s")
+    res = await fetch_relevant_async("https://example.com", "q", Config(), FakeJev())
+    assert not res.rendered and res.status == "passthrough" and "Loading..." in res.text
+    assert res.render_error.startswith("rendering timed out") and "Loading..." in res.fetch.text
+    assert res.fetch.rendered is False and res.fetch.render_status == "render_failed"
+    assert res.fetch.ok is True  # the fetch itself succeeded; only the render step failed
+
+
+async def test_a_missing_chrome_keeps_the_static_page_and_marks_rendering_failed(monkeypatch):
+    fake_scores(monkeypatch, {}, {})
+    serve(monkeypatch, b"<html><body><p>Loading...</p></body></html>", "text/html")
+    render_fails(monkeypatch, "no Chrome or Chromium found; set JEVFETCH_CHROME or install one")
+    res = await fetch_relevant_async("https://example.com", "q", Config(), FakeJev())
+    assert "Loading..." in res.text and res.fetch.render_status == "render_failed"
+    assert res.fetch.render_error.startswith("no Chrome")
+
+
+def test_cli_reports_a_render_failure_but_prints_the_static_text(monkeypatch, capsys):
+    fake_scores(monkeypatch, {}, {})
+    serve(monkeypatch, b"<html><body><p>Loading...</p></body></html>", "text/html")
+    render_fails(monkeypatch, "rendering timed out after 60 s")
+    monkeypatch.setattr(cli, "fetch_relevant", pipeline.fetch_relevant)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    code = cli.main(["https://example.com", "what?", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and out["fetch"]["render_status"] == "render_failed"
+    assert "timed out" in out["fetch"]["render_error"] and out["text"].startswith("Loading...")
 
 
 async def test_markdown_served_as_plain_text_keeps_its_headings_and_is_not_rendered(monkeypatch):
     doc = "# Client\n\n```pycon\n>>> r.text\n'<!doctype html>\\n<html>'\n```\n\n## Install\n\nRun pip install.\n"
-    monkeypatch.setattr(pipeline, "fetch_page", lambda url: (doc, url, "text/plain"))
+    serve(monkeypatch, doc.encode(), "text/plain")
     rendered = []
-    monkeypatch.setattr(pipeline, "fetch_rendered", rendered.append)
+    monkeypatch.setattr(pipeline, "fetch_rendered_result", rendered.append)
     res = await fetch_relevant_async("https://example.com/README.md", "q", Config(), FakeJev())
     assert "## Client > Install" in res.text and not rendered
 
@@ -367,8 +405,7 @@ async def test_stage2_sends_passage_and_context_without_link_targets():
 async def test_fetched_pages_resolve_relative_links_against_their_url(monkeypatch):
     fake_scores(monkeypatch, {}, {})
     html = '<html><body><p>Read the <a href="/docs/">docs</a>.</p></body></html>'
-    monkeypatch.setattr(pipeline, "fetch_page", lambda url: (html, url, "text/html"))
-    monkeypatch.setattr(pipeline, "fetch_rendered", lambda url: None)
+    serve(monkeypatch, html.encode(), "text/html")
     res = await fetch_relevant_async("https://example.com/start", "q", Config(), FakeJev())
     assert "[docs](https://example.com/docs/)" in res.text
 
@@ -382,10 +419,18 @@ async def test_stage1_sends_code_blocks_as_written():
 async def test_links_resolve_against_the_final_url_after_redirects(monkeypatch):
     fake_scores(monkeypatch, {}, {})
     html = '<html><body><p>Read the <a href="docs/">docs</a>.</p></body></html>'
-    monkeypatch.setattr(pipeline, "fetch_page", lambda url: (html, "https://example.com/v2/start", "text/html"))
-    monkeypatch.setattr(pipeline, "fetch_rendered", lambda url: None)
+    redirect = {"next": ("https://example.com/v2/start", html)}
+
+    def fake_get(url, **kwargs):
+        final, body = redirect["next"]
+        return httpx.Response(
+            200, text=body, headers={"Content-Type": "text/html"}, request=httpx.Request("GET", final)
+        )
+
+    monkeypatch.setattr(web.httpx, "get", fake_get)
     res = await fetch_relevant_async("https://example.com/start", "q", Config(), FakeJev())
     assert "[docs](https://example.com/v2/docs/)" in res.text
+    assert res.fetch.url == "https://example.com/v2/start"
 
 
 def test_windows_measure_blocks_without_link_targets():
@@ -447,12 +492,8 @@ async def test_without_score_notes_a_short_page_that_notes_would_push_over_the_l
 async def test_a_nearly_empty_page_with_a_long_note_is_still_rendered(monkeypatch):
     fake_scores(monkeypatch, {}, {})
     note = "<aside class='note'><p>" + "Note: caveat " * 200 + "</p></aside>"
-    monkeypatch.setattr(
-        pipeline, "fetch_page", lambda url: (f"<html><body><p>Loading...</p>{note}</body></html>", url, "text/html")
-    )
-    monkeypatch.setattr(
-        pipeline, "fetch_rendered", lambda url: "<html><body><p>" + "rendered text " * 40 + "</p></body></html>"
-    )
+    serve(monkeypatch, f"<html><body><p>Loading...</p>{note}</body></html>".encode(), "text/html")
+    render_as(monkeypatch, "<html><body><p>" + "rendered text " * 40 + "</p></body></html>")
     res = await fetch_relevant_async("https://example.com", "q", Config(), FakeJev())
     assert res.rendered and "rendered text" in res.text
 

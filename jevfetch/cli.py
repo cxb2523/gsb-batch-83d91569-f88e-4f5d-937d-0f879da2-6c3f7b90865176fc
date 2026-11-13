@@ -48,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"# {res.blocks_kept}/{res.blocks_total} blocks, {res.out_tokens} of {res.doc_tokens} tokens"
                 + (", rendered with a headless browser" if res.rendered else "")
             )
+        if res.render_error:
+            head.append(f"# render failed: {res.render_error}; the static HTML is kept")
         if res.error:
             head.append(f"# error: {res.error}")
         if res.saved:

@@ -128,7 +128,7 @@ Jev 요청이 실패하면(키 없음, 크레딧 부족) 종료 코드 2로 끝�
 
 옵션은 다음과 같다.
 
-- `--json`: 토큰 수와 Jev 사용량을 포함해 JSON으로 출력한다.
+- `--json`: 토큰 수, Jev 사용량, 그리고 페이지를 가져온 결과를 담은 `fetch` 객체를 포함해 JSON으로 출력한다. `fetch`에는 리다이렉트 후 최종 주소, 미디어 타입, 성공 여부, 실패 분류, 바이너리일 때 저장된 파일 경로가 들어 있다. 렌더링에 실패하면 `render_status`가 `"render_failed"`이고 사유가 함께 나오며, 정적 텍스트는 그대로 남는다.
 - `--no-render`: 헤드리스 브라우저 렌더링을 끈다.
 - `--model`: Jev 모델을 지정한다.
 - `--no-notes`: 통째로 돌려주기에 긴 페이지에서 메모를 판정하지 않고 버린다. 그만큼 Jev 요청이 줄어든다([동작 방식](#동작-방식) 참고).
@@ -230,15 +230,22 @@ jevfetch는 기술 문서, 레퍼런스, 위키백과처럼 긴 페이지에서 
 ## Python API
 
 ```python
-from jevfetch import Config, fetch_relevant, select_relevant
+from jevfetch import Config, fetch_page_result, fetch_relevant, select_relevant
 
 res = fetch_relevant(url, "question")  # fetch, then select
 res = select_relevant(html_or_text, "question")  # a document you already have
 res = select_relevant(html, "question", base_url="https://example.com/")  # resolve relative links against the page URL
 print(res.status, res.text, res.jev_input_tokens)
+
+page = fetch_page_result(url)  # the fetch alone, as a record instead of a tuple or an exception
+if not page.ok:
+    print(page.error_kind, page.error)  # e.g. "http_error" and "HTTP 404 Not Found for ..."
+print(page.url, page.media_type, page.saved)
 ```
 
 비동기 버전은 `fetch_relevant_async`와 `select_relevant_async`다. 임계값, 윈도우 크기, Jev 모델은 `Config`로 바꾼다. URL이 PDF 같은 파일이면 `res.saved`에 저장된 경로가 들어 있다.
+
+`fetch_page_result`는 `FetchResult`를 돌려준다. 리다이렉트 후 최종 주소, 미디어 타입, 성공 여부, 실패 분류(`"network_error"`, `"http_error"`, `"unsupported_content"`, `"empty_content"`, 성공 시 빈 문자열), 읽을 수 있는 오류 설명, 바이너리 파일의 저장 경로가 들어 있다. `render_status`는 헤드리스 브라우저의 DOM을 썼으면 `"rendered"`, Chrome이 없거나 타임아웃으로 못 썼으면 `"render_failed"`(정적 텍스트는 유지)이고, 렌더링이 필요 없었으면 `""`다. 사유는 `render_error`에 있다. `fetch_relevant`의 결과는 같은 객체를 `res.fetch`에 담는다. `fetch_page`와 `fetch`의 동작은 그대로다.
 
 ## 개발
 
