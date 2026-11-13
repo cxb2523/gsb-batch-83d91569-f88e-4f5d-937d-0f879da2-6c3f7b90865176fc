@@ -124,3 +124,38 @@ export const keywordCursors = sqliteTable(
 	},
 	(t) => [primaryKey({ columns: [t.platform, t.term] })]
 );
+
+/**
+ * Bitácora página por página de la búsqueda de Computrabajo: una fila por cada petición de
+ * una palabra en un lugar (remoto o ciudad), con cómo terminó y cuántas vacantes trajo.
+ * Si la última fila de una palabra/lugar es un error, la próxima búsqueda reintenta esa misma
+ * página en vez de arrancar de la página 1. Las filas quedan aunque la búsqueda termine bien,
+ * para mostrarlas en la página o en los logs.
+ */
+export const searchPageLogs = sqliteTable(
+	'search_page_logs',
+	{
+		id: integer('id').primaryKey(),
+		platform: text('platform').notNull(),
+		term: text('term').notNull(),
+		/** 'remoto' para la búsqueda nacional remota; si no, el slug del lugar (ciudad o país). */
+		place: text('place').notNull(),
+		/** Etiqueta legible del lugar, para mostrar sin recalcular el slug. */
+		placeLabel: text('place_label').notNull(),
+		page: integer('page').notNull(),
+		outcome: text('outcome', {
+			enum: ['ok', 'sin-novedades', 'sin-paginas', 'bloqueado', 'error']
+		}).notNull(),
+		/** Vacantes que parseó la página (antes de filtrar por ubicación o relevancia). */
+		parsed: integer('parsed').notNull().default(0),
+		error: text('error'),
+		attemptedAt: text('attempted_at').notNull()
+	},
+	(t) => [
+		index('search_page_logs_lookup').on(t.platform, t.term, t.place, t.attemptedAt),
+		check(
+			'search_page_logs_outcome_check',
+			sql`${t.outcome} IN ('ok', 'sin-novedades', 'sin-paginas', 'bloqueado', 'error')`
+		)
+	]
+);

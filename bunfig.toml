@@ -1,0 +1,3 @@
+[test]
+# Aísla la base SQLite de las pruebas en una base temporal (ver scripts/test-preload.ts).
+preload = ["./scripts/test-preload.ts"]

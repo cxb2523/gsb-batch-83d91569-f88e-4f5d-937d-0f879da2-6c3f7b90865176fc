@@ -4,7 +4,8 @@ import type { BaseSQLiteDatabase } from 'drizzle-orm/sqlite-core';
 import * as schema from './schema';
 
 // Rutas relativas a jobfilter/: `bun run dev`, `bun run dev:node` y `bun run buscar` corren ahí.
-const DB_PATH = resolve('data/jobfilter.db');
+// JOBFILTER_DB apunta a otra base (las pruebas de integración la usan para no tocar la real).
+const DB_PATH = process.env.JOBFILTER_DB ?? resolve('data/jobfilter.db');
 const MIGRATIONS = resolve('drizzle');
 
 /** Ambos drivers son síncronos, así que el resto del código usa .all()/.get()/.run() igual. */

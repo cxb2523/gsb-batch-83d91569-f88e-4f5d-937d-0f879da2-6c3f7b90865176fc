@@ -95,6 +95,14 @@ Sondeo hecho sin login y con un User-Agent de navegador (octubre de 2026):
     "Director Técnico Farmacéutico". El adapter declara `looseSearch: true` y la búsqueda
     solo guarda las que mencionan el término en el título o la descripción, con sus palabras
     en orden y cerca (en una prueba real, eso descartó 148 de 180).
+  - Bitácora página por página y reanudación: cada petición de una palabra en un lugar
+    (`remoto` o la ciudad) deja una fila en `search_page_logs` con la página, el resultado
+    (`ok`, `sin-novedades`, `sin-paginas`, `bloqueado`, `error`) y cuántas tarjetas parseó.
+    Si la última fila de una palabra/lugar es un fallo, la próxima búsqueda reintenta esa
+    misma página en vez de arrancar por la 1; si terminó por `sin-novedades` o
+    `sin-paginas`, se respeta el cursor normal y se vuelve a empezar por la 1. Las vacantes
+    ya entregadas se guardan antes de pedir la siguiente página, así que un fallo no las
+    borra. La bitácora se consulta con `listPageLogs()` o en `GET /api/bitacora`.
 - **elempleo** (solo Colombia): la página de ofertas renderiza las primeras 20 vacantes, pero
   pagina con su API JSON. El adapter usa esa API:
   - `GET https://www.elempleo.com/co/ofertas-empleo/` trae el token antifalsificación (input

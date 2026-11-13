@@ -22,6 +22,7 @@ import {
 	setKeywordCursor
 } from '../run-log';
 import { cacheDetail, cachedDetail } from '../detail-cache';
+import { latestFailedPage, recordPageLog, resumePageFor } from '../page-log';
 import { search } from '../state';
 import { dueKeywords, gapUntil } from '../throttle';
 
@@ -135,13 +136,22 @@ async function runPlatform(adapter: PlatformAdapter, p: PlatformProgress, keywor
 		(a, b) => (cursors.get(a.term) ?? '').localeCompare(cursors.get(b.term) ?? '') || a.id - b.id
 	);
 
+	// bitácora página por página y reanudación: solo Computrabajo implementa los hooks; las
+	// demás plataformas reciben el contexto sin estas funciones y siguen con su lógica actual
+	const contextFor = (term: string): SearchContext => ({
+		client,
+		location,
+		since: sinceFor(cursors.get(term)),
+		recordPage: (entry) => recordPageLog({ platform: adapter.id, term, ...entry }),
+		resumePage: (place) => resumePageFor(adapter.id, term, place)
+	});
+
 	try {
 		let left = 0;
 		for (const [i, keyword] of ordered.entries()) {
 			const startedAt = new Date().toISOString();
 			p.term = keyword.term;
-			const ctx = { client, location, since: sinceFor(cursors.get(keyword.term)) };
-			const complete = await searchKeyword(adapter, keyword, keywords, ctx, p, seen);
+			const complete = await searchKeyword(adapter, keyword, keywords, contextFor(keyword.term), p, seen);
 			if (complete) {
 				setKeywordCursor(adapter.id, keyword.term, startedAt);
 				p.done++;
@@ -164,12 +174,15 @@ async function runPlatform(adapter: PlatformAdapter, p: PlatformProgress, keywor
 		finishRun(runId, p.found, p.created);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
+		// la bitácora dice en qué palabra/lugar/página se cortó: el usuario ve por dónde va
+		const failed = latestFailedPage(adapter.id);
+		const where = failed ? ` (${failed.term} · ${failed.placeLabel} · pág. ${failed.page})` : '';
 		if (err instanceof BlockedError || adapter.pauseOnErrors) {
 			p.state = 'pausada';
 			p.detail = pausePlatform(adapter.id, adapter.pauseMinutes);
 		} else {
 			p.state = 'error';
-			p.detail = message;
+			p.detail = `${message}${where}`;
 		}
 		finishRun(runId, p.found, p.created, message);
 	}

@@ -8,6 +8,14 @@ Todos los cambios relevantes del proyecto se documentan aquí. El formato sigue
 
 ### Agregado
 
+- **Bitácora página por página de Computrabajo.** Cada página pedida para una palabra en un
+  lugar (remoto o ciudad) deja una fila con la página, el resultado (éxito, corte por falta de
+  novedades, fin de páginas, bloqueo u otro error) y cuántas vacantes parseó. Si una búsqueda
+  se corta por un bloqueo (429, captcha) o un error de red en una página, la próxima reintenta
+  esa misma página en vez de volver a la 1; las vacantes ya guardadas no se pierden. Cuando la
+  palabra terminó por su corte normal, se respeta el cursor y se arranca de nuevo por la 1. La
+  bitácora queda en la base (`search_page_logs`), se lee con `listPageLogs()` y en
+  `GET /api/bitacora`, y el detalle de la barra de progreso indica en qué página se frenó.
 - **Más filtros en la lista.** Además de plataforma y antigüedad, la lista se filtra por
   modalidad (remoto, híbrido o presencial) y por encaje (solo verdes, o verdes y naranjas).
   Como los demás, viven en la URL (`?modalidad=remoto&encaje=verde`).

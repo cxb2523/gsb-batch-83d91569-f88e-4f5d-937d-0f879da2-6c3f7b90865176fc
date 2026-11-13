@@ -30,6 +30,42 @@ export type SearchContext = {
 	since: Date;
 	/** Dónde puedes trabajar (profile/location.json); cada adapter filtra con esto. */
 	location: Location;
+	/**
+	 * Bitácora página por página (Computrabajo). Cada petición de una página llama al hook con
+	 * cómo terminó y cuántas vacantes parseó. Es opcional: las demás plataformas no lo usan.
+	 */
+	recordPage?: (entry: PageLogEntry) => void;
+	/**
+	 * Página por la que reintentar una palabra en un lugar (Computrabajo). Sin el hook, se
+	 * arranca siempre por la página 1, que es el comportamiento de las demás plataformas.
+	 */
+	resumePage?: (term: string, place: string) => number;
+};
+
+/**
+ * Cómo terminó la petición de una página de Computrabajo:
+ * - 'ok': se recibió y parseó bien (haya o no vacantes que pasen los filtros).
+ * - 'sin-novedades': la página no trajo nada publicado desde `since` con fecha cierta.
+ * - 'sin-paginas': ya no quedaban páginas según el total que reporta el sitio.
+ * - 'bloqueado': 429, captcha, muro de login o redirección de bloqueo.
+ * - 'error': cualquier otro fallo (red, 5xx agotados los reintentos, cupo, parseo…).
+ */
+export type PageOutcome = 'ok' | 'sin-novedades' | 'sin-paginas' | 'bloqueado' | 'error';
+
+export const PAGE_OUTCOMES: readonly PageOutcome[] = ['ok', 'sin-novedades', 'sin-paginas', 'bloqueado', 'error'];
+
+/** Una fila de la bitácora de páginas, tal como la entrega el adapter al hook de SearchContext. */
+export type PageLogEntry = {
+	/** 'remoto' para la búsqueda nacional remota; si no, el slug del lugar (ciudad o país). */
+	place: string;
+	/** Etiqueta legible del lugar, para mostrar sin recalcular el slug. */
+	placeLabel: string;
+	page: number;
+	outcome: PageOutcome;
+	/** Vacantes que parseó la página (antes de filtrar por ubicación o relevancia). */
+	parsed: number;
+	/** Mensaje del error, solo cuando el resultado es 'bloqueado' o 'error'. */
+	error?: string | null;
 };
 
 export interface PlatformAdapter {

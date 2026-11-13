@@ -15,6 +15,13 @@
       "when": 1792255194343,
       "tag": "0001_cache_y_cursores",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794593512362,
+      "tag": "0002_bitacora_paginas",
+      "breakpoints": true
     }
   ]
 }
