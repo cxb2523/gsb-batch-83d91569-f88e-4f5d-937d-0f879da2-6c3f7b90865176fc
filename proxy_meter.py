@@ -138,13 +138,15 @@ class ProxyMeter:
     def on_exceeded(self, callback) -> None:
         """Run `callback()` once when the budget is first exceeded (e.g. to
         block every further request in a live browser)."""
-        if self.exceeded:
+        with self._lock:
+            pending = not self.exceeded
+            if pending:
+                self._on_exceeded.append(callback)
+        if not pending:
             try:
                 callback()
             except Exception:  # noqa: BLE001
                 pass
-        else:
-            self._on_exceeded.append(callback)
 
     def check(self) -> None:
         """Raise ProxyBudgetExceeded once the budget is spent."""

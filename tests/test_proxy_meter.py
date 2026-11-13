@@ -12,6 +12,8 @@ engine jobs) a missing engine or browser is a failure, not a skip.
 """
 import argparse
 import asyncio
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -141,9 +143,64 @@ class Budget(unittest.TestCase):
         self.assertEqual(parser.parse_args([]).proxy_budget_mb, 10)
         self.assertEqual(parser.parse_args(["--proxy-budget-mb", "0"]).proxy_budget_mb, 0)
         self.assertEqual(parser.parse_args(["--proxy-budget-mb", "2.5"]).proxy_budget_mb, 2.5)
-        for bad in ("-1", "x", "nan", "inf"):
-            with self.assertRaises(SystemExit):
+        for bad in ("-1", "-0.5", "x", "nan", "-nan", "inf", "-inf", "Infinity", "1e999", ""):
+            with self.assertRaises(SystemExit, msg=bad):
                 parser.parse_args(["--proxy-budget-mb", bad])
+
+    def test_exact_budget_is_not_over_one_byte_more_is(self):
+        meter = proxy_meter.ProxyMeter(1, active=True)  # exactly 1,000,000 bytes
+        fired = []
+        meter.on_exceeded(lambda: fired.append(1))
+        self.assertFalse(meter.add(999_999))
+        self.assertFalse(meter.add(1), "exactly the budget is not over it")
+        self.assertFalse(meter.exceeded)
+        self.assertEqual(fired, [])
+        meter.check()
+        self.assertTrue(meter.add(1), "one byte past the budget is over it")
+        self.assertEqual(fired, [1])
+
+    def test_zero_budget_never_trips(self):
+        meter = proxy_meter.ProxyMeter(0, active=True)
+        for _ in range(100):
+            self.assertFalse(meter.add(10 ** 9))
+        self.assertFalse(meter.exceeded)
+        meter.check()
+        self.assertEqual(meter.sidecar(), {"proxy_bytes": 100 * 10 ** 9, "proxy_budget_bytes": None,
+                                           "proxy_budget_exceeded": False})
+
+    def test_inactive_meter_counts_nothing_and_touches_no_driver(self):
+        meter = proxy_meter.ProxyMeter(0.001, active=False)
+        meter.add(10 ** 9)
+        meter.feed_cdp("Network.requestWillBeSent", {"requestId": "1", "request": {
+            "method": "GET", "url": "http://x.test/", "headers": {}}})
+        meter.feed_cdp("Network.responseReceived", {"requestId": "1", "response": {}})
+        meter.feed_cdp("Network.loadingFinished", {"requestId": "1", "encodedDataLength": 10 ** 9})
+        self.assertEqual(meter.sidecar(), {"proxy_bytes": None, "proxy_budget_bytes": None,
+                                           "proxy_budget_exceeded": False})
+        self.assertFalse(meter.exceeded)
+        meter.check()
+
+        class Target:
+            def __init__(self):
+                self.calls = []
+
+            def on(self, *args):
+                self.calls.append(args)
+
+            def route(self, *args):
+                self.calls.append(args)
+
+        target = Target()
+        meter.attach_playwright(target)
+        self.assertEqual(target.calls, [], "no proxy: the page/context is left alone")
+
+        class Driver:
+            def get_log(self, kind):
+                return []
+
+        driver = Driver()
+        meter.attach_selenium(driver)
+        self.assertFalse(hasattr(driver, "_proxy_meter_poll"), "no proxy: the driver is left alone")
 
     def test_running_total_budget_and_callback(self):
         meter = proxy_meter.ProxyMeter(1, active=True)
@@ -180,6 +237,99 @@ class Budget(unittest.TestCase):
         self.assertEqual(meter.budget_bytes, 3_000_000)
         proxy_meter.start(None, active=False)
         self.assertEqual(proxy_meter.current().budget_bytes, 10_000_000)
+
+
+class Concurrency(unittest.TestCase):
+    """Worker threads adding bytes at once: the budget trips exactly once,
+    the callback fires exactly once, the warning prints exactly once, and
+    bytes that arrive after the trip are still counted."""
+
+    THREADS = 8
+    PER_THREAD = 500
+    CHUNK = 1_000  # 8 * 500 * 1,000 = 4,000,000 bytes against a 1 MB budget
+
+    def _hammer(self, meter):
+        barrier = threading.Barrier(self.THREADS)
+
+        def worker():
+            barrier.wait()
+            for _ in range(self.PER_THREAD):
+                meter.add(self.CHUNK)
+
+        threads = [threading.Thread(target=worker) for _ in range(self.THREADS)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    def test_concurrent_adds_trip_the_budget_once(self):
+        meter = proxy_meter.ProxyMeter(1, active=True)  # 1,000,000 bytes
+        fired = []
+        meter.on_exceeded(lambda: fired.append(1))
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self._hammer(meter)
+        total = self.THREADS * self.PER_THREAD * self.CHUNK
+        self.assertEqual(meter.bytes, total, "no concurrent add was lost")
+        self.assertTrue(meter.exceeded)
+        self.assertEqual(fired, [1], "the callback fired exactly once")
+        self.assertEqual(stderr.getvalue().count("[!] Proxy budget"), 1,
+                         "the warning printed exactly once")
+        with self.assertRaises(proxy_meter.ProxyBudgetExceeded):
+            meter.check()
+
+    def test_bytes_after_the_trip_are_still_counted_silently(self):
+        meter = proxy_meter.ProxyMeter(1, active=True)
+        fired = []
+        meter.on_exceeded(lambda: fired.append(1))
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            meter.add(2_000_000)  # over the 1 MB budget already
+            self._hammer(meter)   # every one of these arrives after the trip
+        total = 2_000_000 + self.THREADS * self.PER_THREAD * self.CHUNK
+        self.assertEqual(meter.bytes, total, "bytes past the budget still count")
+        self.assertEqual(fired, [1], "no second callback for the later bytes")
+        self.assertEqual(stderr.getvalue().count("[!] Proxy budget"), 1, "no second warning")
+
+    def test_concurrent_adds_on_an_unlimited_budget_never_trip(self):
+        meter = proxy_meter.ProxyMeter(0, active=True)
+        fired = []
+        meter.on_exceeded(lambda: fired.append(1))
+        self._hammer(meter)
+        self.assertEqual(meter.bytes, self.THREADS * self.PER_THREAD * self.CHUNK)
+        self.assertFalse(meter.exceeded)
+        self.assertEqual(fired, [])
+
+    def test_callback_registered_after_the_trip_runs_once_immediately(self):
+        meter = proxy_meter.ProxyMeter(1, active=True)
+        meter.add(2_000_000)
+        fired = []
+        meter.on_exceeded(lambda: fired.append(1))
+        meter.add(1_000)
+        self.assertEqual(fired, [1], "a late callback runs once, not per add")
+
+    def test_callback_registered_during_the_trip_is_not_lost(self):
+        """A callback that registers while another thread is crossing the
+        budget still runs exactly once (not lost, not twice)."""
+        for _ in range(50):
+            meter = proxy_meter.ProxyMeter(1, active=True)
+            fired = []
+            barrier = threading.Barrier(2)
+
+            def cross():
+                barrier.wait()
+                meter.add(2_000_000)
+
+            def register():
+                barrier.wait()
+                meter.on_exceeded(lambda: fired.append(1))
+
+            threads = [threading.Thread(target=cross), threading.Thread(target=register)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual(fired, [1])
 
 
 class HttpClient(unittest.TestCase):
@@ -237,6 +387,53 @@ class CdpEvents(unittest.TestCase):
         meter.feed_cdp("Network.requestWillBeSent", {"requestId": "4", "redirectResponse": {"encodedDataLength": 77},
                                                      "request": {"method": "GET", "url": "http://x.test/"}})
         self.assertEqual(meter.bytes, before + 77 + len("GET / HTTP/1.1\r\n") + 2)
+
+    def test_failed_load_with_response_counts_what_arrived(self):
+        """responseReceived then loadingFailed: the bytes that did arrive
+        (the dataReceived running length) are counted."""
+        meter = proxy_meter.ProxyMeter(0, active=True)
+        meter.feed_cdp("Network.responseReceived", {"requestId": "1",
+                                                    "response": {"status": 200, "url": "http://x.test/big"}})
+        meter.feed_cdp("Network.dataReceived", {"requestId": "1", "encodedDataLength": 400})
+        meter.feed_cdp("Network.dataReceived", {"requestId": "1", "encodedDataLength": 300})
+        meter.feed_cdp("Network.loadingFailed", {"requestId": "1", "errorText": "net::ERR_CONNECTION_RESET"})
+        self.assertEqual(meter.bytes, 700, "a failed load counts the bytes that arrived")
+        # Nothing may be counted twice when the failure is followed by more events.
+        meter.feed_cdp("Network.loadingFinished", {"requestId": "1", "encodedDataLength": 5000})
+        self.assertEqual(meter.bytes, 700)
+
+    def test_failed_load_without_response_counts_nothing(self):
+        """No responseReceived (Chrome's own 'This site can't be reached'
+        error page): generated locally, nothing crossed the proxy."""
+        meter = proxy_meter.ProxyMeter(0, active=True)
+        meter.feed_cdp("Network.loadingFailed", {"requestId": "e", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"})
+        meter.feed_cdp("Network.dataReceived", {"requestId": "e", "encodedDataLength": 0})
+        meter.feed_cdp("Network.loadingFinished", {"requestId": "e", "encodedDataLength": 250609})
+        self.assertEqual(meter.bytes, 0, "Chrome's error page never crossed the proxy")
+
+    def test_redirect_3xx_counted_on_its_own(self):
+        """A redirect's 3xx response has no loadingFinished of its own: its
+        encodedDataLength is counted from requestWillBeSent's
+        redirectResponse, separately from the final response."""
+        meter = proxy_meter.ProxyMeter(0, active=True)
+        meter.feed_cdp("Network.requestWillBeSent", {"requestId": "1", "request": {
+            "method": "GET", "url": "http://x.test/old", "headers": {"A": "b"}}})
+        sent_first = len("GET /old HTTP/1.1\r\n") + 2 + 1 + 1 + 4
+        self.assertEqual(meter.bytes, sent_first)
+        # The 3xx arrived (302 with a small body), then the follow-up request.
+        meter.feed_cdp("Network.requestWillBeSent", {"requestId": "1",
+                                                     "redirectResponse": {"status": 302, "encodedDataLength": 77},
+                                                     "request": {"method": "GET", "url": "http://x.test/new",
+                                                                 "headers": {}}})
+        sent_second = len("GET /new HTTP/1.1\r\n") + 2
+        self.assertEqual(meter.bytes, sent_first + 77 + sent_second,
+                         "the 3xx's own encodedDataLength is counted once")
+        # The final 200 gets its own loadingFinished; the 3xx must not be
+        # counted again with it.
+        meter.feed_cdp("Network.responseReceived", {"requestId": "1",
+                                                    "response": {"status": 200, "url": "http://x.test/new"}})
+        meter.feed_cdp("Network.loadingFinished", {"requestId": "1", "encodedDataLength": 1000})
+        self.assertEqual(meter.bytes, sent_first + 77 + sent_second + 1000)
 
     def test_selenium_log_is_teed_not_stolen(self):
         def entry(method, **params):
@@ -454,8 +651,8 @@ class RealBrowsers(unittest.TestCase):
     def test_pyppeteer(self):
         try:
             from pyppeteer import launch
-        except ImportError:
-            return unavailable(self, "pyppeteer", "pyppeteer is not installed")
+        except Exception as exc:  # noqa: BLE001 - not installed, or its deps break on this machine
+            return unavailable(self, "pyppeteer", "pyppeteer is not importable: %s" % exc)
         binary = chrome_binary()
         if not binary:
             return unavailable(self, "pyppeteer", "no Chrome/Chromium binary (set CHROME_BIN)")
