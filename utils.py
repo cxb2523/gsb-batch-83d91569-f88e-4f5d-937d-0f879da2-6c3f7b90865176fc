@@ -1,0 +1,654 @@
+"""
+Utility Functions for LinkedIn Scraper
+=======================================
+Helper functions for delays, scrolling, file I/O, and Excel export.
+"""
+
+import asyncio
+import json
+import logging
+import os
+import random
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+
+logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────
+#  NOTIFICATIONS
+# ─────────────────────────────────────────────
+
+def send_webhook_notification(webhook_url: str, title: str, summary: dict):
+    """Send a formatted notification to Discord or Slack."""
+    if not webhook_url:
+        return
+
+    try:
+        # Discord format
+        payload = {
+            "embeds": [{
+                "title": f"🚀 {title}",
+                "color": 65442, # Blue
+                "fields": [
+                    {"name": k, "value": str(v), "inline": True} 
+                    for k, v in summary.items()
+                ],
+                "footer": {"text": "LinkedIn Scraper v4.0 Enhanced"}
+            }]
+        }
+
+        req = urllib.request.Request(
+            webhook_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req) as response:
+            pass
+        logger.info("🔔 Webhook notification sent!")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to send webhook: {e}")
+
+
+# ─────────────────────────────────────────────
+#  HUMAN-LIKE BEHAVIOR
+# ─────────────────────────────────────────────
+
+async def human_delay(min_sec: float = 1.0, max_sec: float = 3.0):
+    """Sleep for a random duration to mimic human behavior."""
+    delay = random.uniform(min_sec, max_sec)
+    await asyncio.sleep(delay)
+
+
+async def random_scroll(page, scrolls: int = 4):
+    """Scroll the page randomly like a human reading content."""
+    for _ in range(scrolls):
+        scroll_amount = random.randint(300, 800)
+        direction = random.choice([1, 1, 1, -1])  # mostly down
+        await page.evaluate(f"window.scrollBy(0, {scroll_amount * direction})")
+        await asyncio.sleep(random.uniform(0.5, 1.5))
+
+
+# ─────────────────────────────────────────────
+#  PROGRESS SAVE/LOAD (Resume after crash)
+# ─────────────────────────────────────────────
+
+def _empty_progress() -> dict:
+    """The shape a fresh (or unrecoverable) progress file should have."""
+    return {"results": [], "completed_keys": [], "completed_companies": []}
+
+
+def save_progress(filepath: str, data: dict):
+    """Save scraping progress to JSON for resume capability (atomic write).
+
+    Written via a temp file + os.replace so a crash mid-save leaves either the
+    complete old file or the complete new one — never a truncated JSON blob
+    that would break the next resume.
+    """
+    try:
+        _write_json_atomic(Path(filepath), data)
+    except Exception as e:
+        # Losing progress must never kill an otherwise healthy run.
+        logger.warning(f"⚠️  Could not save progress ({e.__class__.__name__}: {e}).")
+        return
+    logger.debug(f"Progress saved: {len(data.get('results', []))} records")
+
+
+def load_progress(filepath: str) -> dict:
+    """Load previous progress, tolerating a missing, corrupt or malformed file.
+
+    A crash mid-write (or a hand-edited progress.json) must never stop the
+    scraper from starting — it degrades to a fresh run with a warning.
+    """
+    path = Path(filepath)
+    if not path.exists():
+        return _empty_progress()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        logger.warning(
+            f"⚠️  Could not read progress file ({e.__class__.__name__}: {e}) — starting fresh."
+        )
+        return _empty_progress()
+    if not isinstance(data, dict):
+        logger.warning("⚠️  Progress file was not a JSON object — starting fresh.")
+        return _empty_progress()
+
+    if not isinstance(data.get("results"), list):
+        data["results"] = []
+    if not isinstance(data.get("completed_keys"), list):
+        # Back-compat: older files tracked progress under "completed_companies".
+        prior = data.get("completed_companies")
+        data["completed_keys"] = list(prior) if isinstance(prior, list) else []
+    if not isinstance(data.get("completed_companies"), list):
+        data["completed_companies"] = []
+
+    logger.info(f"📂 Resumed progress: {len(data['results'])} existing records, "
+                f"{len(data['completed_keys'])} items done")
+    return data
+
+
+def _load_session_health_file(path: Path) -> dict:
+    """Read the telemetry file, tolerating missing/corrupt content."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if not isinstance(data.get("runs"), list):
+        data["runs"] = []
+    return data
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    """Write via a temp file + rename so a concurrent reader (e.g. the
+    dashboard generator) never sees a half-written file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def save_session_health_live(filepath: str, entry: dict) -> None:
+    """
+    Persist an IN-PROGRESS run so consumers can watch it live.
+    Finished-run history is preserved; `current` and `last` both mirror the
+    live entry. Atomic write.
+    """
+    path = Path(filepath)
+    data = _load_session_health_file(path)
+    data["current"] = entry
+    data["last"] = entry
+    _write_json_atomic(path, data)
+
+
+def save_session_health(filepath: str, entry: dict, cap: int = 20) -> None:
+    """
+    Finalize a run: append it to history with a rolling cap, clear `current`
+    (no longer running), and mirror the newest entry as `last`. Atomic write.
+    Shape: {"runs": [...], "current": null, "last": {...}}
+    """
+    path = Path(filepath)
+    data = _load_session_health_file(path)
+    runs = (data["runs"] + [entry])[-cap:]
+    data["runs"] = runs
+    data["current"] = None
+    data["last"] = entry
+    _write_json_atomic(path, data)
+
+
+# ─────────────────────────────────────────────
+#  LOGGING SETUP
+# ─────────────────────────────────────────────
+
+def setup_logging(log_file: str = "scraper.log"):
+    """Configure logging to both console and file."""
+    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_file, encoding="utf-8")
+        ]
+    )
+
+
+# ─────────────────────────────────────────────
+#  EXCEL EXPORT (PEOPLE)
+# ─────────────────────────────────────────────
+
+def export_to_excel(results: list, output_path: str) -> str:
+    """
+    Export scraped recruiter data to a beautifully formatted Excel file.
+    Includes clickable LinkedIn URLs, color-coded rows, and auto-sized columns.
+    """
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Build DataFrame
+    df = pd.DataFrame(results)
+
+    # Reorder and rename columns
+    # Ordered the way a recruiter reads a profile: who → role → screening
+    # metrics → contact → audience → badges → depth → links.
+    columns_order = [
+        "name", "title", "company", "search_company", "headline", "location", "seniority",
+        "total_experience_years", "career_start_year", "companies_count",
+        "avg_tenure_months", "current_tenure_months", "current_role_duration",
+        "email", "phone", "websites",
+        "connections", "connection_count", "followers", "follower_count",
+        "recommendation_count",
+        "open_to_work", "is_hiring", "is_premium", "is_creator", "verified",
+        "public_id", "pronouns",
+        "skills", "skills_count", "experience_count", "education_count",
+        "about", "experience", "education",
+        "certifications", "languages", "honors",
+        "volunteer", "projects", "publications", "courses", "patents",
+        "services", "interests", "recommendations",
+        "photo_url", "banner_url", "linkedin_url", "scraped_at"
+    ]
+    # Keep only existing columns
+    columns_order = [c for c in columns_order if c in df.columns]
+    df = df[columns_order]
+
+    column_names = {
+        "name": "Full Name",
+        "title": "Job Title",
+        "company": "Company (from Profile)",
+        "search_company": "Searched Company",
+        "headline": "LinkedIn Headline",
+        "location": "Location",
+        "seniority": "Seniority Band",
+        "total_experience_years": "Years Experience",
+        "career_start_year": "Career Start Year",
+        "companies_count": "Employers",
+        "avg_tenure_months": "Avg Tenure (mo)",
+        "current_tenure_months": "Current Tenure (mo)",
+        "current_role_duration": "Current Role Duration",
+        "email": "Email Address",
+        "phone": "Phone",
+        "websites": "Websites",
+        "connections": "Connections",
+        "connection_count": "Connections (num)",
+        "followers": "Followers",
+        "follower_count": "Followers (num)",
+        "recommendation_count": "Recommendations",
+        "open_to_work": "Open To Work",
+        "is_hiring": "Hiring",
+        "is_premium": "Premium",
+        "is_creator": "Creator",
+        "verified": "Verified",
+        "public_id": "Profile ID",
+        "pronouns": "Pronouns",
+        "skills": "Skills",
+        "skills_count": "Skills (count)",
+        "experience_count": "Roles Held",
+        "education_count": "Schools",
+        "about": "About Section",
+        "experience": "Work History",
+        "education": "Education",
+        "certifications": "Certifications",
+        "languages": "Languages",
+        "honors": "Honors & Awards",
+        "volunteer": "Volunteer",
+        "projects": "Projects",
+        "publications": "Publications",
+        "courses": "Courses",
+        "patents": "Patents",
+        "services": "Services Offered",
+        "interests": "Interests",
+        "recommendations": "Recommendation Text",
+        "photo_url": "Photo URL",
+        "banner_url": "Banner URL",
+        "linkedin_url": "LinkedIn URL",
+        "scraped_at": "Scraped At"
+    }
+    df = df.rename(columns=column_names)
+
+    # Write to Excel
+    df.to_excel(output_path, index=False, sheet_name="Recruiters")
+
+    # ── Apply Beautiful Formatting ──
+    wb = load_workbook(output_path)
+    ws = wb.active
+
+    # Colors
+    HEADER_BG = "0A66C2"     # LinkedIn blue
+    HEADER_FG = "FFFFFF"     # White
+    ROW_ALT   = "EBF3FB"     # Light blue
+    ROW_NORM  = "FFFFFF"     # White
+    BORDER_CLR = "CCCCCC"
+
+    thin_border = Border(
+        left=Side(style="thin", color=BORDER_CLR),
+        right=Side(style="thin", color=BORDER_CLR),
+        top=Side(style="thin", color=BORDER_CLR),
+        bottom=Side(style="thin", color=BORDER_CLR)
+    )
+
+    # Style header row
+    for col_num, cell in enumerate(ws[1], 1):
+        cell.font = Font(bold=True, color=HEADER_FG, size=11, name="Calibri")
+        cell.fill = PatternFill("solid", fgColor=HEADER_BG)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = thin_border
+
+    ws.row_dimensions[1].height = 32
+
+    # Style data rows + make URLs clickable
+    url_col_idx = None
+    for col_idx, cell in enumerate(ws[1], 1):
+        if cell.value == "LinkedIn URL":
+            url_col_idx = col_idx
+            break
+
+    for row_num, row in enumerate(ws.iter_rows(min_row=2, max_row=ws.max_row), 2):
+        fill_color = ROW_ALT if row_num % 2 == 0 else ROW_NORM
+        for col_idx, cell in enumerate(row, 1):
+            cell.fill = PatternFill("solid", fgColor=fill_color)
+            cell.alignment = Alignment(vertical="center", wrap_text=False)
+            cell.border = thin_border
+            cell.font = Font(size=10, name="Calibri")
+
+            # Make LinkedIn URL clickable hyperlink
+            if url_col_idx and col_idx == url_col_idx and cell.value:
+                url = str(cell.value)
+                cell.hyperlink = url
+                cell.value = url
+                cell.font = Font(
+                    size=10, color="0563C1", underline="single",
+                    name="Calibri"
+                )
+
+        ws.row_dimensions[row_num].height = 22
+
+    # Auto-size columns
+    col_widths = {
+        "Full Name": 22,
+        "Job Title": 28,
+        "Company (from Profile)": 25,
+        "Searched Company": 22,
+        "LinkedIn Headline": 40,
+        "Location": 22,
+        "Seniority Band": 18,
+        "Years Experience": 15,
+        "Career Start Year": 15,
+        "Employers": 11,
+        "Avg Tenure (mo)": 14,
+        "Current Tenure (mo)": 16,
+        "Current Role Duration": 20,
+        "Email Address": 28,
+        "Phone": 16,
+        "Websites": 40,
+        "Connections": 14,
+        "Connections (num)": 16,
+        "Followers": 16,
+        "Followers (num)": 16,
+        "Recommendations": 16,
+        "Open To Work": 13,
+        "Hiring": 10,
+        "Premium": 11,
+        "Creator": 11,
+        "Verified": 10,
+        "Profile ID": 24,
+        "Pronouns": 12,
+        "Skills": 40,
+        "Skills (count)": 13,
+        "Roles Held": 11,
+        "Schools": 10,
+        "About Section": 50,
+        "Work History": 60,
+        "Education": 40,
+        "Certifications": 40,
+        "Languages": 28,
+        "Honors & Awards": 40,
+        "Volunteer": 40,
+        "Projects": 40,
+        "Publications": 40,
+        "Courses": 40,
+        "Patents": 40,
+        "Services Offered": 34,
+        "Interests": 40,
+        "Recommendation Text": 50,
+        "Photo URL": 40,
+        "Banner URL": 40,
+        "LinkedIn URL": 45,
+        "Scraped At": 18,
+    }
+    for col_idx, cell in enumerate(ws[1], 1):
+        col_letter = get_column_letter(col_idx)
+        width = col_widths.get(cell.value, 18)
+        ws.column_dimensions[col_letter].width = width
+
+    # Freeze top row
+    ws.freeze_panes = "A2"
+
+    # Auto-filter
+    ws.auto_filter.ref = ws.dimensions
+
+    # Add summary sheet
+    ws_summary = wb.create_sheet("Summary")
+    ws_summary["A1"] = "LinkedIn Recruiter Scrape - Summary Report"
+    ws_summary["A1"].font = Font(bold=True, size=14, color="0A66C2")
+    ws_summary["A3"] = "Generated On:"
+    ws_summary["B3"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ws_summary["A4"] = "Total Recruiters Found:"
+    ws_summary["B4"] = len(results)
+    ws_summary["A5"] = "Unique Companies:"
+    ws_summary["B5"] = len(set(r.get("search_company", "") for r in results))
+    ws_summary["A6"] = "Profiles with Email:"
+    ws_summary["B6"] = sum(1 for r in results if r.get("email"))
+
+    for row in ws_summary.iter_rows(min_row=3, max_row=6, min_col=1, max_col=2):
+        for cell in row:
+            cell.font = Font(size=11, name="Calibri")
+            if cell.column == 1:
+                cell.font = Font(bold=True, size=11, name="Calibri")
+    ws_summary.column_dimensions["A"].width = 28
+    ws_summary.column_dimensions["B"].width = 22
+
+    wb.save(output_path)
+    logger.info(f"✅ Excel file saved: {output_path}")
+    return output_path
+
+
+# ─────────────────────────────────────────────
+#  EXCEL EXPORT (JOBS)
+# ─────────────────────────────────────────────
+
+def export_jobs_to_excel(results: list, output_path: str) -> str:
+    """Export job listings to Excel."""
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame(results)
+
+    columns_order = ["title", "company", "location", "url", "search_keyword", "scraped_at"]
+    columns_order = [c for c in columns_order if c in df.columns]
+    df = df[columns_order]
+
+    column_names = {
+        "title": "Job Title",
+        "company": "Company",
+        "location": "Location",
+        "url": "Job Link",
+        "search_keyword": "Searched Keyword",
+        "scraped_at": "Scraped At"
+    }
+    df = df.rename(columns=column_names)
+
+    df.to_excel(output_path, index=False, sheet_name="Jobs")
+
+    wb = load_workbook(output_path)
+    ws = wb.active
+
+    # Formatting styling
+    HEADER_BG = "0A66C2"
+    HEADER_FG = "FFFFFF"
+    ROW_ALT   = "EBF3FB"
+    ROW_NORM  = "FFFFFF"
+    BORDER_CLR = "CCCCCC"
+
+    thin_border = Border(
+        left=Side(style="thin", color=BORDER_CLR), right=Side(style="thin", color=BORDER_CLR),
+        top=Side(style="thin", color=BORDER_CLR), bottom=Side(style="thin", color=BORDER_CLR)
+    )
+
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color=HEADER_FG, size=11, name="Calibri")
+        cell.fill = PatternFill("solid", fgColor=HEADER_BG)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = thin_border
+    ws.row_dimensions[1].height = 32
+
+    # Make URLs clickable
+    url_col_idx = None
+    for idx, cell in enumerate(ws[1], 1):
+        if cell.value == "Job Link":
+            url_col_idx = idx
+            break
+
+    for row_num, row in enumerate(ws.iter_rows(min_row=2, max_row=ws.max_row), 2):
+        fill_color = ROW_ALT if row_num % 2 == 0 else ROW_NORM
+        for col_idx, cell in enumerate(row, 1):
+            cell.fill = PatternFill("solid", fgColor=fill_color)
+            cell.alignment = Alignment(vertical="center", wrap_text=False)
+            cell.border = thin_border
+            cell.font = Font(size=10, name="Calibri")
+
+            if url_col_idx and col_idx == url_col_idx and cell.value:
+                url = str(cell.value)
+                cell.hyperlink = url
+                cell.font = Font(size=10, color="0563C1", underline="single", name="Calibri")
+
+        ws.row_dimensions[row_num].height = 22
+
+    # Column widths
+    widths = {"Job Title": 45, "Company": 30, "Location": 25, "Job Link": 55, "Searched Keyword": 25, "Scraped At": 18}
+    for idx, cell in enumerate(ws[1], 1):
+        ws.column_dimensions[get_column_letter(idx)].width = widths.get(cell.value, 20)
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+    wb.save(output_path)
+    logger.info(f"✅ Jobs Excel file saved: {output_path}")
+    return output_path
+
+
+# ─────────────────────────────────────────────
+#  EXCEL EXPORT (CANDIDATES)
+# ─────────────────────────────────────────────
+
+def export_candidates_to_excel(results: list, output_path: str) -> str:
+    """Export candidate data to Excel."""
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame(results)
+
+    columns_order = [
+        "name", "title", "company", "search_skill", "headline", "location", "seniority",
+        "total_experience_years", "career_start_year", "companies_count",
+        "avg_tenure_months", "current_tenure_months", "current_role_duration",
+        "email", "phone", "websites",
+        "connections", "connection_count", "followers", "follower_count",
+        "recommendation_count",
+        "open_to_work", "is_hiring", "is_premium", "is_creator", "verified", "pronouns",
+        "public_id",
+        "skills", "skills_count", "experience_count", "education_count",
+        "about", "experience", "education",
+        "certifications", "languages", "honors",
+        "volunteer", "projects", "publications", "courses", "patents",
+        "services", "interests", "recommendations",
+        "linkedin_url", "scraped_at"
+    ]
+    columns_order = [c for c in columns_order if c in df.columns]
+    df = df[columns_order]
+
+    column_names = {
+        "name": "Candidate Name", "title": "Current Title", "company": "Current Company",
+        "search_skill": "Matched Skill", "headline": "LinkedIn Headline",
+        "location": "Location", "seniority": "Seniority Band",
+        "total_experience_years": "Years Experience", "career_start_year": "Career Start Year",
+        "companies_count": "Employers", "avg_tenure_months": "Avg Tenure (mo)",
+        "current_tenure_months": "Current Tenure (mo)",
+        "current_role_duration": "Current Role Duration",
+        "email": "Email Address", "phone": "Phone", "websites": "Websites",
+        "connections": "Connections", "connection_count": "Connections (num)",
+        "followers": "Followers", "follower_count": "Followers (num)",
+        "recommendation_count": "Recommendations",
+        "open_to_work": "Open To Work", "is_hiring": "Hiring",
+        "is_premium": "Premium", "is_creator": "Creator", "verified": "Verified",
+        "pronouns": "Pronouns", "public_id": "Profile ID",
+        "skills": "Skills", "skills_count": "Skills (count)",
+        "experience_count": "Roles Held", "education_count": "Schools",
+        "about": "About Section", "experience": "Work History",
+        "education": "Education", "certifications": "Certifications",
+        "languages": "Languages", "honors": "Honors & Awards",
+        "volunteer": "Volunteer", "projects": "Projects",
+        "publications": "Publications", "courses": "Courses", "patents": "Patents",
+        "services": "Services Offered", "interests": "Interests",
+        "recommendations": "Recommendation Text",
+        "linkedin_url": "Profile URL", "scraped_at": "Scraped At"
+    }
+    df = df.rename(columns=column_names)
+    df.to_excel(output_path, index=False, sheet_name="Candidates")
+
+    wb = load_workbook(output_path)
+    ws = wb.active
+
+    # Set up basic styles
+    HEADER_BG = "0A66C2"
+    HEADER_FG = "FFFFFF"
+    ROW_ALT   = "EBF3FB"
+    ROW_NORM  = "FFFFFF"
+    BORDER_CLR = "CCCCCC"
+
+    thin_border = Border(
+        left=Side(style="thin", color=BORDER_CLR), right=Side(style="thin", color=BORDER_CLR),
+        top=Side(style="thin", color=BORDER_CLR), bottom=Side(style="thin", color=BORDER_CLR)
+    )
+
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color=HEADER_FG, size=11, name="Calibri")
+        cell.fill = PatternFill("solid", fgColor=HEADER_BG)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = thin_border
+    ws.row_dimensions[1].height = 32
+
+    # Clickable URLs
+    url_col_idx = None
+    for idx, cell in enumerate(ws[1], 1):
+        if cell.value == "Profile URL":
+            url_col_idx = idx
+            break
+
+    for row_num, row in enumerate(ws.iter_rows(min_row=2, max_row=ws.max_row), 2):
+        fill_color = ROW_ALT if row_num % 2 == 0 else ROW_NORM
+        for col_idx, cell in enumerate(row, 1):
+            cell.fill = PatternFill("solid", fgColor=fill_color)
+            cell.alignment = Alignment(vertical="center", wrap_text=False)
+            cell.border = thin_border
+            cell.font = Font(size=10, name="Calibri")
+
+            if url_col_idx and col_idx == url_col_idx and cell.value:
+                url = str(cell.value)
+                cell.hyperlink = url
+                cell.font = Font(size=10, color="0563C1", underline="single", name="Calibri")
+
+        ws.row_dimensions[row_num].height = 22
+
+    widths = {
+        "Candidate Name": 22, "Current Title": 30, "Current Company": 25,
+        "Matched Skill": 20, "LinkedIn Headline": 45, "Location": 25,
+        "Seniority Band": 18, "Years Experience": 15, "Career Start Year": 15,
+        "Employers": 11, "Avg Tenure (mo)": 14, "Current Tenure (mo)": 16,
+        "Current Role Duration": 20,
+        "Email Address": 28, "Phone": 18, "Websites": 40,
+        "Connections": 15, "Connections (num)": 16, "Followers": 16,
+        "Followers (num)": 16, "Recommendations": 16,
+        "Open To Work": 13, "Hiring": 10, "Premium": 11, "Creator": 11,
+        "Verified": 10, "Pronouns": 12, "Profile ID": 24,
+        "About Section": 50, "Skills": 40, "Skills (count)": 13,
+        "Roles Held": 11, "Schools": 10,
+        "Work History": 60, "Education": 40, "Certifications": 40,
+        "Languages": 28, "Honors & Awards": 40,
+        "Volunteer": 40, "Projects": 40, "Publications": 40, "Courses": 40,
+        "Patents": 40, "Services Offered": 34, "Interests": 40,
+        "Recommendation Text": 50, "Profile URL": 45, "Scraped At": 18
+    }
+    for idx, cell in enumerate(ws[1], 1):
+        ws.column_dimensions[get_column_letter(idx)].width = widths.get(cell.value, 20)
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+    wb.save(output_path)
+    logger.info(f"✅ Candidates Excel file saved: {output_path}")
+    return output_path

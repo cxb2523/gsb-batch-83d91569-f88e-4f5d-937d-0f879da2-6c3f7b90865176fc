@@ -1,0 +1,2642 @@
+import asyncio
+import json
+import random
+import re
+import logging
+from pathlib import Path
+from datetime import datetime
+from typing import Optional
+
+from playwright.async_api import async_playwright, Page, BrowserContext
+from bs4 import BeautifulSoup
+
+from behavior import human_mouse_move, idle_jitter, warm_up
+from config import Config
+from enrichment import enrich_record
+from scoring import keyword_weights, read_resume_text, score_record
+from search_filters import (JobFilters, PeopleFilters, build_jobs_search_url,
+                            build_keywords, build_people_search_url,
+                            canonical_profile_url, resolve_geo)
+from storage import EventLog, open_store
+from utils import (
+    human_delay, random_scroll, save_progress,
+    load_progress, setup_logging,
+    save_session_health, save_session_health_live
+)
+
+logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────
+#  COHERENT FINGERPRINT PROFILES
+#  A UA must agree with the rest of the browser or the mismatch itself
+#  becomes the detection signal: a Mac UA on a Windows Chromium build
+#  exposes navigator.platform, userAgentData.platform and GPU strings
+#  that contradict it. Each profile keeps UA / platform / viewport / GPU
+#  / timezone / locale telling the same story, and the geo defaults
+#  (timezone + geolocation + locale) stay consistent within a profile.
+# ─────────────────────────────────────────────────────────────
+_FINGERPRINTS = [
+    {   # Windows / Chrome — most common real-world profile
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "platform": "Win32",
+        "platform_label": "Windows",
+        "platform_ver": "15.0.0",
+        "ua_version": "131",
+        "viewport": (1920, 1080),
+        "timezone_id": "America/New_York",
+        "locale": "en-US",
+        "geo": {"longitude": -74.006, "latitude": 40.7128},
+        "webgl_vendor": "Google Inc. (NVIDIA)",
+        "webgl_renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "hardware": {"deviceMemory": 16, "hardwareConcurrency": 12, "maxTouchPoints": 0},
+    },
+    {   # Windows / Chrome — integrated GPU, 1366x768 laptop
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "platform": "Win32",
+        "platform_label": "Windows",
+        "platform_ver": "15.0.0",
+        "ua_version": "130",
+        "viewport": (1366, 768),
+        "timezone_id": "America/Chicago",
+        "locale": "en-US",
+        "geo": {"longitude": -87.6298, "latitude": 41.8781},
+        "webgl_vendor": "Google Inc. (Intel)",
+        "webgl_renderer": "ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "hardware": {"deviceMemory": 8, "hardwareConcurrency": 8, "maxTouchPoints": 0},
+    },
+    {   # macOS / Chrome — M-series MacBook
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "platform": "MacIntel",
+        "platform_label": "macOS",
+        "platform_ver": "10.15.7",
+        "ua_version": "131",
+        "viewport": (1728, 1117),  # 14" MacBook Pro logical resolution
+        "timezone_id": "America/Los_Angeles",
+        "locale": "en-US",
+        "geo": {"longitude": -122.4194, "latitude": 37.7749},
+        "webgl_vendor": "Apple Inc.",
+        "webgl_renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+        "hardware": {"deviceMemory": 8, "hardwareConcurrency": 10, "maxTouchPoints": 0},
+    },
+    {   # Linux / Chrome — desktop workstation
+        "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "platform": "Linux x86_64",
+        "platform_label": "Linux",
+        "platform_ver": "6.5.0",
+        "ua_version": "130",
+        "viewport": (1600, 900),
+        "timezone_id": "America/Denver",
+        "locale": "en-US",
+        "geo": {"longitude": -104.9903, "latitude": 39.7392},
+        "webgl_vendor": "Google Inc. (AMD)",
+        "webgl_renderer": "ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "hardware": {"deviceMemory": 16, "hardwareConcurrency": 16, "maxTouchPoints": 0},
+    },
+]
+
+# Month name → 1-12, for turning LinkedIn's loose date strings ("Jan 2021",
+# "2021", "Present") into something we can do arithmetic on.
+_MONTH_NAMES = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+# Sections worth watching for selector rot. Counted as empty misses during a
+# run and reported in the final summary, so a LinkedIn markup change shows up
+# as a clear warning instead of silently exporting blank columns.
+_TRACKED_SECTIONS = (
+    "title", "headline", "location", "about", "skills",
+    "experience_roles", "education_entries", "certifications", "languages",
+    "honors", "followers", "connections", "photo_url", "websites", "services",
+)
+
+
+class LinkedInScraper:
+    """
+    Flexible LinkedIn Scraper v3.0.
+    Supports People Search, Job Search, and Candidate/Resume Search
+    with robust anti-block measures.
+    """
+
+    def __init__(self, config: Config):
+        self.config = config
+        self.results = []
+        self.failed_urls = []
+        self.session_count = 0
+        self.daily_searches = 0
+        self.consecutive_errors = 0
+        self.browser = None
+        self.context: Optional[BrowserContext] = None
+        self.page: Optional[Page] = None
+        self.playwright = None
+        # Auto-recovery counter: how many block/authwall events this run has
+        # already rotated its way out of (see _recover_from_block).
+        self._block_recoveries = 0
+        # Single account from config; supports the login/session code path.
+        self.current_account = {
+            "email": config.LINKEDIN_EMAIL,
+            "password": config.LINKEDIN_PASSWORD,
+        }
+        # URLs already scraped this run (resumed progress included) — avoids
+        # re-scraping the same profile under different titles/companies.
+        self.scraped_urls = set()
+        # Set to "credentials" when LinkedIn rejects the login form, so the
+        # retry loop gives up instead of risking an account lock.
+        self._last_login_error = ""
+        # Why the last _check_page_block_status() call called it blocked
+        # ("authwall" / "rate_limit" / "captcha" / "checkpoint").
+        self._block_reason = ""
+        # How many profiles came back empty for each tracked field — surfaced in
+        # the final summary as an early warning for LinkedIn selector changes.
+        self.section_misses = {}
+        # ── Power stack (v5.0) state. Everything is optional: with the new
+        # config defaults the scraper behaves exactly as it did before. ──
+        self.store = None            # SQLite Store (None when disabled/unavailable)
+        self.run_id = ""
+        self.event_log = None        # JSONL EventLog for this run
+        self.resume_weights = {}     # keyword -> weight, from RESUME_FILE_PATH
+        self.profiles_this_run = 0
+        self.new_records = 0
+        self.updated_records = 0
+        self._warned = set()         # de-duplicate filter warnings across pages
+        self._stop_reason = ""
+        # Proxy rotation state (see _next_proxy).
+        self.current_proxy = None
+        self._proxy_cursor = random.randrange(max(1, len(config.PROXY_LIST)))
+        # Lazy ProxyManager for USE_FREE_PROXIES mode (auto-fetched free proxies).
+        self.proxy_manager = None
+        # Session-health telemetry. Persisted LIVE on every meaningful event
+        # (login, throttle, rotation) so the dashboard can watch the run as it
+        # happens; finalized + moved into history at run end.
+        self.telemetry = {
+            "status": "running",
+            "started_at": None,
+            "finished_at": None,
+            "mode": None,
+            "login": None,
+            "proxy": {"source": "none", "url": None},
+            "max_consecutive_errors": 0,
+            "throttle_events": 0,
+            "daily_searches": 0,
+            "daily_search_limit": config.MAX_DAILY_SEARCHES,
+            "records_scraped": 0,
+            "recovered": 0,
+            "still_failed": 0,
+            "ban_risk": 0,
+            "events": [],
+        }
+
+    # ─────────────────────────────────────────────
+    #  BROWSER SETUP & ANTI-BLOCK
+    # ─────────────────────────────────────────────
+
+    async def _launch_browser(self):
+        """Launch a stealth browser instance."""
+        logger.info("🚀 Launching stealth browser...")
+
+        proxy_dict = None
+        if self.config.PROXY_LIST:
+            proxy_url = self._next_proxy()
+            proxy_dict = {"server": proxy_url}
+            logger.info(f"🛡️  Using proxy server: {proxy_url}")
+            self.telemetry["proxy"] = {"source": "config_list", "url": proxy_url}
+        elif self.config.USE_FREE_PROXIES:
+            await self._ensure_free_proxies()
+            proxy_url = self._next_proxy()
+            if proxy_url:
+                proxy_dict = {"server": proxy_url}
+                logger.info(f"🌐 Using free proxy: {proxy_url}")
+                self.telemetry["proxy"] = {"source": "free", "url": proxy_url}
+            else:
+                logger.warning("🌐 No free proxy available — using direct connection")
+
+        self.playwright = await async_playwright().start()
+        try:
+            self.browser = await self.playwright.chromium.launch(
+                headless=self.config.HEADLESS,
+                proxy=proxy_dict,
+                args=[
+                    "--no-sandbox",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--disable-dev-shm-usage",
+                    "--disable-extensions",
+                    "--start-maximized",
+                ]
+            )
+        except Exception as e:
+            # A dead proxy usually surfaces right here — fall back to a direct
+            # connection once instead of dying with the launch.
+            if proxy_dict:
+                logger.warning(f"⚠️  Launch with proxy failed ({e.__class__.__name__}) — retrying direct.")
+                proxy_dict = None
+                self.current_proxy = None
+                self.browser = await self.playwright.chromium.launch(
+                    headless=self.config.HEADLESS,
+                    proxy=None,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-infobars",
+                        "--disable-dev-shm-usage",
+                        "--disable-extensions",
+                        "--start-maximized",
+                    ]
+                )
+            else:
+                raise
+
+        # Coherent fingerprint selection — either a fixed profile per launch
+        # (consistent UA/platform/GPU/viewport/timezone) or randomized each
+        # launch when RANDOMIZE_FINGERPRINT is on. The viewport is read
+        # defensively so a hand-edited profile missing the key degrades to
+        # 1920x1080 instead of crashing the launch.
+        if self.config.RANDOMIZE_FINGERPRINT:
+            fp = random.choice(_FINGERPRINTS)
+        else:
+            fp = _FINGERPRINTS[0]
+        user_agent = fp["user_agent"]
+        viewport = fp.get("viewport", (1920, 1080))
+        logger.info(f"🕵️  Fingerprint: {fp['platform']} · {viewport[0]}x{viewport[1]} · {fp['timezone_id']}")
+
+        # Reuse a persisted login session if one exists — the fastest and least
+        # detectable path (no typing, no 2FA on subsequent runs).
+        storage_state = None
+        if self.config.USE_PERSISTENT_SESSION:
+            session_file = self._session_file()
+            if session_file.exists():
+                storage_state = str(session_file)
+
+        # A single context must present ONE coherent identity: UA, platform,
+        # viewport, locale, timezone, geo and client hints all come from the
+        # same profile so nothing contradicts anything else.
+        self.context = await self.browser.new_context(
+            user_agent=user_agent,
+            viewport={"width": viewport[0], "height": viewport[1]},
+            locale=fp["locale"],
+            timezone_id=fp["timezone_id"],
+            permissions=["geolocation"],
+            geolocation=fp["geo"],
+            extra_http_headers={
+                "Accept-Language": f"{fp['locale']},en;q=0.9",
+                "sec-ch-ua-platform": f'"{fp["platform_label"]}"',
+            },
+            storage_state=storage_state,
+        )
+
+        # Deep stealth script — every LinkedIn bot-check surface, patched in
+        # one pass. f-string with doubled braces; {fp[...]} holes inject the
+        # coherent fingerprint values (WebGL vendor/renderer, hardware).
+        await self.context.add_init_script(f"""
+            // --- navigator.webdriver must disappear -------------------------
+            Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined }});
+
+            // --- window.chrome must exist in a Chromium browser --------------
+            if (!window.chrome) {{
+                window.chrome = {{
+                    runtime: {{}},
+                    loadTimes: function() {{}},
+                    csi: function() {{}},
+                    app: {{ isInstalled: false }}
+                }};
+            }}
+
+            // --- permissions.query must not leak 'prompt' for notifications --
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                    Promise.resolve({{ state: Notification.permission }}) :
+                    originalQuery(parameters)
+            );
+
+            // --- plugins must look populated (PDF viewer, Chrome components) -
+            const PLUGIN_DATA = [
+                {{ name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }},
+                {{ name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoikgieeekl', description: '' }},
+                {{ name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }}
+            ];
+            const fakePluginArray = Object.create(PluginArray.prototype);
+            PLUGIN_DATA.forEach((p, i) => {{
+                const plugin = Object.create(Plugin.prototype);
+                Object.defineProperties(plugin, {{
+                    name: {{ value: p.name, enumerable: true }},
+                    filename: {{ value: p.filename, enumerable: true }},
+                    description: {{ value: p.description, enumerable: true }},
+                    length: {{ value: 0, enumerable: true }}
+                }});
+                Object.defineProperty(fakePluginArray, i, {{ value: plugin, enumerable: true }});
+            }});
+            Object.defineProperty(fakePluginArray, 'length', {{ value: PLUGIN_DATA.length, enumerable: true }});
+            Object.defineProperty(navigator, 'plugins', {{ get: () => fakePluginArray }});
+            Object.defineProperty(navigator, 'mimeTypes', {{ get: () => {{
+                const mt = Object.create(MimeTypeArray.prototype);
+                Object.defineProperty(mt, 'length', {{ value: 2, enumerable: true }});
+                return mt;
+            }}}});
+
+            // --- languages must include the context locale -------------------
+            Object.defineProperty(navigator, 'languages', {{ get: () => ['{fp['locale']}', 'en'] }});
+
+            // --- WebGL must report the fingerprint GPU, not SwiftShader ------
+            try {{
+                const WEBGL_VENDOR = '{fp['webgl_vendor']}';
+                const WEBGL_RENDERER = '{fp['webgl_renderer']}';
+                const patchGetParameter = (proto) => {{
+                    const getParameter = proto.getParameter;
+                    proto.getParameter = function (param) {{
+                        if (param === 37445) return WEBGL_VENDOR;
+                        if (param === 37446) return WEBGL_RENDERER;
+                        return getParameter.call(this, param);
+                    }};
+                }};
+                patchGetParameter(WebGLRenderingContext.prototype);
+                patchGetParameter(WebGL2RenderingContext.prototype);
+            }} catch (err) {{ /* never break page scripts */ }}
+
+            // --- hardware hints must match the fingerprint profile -----------
+            try {{
+                Object.defineProperty(navigator, 'deviceMemory', {{ get: () => {fp['hardware']['deviceMemory']} }});
+                Object.defineProperty(navigator, 'hardwareConcurrency', {{ get: () => {fp['hardware']['hardwareConcurrency']} }});
+                Object.defineProperty(navigator, 'maxTouchPoints', {{ get: () => {fp['hardware']['maxTouchPoints']} }});
+            }} catch (err) {{ /* non-fatal */ }}
+
+            // --- userAgentData must agree with the UA string -----------------
+            try {{
+                const BRAND_VERSION = '{fp['ua_version']}';
+                const UA_PLATFORM = '{fp['platform_label']}';
+                Object.defineProperty(navigator, 'userAgentData', {{
+                    value: {{
+                        brands: [
+                            {{ brand: 'Not_A Brand', version: '24' }},
+                            {{ brand: 'Chromium', version: BRAND_VERSION }},
+                            {{ brand: 'Google Chrome', version: BRAND_VERSION }},
+                        ],
+                        mobile: false,
+                        platforms: [UA_PLATFORM],
+                        getHighEntropyValues: async (hints) => ({{
+                            architecture: 'x86',
+                            bitness: '64',
+                            model: '',
+                            platform: UA_PLATFORM,
+                            platformVersion: '{fp['platform_ver']}',
+                            uaFullVersion: BRAND_VERSION + '.0.0.0',
+                            fullVersionList: [
+                                {{ brand: 'Not_A Brand', version: '24.0.0.0' }},
+                                {{ brand: 'Chromium', version: BRAND_VERSION + '.0.0.0' }},
+                                {{ brand: 'Google Chrome', version: BRAND_VERSION + '.0.0.0' }},
+                            ],
+                        }}),
+                        toJSON: function() {{
+                            return {{ brands: this.brands, mobile: this.mobile, platform: this.platform }};
+                        }},
+                    }}
+                }});
+            }} catch (err) {{ /* non-fatal */ }}
+
+            // --- Chrome has no notification permission by default ------------
+            try {{
+                if (typeof Notification !== 'undefined' && Notification.permission === 'default') {{
+                    // Leave as-is; permissions.query patch handles the probe.
+                }}
+            }} catch (err) {{ /* non-fatal */ }}
+        """)
+
+        self.page = await self.context.new_page()
+        await self.page.route(
+            "**/*.{png,jpg,jpeg,gif,svg,woff,woff2,ttf}",
+            lambda route: route.abort()
+        )
+
+        logger.info("✅ Browser launched successfully.")
+
+    async def _rotate_identity(self) -> bool:
+        """Re-launch with a fresh IP/proxy + fingerprint, then re-login.
+
+        Teardown is guarded so a half-dead browser/context/page (very likely
+        right after a block) can't turn a rotation into a crash, and the
+        Playwright driver is always stopped and restarted cleanly instead of
+        being reused in an unknown state.
+
+        Returns True only when the new identity is authenticated — callers can
+        use that to decide whether it's safe to resume scraping.
+        """
+        logger.info("🔄 Rotating identity (new IP + fingerprint)...")
+        self._telemetry_event("rotate", f"proxy: {self.current_proxy or 'direct'}")
+
+        # Tear down old context then browser, each independently guarded.
+        for closer in (
+            (self.context.close() if self.context is not None else None),
+            (self.browser.close() if self.browser is not None else None),
+        ):
+            if closer is None:
+                continue
+            try:
+                await closer
+            except Exception:
+                pass
+        self.context = None
+        self.browser = None
+        self.page = None
+
+        # Always restart the driver — reusing it after a block/dead proxy is the
+        # single most common source of "target closed" crashes.
+        try:
+            if self.playwright is not None:
+                await self.playwright.stop()
+        except Exception:
+            pass
+        self.playwright = None
+
+        try:
+            await self._launch_browser()
+        except Exception as e:
+            logger.error(f"❌ Re-launch after rotation failed ({e.__class__.__name__}: {e}).")
+            return False
+
+        try:
+            if not await self.login():
+                logger.error("❌ Re-login after rotation failed — session is not authenticated.")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Re-login after rotation errored ({e.__class__.__name__}: {e}).")
+            return False
+
+        return True
+
+    def _next_proxy(self):
+        """
+        Pick the next proxy for a launch/rotation. Source priority:
+          1. config.PROXY_LIST — round-robin, never the same proxy twice in a row
+             (so identity rotation actually changes IPs).
+          2. ProxyManager free-proxy pool (USE_FREE_PROXIES, PROXY_LIST empty).
+        Returns None to use a direct connection.
+        """
+        proxies = self.config.PROXY_LIST
+        if proxies:
+            if len(proxies) > 1:
+                for _ in range(len(proxies)):
+                    candidate = proxies[self._proxy_cursor % len(proxies)]
+                    self._proxy_cursor = (self._proxy_cursor + 1) % len(proxies)
+                    if candidate != self.current_proxy:
+                        self.current_proxy = candidate
+                        return candidate
+            self.current_proxy = proxies[self._proxy_cursor % len(proxies)]
+            return self.current_proxy
+        if self.config.USE_FREE_PROXIES and self.proxy_manager is not None:
+            proxy = self.proxy_manager.get_proxy()
+            if proxy:
+                self.current_proxy = proxy
+                return proxy
+        self.current_proxy = None
+        return None
+
+    async def _ensure_free_proxies(self):
+        """Fetch and test a pool of free proxies when PROXY_LIST is empty and
+        USE_FREE_PROXIES is on. Network work runs off the event loop; results
+        are cached to output/proxies.json for an hour."""
+        if self.proxy_manager is None:
+            from proxy_manager import ProxyManager
+            self.proxy_manager = ProxyManager()
+        if not self.proxy_manager.working_proxies:
+            await asyncio.to_thread(self.proxy_manager.refresh)
+            if not self.proxy_manager.working_proxies:
+                logger.warning("⚠️  No free proxies could be fetched/tested — continuing without a proxy.")
+
+    @staticmethod
+    def _backoff_delay(consecutive_errors: int) -> float:
+        """Exponential backoff with jitter: ~60s * 2^(errors-3), capped at 600s."""
+        capped = min(60 * (2 ** max(consecutive_errors - 3, 0)), 600)
+        return capped * random.uniform(0.8, 1.2)
+
+    async def _handle_potential_block(self):
+        """Increase delay multipliers and evaluate if identity rotation is needed."""
+        self.consecutive_errors += 1
+        
+        if self.consecutive_errors >= self.config.CONSECUTIVE_ERROR_LIMIT and self.config.ADAPTIVE_THROTTLE:
+            logger.warning(f"⚠️  {self.consecutive_errors} consecutive errors. Increasing delays and rotating!")
+            # Exponential backoff that grows with the error streak, then rotate.
+            wait = self._backoff_delay(self.consecutive_errors)
+            logger.info(f"⏳ Adaptive break: {wait:.0f}s (consecutive errors: {self.consecutive_errors})")
+            await human_delay(wait * 0.9, wait * 1.1)
+            
+            rotated = True
+            if self.config.ROTATE_USER_AGENT:
+                # Shed the current proxy before rotating — dead proxies are
+                # removed from the free-proxy pool so the list refills.
+                if self.proxy_manager is not None and self.current_proxy:
+                    self.proxy_manager.mark_failed(self.current_proxy)
+                    self.current_proxy = None
+                rotated = await self._rotate_identity()
+            
+            self.telemetry["max_consecutive_errors"] = max(
+                self.telemetry["max_consecutive_errors"], self.consecutive_errors
+            )
+            self.telemetry["throttle_events"] += 1
+            self._telemetry_event("throttle", f"{self.consecutive_errors} consecutive errors")
+            self.consecutive_errors = 0
+            if not rotated:
+                # The browser/login is in an unusable state — continuing would
+                # just spray errors at a dead session. Let the caller stop.
+                logger.error("❌ Rotation failed while throttled — stopping this search.")
+                self._telemetry_event("block", "rotation failed while throttled")
+                return False
+            return True
+            
+        return False
+
+    async def _check_page_block_status(self) -> bool:
+        """Classify the current page as blocked / limited (sets self._block_reason).
+
+        Returns True when the page is an auth-wall, captcha, security
+        checkpoint or a rate-limit / "unusual activity" interstitial — i.e. the
+        session should stop and recover instead of hammering LinkedIn.
+        """
+        self._block_reason = ""
+        try:
+            current_url = (self.page.url or "").lower()
+        except Exception:
+            return False
+
+        # 1) Hard security checkpoint / captcha — sometimes human-solvable.
+        if any(m in current_url for m in ("/checkpoint/", "challenge", "/security/")):
+            logger.error("🛑 CAPTCHA / security checkpoint detected!")
+            logger.warning("   Complete the challenge in the browser window if you can.")
+            resolved = await self._await_challenge_resolution(
+                self.config.LOGIN_CHALLENGE_TIMEOUT_SECONDS
+            )
+            if resolved:
+                return False
+            self._block_reason = "checkpoint"
+            return True
+
+        content = ""
+        try:
+            content = (await self.page.content()).lower()
+        except Exception:
+            pass
+
+        # 2) Rate limiting / throttling — LinkedIn's classic "slow down" wall.
+        if any(m in content for m in (
+            "too many requests",
+            "error 429",
+            "http 429",
+            "you've reached the limit",
+            "unusual activity",
+            "we've restricted",
+            "temporarily restricted",
+        )):
+            logger.error("🛑 Rate-limit / unusual-activity page detected.")
+            self._block_reason = "rate_limit"
+            return True
+
+        # 3) Forced auth wall — a logged-in session never sees this on a search.
+        if any(m in current_url for m in ("authwall", "/uas/login", "/signup")) or any(
+            m in content for m in ("sign in to linkedin", "join linkedin to see", "authwall")
+        ):
+            logger.error("🛑 Auth-wall detected — session is no longer authenticated.")
+            self._block_reason = "authwall"
+            return True
+
+        # 4) Explicit human-verification interstitials.
+        if any(m in content for m in (
+            "prove you're not a robot",
+            "are you a human",
+            "let's do a quick security check",
+        )):
+            logger.error("🛑 Human-verification interstitial detected.")
+            self._block_reason = "captcha"
+            return True
+
+        return False
+
+    async def _recover_from_block(self, context: str) -> bool:
+        """Rotate identity + re-login to recover from a block, then resume.
+
+        Bounded by config.MAX_BLOCK_RECOVERIES so a determined auth-wall can't
+        spin forever or burn the account. Returns True when a fresh,
+        authenticated identity is ready to continue the current search;
+        False when the recovery budget is spent or the re-login failed (the
+        caller should stop cleanly rather than retry).
+        """
+        reason = self._block_reason or "unknown"
+        if self._block_recoveries >= self.config.MAX_BLOCK_RECOVERIES:
+            logger.error(
+                f"🛑 Blocked again during {context} ({reason}) but the recovery "
+                f"budget ({self.config.MAX_BLOCK_RECOVERIES}) is exhausted — stopping."
+            )
+            self._telemetry_event("block", f"{reason}: budget exhausted")
+            return False
+
+        self._block_recoveries += 1
+        attempt = self._block_recoveries
+        budget = self.config.MAX_BLOCK_RECOVERIES
+        logger.warning(f"♻️  Block recovery {attempt}/{budget} after '{reason}' during {context}...")
+        self._telemetry_event("recover", f"{reason} (#{attempt}/{budget})")
+
+        # Grow the pause with each successive recovery — an instant retry after
+        # a rate-limit just re-triggers it.
+        wait = self._backoff_delay(3 + attempt)
+        logger.info(f"⏳ Cooling down {wait:.0f}s before rotating identity...")
+        await human_delay(wait * 0.9, wait * 1.1)
+
+        try:
+            rotated = await self._rotate_identity()
+        except Exception as e:
+            logger.error(f"❌ Identity rotation failed ({e.__class__.__name__}: {e}) — stopping.")
+            return False
+
+        if not rotated:
+            logger.error("❌ Could not re-authenticate after rotation — stopping.")
+            return False
+
+        self.consecutive_errors = 0
+        self._block_reason = ""
+        logger.info(f"✅ Recovered from '{reason}' — resuming {context}.")
+        return True
+
+    # ─────────────────────────────────────────────
+    #  AUTHENTICATION
+    # ─────────────────────────────────────────────
+
+    def _session_file(self) -> Path:
+        """Path to the persisted session file for the current account."""
+        return Path(self.config.SESSION_DIR) / f"session_{self.current_account['email'].replace('@', '_')}.json"
+
+    async def _is_logged_in(self) -> bool:
+        """True if the current page looks like an authenticated LinkedIn page."""
+        url = self.page.url
+        if any(x in url for x in ["feed", "mynetwork", "jobs", "messaging"]):
+            return True
+        try:
+            # The global nav only renders for authenticated sessions.
+            return await self.page.query_selector("nav.global-nav, .global-nav") is not None
+        except Exception:
+            return False
+
+    async def _await_challenge_resolution(self, timeout: int) -> bool:
+        """Poll until a checkpoint / 2FA / verification page resolves (or the
+        timeout elapses). Returns True once the session is authenticated."""
+        logger.warning(f"⚠️  Verification/2FA required — complete it in the browser window (up to {timeout}s)...")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            await asyncio.sleep(5)
+            if await self._is_logged_in():
+                return True
+            url = self.page.url
+            still_blocked = any(x in url for x in ["checkpoint", "challenge", "verification", "authwall"])
+            if not still_blocked:
+                # Left the challenge page — give the feed one last check.
+                if await self._is_logged_in():
+                    return True
+        logger.error("❌ Verification/2FA was not completed in time.")
+        return False
+
+    async def login(self) -> bool:
+        """
+        Log in to LinkedIn. Attack order:
+          1. Restore the persisted session (fast, invisible, no typing).
+          2. If stale, clear cookies and do a human-like fresh login with retries.
+          3. Poll through checkpoint/2FA instead of blind waits, then confirm
+             with a URL + global-nav check before declaring success.
+        """
+        logger.info(f"🔐 Attempting login for: {self.current_account['email']}")
+        session_file = self._session_file()
+
+        # 1) Persisted session restore first.
+        if self.config.USE_PERSISTENT_SESSION and session_file.exists():
+            logger.info("🔑 Restoring persisted session...")
+            try:
+                await self.page.goto(
+                    "https://www.linkedin.com/feed/",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                await human_delay(2, 4)
+                if await self._is_logged_in():
+                    logger.info("✅ Session restored — already logged in.")
+                    self._record_login(True, "restored")
+                    return True
+                # Stale session: drop cookies so the fresh login isn't fought by
+                # a half-validated old session.
+                logger.warning("⚠️  Persisted session expired — falling back to fresh login.")
+                await self.context.clear_cookies()
+            except Exception as e:
+                logger.warning(f"⚠️  Session restore failed ({e}); continuing with fresh login.")
+
+        # 2) Fresh login with retries (MAX_RETRIES attempts, growing backoff).
+        max_attempts = max(1, self.config.MAX_RETRIES)
+        for attempt in range(1, max_attempts + 1):
+            if await self._fresh_login():
+                if self.config.USE_PERSISTENT_SESSION:
+                    session_file.parent.mkdir(parents=True, exist_ok=True)
+                    await self.context.storage_state(path=str(session_file))
+                    logger.info(f"💾 Session state saved to {session_file}")
+                return True
+            # Bad credentials won't fix themselves — retrying only risks an account lock.
+            # (The detailed outcome was already recorded inside _fresh_login.)
+            if self._last_login_error == "credentials":
+                return False
+            if attempt < max_attempts:
+                backoff = random.uniform(15, 30) * attempt
+                logger.warning(f"⏳ Login retry {attempt}/{max_attempts} in {backoff:.0f}s...")
+                await asyncio.sleep(backoff)
+        self._record_login(False, "retries_exhausted")
+        return False
+
+    async def _fresh_login(self) -> bool:
+        """Single human-like login attempt. Returns True on success and records
+        the failure kind in self._last_login_error ("credentials" vs generic)."""
+        self._last_login_error = ""
+        try:
+            await self.page.goto(
+                "https://www.linkedin.com/login",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await human_delay(3, 5)
+
+            email_input = await self.page.wait_for_selector("#username", timeout=20000)
+            await email_input.click()
+            await human_delay(0.5, 1.5)
+            await self._type_like_human(email_input, self.current_account['email'])
+            await human_delay(0.8, 1.5)
+
+            password_input = await self.page.wait_for_selector("#password")
+            await password_input.click()
+            await human_delay(0.3, 0.8)
+            await self._type_like_human(password_input, self.current_account['password'])
+            await human_delay(0.5, 1.5)
+
+            await self.page.click('button[type="submit"]')
+
+            try:
+                await self.page.wait_for_load_state("domcontentloaded", timeout=20000)
+            except Exception:
+                pass
+            await human_delay(4, 7)
+
+            # Fast path: straight to an authenticated page.
+            if await self._is_logged_in():
+                logger.info("✅ Login successful!")
+                self._record_login(True, "fresh")
+                return True
+
+            url = self.page.url
+            logger.info(f"   Post-login URL: {url}")
+
+            # Credentials rejected — surface LinkedIn's own message instead of guessing.
+            if "#username" in url or ("login" in url and await self.page.query_selector("#error-for-password, .alert, .form__error")):
+                error_text = await self.page.evaluate(
+                    """() => {
+                        const el = document.querySelector('#error-for-password, .alert, .form__error');
+                        return el ? el.textContent.trim() : '';
+                    }"""
+                )
+                logger.error(f"❌ Login rejected by LinkedIn: {error_text or 'check LINKEDIN_EMAIL / LINKEDIN_PASSWORD'}")
+                self._last_login_error = "credentials"
+                self._record_login(False, "credentials", detail=error_text or "")
+                return False
+
+            # Checkpoint / 2FA / verification — poll until resolved.
+            if any(x in url for x in ["checkpoint", "challenge", "verification"]):
+                if await self._await_challenge_resolution(self.config.LOGIN_CHALLENGE_TIMEOUT_SECONDS):
+                    logger.info("✅ Login successful (after verification)!")
+                    self._record_login(True, "fresh_after_verification")
+                    return True
+                self._record_login(False, "challenge_timeout")
+                return False
+
+            # Landed on the homepage without a challenge — poke at the feed once.
+            if url.rstrip("/") in ["https://www.linkedin.com", "https://linkedin.com", "https://www.linkedin.com/feed"]:
+                await self.page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
+                await human_delay(2, 4)
+                if await self._is_logged_in():
+                    logger.info("✅ Login successful!")
+                    self._record_login(True, "fresh")
+                    return True
+
+            logger.error(f"❌ Login failed. URL: {self.page.url}")
+            logger.error("   Double-check LINKEDIN_EMAIL and LINKEDIN_PASSWORD in config.py")
+            self._record_login(False, "unknown")
+            return False
+
+        except Exception as e:
+            logger.error(f"❌ Login error: {e}")
+            self._record_login(False, "error", detail=str(e)[:200])
+            return False
+
+    async def _type_like_human(self, element, text: str):
+        """Type character by character to mimic human typing."""
+        for char in text:
+            await element.type(char, delay=random.randint(50, 200))
+
+    # ─────────────────────────────────────────────
+    #  SEARCH — JOBS (NEW)
+    # ─────────────────────────────────────────────
+
+    async def search_jobs(self, keyword: str) -> list:
+        """
+        Search LinkedIn for job listings by keyword.
+        Returns a list of job dicts extracted from the search results page.
+        """
+        jobs = []
+        page_num = 1
+
+        # Faceted job URL (v5.0): recency / experience / workplace / easy-apply
+        # / sort are rendered by the shared builder, which validates every value
+        # (LinkedIn silently ignores a filter it does not recognise).
+        base_filters = self._build_job_filters(keyword)
+        self._log_search_warnings(base_filters.warnings, f"job search '{keyword}'")
+
+        logger.info(f"   💼 Searching Jobs: '{keyword}'")
+
+        while page_num <= self.config.MAX_JOB_PAGES:
+            if self.daily_searches >= self.config.MAX_DAILY_SEARCHES:
+                logger.warning("🛑 Daily search limit reached. Stopping.")
+                break
+
+            try:
+                # LinkedIn pages jobs by ``start`` offset (25 cards per page).
+                page_filters = self._build_job_filters(
+                    keyword, start=base_filters.page_start(page_num, per_page=25))
+                url = build_jobs_search_url(page_filters)
+                await self.page.goto(url, wait_until="domcontentloaded", timeout=self.config.REQUEST_TIMEOUT_MS)
+                await human_delay(3, 6)
+                
+                if await self._check_page_block_status():
+                    # Rotate + re-login and retry this page; stop only when the
+                    # recovery budget is exhausted or re-login failed.
+                    if await self._recover_from_block(f"jobs search '{keyword}' page {page_num}"):
+                        continue
+                    break
+                    
+                self.consecutive_errors = 0  # Reset errors on success
+                self._register_search()
+                
+                await random_scroll(self.page, scrolls=5) # Scroll more for jobs to load
+
+                content = await self.page.content()
+                if "No matching jobs found" in content or "We couldn't find any jobs" in content:
+                    logger.info("   No more jobs found.")
+                    break
+
+                new_jobs = await self._extract_job_cards()
+                if not new_jobs:
+                    logger.info(f"      No extractable jobs on page {page_num}.")
+                    break
+
+                # Apply Strict Hours Filter (dropped is initialised outside the
+                # branch: it used to be referenced before assignment whenever the
+                # strict filter was off, raising UnboundLocalError).
+                dropped = 0
+                if getattr(self.config, 'JOB_STRICT_HOURS_FILTER', None) is not None:
+                    filtered_jobs = []
+                    for job in new_jobs:
+                        hours_old = self._parse_hours_ago(job.get('full_text', ''))
+                        if hours_old <= self.config.JOB_STRICT_HOURS_FILTER:
+                            filtered_jobs.append(job)
+
+                    dropped = len(new_jobs) - len(filtered_jobs)
+                    if dropped > 0:
+                        logger.info(f"      Dropped {dropped} jobs older than {self.config.JOB_STRICT_HOURS_FILTER} hours.")
+
+                    new_jobs = filtered_jobs
+
+                if not new_jobs:
+                    logger.info(f"      No jobs matched time filter on page {page_num}.")
+                    # If all jobs on page are too old, we probably hit the chronological end.
+                    if dropped > 0:
+                        break
+
+                jobs.extend(new_jobs)
+                logger.info(f"      Page {page_num}: +{len(new_jobs)} jobs extracted")
+
+                page_num += 1
+                await human_delay(4, 9)
+
+                self.session_count += 1
+                if self.session_count % self.config.BREAK_EVERY_N_REQUESTS == 0:
+                    await self._take_session_break()
+                    
+                if self.config.ROTATE_USER_AGENT and self.session_count % self.config.UA_ROTATE_EVERY_N == 0:
+                    await self._rotate_identity()
+
+            except Exception as e:
+                logger.error(f"      Search error page {page_num}: {e}")
+                if await self._handle_potential_block():
+                    pass # Handled by block detector
+                else:
+                    break
+
+        return jobs
+
+    async def _extract_job_cards(self) -> list:
+        """Extract job details directly from the search results list."""
+        jobs = []
+        try:
+            # Wait for job list to render
+            await self.page.wait_for_selector(".jobs-search-results-list", timeout=5000)
+            
+            # Extract basic data using playwright eval
+            job_cards = await self.page.eval_on_selector_all(
+                ".job-card-container",
+                """elements => elements.map(el => {
+                    const titleEl = el.querySelector('.job-card-list__title');
+                    const companyEl = el.querySelector('.job-card-container__company-name');
+                    const locationEl = el.querySelector('.job-card-container__metadata-item');
+                    const linkEl = el.querySelector('a.job-card-container__link');
+                    
+                    return {
+                        title: titleEl ? titleEl.innerText.trim() : 'Unknown',
+                        company: companyEl ? companyEl.innerText.trim() : 'Unknown',
+                        location: locationEl ? locationEl.innerText.trim() : 'Unknown',
+                        url: linkEl ? linkEl.href.split('?')[0] : '',
+                        full_text: el.innerText
+                    }
+                })"""
+            )
+            
+            for card in job_cards:
+                if card['url']:
+                    card['scraped_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    jobs.append(card)
+                    
+        except Exception as e:
+            logger.warning(f"Job extraction warning: {e}")
+            
+        return jobs
+
+    def _parse_hours_ago(self, text: str) -> int:
+        """Parse text like '5 minutes ago' or '2 days ago' into total hours."""
+        text = text.lower()
+        if "just now" in text or "minutes ago" in text or "minute ago" in text:
+            return 0
+            
+        match = re.search(r'(\d+)\s+(hour|day|week|month)s?\s*ago', text)
+        if match:
+            val = int(match.group(1))
+            unit = match.group(2)
+            if unit == 'hour': return val
+            if unit == 'day': return val * 24
+            if unit == 'week': return val * 24 * 7
+            if unit == 'month': return val * 24 * 30
+            
+        return 999999 # Unknown or extremely old
+
+    # ─────────────────────────────────────────────
+    #  SEARCH — CANDIDATES (NEW)
+    # ─────────────────────────────────────────────
+
+    async def search_candidates(self, skill: str) -> list:
+        """
+        Search LinkedIn for people matching specific skills.
+        Returns a list of profile URLs.
+        """
+        profile_urls = []
+        page_num = 1
+
+        # Skill + optional title filter, rendered through the same faceted
+        # builder as people search (so network/seniority/location filters apply
+        # here too instead of silently diverging).
+        base_filters = self._build_people_filters(skill, self.config.CANDIDATE_TITLE_FILTER or "")
+        self._log_search_warnings(base_filters.warnings, f"candidate search '{skill}'")
+        search_query = base_filters.keywords
+
+        logger.info(f"   👤 Searching Candidates: '{search_query}'")
+
+        while page_num <= self.config.MAX_CANDIDATE_PAGES:
+            if self.daily_searches >= self.config.MAX_DAILY_SEARCHES:
+                logger.warning("🛑 Daily search limit reached. Stopping.")
+                break
+
+            try:
+                page_filters = self._build_people_filters(
+                    skill, self.config.CANDIDATE_TITLE_FILTER or "")
+                page_filters.page = page_num
+                url = build_people_search_url(page_filters)
+
+                await self.page.goto(url, wait_until="domcontentloaded", timeout=self.config.REQUEST_TIMEOUT_MS)
+                await human_delay(3, 6)
+                
+                if await self._check_page_block_status():
+                    # Rotate + re-login and retry this page; stop only when the
+                    # recovery budget is exhausted or re-login failed.
+                    if await self._recover_from_block(f"search results page {page_num}"):
+                        continue
+                    break
+                    
+                self.consecutive_errors = 0
+                self._register_search()
+                
+                await random_scroll(self.page)
+
+                content = await self.page.content()
+                if "No results found" in content or "no results" in content.lower():
+                    break
+
+                new_urls = await self._extract_profile_urls()
+                if not new_urls:
+                    break
+
+                profile_urls.extend(new_urls)
+                logger.info(f"      Page {page_num}: +{len(new_urls)} candidate profiles")
+
+                page_num += 1
+                await human_delay(4, 9)
+
+                self.session_count += 1
+                if self.session_count % self.config.BREAK_EVERY_N_REQUESTS == 0:
+                    await self._take_session_break()
+                    
+                if self.config.ROTATE_USER_AGENT and self.session_count % self.config.UA_ROTATE_EVERY_N == 0:
+                    await self._rotate_identity()
+
+            except Exception as e:
+                logger.error(f"      Search error page {page_num}: {e}")
+                if await self._handle_potential_block():
+                    pass
+                else:
+                    break
+
+        return list(set(profile_urls))
+
+    # ─────────────────────────────────────────────
+    #  SEARCH — PEOPLE (EXISTING, UPDATED with anti-block)
+    # ─────────────────────────────────────────────
+
+    async def search_people(self, company: str, job_title: str) -> list:
+        """
+        Search LinkedIn for people with a specific job title at a company.
+        Returns a list of profile URLs.
+        """
+        profile_urls = []
+        page_num = 1
+
+        # Faceted search URL (v5.0). Title + company stay quoted, AND-ed terms;
+        # configured facets (network, current/past company, school, industry,
+        # seniority) are emitted as LinkedIn-native JSON facets. Invalid values
+        # are reported instead of being silently ignored by LinkedIn.
+        base_filters = self._build_people_filters(job_title, company)
+        self._log_search_warnings(base_filters.warnings,
+                                  f"people search '{job_title}' at '{company}'")
+        search_query = base_filters.keywords
+
+        logger.info(f"   🔍 '{job_title}' at '{company}'")
+
+        while page_num <= self.config.MAX_PAGES_PER_COMPANY:
+            if self.daily_searches >= self.config.MAX_DAILY_SEARCHES:
+                logger.warning("🛑 Daily search limit reached. Stopping.")
+                break
+
+            try:
+                page_filters = self._build_people_filters(job_title, company)
+                page_filters.page = page_num
+                url = build_people_search_url(page_filters)
+                await self.page.goto(url, wait_until="domcontentloaded", timeout=self.config.REQUEST_TIMEOUT_MS)
+                await human_delay(3, 6)
+                
+                if await self._check_page_block_status():
+                    # Rotate + re-login and retry this page; stop only when the
+                    # recovery budget is exhausted or re-login failed.
+                    if await self._recover_from_block(f"search results page {page_num}"):
+                        continue
+                    break
+                    
+                self.consecutive_errors = 0
+                self._register_search()
+                
+                await random_scroll(self.page)
+
+                content = await self.page.content()
+                if "No results found" in content or "no results" in content.lower():
+                    break
+
+                new_urls = await self._extract_profile_urls()
+                if not new_urls:
+                    break
+
+                profile_urls.extend(new_urls)
+                logger.info(f"      Page {page_num}: +{len(new_urls)} profiles")
+
+                page_num += 1
+                await human_delay(4, 9)
+
+                self.session_count += 1
+                if self.session_count % self.config.BREAK_EVERY_N_REQUESTS == 0:
+                    await self._take_session_break()
+                    
+                if self.config.ROTATE_USER_AGENT and self.session_count % self.config.UA_ROTATE_EVERY_N == 0:
+                    await self._rotate_identity()
+
+            except Exception as e:
+                logger.error(f"      Search error page {page_num}: {e}")
+                if await self._handle_potential_block():
+                    pass
+                else:
+                    break
+
+        return list(set(profile_urls))
+
+    async def _extract_profile_urls(self) -> list:
+        """Extract all LinkedIn /in/ profile URLs from the current page."""
+        urls = []
+        try:
+            links = await self.page.eval_on_selector_all(
+                "a[href*='/in/']",
+                "elements => elements.map(el => el.href)"
+            )
+            for link in links:
+                clean = re.sub(r'\?.*', '', link).rstrip('/')
+                if "/in/" in clean and clean not in urls:
+                    urls.append(clean)
+        except Exception as e:
+            logger.warning(f"URL extraction warning: {e}")
+        return urls
+
+    # ─────────────────────────────────────────────
+    #  PROFILE SCRAPING
+    # ─────────────────────────────────────────────
+
+    async def scrape_profile(self, profile_url: str, search_company: str, job_title: str) -> Optional[dict]:
+        """Scrape a single LinkedIn profile. Returns dict or None."""
+        try:
+            await self.page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
+            await human_delay(3, 7)
+            await self._maybe_humanize()
+            await random_scroll(self.page, scrolls=3)
+
+            soup = BeautifulSoup(await self.page.content(), "html.parser")
+
+            # Parse the heavy sections ONCE and derive both the structured and
+            # flat views from the same result — no repeated DOM walks.
+            deep = self.config.SCRAPE_WORK_EXPERIENCE
+            roles = self._extract_roles(soup) if deep else []
+            education_entries = (
+                self._extract_education_entries(soup) if self.config.SCRAPE_EDUCATION else []
+            )
+
+            title = self._extract_current_title(soup)
+            skills_text = self._extract_skills(soup) if deep else ""
+            career = self._career_stats(roles)
+
+            profile = {
+                "name":           self._extract_name(soup),
+                "title":          title,
+                "company":        self._extract_current_company(soup),
+                "headline":       self._extract_headline(soup),
+                "location":       self._extract_location(soup),
+                "about":          self._extract_about(soup) if deep else "",
+                "skills":         skills_text,
+                "experience":     self._format_experience(roles),
+                "education":      self._format_education(education_entries),
+                # ── Deeper structured data (same page load, zero extra requests) ──
+                "experience_roles":  json.dumps(roles, ensure_ascii=False) if roles else "",
+                "education_entries": json.dumps(education_entries, ensure_ascii=False) if education_entries else "",
+                "experience_count":  len(roles),
+                "education_count":   len(education_entries),
+                "skills_count":      len([s for s in skills_text.split(",") if s.strip()]),
+                "certifications":    self._extract_certifications(soup) if deep else "",
+                "languages":         self._extract_languages(soup) if deep else "",
+                "honors":            self._extract_honors(soup) if deep else "",
+                # ── Further sections ──
+                "volunteer":         self._extract_volunteer(soup) if deep else "",
+                "projects":          self._extract_projects(soup) if deep else "",
+                "publications":      self._extract_publications(soup) if deep else "",
+                "courses":           self._extract_courses(soup) if deep else "",
+                "patents":           self._extract_patents(soup) if deep else "",
+                "services":          self._extract_services(soup) if deep else "",
+                "interests":         self._extract_interests(soup) if deep else "",
+                "recommendations":   self._extract_recommendations(soup),
+                "recommendation_count": self._extract_recommendation_count(soup),
+                "websites":          self._extract_websites(soup),
+                # ── Identity / badges ──
+                "public_id":         self._extract_public_id(profile_url),
+                "pronouns":          self._extract_pronouns(soup),
+                "is_hiring":         self._extract_is_hiring(soup),
+                "is_creator":        self._extract_is_creator(soup),
+                "verified":          self._extract_verified(soup),
+                "banner_url":        self._extract_banner_url(soup),
+                "photo_url":         self._extract_photo_url(soup),
+                # ── Counts & audience ──
+                "followers":         self._extract_followers(soup),
+                "follower_count":    self._extract_follower_count(soup),
+                "connections":       self._extract_connections(soup),
+                "connection_count":  self._extract_connection_count(soup),
+                "open_to_work":      self._extract_open_to_work(soup),
+                "is_premium":        self._extract_is_premium(soup),
+                # ── Derived screening metrics (computed, not scraped) ──
+                "seniority":         self._seniority_of(title),
+                "total_experience_years": career["total_experience_years"],
+                "career_start_year":      career["career_start_year"],
+                "companies_count":        career["companies_count"],
+                "avg_tenure_months":      career["avg_tenure_months"],
+                "current_tenure_months":  career["current_tenure_months"],
+                "current_role_duration":  (roles[0].get("duration", "") if roles else ""),
+                "email":          self._extract_email(soup),
+                "phone":          self._extract_phone(soup),
+                "linkedin_url":   profile_url,
+                "search_company": search_company,
+                "searched_title": job_title,
+                "scraped_at":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+
+            # v5.0: derive screening fields (location parts, seniority rank,
+            # normalized skills, inferred-email candidates, completeness) and
+            # attach a resume match score when a resume is configured. Both are
+            # additive and fail soft, so the raw scrape is never lost.
+            profile = self._enrich_profile(profile)
+            self._count_section_misses(profile)
+
+            # Apply keyword / screening filters if configured
+            if self._passes_filter(profile):
+                logger.info(f"   ✅ {profile['name']} | {profile['title']} | {profile['company']}")
+                return profile
+            else:
+                logger.debug(f"   ⏭️  Skipped (filtered out): {profile['name']}")
+                return None
+
+        except Exception as e:
+            logger.error(f"   ❌ Failed: {profile_url} — {e}")
+            # Keep enough context to retry this profile once at the end of the run.
+            self.failed_urls.append({
+                "url": profile_url,
+                "company": search_company,
+                "title": job_title,
+            })
+            return None
+
+    def _passes_filter(self, profile: dict) -> bool:
+        """
+        Returns True if the profile passes every configured screening rule.
+
+        Rules are applied cheapest-first: client-side flags (open to work,
+        hiring), completeness, resume match score, then the legacy keyword
+        check on title + headline.  Empty/zero settings disable their rule, so
+        the default config accepts everything.
+        """
+        cfg = self.config
+        if getattr(cfg, "OPEN_TO_WORK_ONLY", False) and not profile.get("open_to_work"):
+            return False
+        if getattr(cfg, "HIRING_ONLY", False) and not profile.get("is_hiring"):
+            return False
+        min_completeness = int(getattr(cfg, "MIN_COMPLETENESS", 0) or 0)
+        if min_completeness and int(profile.get("completeness_score") or 0) < min_completeness:
+            return False
+        min_score = float(getattr(cfg, "MATCH_MIN_SCORE", 0) or 0)
+        if min_score and float(profile.get("match_score") or 0) < min_score:
+            return False
+        if not cfg.FILTER_KEYWORDS:
+            return True  # No filter = accept everything
+
+        text = (
+            (profile.get("title") or "") + " " +
+            (profile.get("headline") or "")
+        ).lower()
+
+        return any(kw.lower() in text for kw in self.config.FILTER_KEYWORDS)
+
+    # ─────────────────────────────────────────────
+    #  DATA EXTRACTION HELPERS
+    # ─────────────────────────────────────────────
+
+    def _extract_name(self, soup) -> str:
+        for sel in ["h1.text-heading-xlarge", "h1.inline.t-24", "h1"]:
+            el = soup.select_one(sel)
+            if el:
+                return el.get_text(strip=True)
+        return "Unknown"
+
+    def _extract_headline(self, soup) -> str:
+        for sel in [".text-body-medium.break-words", ".pv-top-card--experience-list-item"]:
+            el = soup.select_one(sel)
+            if el:
+                return el.get_text(strip=True)
+        return ""
+
+    def _extract_current_title(self, soup) -> str:
+        headline = self._extract_headline(soup)
+        if headline:
+            parts = re.split(r"\s+at\s+|\s*\|\s*", headline)
+            return parts[0].strip()
+        return ""
+
+    def _extract_current_company(self, soup) -> str:
+        exp_section = soup.find("section", {"id": "experience"})
+        if exp_section:
+            el = exp_section.select_one(".pv-entity__secondary-title, .t-14.t-normal")
+            if el:
+                return el.get_text(strip=True)
+        el = soup.select_one(".pv-top-card--experience-list .pv-top-card--experience-list-item")
+        return el.get_text(strip=True) if el else ""
+
+    def _extract_location(self, soup) -> str:
+        for sel in [".text-body-small.inline.t-black--light.break-words"]:
+            els = soup.select(sel)
+            for el in els:
+                text = el.get_text(strip=True)
+                if "," in text and len(text) < 60:
+                    return text
+        return ""
+
+    def _extract_email(self, soup) -> str:
+        """Find the profile's contact email. Prefers explicit mailto: links,
+        then falls back to scanning page text for a plausible address while
+        filtering out framework/image/site-internal false positives."""
+        # 1) Explicit mailto: links are the most reliable signal.
+        mailto = soup.select_one('a[href^="mailto:"]')
+        if mailto:
+            addr = mailto.get("href", "").replace("mailto:", "").split("?")[0].strip()
+            if addr and "@" in addr:
+                return addr
+
+        # 2) Text scan with aggressive false-positive filtering.
+        text = soup.get_text()
+        emails = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b', text)
+        junk_domains = (
+            "linkedin.com", "sentry.io", "example.com", "gstatic.com",
+            "w3.org", "schema.org", "play.google.com", "microsoft.com",
+            "google.com", "github.com", "2x.png", "png", "jpg", "jpeg",
+        )
+        for email in emails:
+            local, _, domain = email.partition("@")
+            if any(j in domain.lower() for j in junk_domains):
+                continue
+            if local.isdigit():  # image hash like 123456789@2x.png
+                continue
+            return email
+        return ""
+
+    def _extract_phone(self, soup) -> str:
+        """Find a phone number only when the page actually presents one.
+
+        LinkedIn hides phone numbers, so "" is the honest default. The previous
+        pattern matched any 10-digit run anywhere in the page and returned the
+        same internal id for every profile (all 46 imported records shared one
+        "phone"). Prefer tel: links, then require visible separators.
+        """
+        link = soup.select_one('a[href^="tel:"]')
+        if link:
+            raw = str(link.get("href", "")).split(":", 1)[-1].split("?")[0].strip()
+            if 7 <= len(re.sub(r"\D", "", raw)) <= 15:
+                return raw
+        text = soup.get_text(" ", strip=True)
+        # 3-3-4 with at least one separator between groups; a bare digit run is
+        # an id, and dates/ids must not become phone numbers.
+        pattern = re.compile(
+            r"(?<![\d])(\+?\d{1,3}[\s.\-]?)?\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}(?![\d])"
+        )
+        for match in pattern.finditer(text):
+            candidate = match.group(0).strip()
+            if 10 <= len(re.sub(r"\D", "", candidate)) <= 15:
+                return candidate
+        return ""
+
+    def _extract_connections(self, soup) -> str:
+        el = soup.select_one(".pv-top-card--list.pv-top-card--list-bullet .t-black--light")
+        if el and el.get_text(strip=True):
+            return el.get_text(strip=True)
+        # Fallback: the top card is near the start, so a bounded scan is cheap.
+        for node in soup.find_all(["span", "div"], limit=400):
+            text = node.get_text(" ", strip=True)
+            if text and len(text) < 40 and re.search(r"\bconnections?\b", text, re.I):
+                return text
+        return ""
+
+    def _extract_connection_count(self, soup) -> int:
+        """Numeric connection count ('500+ connections' → 500); 0 if unknown."""
+        return self._parse_count(self._extract_connections(soup))
+
+    def _extract_followers(self, soup) -> str:
+        """Follower line from the top card, e.g. '1,234 followers'."""
+        for node in soup.find_all(["span", "div", "a"]):
+            text = node.get_text(" ", strip=True)
+            if not text or len(text) > 40:
+                continue
+            if re.search(r"\bfollowers?\b", text, re.I):
+                return text
+        return ""
+
+    def _extract_follower_count(self, soup) -> int:
+        return self._parse_count(self._extract_followers(soup))
+
+    def _extract_open_to_work(self, soup) -> bool:
+        """Detect the green #OPEN_TO_WORK banner (image alt, aria-label or class)."""
+        for node in soup.select("img, div"):
+            blob = " ".join(filter(None, [
+                node.get("alt") or "",
+                node.get("aria-label") or "",
+                " ".join(node.get("class") or []),
+                node.get("src") or "",
+            ])).lower()
+            if "open to work" in blob or "open-to-work" in blob or "#open_to_work" in blob:
+                return True
+        return False
+
+    def _extract_is_premium(self, soup) -> bool:
+        """Detect a LinkedIn Premium badge in the top card."""
+        for node in soup.select("span, li, div"):
+            blob = " ".join(filter(None, [
+                node.get("aria-label") or "",
+                " ".join(node.get("class") or []),
+            ])).lower()
+            if "premium" in blob:
+                return True
+        return False
+
+    def _extract_photo_url(self, soup) -> str:
+        """Profile photo URL with the ephemeral query string stripped."""
+        for selector in (
+            ".pv-top-card-profile-picture__image",
+            ".pv-top-card-profile-picture img",
+            "img.profile-photo-edit__preview",
+            ".pv-top-card__photo",
+        ):
+            node = soup.select_one(selector)
+            if node and node.get("src"):
+                return str(node["src"]).split("?")[0]
+        return ""
+
+    def _section_list(self, soup, ids, patterns, item_selectors, limit: int = 8) -> str:
+        """Generic 'section of short entries' reader for certifications,
+        languages and honors/awards — the first selector that yields anything
+        wins, so it survives LinkedIn's periodic class renames."""
+        section = None
+        for section_id in ids:
+            section = soup.find("section", {"id": section_id})
+            if section:
+                break
+        if section is None:
+            for pattern in patterns:
+                section = soup.find("section", class_=re.compile(pattern, re.I))
+                if section:
+                    break
+        if section is None:
+            return ""
+
+        found = []
+        for selector in item_selectors:
+            for node in section.select(selector):
+                text = node.get_text(" ", strip=True)
+                if text and text not in found:
+                    found.append(text)
+            if found:
+                break
+        return " | ".join(found[:limit])
+
+    def _extract_certifications(self, soup) -> str:
+        return self._section_list(
+            soup,
+            ids=("licenses_and_certifications", "certifications"),
+            patterns=(r"certification", r"licenses"),
+            item_selectors=(".pv-certifications__entity", ".t-bold", "h3", "li"),
+        )
+
+    def _extract_languages(self, soup) -> str:
+        return self._section_list(
+            soup,
+            ids=("languages",),
+            patterns=(r"language",),
+            item_selectors=(".pv-language__name", "li", ".t-bold", "h3"),
+            limit=10,
+        )
+
+    def _extract_honors(self, soup) -> str:
+        return self._section_list(
+            soup,
+            ids=("honors_and_awards", "honors", "awards"),
+            patterns=(r"honor", r"award"),
+            item_selectors=("h3", ".t-bold", "li"),
+        )
+
+    # ── additional profile sections (all same page load) ────────
+
+    def _extract_volunteer(self, soup) -> str:
+        return self._section_list(
+            soup,
+            ids=("volunteering_experience", "volunteer_experience"),
+            patterns=(r"volunteer",),
+            item_selectors=("li", "h3", ".t-bold"),
+        )
+
+    def _extract_projects(self, soup) -> str:
+        return self._section_list(
+            soup,
+            ids=("projects", "project_experience"),
+            patterns=(r"project",),
+            item_selectors=("li", "h3", ".t-bold"),
+        )
+
+    def _extract_publications(self, soup) -> str:
+        return self._section_list(
+            soup,
+            ids=("publications",),
+            patterns=(r"publication",),
+            item_selectors=("li", "h3", ".t-bold"),
+        )
+
+    def _extract_courses(self, soup) -> str:
+        return self._section_list(
+            soup,
+            ids=("courses", "course"),
+            patterns=(r"course",),
+            item_selectors=("li", "h3", ".t-bold"),
+            limit=10,
+        )
+
+    def _extract_patents(self, soup) -> str:
+        return self._section_list(
+            soup,
+            ids=("patents", "patents_and_inventors"),
+            patterns=(r"patent",),
+            item_selectors=("li", "h3", ".t-bold"),
+        )
+
+    def _extract_services(self, soup) -> str:
+        """'Services offered' — how a freelancer/consultant wants to be hired."""
+        return self._section_list(
+            soup,
+            ids=("services", "service_category"),
+            patterns=(r"service",),
+            item_selectors=(".pv-service__name", "li", ".t-bold", "h3"),
+            limit=10,
+        )
+
+    def _extract_interests(self, soup) -> str:
+        """Companies / groups / schools the person follows."""
+        return self._section_list(
+            soup,
+            ids=("interests",),
+            patterns=(r"interest",),
+            item_selectors=(".pv-interest-entity", ".t-bold", "h3", "li"),
+            limit=12,
+        )
+
+    def _extract_recommendations(self, soup) -> str:
+        """Recommendation snippets (may be gated behind a click — '' is normal)."""
+        return self._section_list(
+            soup,
+            ids=("recommendations", "recommendation"),
+            patterns=(r"recommendation",),
+            item_selectors=(".pv-recommendation-entity", "li"),
+            limit=6,
+        )
+
+    def _extract_recommendation_count(self, soup) -> int:
+        """Parse the top-card '3 recommendations received' counter."""
+        text = soup.get_text(" ", strip=True)
+        match = re.search(r"(\d[\d,]*\+?)\s+recommendations?", text, re.I)
+        return self._parse_count(match.group(1)) if match else 0
+
+    def _extract_websites(self, soup) -> str:
+        """External links (portfolio, personal site, GitHub) shown on the profile.
+
+        Deliberately filters LinkedIn/CDN/asset hosts so the column stays useful
+        instead of filling up with CDN and deep-link noise.
+        """
+        junk = (
+            "linkedin.com", "licdn.com", "lnkd.in", "w3.org", "schema.org",
+            "gstatic.com", "google.com", "microsoft.com", "wikipedia.org",
+            "sentry.io", "javascript:", "mailto:", "tel:",
+        )
+        asset_tail = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js", ".ico")
+        found = []
+        for anchor in soup.find_all("a", href=True):
+            href = str(anchor["href"]).strip()
+            if not href.lower().startswith(("http://", "https://")):
+                continue
+            lowered = href.lower()
+            if any(token in lowered for token in junk):
+                continue
+            if lowered.split("?")[0].endswith(asset_tail):
+                continue
+            # Skip redirect wrappers; keep the real destination.
+            match = re.search(r"[?&]url=([^&]+)", href)
+            if match:
+                from urllib.parse import unquote
+                href = unquote(match.group(1))
+                lowered = href.lower()
+                if any(token in lowered for token in junk):
+                    continue
+            clean = href.split("?")[0].rstrip("/")
+            if clean and clean not in found:
+                found.append(clean)
+            if len(found) >= 5:
+                break
+        return " | ".join(found)
+
+    def _extract_pronouns(self, soup) -> str:
+        """Pronouns shown next to the name, e.g. '(she/her)'."""
+        for node in soup.select('[class*="pronoun" i], [aria-label*="pronoun" i]'):
+            text = node.get_text(" ", strip=True)
+            if text and len(text) <= 30:
+                return text
+        # Fallback: a short parenthetical with a slash near the top of the page.
+        for node in soup.find_all(["span", "div"], limit=300):
+            text = node.get_text(" ", strip=True)
+            if text and len(text) <= 24 and re.fullmatch(r"\([A-Za-z]+\s*/\s*[A-Za-z]+(?:\s*-\s*[A-Za-z]+)?\)", text):
+                return text
+        return ""
+
+    def _extract_top_card_flag(self, soup, tokens: tuple) -> bool:
+        """Detect a top-card badge by scanning ONLY attribute/class blobs.
+
+        Scanning visible text here would false-positive constantly — the word
+        "hiring" appears in ordinary About text — so this is intentionally
+        restricted to markers LinkedIn renders for the badge itself.
+        """
+        for node in soup.select("img, div, span"):
+            blob = " ".join(filter(None, [
+                node.get("alt") or "",
+                node.get("aria-label") or "",
+                " ".join(node.get("class") or []),
+                node.get("src") or "",
+            ])).lower()
+            if any(token in blob for token in tokens):
+                return True
+        return False
+
+    def _extract_is_hiring(self, soup) -> bool:
+        """The green #HIRING banner (very relevant for recruiter research)."""
+        return self._extract_top_card_flag(soup, ("#hiring", "open-to-hiring", "hiring-badge"))
+
+    def _extract_is_creator(self, soup) -> bool:
+        return self._extract_top_card_flag(soup, ("creator-mode", "creator_mode", "creator-badge"))
+
+    def _extract_verified(self, soup) -> bool:
+        return self._extract_top_card_flag(soup, ("verified"))
+
+    def _extract_banner_url(self, soup) -> str:
+        """Background/cover image URL, query string stripped."""
+        for selector in (
+            ".pv-top-card__cover-img img",
+            ".profile-background-image img",
+            ".pv-top-card--background-image img",
+        ):
+            node = soup.select_one(selector)
+            if node and node.get("src"):
+                return str(node["src"]).split("?")[0]
+        return ""
+
+    def _extract_about(self, soup) -> str:
+        section = soup.find("section", {"id": "about"}) or soup.find("section", class_=re.compile(r"pv-about"))
+        if not section:
+            return ""
+        el = section.select_one(".pv-shared-text-with-see-more") or section.select_one(".pv-about__summary-text")
+        return el.get_text(" ", strip=True)[:1000] if el else ""
+
+    def _extract_skills(self, soup) -> str:
+        section = soup.find("section", {"id": "skills"}) or soup.find("section", class_=re.compile(r"pv-skill"))
+        if not section:
+            return ""
+        names = [
+            el.get_text(strip=True)
+            for el in section.select(".pv-skill-category-entity__name-text, .skill-category-entity__name")
+        ]
+        return ", ".join(dict.fromkeys(n for n in names if n))
+
+    @staticmethod
+    def _parse_count(value) -> int:
+        """Parse LinkedIn's loosely-formatted counts into an int.
+
+        Handles the forms the site actually emits and every one a human might
+        paste: "500+", "1,234", "10K", "2.5M", "12 followers". Returns 0 when
+        there is nothing numeric, so callers never have to guard for None.
+        """
+        if isinstance(value, bool) or value is None:
+            return 0
+        if isinstance(value, int):
+            return value
+        text = str(value).replace(",", "").replace("\u00a0", " ").strip().lower()
+        if not text:
+            return 0
+        match = re.search(r"(\d+(?:\.\d+)?)\s*([km])?", text)
+        if not match:
+            return 0
+        multiplier = {"k": 1_000, "m": 1_000_000}.get(match.group(2) or "", 1)
+        return int(float(match.group(1)) * multiplier)
+
+    @staticmethod
+    def _date_range_from(node, selector: str) -> str:
+        """Read a 'Start – End' pair out of a date container ('' if absent)."""
+        container = node.select_one(selector)
+        if not container:
+            return ""
+        spans = [s.get_text(strip=True) for s in container.find_all("span")]
+        spans = [s for s in spans if s]
+        if len(spans) >= 2:
+            return f"{spans[0]} – {spans[1]}"
+        return spans[0] if spans else ""
+
+    # ── derived career analytics ────────────────────────────────
+
+    @staticmethod
+    def _month_index(text: str) -> Optional[int]:
+        """'Jan 2021' → 24252 (year*12+month-1). None for '' / 'Present'.
+
+        Used only for computing durations, never stored as a field.
+        """
+        if not text:
+            return None
+        lowered = text.strip().lower()
+        if "present" in lowered or "current" in lowered or "now" == lowered:
+            return None
+        year_match = re.search(r"(?:19|20)\d{2}", lowered)
+        if not year_match:
+            return None
+        year = int(year_match.group(0))
+        month = 1
+        for name, number in _MONTH_NAMES.items():
+            if name in lowered:
+                month = number
+                break
+        return year * 12 + (month - 1)
+
+    @staticmethod
+    def _now_month_index() -> int:
+        today = datetime.now()
+        return today.year * 12 + (today.month - 1)
+
+    @classmethod
+    def _career_stats(cls, roles: list) -> dict:
+        """Screening metrics derived from structured roles.
+
+        Definitions are deliberately explicit so nobody has to guess:
+          total_experience_years — earliest role start → now, in years
+          career_start_year      — year of the earliest role start
+          companies_count        — distinct employers across all listed roles
+          avg_tenure_months      — mean months per role
+          current_tenure_months  — months in the role listed as current
+        """
+        stats = {
+            "total_experience_years": 0.0,
+            "career_start_year": 0,
+            "companies_count": 0,
+            "avg_tenure_months": 0,
+            "current_tenure_months": 0,
+        }
+        if not roles:
+            return stats
+
+        now_index = cls._now_month_index()
+        starts, durations, companies = [], [], []
+        current_duration = 0
+
+        for role in roles:
+            # Employer count must not depend on whether the dates parse.
+            company = (role.get("company") or "").strip().lower()
+            if company:
+                companies.append(company)
+
+            dates = role.get("dates") or ""
+            start_text, _, end_text = dates.partition("–")
+            start = cls._month_index(start_text)
+            if start is None:
+                continue
+            # "Present" (and anything unparseable as an end) means still running.
+            end = cls._month_index(end_text)
+            is_current = end is None
+            if is_current:
+                end = now_index
+            if end < start:  # guard against reversed/typo'd ranges
+                end = start
+            starts.append(start)
+            durations.append(end - start)
+            if is_current:
+                current_duration = end - start
+
+        if starts:
+            stats["career_start_year"] = min(starts) // 12
+            stats["total_experience_years"] = round((now_index - min(starts)) / 12.0, 1)
+            stats["avg_tenure_months"] = int(round(sum(durations) / len(durations)))
+            stats["current_tenure_months"] = current_duration
+        stats["companies_count"] = len(set(companies))
+        return stats
+
+    @staticmethod
+    def _seniority_of(title: str) -> str:
+        """Bucket a title into a seniority band — same bands the dashboard uses."""
+        text = (title or "").lower()
+        if re.search(r"\b(ceo|cto|cfo|coo|cmo|cpo|chief)\b", text):
+            return "C-suite"
+        if re.search(r"vice president|\bvp\b", text):
+            return "VP"
+        if re.search(r"\bdirector\b", text):
+            return "Director"
+        if re.search(r"\b(manager|head|lead)\b", text):
+            return "Manager / Lead"
+        if re.search(r"\b(senior|sr\.?|principal|staff)\b", text):
+            return "Senior / Principal"
+        if re.search(r"\b(recruiter|talent|acquisition|sourcer|partner|specialist)\b", text):
+            return "Recruiting / TA"
+        return "Other"
+
+    @staticmethod
+    def _extract_public_id(profile_url: str) -> str:
+        """LinkedIn's public identifier from a profile URL (/in/<id>)."""
+        match = re.search(r"/in/([^/?#]+)", profile_url or "")
+        return match.group(1) if match else ""
+
+    def _count_section_misses(self, profile: dict) -> None:
+        """Tally which tracked fields came back empty for this profile."""
+        for field in _TRACKED_SECTIONS:
+            if not profile.get(field):
+                self.section_misses[field] = self.section_misses.get(field, 0) + 1
+
+    def _log_section_coverage(self, total: int) -> None:
+        """Report which fields were empty across the run.
+
+        LinkedIn reshuffles its markup periodically. Rather than let a broken
+        selector quietly export a blank column forever, this turns it into an
+        explicit warning naming the fields to fix.
+        """
+        if not total:
+            return
+        missing = sorted(
+            ((field, count) for field, count in self.section_misses.items() if count),
+            key=lambda pair: pair[1],
+            reverse=True,
+        )
+        if not missing:
+            logger.info("🧩 Selector coverage: every tracked field was populated.")
+            return
+
+        logger.info(
+            "🧩 Selector coverage: "
+            + ", ".join(f"{field} {count}/{total} empty" for field, count in missing)
+        )
+        always_empty = [field for field, count in missing if count >= total]
+        if always_empty:
+            logger.warning(
+                "⚠️  Empty for EVERY profile (likely a markup/selector change): "
+                + ", ".join(always_empty)
+            )
+
+    def _extract_roles(self, soup, limit: int = 10) -> list:
+        """Structured work history — one dict per role.
+
+        This is the single source of truth for work history: the flat
+        `experience` string is rendered from it, so the structured and flat
+        views can never disagree. Handles both the older one-entity-per-role
+        markup and the newer layout that groups several roles under one company.
+        """
+        section = (soup.find("section", {"id": "experience"})
+                   or soup.find("section", class_=re.compile(r"pv-experience")))
+        if not section:
+            return []
+
+        roles = []
+        for position in section.select(".pv-position-entity"):
+            # Newer markup nests each role of a company inside the entity.
+            nested = position.select(
+                ".pv-entity__position-group-role-item, .pv-entity__position-group-pager li"
+            )
+            company_el = (position.select_one(".pv-entity__secondary-title")
+                          or position.select_one(".pv-entity__company-name"))
+            company = company_el.get_text(strip=True) if company_el else ""
+
+            for node in (nested or [position]):
+                title_el = (node.select_one(".pv-entity__summary-info h3")
+                            or node.select_one(".t-bold")
+                            or node.select_one("h3"))
+                if not title_el:
+                    continue
+                location_el = (node.select_one(".pv-entity__location")
+                               or node.select_one(".pv-entity__location span"))
+                description_el = node.select_one(".pv-entity__description")
+                roles.append({
+                    "title": title_el.get_text(strip=True),
+                    "company": company,
+                    "dates": self._date_range_from(node, ".pv-entity__date-range"),
+                    "duration": (node.select_one(".pv-entity__duration").get_text(strip=True)
+                                 if node.select_one(".pv-entity__duration") else ""),
+                    "location": location_el.get_text(strip=True) if location_el else "",
+                    "description": (description_el.get_text(" ", strip=True)[:600]
+                                    if description_el else ""),
+                })
+                if len(roles) >= limit:
+                    return roles
+        return roles
+
+    @staticmethod
+    def _format_experience(roles: list) -> str:
+        """Render structured roles into the flat 'Title at Company (dates) | …'
+        string, so the flat and structured views can never disagree."""
+        entries = []
+        for role in roles:
+            parts = [role.get("title", "")]
+            if role.get("company"):
+                parts.append("at " + role["company"])
+            if role.get("dates"):
+                parts.append(f"({role['dates']})")
+            entries.append(" ".join(parts).strip())
+        return " | ".join(e for e in entries[:10] if e)
+
+    def _extract_experience(self, soup) -> str:
+        """Flat work-history string, rendered from _extract_roles."""
+        return self._format_experience(self._extract_roles(soup))
+
+    def _extract_education_entries(self, soup, limit: int = 6) -> list:
+        """Structured education — one dict per school (source of truth for the
+        flat `education` string)."""
+        section = (soup.find("section", {"id": "education"})
+                   or soup.find("section", class_=re.compile(r"pv-education")))
+        if not section:
+            return []
+        entries = []
+        for edu in section.select(".pv-education-entity"):
+            school_el = edu.select_one(".pv-entity__school-name")
+            if not school_el:
+                continue
+            degree_el = (edu.select_one(".pv-entity__degree-name")
+                         or edu.select_one(".pv-entity__summary-info h3"))
+            field_el = (edu.select_one(".pv-entity__fos")
+                        or edu.select_one(".pv-entity__field-of-study"))
+            entries.append({
+                "school": school_el.get_text(strip=True),
+                "degree": degree_el.get_text(strip=True) if degree_el else "",
+                "field": field_el.get_text(strip=True) if field_el else "",
+                "dates": self._date_range_from(edu, ".pv-entity__dates"),
+            })
+            if len(entries) >= limit:
+                break
+        return entries
+
+    @staticmethod
+    def _format_education(entries: list) -> str:
+        """Render structured education into the flat 'School — Degree' string."""
+        out = []
+        for edu in entries:
+            text = edu.get("school", "")
+            if edu.get("degree"):
+                text += f" — {edu['degree']}"
+            if text.strip():
+                out.append(text)
+        return " | ".join(out[:6])
+
+    def _extract_education(self, soup) -> str:
+        """Flat education string, rendered from _extract_education_entries."""
+        return self._format_education(self._extract_education_entries(soup))
+
+    async def _retry_failed_profiles(self) -> int:
+        """
+        One final pass over profiles that failed transiently (timeouts, bad
+        page loads). Each URL not already scraped gets a single fresh attempt.
+        Returns the number of profiles recovered.
+        """
+        pending = [f for f in self.failed_urls if f.get("url") not in self.scraped_urls]
+        if not pending:
+            return 0
+        logger.info(f"🔁 Retrying {len(pending)} failed profile(s) once...")
+        recovered = 0
+        for f in pending:
+            profile = await self.scrape_profile(
+                f["url"], search_company=f.get("company", ""), job_title=f.get("title", "")
+            )
+            if profile:
+                self.results.append(profile)
+                self.scraped_urls.add(f["url"])
+                self.scraped_urls.add(canonical_profile_url(f["url"]) or f["url"])
+                self._remember_profile(profile)
+                self.telemetry["records_scraped"] = len(self.results)
+                recovered += 1
+            await human_delay(
+                self.config.MIN_DELAY_BETWEEN_PROFILES,
+                self.config.MAX_DELAY_BETWEEN_PROFILES,
+            )
+        # Keep only the ones that are still genuinely failing.
+        self.failed_urls = [f for f in self.failed_urls if f.get("url") not in self.scraped_urls]
+        logger.info(f"   ↪ Recovered {recovered}, {len(self.failed_urls)} still failing.")
+        return recovered
+
+    async def dry_run(self, input_list: list) -> bool:
+        """
+        Safe end-to-end smoke test: launch the browser, log in, and run ONE
+        search for the current mode — then stop. No profiles are scraped, no
+        progress.json is written, nothing is exported.
+        Returns True only if browser + login + search all worked.
+        """
+        setup_logging(self.config.LOG_FILE)
+        mode = self.config.SEARCH_MODE.lower()
+        logger.info("=" * 65)
+        logger.info(f"  🧪 DRY RUN — mode: {mode.upper()} (no profile scraping)")
+        logger.info("=" * 65)
+
+        self.telemetry["mode"] = mode
+        self.telemetry["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._telemetry_event("run_start", f"dry-run · {mode} mode")
+
+        await self._launch_browser()
+        try:
+            if not await self.login():
+                logger.error("❌ Login failed — dry run aborted.")
+                return False
+
+            if mode == "jobs":
+                keyword = input_list[0] if input_list else "python"
+                jobs = await self.search_jobs(keyword)
+                logger.info(f"✅ DRY RUN OK — {len(jobs)} job card(s) found for '{keyword}'. No profiles scraped.")
+            elif mode == "candidates":
+                skill = input_list[0] if input_list else "Python"
+                urls = await self.search_candidates(skill)
+                logger.info(f"✅ DRY RUN OK — {len(urls)} candidate profile(s) found for '{skill}'. No profiles scraped.")
+            else:  # people
+                company = input_list[0] if input_list else "Google"
+                title = self.config.JOB_TITLES[0] if self.config.JOB_TITLES else "Recruiter"
+                urls = await self.search_people(company, title)
+                logger.info(f"✅ DRY RUN OK — {len(urls)} profile(s) found for '{title}' at '{company}'. No profiles scraped.")
+            return True
+        finally:
+            if self.browser:
+                await self.browser.close()
+            if self.playwright:
+                await self.playwright.stop()
+            self._finalize_telemetry(mode)
+
+    # ─────────────────────────────────────────────
+    #  SESSION MANAGEMENT
+    # ─────────────────────────────────────────────
+
+    async def _take_session_break(self):
+        """Random break to avoid detection — visits feed like a real user."""
+        t = random.randint(self.config.MIN_SESSION_BREAK_SECONDS, self.config.MAX_SESSION_BREAK_SECONDS)
+        logger.info(f"☕ Session break: {t}s...")
+        await self.page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
+        await asyncio.sleep(t / 2)
+        await random_scroll(self.page, scrolls=random.randint(2, 4))
+        await asyncio.sleep(t / 2)
+
+    # ─────────────────────────────────────────────
+    #  MAIN ORCHESTRATION
+    # ─────────────────────────────────────────────
+
+    def _compute_ban_risk(self) -> int:
+        """0-100 heuristic: a failed login is the heaviest signal, then
+        throttles and error streaks, with small bumps for free proxies and
+        hitting the daily search cap."""
+        t = self.telemetry
+        score = 0
+        if t.get("login") and not t["login"].get("ok"):
+            score += 40
+        score += min((t.get("throttle_events") or 0) * 10, 30)
+        score += min((t.get("max_consecutive_errors") or 0) * 5, 20)
+        if t.get("proxy", {}).get("source") == "free":
+            score += 5
+        limit = t.get("daily_search_limit") or 0
+        if limit and (t.get("daily_searches") or 0) >= limit:
+            score += 5
+        return min(score, 100)
+
+    def _telemetry_event(self, kind: str, detail: str = ""):
+        """Append a timestamped event and persist the live session file so a
+        crash mid-run leaves the full story behind."""
+        events = self.telemetry.get("events", [])[-49:]
+        events.append({
+            "t": datetime.now().strftime("%H:%M:%S"),
+            "kind": kind,
+            "detail": detail,
+        })
+        self.telemetry["events"] = events
+        self.telemetry["ban_risk"] = self._compute_ban_risk()
+        try:
+            save_session_health_live(self.config.SESSION_HEALTH_FILE, self.telemetry)
+        except Exception as e:
+            logger.warning(f"⚠️  Could not persist session telemetry: {e}")
+
+    def _record_login(self, ok: bool, reason: str, detail: str = ""):
+        """Record a login outcome in telemetry and emit a login event."""
+        entry = {"ok": ok, "reason": reason}
+        if detail:
+            entry["detail"] = detail
+        self.telemetry["login"] = entry
+        self._telemetry_event("login", f"{'ok' if ok else 'fail'}: {reason}")
+
+    def _register_search(self):
+        """Count one search-page load (daily cap + live telemetry counter).
+
+        v5.0 fix: this used to call itself recursively, so every search raised
+        RecursionError into the caller's except-block and the daily cap was
+        never actually enforced. One search page = one increment.
+        """
+        self.daily_searches += 1
+        self.telemetry["daily_searches"] = self.daily_searches
+        if self.daily_searches >= self.config.MAX_DAILY_SEARCHES:
+            logger.warning(f"🛑 Daily search limit reached ({self.daily_searches}).")
+            self._telemetry_event("limit", "daily search cap reached")
+
+    def _finalize_telemetry(self, mode: str, recovered: int = 0):
+        """Mark the run finished and move it into session_health history."""
+        self.telemetry["mode"] = mode
+        self.telemetry["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.telemetry["daily_searches"] = self.daily_searches
+        self.telemetry["records_scraped"] = len(self.results)
+        self.telemetry["recovered"] = recovered
+        self.telemetry["still_failed"] = len(self.failed_urls)
+        self.telemetry["status"] = "finished"
+        self.telemetry["ban_risk"] = self._compute_ban_risk()
+        self._telemetry_event("run_end", f"{mode} mode · {len(self.results)} records")
+        try:
+            save_session_health(self.config.SESSION_HEALTH_FILE, self.telemetry)
+        except Exception as e:
+            logger.warning(f"⚠️  Could not write session-health telemetry: {e}")
+
+    # ─────────────────────────────────────────────
+    #  POWER STACK (v5.0)
+    #  Faceted search, enrichment, resume scoring, SQLite storage,
+    #  multi-format exports and a per-run event log. Each piece is
+    #  optional and fails soft: a broken database or export must never
+    #  cost you a successfully scraped profile.
+    # ─────────────────────────────────────────────
+
+    def _emit(self, kind: str, detail: str = "", **data) -> None:
+        """Write one event to the run's JSONL log and the SQLite event table."""
+        if self.event_log is not None:
+            try:
+                self.event_log.emit(kind, detail=detail, **data)
+            except Exception:
+                pass
+        if self.store is not None:
+            self.store.log_event(kind, detail, run_id=self.run_id)
+
+    def _warn_once(self, message: str) -> None:
+        if message and message not in self._warned:
+            self._warned.add(message)
+            logger.warning(f"   [search filter] {message}")
+
+    def _log_search_warnings(self, warnings, context: str) -> None:
+        for warning in warnings or []:
+            self._warn_once(f"{context}: {warning}")
+
+    def _build_people_filters(self, job_title: str = "", company: str = "",
+                              extra_terms=()) -> PeopleFilters:
+        """Translate config into a validated, faceted people-search filter."""
+        cfg = self.config
+        terms = [term for term in (job_title, company) if term]
+        terms.extend(extra_terms or ())
+        keywords = build_keywords(
+            terms,
+            boolean_or=bool(getattr(cfg, "KEYWORD_BOOLEAN_OR", False)),
+            exclude=getattr(cfg, "EXCLUDE_KEYWORDS", []) or [],
+        )
+        geo_ids = []
+        geo_urn = str(getattr(cfg, "GEO_URN", "") or "").strip()
+        if geo_urn:
+            ids, warning = resolve_geo(geo_urn)
+            if warning:
+                self._warn_once(warning)
+            geo_ids = ids
+        return PeopleFilters(
+            keywords=keywords,
+            geo_ids=geo_ids,
+            network=list(getattr(cfg, "NETWORK_FILTER", []) or []),
+            current_company_ids=list(getattr(cfg, "CURRENT_COMPANY_FILTER", []) or []),
+            past_company_ids=list(getattr(cfg, "PAST_COMPANY_FILTER", []) or []),
+            school_ids=list(getattr(cfg, "SCHOOL_FILTER", []) or []),
+            industry_ids=list(getattr(cfg, "INDUSTRY_FILTER", []) or []),
+            seniority=list(getattr(cfg, "SENIORITY_FILTER", []) or []),
+        ).validate()
+
+    def _build_job_filters(self, keyword: str, start: int = 0) -> JobFilters:
+        """Translate config into a validated job-search filter (offset paging)."""
+        cfg = self.config
+        strict = getattr(cfg, "JOB_STRICT_HOURS_FILTER", None)
+        if strict is not None:
+            if strict <= 24:
+                date_posted = "r86400"
+            elif strict <= 168:
+                date_posted = "r604800"
+            else:
+                date_posted = "r2592000"
+        else:
+            date_posted = str(getattr(cfg, "JOB_DATE_POSTED", "") or "")
+        experience = [str(cfg.JOB_EXPERIENCE_LEVEL)] if cfg.JOB_EXPERIENCE_LEVEL else []
+        workplace = [str(cfg.JOB_REMOTE_FILTER)] if cfg.JOB_REMOTE_FILTER else []
+        return JobFilters(
+            keywords=keyword,
+            location=str(getattr(cfg, "SEARCH_LOCATION_NAME", "") or ""),
+            geo_id=str(getattr(cfg, "GEO_URN", "") or "") or None,
+            date_posted=date_posted,
+            experience_levels=experience,
+            workplace=workplace,
+            easy_apply=bool(getattr(cfg, "JOB_EASY_APPLY", False)),
+            sort_by=str(getattr(cfg, "JOB_SORT_BY", "") or ""),
+            start=start,
+        ).validate()
+
+    def _enrich_profile(self, profile: dict) -> dict:
+        """Add derived screening fields and, when configured, a resume score."""
+        cfg = self.config
+        if not getattr(cfg, "ENRICH_PROFILES", True):
+            return profile
+        try:
+            enriched = enrich_record(
+                profile,
+                infer_email=bool(getattr(cfg, "INFER_EMAILS", True)),
+                domains=getattr(cfg, "COMPANY_DOMAINS", None) or None,
+            )
+        except Exception as exc:
+            logger.debug(f"enrichment skipped: {exc}")
+            enriched = profile
+        if self.resume_weights and getattr(cfg, "SCORE_WITH_RESUME", True):
+            try:
+                enriched = score_record(enriched, self.resume_weights)
+            except Exception as exc:
+                logger.debug(f"scoring skipped: {exc}")
+        return enriched
+
+    def _already_seen(self, url: str) -> bool:
+        """Dedupe across this run *and* every previous run (SQLite)."""
+        if not url:
+            return True
+        canonical = canonical_profile_url(url) or url
+        if url in self.scraped_urls or canonical in self.scraped_urls:
+            return True
+        if self.store is not None:
+            try:
+                if self.store.record_exists(url):
+                    self.scraped_urls.add(canonical)
+                    self.scraped_urls.add(url)
+                    return True
+            except Exception as exc:
+                logger.debug(f"store lookup failed: {exc}")
+        return False
+
+    def _remember_profile(self, profile: dict) -> None:
+        """Count a successful profile and persist/merge it in the store."""
+        self.profiles_this_run += 1
+        if self.store is None:
+            return
+        try:
+            result = self.store.upsert_record(profile, run_id=self.run_id)
+        except Exception as exc:
+            logger.warning(f"   Could not persist profile: {exc}")
+            return
+        if result["status"] == "inserted":
+            self.new_records += 1
+        elif result["status"] == "updated":
+            self.updated_records += 1
+        self._emit("profile", str(profile.get("name") or ""),
+                   status=result["status"], url=profile.get("linkedin_url", ""))
+
+    def _start_power_stack(self, mode: str) -> None:
+        """Open the store + event log for this run (never raises)."""
+        cfg = self.config
+        if getattr(cfg, "ENABLE_DATABASE", True):
+            self.store = open_store(getattr(cfg, "DATABASE_FILE", "output/scraper.db"))
+            if self.store is not None:
+                try:
+                    self.run_id = self.store.start_run(mode, {
+                        "location": getattr(cfg, "SEARCH_LOCATION_NAME", ""),
+                        "titles": len(getattr(cfg, "JOB_TITLES", []) or []),
+                        "version": "5.0",
+                    })
+                except Exception as exc:
+                    logger.warning(f"Could not start a run record: {exc}")
+        if getattr(cfg, "ENABLE_EVENT_LOG", True):
+            try:
+                run_dir = Path(getattr(cfg, "EVENT_LOG_DIR", "output/runs"))
+                stamp = self.run_id or datetime.now().strftime("%Y%m%d-%H%M%S")
+                self.event_log = EventLog(str(run_dir / f"{stamp}.jsonl"))
+            except Exception as exc:
+                logger.debug(f"event log disabled: {exc}")
+        self._emit("run_start", mode=mode,
+                   location=getattr(cfg, "SEARCH_LOCATION_NAME", ""))
+
+    def _load_resume_weights(self, mode: str) -> dict:
+        """Keyword weights from the configured resume ({} when not usable)."""
+        cfg = self.config
+        if mode == "jobs" or not getattr(cfg, "SCORE_WITH_RESUME", True):
+            return {}
+        path = str(getattr(cfg, "RESUME_FILE_PATH", "") or "")
+        if not path or not Path(path).exists():
+            return {}
+        try:
+            weights = keyword_weights(read_resume_text(path))
+        except Exception as exc:
+            logger.debug(f"resume scoring disabled: {exc}")
+            return {}
+        if weights:
+            logger.info(f"Resume scoring enabled: {len(weights)} weighted keywords.")
+        return weights
+
+    async def _after_login(self) -> None:
+        """Warm the session up like a returning user (bounded, never fatal)."""
+        if not getattr(self.config, "WARM_UP_BROWSER", True):
+            return
+        try:
+            ok = await warm_up(self.page, seconds=random.uniform(8, 16))
+        except Exception as exc:
+            logger.debug(f"warm-up failed: {exc}")
+            ok = False
+        self._emit("warmup", "ok" if ok else "skipped")
+        if ok:
+            logger.info("Warm-up browse complete.")
+
+    async def _maybe_humanize(self) -> None:
+        """Pointer movement + occasional idle scroll before reading a page."""
+        if not getattr(self.config, "HUMAN_MOUSE", True):
+            return
+        try:
+            await human_mouse_move(self.page, moves=random.randint(1, 2))
+            await idle_jitter(self.page, chance=0.35)
+        except Exception:
+            pass
+
+    def _cap_reached(self) -> bool:
+        cap = int(getattr(self.config, "MAX_PROFILES_PER_RUN", 0) or 0)
+        return bool(cap and self.profiles_this_run >= cap)
+
+    def _complete_search(self, key: str, completed_keys: set) -> None:
+        """Checkpoint one finished search in progress.json and the database."""
+        completed_keys.add(key)
+        try:
+            save_progress(self.config.PROGRESS_FILE, {
+                "results": self.results,
+                "completed_keys": list(completed_keys),
+            })
+        except Exception as exc:
+            logger.warning(f"Could not save progress: {exc}")
+        if self.store is not None:
+            try:
+                self.store.mark_search_done(key, run_id=self.run_id)
+            except Exception:
+                pass
+        self._emit("search_done", key)
+
+    async def _scrape_profile_urls(self, urls, search_company: str, job_title: str,
+                                   skill: str = "") -> int:
+        """Scrape every not-yet-seen profile URL from one search result page."""
+        if not urls:
+            logger.info("      No results found.")
+            return 0
+        fresh = [url for url in dict.fromkeys(urls) if not self._already_seen(url)]
+        skipped = len(set(urls)) - len(fresh)
+        if skipped:
+            logger.info(f"      Skipped {skipped} already-scraped profile(s)")
+        if not fresh:
+            return 0
+        logger.info(f"      Found {len(fresh)} new profiles to scrape...")
+        scraped = 0
+        for index, url in enumerate(fresh, 1):
+            if self._cap_reached():
+                logger.info(f"      Per-run profile cap reached "
+                            f"({self.config.MAX_PROFILES_PER_RUN}) - stopping this search.")
+                self._stop_reason = "profile cap"
+                break
+            logger.info(f"      [{index}/{len(fresh)}] Scraping...")
+            profile = await self.scrape_profile(url, search_company=search_company,
+                                                job_title=job_title)
+            if profile:
+                if skill:
+                    profile["search_skill"] = skill
+                self.results.append(profile)
+                self.scraped_urls.add(url)
+                self.scraped_urls.add(canonical_profile_url(url) or url)
+                self._remember_profile(profile)
+                scraped += 1
+                self.telemetry["records_scraped"] = len(self.results)
+
+            await human_delay(
+                self.config.MIN_DELAY_BETWEEN_PROFILES,
+                self.config.MAX_DELAY_BETWEEN_PROFILES,
+            )
+            self.session_count += 1
+            if self.session_count % self.config.BREAK_EVERY_N_REQUESTS == 0:
+                await self._take_session_break()
+            if self.config.ROTATE_USER_AGENT and self.session_count % self.config.UA_ROTATE_EVERY_N == 0:
+                await self._rotate_identity()
+        return scraped
+
+    def _export_results(self, mode: str) -> dict:
+        """Write every configured format; returns {format: path}."""
+        formats = list(getattr(self.config, "EXPORT_FORMATS", []) or [])
+        if not formats or not self.results:
+            return {}
+        from exporters import export_all
+
+        base = {
+            "jobs": self.config.JOBS_OUTPUT_FILE,
+            "candidates": self.config.CANDIDATES_OUTPUT_FILE,
+        }.get(mode, self.config.OUTPUT_FILE)
+        meta = {
+            "title": f"LinkedIn {mode.title()} Export",
+            "mode": mode,
+            "run_id": self.run_id,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "location": getattr(self.config, "SEARCH_LOCATION_NAME", ""),
+        }
+        try:
+            written = export_all(self.results, base, formats=formats, mode=mode, meta=meta)
+        except Exception as exc:
+            logger.error(f"Export failed ({exc.__class__.__name__}: {exc})")
+            return {}
+        for fmt, path in written.items():
+            logger.info(f"   {fmt}: {path}")
+        self._emit("export", ", ".join(written.keys()))
+        return written
+
+    def _finish_power_stack(self, mode: str, recovered: int = 0,
+                            written: Optional[dict] = None) -> dict:
+        """Close out the run: export, summarize, persist, release the store."""
+        written = written if written is not None else {}
+        summary = {
+            "mode": mode,
+            "records": len(self.results),
+            "profiles_this_run": self.profiles_this_run,
+            "new_in_db": self.new_records,
+            "updated_in_db": self.updated_records,
+            "failed_urls": len(self.failed_urls),
+            "recovered": recovered,
+            "searches": self.daily_searches,
+            "run_id": self.run_id,
+            "exports": written,
+            "stop_reason": self._stop_reason,
+        }
+        if self.store is not None:
+            try:
+                self.store.finish_run(self.run_id, summary)
+            except Exception as exc:
+                logger.debug(f"could not finalize run row: {exc}")
+        self._emit("run_end", f"{len(self.results)} records", **summary)
+        return summary
+
+    async def run(self, input_list: list):
+        """
+        Main loop:
+          If mode="people": search for titles at given companies
+          If mode="jobs": search for job listings from input keywords
+          If mode="candidates": search for candidates from input skills
+
+        v5.0: also seeds cross-run state (SQLite + event log + resume scoring),
+        persists every new profile as it is scraped, honours MAX_PROFILES_PER_RUN,
+        and returns a summary dict (also stored on the run row).
+        """
+        setup_logging(self.config.LOG_FILE)
+
+        mode = self.config.SEARCH_MODE.lower()
+        self.telemetry["mode"] = mode
+        self.telemetry["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._telemetry_event("run_start", f"{mode} mode")
+
+        logger.info("=" * 65)
+        logger.info(f"  LinkedIn Scraper v5.0 - Mode: {mode.upper()}")
+        logger.info(f"  Location   : {self.config.SEARCH_LOCATION_NAME}")
+        logger.info("=" * 65)
+
+        saved = load_progress(self.config.PROGRESS_FILE)
+        self.results = saved.get("results", [])
+        completed_keys = set(saved.get("completed_keys", []))
+        # Don't re-scrape profiles already captured in a previous run.
+        self.scraped_urls = {r.get("linkedin_url") for r in self.results if r.get("linkedin_url")}
+
+        # Cross-run state: SQLite store + JSONL event log + resume scoring.
+        self._start_power_stack(mode)
+        if self.store is not None:
+            try:
+                completed_keys |= set(self.store.completed_keys())
+                if getattr(self.config, "IMPORT_PROGRESS_ON_START", True):
+                    self.store.import_progress(self.config.PROGRESS_FILE, run_id=self.run_id)
+            except Exception as exc:
+                logger.debug(f"store seeding skipped: {exc}")
+        self.resume_weights = self._load_resume_weights(mode)
+
+        summary = None
+
+        try:
+            await self._launch_browser()
+            if not await self.login():
+                logger.error("Login failed. Exiting.")
+                self._stop_reason = "login failed"
+                return None
+
+            await self._after_login()
+            total = len(input_list)
+            resume_done = getattr(self.config, "RESUME_COMPLETED_SEARCHES", True)
+
+            # --- PEOPLE SEARCH MODE ---
+            if mode == "people":
+                for i, company in enumerate(input_list, 1):
+                    if self._cap_reached():
+                        break
+                    logger.info(f"\n[{i}/{total}] {company}")
+
+                    for job_title in self.config.JOB_TITLES:
+                        key = f"people::{company}::{job_title}"
+                        if resume_done and key in completed_keys:
+                            logger.info(f"   Already done: '{job_title}' - skipping")
+                            continue
+
+                        profile_urls = await self.search_people(company, job_title)
+                        await self._scrape_profile_urls(profile_urls, company, job_title)
+                        self._complete_search(key, completed_keys)
+                        await human_delay(4, 10)
+
+            # --- JOB SEARCH MODE ---
+            elif mode == "jobs":
+                for i, keyword in enumerate(input_list, 1):
+                    logger.info(f"\n[{i}/{total}] Keyword: {keyword}")
+
+                    key = f"jobs::{keyword}"
+                    if resume_done and key in completed_keys:
+                        logger.info(f"   Already done: '{keyword}' - skipping")
+                        continue
+
+                    jobs = await self.search_jobs(keyword)
+
+                    if not jobs:
+                        logger.info("      No jobs found.")
+                    else:
+                        for job in jobs:
+                            job["search_keyword"] = keyword
+                        self.results.extend(jobs)
+
+                    self._complete_search(key, completed_keys)
+                    await human_delay(4, 10)
+
+            # --- CANDIDATES SEARCH MODE ---
+            elif mode == "candidates":
+                for i, skill in enumerate(input_list, 1):
+                    if self._cap_reached():
+                        break
+                    logger.info(f"\n[{i}/{total}] Skill: {skill}")
+
+                    key = f"candidates::{skill}"
+                    if resume_done and key in completed_keys:
+                        logger.info(f"   Already done: '{skill}' - skipping")
+                        continue
+
+                    profile_urls = await self.search_candidates(skill)
+                    # search_company="N/A" because this is a pure skill search.
+                    await self._scrape_profile_urls(profile_urls, "N/A", skill, skill=skill)
+                    self._complete_search(key, completed_keys)
+                    await human_delay(4, 10)
+
+        except KeyboardInterrupt:
+            logger.info("\nInterrupted. Saving progress...")
+            self._stop_reason = "interrupted"
+
+        except Exception as exc:
+            # A dead proxy, a missing browser build or a closed driver should
+            # end the run with a clear message (and a full traceback in the log
+            # file), not a bare crash that skips the export and the run record.
+            logger.exception(f"Run aborted: {exc.__class__.__name__}: {exc}")
+            logger.error("Hint: `playwright install chromium` fixes the most common "
+                         "launch error; check the proxy if launch fails with it.")
+            self._stop_reason = self._stop_reason or f"error: {exc.__class__.__name__}"
+            self._emit("error", str(exc)[:500])
+
+        finally:
+            # One last chance for profiles that failed transiently.
+            recovered = 0
+            if mode in ("people", "candidates") and self.config.RETRY_FAILED_PROFILES:
+                try:
+                    recovered = await self._retry_failed_profiles()
+                except Exception as e:
+                    logger.warning(f"Failed-URL retry pass errored: {e}")
+
+            written = self._export_results(mode)
+            if self.results:
+                primary = written.get("xlsx") or next(iter(written.values()), "")
+                logger.info(f"\nExported {len(self.results)} records -> {primary or 'no files'}")
+
+                if self.config.DISCORD_WEBHOOK_URL:
+                    from utils import send_webhook_notification
+                    summary_payload = {
+                        "Mode": mode.upper(),
+                        "Total Records": len(self.results),
+                        "New": self.new_records,
+                        "Updated": self.updated_records,
+                        "Searches Done": self.daily_searches,
+                        "Output File": primary,
+                    }
+                    send_webhook_notification(
+                        self.config.DISCORD_WEBHOOK_URL, "Scrape Complete!", summary_payload)
+            else:
+                logger.info("\nNo results to export.")
+
+            if self.browser:
+                await self.browser.close()
+            if self.playwright:
+                await self.playwright.stop()
+
+            logger.info("\nFinal Summary:")
+            logger.info(f"   Records saved   : {len(self.results)}")
+            logger.info(f"   New this run    : {self.new_records} new, "
+                        f"{self.updated_records} updated")
+            if mode != "jobs":
+                logger.info(f"   Failed URLs     : {len(self.failed_urls)}")
+            logger.info(f"   Searches done   : {self.daily_searches} page loads")
+
+            # Early warning for LinkedIn selector changes (see _log_section_coverage).
+            self._log_section_coverage(len(self.results))
+
+            self._finalize_telemetry(mode, recovered)
+            summary = self._finish_power_stack(mode, recovered, written)
+            if self.store is not None:
+                try:
+                    self.store.close()
+                except Exception:
+                    pass
+                self.store = None
+
+        return summary

@@ -1,0 +1,161 @@
+# AGENTS.md
+
+Non-obvious knowledge about this repo that isn't recoverable from the code or docs.
+
+## Project state
+
+- As of the 2026-08 scraper power-up, the main path runs: `config.py`, `linkedin_scraper.py`
+  and `utils.py` were fixed (duplicate `USER_AGENTS` block, merged `logger.info` line, and
+  stripped imports restored). `python main.py` requires the project venv
+  (`.venv/Scripts/python.exe`) with `Requirements.txt` installed — the venv had been left
+  empty. `playwright install chromium` is still needed before a real run.
+- `linkedin_scraper.py` referenced `self.current_account` (login) and `config.DISCORD_WEBHOOK_URL`
+  which didn't exist; both are now defined. `scrape_profile` calls `_extract_about/skills/
+  experience/education` — implemented in the power-up; keep them if you touch the scraper.
+- Login (2026-08): `login()` now restores the persisted session from `session/` before typing
+  (it previously saved but never loaded it), retries `MAX_RETRIES` times with backoff but gives
+  up immediately on bad credentials, and polls checkpoint/2FA pages until they resolve
+  (`LOGIN_CHALLENGE_TIMEOUT_SECONDS`, default 90) instead of blind 60s sleeps. Success is
+  confirmed by URL + presence of `nav.global-nav`. `test_login_flow.py` drives the real
+  `login()` decision tree against fakes — run both test files with the venv python.
+- The `*_diff.py` files (`linkedin_scraper_enhanced_diff.py`, `linkedin_scraper_pro_diff.py`,
+  `config_enhanced_diff.py`) and `_diff.gitignore` are saved unified-diff patches for a
+  never-merged "v4.0 Enhanced" line — not runnable modules; they reference modules
+  (`linkedin_scraper_enhanced.py`, `config_enhanced.py`) that don't exist in the repo.
+- Scraper accuracy features added: `self.scraped_urls` dedup (seeded from `progress.json`
+  results) so the same profile isn't re-scraped under different titles/companies; search URLs
+  built with `urlencode` (manual `%20`/`"` replacing broke company names containing `&` like
+  "AT&T"); `_extract_email` prefers `mailto:` links and filters image/site-internal junk.
+- Anti-block / resilience (2026-08): `_next_proxy()` round-robins `PROXY_LIST` and never
+  repeats the current proxy (identity rotation actually changes IPs); `_handle_potential_block`
+  uses exponential backoff `_backoff_delay(errors)` (~60s·2^(n-3), cap 600s, jittered); failed
+  profile URLs are retried once before export (`RETRY_FAILED_PROFILES`, `failed_urls` now stores
+  `{url, company, title}` dicts, not bare strings); `USE_TEST_COMPANIES` makes main.py run a
+  2-company smoke test instead of the full 25-company Fortune 500 list.
+- `USE_FREE_PROXIES=True` (PROXY_LIST empty) makes the main scraper auto-fetch/test free proxies
+  via `proxy_manager.ProxyManager` — refresh runs in a thread (`asyncio.to_thread`); results cache
+  to `output/proxies.json`. Note: `ProxyManager.refresh()` was fixed so a fresh instance honors a
+  fresh cache (`last_refresh` was 0 → it used to refetch from the network every launch). Dead
+  proxies are shed via `mark_failed` on consecutive errors.
+- Anti-detection (2026-09): `_FINGERPRINTS` (top of `linkedin_scraper.py`) holds 4 *coherent*
+  identity profiles. `_launch_browser` picks one (`RANDOMIZE_FINGERPRINT`, else `[0]`) and feeds
+  UA, ``navigator.platform``, viewport, locale, timezone, geolocation **and** the stealth script
+  from that same profile, so nothing contradicts anything else. `config.USER_AGENTS` is now
+  Chromium-desktop-only on purpose (Firefox/Safari UAs in a Chromium build are a signal).
+- Block handling (2026-09): `_check_page_block_status()` classifies auth-wall / captcha /
+  checkpoint / rate-limit pages and records the reason in `self._block_reason`;
+  `_recover_from_block(context)` cools down, calls `_rotate_identity()` (new proxy + fingerprint
+  + re-login) and returns True so the calling search loop `continue`s. Bounded by
+  `config.MAX_BLOCK_RECOVERIES`. `_rotate_identity()` now returns bool (False on relaunch/login
+  failure) and is teardown-safe: context/browser closes are individually guarded, the Playwright
+  driver is always stopped + restarted, and `_handle_potential_block` returns False if rotation
+  fails so the search stops instead of spraying errors at a dead session.
+- `utils.save_progress` writes atomically (temp + `os.replace`) and never raises;
+  `utils.load_progress` tolerates missing/corrupt/non-dict files and normalises the legacy
+  `completed_companies` key into `completed_keys` (the key `run()` actually reads).
+- Deep extraction (2026-09): `scrape_profile` now also records structured work history and
+  education plus certifications / languages / honors / followers / open-to-work / premium /
+  photo, all parsed from the ONE page load (no extra requests). Invariant to preserve:
+  `_extract_experience`/`_extract_education` are thin wrappers over `_format_experience(
+  _extract_roles(soup))` / `_format_education(_extract_education_entries(soup))`, so the flat
+  string and the structured `experience_roles`/`education_entries` JSON can never drift. Edit
+  the structured extractor, not the flatteners. `_parse_count` turns "500+"/"1,234"/"10K" into
+  ints. Extend `DEEP_FIXTURE` in the tests, not `FIXTURE`, to cover new fields.
+- Second wave of profile depth (2026-09): added volunteer / projects / publications / courses /
+  patents / services / interests / recommendations / websites, badge flags (`is_hiring`,
+  `is_creator`, `verified`), `pronouns`, `public_id`, `banner_url`, plus derived screening
+  metrics (`seniority`, `total_experience_years`, `career_start_year`, `companies_count`,
+  `avg_tenure_months`, `current_tenure_months`, `current_role_duration`, `skills_count`).
+  Almost all new sections reuse `_section_list(soup, ids, patterns, item_selectors)` — add a
+  new section by calling it with the right id rather than hand-rolling a selector chain.
+  `_career_stats` is frozen-time testable because `_now_month_index` is a classmethod the
+  tests monkeypatch; keep it that way. Badge detection MUST stay attribute-only
+  (`_extract_top_card_flag` scans alt/aria/class/src, never visible text) — scanning text makes
+  every profile look like it's hiring, because 'hiring' appears in ordinary About copy.
+- `scrape_profile` tallies empty fields into `self.section_misses` and `_log_section_coverage`
+  prints them at the end of a run (naming fields empty for EVERY profile). That is the
+  intended early-warning signal for LinkedIn selector changes — do not remove it as noise.
+- The dashboard template renders and CSV-exports `r.url`, but records store `linkedin_url`;
+  `generate_dashboard.load_records()` mirrors it. Profile links silently broke before that
+  normalisation — keep it if you touch either side.
+- The dashboard table's sort coerces with `String(a[key] ?? "")`; without that, sorting any
+  boolean/number column (open_to_work, follower_count, connection_count) throws.
+- Behavioral tests: `test_scraper_fixes.py` (33 tests) and `test_login_flow.py` (5 tests) — run
+  both with `.venv/Scripts/python.exe <file>` (no browser or network needed; the login suite
+  drives the real `login()` against fakes). No pytest in the venv — each file is a plain script
+  with a `__main__` runner list; add new tests to that list.
+
+## Power stack (v5.0, 2026-11)
+
+- New modules, all stdlib-only and import-safe (no browser/network at import):
+  `search_filters.py` (URL grammar + facet validation), `enrichment.py` (derived fields),
+  `scoring.py` (resume + ICP), `storage.py` (SQLite + EventLog), `exporters.py`
+  (csv/json/jsonl/md/html + `export_all`), `behavior.py` (human pointer/scroll/warm-up),
+  `mcp_server.py` (JSON-RPC over stdio), `cli.py` (run/export/stats/report/mcp/doctor/db).
+  `main.py` keeps the old menu and `build_parser()`; `test_cli_parser` depends on it.
+- `linkedin_scraper.run()` now returns a summary dict and owns a "power stack" block of
+  helpers (`_start_power_stack`, `_scrape_profile_urls`, `_complete_search`, `_export_results`,
+  `_finish_power_stack`). All of them are fail-soft: a missing database, export or event-log
+  error must never lose a scraped profile. `run()` returns from `finally`-adjacent code, not
+  inside `finally`, so KeyboardInterrupt is not swallowed.
+- Critical fixed bug: `_register_search()` used to call itself recursively, so every search
+  page raised `RecursionError` into the caller's except-block (counted as an error and
+  triggered a pointless identity rotation) and `daily_searches` never advanced. One search
+  page now increments exactly once — do not reintroduce a call to any "count" helper inside it.
+- `_scrape_profile_urls()` is the single profile loop for people and candidates mode. It
+  dedupes through `_already_seen()` (in-memory + SQLite `record_exists`), persists each
+  profile with `_remember_profile()`, and enforces `MAX_PROFILES_PER_RUN` via `_cap_reached()`.
+  Add per-profile behaviour there, not in the three mode loops.
+- Faceted search invariant: LinkedIn silently ignores plain-text `location`/`currentCompany`
+  on people search. `PeopleFilters.validate()` therefore rejects non-numeric company/school/
+  industry ids and unknown place names and records warnings; `_log_search_warnings` prints
+  them once. Do not "helpfully" emit a name facet — that is the bug where a filtered search
+  returns the whole world. Verified job params are `geoId`/`f_TPR`/`f_E`/`f_JT`/`f_WT`/`f_EA`
+  (easy apply is `f_EA`, not `f_AL`) and paging is `start`, not `page`.
+- Enrichment is additive and must stay that way: `enrich_record()` returns a copy, never
+  overwrites a scraped value with a worse one, and labels guessed emails `email_status:
+  "inferred"` + `verified: false`. `email` stays empty unless it was scraped. Department
+  matching uses `_has_keyword()` with `*` suffix meaning word-prefix — plain substring matching
+  routed "Talent Acquisition" to Design because "ui" is inside "acquisition".
+- SQLite (`output/scraper.db`) upserts merge via `enrichment.merge_record`: blank incoming
+  fields never erase stored ones, `seen_count`/`first_seen`/`first_run` are metadata and are
+  skipped by the merge, and `_decode()` always overrides those from the row. `record_exists()`
+  normalises any URL variant to the public id, so `?trk=` and `uk.linkedin.com` are the same
+  person. Jobs are deliberately NOT stored in SQLite (profile-centric schema).
+- `test_power_features.py` (58 tests) is the third suite. It covers URL facets/encoding,
+  enrichment edge cases (mojibake, metro/remote locations, E.164, name particles), scoring
+  bounds and word boundaries (`java` ≠ `javascript`), SQLite merge/filters/prune, every
+  exporter (including HTML escaping of a `<script>` name), MCP dispatcher failures, and the
+  scraper integration (`_register_search`, faceted search URL, post-scrape enrichment,
+  `_finish_power_stack`). Run all three suites before claiming a change works.
+- MCP is read-only over the database by design. It must never launch a browser or touch
+  LinkedIn directly; scraping stays in `cli.py run`. stdout is protocol-only — log to stderr.
+
+
+## Security
+
+- `config.py` hardcodes real-looking LinkedIn credentials as field defaults and they are in
+  git history. Never propagate or display them; use `LINKEDIN_EMAIL` / `LINKEDIN_PASSWORD`
+  env vars instead.
+
+## Gotchas
+
+- `python -m py_compile` writes `.pyc` files into `__pycache__`, which is TRACKED in git here
+  (`.gitignore` only excludes `.aider*`). For syntax checks prefer in-process `ast.parse`, or
+  run with `PYTHONDONTWRITEBYTECODE=1`.
+- The stealth init script in `_launch_browser` is one big f-string, so **every** literal JS brace
+  must be doubled (`{{`/`}}`). A single stray `{` makes the module fail to import
+  (`f-string: single '}' is not allowed`) or silently emits broken JS. `test_stealth_script_
+  renders_with_real_fingerprint` renders the f-string with a sample profile and asserts there are
+  no unconverted braces — extend that test if you edit the script.
+- The Windows console (cp1252) can't print emoji from Python — a bare `print("✅ ...")`
+  raises UnicodeEncodeError. Keep script prints ASCII or set `PYTHONIOENCODING=utf-8`.
+
+## Dashboard preview
+
+- `dashboard.html` is a generated artifact. Edit `dashboard_template.html` (UI source of
+  truth), then regenerate with `python generate_dashboard.py`; never edit `dashboard.html`
+  directly or the next run wipes your change.
+- `.freebuff/` contains Freebuff client DB files (`desktop-v2.db*`) that must never be
+  committed; `.freebuff/run.md` documents how the dashboard preview is reproduced and served
+  (static htmlPath mode — no server).

@@ -1,0 +1,631 @@
+# 🔵 LinkedIn People Scraper
+
+[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
+[![Playwright](https://img.shields.io/badge/Playwright-1.40+-green.svg)](https://playwright.dev/python/)
+[![Proxies](https://img.shields.io/badge/Proxies-Auto--Rotating-purple.svg)](#-proxy-support-free)
+[![License](https://img.shields.io/badge/License-Educational-orange.svg)](#-disclaimer)
+
+> **A learning project** built to practice real-world Python skills —
+> async programming, browser automation, HTML parsing, proxy rotation, and Excel file I/O.
+
+Search LinkedIn for **any job title**, at **any company**, in **any country** — export everything to a clean Excel file with one command. Now with **free auto-rotating proxy support**, a **`--dry-run` smoke mode**, and a **live dashboard** that shows your session health (login state, ban risk, daily search cap) in real time.
+
+![LinkedIn Scraper → live dashboard — animated pipeline](assets/dashboard-demo.gif)
+
+---
+
+## ⚠️ Disclaimer
+
+This tool is for **educational purposes only.**
+Scraping LinkedIn may violate their [Terms of Service](https://www.linkedin.com/legal/user-agreement).
+- Do **not** use this for commercial purposes
+- Do **not** run this at large scale
+- Use a **secondary LinkedIn account** — not your main one
+- The author is not responsible for any account restrictions or legal issues
+
+---
+
+## 📋 Table of Contents
+
+- [What It Does](#-what-it-does)
+- [Power Stack (v5.0)](#-power-stack-v50)
+- [Project Structure](#-project-structure)
+- [Requirements](#-requirements)
+- [Installation](#-installation)
+- [Configuration](#-configuration)
+- [How to Run](#-how-to-run)
+- [Proxy Support](#-proxy-support-free)
+- [Output](#-output)
+- [Live Dashboard & Session Health](#-live-dashboard--session-health)
+- [How It Works](#-how-it-works)
+- [Troubleshooting](#-troubleshooting)
+- [Tech Stack](#-tech-stack)
+
+---
+
+## ✨ What It Does
+
+- 🔍 Search LinkedIn for **any job title** — Recruiter, Engineer, Designer, CEO, anything
+- 🏢 Search across **any company list** — your own list or the full Fortune 500
+- 🌍 Filter by **country or city** using LinkedIn's location system
+- 🔄 **Auto-rotating free proxies** — fetches and tests fresh proxies every hour
+- 📊 Export results to a **formatted Excel file** with clickable LinkedIn profile links
+- 🧬 **Deep profile data** — 45+ fields per profile (structured work history, education, certifications, languages, honors, volunteer, projects, publications, courses, patents, services, interests, websites, badges, contact, audience) all from the same page load
+- 📐 **Derived screening metrics** — years of experience, career start year, employer count, average and current tenure, seniority band — computed from the work history, no extra scraping
+- 🧩 **Selector-rot early warning** — the run summary names any field that came back empty for every profile, so a LinkedIn markup change is visible instead of silently exporting blanks
+- ♻️ **Auto-resumes** if stopped — progress is saved after every search, duplicate profiles are skipped
+- 🛡️ Built-in **anti-detection** — stealth JS, human delays, session breaks, exponential backoff
+- 🔑 **Smart login** — restores your saved session, retries with backoff, polls through 2FA/checkpoints
+- 🧪 **`--dry-run`** — boots the browser, logs in, verifies one search, saves nothing
+- 📈 **Live session health** — ban-risk score, error streaks, and daily search cap on the dashboard
+
+---
+
+## ⚡ Power Stack (v5.0)
+
+The scraper is now a small sourcing platform, not just an Excel writer. Every
+piece is optional and **switched on by default where it is safe**; the classic
+menu flow still works exactly as before.
+
+| Capability | What it does | Module |
+| --- | --- | --- |
+| **Faceted search** | 2nd-degree / current company / past company / school / industry / seniority / boolean OR / NOT — rendered into real LinkedIn facets instead of being silently ignored | `search_filters.py` |
+| **Enrichment** | splits names, parses city/region/country, normalizes phones to E.164, canonicalizes skills, ranks seniority, guesses department, scores completeness, and infers *clearly-labelled* email candidates | `enrichment.py` |
+| **Resume matching** | weights your resume (or a job description), scores every profile 0-100 against it, explains the matches, ranks the pool | `scoring.py` |
+| **Cross-run database** | SQLite store keys every profile by public id, merges re-scrapes instead of overwriting, skips anything seen in any previous run, and records runs/searches/events | `storage.py` |
+| **Multi-format export** | XLSX (unchanged), CSV (UTF-8 BOM for Excel), JSON, JSONL, Markdown summary, and a self-contained HTML report with charts | `exporters.py` |
+| **MCP server** | exposes the pool to AI agents over stdio (list/get/search/export/build-search-url) with zero dependencies | `mcp_server.py` |
+| **Automation CLI** | `run`, `export`, `stats`, `report`, `mcp`, `doctor`, `db` — non-interactive, exit codes, no prompts | `cli.py` |
+| **Human behaviour** | curved pointer paths, uneven wheel scrolling, a feed warm-up after login, idle jitter | `behavior.py` |
+| **Per-run event log** | JSONL under `output/runs/` plus the SQLite `events` table for post-mortems | `storage.EventLog` |
+
+Full guide with field tables, URL grammar and examples: **[POWER_STACK.md](POWER_STACK.md)**.
+
+```bash
+# Faceted search: 2nd-degree directors/recruiters at Google in the US
+python cli.py run --mode people --companies Google --titles Recruiter \
+    --network S --seniority director --location "United States"
+
+# Jobs with real filters, then every export format
+python cli.py run --mode jobs --keywords "data engineer" \
+    --formats xlsx,csv,json,jsonl,md,html
+
+# Everything already stored, re-exported + analysed
+python cli.py export --format all
+python cli.py stats
+python cli.py report --out output/report.html
+```
+
+> **Why the filters matter:** LinkedIn *silently ignores* a plain-text
+> `location=` or `currentCompany=` on people search and returns the unfiltered
+> result set — a search that reads as scoped but isn't. This build refuses
+> invalid facet values and tells you, instead of pretending the filter applied.
+
+---
+
+## 📁 Project Structure
+
+```
+linkedin-scraper/
+│
+├── main.py                    ← Main entry (menu + --dry-run CLI mode)
+├── main_proxy.py              ← Alt engine with free proxy rotation
+│
+├── linkedin_scraper.py        ← Core scraping engine (login, proxy rotation,
+│                                anti-block, live session telemetry)
+├── linkedin_scraper_proxy.py  ← Scraping engine with proxy support
+├── proxy_manager.py           ← Free proxy fetcher, tester & rotator
+│
+├── config.py                  ← ALL your settings (edit this!)
+├── utils.py                   ← Helpers, delays, Excel export, telemetry store
+├── resume_parser.py           ← Parses and structures profile data
+├── Requirements.txt           ← Python dependencies
+│
+├── cli.py                     ← Automation CLI (run/export/stats/report/mcp/doctor/db)
+├── search_filters.py          ← LinkedIn URL grammar + faceted search filters
+├── enrichment.py              ← Names, locations, phones, skills, emails, dedupe keys
+├── scoring.py                 ← Resume match + ICP fit scoring
+├── storage.py                 ← SQLite store, cross-run dedupe, run history, event log
+├── exporters.py               ← CSV / JSON / JSONL / Markdown / HTML report
+├── behavior.py                ← Human pointer paths, wheel scrolling, warm-up
+├── mcp_server.py              ← Dependency-free MCP server (stdio) over the database
+├── POWER_STACK.md             ← Full guide to the v5.0 features
+│
+├── dashboard_template.html    ← Dashboard UI source of truth
+├── generate_dashboard.py      ← Builds dashboard.html from output/ (stdlib only)
+├── dashboard.html             ← Generated live dashboard (open in a browser)
+│
+├── test_scraper_fixes.py      ← Behavioral tests (no browser needed)
+├── test_login_flow.py         ← Drives the real login() against fakes
+├── test_power_features.py     ← 58 tests for the v5.0 stack (no browser needed)
+│
+├── output/                    ← Auto-created on first run
+│   ├── linkedin_results.xlsx  ← Your exported Excel data
+│   ├── linkedin_results.csv   ← CSV / JSON / JSONL / MD / HTML (when enabled)
+│   ├── scraper.db             ← SQLite: unique profiles, runs, searches, events
+│   ├── runs/*.jsonl           ← Per-run event log
+│   ├── progress.json          ← Auto-save checkpoint (resume feature)
+│   ├── proxies.json           ← Cached working proxy list
+│   ├── scraper.log            ← Full activity log
+│   └── session_health.json    ← Live session telemetry (dashboard panel)
+│
+└── session/                   ← Browser session/cookie cache
+```
+
+---
+
+## 📦 Requirements
+
+- Python **3.8 or higher**
+- A LinkedIn account (use a secondary one!)
+- Windows / macOS / Linux
+
+Check your Python version:
+```bash
+python --version
+```
+
+---
+
+## 🚀 Installation
+
+### Step 1 — Clone the repository
+```bash
+git clone https://github.com/yagyeshVyas/linkedin-scraper.git
+cd linkedin-scraper
+```
+
+### Step 2 — Install Python dependencies
+```bash
+pip install -r Requirements.txt
+```
+
+> Prefer a project virtual environment (recommended):
+> ```bash
+> python -m venv .venv
+> .venv/Scripts/python.exe -m pip install -r Requirements.txt   # Windows
+> source .venv/bin/activate && pip install -r Requirements.txt  # Mac / Linux
+> ```
+
+### Step 3 — Install the Playwright browser
+```bash
+playwright install chromium
+```
+
+---
+
+## ⚙️ Configuration
+
+**You only ever need to edit one file: `config.py`**
+
+---
+
+### 🔐 Step 1 — Set Your LinkedIn Credentials
+
+```python
+LINKEDIN_EMAIL    = "your_email@gmail.com"
+LINKEDIN_PASSWORD = "your_password"
+```
+
+> 💡 Use environment variables to keep credentials safe:
+> ```bash
+> # Windows
+> set LINKEDIN_EMAIL=your_email@gmail.com
+> set LINKEDIN_PASSWORD=your_password
+>
+> # Mac / Linux
+> export LINKEDIN_EMAIL=your_email@gmail.com
+> export LINKEDIN_PASSWORD=your_password
+> ```
+
+---
+
+### 🎯 Step 2 — Choose What Job Title to Search
+
+Edit `JOB_TITLES` in `config.py`:
+
+```python
+# Recruiters (default)
+JOB_TITLES = ["Recruiter", "Technical Recruiter", "Talent Acquisition"]
+
+# Software Engineers
+JOB_TITLES = ["Software Engineer", "Backend Developer", "Frontend Developer"]
+
+# Sales
+JOB_TITLES = ["Account Executive", "Sales Manager", "VP of Sales"]
+
+# Data / AI
+JOB_TITLES = ["Data Scientist", "Machine Learning Engineer", "Data Analyst"]
+
+# Leadership / C-Suite
+JOB_TITLES = ["CEO", "CTO", "Co-Founder", "Director of Engineering"]
+
+# Marketing
+JOB_TITLES = ["Marketing Manager", "CMO", "Growth Manager", "SEO Specialist"]
+```
+
+---
+
+### 🌍 Step 3 — Choose Your Location
+
+```python
+SEARCH_LOCATION_NAME = "United States"
+GEO_URN = "103644278"
+```
+
+| Country / City   | GEO_URN     |
+|------------------|-------------|
+| United States    | `103644278` |
+| United Kingdom   | `101165590` |
+| Canada           | `101174742` |
+| Australia        | `101452733` |
+| India            | `102713980` |
+| Germany          | `101282230` |
+| France           | `105015875` |
+| Singapore        | `102454443` |
+| New York City    | `105080838` |
+| San Francisco    | `102277331` |
+| London           | `102257491` |
+
+---
+
+### 🔎 Step 4 — Optional: Filter by Seniority
+
+```python
+# Only save senior-level profiles:
+FILTER_KEYWORDS = ["senior", "lead", "principal", "director", "vp"]
+
+# Save everyone — no filter:
+FILTER_KEYWORDS = []
+```
+
+---
+
+### 🏢 Step 5 — Choose Company List
+
+The scraper uses `FORTUNE_500_COMPANIES` (25 companies) by default. For a quick first run set:
+
+```python
+USE_TEST_COMPANIES = True  # runs the 2-company TEST_COMPANIES list instead
+```
+
+You can also edit the `TEST_COMPANIES` / `FORTUNE_500_COMPANIES` lists in `main.py`.
+
+---
+
+### 🆕 Step 6 — New Settings Worth Knowing
+
+**Proxies** (either `PROXY_LIST` with your own proxies, or free auto-fetch):
+
+```python
+PROXY_LIST = []            # e.g. ["http://user:pass@proxy1:8080", ...] — round-robin rotated
+USE_FREE_PROXIES = False   # True → auto-fetch + test free proxies when PROXY_LIST is empty
+```
+
+**Safety / resilience:**
+
+```python
+RETRY_FAILED_PROFILES = True      # one final pass over transiently-failed profiles before export
+LOGIN_CHALLENGE_TIMEOUT_SECONDS = 90  # how long to poll 2FA/checkpoint pages (no blind waits)
+MAX_BLOCK_RECOVERIES = 3          # auto-recover from blocks this many times per run, then stop
+RANDOMIZE_FINGERPRINT = True      # pick a fresh coherent identity (UA/viewport/GPU/tz/geo) each launch
+```
+
+**Auto-recovery:** if LinkedIn serves an auth-wall, captcha, security checkpoint or a
+rate-limit / "unusual activity" page mid-run, the scraper cools down, rotates to a new
+identity (fresh proxy + fingerprint), logs back in, and resumes the page it was on. It does
+this at most `MAX_BLOCK_RECOVERIES` times per run, so a hard block can't loop forever or
+burn your account.
+
+**Notifications:**
+
+```python
+DISCORD_WEBHOOK_URL = ""  # optional — posts a summary when a scrape completes
+```
+
+**Telemetry output:** `output/session_health.json` is written automatically (login reason, proxy used,
+error streaks, daily search count, ban-risk score). No setup needed.
+
+---
+
+## ▶️ How to Run
+
+### Option A — Without Proxy (direct connection)
+```bash
+python main.py
+```
+
+### Option B — With Free Auto-Rotating Proxies ✨
+
+Set `USE_FREE_PROXIES = True` in `config.py`, then run normally:
+
+```bash
+python main.py
+```
+
+The scraper fetches + tests free proxies on launch (cached to `output/proxies.json` for an hour),
+rotates through them, and sheds dead ones automatically. You can also use the dedicated proxy
+engine (`python main_proxy.py`) if you prefer the separate path.
+
+### Option C — Smoke Test Everything First (recommended)
+
+```bash
+python main.py --dry-run            # people mode, one search
+python main.py --dry-run --mode jobs       # job search
+python main.py --dry-run --mode candidates # candidate search
+```
+
+Boots the browser, logs in, verifies **one** search page, then stops. Scrapes nothing and
+writes nothing — a safe end-to-end check that your credentials, session, and search URLs work.
+Exit code `0` = all good.
+
+---
+
+### ♻️ Resume After a Stop
+
+If the scraper stops for any reason — just run the same command again:
+
+```bash
+python main.py
+```
+
+It reads `output/progress.json` and continues exactly where it left off. No data is lost — and
+profiles already captured are never re-scraped.
+
+---
+
+## 🔄 Proxy Support (Free)
+
+Two ways to use proxies — both feed the same round-robin rotation:
+
+- **Your own proxies** — set `PROXY_LIST` in `config.py`. Rotation never picks the same proxy
+twice in a row, so every identity rotation actually changes your IP.
+- **Free proxies** — set `USE_FREE_PROXIES = True`; `proxy_manager.py` fetches, tests, caches,
+and rotates free proxies for you (also the engine behind `main_proxy.py`).
+
+### How It Works
+
+| When | What Happens |
+|------|-------------|
+| **On startup** | Fetches 100+ free proxies, tests them, keeps working ones |
+| **Every hour** | Fetches a completely fresh proxy list automatically (or loads the cache) |
+| **Every identity rotation** | Picks the next proxy — never the same IP twice in a row |
+| **On consecutive errors** | Marks the current proxy failed, sheds it, and rotates |
+| **Proxy list runs out** | Auto-fetches a brand new list instantly |
+
+### Free Proxy Sources Used
+
+| Source | Refresh Rate |
+|--------|-------------|
+| [ProxyScrape](https://proxyscrape.com) | Every few minutes |
+| [GeoNode](https://geonode.com/free-proxy-list) | Hourly |
+| [Proxy-List.download](https://www.proxy-list.download) | Daily |
+| [ProxyNova](https://proxynova.com) | Hourly |
+
+### Proxy Reality Check
+
+Free proxies are not perfect — expect:
+- ~10–30% of fetched proxies will actually work
+- Some will be slow (3–8 second response times)
+- `proxy_manager.py` automatically tests and removes bad proxies
+
+---
+
+## 📊 Output
+
+Results saved to `output/linkedin_results.xlsx` with two sheets:
+
+**Sheet 1 — All Profiles**
+
+| Column | Description |
+|--------|-------------|
+| Full Name | Person's full name |
+| Job Title | Their current title |
+| Company (from Profile) | Company listed on their LinkedIn |
+| Searched Company | Company name you searched for |
+| LinkedIn Headline | Their full LinkedIn headline |
+| Location | City, State |
+| Email Address | If publicly visible |
+| Phone | If publicly visible |
+| Connections / Connections (num) | "500+ connections" plus the parsed number |
+| Followers / Followers (num) | Follower line plus the parsed number |
+| Open To Work | Detected from the green `#OPEN_TO_WORK` banner |
+| Premium | LinkedIn Premium badge detected |
+| Roles Held / Schools | Counts, for quick screening |
+| Skills | Comma-separated skills |
+| About Section | Their About text |
+| Work History | Flat "Title at Company (dates) \| …" summary |
+| Education | Flat "School — Degree \| …" summary |
+| Certifications | Licenses & certifications |
+| Languages | Languages with proficiency |
+| Honors & Awards | Awards and honors |
+| Volunteer / Projects / Publications / Courses / Patents | Those profile sections, when present |
+| Services Offered | Services the person offers (consulting, training, …) |
+| Interests | Companies, groups and schools they follow |
+| Websites | External links (portfolio, personal site) — LinkedIn/CDN links filtered out |
+| Seniority Band | C-suite / VP / Director / Manager-Lead / Senior-Principal / Recruiting-TA / Other |
+| Years Experience | Earliest role start → today, in years (derived) |
+| Career Start Year | Year of the earliest listed role |
+| Employers | Distinct employers across all listed roles |
+| Avg Tenure (mo) / Current Tenure (mo) | Mean role length, and months in the current role |
+| Hiring / Creator / Verified | Top-card badges (detected from LinkedIn's own markers, not page text) |
+| Pronouns | As shown next to the name |
+| Profile ID | LinkedIn's public identifier from the URL |
+| Photo URL / Banner URL | Profile photo and cover image |
+| LinkedIn URL | 🔗 Clickable link to their profile |
+| Scraped At | Date and time scraped |
+
+> **About the derived metrics:** `Years Experience` is *earliest role start → today*, so it includes career
+> gaps. `Avg Tenure` is the mean of the role durations LinkedIn shows. Both are labelled as estimates,
+> not facts — always confirm before making a hiring decision.
+
+> **Structured data:** the JSON columns `experience_roles` and `education_entries` are also written to
+> `output/progress.json` — one object per role/school with title, company, dates, duration, location
+> and description (or school, degree, field, dates). The flat `Work History` / `Education` columns are
+> **rendered from those same objects**, so the two views can never disagree.
+
+**Sheet 2 — Summary**
+
+Quick stats: total profiles, companies covered, profiles with email.
+
+---
+
+## 📈 Live Dashboard & Session Health
+
+Regenerate the self-contained dashboard any time (stdlib only, no install):
+
+```bash
+python generate_dashboard.py
+```
+
+Then open `dashboard.html` in any browser. It shows:
+
+- 📊 Overview stats + searchable/sortable profile table (with CSV export)
+- 📈 Analytics — title keywords, US states, seniority, email coverage
+- 🧾 Colorized activity feed (last 40 log lines, filterable by level)
+- 🩺 Project health — live syntax check of every module, plus known issues
+- ❤️ **Session Health** — login reason, proxy used, error streaks, daily search
+  cap gauge, a **0–100 ban-risk score**, and a live event timeline. While a
+  scrape is running the panel shows a pulsing **LIVE** badge.
+
+The scraper writes `output/session_health.json` automatically (atomically, on
+every event) — nothing to configure.
+
+---
+
+## 🛡️ How It Works (Anti-Detection)
+
+| Technique | What It Does |
+|-----------|-------------|
+| **Random delays** | Waits 8–18 seconds between profiles (not fixed) |
+| **Session breaks** | 1–3 min break every 15 requests, scrolls feed naturally |
+| **Proxy rotation** | Round-robins IPs — never the same proxy twice in a row |
+| **Exponential backoff** | Adaptive breaks grow with the error streak (~60s → capped 600s, jittered) |
+| **Smart login** | Restores saved sessions; retries with backoff; polls 2FA/checkpoints |
+| **Coherent fingerprints** | One story per session: UA, `navigator.platform`, viewport, GPU, timezone, locale and geolocation all agree — a UA that contradicts the machine is itself a signal |
+| **Deep stealth JS** | Hides `navigator.webdriver`, fakes `window.chrome`, plugins/mimeTypes, WebGL GPU strings, hardware hints and `userAgentData`(client hints) |
+| **User agent rotation** | Rotates across real **Chromium** desktop agents (matching the engine that's actually driving) |
+| **Block auto-recovery** | Detects auth-walls / captchas / checkpoints / rate-limits, then rotates identity + re-logins and resumes (bounded) |
+| **Dead-proxy shedding** | Failed proxied launches fall back to direct; dead free proxies are dropped from the pool |
+| **Human-like typing** | Types credentials one character at a time |
+| **Random scrolling** | Scrolls pages up and down like a real person |
+| **Geo/timezone matching** | Geolocation is set to the same city as the profile's timezone and locale |
+
+> ⚠️ **Do NOT reduce the delay settings.** Faster = higher chance of getting blocked.
+
+---
+
+## 🔧 Troubleshooting
+
+**❌ Login timeout**
+```
+Login error: Timeout 15000ms exceeded
+```
+→ Run again. LinkedIn can be slow to load sometimes.
+
+---
+
+**❌ No results for every company**
+
+→ LinkedIn may have rate-limited your IP.
+→ Switch to proxy mode: `python main_proxy.py`
+→ Or wait 1–2 hours and try again.
+
+---
+
+**⚠️ Verification / 2FA / CAPTCHA screen**
+
+→ Normal! The scraper **polls** the page every 5 seconds (up to
+`LOGIN_CHALLENGE_TIMEOUT_SECONDS`, default 90s) and continues the moment you
+complete the challenge — no wasted waiting. If it isn't finished in time,
+run again; your session may need a fresh login.
+
+---
+
+**❌ "Login rejected by LinkedIn"**
+
+→ That's LinkedIn saying the email/password is wrong — check `config.py` or the
+`LINKEDIN_EMAIL` / `LINKEDIN_PASSWORD` env vars. The scraper gives up immediately
+instead of hammering the login (that's how accounts get locked).
+
+---
+
+**❌ Does everything work?**
+
+→ Run the test suite (no browser or network needed):
+```bash
+python test_scraper_fixes.py
+python test_login_flow.py
+```
+→ Or a real end-to-end smoke test: `python main.py --dry-run`
+
+---
+
+**❌ All proxies failing**
+
+→ Free proxies sometimes go down all at once.
+→ The scraper will fall back to direct connection automatically.
+→ Try again after 30 minutes — new proxies will be available.
+
+---
+
+**❌ ModuleNotFoundError**
+```bash
+pip install -r Requirements.txt
+playwright install chromium
+```
+
+---
+
+**❌ 0 results every time**
+
+→ LinkedIn may have updated their HTML structure.
+→ Open an [Issue](https://github.com/yagyeshVyas/linkedin-scraper/issues) and I'll investigate.
+
+---
+
+## ⏱️ Time Estimates
+
+| Companies | Job Titles | Mode | Est. Time |
+|-----------|-----------|------|-----------|
+| 3 (test) | 2 | Any | ~10–20 min |
+| 50 | 2 | Direct | ~2–5 hours |
+| 50 | 2 | Proxy | ~3–7 hours |
+| 500 | 5 | Proxy | ~25–70 hours |
+
+> Run overnight for large lists. The resume feature means you can split it across multiple sessions.
+
+---
+
+## 🧰 Tech Stack
+
+| Library | Version | Purpose |
+|---------|---------|---------|
+| [Playwright](https://playwright.dev/python/) | 1.40+ | Browser automation |
+| [BeautifulSoup4](https://www.crummy.com/software/BeautifulSoup/) | 4.12+ | HTML parsing |
+| [Pandas](https://pandas.pydata.org/) | 2.0+ | Data handling |
+| [OpenPyXL](https://openpyxl.readthedocs.io/) | 3.1+ | Excel export |
+| asyncio | built-in | Async execution |
+| urllib | built-in | Proxy fetching |
+
+---
+
+## 🤝 Contributing
+
+Found a bug or want to improve something?
+
+1. Fork the repo
+2. Create a branch: `git checkout -b fix/your-fix`
+3. Commit: `git commit -m "Fix: describe what you fixed"`
+4. Push: `git push origin fix/your-fix`
+5. Open a Pull Request
+
+---
+
+## ⭐ Support
+
+If this helped you, consider giving it a star — it helps others find it!
+
+---
+
+*Built as a learning project. Practicing Python, Playwright, asyncio, proxy rotation, and real-world problem solving.*
