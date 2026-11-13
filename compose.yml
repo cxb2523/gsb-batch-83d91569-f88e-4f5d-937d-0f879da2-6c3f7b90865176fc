@@ -1,0 +1,336 @@
+# Development / laptop stack. For the server behind Traefik use docker-compose.server.yml.
+services:
+  postgres:
+    image: postgres:16.15-alpine@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139
+    container_name: infradeck-postgres
+    restart: unless-stopped
+    # The image's entrypoint prepares the data folder as root (owner and 0700 mode), then runs PostgreSQL as the
+    # postgres user, which keeps none of these. Its socket and lock files live in memory.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_READ_SEARCH, FOWNER, SETUID, SETGID]
+    read_only: true
+    tmpfs:
+      - /var/run/postgresql:uid=70,gid=70
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    networks: [data]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-infradeck}
+      POSTGRES_USER: ${POSTGRES_USER:-infradeck}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-infradeck} -d $${POSTGRES_DB:-infradeck}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.4.12-alpine@sha256:c5d34a98396a4775e223c74e929162c35c5a2182901ba26b50ade939941ce14b
+    container_name: infradeck-redis
+    restart: unless-stopped
+    networks: [data]
+    # Needs a password: Redis holds the login sessions, so nothing that can merely reach it on the network
+    # may use it. Generate one with `openssl rand -hex 24` (letters and digits only, so it fits in a URL).
+    # Through the image's entrypoint, which hands /data to the redis user and drops root before Redis starts.
+    command: ["sh", "-c", "exec docker-entrypoint.sh redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    # Only what that hand-over needs: reading and chowning /data, and switching to the redis user.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_READ_SEARCH, SETUID, SETGID]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env (generate one with openssl rand -hex 24)}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    container_name: infradeck-backend
+    image: infradeck-backend:latest
+    restart: unless-stopped
+    # Runs as an unprivileged user (see the Dockerfile) with no capabilities and a read-only filesystem.
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    networks: [data, front]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-infradeck}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-infradeck}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env (generate one with openssl rand -hex 24)}@redis:6379/0
+      # Set to true when the dashboard is served over HTTPS.
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      # This stack has one listener, so collector traffic can't be told apart (the backend's default is strict).
+      COLLECTOR_ACCESS: open
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-homie_session}
+      LOGIN_RATE_LIMIT: ${LOGIN_RATE_LIMIT:-5}
+      LOGIN_RATE_WINDOW_SECONDS: ${LOGIN_RATE_WINDOW_SECONDS:-60}
+      REGISTER_RATE_LIMIT: ${REGISTER_RATE_LIMIT:-3}
+      REGISTER_RATE_WINDOW_SECONDS: ${REGISTER_RATE_WINDOW_SECONDS:-3600}
+      # Email notifications (Account → Notifications). Off unless SMTP_HOST and SMTP_FROM are set.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      # Key that encrypts stored secrets such as two-factor secrets (generate: docker compose run --rm backend python -m src.backend.secrets_box).
+      SECRETS_KEY: ${SECRETS_KEY:-}
+      # Limits on what collectors can do. A check-in must come at least this share of the check interval after the
+      # previous one (0 switches it off); the install holds at most MAX_SERVERS; /docs is off unless enabled.
+      INGEST_MIN_SPACING_RATIO: ${INGEST_MIN_SPACING_RATIO:-0.25}
+      MAX_SERVERS: ${MAX_SERVERS:-200}
+      ENROLL_RATE_LIMIT: ${ENROLL_RATE_LIMIT:-30}
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
+      # Setup token for the very first account. Empty: one is generated and printed in the backend log.
+      ADMIN_BOOTSTRAP_TOKEN: ${ADMIN_BOOTSTRAP_TOKEN:-}
+      # How long a token from "Connect a server" stays valid, in seconds.
+      JOIN_TOKEN_TTL_SECONDS: ${JOIN_TOKEN_TTL_SECONDS:-900}
+      # Connect a server panel: images remote hosts install, and the address they reach this dashboard at.
+      COLLECTOR_IMAGE: ${COLLECTOR_IMAGE:-}
+      DOCKER_PROXY_IMAGE: ${DOCKER_PROXY_IMAGE:-}
+      COLLECTOR_PUBLIC_URL: ${COLLECTOR_PUBLIC_URL:-}
+    # Browsers and remote collectors reach the API through the frontend at /api;
+    # the direct port is only published on this machine for debugging. 8060 keeps it clear of the
+    # many other tools that use 8000; set BACKEND_PORT in .env if 8060 is taken too.
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8060}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Runs the incident agent's jobs (diagnoses) from the queue in Redis, apart from the backend, so a slow or
+  # stuck model never holds up the API. Stopping it only delays diagnoses; everything else keeps working.
+  # It needs the database, Redis and the internet (the model provider), and nothing else. See docs/containers.md.
+  agent-worker:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    image: infradeck-backend:latest
+    container_name: infradeck-agent-worker
+    restart: unless-stopped
+    command: ["python", "-m", "src.agent.worker"]
+    networks: [data, front]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-infradeck}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-infradeck}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env (generate one with openssl rand -hex 24)}@redis:6379/0
+      # Decrypts the agent's API key, which Admin › Incident agent stores encrypted.
+      SECRETS_KEY: ${SECRETS_KEY:-}
+      PYTHONDONTWRITEBYTECODE: "1"
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.agent.worker", "--health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # Monitors the machine running this stack. Other servers use collector-compose.yml.
+  collector:
+    build:
+      context: .
+      dockerfile: docker/collector.Dockerfile
+    image: infradeck-collector:latest
+    container_name: infradeck-collector
+    restart: unless-stopped
+    networks: [front]
+    environment:
+      INFRADECK_API_URL: http://backend:8000
+      # Marks this collector as the machine running the dashboard (the charts at the top).
+      INFRADECK_DASHBOARD_HOST: "true"
+      # Nothing to configure: this machine shows up under "New servers detected"
+      # on the dashboard. An optional enrollment key skips that approval.
+      INFRADECK_ENROLL_KEY: ${INFRADECK_ENROLL_KEY:-}
+      INFRADECK_SERVER_NAME: ${INFRADECK_SERVER_NAME:-}
+      # Optional internet check, off when empty: comma-separated host:port targets this collector tries to reach.
+      INFRADECK_CONNECTIVITY_TARGETS: ${INFRADECK_CONNECTIVITY_TARGETS:-}
+      # Docker data comes through the read-only proxy; the collector has no Docker socket.
+      INFRADECK_DOCKER_HOST: /run/docker-proxy/docker.sock
+    volumes:
+      - /proc:/host/proc:ro
+      - /:/hostfs:ro
+      - collector_state:/var/lib/infradeck-collector
+      # Summary from the optional system helper (read-only; empty unless that profile runs).
+      - system_events:/helper:ro
+      - docker_proxy_socket:/run/docker-proxy:ro
+    # Read-only host view, no capabilities: as root it then reads only what root owns or everyone may
+    # read, not other users' private files, even though / is mounted. Root-owned files (/etc/shadow,
+    # /root/.ssh, a root-owned .env) stay readable; see SECURITY.md.
+    cap_drop: [ALL]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    # Lets availability "Ping" checks send ICMP echo through an unprivileged datagram socket for the
+    # container's own group only. This grants no capability and no raw sockets; without it, ping checks
+    # simply report that ICMP is not permitted. Namespaced to this container.
+    sysctls:
+      - net.ipv4.ping_group_range=0 0
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # The only container that mounts the Docker socket (a mount flag can't make it read-only).
+  # It answers six kinds of read request and nothing else. It has no network at all: the collector
+  # reaches it through a Unix socket in a volume only the two of them share. See SECURITY.md.
+  docker-proxy:
+    build:
+      context: .
+      dockerfile: docker/docker-proxy.Dockerfile
+    image: infradeck-docker-proxy:latest
+    container_name: infradeck-docker-proxy
+    restart: unless-stopped
+    user: "0:0"
+    cap_drop: [ALL]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - docker_proxy_socket:/run/docker-proxy
+
+  # Optional: adds OOM-killer process names, kernel errors and crash-vs-clean-shutdown detection.
+  # Enable with: docker compose --profile system-events up -d
+  # Its only privilege is CAP_SYSLOG (to read the kernel log); it has no network, a read-only
+  # filesystem, and sees the host only through the read-only wtmp file. See SECURITY.md.
+  system-helper:
+    profiles: ["system-events"]
+    build:
+      context: .
+      dockerfile: docker/system-helper.Dockerfile
+    image: infradeck-system-helper:latest
+    container_name: infradeck-system-helper
+    restart: unless-stopped
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [SYSLOG]
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /var/log/wtmp:/host/wtmp:ro
+      - system_events:/out
+
+  # Optional and off by default: names the process behind each listening port for the Network tab.
+  # Enable with: docker compose --profile port-owners up -d
+  # This is the most privileged piece of the stack. Seeing which process holds a socket means looking into
+  # other users' processes, which needs the host's /proc, CAP_SYS_PTRACE, CAP_DAC_READ_SEARCH and no
+  # AppArmor confinement. Together those can read any file on the host, so it gets no network, a
+  # read-only filesystem, and publishes only protocol, port and process name. Read SECURITY.md first.
+  port-owners:
+    profiles: ["port-owners"]
+    build:
+      context: .
+      dockerfile: docker/system-helper.Dockerfile
+    image: infradeck-system-helper:latest
+    container_name: infradeck-port-owners
+    restart: unless-stopped
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [SYS_PTRACE, DAC_READ_SEARCH]
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+      - apparmor=unconfined
+    environment:
+      INFRADECK_HELPER_MODE: port-owners
+    volumes:
+      - /proc:/host/proc:ro
+      - system_events:/out
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    container_name: infradeck-frontend
+    restart: unless-stopped
+    # Runs as the unprivileged nginx user (see the Dockerfile) with no capabilities and a read-only filesystem;
+    # it writes only its cache, its pid file and the TRUSTED_PROXIES settings, all in memory.
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp:uid=101,gid=101
+      - /var/cache/nginx:uid=101,gid=101
+      - /etc/nginx/trusted-proxies:uid=101,gid=101
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      # Address or network of a reverse proxy in front of this one; empty trusts nobody's X-Forwarded-For.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+    networks: [front]
+    # Serves the dashboard and proxies /api to the backend. Reach it directly over
+    # LAN/VPN, or put the `https` profile's Caddy in front for a public domain.
+    ports:
+      - "${FRONTEND_BIND:-0.0.0.0}:${FRONTEND_PORT:-5173}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # Optional public HTTPS entry point: docker compose --profile https up -d
+  caddy:
+    image: caddy:2.11.9-alpine@sha256:0bbb055bda6793c999bde78b1b5ce3e89f829fb031af2cf50056ea1246559fee
+    container_name: infradeck-caddy
+    profiles: ["https"]
+    restart: unless-stopped
+    networks: [front]
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+
+networks:
+  # Redis and PostgreSQL are reachable only by the backend and the agent worker; the collector can reach the backend
+  # and nothing else.
+  data:
+    internal: true
+  front:
+
+volumes:
+  postgres_data:
+  redis_data:
+  collector_state:
+  system_events:
+  docker_proxy_socket:
+  caddy_data:
+  caddy_config:

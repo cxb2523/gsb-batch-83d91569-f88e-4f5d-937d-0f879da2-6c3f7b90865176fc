@@ -1,0 +1,118 @@
+# Collector-only stack that builds the images locally, an alternative to the signed images the compose
+# command from the dashboard (Connect a server) installs. Set INFRADECK_API_URL (e.g. in a .env next to
+# this file) and run:
+#   docker compose -f collector-compose.yml up -d --build
+# The server then appears on the dashboard under "New servers detected"; click
+# Add. Credentials are saved in the collector_state volume.
+
+services:
+  collector:
+    build:
+      context: .
+      dockerfile: docker/collector.Dockerfile
+    image: ${INFRADECK_COLLECTOR_IMAGE:-infradeck-collector:latest}
+    container_name: infradeck-collector
+    restart: unless-stopped
+    environment:
+      INFRADECK_API_URL: ${INFRADECK_API_URL:?Set INFRADECK_API_URL to your backend address}
+      INFRADECK_ENROLL_KEY: ${INFRADECK_ENROLL_KEY:-}
+      INFRADECK_SERVER_NAME: ${INFRADECK_SERVER_NAME:-}
+      # Optional internet check, off when empty: comma-separated host:port targets this collector tries to reach.
+      INFRADECK_CONNECTIVITY_TARGETS: ${INFRADECK_CONNECTIVITY_TARGETS:-}
+      # Docker data comes through the read-only proxy; the collector has no Docker socket.
+      INFRADECK_DOCKER_HOST: /run/docker-proxy/docker.sock
+    volumes:
+      - /proc:/host/proc:ro
+      - /:/hostfs:ro
+      - collector_state:/var/lib/infradeck-collector
+      # Summary from the optional system helper (read-only; empty unless that profile runs).
+      - system_events:/helper:ro
+      - docker_proxy_socket:/run/docker-proxy:ro
+    # Read-only host view, no capabilities: as root it then reads only what root owns or everyone may
+    # read, not other users' private files, even though / is mounted. Root-owned files (/etc/shadow,
+    # /root/.ssh, a root-owned .env) stay readable; see SECURITY.md.
+    cap_drop: [ALL]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    # Lets availability "Ping" checks send ICMP echo through an unprivileged datagram socket for the
+    # container's own group only. This grants no capability and no raw sockets; without it, ping checks
+    # simply report that ICMP is not permitted. Namespaced to this container.
+    sysctls:
+      - net.ipv4.ping_group_range=0 0
+
+  # The only container that mounts the Docker socket (a mount flag can't make it read-only).
+  # It answers six kinds of read request and nothing else. It has no network at all: the collector
+  # reaches it through a Unix socket in a volume only the two of them share. See SECURITY.md.
+  docker-proxy:
+    build:
+      context: .
+      dockerfile: docker/docker-proxy.Dockerfile
+    image: infradeck-docker-proxy:latest
+    container_name: infradeck-docker-proxy
+    restart: unless-stopped
+    user: "0:0"
+    cap_drop: [ALL]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - docker_proxy_socket:/run/docker-proxy
+
+  # Optional: adds OOM-killer process names, kernel errors and crash-vs-clean-shutdown detection.
+  # Enable with: docker compose --profile system-events up -d
+  # Its only privilege is CAP_SYSLOG (to read the kernel log); it has no network, a read-only
+  # filesystem, and sees the host only through the read-only wtmp file. See SECURITY.md.
+  system-helper:
+    profiles: ["system-events"]
+    build:
+      context: .
+      dockerfile: docker/system-helper.Dockerfile
+    image: infradeck-system-helper:latest
+    container_name: infradeck-system-helper
+    restart: unless-stopped
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [SYSLOG]
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /var/log/wtmp:/host/wtmp:ro
+      - system_events:/out
+
+  # Optional and off by default: names the process behind each listening port for the Network tab.
+  # Enable with: docker compose --profile port-owners up -d
+  # This is the most privileged piece of the stack. Seeing which process holds a socket means looking into
+  # other users' processes, which needs the host's /proc, CAP_SYS_PTRACE, CAP_DAC_READ_SEARCH and no
+  # AppArmor confinement. Together those can read any file on the host, so it gets no network, a
+  # read-only filesystem, and publishes only protocol, port and process name. Read SECURITY.md first.
+  port-owners:
+    profiles: ["port-owners"]
+    build:
+      context: .
+      dockerfile: docker/system-helper.Dockerfile
+    image: infradeck-system-helper:latest
+    container_name: infradeck-port-owners
+    restart: unless-stopped
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [SYS_PTRACE, DAC_READ_SEARCH]
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+      - apparmor=unconfined
+    environment:
+      INFRADECK_HELPER_MODE: port-owners
+    volumes:
+      - /proc:/host/proc:ro
+      - system_events:/out
+
+volumes:
+  collector_state:
+  system_events:
+  docker_proxy_socket:
