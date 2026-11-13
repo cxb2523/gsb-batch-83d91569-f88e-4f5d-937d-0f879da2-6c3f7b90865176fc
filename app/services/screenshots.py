@@ -22,7 +22,14 @@ BROWSER_SCREENSHOT_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
+# A hung teardown call (context/browser close or driver shutdown) must not hold
+# the capture open.  The whole teardown gets this short, shared grace period.
 _CLEANUP_TIMEOUT_SECONDS = 0.2
+# Cancelled browser operations are given this short, shared grace period to
+# unwind before the capture returns; a hung operation must not outlive it.
+_CANCELLATION_GRACE_SECONDS = 0.02
+# How often a queued capture re-checks the browser slot while it waits.
+_SLOT_POLL_SECONDS = 0.05
 _Result = TypeVar("_Result")
 
 
@@ -36,6 +43,10 @@ _MINIMAL_PNG_BASE64 = (
 class ScreenshotResult:
     path: str | None
     error: str | None = None
+
+
+class _CaptureDeadlineExceeded(TimeoutError):
+    """The capture-wide deadline elapsed; no further browser step may run."""
 
 
 class ScreenshotService:
@@ -154,17 +165,16 @@ class ScreenshotService:
         loop = asyncio.get_running_loop()
         timeout_seconds = max(0.01, float(self.settings.screenshot_timeout_seconds))
         deadline = loop.time() + timeout_seconds
-        operation_deadline = deadline
         browser = None
         context = None
         manager = None
         acquired = False
         try:
             while not self._browser_slots.acquire(blocking=False):
-                await self._within_deadline(asyncio.sleep(0.2), operation_deadline)
+                await self._within_deadline(asyncio.sleep(_SLOT_POLL_SECONDS), deadline)
             acquired = True
             manager = async_playwright()
-            playwright = await self._within_deadline(manager.start(), operation_deadline)
+            playwright = await self._within_deadline(manager.start(), deadline)
             browser = await self._within_deadline(playwright.chromium.launch(
                 headless=True,
                 args=[
@@ -190,7 +200,7 @@ class ScreenshotService:
                     "--renderer-process-limit=1",
                     "--disable-blink-features=AutomationControlled",
                 ],
-            ), operation_deadline)
+            ), deadline)
             context = await self._within_deadline(browser.new_context(
                 ignore_https_errors=True,
                 viewport={"width": 1280, "height": 720},
@@ -199,26 +209,32 @@ class ScreenshotService:
                 locale="ru-RU",
                 timezone_id="Asia/Almaty",
                 proxy={"server": self.settings.kz_proxy_url} if self.settings.kz_proxy_url else None,
-            ), operation_deadline)
-            page = await self._within_deadline(context.new_page(), operation_deadline)
+            ), deadline)
+            page = await self._within_deadline(context.new_page(), deadline)
             timeout_ms = max(2_500, int(self.settings.screenshot_timeout_seconds * 1000))
             settle_ms = max(0, int(self.settings.screenshot_settle_ms))
             page.set_default_timeout(timeout_ms)
             navigation_error = None
             try:
-                await self._within_deadline(page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms), operation_deadline)
+                await self._within_deadline(page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms), deadline)
+            except _CaptureDeadlineExceeded:
+                raise
             except Exception as exc:  # noqa: BLE001
                 navigation_error = exc
                 try:
-                    await self._within_deadline(page.goto(url, wait_until="commit", timeout=max(1_500, timeout_ms // 2)), operation_deadline)
+                    await self._within_deadline(page.goto(url, wait_until="commit", timeout=max(1_500, timeout_ms // 2)), deadline)
+                except _CaptureDeadlineExceeded:
+                    raise
                 except Exception:
                     pass
             try:
-                await self._within_deadline(page.wait_for_load_state("load", timeout=min(750, timeout_ms)), operation_deadline)
+                await self._within_deadline(page.wait_for_load_state("load", timeout=min(750, timeout_ms)), deadline)
+            except _CaptureDeadlineExceeded:
+                raise
             except Exception:
                 pass
             if settle_ms:
-                await self._within_deadline(page.wait_for_timeout(settle_ms), operation_deadline)
+                await self._within_deadline(page.wait_for_timeout(settle_ms), deadline)
             try:
                 await self._within_deadline(page.screenshot(
                     path=str(output),
@@ -226,7 +242,7 @@ class ScreenshotService:
                     timeout=max(2_000, min(timeout_ms, 3_000)),
                     animations="disabled",
                     caret="hide",
-                ), operation_deadline)
+                ), deadline)
                 result = self._capture_result(output, rel_path)
                 if result.path or not self.settings.screenshot_fallback_enabled:
                     if result.path and navigation_error:
@@ -244,7 +260,9 @@ class ScreenshotService:
                     status_code=status_code,
                     error=result.error or "browser screenshot was not usable",
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                if isinstance(exc, _CaptureDeadlineExceeded):
+                    raise
                 try:
                     await self._within_deadline(page.screenshot(
                         path=str(output),
@@ -252,13 +270,15 @@ class ScreenshotService:
                         timeout=max(1_500, min(timeout_ms // 2, 2_500)),
                         animations="disabled",
                         caret="hide",
-                    ), operation_deadline)
+                    ), deadline)
+                except _CaptureDeadlineExceeded:
+                    raise
                 except Exception:  # noqa: BLE001
-                    client = await self._within_deadline(context.new_cdp_session(page), operation_deadline)
+                    client = await self._within_deadline(context.new_cdp_session(page), deadline)
                     capture = await self._within_deadline(client.send(
                         "Page.captureScreenshot",
                         {"format": "png", "fromSurface": True, "captureBeyondViewport": False},
-                    ), operation_deadline)
+                    ), deadline)
                     output.write_bytes(base64.b64decode(capture["data"]))
                 result = self._capture_result(output, rel_path)
                 if result.path or not self.settings.screenshot_fallback_enabled:
@@ -277,6 +297,18 @@ class ScreenshotService:
                     status_code=status_code,
                     error=result.error or "browser screenshot was not usable",
                 )
+        except _CaptureDeadlineExceeded as exc:
+            # The capture-wide budget elapsed in the middle of a browser step:
+            # report the timeout (and fall back) without trying further steps.
+            return self._fallback_result(
+                output,
+                rel_path,
+                url=url,
+                title=title,
+                html_path=html_path,
+                status_code=status_code,
+                error=str(exc),
+            )
         except Exception as exc:  # noqa: BLE001
             return self._fallback_result(
                 output,
@@ -300,27 +332,57 @@ class ScreenshotService:
         deadline: float,
         *,
         start_before_timeout: bool = False,
+        hard_deadline: float | None = None,
     ) -> _Result:
+        """Await ``operation`` until ``deadline`` (loop time) and no later.
+
+        On timeout the operation is cancelled and given a short, fixed grace
+        period to unwind so a hung browser call cannot outlive the capture and
+        leave a pending asyncio task behind.  ``hard_deadline`` caps that
+        unwinding wait as well, so a single teardown phase stays bounded.
+        """
+        loop = asyncio.get_running_loop()
+        remaining = deadline - loop.time()
+        if remaining <= 0 and not start_before_timeout:
+            # The capture budget is already spent: do not start (or leak) another
+            # browser call just to time it out immediately.
+            self._discard_operation(operation)
+            raise self._deadline_error()
         task = asyncio.ensure_future(operation)
+        task.add_done_callback(self._consume_task_result)
         try:
             if start_before_timeout:
                 # Driver shutdown must run far enough to request process stop,
                 # even if earlier browser teardown used its remaining budget.
                 await asyncio.sleep(0)
-            remaining = max(0.0, deadline - asyncio.get_running_loop().time())
-            if remaining:
-                done, _ = await asyncio.wait({task}, timeout=remaining)
-                if done:
-                    return task.result()
-            raise TimeoutError(
-                f"screenshot timed out after {self.settings.screenshot_timeout_seconds:g} seconds"
-            )
+            remaining = deadline - loop.time()
+            if remaining > 0 and not task.done():
+                await asyncio.wait({task}, timeout=remaining)
+            if task.done():
+                return task.result()
+            raise self._deadline_error()
         finally:
             if not task.done():
                 task.cancel()
-                # Do not wait indefinitely for an unresponsive browser operation
-                # to acknowledge cancellation. Driver shutdown runs separately.
-            task.add_done_callback(self._consume_task_result)
+                # Bounded wait: returns as soon as the cancelled operation
+                # unwinds or the short grace period expires.  The task has
+                # already been asked to stop, so nothing is left pending.
+                grace_deadline = loop.time() + _CANCELLATION_GRACE_SECONDS
+                if hard_deadline is not None:
+                    grace_deadline = min(grace_deadline, hard_deadline)
+                await asyncio.wait({task}, timeout=max(0.0, grace_deadline - loop.time()))
+
+    def _deadline_error(self) -> _CaptureDeadlineExceeded:
+        return _CaptureDeadlineExceeded(
+            f"TimeoutError: screenshot timed out after {self.settings.screenshot_timeout_seconds:g} seconds"
+        )
+
+    @staticmethod
+    def _discard_operation(operation: Awaitable[Any]) -> None:
+        """Close an unstarted coroutine so Python does not warn about it."""
+        close = getattr(operation, "close", None)
+        if callable(close):
+            close()
 
     @staticmethod
     def _consume_task_result(task: asyncio.Future[Any]) -> None:
@@ -328,21 +390,26 @@ class ScreenshotService:
             task.exception()
 
     async def _cleanup_browser(self, context: Any, browser: Any, manager: Any) -> None:
-        closers = []
+        # Close the page context and browser first so the driver is still alive
+        # to process those commands, then stop the Playwright driver itself.
+        closers = [resource.close for resource in (context, browser) if resource is not None]
         if manager is not None:
             closers.append(manager.__aexit__)
-        closers.extend(resource.close for resource in (context, browser) if resource is not None)
+
         canceled = False
         loop = asyncio.get_running_loop()
-        # A fresh, shared grace period lets the driver terminate after a capture
-        # timeout without turning one hung close into another unbounded wait.
+        # A fresh, short shared grace period lets the driver terminate after a
+        # capture timeout without turning one hung close into another unbounded wait.
         deadline = loop.time() + _CLEANUP_TIMEOUT_SECONDS
         for index, close in enumerate(closers):
             remaining = max(0.0, deadline - loop.time())
             close_budget = remaining / (len(closers) - index)
             try:
                 await self._within_deadline(
-                    close(), loop.time() + close_budget, start_before_timeout=True
+                    close(),
+                    loop.time() + close_budget,
+                    start_before_timeout=True,
+                    hard_deadline=deadline,
                 )
             except asyncio.CancelledError:
                 canceled = True
