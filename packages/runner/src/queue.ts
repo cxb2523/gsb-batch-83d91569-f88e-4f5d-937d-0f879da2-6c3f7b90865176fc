@@ -1,0 +1,1479 @@
+/**
+ * Job queue for processing Actor runs.
+ *
+ * Uses PostgreSQL for durability and Redis for notifications.
+ */
+
+import pg from 'pg';
+import { Redis } from 'ioredis';
+import { nanoid } from 'nanoid';
+import { config } from './config.js';
+import {
+  executeRun,
+  buildActorEnv,
+  stopRun,
+  writeLifecycleLog,
+  clampMemoryToHost,
+  cleanupDocker,
+} from './docker.js';
+import { getAvailableMemoryMb, getDiskUsageRatio } from './heartbeat.js';
+import { logClientErrors, logPoolErrors } from './client-errors.js';
+import { applyWebhookTemplate } from './webhook-template.js';
+import { resolveProxy } from './proxy-resolver.js';
+
+const { Pool } = pg;
+
+/**
+ * Cap and redact the rendered webhook body before persisting it to
+ * `webhook_deliveries.request_body`. The actual bytes sent to the receiver
+ * stay raw — only the stored copy gets transformed.
+ *
+ * Why both: (a) `Authorization` headers are masked in the dashboard, so
+ * leaving rendered tokens in stored payloads breaks the operator's mental
+ * model of "credentials are masked end-to-end"; (b) `response_body` is
+ * capped at 1024 chars, so an unbounded `request_body` would be a
+ * surprising asymmetry for anyone reading the column comments.
+ *
+ * Matches dashboard's header-mask heuristic — see RunWebhookCard's HEADERS
+ * section. KEEP IN SYNC with `packages/api/src/routes/webhooks.ts` (the
+ * test endpoint uses an identical helper); if the regex changes here, it
+ * must change there too — webhook_deliveries gets writes from both paths.
+ */
+const REQUEST_BODY_STORAGE_CAP = 4096;
+// `key$` (suffix-anchored) catches credential-style endings (apiKey,
+// secretKey, accessKey, privateKey) WITHOUT false-positive-matching
+// resource id fields like `defaultKeyValueStoreId`, `keyValueStoreId`,
+// `keyName`. Bare-substring `key` would mask the KV store id on every
+// single Apify-shape delivery — high-frequency noise that erodes the
+// signal value of the mask. Other tokens (`auth`, `token`, ...) are kept
+// as substrings because they don't have the same "appears in benign id
+// fields" problem.
+const SECRET_KEY_PATTERN = /auth|token|password|secret|cookie|signature|hmac|key$/i;
+const MIN_REDACTED_VALUE_LEN = 8;
+
+export function redactSecretsForStorage(jsonString: string): string {
+  // If the rendered body isn't JSON (shouldn't happen — we JSON.stringify
+  // ourselves — but a defensive fallback for future template engines),
+  // just cap-and-store the raw form. No keys to walk = nothing to redact.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonString);
+  } catch {
+    return jsonString.slice(0, REQUEST_BODY_STORAGE_CAP);
+  }
+  return JSON.stringify(walkAndRedact(parsed)).slice(0, REQUEST_BODY_STORAGE_CAP);
+}
+
+export function walkAndRedact(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(walkAndRedact);
+  if (node && typeof node === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+      // Only mask string values longer than 8 chars — shorter strings are
+      // unlikely to be real credentials and masking them ("abc" → "••• abc")
+      // would be noise. Numbers / booleans for secret-named keys (e.g.,
+      // `apiKey: true`) are passed through unchanged.
+      if (
+        typeof v === 'string' &&
+        v.length > MIN_REDACTED_VALUE_LEN &&
+        SECRET_KEY_PATTERN.test(k)
+      ) {
+        out[k] = `••• ${v.slice(-4)}`;
+      } else {
+        out[k] = walkAndRedact(v);
+      }
+    }
+    return out;
+  }
+  return node;
+}
+
+export interface RunJob {
+  id: string;
+  actor_id: string;
+  user_id: string;
+  status: string;
+  default_dataset_id: string;
+  default_key_value_store_id: string;
+  default_request_queue_id: string;
+  timeout_secs: number;
+  memory_mbytes: number;
+  retry_count: number;
+  origin_run_id: string | null;
+  run_after: Date | null;
+  // Optional: present on rows fetched after a run has progressed.
+  // attemptWebhookDelivery uses these to build the Apify-compatible
+  // resource block — null means "not yet" (e.g. run still RUNNING).
+  started_at?: Date | null;
+  finished_at?: Date | null;
+  exit_code?: number | null;
+  build_id?: string | null;
+  build_number?: string | null;
+  stats_json?: {
+    inputBodyLen?: number;
+    restartCount?: number;
+    resurrectCount?: number;
+    runTimeSecs?: number;
+    computeUnits?: number;
+  } | null;
+}
+
+interface ActorRow {
+  id: string;
+  name: string;
+  default_run_options: {
+    image?: string;
+    envVars?: Record<string, string>;
+  } | null;
+}
+
+const RUNNER_API_KEY_REDIS_KEY = 'runner:api-key';
+
+let pool: pg.Pool;
+let redis: Redis;
+let isProcessing = false;
+let activeRuns = 0;
+let shuttingDown = false;
+let runnerApiKey: string | null = null;
+const activeRunIds = new Set<string>();
+// Runs aborted via run:abort whose container may not exist yet (image
+// pull in progress). executeRun checks this after the pull, before
+// starting the container — stopRun alone can't cover that window.
+const abortedRunIds = new Set<string>();
+// Effective (host-clamped) container memory limit per active run, in MB.
+// Feeds the claim gate: the sum of these plus a new run's limit must fit
+// under hostTotalMemoryMb - memoryReserveMb, or the new run isn't claimed
+// on this host. Kept alongside activeRunIds with identical lifecycle.
+const activeRunMemoryMb = new Map<string, number>();
+// Log the memory-backpressure skip only on entering the throttled state —
+// the poll fires every second and would otherwise flood the journal.
+let memoryThrottled = false;
+let diskThrottled = false;
+
+export function stopProcessing(): void {
+  shuttingDown = true;
+}
+
+export function getActiveRunCount(): number {
+  return activeRuns;
+}
+
+export function getActiveRunIds(): string[] {
+  return [...activeRunIds];
+}
+
+/**
+ * Initialize job queue connections.
+ */
+export async function initJobQueue(): Promise<void> {
+  pool = logPoolErrors(
+    new Pool({
+      connectionString: config.databaseUrl,
+    }),
+    'db'
+  );
+
+  redis = logClientErrors(new Redis(config.redisUrl), 'redis');
+
+  // Fetch runner API key from Redis (created by API's setupAdminUser)
+  runnerApiKey = await redis.get(RUNNER_API_KEY_REDIS_KEY);
+  if (runnerApiKey) {
+    console.log('Runner API key loaded from Redis');
+  } else {
+    console.warn(
+      'WARNING: No runner API key found in Redis. Actor containers will fail to authenticate.'
+    );
+    console.warn('Make sure the API server has started and created the runner key.');
+  }
+
+  // Subscribe to run notifications
+  const subscriber = logClientErrors(new Redis(config.redisUrl), 'redis-subscriber');
+  await subscriber.subscribe('run:new', 'run:abort');
+
+  const onAbort = createAbortHandler(
+    () => activeRunIds,
+    (id) => stopRun(id),
+    (id) => abortedRunIds.add(id)
+  );
+
+  subscriber.on('message', (channel, message) => {
+    if (channel === 'run:abort') {
+      void onAbort(message);
+      return;
+    }
+    console.log(`New run notification: ${message}`);
+    void processNextRun();
+  });
+
+  console.log('Job queue initialized');
+}
+
+/**
+ * Build the handler for `run:abort` notifications (published by the API's
+ * abort endpoint). Dependency-injected so the containment logic is unit
+ * testable: only stop containers for runs THIS runner owns — stopRun on a
+ * foreign runId is a harmless no-op (label filter matches nothing), but
+ * skipping it avoids a Docker round-trip on every abort fleet-wide.
+ *
+ * The container stop surfaces in processRun as a non-zero exit; its
+ * `WHERE status = 'RUNNING'` guard then preserves the ABORTED status the
+ * API already committed.
+ *
+ * `markAborted` MUST be recorded before attempting the stop: if the abort
+ * lands while the image is still pulling, there is no container for
+ * stopRun to find — the mark is what executeRun consults after the pull,
+ * before starting the container.
+ */
+export function createAbortHandler(
+  getActiveIds: () => Set<string>,
+  stop: (runId: string) => Promise<void>,
+  markAborted: (runId: string) => void
+): (runId: string) => Promise<void> {
+  return async (runId: string) => {
+    if (!getActiveIds().has(runId)) return;
+    markAborted(runId);
+    console.log(`Abort requested for run ${runId} — stopping container`);
+    try {
+      await stop(runId);
+    } catch (err) {
+      // Container may have exited between the abort and the stop — the
+      // normal completion path already handles final status. Never throw
+      // from a pub-sub handler.
+      console.warn(`Failed to stop container for aborted run ${runId}: ${(err as Error).message}`);
+    }
+  };
+}
+
+/**
+ * Main processing loop.
+ */
+export async function startProcessing(): Promise<void> {
+  console.log('Starting run processor...');
+
+  // Start webhook retry processor (every 10 seconds)
+  void (async () => {
+    while (!shuttingDown) {
+      await processWebhookRetries();
+      await sleep(10_000);
+    }
+  })();
+
+  while (!shuttingDown) {
+    await processNextRun();
+    await sleep(1000);
+  }
+}
+
+/**
+ * Atomically claim the next READY run: flip it to RUNNING and return it in
+ * ONE statement. The previous two-statement form (SELECT ... FOR UPDATE
+ * SKIP LOCKED, then a separate UPDATE) was racy under auto-commit: the row
+ * lock dies when the SELECT statement returns, and `run:new` is broadcast
+ * to every runner — two runners landing in each other's SELECT→UPDATE gap
+ * both claimed the run and both spawned containers (reproduced live on
+ * PG 16). Inside a single statement the inner SELECT's lock is held until
+ * the UPDATE commits, so exactly one claimant wins; the outer
+ * `status = 'READY'` recheck is defense in depth, matching the
+ * CTE-with-recheck pattern in the API's retention reaper.
+ */
+export async function claimNextRun(
+  dbPool: pg.Pool,
+  /**
+   * Remaining host-memory headroom in MB, or null for "no gate" (this
+   * host has zero active runs). When set, only runs whose EFFECTIVE
+   * container limit — LEAST(memory_mbytes, host usable) — fits are
+   * eligible; bigger runs are skipped (not blocked head-of-line) and
+   * left for a host with room. Null (not "usable MB") for the idle case
+   * so an oversized run (memory_mbytes > host usable) is still claimable
+   * somewhere: it runs solo with its limit clamped by executeRun rather
+   * than starving READY forever.
+   */
+  memoryHeadroomMb: number | null
+): Promise<RunJob | null> {
+  // Cost-attribution stamping (runner_id / price / provider) rides the
+  // claim statement itself — a follow-up UPDATE would reopen the two-
+  // claimants race this function exists to close. runner_id is the same
+  // identity the heartbeat reports; price/provider are NULL/'local-docker'
+  // unless the scaler injected them at provision time. See
+  // docs/superpowers/specs/2026-07-15-run-cost-analysis-design.md.
+  const usableMb = Math.max(256, config.hostTotalMemoryMb - config.memoryReserveMb);
+  // Anti-starvation drain (the NOT EXISTS): a run whose limit fits NO
+  // busy host's headroom is claimable only via the idle null-gate — and
+  // busy hosts ping-ponging smaller claims may never go idle, starving it
+  // behind younger runs indefinitely. Once such a run has waited past
+  // starvedReadyWaitSecs (clock starts at eligibility, not insert), busy
+  // hosts stop claiming ANYTHING until somewhere drains to idle and
+  // FIFO-claims it. Normal skip-ahead is untouched for the first
+  // starvedReadyWaitSecs. Idle hosts ($4 NULL) are never blocked.
+  const result = await dbPool.query<RunJob>(
+    `
+    UPDATE runs
+    SET status = 'RUNNING', started_at = NOW(), modified_at = NOW(),
+        runner_id = $1, runner_price_hourly = $2, runner_provider = $3
+    WHERE id = (
+      SELECT id FROM runs
+      WHERE status = 'READY' AND (run_after IS NULL OR run_after <= NOW())
+        AND ($4::int IS NULL OR (
+          LEAST(COALESCE(memory_mbytes, $5), $6) <= $4
+          AND NOT EXISTS (
+            SELECT 1 FROM runs starved
+            WHERE starved.status = 'READY'
+              AND (starved.run_after IS NULL OR starved.run_after <= NOW())
+              AND LEAST(COALESCE(starved.memory_mbytes, $5), $6) > $4
+              AND GREATEST(starved.created_at, COALESCE(starved.run_after, starved.created_at))
+                    < NOW() - ($7::int * interval '1 second')
+          )
+        ))
+      ORDER BY created_at ASC
+      LIMIT 1
+      FOR UPDATE SKIP LOCKED
+    ) AND status = 'READY'
+    RETURNING *
+  `,
+    [
+      config.runnerId,
+      config.runnerPriceHourly,
+      config.runnerProvider,
+      memoryHeadroomMb,
+      config.defaultMemoryMb,
+      usableMb,
+      config.starvedReadyWaitSecs,
+    ]
+  );
+  return result.rows[0] ?? null;
+}
+
+/**
+ * Process the next pending run. Exported for unit tests (the claim-failure
+ * containment below is load-bearing for process survival).
+ */
+export async function processNextRun(
+  // Injectable seams for unit tests; production callers use the defaults
+  // (module singletons wired by initJobQueue, the real memory probe, and
+  // the real run executor).
+  deps: {
+    db?: pg.Pool;
+    getAvailableMemory?: () => number | null;
+    getDiskUsageRatio?: () => number;
+    runProcessor?: (run: RunJob) => Promise<void>;
+    cleanup?: () => Promise<void>;
+  } = {}
+): Promise<void> {
+  const db = deps.db ?? pool;
+  const getAvailableMemory = deps.getAvailableMemory ?? getAvailableMemoryMb;
+  const getDiskRatio = deps.getDiskUsageRatio ?? getDiskUsageRatio;
+  const runProcessor = deps.runProcessor ?? processRun;
+  const cleanup = deps.cleanup ?? cleanupDocker;
+
+  if (shuttingDown || isProcessing || activeRuns >= config.maxConcurrentRuns) {
+    return;
+  }
+
+  isProcessing = true;
+
+  try {
+    const usableMb = Math.max(256, config.hostTotalMemoryMb - config.memoryReserveMb);
+
+    // Backpressure on ACTUAL memory, not just limits: when the host's
+    // MemAvailable is already inside the reserve, claiming anything —
+    // even a run whose limit nominally fits — feeds a wedge in progress.
+    // Skip the tick and let the pressure resolve (a container finishing
+    // or the kernel OOM-killing one). Null (non-Linux dev box) = unknown
+    // = no throttle. Deliberately UNCONDITIONAL on activeRuns: a
+    // restarted runner (crash/systemd) has activeRuns 0 but may share the
+    // host with the orphaned containers that caused the pressure — the
+    // limit-sum gate below can't see them, so this is the only defense.
+    const availableMb = getAvailableMemory();
+    if (availableMb !== null && availableMb < config.memoryReserveMb) {
+      if (!memoryThrottled) {
+        memoryThrottled = true;
+        console.warn(
+          `[Runner] Host memory low (${String(availableMb)}MB available < ${String(config.memoryReserveMb)}MB reserve) — pausing claims until pressure clears`
+        );
+      }
+      return;
+    }
+    if (memoryThrottled) {
+      memoryThrottled = false;
+      console.log('[Runner] Host memory pressure cleared — resuming claims');
+    }
+
+    // Disk admission gate: a claim on a near-full disk dies at image
+    // pull ("no space left on device") in ~90s — and because work is
+    // runner-pull, a fast-failing runner out-claims healthy capacity
+    // and drains the READY queue by failing it, hiding the pressure
+    // from the scaler (prod 2026-08-04/05: 104 runs failed this way).
+    // Idling instead lets the queue back up so the scaler's starvation
+    // escalation provisions a healthy replacement, while the periodic
+    // cleanup's eviction (threshold below this one) frees the disk.
+    const diskRatio = getDiskRatio();
+    if (diskRatio * 100 >= config.diskClaimMaxPct) {
+      if (!diskThrottled) {
+        diskThrottled = true;
+        console.warn(
+          `[Runner] Host disk ${String(Math.round(diskRatio * 100))}% full (>= ${String(config.diskClaimMaxPct)}% claim gate) — pausing claims until cleanup frees space`
+        );
+        // Kick cleanup NOW instead of waiting out the 30-minute periodic
+        // sweep: one 2.5-8.4GB pull can jump usage from below the evict
+        // threshold straight past the gate within a single sweep window,
+        // and a gated runner claiming nothing has no other path back
+        // below the gate. Transition-edge only (debounced by the
+        // diskThrottled flag), fire-and-forget so the poll tick isn't
+        // blocked — cleanupDocker contains its own errors.
+        void cleanup();
+      }
+      return;
+    }
+    if (diskThrottled) {
+      diskThrottled = false;
+      console.log('[Runner] Host disk pressure cleared — resuming claims');
+    }
+
+    // Memory-aware admission: gate the claim on the sum of active
+    // container LIMITS so co-located worst cases stay under what the
+    // kernel can enforce (2 x 2048MB limits on a 3912MB host was the
+    // 2026-07-16 host-wedge). No gate when idle — see claimNextRun.
+    const activeMemMb = [...activeRunMemoryMb.values()].reduce((a, b) => a + b, 0);
+    const headroomMb = activeRuns === 0 ? null : usableMb - activeMemMb;
+    if (headroomMb !== null && headroomMb <= 0) {
+      return; // No room for even the smallest run — skip the round-trip.
+    }
+
+    // Claim the next pending run (FIFO among runs that fit, respecting
+    // delayed retries)
+    const run = await claimNextRun(db, headroomMb);
+
+    if (!run) {
+      return; // No pending runs
+    }
+
+    console.log(`Processing run ${run.id}`);
+
+    activeRuns++;
+    activeRunIds.add(run.id);
+    activeRunMemoryMb.set(run.id, Math.min(run.memory_mbytes ?? config.defaultMemoryMb, usableMb));
+
+    // Process in background
+    void runProcessor(run).finally(() => {
+      activeRuns--;
+      activeRunIds.delete(run.id);
+      abortedRunIds.delete(run.id);
+      activeRunMemoryMb.delete(run.id);
+    });
+  } catch (err) {
+    // A failed claim must cost one poll tick, not the process. Without
+    // this catch the rejection propagates through startProcessing's loop
+    // into main().catch → immediate exit with NO drain, orphaning every
+    // active container (the zombie factory the crash guards exist to
+    // close — they never fire here because main().catch makes this a
+    // HANDLED rejection). Covers transient pg errors (failover, reset,
+    // 53300 no-slots) and a not-yet-migrated schema (42703 on the new
+    // cost-attribution columns if a runner rolls out before api-migrate).
+    console.error('[Runner] Claim poll failed (will retry):', (err as Error).message);
+  } finally {
+    isProcessing = false;
+  }
+}
+
+/**
+ * Process a single run.
+ */
+async function processRun(run: RunJob): Promise<void> {
+  const runId = run.id;
+
+  // One effective (host-clamped) memory value for everything downstream:
+  // the container limit, APIFY_MEMORY_MBYTES, and the OOM status message
+  // must agree, or the actor sizes itself for RAM the cgroup won't grant.
+  const effectiveMemoryMb = clampMemoryToHost(
+    run.memory_mbytes ?? config.defaultMemoryMb,
+    config.hostTotalMemoryMb,
+    config.memoryReserveMb
+  );
+
+  try {
+    // Get actor details
+    const actorResult = await pool.query<ActorRow>('SELECT * FROM actors WHERE id = $1', [
+      run.actor_id,
+    ]);
+
+    if (!actorResult.rows[0]) {
+      throw new Error(`Actor not found: ${run.actor_id}`);
+    }
+
+    const actor = actorResult.rows[0];
+    const actorEnvVars = actor.default_run_options?.envVars ?? {};
+
+    // Resolve image: actor config → registry → local convention
+    let image: string;
+    if (actor.default_run_options?.image) {
+      image = actor.default_run_options.image;
+    } else if (config.imageRegistry) {
+      // Pull from configured registry. The `actor-` prefix matches what
+      // `crc push` writes (see cli/src/commands/push.ts) — both the local
+      // (`crawlee-cloud/actor-NAME`) and GHCR (`ghcr.io/REPO/actor-NAME`)
+      // push paths use it. Without the prefix here, runners would 404 on
+      // every pull from a configured registry.
+      image = `${config.imageRegistry}/actor-${actor.name}:latest`;
+    } else {
+      // Local convention
+      image = `crawlee-cloud/actor-${actor.name}:latest`;
+    }
+
+    // Fetch runtime env vars from Redis (set by CLI -e flag)
+    const runtimeEnvVarsJson = await redis.get(`run:${run.id}:envVars`);
+    const runtimeEnvVars = runtimeEnvVarsJson
+      ? (JSON.parse(runtimeEnvVarsJson) as unknown as Record<string, string>)
+      : {};
+
+    // Resolve token: prefer runner API key from Redis, fall back to config
+    const token = runnerApiKey ?? config.apiToken;
+    if (!runnerApiKey) {
+      // Try fetching again in case the API created it after we started
+      runnerApiKey = await redis.get(RUNNER_API_KEY_REDIS_KEY);
+    }
+
+    // Resolve proxy password (actor → user → platform). Log the source
+    // for triage but never the value. See proxy-resolver.ts and the
+    // design doc at docs/superpowers/specs/2026-06-01-apify-proxy-design.md.
+    const proxy = await resolveProxy(pool, run.actor_id, run.user_id);
+    // writeLifecycleLog (vs raw rpush): best-effort + sets the 24h TTL.
+    // This is the FIRST write of every run's log key — a raw rpush created
+    // the key with no TTL, leaving it immortal if the runner died before
+    // executeRun's first expire-setting write.
+    await writeLifecycleLog(
+      run.id,
+      proxy.source === 'none' ? 'WARN' : 'INFO',
+      proxy.source === 'none'
+        ? 'No proxy password configured (actor/user/platform). Actor inputs using useApifyProxy=true will fail at runtime.'
+        : `Proxy credentials: ${proxy.source}`
+    );
+
+    // Build environment variables
+    const baseEnv = buildActorEnv({
+      runId: run.id,
+      actorId: run.actor_id,
+      apiBaseUrl: config.apiBaseUrl,
+      token: runnerApiKey ?? token,
+      defaultDatasetId: run.default_dataset_id,
+      defaultKeyValueStoreId: run.default_key_value_store_id,
+      defaultRequestQueueId: run.default_request_queue_id,
+      // Host-clamped: the actor SDK sizes its heap/autoscaling from
+      // APIFY_MEMORY_MBYTES, so it must see the limit the container will
+      // actually be enforced at, not the unsatisfiable requested value.
+      memoryMbytes: effectiveMemoryMb,
+      timeoutSecs: run.timeout_secs,
+      proxyPassword: proxy.password,
+      proxyHostname: proxy.hostname,
+      proxyPort: proxy.port,
+    });
+
+    // Merge: base env < actor env (from actor.json) < runtime env (from -e flag)
+    const env = { ...baseEnv, ...actorEnvVars, ...runtimeEnvVars };
+
+    // Execute container
+    const result = await executeRun({
+      runId: run.id,
+      actorId: run.actor_id,
+      image,
+      env,
+      memoryMb: effectiveMemoryMb,
+      timeoutSecs: run.timeout_secs,
+      // Checked after the image pull, before container start — an abort
+      // arriving mid-pull has no container for stopRun to stop.
+      isAborted: () => abortedRunIds.has(run.id),
+    });
+
+    // Determine final status
+    let status: string;
+    if (result.exitCode === 0) {
+      status = 'SUCCEEDED';
+    } else if (result.exitCode === 143) {
+      status = 'TIMED-OUT';
+    } else {
+      status = 'FAILED';
+    }
+
+    // Operator-facing cause line. Log-line enrichment only matters for
+    // plain failures (OOM/timeout produce their own message) and costs a
+    // Redis round-trip, so skip it otherwise.
+    const statusMessage = buildRunStatusMessage({
+      status,
+      exitCode: result.exitCode,
+      oomKilled: result.oomKilled,
+      memoryMb: effectiveMemoryMb,
+      timeoutSecs: run.timeout_secs,
+      lastErrorLine:
+        status === 'FAILED' && !result.oomKilled ? await getLastErrorLogLine(run.id) : null,
+    });
+
+    // Update run record. Persist exit_code alongside status so receivers
+    // reading the webhook payload (resource.exitCode) and the runs API see
+    // the real exit value rather than null.
+    //
+    // The `WHERE status = 'RUNNING'` guard is the lifecycle invariant: if
+    // the actor SDK called Actor.fail() (PUT /v2/actor-runs/:id with
+    // status=FAILED) while the container was alive, the run is already in
+    // a terminal state and we MUST NOT overwrite it from the container's
+    // exit code. Common scenario: actor catches its own error, calls
+    // Actor.fail(), the SDK then cleans up and the process exits 0 — the
+    // pre-fix code would have flipped the run back to SUCCEEDED, hiding
+    // the failure on the dashboard, in webhooks, and in the runs API.
+    //
+    // RETURNING to detect the no-op case so we can log it (operator
+    // signal that some other path won the race — usually Actor.fail()).
+    // COALESCE keeps any message written by an earlier path (e.g.
+    // Actor.fail() with a custom message) — we only fill the blank.
+    const updateResult = await pool.query<{ status: string }>(
+      `
+      UPDATE runs
+      SET status = $1, finished_at = $2, exit_code = $3,
+          status_message = COALESCE(status_message, $4),
+          modified_at = NOW()
+      WHERE id = $5 AND status = 'RUNNING'
+      RETURNING status
+    `,
+      [status, result.finishedAt, result.exitCode, sanitizeStatusMessage(statusMessage), runId]
+    );
+
+    // Peak memory rides a SEPARATE best-effort UPDATE, deliberately NOT
+    // the load-bearing terminal one: observability must never decide a
+    // run's fate. Folded into the terminal UPDATE, a 42703 during a
+    // deploy-skew window (runner ahead of api-migrate's peak_memory_mb
+    // column) would throw the whole terminalization into the catch path —
+    // flipping an exit-0 run FAILED and re-executing it via maybeRetryRun.
+    // No status guard either: recording the peak is valid even when
+    // Actor.fail() won the terminal race.
+    if (result.peakMemoryMb !== null) {
+      try {
+        await pool.query(`UPDATE runs SET peak_memory_mb = $1 WHERE id = $2`, [
+          result.peakMemoryMb,
+          runId,
+        ]);
+      } catch (err) {
+        console.warn(`[${runId}] Failed to record peak memory: ${(err as Error).message}`);
+      }
+    }
+
+    if (updateResult.rowCount === 0) {
+      // Status was already terminal — re-read what's there so the rest of
+      // the function (webhooks, retry) sees the authoritative status.
+      const cur = await pool.query<{ status: string }>('SELECT status FROM runs WHERE id = $1', [
+        runId,
+      ]);
+      const winning = cur.rows[0]?.status ?? status;
+      console.log(
+        `Run ${runId} container exited ${String(result.exitCode)} but run was already ${winning} (kept that). Likely Actor.fail() or abort.`
+      );
+      status = winning;
+    } else {
+      console.log(`Run ${runId} completed with status: ${status}`);
+    }
+
+    // Ingest Crawlee stats (SDK_CRAWLER_STATISTICS_0 from the run's KV
+    // store) so resource.stats in the webhook payload and the runs API
+    // carry real numbers instead of zero placeholders. Quiet no-op when
+    // the file isn't there (actor crashed before crawler.run()).
+    await ingestCrawlerStats(runId);
+
+    // Archive logs for bad endings before the Redis copy expires.
+    await persistFailureLog(run, status);
+
+    // Trigger webhooks
+    await triggerWebhooks(runId, status);
+
+    if (status === 'FAILED') {
+      await maybeRetryRun(run, runId);
+    }
+  } catch (err) {
+    console.error(`Run ${runId} failed with error:`, err);
+
+    // Surface the failure cause in the run's own log — operators triage
+    // from the log view, where runs used to end at the last INFO line
+    // (e.g. "Image ... pulled successfully") while the real error hid in
+    // status_message. Must precede persistFailureLog below so the archived
+    // RUN_LOG.txt carries it too. Best-effort by construction.
+    await writeLifecycleLog(runId, 'ERROR', `Run failed: ${(err as Error).message}`);
+
+    // Same `WHERE status = 'RUNNING'` guard as the success path: if the
+    // run reached a terminal state via another path (Actor.fail() →
+    // PUT /v2/actor-runs/:id, or POST /v2/actor-runs/:id/abort) while
+    // we were processing, we MUST NOT overwrite that status with
+    // 'FAILED'. Common scenario: operator aborts → container is killed
+    // → kill signal surfaces here as a thrown error → without this
+    // guard, the run flips ABORTED → FAILED, hiding the operator
+    // intent on the dashboard, in webhooks, and in the runs API.
+    const updateResult = await pool.query<{ status: string }>(
+      `
+      UPDATE runs
+      SET status = 'FAILED', status_message = $1, finished_at = NOW(), modified_at = NOW()
+      WHERE id = $2 AND status = 'RUNNING'
+      RETURNING status
+    `,
+      [sanitizeStatusMessage((err as Error).message), runId]
+    );
+
+    let webhookStatus = 'FAILED';
+    if (updateResult.rowCount === 0) {
+      // Terminal status was already set elsewhere — re-read so we fire
+      // the right ACTOR.RUN.* event (e.g. ABORTED, not FAILED).
+      const cur = await pool.query<{ status: string }>('SELECT status FROM runs WHERE id = $1', [
+        runId,
+      ]);
+      webhookStatus = cur.rows[0]?.status ?? 'FAILED';
+      console.log(
+        `Run ${runId} caught error but run was already ${webhookStatus} (kept that). Likely Actor.fail() or abort.`
+      );
+    }
+
+    await persistFailureLog(run, webhookStatus);
+    await triggerWebhooks(runId, webhookStatus);
+    if (webhookStatus === 'FAILED') {
+      await maybeRetryRun(run, runId, pool, redis, {
+        infraFailure: isInfraFailure((err as Error).message),
+      });
+    }
+  }
+}
+
+/**
+ * The runner's own URL for calling the API. config.apiBaseUrl is what we
+ * inject into actor *containers* (translated to host.docker.internal on
+ * macOS). For the runner process itself (running on the host), the
+ * `host.docker.internal` form doesn't resolve back — collapse it to
+ * `localhost`. Linux deploys typically have the API reachable at the same
+ * URL from runner and actor, so this is a no-op there.
+ */
+export function selfApiBaseUrl(): string {
+  return config.apiBaseUrl.replace(/(^https?:\/\/)host\.docker\.internal(:|\/|$)/, '$1localhost$2');
+}
+
+/**
+ * After a run completes, fetch SDK_CRAWLER_STATISTICS_0 from the run's KV
+ * store via the API's ingest endpoint and stamp the parsed stats onto
+ * runs.stats_json. This is what makes webhook payload's resource.stats
+ * carry real Crawlee numbers (requestsFinished, requestsFailed, errors,
+ * crawlerRuntimeMillis) instead of zero placeholders.
+ *
+ * Best-effort: any failure is logged and swallowed — webhook delivery
+ * must not be blocked by stats ingestion. The endpoint itself returns 200
+ * with `stats: null` when the SDK file is absent (actor crashed before
+ * crawler.run()), which is the common case.
+ */
+async function ingestCrawlerStats(runId: string): Promise<void> {
+  if (!runnerApiKey) return;
+  try {
+    const url = `${selfApiBaseUrl()}/v2/actor-runs/${runId}/ingest-crawler-stats`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${runnerApiKey}`,
+      },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) {
+      console.warn(`[stats] ingest endpoint returned HTTP ${String(response.status)} for ${runId}`);
+    }
+  } catch (err) {
+    console.warn(`[stats] ingest failed for ${runId}: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Turn a container's exit into an operator-readable status_message.
+ * Pure — exported for unit testing.
+ *
+ * Priority: OOM > timeout > generic failure. OOM must win because its
+ * observable symptoms masquerade as the others: the kernel OOM killer
+ * yields exit 137 (or SIGKILLs the actor's child process → exit 1),
+ * and before this existed those runs showed an empty message —
+ * one prod actor had 7/8 runs "exit 1" whose real cause (OOM) was only visible
+ * in a Redis log tail that expires after 24h.
+ */
+/**
+ * Postgres text columns reject NUL bytes: an unsanitized status_message
+ * write fails with `invalid byte sequence for encoding "UTF8": 0x00`,
+ * and that PG error then gets stored as the status_message — shadowing
+ * the real failure cause (3 prod runs 2026-08-05, actual cause was a
+ * disk-full pull failure). Docker daemon error strings are the known
+ * NUL source; collapse the leftover double spaces for readability.
+ */
+export function sanitizeStatusMessage(message: string | null): string | null {
+  if (message === null) return null;
+  // eslint-disable-next-line no-control-regex -- matching NUL is the point
+  return message.replace(/\u0000/g, '').replace(/ {2,}/g, ' ');
+}
+
+/**
+ * Infrastructure failures are runner/host problems (full disk, registry
+ * outage), not actor bugs — they retry on a platform floor even when the
+ * actor has retries disabled (see maybeRetryRun).
+ *
+ * "Image pull failed" is stamped at the pull site in executeRun
+ * (docker.ts), covering both in-band daemon errors and transport-level
+ * ones. "No such image" is createContainer's 404 — reachable when the
+ * periodic cleanup's eviction races a just-pulled image in the
+ * pull→create window (only under disk pressure, i.e. exactly when
+ * fast-failing terminally is most harmful).
+ */
+export function isInfraFailure(message: string): boolean {
+  return message.startsWith('Image pull failed') || /no such image/i.test(message);
+}
+
+export function buildRunStatusMessage(params: {
+  status: string;
+  exitCode: number;
+  oomKilled: boolean;
+  memoryMb: number | null;
+  timeoutSecs: number | null;
+  lastErrorLine: string | null;
+}): string | null {
+  if (params.oomKilled) {
+    const limit = params.memoryMb != null ? ` (${params.memoryMb} MB limit)` : '';
+    return `Out of memory: container was OOM-killed${limit}, exit code ${params.exitCode}`;
+  }
+  if (params.status === 'TIMED-OUT') {
+    const limit = params.timeoutSecs != null ? ` after ${params.timeoutSecs} seconds` : '';
+    return `Run timed out${limit}`;
+  }
+  if (params.status === 'SUCCEEDED') return null;
+
+  let msg = `Container exited with code ${params.exitCode}`;
+  if (params.lastErrorLine) {
+    // status_message is a one-line dashboard field, not a log sink:
+    // collapse newlines/indentation (stack traces) to single spaces
+    // before truncating.
+    const clean = params.lastErrorLine.replace(/\s+/g, ' ').trim();
+    const line = clean.length > 300 ? `${clean.slice(0, 300)}…` : clean;
+    msg += `. Last error: ${line}`;
+  }
+  return msg;
+}
+
+/**
+ * Best-effort: last ERROR-level line from the run's Redis log stream,
+ * used to enrich status_message for plain failures. Returns null on any
+ * problem — enrichment must never break run terminalization.
+ */
+async function getLastErrorLogLine(runId: string): Promise<string | null> {
+  try {
+    const tail = await redis.lrange(`logs:${runId}`, -100, -1);
+    for (let i = tail.length - 1; i >= 0; i--) {
+      const raw = tail[i];
+      if (!raw) continue;
+      try {
+        const entry = JSON.parse(raw) as { level?: string; message?: string };
+        if (entry.level === 'ERROR' && entry.message) {
+          // Skip the runner's own epilogue line — it repeats the exit
+          // code, which the message already carries.
+          if (entry.message.startsWith('Container finished with exit code')) continue;
+          return entry.message;
+        }
+      } catch {
+        // non-JSON line — skip
+      }
+    }
+  } catch {
+    // Redis unavailable — fine, message just stays generic.
+  }
+  return null;
+}
+
+/** KV record key for archived run logs — shared with the scaler's zombie-reap salvage path. */
+export const RUN_LOG_KV_KEY = 'RUN_LOG.txt';
+
+/**
+ * Persist the run's Redis log stream to its default KV store when the run
+ * ends badly. The Redis list (`logs:<runId>`) has a 24h TTL and a
+ * 1000-line cap — during the 2026-07-09..13 zombie incident, 4-day-old
+ * failed runs were un-autopsiable because their logs had already
+ * evaporated. SUCCEEDED runs are skipped: their logs are rarely needed
+ * and the KV write isn't free.
+ *
+ * Best-effort by design — a log-archival failure must never affect run
+ * terminalization or webhooks.
+ */
+async function persistFailureLog(run: RunJob, status: string): Promise<void> {
+  if (status !== 'FAILED' && status !== 'TIMED-OUT') return;
+  if (!run.default_key_value_store_id || !runnerApiKey) return;
+  try {
+    const lines = await redis.lrange(`logs:${run.id}`, 0, -1);
+    if (lines.length === 0) return;
+    const text = lines
+      .map((raw) => {
+        try {
+          const e = JSON.parse(raw) as { timestamp?: string; level?: string; message?: string };
+          return `${e.timestamp ?? ''} ${e.level ?? ''} ${e.message ?? ''}`.trim();
+        } catch {
+          return raw;
+        }
+      })
+      .join('\n');
+    const url = `${selfApiBaseUrl()}/v2/key-value-stores/${run.default_key_value_store_id}/records/${RUN_LOG_KV_KEY}`;
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        Authorization: `Bearer ${runnerApiKey}`,
+      },
+      body: text,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) {
+      console.warn(`[logs] persist returned HTTP ${String(response.status)} for ${run.id}`);
+    }
+  } catch (err) {
+    console.warn(`[logs] persist failed for ${run.id}: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Trigger webhooks for run events.
+ * Creates delivery records and attempts immediate delivery.
+ */
+export async function triggerWebhooks(
+  runId: string,
+  status: string,
+  db: pg.Pool = pool
+): Promise<void> {
+  // Apify convention: status string uses HYPHEN ('TIMED-OUT') but event
+  // type uses UNDERSCORE ('ACTOR.RUN.TIMED_OUT'). Translate at this seam
+  // so the rest of the codebase carries Apify-canonical status strings
+  // while webhook receivers (apify-client and other external consumers)
+  // get the canonical event-type form.
+  const eventType = `ACTOR.RUN.${status.replace(/-/g, '_')}`;
+
+  // Get run details for payload
+  const runResult = await db.query<RunJob>('SELECT * FROM runs WHERE id = $1', [runId]);
+  const run = runResult.rows[0];
+  if (!run) return;
+
+  // Get applicable webhooks: the run owner's own, global OR scoped to this
+  // actor. The owner predicate matters: a webhook with actor_id NULL is
+  // global only for the user who created it, never for every tenant.
+  //
+  // KEEP IN SYNC with packages/api/src/routes/runs.ts → queueAbortedWebhooks:
+  // aborting a READY run never reaches a runner, so the API queues those
+  // ACTOR.RUN.ABORTED deliveries itself with the same matching WHERE clause,
+  // event-type spelling and delivery-row columns as below (but
+  // next_retry_at = NOW(), since nothing sends them inline — the retry
+  // processor delivers them).
+  const webhooks = await db.query<{
+    id: string;
+    request_url: string;
+    payload_template: string | null;
+    headers: Record<string, string> | null;
+    actor_id: string | null;
+  }>(
+    `SELECT * FROM webhooks
+     WHERE is_enabled = true AND $1 = ANY(event_types)
+       AND (actor_id IS NULL OR actor_id = $2)
+       AND (run_id IS NULL OR run_id = $3)
+       AND user_id = $4`,
+    [eventType, run.actor_id, runId, run.user_id]
+  );
+
+  if (webhooks.rows.length === 0) return;
+
+  for (const webhook of webhooks.rows) {
+    const deliveryId = nanoid();
+
+    // Create delivery record. next_retry_at MUST be NULL on insert — we
+    // call attemptWebhookDelivery synchronously below for the first try.
+    // If we set next_retry_at = NOW() here, processWebhookRetries (running
+    // in parallel every 10s) sees this PENDING row as eligible for retry
+    // and fires a duplicate POST before our immediate attempt finishes the
+    // UPDATE. Net effect was 2-3 webhook.site receives per run, only one
+    // delivery row in the DB (UPDATEs raced and overwrote attempt_count).
+    // scheduleRetry sets next_retry_at forward only on actual failures.
+    await db.query(
+      `INSERT INTO webhook_deliveries (id, webhook_id, run_id, event_type, status, attempt_count, max_attempts, next_retry_at)
+       VALUES ($1, $2, $3, $4, 'PENDING', 0, 5, NULL)`,
+      [deliveryId, webhook.id, runId, eventType]
+    );
+
+    // Attempt immediate delivery
+    await attemptWebhookDelivery(deliveryId, webhook, run, eventType, db);
+  }
+}
+
+// Infra-failure retry floor: pull failures are host problems, not actor
+// bugs, so they get a couple of delayed attempts even when the actor has
+// retries disabled (fleet-wide max_retries=0 made all 104 disk-full pull
+// failures terminal on 2026-08-04/05). The delay floor gives the disk
+// gate + eviction cleanup time to act; the retried run lands on whichever
+// runner is healthy by then.
+const INFRA_MAX_RETRIES = 2;
+const INFRA_MIN_DELAY_SECS = 60;
+
+/**
+ * Schedule a retry run if the actor's retry policy allows it — or, for
+ * infrastructure failures, the platform floor (whichever is larger).
+ */
+export async function maybeRetryRun(
+  run: RunJob,
+  runId: string,
+  db: pg.Pool = pool,
+  redisClient: Redis = redis,
+  opts: { infraFailure?: boolean } = {}
+): Promise<void> {
+  try {
+    const actorResult = await db.query<{
+      max_retries: number;
+      retry_delay_secs: number;
+    }>('SELECT max_retries, retry_delay_secs FROM actors WHERE id = $1', [run.actor_id]);
+
+    const actor = actorResult.rows[0];
+    if (!actor) return;
+    const maxRetries = opts.infraFailure
+      ? Math.max(actor.max_retries, INFRA_MAX_RETRIES)
+      : actor.max_retries;
+    if (maxRetries <= 0) return;
+    if (run.retry_count >= maxRetries) return;
+    const delaySecs = opts.infraFailure
+      ? Math.max(actor.retry_delay_secs, INFRA_MIN_DELAY_SECS)
+      : actor.retry_delay_secs;
+
+    const newRunId = nanoid();
+    const originRunId = run.origin_run_id ?? runId;
+    const newRetryCount = run.retry_count + 1;
+
+    // One active clone per chain, shared with the API's manual rerun.
+    // KEEP-IN-SYNC: the lock key and the active-clone check mirror the
+    // rerun endpoint (packages/api/src/routes/runs.ts POST
+    // /actor-runs/:runId/rerun). Without them, a manual rerun committing
+    // in the window between our caller flipping this run FAILED and this
+    // INSERT would leave TWO active clones of the chain. The lock is
+    // transaction-scoped (auto-released at COMMIT/ROLLBACK); the check is
+    // race-free under it because a competing clone either committed
+    // before us (visible here) or is queued behind the lock. The failed
+    // run itself is already terminal (callers flip status first), so it
+    // never trips its own check.
+    const client = await db.connect();
+    let inserted = false;
+    try {
+      await client.query('BEGIN');
+      await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('rerun:' || $1, 0))`, [
+        originRunId,
+      ]);
+      const activeClone = await client.query(
+        `SELECT 1 FROM runs
+          WHERE (origin_run_id = $1 OR id = $1)
+            AND status IN ('READY', 'RUNNING', 'ABORTING')
+          LIMIT 1`,
+        [originRunId]
+      );
+      if (activeClone.rows[0]) {
+        await client.query('ROLLBACK');
+        console.log(
+          `Skipping retry for run ${runId}: a rerun or retry of chain ${originRunId} is already queued or running`
+        );
+      } else {
+        console.log(
+          `Scheduling retry ${newRetryCount}/${maxRetries} for run ${runId} as ${newRunId}`
+        );
+        await client.query(
+          `INSERT INTO runs (id, actor_id, user_id, status, default_dataset_id, default_key_value_store_id,
+            default_request_queue_id, timeout_secs, memory_mbytes, retry_count, origin_run_id, run_after)
+           VALUES ($1, $2, (SELECT user_id FROM runs WHERE id = $3), 'READY',
+            $4, $5, $6, $7, $8, $9, $10,
+            NOW() + INTERVAL '1 second' * $11)`,
+          [
+            newRunId,
+            run.actor_id,
+            runId,
+            run.default_dataset_id,
+            run.default_key_value_store_id,
+            run.default_request_queue_id,
+            run.timeout_secs,
+            run.memory_mbytes,
+            newRetryCount,
+            originRunId,
+            delaySecs,
+          ]
+        );
+        await client.query('COMMIT');
+        inserted = true;
+      }
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Ignore rollback errors if transaction was already aborted or connection closed
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    if (inserted) {
+      await redisClient.publish('run:new', newRunId);
+    }
+  } catch (err) {
+    console.error(`Failed to schedule retry for run ${runId}:`, err);
+  }
+}
+
+/**
+ * Check if a URL targets a private/internal network address.
+ * Blocks RFC 1918, link-local, loopback, and metadata endpoints.
+ * KEEP IN SYNC with `isPrivateUrl` in `packages/api/src/routes/webhooks.ts`
+ * (the webhook test endpoint uses a twin of this guard).
+ */
+export function isPrivateUrl(urlString: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(urlString);
+  } catch {
+    return true; // Invalid URLs are blocked
+  }
+
+  const hostname = parsed.hostname;
+
+  // Block loopback
+  // URL.hostname keeps the brackets around IPv6 literals ('[::1]'), so
+  // both forms must be matched or IPv6-loopback URLs bypass the guard.
+  if (
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname === '::1' ||
+    hostname === '[::1]'
+  ) {
+    return true;
+  }
+
+  // Block link-local / cloud metadata (169.254.x.x)
+  if (hostname.startsWith('169.254.')) {
+    return true;
+  }
+
+  // Block RFC 1918 private ranges
+  const parts = hostname.split('.').map(Number);
+  if (parts.length === 4 && parts.every((p) => !isNaN(p))) {
+    const [a, b] = parts as [number, number, number, number];
+    // 127.0.0.0/8 loopback
+    if (a === 127) return true;
+    // 10.0.0.0/8
+    if (a === 10) return true;
+    // 172.16.0.0/12
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    // 192.168.0.0/16
+    if (a === 192 && b === 168) return true;
+    // 0.0.0.0
+    if (parts.every((p) => p === 0)) return true;
+  }
+
+  return false;
+}
+
+/**
+ * Attempt a single webhook delivery.
+ */
+export async function attemptWebhookDelivery(
+  deliveryId: string,
+  webhook: {
+    id: string;
+    request_url: string;
+    payload_template: string | null;
+    headers: Record<string, string> | null;
+  },
+  run: RunJob,
+  eventType: string,
+  db: pg.Pool = pool
+): Promise<void> {
+  const RETRY_DELAYS = [10, 30, 60, 300, 900]; // seconds
+  // Declared outside try so the catch path can still record what we tried
+  // to send when fetch throws *after* we built the body (e.g., AbortSignal
+  // timeout). Pre-render-failure errors leave this null, which is honest:
+  // nothing was sent.
+  //
+  // Note: this holds the REDACTED + CAPPED form for storage. The raw
+  // unredacted bytes (sent to the receiver) live as a local const inside
+  // the try block — never escapes the function, never lands in the DB.
+  let requestBodyForStorage: string | null = null;
+
+  try {
+    // Default Apify-compatible payload. KEEP IN SYNC with
+    // packages/api/src/routes/webhooks.ts → buildWebhookPayload — the
+    // test endpoint mirrors this shape so receivers tested with one
+    // path don't break in production. The webhook test snapshot in
+    // webhooks.test.ts locks the contract.
+    //
+    // The user's optional payload_template is then applied via the
+    // shared two-pass engine, which gives Apify-style typed splicing
+    // (`"{{eventData}}"` becomes the object, not the literal string)
+    // against this camelCase payload — not the snake_case run row.
+    const defaultPayload = {
+      userId: run.user_id,
+      createdAt: new Date().toISOString(),
+      eventType,
+      eventData: { actorId: run.actor_id, actorRunId: run.id },
+      resource: {
+        id: run.id,
+        actId: run.actor_id,
+        userId: run.user_id,
+        usageTotalUsd: 0, // Apify-shape parity; Crawlee Cloud has no usage tracking yet
+        status: run.status,
+        startedAt: run.started_at?.toISOString() ?? null,
+        finishedAt: run.finished_at?.toISOString() ?? null,
+        defaultDatasetId: run.default_dataset_id,
+        defaultKeyValueStoreId: run.default_key_value_store_id,
+        defaultRequestQueueId: run.default_request_queue_id,
+        options: { timeoutSecs: run.timeout_secs, memoryMbytes: run.memory_mbytes },
+        buildId: run.build_id ?? null,
+        buildNumber: run.build_number ?? null,
+        exitCode: run.exit_code ?? null,
+        stats: {
+          inputBodyLen: run.stats_json?.inputBodyLen ?? 0,
+          restartCount: run.stats_json?.restartCount ?? 0,
+          resurrectCount: run.stats_json?.resurrectCount ?? 0,
+          runTimeSecs:
+            run.stats_json?.runTimeSecs ??
+            (run.finished_at && run.started_at
+              ? Math.round(
+                  (new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()) / 1000
+                )
+              : 0),
+          computeUnits: run.stats_json?.computeUnits ?? 0,
+        },
+      },
+    };
+    const payload = applyWebhookTemplate(webhook.payload_template, defaultPayload);
+    // `rawBody` is the exact bytes sent to the receiver — never persisted.
+    // `requestBodyForStorage` is the secrets-redacted, length-capped form
+    // that lands in webhook_deliveries.request_body. Keeping them as
+    // separate identifiers prevents the "stored copy diverged from sent
+    // copy" bug class — and prevents the inverse: never accidentally
+    // sending the redacted form to the receiver (they'd authenticate-fail).
+    const rawBody = JSON.stringify(payload);
+    requestBodyForStorage = redactSecretsForStorage(rawBody);
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(webhook.headers ?? {}),
+    };
+
+    console.log(`Delivering webhook ${webhook.id} to ${webhook.request_url}`);
+
+    if (isPrivateUrl(webhook.request_url)) {
+      await db.query(
+        `UPDATE webhook_deliveries
+         SET status = 'FAILED', attempt_count = attempt_count + 1,
+             request_body = $1,
+             response_body = 'Webhook URL targets a private/internal network address',
+             finished_at = NOW(), next_retry_at = NULL
+         WHERE id = $2`,
+        [requestBodyForStorage, deliveryId]
+      );
+      return;
+    }
+
+    const response = await fetch(webhook.request_url, {
+      method: 'POST',
+      headers,
+      body: rawBody,
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    const responseBody = await response.text().catch(() => '');
+
+    if (response.ok) {
+      // Success
+      await db.query(
+        `UPDATE webhook_deliveries
+         SET status = 'DELIVERED', attempt_count = attempt_count + 1,
+             request_body = $1,
+             response_status = $2, response_body = $3,
+             finished_at = NOW(), next_retry_at = NULL
+         WHERE id = $4`,
+        [requestBodyForStorage, response.status, responseBody.slice(0, 1024), deliveryId]
+      );
+    } else {
+      // HTTP error — schedule retry
+      await scheduleRetry(
+        deliveryId,
+        response.status,
+        responseBody.slice(0, 1024),
+        requestBodyForStorage,
+        RETRY_DELAYS,
+        db
+      );
+    }
+  } catch (err) {
+    // Network error — schedule retry. requestBodyForStorage may be null if
+    // the exception fired before we built it (e.g., template rendering
+    // threw), in which case `null` is honest: nothing was sent.
+    //
+    // Defensive `String(err instanceof Error ? err.message : err)`: any
+    // value can be `throw`n in JS — a string, null, a plain object — and
+    // a bare `(err as Error).message.slice()` crashes on those. A crash
+    // here would leave the delivery stuck PENDING forever (no UPDATE
+    // fires, retry loop never runs). The wrapped form is cheap and keeps
+    // the delivery moving toward a terminal state regardless of what
+    // the upstream throw looked like.
+    await scheduleRetry(
+      deliveryId,
+      null,
+      String(err instanceof Error ? err.message : err).slice(0, 1024),
+      requestBodyForStorage,
+      RETRY_DELAYS,
+      db
+    );
+  }
+}
+
+/**
+ * Schedule a retry with exponential backoff, or mark as failed if max attempts reached.
+ *
+ * `requestBody` is the JSON we attempted to send on this attempt; null means
+ * we never got far enough to render it (e.g., a template-rendering exception).
+ * Stored on every UPDATE path so the dashboard always shows what was last
+ * tried, not a stale body from a previous attempt.
+ */
+export async function scheduleRetry(
+  deliveryId: string,
+  responseStatus: number | null,
+  responseBody: string,
+  requestBody: string | null,
+  retryDelays: number[],
+  db: pg.Pool = pool
+): Promise<void> {
+  // Get current attempt count
+  const delivery = await db.query<{ attempt_count: number; max_attempts: number }>(
+    'SELECT attempt_count, max_attempts FROM webhook_deliveries WHERE id = $1',
+    [deliveryId]
+  );
+
+  if (!delivery.rows[0]) return;
+
+  const newAttempt = delivery.rows[0].attempt_count + 1;
+
+  if (newAttempt >= delivery.rows[0].max_attempts) {
+    // Max retries exhausted
+    await db.query(
+      `UPDATE webhook_deliveries
+       SET status = 'FAILED', attempt_count = $1,
+           request_body = $2,
+           response_status = $3, response_body = $4,
+           finished_at = NOW(), next_retry_at = NULL
+       WHERE id = $5`,
+      [newAttempt, requestBody, responseStatus, responseBody, deliveryId]
+    );
+  } else {
+    // Schedule next retry
+    const delaySecs = retryDelays[newAttempt - 1] ?? retryDelays[retryDelays.length - 1]!;
+    await db.query(
+      `UPDATE webhook_deliveries
+       SET attempt_count = $1,
+           request_body = $2,
+           response_status = $3, response_body = $4,
+           next_retry_at = NOW() + INTERVAL '1 second' * $5
+       WHERE id = $6`,
+      [newAttempt, requestBody, responseStatus, responseBody, delaySecs, deliveryId]
+    );
+  }
+}
+
+/**
+ * Atomically claim due webhook retries. Same race class as claimNextRun:
+ * the old standalone `SELECT ... FOR UPDATE SKIP LOCKED` released its locks
+ * at statement end, so two runner processes polling within the same window
+ * both fetched the same PENDING rows and both POSTed to the receiver
+ * (duplicate deliveries). Claiming = pushing next_retry_at into the future
+ * in the SAME statement that selects: sibling pollers no longer see the
+ * row, and if this process crashes mid-delivery the row simply comes due
+ * again — at-least-once, but no longer concurrently-twice.
+ *
+ * The 600s horizon must exceed the batch worst case: 10 rows delivered
+ * sequentially × 30s fetch timeout = 300s. A shorter horizon would let
+ * rows come due again while their own batch was still draining. The only
+ * cost of the slack is slower crash recovery — on the happy path success
+ * nulls next_retry_at and failure overwrites it with the real backoff.
+ */
+export async function claimWebhookRetries(dbPool: pg.Pool): Promise<
+  {
+    id: string;
+    webhook_id: string;
+    run_id: string;
+    event_type: string;
+  }[]
+> {
+  const result = await dbPool.query<{
+    id: string;
+    webhook_id: string;
+    run_id: string;
+    event_type: string;
+  }>(
+    `UPDATE webhook_deliveries
+     SET next_retry_at = NOW() + INTERVAL '600 seconds'
+     WHERE id IN (
+       SELECT id FROM webhook_deliveries
+       WHERE status = 'PENDING' AND next_retry_at <= NOW()
+       ORDER BY next_retry_at ASC
+       LIMIT 10
+       FOR UPDATE SKIP LOCKED
+     ) AND status = 'PENDING'
+     RETURNING id, webhook_id, run_id, event_type`
+  );
+  return result.rows;
+}
+
+/**
+ * Process pending webhook delivery retries.
+ * Runs on a 10-second interval.
+ */
+export async function processWebhookRetries(db: pg.Pool = pool): Promise<void> {
+  try {
+    const pending = await claimWebhookRetries(db);
+
+    for (const delivery of pending) {
+      const webhook = await db.query<{
+        id: string;
+        request_url: string;
+        payload_template: string | null;
+        headers: Record<string, string> | null;
+      }>('SELECT * FROM webhooks WHERE id = $1', [delivery.webhook_id]);
+
+      if (!webhook.rows[0]) {
+        // Webhook deleted — mark delivery as failed
+        await db.query(
+          `UPDATE webhook_deliveries SET status = 'FAILED', finished_at = NOW(), next_retry_at = NULL WHERE id = $1`,
+          [delivery.id]
+        );
+        continue;
+      }
+
+      const run = await db.query<RunJob>('SELECT * FROM runs WHERE id = $1', [delivery.run_id]);
+      if (!run.rows[0]) {
+        // Run deleted — mark delivery as failed
+        await db.query(
+          `UPDATE webhook_deliveries SET status = 'FAILED', finished_at = NOW(), next_retry_at = NULL WHERE id = $1`,
+          [delivery.id]
+        );
+        continue;
+      }
+
+      await attemptWebhookDelivery(
+        delivery.id,
+        webhook.rows[0],
+        run.rows[0],
+        delivery.event_type,
+        db
+      );
+    }
+  } catch (err) {
+    console.error('Webhook retry processor error:', err);
+  }
+}
+
+/**
+ * Notify about new run.
+ */
+export async function notifyNewRun(runId: string, redisClient: Redis = redis): Promise<void> {
+  await redisClient.publish('run:new', runId);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

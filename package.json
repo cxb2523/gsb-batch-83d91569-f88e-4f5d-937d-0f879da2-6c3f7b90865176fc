@@ -1,0 +1,61 @@
+{
+  "name": "crawlee-cloud",
+  "version": "1.7.0",
+  "private": true,
+  "description": "Open-source self-hosted platform for Crawlee scrapers with Apify-compatible API",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/crawlee-cloud/crawlee-cloud"
+  },
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "packageManager": "npm@10.2.0",
+  "scripts": {
+    "prepare": "husky",
+    "build": "turbo run build",
+    "dev": "npm run dev --workspace=@crawlee-cloud/api",
+    "start": "npm run start --workspace=@crawlee-cloud/api",
+    "lint": "turbo run lint",
+    "lint:fix": "turbo run lint:fix",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:coverage": "turbo run test:coverage",
+    "test:mcp-e2e": "npm --prefix tests/mcp-e2e ci && npm --prefix tests/mcp-e2e test",
+    "clean": "turbo run clean && rm -rf node_modules",
+    "db:migrate": "npm run db:migrate --workspace=@crawlee-cloud/api",
+    "docker:dev": "docker compose -f docker-compose.dev.yml up -d",
+    "docker:down": "docker compose down",
+    "security:audit": "npm audit --audit-level=moderate",
+    "security:validate-config": "node scripts/validate-config.js",
+    "cleanup": "npx tsx scripts/cleanup-old-data.ts",
+    "backup:create": "npx tsx scripts/backup-db.ts",
+    "backup:restore": "npx tsx scripts/restore-db.ts",
+    "backup:list": "npx tsx scripts/list-backups.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@vitest/coverage-v8": "^3.2.6",
+    "eslint": "^9.16.0",
+    "eslint-config-prettier": "^10.1.8",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.2.10",
+    "prettier": "^3.4.2",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.6"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yml,yaml}": [
+      "prettier --write"
+    ]
+  }
+}

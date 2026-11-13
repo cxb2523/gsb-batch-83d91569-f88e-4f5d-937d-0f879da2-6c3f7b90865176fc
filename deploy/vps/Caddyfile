@@ -1,0 +1,11 @@
+# Caddyfile for Crawlee Cloud
+# Automatic HTTPS via Let's Encrypt
+# Set DOMAIN environment variable before starting
+
+{$DOMAIN} {
+	reverse_proxy api:3000
+}
+
+dashboard.{$DOMAIN} {
+	reverse_proxy dashboard:3001
+}

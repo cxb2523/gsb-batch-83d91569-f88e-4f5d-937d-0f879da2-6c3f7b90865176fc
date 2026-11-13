@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ============================================
+# Crawlee Cloud - VPS Deployment Script
+# ============================================
+
+REPO_URL="https://github.com/crawlee-cloud/crawlee-cloud.git"
+INSTALL_DIR="/opt/crawlee-cloud"
+
+# -------------------------------------------
+# Banner
+# -------------------------------------------
+echo ""
+echo "=========================================="
+echo "  Crawlee Cloud - VPS Deployment"
+echo "=========================================="
+echo ""
+
+# -------------------------------------------
+# Prompt for required configuration
+# -------------------------------------------
+read -rp "Enter your domain name (e.g. crawlee.example.com): " DOMAIN
+if [[ -z "${DOMAIN}" ]]; then
+    echo "Error: Domain name is required."
+    exit 1
+fi
+
+read -rp "Enter admin email address: " ADMIN_EMAIL
+if [[ -z "${ADMIN_EMAIL}" ]]; then
+    echo "Error: Admin email is required."
+    exit 1
+fi
+
+echo ""
+echo "Generating secure credentials..."
+
+# -------------------------------------------
+# Generate secrets
+# -------------------------------------------
+API_SECRET=$(openssl rand -base64 48 | tr -d '\n/+=')
+DB_PASSWORD=$(openssl rand -base64 24 | tr -d '\n/+=')
+DB_USER="crawlee"
+DB_NAME="crawlee_cloud"
+REDIS_PASSWORD=$(openssl rand -base64 24 | tr -d '\n/+=')
+S3_ACCESS_KEY=$(openssl rand -hex 16)
+S3_SECRET_KEY=$(openssl rand -base64 32 | tr -d '\n/+=')
+ADMIN_PASSWORD=$(openssl rand -base64 16 | tr -d '\n/+=')
+
+echo "Credentials generated."
+echo ""
+
+# -------------------------------------------
+# Install Docker if not present
+# -------------------------------------------
+if ! command -v docker &>/dev/null; then
+    echo "Docker not found. Installing Docker..."
+    curl -fsSL https://get.docker.com | sh
+    systemctl enable docker
+    systemctl start docker
+    echo "Docker installed successfully."
+else
+    echo "Docker is already installed."
+fi
+
+# -------------------------------------------
+# Verify docker compose is available
+# -------------------------------------------
+if ! docker compose version &>/dev/null; then
+    echo "Error: 'docker compose' (v2) is required but not found."
+    echo "Please install the Docker Compose plugin: https://docs.docker.com/compose/install/"
+    exit 1
+fi
+
+echo "Docker Compose detected: $(docker compose version --short)"
+echo ""
+
+# -------------------------------------------
+# Clone or update repository
+# -------------------------------------------
+if [[ -d "${INSTALL_DIR}/.git" ]]; then
+    echo "Existing installation found at ${INSTALL_DIR}. Pulling latest changes..."
+    git -C "${INSTALL_DIR}" pull
+else
+    echo "Cloning Crawlee Cloud to ${INSTALL_DIR}..."
+    git clone "${REPO_URL}" "${INSTALL_DIR}"
+fi
+
+echo ""
+
+# -------------------------------------------
+# Write .env file
+# -------------------------------------------
+cd "${INSTALL_DIR}/deploy/vps"
+
+echo "Writing configuration to ${INSTALL_DIR}/deploy/vps/.env ..."
+
+cat > .env <<EOF
+# Crawlee Cloud - Production Configuration
+# Generated on $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# WARNING: This file contains secrets. Do not commit to version control.
+
+DOMAIN=${DOMAIN}
+ADMIN_EMAIL=${ADMIN_EMAIL}
+ADMIN_PASSWORD=${ADMIN_PASSWORD}
+
+API_SECRET=${API_SECRET}
+
+DB_USER=${DB_USER}
+DB_PASSWORD=${DB_PASSWORD}
+DB_NAME=${DB_NAME}
+
+REDIS_PASSWORD=${REDIS_PASSWORD}
+
+S3_ACCESS_KEY=${S3_ACCESS_KEY}
+S3_SECRET_KEY=${S3_SECRET_KEY}
+EOF
+
+chmod 600 .env
+
+echo "Configuration written and secured (chmod 600)."
+echo ""
+
+# -------------------------------------------
+# Start services
+# -------------------------------------------
+echo "Starting Crawlee Cloud services..."
+docker compose -f docker-compose.prod.yml up -d --build
+
+echo ""
+echo "Waiting for services to initialize..."
+sleep 10
+
+# -------------------------------------------
+# Deployment summary
+# -------------------------------------------
+echo ""
+echo "=========================================="
+echo "  Deployment Complete!"
+echo "=========================================="
+echo ""
+echo "  API URL:        https://${DOMAIN}"
+echo "  Dashboard URL:  https://dashboard.${DOMAIN}"
+echo ""
+echo "  Admin Email:    ${ADMIN_EMAIL}"
+echo "  Admin Password: ${ADMIN_PASSWORD}"
+echo ""
+echo "  Install Dir:    ${INSTALL_DIR}"
+echo "  Config File:    ${INSTALL_DIR}/deploy/vps/.env"
+echo ""
+echo "=========================================="
+echo "  DNS Configuration"
+echo "=========================================="
+echo ""
+echo "  Point both of the following DNS records"
+echo "  to this server's IP address:"
+echo ""
+echo "    ${DOMAIN}            -> <YOUR_SERVER_IP>"
+echo "    dashboard.${DOMAIN}  -> <YOUR_SERVER_IP>"
+echo ""
+echo "  Caddy will automatically provision HTTPS"
+echo "  certificates via Let's Encrypt once DNS"
+echo "  records are active."
+echo ""
+echo "=========================================="
+echo "  Common Commands"
+echo "=========================================="
+echo ""
+echo "  View logs:"
+echo "    cd ${INSTALL_DIR}/deploy/vps && docker compose -f docker-compose.prod.yml logs -f"
+echo ""
+echo "  Stop all services:"
+echo "    cd ${INSTALL_DIR}/deploy/vps && docker compose -f docker-compose.prod.yml down"
+echo ""
+echo "  Update to latest version:"
+echo "    cd ${INSTALL_DIR} && git pull && cd deploy/vps && docker compose -f docker-compose.prod.yml up -d --build"
+echo ""
+echo "  Restart services:"
+echo "    cd ${INSTALL_DIR}/deploy/vps && docker compose -f docker-compose.prod.yml restart"
+echo ""
+echo "=========================================="
+echo ""
+echo "  IMPORTANT: Save your admin password above"
+echo "  in a safe place. It will not be shown again."
+echo ""
+echo "=========================================="

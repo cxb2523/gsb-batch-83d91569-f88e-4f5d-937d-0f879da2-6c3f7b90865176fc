@@ -1,0 +1,190 @@
+services:
+  # ===========================================
+  # REVERSE PROXY
+  # ===========================================
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - dashboard
+    networks:
+      - crawlee-network
+    restart: unless-stopped
+
+  # ===========================================
+  # CORE SERVICES
+  # ===========================================
+
+  api:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile.api
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - S3_ENDPOINT=http://minio:9000
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
+      - S3_SECRET_KEY=${S3_SECRET_KEY}
+      - S3_BUCKET=crawlee-cloud
+      - S3_REGION=us-east-1
+      - S3_FORCE_PATH_STYLE=true
+      - API_SECRET=${API_SECRET}
+      - CORS_ORIGINS=https://${DOMAIN},https://dashboard.${DOMAIN}
+      - RATE_LIMIT_MAX=100
+      - LOG_LEVEL=info
+      - ADMIN_EMAIL=${ADMIN_EMAIL}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - crawlee-network
+    restart: unless-stopped
+
+  runner:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile.runner
+    environment:
+      - NODE_ENV=production
+      - API_BASE_URL=http://api:3000
+      - API_TOKEN=${API_SECRET}
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - DOCKER_SOCKET=/var/run/docker.sock
+      - DOCKER_NETWORK=crawlee-prod_crawlee-network
+      - MAX_CONCURRENT_RUNS=${MAX_CONCURRENT_RUNS:-5}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - api
+      - redis
+      - postgres
+    networks:
+      - crawlee-network
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile.dashboard
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - NEXT_PUBLIC_API_URL=https://${DOMAIN}
+    depends_on:
+      - api
+    networks:
+      - crawlee-network
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile.api
+    command: ['node', 'packages/api/dist/scheduler.js']
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - S3_ENDPOINT=http://minio:9000
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
+      - S3_SECRET_KEY=${S3_SECRET_KEY}
+      - S3_BUCKET=crawlee-cloud
+      - S3_REGION=us-east-1
+      - S3_FORCE_PATH_STYLE=true
+      - API_SECRET=${API_SECRET}
+      - CORS_ORIGINS=https://${DOMAIN},https://dashboard.${DOMAIN}
+    depends_on:
+      - api
+      - redis
+    networks:
+      - crawlee-network
+    restart: unless-stopped
+
+  # ===========================================
+  # DATA STORES
+  # ===========================================
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${DB_USER}']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - crawlee-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-a', '${REDIS_PASSWORD}', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - crawlee-network
+    restart: unless-stopped
+
+  minio:
+    # minio/minio and minio/mc can no longer be pulled (#121). This pins the
+    # Bitnami legacy archive as a stopgap; it creates MINIO_DEFAULT_BUCKETS at
+    # startup, so no separate mc init job is needed.
+    image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+      MINIO_DEFAULT_BUCKETS: crawlee-cloud
+    volumes:
+      - minio_data:/bitnami/minio/data
+    healthcheck:
+      # Healthy only once the default bucket exists: Bitnami answers on :9000
+      # during its setup phase, before MINIO_DEFAULT_BUCKETS is created.
+      test:
+        [
+          'CMD-SHELL',
+          'curl -f http://localhost:9000/minio/health/live && test -d /bitnami/minio/data/crawlee-cloud',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - crawlee-network
+    restart: unless-stopped
+
+networks:
+  crawlee-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  caddy_data:
+  caddy_config:

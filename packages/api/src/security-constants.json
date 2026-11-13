@@ -1,0 +1,14 @@
+{
+  "weakSecrets": [
+    "dev-secret-change-in-production",
+    "dev-secret-do-not-use-in-production-32chars",
+    "your-super-secret-jwt-key-change-in-production",
+    "secret",
+    "password",
+    "admin",
+    "changeme",
+    "test"
+  ],
+  "insecureDbPasswords": ["password", "devpassword", "postgres", "admin", "root", "crawlee"],
+  "insecureS3Credentials": ["minioadmin", "devminioadmin", "admin", "password"]
+}

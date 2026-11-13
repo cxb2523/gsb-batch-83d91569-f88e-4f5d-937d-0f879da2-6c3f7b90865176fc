@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # Runs each package's `test:coverage` (vitest run --coverage), which
+      # executes the same unit suites the previous plain `npx vitest run`
+      # step did, plus enforces the per-package coverage thresholds
+      # declared in each vitest.config.ts. Thresholds are ratcheted up as
+      # coverage improves; a regression below the floor fails this job.
+      - run: npx turbo run test:coverage
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: crawlee_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      minio:
+        # bitnami/minio was retired by Bitnami in late 2024; the
+        # bitnamilegacy namespace is their drop-in archive of the old
+        # catalog (same env vars, same auto-start behavior, same health
+        # endpoint). Pinned to the same tag as the compose files and templates
+        # (#121); moving to SeaweedFS is tracked separately.
+        image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+        ports:
+          - 9000:9000
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+          # The Bitnami image creates these at startup, so CI needs no `mc`
+          # client. dl.min.io stopped serving it (HTTP 410, Oct 2026), and
+          # the integration tests also call ensureS3Bucket() themselves.
+          MINIO_DEFAULT_BUCKETS: crawlee-test
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Run integration tests
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/crawlee_test
+          REDIS_URL: redis://localhost:6379
+          S3_ENDPOINT: http://localhost:9000
+          S3_ACCESS_KEY: minioadmin
+          S3_SECRET_KEY: minioadmin
+          S3_BUCKET: crawlee-test
+          S3_REGION: us-east-1
+          S3_FORCE_PATH_STYLE: 'true'
+          API_SECRET: integration-test-secret-at-least-32-characters
+          CORS_ORIGINS: http://localhost:3000
+          NODE_ENV: test
+        run: npx vitest run --config vitest.integration.config.ts

@@ -1,0 +1,398 @@
+# API Reference
+
+Crawlee Cloud provides a REST API that is fully compatible with the [Apify API v2](https://docs.apify.com/api/v2).
+
+## Base URL
+
+```
+https://your-server.com/v2
+```
+
+## Authentication
+
+All requests require a Bearer token in the `Authorization` header:
+
+```bash
+curl -H "Authorization: Bearer YOUR_TOKEN" \
+  https://your-server.com/v2/datasets
+```
+
+All resource endpoints are user-scoped — authenticated users can only access their own resources.
+
+Two token kinds are accepted: `cp_`-prefixed API keys (created via the endpoints below, shown in full only once at creation) and JWTs returned by `/v2/auth/login`. As an alternative to the Bearer header, a `?token=` query parameter is accepted on any authenticated route — useful for browser download links that can't set custom headers.
+
+| Method   | Endpoint                    | Description                               |
+| -------- | --------------------------- | ----------------------------------------- |
+| `POST`   | `/v2/auth/login`            | Log in with email/password, returns a JWT |
+| `GET`    | `/v2/auth/me`               | Get the authenticated user                |
+| `POST`   | `/v2/auth/api-keys`         | Create an API key (raw key returned once) |
+| `GET`    | `/v2/auth/api-keys`         | List API keys                             |
+| `DELETE` | `/v2/auth/api-keys/{keyId}` | Revoke an API key                         |
+
+Registration is disabled — the admin user is created on startup from the `ADMIN_EMAIL` / `ADMIN_PASSWORD` environment variables.
+
+---
+
+## Datasets
+
+Store and retrieve scraped data.
+
+| Method   | Endpoint                  | Description           |
+| -------- | ------------------------- | --------------------- |
+| `GET`    | `/v2/datasets`            | List all datasets     |
+| `POST`   | `/v2/datasets`            | Create a new dataset  |
+| `GET`    | `/v2/datasets/{id}`       | Get dataset details   |
+| `DELETE` | `/v2/datasets/{id}`       | Delete a dataset      |
+| `POST`   | `/v2/datasets/{id}/items` | Push items to dataset |
+| `GET`    | `/v2/datasets/{id}/items` | Retrieve items        |
+
+### Push Items
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '[{"title": "Item 1"}, {"title": "Item 2"}]' \
+  https://your-server.com/v2/datasets/{id}/items
+```
+
+### Retrieve Items
+
+Supports pagination with `offset` and `limit` query parameters (max limit: 1000).
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://your-server.com/v2/datasets/{id}/items?offset=0&limit=100"
+```
+
+**Omitting `limit` returns the entire dataset** (matching real Apify), streamed as plain JSON with Apify-style pagination headers — no in-memory materialization on the server, and `offset` is still honored. Passing an explicit `limit` uses the paged path. Before v1.6.0 the no-limit case silently defaulted to 100 items; Apify-compatible clients fetching without a limit were truncated.
+
+Pass `?download=1` to stream the entire dataset as a single JSON array file (attachment disposition) — same zero-materialization path.
+
+`fields=a,b` keeps only those top-level keys, `omit=a,b` drops keys, and `desc=1` returns the newest items first (with `offset` counted from the end), as on Apify. They apply to all three read modes and to `GET /v2/actor-runs/{id}/dataset/items`.
+
+---
+
+## Key-Value Stores
+
+Store arbitrary data by key.
+
+| Method   | Endpoint                                  | Description        |
+| -------- | ----------------------------------------- | ------------------ |
+| `GET`    | `/v2/key-value-stores`                    | List all stores    |
+| `POST`   | `/v2/key-value-stores`                    | Create a new store |
+| `GET`    | `/v2/key-value-stores/{id}`               | Get store details  |
+| `DELETE` | `/v2/key-value-stores/{id}`               | Delete a store     |
+| `GET`    | `/v2/key-value-stores/{id}/keys`          | List record keys   |
+| `PUT`    | `/v2/key-value-stores/{id}/records/{key}` | Set a record       |
+| `GET`    | `/v2/key-value-stores/{id}/records/{key}` | Get a record       |
+| `DELETE` | `/v2/key-value-stores/{id}/records/{key}` | Delete a record    |
+
+### Common Keys
+
+- `INPUT` — Actor input configuration
+- `OUTPUT` — Actor output/results
+
+### Presigned Record URLs
+
+`GET .../records/{key}?presigned=1` returns a presigned S3 URL valid for 1 hour instead of the record body — useful for large or binary values (screenshots, big JSON) the browser should fetch directly from object storage.
+
+---
+
+## Request Queues
+
+Manage URLs to crawl with automatic deduplication.
+
+| Method   | Endpoint                                            | Description               |
+| -------- | --------------------------------------------------- | ------------------------- |
+| `GET`    | `/v2/request-queues`                                | List all queues           |
+| `POST`   | `/v2/request-queues`                                | Create a new queue        |
+| `GET`    | `/v2/request-queues/{id}`                           | Get queue details         |
+| `DELETE` | `/v2/request-queues/{id}`                           | Delete a queue            |
+| `GET`    | `/v2/request-queues/{id}/head`                      | Get next pending requests |
+| `POST`   | `/v2/request-queues/{id}/head/lock`                 | Lock and fetch requests   |
+| `POST`   | `/v2/request-queues/{id}/requests`                  | Add request to queue      |
+| `POST`   | `/v2/request-queues/{id}/requests/batch`            | Batch add requests        |
+| `GET`    | `/v2/request-queues/{id}/requests/{requestId}`      | Get request details       |
+| `PUT`    | `/v2/request-queues/{id}/requests/{requestId}`      | Update request status     |
+| `PUT`    | `/v2/request-queues/{id}/requests/{requestId}/lock` | Prolong request lock      |
+| `DELETE` | `/v2/request-queues/{id}/requests/{requestId}/lock` | Release a lock            |
+
+### Deduplication
+
+Requests are deduplicated by `uniqueKey`. Adding a request with an existing `uniqueKey` is a no-op.
+
+### Locking
+
+The lock endpoint (`POST .../head/lock`) supports distributed crawling. Parameters:
+
+- `lockSecs` — Lock duration in seconds (max 86400)
+- `limit` — Number of requests to fetch (max 1000)
+- `clientKey` — Unique identifier for the crawling client
+
+---
+
+## Actors
+
+Manage Actor definitions.
+
+| Method   | Endpoint                 | Description                                                       |
+| -------- | ------------------------ | ----------------------------------------------------------------- |
+| `GET`    | `/v2/acts`               | List all Actors                                                   |
+| `POST`   | `/v2/acts`               | Create an Actor                                                   |
+| `GET`    | `/v2/acts/{id}`          | Get Actor details                                                 |
+| `PUT`    | `/v2/acts/{id}`          | Update an Actor                                                   |
+| `DELETE` | `/v2/acts/{id}`          | Delete an Actor                                                   |
+| `GET`    | `/v2/acts/{id}/runs`     | List the Actor's runs                                             |
+| `POST`   | `/v2/acts/{id}/runs`     | Start a new run                                                   |
+| `POST`   | `/v2/acts/{id}/run-sync` | Start a run, returns the run (waits only with `?waitForFinish=N`) |
+| `GET`    | `/v2/store`              | Search your own Actors                                            |
+
+Every `/v2/acts/...` route is also served as `/v2/actors/...` (the path `apify-client` 2.23.4+ uses). `{id}` can be the Actor ID, its name, `username~name` or `username/name` (URL-encoded), with the username and name matched case-insensitively; another user's username is a `404`.
+
+### Starting a run
+
+As on Apify, the request body is the Actor input, and run options go in the query string: `timeout`, `memory`, `waitForFinish` (seconds; fractions are floored, values above 60 are clamped, and the response is held for at most 55 s), `webhooks` (base64 JSON array) and `envVars` (base64 JSON object of strings, a Crawlee Cloud extension).
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"query": "laptops"}' \
+  "https://your-server.com/v2/acts/alice~my-actor/runs?timeout=600&memory=2048&waitForFinish=60"
+```
+
+The legacy wrapper body `{ input, timeout, memory, envVars, webhooks }` is also accepted, permanently, as a documented extension. See [Apify API compatibility](./apify-compatibility.md#run-start-contract) for the exact detection rule.
+
+### Store search
+
+`GET /v2/store` is `apify-client`'s `store().list()`, scoped to **your own** Actors: every whitespace-separated keyword in `search` must match (case-insensitively) the name, title, description, username or `username/name`; `limit` (default 10, max 100, max 10 with `includeInputSchema=1`) and `offset` (clamped at 1,000,000) paginate; `username` (case-insensitive) other than yours returns an empty list. See [Apify API compatibility](./apify-compatibility.md#store-search).
+
+### Deleting Actors
+
+`DELETE /v2/acts/{id}` refuses to delete an Actor that has runs, returning `409` with error type `actor-has-runs`. Pass `?force=true` to cascade-delete the Actor together with its run history (and the runs' webhook deliveries). Force delete still returns `409` (`actor-has-active-runs`) while any run is `READY`, `RUNNING`, or `ABORTING` — abort those first.
+
+### Input Validation
+
+Actor create/update bodies are validated with the following constraints:
+
+- `name` — 1-100 chars, alphanumeric with dots, dashes, underscores
+- `title` — Max 200 chars
+- `description` — Max 5000 chars
+- `defaultRunOptions.timeoutSecs` — Max 86400 seconds (24h)
+- `defaultRunOptions.memoryMbytes` — Max 16384 MB (16 GB)
+- `maxRetries` — 0-10
+- `retryDelaySecs` — 1-3600 seconds
+- `version` — 1-64 chars, alphanumeric with `.` `_` `+` `-`
+
+The run-start query options `timeout` and `memory` have the same 86400-second and 16384-MB caps.
+
+---
+
+## Actor Versions & Builds
+
+Manage source versions and Docker image builds for an Actor.
+
+| Method   | Endpoint                               | Description                                    |
+| -------- | -------------------------------------- | ---------------------------------------------- |
+| `GET`    | `/v2/acts/{id}/versions`               | List versions                                  |
+| `POST`   | `/v2/acts/{id}/versions`               | Create a version                               |
+| `GET`    | `/v2/acts/{id}/versions/{versionId}`   | Get version details                            |
+| `DELETE` | `/v2/acts/{id}/versions/{versionId}`   | Delete a version                               |
+| `GET`    | `/v2/acts/{id}/builds`                 | List builds                                    |
+| `POST`   | `/v2/acts/{id}/builds`                 | Start a build                                  |
+| `GET`    | `/v2/acts/{id}/builds/default`         | Get the default build (with `actorDefinition`) |
+| `GET`    | `/v2/acts/{id}/builds/{buildId}`       | Get build details                              |
+| `GET`    | `/v2/actor-builds/{buildId}`           | Get a build by ID (with `actorDefinition`)     |
+| `POST`   | `/v2/acts/{id}/builds/{buildId}/abort` | Abort a build                                  |
+| `GET`    | `/v2/acts/{id}/builds/{buildId}/logs`  | Get build logs                                 |
+
+---
+
+## Runs
+
+Monitor Actor executions.
+
+| Method | Endpoint                                            | Description                                           |
+| ------ | --------------------------------------------------- | ----------------------------------------------------- |
+| `GET`  | `/v2/actor-runs`                                    | List all runs                                         |
+| `GET`  | `/v2/actor-runs/{id}`                               | Get run status (`?waitForFinish=N` long-polls ≤ 55 s) |
+| `PUT`  | `/v2/actor-runs/{id}`                               | Update run status                                     |
+| `POST` | `/v2/actor-runs/{id}/abort`                         | Abort a run (a finished run is returned unchanged)    |
+| `POST` | `/v2/actor-runs/{id}/resurrect`                     | Resurrect a failed run                                |
+| `GET`  | `/v2/actor-runs/{id}/logs`                          | Get run logs                                          |
+| `POST` | `/v2/actor-runs/{id}/logs`                          | Append log entry                                      |
+| `GET`  | `/v2/actor-runs/{id}/logs/raw`                      | Download raw log text                                 |
+| `GET`  | `/v2/actor-runs/{id}/log`                           | Apify-compatible alias for `/logs/raw`                |
+| `POST` | `/v2/actor-runs/{id}/ingest-crawler-stats`          | Ingest the run's Crawlee statistics blob into `stats` |
+| `GET`  | `/v2/actor-runs/{id}/dataset/items`                 | Get run's dataset items                               |
+| `GET`  | `/v2/actor-runs/{id}/key-value-store/records/{key}` | Get run's KV store record                             |
+
+### Platform extensions (not part of the Apify v2 surface)
+
+These endpoints power the dashboard and are safe to use from custom tooling, but don't expect them from `apify-client` or the Apify platform:
+
+| Method | Endpoint                       | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------ | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST` | `/v2/actor-runs/{id}/rerun`    | Rerun a terminal (`FAILED`/`ABORTED`/`TIMED-OUT`) run as a **new** run (since 1.7.0): fresh id and storages, the origin's INPUT bytes, timeout/memory, per-run webhooks, and (within their 24h TTL) envVars are copied; `originRunId` links back to the first run in the chain. The origin row is untouched. `409 input-not-found` when retention already reaped the origin's INPUT; `409 rerun-already-active` when a rerun (or runner auto-retry) of the same chain is already queued or running — one active clone per chain, enforced transactionally via a per-chain advisory lock that the runner's auto-retry path takes too, so a manual rerun and an infra retry can't both win. Prefer this over `resurrect` whenever a webhook consumer keys on the run id. |
+| `GET`  | `/v2/actor-runs/stats`         | Aggregate status counters (total, running, succeeded, failed) plus failures in the last 24h, in one indexed query.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `GET`  | `/v2/actor-runs/histogram`     | Hour-bucketed run counts (`?hours=24`) for the dashboard throughput chart; server-side aggregation, bounded response.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `GET`  | `/v2/actor-runs/{id}/cost`     | Cost analysis for one finished run (since 1.3.0): your cost via actual-overlap droplet attribution, an Apify compute-unit estimate, savings %, and the inputs behind the numbers. `400 run-not-finished` before terminal status. Computed on read, never persisted.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `GET`  | `/v2/actor-runs/costs?ids=a,b` | Batch your-cost for up to 50 runs (since 1.4.0), answered in two set-based queries. Returns `{ data: { costs: { [runId]: { yourCostUsd } } } }` where `yourCostUsd` is `0` for self-hosted runs and `null` when attribution was never recorded. Unknown, other-user, and non-terminal ids are silently omitted; >50 ids is a `400`.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+
+### Run Status Values
+
+| Status      | Description                                                                                                         |
+| ----------- | ------------------------------------------------------------------------------------------------------------------- |
+| `READY`     | Queued, waiting to start                                                                                            |
+| `RUNNING`   | Currently executing                                                                                                 |
+| `SUCCEEDED` | Completed successfully                                                                                              |
+| `FAILED`    | Execution failed                                                                                                    |
+| `ABORTED`   | Manually stopped                                                                                                    |
+| `ABORTING`  | Abort requested, not yet terminal (read/filter-only — accepted by the list-runs `status` filter, not by run update) |
+| `TIMED-OUT` | Exceeded time limit                                                                                                 |
+
+### Run response shape (v1.0-committed)
+
+Every endpoint that returns a run (LIST, GET-by-id, PUT, abort, resurrect, rerun) emits the same shape. Notable fields:
+
+| Field                      | Type           | Notes                                                                                                                                                                                                                                                                               |
+| -------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`                       | string         | Apify-style 21-char nanoid.                                                                                                                                                                                                                                                         |
+| `actId`                    | string         | Owning actor id.                                                                                                                                                                                                                                                                    |
+| `status`                   | enum           | See "Run Status Values" above.                                                                                                                                                                                                                                                      |
+| `defaultDatasetId`         | string \| null | Dataset created at run start; null if the run failed before SDK init.                                                                                                                                                                                                               |
+| `defaultDatasetItemCount`  | number \| null | **Live count** from `datasets.item_count`, joined per-request. Null when there is no default dataset. Always present on the response — sourced via the centralized `RUN_SELECT_WITH_DATASET_COUNT` join in the API. Use this when integrating from the dashboard or custom tooling. |
+| `defaultKeyValueStoreId`   | string \| null | Default KV store for the run.                                                                                                                                                                                                                                                       |
+| `defaultRequestQueueId`    | string \| null | Default request queue for the run.                                                                                                                                                                                                                                                  |
+| `options.timeoutSecs`      | number         | Effective timeout for this run.                                                                                                                                                                                                                                                     |
+| `options.memoryMbytes`     | number         | Effective memory limit for this run.                                                                                                                                                                                                                                                |
+| `stats`                    | object         | Crawlee SDK statistics ingested at run completion, plus the live dataset item count below for Apify-client compatibility.                                                                                                                                                           |
+| `stats.datasetItemCount`   | number         | Same value as `defaultDatasetItemCount`, defaulted to `0` when there is no dataset. Mirrors Apify's nested location so `apify-client` consumers reading `run.stats.datasetItemCount` work unchanged.                                                                                |
+| `exitCode`                 | number \| null | Process exit code from the runner; null while the run is still in flight.                                                                                                                                                                                                           |
+| `startedAt` / `finishedAt` | ISO string     | Wall-clock timestamps; `finishedAt` is null until terminal.                                                                                                                                                                                                                         |
+| `createdAt` / `modifiedAt` | ISO string     | Row lifecycle timestamps.                                                                                                                                                                                                                                                           |
+| `originRunId`              | string \| null | First run in the chain when this run was produced by the runner's infra auto-retry or by `rerun`; chains collapse to the original (never a multi-hop walk). Null for first-hand runs.                                                                                               |
+| `retryCount`               | number         | How many infra auto-retries the runner has performed for this run row. Always `0` for runs created via `rerun` (a rerun is a new run, not a retry).                                                                                                                                 |
+
+**Note on webhooks**: the webhook payload's `resource.stats` is built by the runner from the ingested Crawlee statistics blob and does NOT currently mirror `stats.datasetItemCount` — webhook receivers that need the dataset count should query `/v2/actor-runs/{id}` from the `resource.id` they receive. This is tracked for parity in v1.0.1.
+
+---
+
+## Webhooks
+
+Receive HTTP callbacks when runs reach a terminal state. Webhooks can be standalone (catalog) or attached to a single run via the `webhooks` field on run dispatch.
+
+| Method   | Endpoint                              | Description                                                     |
+| -------- | ------------------------------------- | --------------------------------------------------------------- |
+| `POST`   | `/v2/webhooks`                        | Create a webhook                                                |
+| `GET`    | `/v2/webhooks`                        | List webhooks (supports `scope`, `runId`, `runActorId` filters) |
+| `GET`    | `/v2/webhooks/{webhookId}`            | Get webhook details                                             |
+| `PUT`    | `/v2/webhooks/{webhookId}`            | Update a webhook                                                |
+| `DELETE` | `/v2/webhooks/{webhookId}`            | Delete a webhook                                                |
+| `GET`    | `/v2/webhooks/{webhookId}/deliveries` | List delivery attempts                                          |
+| `POST`   | `/v2/webhooks/{webhookId}/test`       | Send a test delivery                                            |
+
+Supported event types are the four terminal run events:
+
+- `ACTOR.RUN.SUCCEEDED`
+- `ACTOR.RUN.FAILED`
+- `ACTOR.RUN.TIMED_OUT`
+- `ACTOR.RUN.ABORTED`
+
+Subscriptions to other Apify event types (e.g. `ACTOR.RUN.CREATED`) are rejected with a `400`.
+
+---
+
+## Schedules
+
+Run Actors automatically on a cron schedule.
+
+| Method   | Endpoint                     | Description          |
+| -------- | ---------------------------- | -------------------- |
+| `POST`   | `/v2/schedules`              | Create a schedule    |
+| `GET`    | `/v2/schedules`              | List schedules       |
+| `GET`    | `/v2/schedules/{scheduleId}` | Get schedule details |
+| `PUT`    | `/v2/schedules/{scheduleId}` | Update a schedule    |
+| `DELETE` | `/v2/schedules/{scheduleId}` | Delete a schedule    |
+
+---
+
+## Users
+
+| Method | Endpoint              | Description                               |
+| ------ | --------------------- | ----------------------------------------- |
+| `GET`  | `/v2/users/me`        | Get current user (Apify-compatible)       |
+| `GET`  | `/v2/users/me/limits` | Get account limits                        |
+| `PUT`  | `/v2/users/me`        | Update current user (e.g. proxy password) |
+
+`GET /v2/users/me` returns `username` (a URL-safe slug such as `alice`, used in `username/actor-name`) and `email` as separate fields. Before the MCP release `username` held the email.
+
+`GET /v2/users/me` uses optional authentication: unauthenticated callers receive an anonymous stub instead of a `401`. The Apify SDK calls this endpoint to resolve the proxy password (`data.proxy.password`) when `APIFY_PROXY_PASSWORD` is not set in the container environment.
+
+---
+
+## System & Operations
+
+| Method | Endpoint                      | Description                                                                                  |
+| ------ | ----------------------------- | -------------------------------------------------------------------------------------------- |
+| `GET`  | `/v2/system/info`             | Version, storage health, execution defaults, scaler config                                   |
+| `GET`  | `/v2/system/retention/status` | Retention reaper state (admin-only)                                                          |
+| `GET`  | `/v2/scaler/status`           | Auto-scaler status (admin-only)                                                              |
+| `GET`  | `/health`                     | Legacy health check                                                                          |
+| `GET`  | `/health/live`                | Liveness probe                                                                               |
+| `GET`  | `/health/ready`               | Readiness probe — returns `503` when any storage backend (PostgreSQL, Redis, S3) is degraded |
+| `GET`  | `/metrics`                    | Prometheus metrics (admin-only unless `METRICS_PUBLIC=true`)                                 |
+
+The `/health*` and `/metrics` endpoints are served at the root, outside the `/v2` prefix.
+
+---
+
+## Response Format
+
+All successful responses wrap data in a `data` field:
+
+```json
+{
+  "data": {
+    "id": "abc123",
+    "name": "my-dataset",
+    "itemCount": 42
+  }
+}
+```
+
+### Validation Errors
+
+Invalid request bodies return a 400 with Zod validation details:
+
+```json
+{
+  "error": {
+    "type": "validation_error",
+    "message": "Validation failed",
+    "details": [{ "path": ["name"], "message": "String must contain at least 1 character(s)" }]
+  }
+}
+```
+
+### Error Responses
+
+```json
+{
+  "error": {
+    "type": "record-not-found",
+    "message": "Dataset with ID 'xyz' was not found"
+  }
+}
+```
+
+Error types are lowercase kebab-case (e.g. `record-not-found`, `actor-has-runs`) — this casing is load-bearing for `apify-client` compatibility, whose `catchNotFoundOrThrow` helper matches `record-not-found` exactly. The one exception is Zod validation failures, which use `validation_error` as shown above.
+
+A route that does not exist returns `404` with type `page-not-found` (`"message": "Route GET /v2/nope not found"`), not `record-not-found`, so `apify-client` reports it as an error instead of a missing record.
+
+| HTTP Code | Description                     |
+| --------- | ------------------------------- |
+| `400`     | Bad request / validation error  |
+| `401`     | Authentication required         |
+| `404`     | Resource not found              |
+| `409`     | Conflict (e.g., locked request) |
+| `500`     | Internal server error           |

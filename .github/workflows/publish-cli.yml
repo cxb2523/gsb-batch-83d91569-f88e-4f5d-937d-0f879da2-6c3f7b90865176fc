@@ -1,0 +1,124 @@
+name: Publish CLI
+
+# Tag-driven publish. We use a synchronized-version flow across the
+# monorepo (root + api + cli + dashboard + runner all bump in lockstep
+# via a chore(release) PR), so the right trigger is the v* tag we push
+# AFTER that PR merges — not push-to-main, which the previous version
+# of this workflow used and which silently skipped every release commit
+# because the path filter excluded package.json edits.
+#
+# Trusted publishing: this workflow assumes the npm package
+# `@crawlee-cloud/cli` is configured for OIDC trusted publishing from
+# the `crawlee-cloud/crawlee-cloud` repo. No NPM_TOKEN secret needed —
+# `id-token: write` + `--provenance` is what npm verifies. If trusted
+# publishing isn't set up on the npm side, this job fails at the
+# publish step with a clear auth error.
+#
+# npm version: the publish step REQUIRES npm >= 11.5.1 because that's
+# when `npm publish` learned to exchange the GitHub OIDC token for an
+# npm publish credential (the actual TP auth handshake). Older npm
+# versions can sign provenance via OIDC just fine but then fall back to
+# .npmrc auth for the PUT — and with TP we have no token in .npmrc, so
+# the publish 404s with npm's intentionally-misleading "package not
+# found" response. We explicitly upgrade to npm@latest to stay TP-capable.
+#
+# Node version: MUST track npm@latest's engine floor. npm 12 requires
+# Node ^22.22.2 || ^24.15.0 || >= 26, so the `npm install -g npm@latest`
+# step EBADENGINE-fails on a Node 20 runner — that silently broke every
+# publish from v1.1.0 through v1.5.0 (npm stayed at 1.0.1 while the repo
+# moved on). Node 24 (LTS) satisfies both npm 12 and this repo's
+# engines (>= 20). If a publish fails with EBADENGINE again, bump
+# node-version to npm@latest's new floor.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Manual fallback: maintainer can re-run the publish for a given tag
+  # without re-tagging (e.g. if trusted-publishing config changed).
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag or branch to publish from'
+        required: true
+        default: 'main'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # '^24.15.0' (not bare '24') so npm 12's documented engine
+          # floor is ENCODED, not assumed — a stale toolcache resolving
+          # an older 24.x patch would otherwise re-trigger EBADENGINE.
+          node-version: '^24.15.0'
+          registry-url: 'https://registry.npmjs.org'
+
+      # See top-of-file note: Trusted Publishing's auth-token exchange
+      # needs npm >= 11.5.1, and npm@latest's engine floor dictates the
+      # node-version above.
+      - name: Upgrade npm to a Trusted-Publishing-capable version
+        run: npm install -g npm@latest
+
+      # Install from the workspace root so the CLI gets its hoisted
+      # devDeps (tsc, etc.). `npm ci` inside packages/cli/ skips the
+      # workspace deduplication and can fail on missing types.
+      - name: Install workspace dependencies
+        run: npm ci
+
+      - name: Build CLI
+        run: npm run build --workspace=@crawlee-cloud/cli
+
+      - name: Verify the version we're about to publish matches the tag
+        env:
+          # On tag push, github.ref is `refs/tags/vX.Y.Z`. On
+          # workflow_dispatch, github.ref is the BRANCH the workflow
+          # was triggered from (typically `refs/heads/main`), NOT the
+          # user-supplied `inputs.ref` — so we must consult inputs.ref
+          # explicitly to decide which value to validate against. Without
+          # this, a maintainer running `workflow_dispatch` from main
+          # could publish whatever's in package.json with no guard.
+          TAG_REF: ${{ github.ref }}
+          DISPATCH_REF: ${{ github.event.inputs.ref }}
+        run: |
+          # Pick the canonical "expected version" from whichever event
+          # triggered us. tag push → strip refs/tags/v from $TAG_REF.
+          # workflow_dispatch → strip leading 'v' from $DISPATCH_REF
+          # and refuse to publish if it doesn't look like a version tag,
+          # because that's the only safe thing to do (publishing from
+          # `main` could ship an arbitrary version with no audit).
+          if [ -n "$DISPATCH_REF" ]; then
+            case "$DISPATCH_REF" in
+              v[0-9]*)
+                EXPECTED="${DISPATCH_REF#v}"
+                ;;
+              *)
+                echo "::error::workflow_dispatch ref must be a tag like v0.8.5 (got: $DISPATCH_REF). Refusing to publish from a branch — would skip the version-match guard."
+                exit 1
+                ;;
+            esac
+          else
+            EXPECTED="${TAG_REF#refs/tags/v}"
+          fi
+
+          PKG=$(node -p "require('./packages/cli/package.json').version")
+          if [ "$EXPECTED" != "$PKG" ]; then
+            echo "::error::Expected version v$EXPECTED but packages/cli/package.json says $PKG. Bump all 5 workspace package.jsons before tagging."
+            exit 1
+          fi
+          echo "Publishing @crawlee-cloud/cli@$PKG"
+
+      - name: Publish to npm with provenance
+        run: npm publish --provenance --access public
+        working-directory: packages/cli

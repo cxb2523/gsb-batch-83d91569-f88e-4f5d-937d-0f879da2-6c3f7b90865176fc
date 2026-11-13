@@ -1,0 +1,891 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+## [1.7.0] - 2026-11-09
+
+MCP support for AI agents through Apify API parity: the stock Apify MCP server (`@apify/actors-mcp-server`) now works unmodified against a Crawlee Cloud instance by setting `APIFY_API_BASE_URL`, so Claude Desktop, Claude Code, Cursor and other MCP clients can search, run and inspect your actors and read their datasets and key-value stores (setup: [docs/mcp.md](docs/mcp.md)). The same fixes make plain `apify-client` work better: current clients' `/v2/actors` paths, `username/name` actor IDs, `actor.call(input)` keeping its input, `waitForFinish` long-polling instead of a tight polling loop, default builds with input schemas, and dataset `fields`/`omit`/`desc`. **Behaviour changes** (details below): `GET /v2/users/me` returns a username slug in `username` and the email in a new `email` field; aborting a finished run returns 200 with the run instead of 404; unknown routes return a `page-not-found` error envelope; run start reads the body as the actor input (the legacy `{ input, ... }` wrapper still works and is kept as a documented extension); `crc call` no longer defaults `--timeout`/`--memory`; invalid boolean query values are a 400; `crc push` fails on a missing or malformed referenced input schema or README; `actorDefinition` without an image is a 400; `text/plain` run-start bodies are a 415.
+
+**Upgrading from v1.6.0** needs a database migration, and compose installs need a one-time MinIO volume ownership fix: back up the MinIO volume and apply the fix from the _Self-hosting_ entry below before starting the new stack. Migrations do not run on startup: run them right after the new API is up (`docker compose exec api node packages/api/dist/db/migrate.js`, or `npm run db:migrate`), since routes that read the new columns fail until you do; if the API logged a `[Setup]` failure before the migration ran, restart it once. The `users.username` migration is one-way: it backfills a slug for every user and sets the column `NOT NULL`, so after rolling back to 1.6.x, that API cannot create users until you run `ALTER TABLE users ALTER COLUMN username DROP NOT NULL`. The CLI and dashboard can be upgraded in any order: they check `GET /health` and keep sending the legacy run-start body to APIs older than 1.7.0. After rolling the API back, reload open dashboard tabs, since the dashboard checks the API version once per page load.
+
+### API
+
+- **API no longer crashes when Postgres drops a pooled connection** — the API's pg pool had no `'error'` listener, so when Postgres terminated an idle connection (`pg_terminate_backend`, failover, restart) the process exited with `Unhandled 'error' event: terminating connection due to administrator command`. The pool and each client it opens now log the error; the broken connection is discarded and the next query opens a new one. The runner's pg pool and its four Redis clients (job queue, run-notification subscriber, log streaming, heartbeat) get the same handlers. ioredis only printed a warning for unhandled errors, so the Redis change just routes those errors through the runner's log format.
+- **Request logs redact secret-bearing query params** — run options now travel in the query string (`?envVars=`, `?webhooks=`, base64 JSON), and Fastify's default request log records the full URL, so their values are replaced with `[REDACTED]` in API request logs (as is `?token=`). Reverse proxies and access logs in front of the API still see the raw query string; configure them accordingly.
+- **Boolean query params accept `1`/`0`** — `apify-client` serializes booleans as `1`/`0`, so `client.runs().list({ desc: false })` sent `desc=0` and got a `400 validation_error` (this broke the MCP `get-actor-run-list` tool on every call), and request-queue `forefront=1` and logs `tail=1` were silently read as `false`. A shared `zBoolQuery` coercer now accepts `true`/`false`/`1`/`0` for `desc` on `GET /v2/actor-runs`, `forefront` on the request-queue routes, `tail` on run logs, and `desc`/`download` on both dataset items routes; absent keeps each route's default. **Behaviour change:** any other value for these params (e.g. `forefront=yes`) is now a `400 validation_error` instead of being treated as `false`.
+- **`forefront` actually puts a request at the head of the queue** — the sign was applied only to the Redis head score, while `GET /head` and `POST /head/lock` order by `order_no` in Postgres, so forefront requests were still served last. Forefront requests are now stored with a negative `order_no` (latest forefront first, as on Apify). This holds on every route that takes `forefront`: single add, batch add (`addRequests`/`addRequestsBatched`; order within one batch is not guaranteed), `PUT /requests/:requestId` (`reclaimRequest`; ignored when the update marks the request handled) and `DELETE /requests/:requestId/lock`. Before, batch add, `PUT` and the lock release ignored `forefront` entirely.
+- **Security: request-queue lock routes are scoped to the caller's queue** — `DELETE /v2/request-queues/:queueId/requests/:requestId/lock` resolved the queue for the caller but then cleared the lock by request id alone, so a user could pass their own queue id with another user's request id and release that lock (`204`), making the request be served again — a double crawl. It now returns `404 record-not-found` for a request outside the resolved queue, and every request-row `UPDATE` in the request-queue routes (head lock, prolong lock, update request, release lock) is scoped to the resolved queue.
+- **Run list filters** — `status` on `GET /v2/actor-runs` accepts `TIMING-OUT` and a comma-separated list (`status=SUCCEEDED,FAILED`, which is how `apify-client` sends a status array) matching any of them; `startedAfter`/`startedBefore` filter on the run's start time with inclusive bounds, as on Apify (a `READY` run, not yet started, is placed at its creation time); they were previously stripped, so the filter was silently ignored. The `since`/`until` extension keeps filtering on creation time; when both pairs are sent, all bounds apply. `PUT /v2/actor-runs/:runId` now accepts the same status set as the list filter — all eight Apify statuses, adding `TIMING-OUT` and `ABORTING`.
+- **`GET /v2/acts/:actorId/runs`** — new per-actor run list (`client.actor(id).runs().list()` returned 404). Resolves the actor by ID or name, scoped to the caller (404 `record-not-found` for unknown or another user's actor), and shares the query params, response shape and ordering of `GET /v2/actor-runs` through one extracted list builder.
+- **`/v2/actors` served as an alias of `/v2/acts` (#109)** — `apify-client` 2.23.4 and later address actors as `/v2/actors/...`, so every `client.actor(...)` / `client.actors()` call from a current client (including actors that install the Apify SDK today) hit a 404. All actor routes and their version and build sub-resources (`/runs`, `/run-sync`, `/versions`, `/builds`, build abort and logs) are now served under both segments by the same handlers; `/v2/acts` stays fully supported. Metrics: requests on the alias are recorded under the `/v2/acts/...` `route` label, so label cardinality is unchanged and dashboards that aggregate on `/v2/acts` keep counting current-client traffic (`/v2/actor-runs` etc. are untouched).
+- **Unknown routes return the platform error envelope** — behaviour change: a request to a route that does not exist now returns `404 { "error": { "type": "page-not-found", "message": "Route <METHOD> <path> not found" } }` instead of Fastify's default `{ message, error, statusCode }` body, so `apify-client` can read `error.type`. It is deliberately not `record-not-found`, which `apify-client` silently turns into `undefined`; 404s from existing handlers (missing actor, run, dataset, ...) still carry `record-not-found`.
+- **Users get a username slug; `/v2/users/me.username` is no longer the email (behaviour change)** — Apify identifies actors as `username/name`, and the Apify MCP server builds per-actor tool names from the username, so returning the email there produced tool names with `@` that MCP clients and LLM APIs reject. A new `users.username` column holds a unique slug derived from the email's local part (`[a-z0-9-]`, at most 30 characters; `alice@a.com` and `alice@b.com` become `alice` and `alice-2`; `me`, `api`, `apify`, `system` and `anonymous` are reserved, `admin` is not, so the default admin gets `admin`). The migration backfills existing users oldest-first and is idempotent. `GET /v2/users/me` now returns the slug in `username` and the email in a new `email` field; clients that read the email from `username` must switch to `email`. `GET /v2/auth/me` and the `user` object of `POST /v2/auth/login` also return `username`. An authenticated `GET /v2/users/me` whose user row no longer exists (a still-valid JWT or cached API key outliving a deleted user) now returns 404 `record-not-found` instead of 200 with an empty username; unauthenticated callers still get `anonymous`. Usernames cannot be changed yet. **The migration is one-way:** it sets `users.username` `NOT NULL`, and 1.6.x does not write the column, so after a downgrade 1.6.x cannot create users (its admin bootstrap fails when `ADMIN_EMAIL` names a user that does not exist yet, and the runner API key setup with it) until you run `ALTER TABLE users ALTER COLUMN username DROP NOT NULL`.
+- **`GET /v2/actor-runs/:runId?waitForFinish=N` now long-polls (behaviour change)** — the parameter was ignored and the run returned immediately, so `apify-client`'s `run(id).waitForFinish()` / `actor(id).call()` re-requested with no delay until its wait budget ran out (one MCP session with three waiting `call-actor`s measured 2,069 requests in ~10 s). The request is now held until the run is terminal (`SUCCEEDED`, `FAILED`, `TIMED-OUT`, `ABORTED`) or `N` seconds pass, then returns the current state. `N` is floored to whole seconds and clamped to 60 (apify-client sends 999999 when no wait budget is set), and the request is never held longer than 55 s so it answers before the 60 s idle timeout of nginx and most load balancers (a non-terminal answer just makes the client re-poll, as on Apify); a negative or non-numeric value is a 400 `validation_error`; an unknown run is still an immediate 404; absent / `0` is unchanged. If a re-read fails mid-wait (e.g. a transient DB error) the wait ends with the last good state and a warning is logged, instead of a 500. The run is re-read about once per second (with jitter) and a sleeping waiter holds no DB connection. Waits end early with the current state when the client disconnects or the server begins shutting down (a `preClose` hook, so pending long-polls no longer hold `app.close()` until `SHUTDOWN_TIMEOUT_SECS`). Requests the server actually held open are excluded from the `http_request_duration_seconds` histogram; ones answered straight away (run already terminal, or not found) stay in it. The reusable pieces (`waitForTerminal`, `parseWaitForFinish`, `createWaitAbortFactory`) live in `packages/api/src/lib/wait-for-terminal.ts` for the upcoming run-start and build endpoints.
+- **Actor definition (input schema, README) stored per build** — `POST /v2/acts` and `PUT /v2/acts/:id` accept an optional `actorDefinition` (`actorSpecification`, `name`, `version`, `input`, `readme`; unknown Apify keys such as `dockerfile`/`storages` are kept), stored on the new `actor_builds.actor_definition` JSONB column — per build, as Apify exposes it on `build.actorDefinition`, so rolling back to an older version restores its schema. A deploy with a new image stores it on the new build; a deploy with the same image and version (or a `PUT` of only `actorDefinition`) updates the latest build in place instead of minting a new one; a deploy without `actorDefinition` never clears a stored one, and a new build without one carries over the definition of an earlier `SUCCEEDED` build that has one — preferring the same version, then the same image, then the newest (so within one version, a build with the same image wins over a newer one with a different image) (so re-pushing an older version, or rolling back to an older image, restores that build's schema; RUNNING/ABORTED builds from the registry routes have none and are skipped, and do not affect same-image dedup) — so a plain image re-push from an older CLI cannot make the MCP actor tools disappear. A sent `actorDefinition` that lacks `input` or `readme` keeps the stored value of the missing key (from the build being updated, or the carry-over source for a new build) instead of erasing it; other keys are taken from the request as sent. Limits: `input` at most 500 KB serialized, `readme` at most 1 MB (UTF-8 bytes), the whole serialized `actorDefinition` at most 2 MB (this bounds unknown passthrough keys too); NUL characters and unpaired surrogates (which JSONB cannot store) are rejected; both return 400 `validation_error` naming the field. A stored definition can reach ~3.5 MB when inherited `input`/`readme` are added to a 2 MB request. If writing the definition fails, the request now fails (500) instead of reporting success; the same holds for deploys without `actorDefinition`: any failed build-row write is a 500. Serving the definition is #117; the CLI upload is #116.
+- **Behaviour change: `actorDefinition` requires an image** — builds only exist for actors with an image, so sending `actorDefinition` to an actor with no `defaultRunOptions.image` (stored or in the same request) now returns 400 `validation_error` ("actorDefinition requires an image") instead of being silently dropped. Requests without `actorDefinition` behave exactly as before.
+- **Build list/get no longer select `*`** — `GET /v2/acts/:id/builds`, `GET /v2/acts/:id/builds/:buildId` and the build create/abort routes select explicit columns, so they never read the up-to-~3.5 MB `actor_definition` per row. Response shape unchanged.
+- **Dataset items honour `fields`, `omit` and `desc` (Apify parity)** — `GET /v2/datasets/:id/items` and `GET /v2/actor-runs/:runId/dataset/items` ignored all three, so a caller asking for one column got whole rows (agents paid for that in context window). `fields=a,b` keeps only those top-level keys in that order, `omit=a,b` drops keys (after `fields`), and `desc=1|true` returns newest first with `offset` counted from the end, as on Apify. Empty `fields=&omit=&flatten=` (what apify-client and the MCP server send for unset options) are treated as absent; `flatten` is accepted but not implemented. Works on the paged, no-`limit` streaming and `download=1` branches; projection runs after the S3 read, and pagination headers keep their meaning. An empty `limit=` is also treated as absent (it used to mean a 100-item page). When a dataset's item count is unknown (`item_count` NULL), the total is counted from storage, so `desc` pages are no longer empty and the pagination total is correct.
+- **Run-scoped dataset items share the dataset route's logic** — `GET /v2/actor-runs/:runId/dataset/items` now goes through the same code as `GET /v2/datasets/:id/items`. It passes the dataset's `item_count` as the total, fixing a wrong `X-Apify-Pagination-Total` and empty pages for offsets inside the last S3 batch. **Behaviour change:** without `limit` it now streams the whole dataset (it previously returned only 100 items), and it accepts `download=1`.
+- **A storage error while streaming dataset items no longer crashes the API** — on both items routes, an S3 failure during the no-`limit` or `download=1` stream threw after the response had started, and Fastify's second `writeHead` (`ERR_HTTP_HEADERS_SENT`) was an unhandled rejection that killed the API process (the dataset route already did this before this release). A failure before the first item is now a normal error response; a failure after it aborts the transfer (the client sees a broken connection, never a truncated array) and is logged.
+- **Abort works on READY runs and returns finished runs instead of 404 (Apify parity)** — **behaviour change:** `POST /v2/actor-runs/:id/abort` on a run that has already finished now returns **200 with the unchanged run** instead of 404 `record-not-found` (`apify-client`'s `abort()` threw on that). A `READY` run can now be aborted: it moves straight to `ABORTED` in one conditional `UPDATE`, so no runner ever claims it. Matching `ACTOR.RUN.ABORTED` webhooks are queued as `PENDING` deliveries in the same transaction, and the runner's retry processor sends them. Known limitation: those deliveries are sent only by a running runner's retry loop, so on an instance with no runner they stay `PENDING` until one starts. Unknown runs and other users' runs still return 404.
+- **Security: actor version and build routes are user-scoped (#77)** — every route in `registry.ts` (`GET`/`POST /v2/acts/:actorId/versions`, `GET`/`DELETE .../versions/:versionId`, `GET`/`POST .../builds`, `GET .../builds/:buildId`, `POST .../builds/:buildId/abort`, `GET .../builds/:buildId/logs`, and their `/v2/actors` twins) looked the actor up by raw ID without checking the owner, so any authenticated user who knew an actor ID could list, read and delete its versions and start, read and abort its builds. They now resolve the actor with the caller's ownership check first and return `404 record-not-found` for an unknown or another user's actor (`POST .../versions` and `POST .../builds` validate the body first, so a malformed body is a 400 either way, which reveals nothing about the actor); build routes also require the build to belong to that actor, including `builds/:buildId/logs`, which previously ignored `:actorId` and served any build's log, and `POST .../builds` requires a body `versionId` to be one of that actor's versions (another actor's version, or an unknown one, is now `404 record-not-found` — an unknown one used to be a 500). `POST .../versions` and `POST .../builds` bodies are validated (`400 validation_error` instead of a 500 on a missing or malformed body; a build with no body still starts, as `actor.build()` sends none). `DELETE .../versions/:versionId` of the actor's current version now succeeds (it was a 500 on the `actors.current_version_id` FK): the pointer is cleared in the same transaction. **Behaviour change:** these routes now also accept an actor name or `username~name` (previously ID only). Response shapes for the owner are unchanged.
+- **Actors resolve by `username~name` / `username/name` (#114)** — `apify-client` addresses actors as `username/name` and sends `username~name` in the URL, so `client.actor('alice/my-actor')` returned 404. One shared resolver (`packages/api/src/lib/resolve-actor.ts`) now backs every route that takes `:actorId` — `actors.ts` (get, update, delete, run list, run start), `schedules.ts` (`actorId` in the body) and `registry.ts` — and accepts the ID, the name, `username~name`, or `username/name` (`%2F`). A username other than the caller's own is a 404; there is no cross-user lookup. Username and name match case-insensitively, as on Apify (`Alice~My-Actor` is `alice~my-actor`); IDs match exactly. When several of the caller's actors match (one named after another one's ID, or `Foo` and `foo`), the exact ID wins, then the exact-case name. The schedule `actorId` limit is raised from 21 to 131 characters to fit `username~name`. Fastify's `maxParamLength` is raised from 100 to 256 so a 30-character username plus a 100-character name no longer falls through to the not-found handler.
+- **Actor objects include `username`; list items include `stats.lastRunStartedAt`** — the Apify MCP server builds `actorFullName` (and its tool names) from `username/name`, and showed `undefined/name` without it. `GET`/`POST`/`PUT /v2/acts[/:actorId]` responses and list items now carry the owner's `username`; `GET /v2/acts` items also carry `stats.lastRunStartedAt` (the latest run's creation time, `null` if none; looked up through `idx_runs_user_actor_created`). `GET /v2/acts` accepts and ignores `my=1` (sent by the MCP `get-actor-list`; lists are always the caller's own).
+- **Run start accepts the Apify body contract: the body is the actor input (#115, behaviour change)** — `POST /v2/acts/:actorId/runs` (and the `/v2/actors` alias) read the input from `body.input`, so input sent by `apify-client` (`actor.start(input)` / `call(input)`, which send the input as the raw body) was silently replaced by `{}` and actors failed with errors like `query is required`. The body is now the input (no body → `{}`; non-object JSON such as an array is stored as given), and run options come from the query string as on Apify: `timeout`, `memory`, `waitForFinish` (clamped to 60; holds the response until the run is terminal or the time passes, then returns the full run object; once the run is created, a failure while waiting returns the `201` creation response instead of a 5xx, so `apify-client` never retries into a duplicate run), `webhooks` (base64 JSON array) and `envVars` (base64 JSON object of strings — a Crawlee Cloud extension). `build`, `maxItems`, `maxTotalChargeUsd`, `restartOnError` and `forcePermissionLevel` are accepted and ignored (but validated: a non-boolean `restartOnError` or a negative `maxItems`/`maxTotalChargeUsd` is a 400). Invalid query options return 400 `validation_error`. On this path an input key named `timeout`, `memory`, `envVars` or `webhooks` is plain input: it no longer fails validation, and `envVars` in the body is never applied as container environment variables. The legacy wrapper body (current CLI `crc call` and dashboard) is detected explicitly and behaves as before; each legacy request logs `run-body: legacy` at info level. Known ambiguity: an input that is exactly `{ "input": ... }` (plus only option-named keys), or made only of option-named keys with option types such as `{ "timeout": 60 }`, is read as the legacy wrapper.
+- **Legacy run-start wrapper body kept as a documented extension** — besides the Apify contract, `POST /v2/acts/:actorId/runs` keeps accepting the wrapper body as a permanent, documented extension: a plain JSON object with an `input` key and otherwise only the option keys `timeout`, `memory`, `envVars` and `webhooks` (`{ "input": {...}, "timeout": 60 }`); options are then read from the body; a query option (`?timeout=`, `?memory=`, `?envVars=`, `?webhooks=`) applies when the wrapper lacks that field, and the wrapper wins on conflict. For compatibility with the pre-#118 dashboard, a body made only of option keys with option value types (`{"timeout":3600,"memory":1024}`) is also read as the wrapper, with input `{}`. New clients should send the input as the body and options in the query string; the CLI and dashboard do since #118 (on APIs ≥ 1.7.0). Clients that must send an input which itself looks like the wrapper should wrap it: `{ "input": <input> }`.
+- **Run start rejects `text/plain` and `application/octet-stream` bodies with 415 (behaviour change)** — they used to start a run with input `{}`. The response is `415 { "error": { "type": "unsupported-media-type" } }`. Only this route is affected; the global parsers still serve KV record uploads and other routes. An empty `application/x-www-form-urlencoded` body (what `apify-client` sends for `start()` without input) still starts a run with `{}`; a non-empty one (e.g. `curl -d '{"query":"x"}'`, which defaults to form-urlencoded) is a `415` with a hint to send `Content-Type: application/json` instead of storing the body as a string INPUT.
+- **`run-sync` forwards the query string, auth and body to run start** — `POST /v2/acts/:actorId/run-sync` now forwards the query string, `Authorization` and `Content-Type` headers to the run-start route, URL-encodes the actor param, and relays its status code and JSON body (it used to return the internal inject response object). The parsed body is re-sent as `application/json`, so an empty form-urlencoded body gets INPUT `{}`, not the string `"{}"`; `text/plain` / `application/octet-stream` and non-empty form-urlencoded bodies keep their content type and get the start route's 415. Without `?waitForFinish=N` it returns as soon as the run is created; with it, the forwarded run start waits as described above. It returns the run object, not the run's `OUTPUT` record as on Apify.
+- **`GET /v2/acts/:actorId/builds/default` and `GET /v2/actor-builds/:buildId` (#117)** — `apify-client`'s `actor.defaultBuild()` (then `.get()`) and `client.build(id)` hit 404 (`default` was read as a build ID, and there was no top-level build route), which blocked the Apify MCP tools `fetch-actor-details`, `call-actor` and the generated per-actor tools. `builds/default` (also under `/v2/actors`) resolves the actor like every registry route (ID, name, `username~name`, caller's own only) and returns the newest `SUCCEEDED` build of the version tagged `latest`, falling back to the actor's newest `SUCCEEDED` build; a `RUNNING` build from `POST /builds` (which nothing ever finishes) is never chosen; an actor with no successful build is 404 `record-not-found`. `/actor-builds/:buildId` is scoped to the caller through the build's actor (another user's build is 404). Both return the build with its `actorDefinition` (`null` for builds pushed before #112 — re-push to fix) and accept `waitForFinish=N`: `/actor-builds/:buildId` long-polls like `GET /v2/actor-runs/:runId`, and `builds/default` validates it but answers at once (the build it picks is always terminal). The selection is exported from `packages/api/src/lib/builds.ts` as `selectDefaultBuild(actorId)` and a one-query batch `selectDefaultBuilds(actorIds)` (LATERAL join) for the store listing (#119).
+- **Build objects gain Apify fields (additive)** — every build response (list, get, create, abort, and the new routes) now also carries `actId`, `userId`, `buildNumber`, `meta: {}`, `stats: {}` and `options: {}`; existing fields (used by the dashboard builds page) are unchanged. `buildNumber` is `<version>.<n>`, `n` being the build's position among its version's builds by creation time, or the build ID for a build without a version. `actorDefinition` is only on the single-build routes `builds/default` and `/actor-builds/:id`; lists and the actor-scoped `builds/:buildId` still never read it. A new index `idx_actor_builds_version (version_id, created_at)` backs the numbering.
+- **Fix: re-pushing an older version (rollback) recorded no build** — moving the `latest` tag back to an existing version cleared the sibling's tag and claimed it in one statement, which could run in the wrong order and hit the unique `(actor_id, build_tag)` index; the error was swallowed, so the rollback push recorded no build and the tag stayed on the newer version. The clear and the claim are now two statements, so `push v0.2` then `push v0.1` makes the new v0.1 build the default (and the one runs are stamped with). Recording a push's build — the version tag clear and claim, the dedup check, the build insert and `actors.current_version_id` — now runs in one transaction that first locks the actor row (`FOR NO KEY UPDATE`, which does not block run starts), so two concurrent pushes of different versions of one actor both record their build and exactly one version ends up tagged `latest` (previously the second push could hit the same unique index between the clear and the claim and silently record no build). The actor's `defaultRunOptions` are re-written under the same lock, so after concurrent pushes the actor's image is the newest build's image (20 concurrent pushes: 20 builds, 20 versions). On failure the transaction is rolled back and the push now answers 500 instead of a 200 with no build recorded.
+- **`GET /v2/store` searches the caller's actors (#119)** — `apify-client`'s `store().list()` hit 404, so the Apify MCP `search-actors` tool failed on every call (and `fetch-actor-details` lost its store lookup). On a self-hosted instance the store is the caller's own actors; other users' actors never appear. `search` is split on whitespace into keywords (the MCP `search-actors` tool sends e.g. `echo input actor`), and every keyword must be a case-insensitive substring of at least one of name, title, description, the owner's username (as on Apify) or the `username/name` handle (an extension, so agents can search with the full handle), with `%`, `_` and `\` matched literally; exact name or `username/name` matches sort first, then the most recently modified. The page is selected before the per-actor run stats are aggregated, so a search no longer counts the runs of every matching actor. `limit` defaults to 10 and is clamped to 1–100 (10 with `includeInputSchema`), `offset` defaults to 0 and is clamped to 1,000,000; `username` (case-insensitive) other than the caller's own returns an empty list; a repeated string param (`?category=a&category=b`) uses its first value; `category`, `pricingModel`, `allowsAgenticUsers`, `sortBy` and `includeUnrunnableActors` are accepted and ignored. The response is Apify's `{ total, count, offset, limit, desc: false, items }`; items carry `id`, `name`, `username`, `title` (the name when unset), `description`, `stats: { totalRuns, lastRunStartedAt }` (`lastRunStartedAt` is the newest run `startedAt`; runs that never started don't count, `null` when none started), `currentPricingInfo: { pricingModel: "FREE" }`, `url: null`, and neutral `pictureUrl: null`, `userPictureUrl: null`, `categories: []`. With `includeInputSchema=1` each item also has `inputSchema` — the default build's `actorDefinition.input`, or `null` when there is none (or it has no `properties` object) — read for the whole page in one query (`selectDefaultInputSchemas` in `packages/api/src/lib/builds.ts`, which reads only the `input` key, not the README).
+- **Run `buildNumber` matches the builds API** — run start (`POST /v2/acts/:actorId/runs`, whose response now also carries `buildId` and `buildNumber`) and rerun stamped runs with the bare version (`0.1`) while `GET /v2/actor-builds/:id` reported `0.1.3` for the same build; both now store the build's own `buildNumber`.
+- **Fix: `POST /v2/acts/:actorId/builds` without a body answered 500** — the body is optional (all fields are), and invalid fields are a 400 `validation_error`. `waitForFinish` on a build now polls a status-only query and reads the full build once at the end; on `builds/default` (always a `SUCCEEDED` build) it no longer waits at all.
+
+### Security
+
+- **Webhooks fire only for their owner's runs** — webhook matching filtered on event type, actor and run but not on the owner, so a webhook with no `actorId` ("all actors") received the run events of every user on the instance, and a webhook created with another user's actor id received that actor's events (webhook create/update does not check `actorId` ownership). All three places that queue run-event deliveries now also require `webhooks.user_id` to equal the run's owner: the runner's `triggerWebhooks`, the API's READY-abort path, and the scaler's TIMED-OUT/FAILED reaper. All three now use the same SQL `WHERE` clause, checked by a source-text test. A user's own global webhooks still fire for all of that user's runs. Runs and webhooks with no owner (`user_id` NULL) no longer match anything.
+
+### Self-hosting
+
+- **MinIO image replaced: `minio/minio` and `minio/mc` can no longer be pulled** (#121) — from Docker Hub or quay.io, so fresh installs failed on first `docker compose up`. `docker-compose.yml`, `docker-compose.dev.yml`, `deploy/vps/docker-compose.prod.yml` and the Render and Railway templates now pin `bitnamilegacy/minio:2025.7.23-debian-12-r5`, the image CI already used. It creates the `crawlee-cloud` bucket at startup (`MINIO_DEFAULT_BUCKETS`), which replaces the `minio-init`/`mc` job; the dev compose now creates the bucket too (it never did), and Render and Railway get it for the first time. The compose healthcheck reports healthy only once the bucket exists. The Render template also now uses `runtime: image` (its `repo:` pointed at a Docker Hub page, which Render can't build from). This is a stopgap: the Bitnami legacy archive is unmaintained, and a move to SeaweedFS is tracked separately.
+  - **Upgrading an existing install:** the Bitnami image runs as uid 1001 and keeps data in `/bitnami/minio/data` (the compose files now mount the existing volume there). Volumes written by the old image are root-owned, so MinIO exits with `Permission denied` until you fix ownership once. Back up the volume first, then run, for example for `docker-compose.yml`: `docker compose run --rm --no-deps --user root --entrypoint chown minio -R 1001:0 /bitnami/minio/data`. The Railway template sets `RAILWAY_RUN_UID=0` (Railway mounts volumes as root), so it needs no manual step; on Render, apply the same ownership change to the attached disk if MinIO fails to start. `docker-compose.yml` and `docker-compose.dev.yml` set `MINIO_BROWSER=on`, because Bitnami disables the web console by default; the production compose file publishes no console port and leaves it off.
+
+### CLI
+
+- **`crc push` uploads the actor definition: input schema, README and the rest of `actor.json` (#116)** — `push` read `.actor/actor.json` but never sent the input schema or README, so the platform (and the Apify MCP server's per-actor tools) had no schema for CLI-pushed actors. Push now sends the whole `actor.json` (`title`, `description`, `storages`, `environmentVariables`, `defaultRunOptions`, `dockerfile`, ...) as `actorDefinition` on actor create and update, with the input schema and README inlined the way the Apify CLI does it. Input: an inline `input` object is used as is, a string is a path relative to `.actor/`, and without `input` the first usable of `.actor/input_schema.json`, `.actor/INPUT_SCHEMA.json`, `./INPUT_SCHEMA.json` is used (so actors created by `crc init` from the Apify templates now get their schema uploaded). README: the `readme` path (relative to `.actor/`), else `.actor/README.md`, else `./README.md`. Paths resolve against the actor directory, not the shell's cwd. When no schema or README is found, the `input`/`readme` key is left out (never sent empty), so the API keeps the previous build's value. Push prints `Input schema: <path | inline | none>` and `README: <path | none>`, and warns when the schema has no top-level `type`/`properties` (MCP clients ignore it). **Behaviour change:** a file referenced by `actor.json` that is missing or malformed, an `input` that is neither an object nor a path, a non-string `readme`, or an empty path now fails the push (before the Docker build) with the file path and reason. Fallback files are best-effort: missing ones are skipped silently, and a malformed or non-object fallback schema is skipped with a warning. An input schema, README or whole definition over the API caps (500 KB input, 1 MB README, 2 MB definition) also fails the push, naming the limit, and nothing is sent. APIs without #112 ignore the field.
+
+- **`crc call` sends the Apify run-start request (#118)** — against an API whose `GET /health` reports version 1.7.0 or later (the release with #115; prereleases such as `1.7.0-rc.1` count), the input is sent as the raw request body and `timeout`, `memory` and `envVars` (base64-encoded JSON from `-e`) go in the query string, so the API no longer logs `run-body: legacy` for the CLI. Older APIs, or a missing, unparseable or unreachable `/health` version, get the legacy wrapper `{ input, timeout, memory, envVars }`. An input that the API would read as that wrapper — a non-empty object whose keys are all `input`, `timeout`, `memory`, `envVars` or `webhooks`, such as `{"input":"x"}` or `{"timeout":30}` — is always sent wrapped, so it reaches the actor unchanged and is never applied as run options. The probe runs once per process with a 2 s timeout and is skipped when `CRAWLEE_CLOUD_RUN_BODY=apify|legacy` forces a shape (e.g. against unreleased `main`, whose `/health` still reports the previous version). The actor argument is percent-encoded in the URL, and `username/name` is sent as `username~name` (it used to hit no route). Run start lives in a shared helper, `packages/cli/src/utils/runs.ts`. **Behaviour change:** `--timeout` / `--memory` no longer default to 3600 / 1024; when omitted, the actor's default run options (`defaultRunOptions` from `actor.json`) apply. Invalid values (anything but a positive decimal integer — `0x10` and `1e3` are rejected) now fail before the request, reported by Commander as an invalid option argument (as is a malformed `-e`).
+
+### Dashboard
+
+- **Abort reports an already-finished run** — when a run finishes before the abort lands, the API now returns 200 with the run, so the run page shows "Run already finished (STATUS)" instead of "Run aborted". The Abort button on `READY` runs, which used to fail with a 404, now works.
+
+- **"Start a new run" sends the Apify run-start request (#118)** — against an API whose `GET /health` reports version 1.7.0 or later (the same gate as the CLI, probed once per page session), `startRun` in `src/lib/api.ts` sends the input as the raw body (`{}` when the input box is empty) and `timeout`, `memory` and optional `envVars` (UTF-8-safe base64 JSON) in the query string, so the API no longer logs `run-body: legacy` for dashboard runs. Older APIs, or a missing, unparseable or unreachable version, get the legacy wrapper — the dashboard can be deployed apart from the API, and an older API would start the run with input `{}`. An input made only of wrapper keys (e.g. `{"timeout":30}`) is always sent wrapped, as in the CLI. The actor id is percent-encoded in the URL.
+
+- **Settings shows your username** — the API access panel has a read-only, copyable **Username** field (the slug from `GET /v2/users/me`), which you need for `username/actor-name` actor IDs and the MCP server's per-actor tools. With an expired or invalid token the endpoint answers with its anonymous stub; the dashboard treats that as signed out and shows no username (never `anonymous`).
+
+### Tests
+
+- **`apify-client` bumped to `^2.25.0`** (dev dependency of `@crawlee-cloud/api`) so compatibility tests exercise the current client. New integration tests cover `client.actor(id).get()`, `client.actors().list()` and `client.actor(id).update(...)` with a body over 1 KB (2.25 brotli-compresses such bodies). New unit tests build the app with the real `configureHttp()` + `registerV2Routes()` and run a representative set of actor, version and build routes (list/create/get/update/delete actor, start a run, list versions, list builds, get a build) under both `/acts` and `/actors`, comparing the responses, plus the `page-not-found` envelope for unknown routes.
+- **`resolveActorDefinitionWithSources` unit tests** — `packages/cli/test/actor-definition.test.ts` covers the payload shape (absent `input`/`readme` keys omitted, other `actor.json` fields passed through), inline, path and fallback input schemas, malformed fallback files skipped with a warning, missing or malformed referenced files, bad `input`/`readme` types and empty paths, README resolution order, the size caps failing the push, and resolving the MCP e2e fixture actor (`input.required = ["query"]`).
+
+- **Run-start body contract tests (#115)** — truth-table unit tests for `isLegacyRunBody`, option-parsing and route tests (Apify body + query options, legacy and dashboard bodies, `envVars` only from the query, 415s, `run-sync` forwarding including form-urlencoded bodies, `waitForFinish` and its long-poll metrics marking), and `apify-client` integration tests: `client.actor(id).start({ query: 'x' })` stores INPUT `{"query":"x"}` with query `timeout`/`memory` applied, and `start(input, { waitForFinish: 30 })` returns the run once it is finished through `PUT /v2/actor-runs/:id`.
+- **Run-start client tests (#118)** — `packages/cli/test/runs.test.ts` covers both request shapes, the semver gate (including prereleases and garbage versions), legacy fallback on a low, missing or unparseable version and on a failed `/health`, the per-process cache, the `CRAWLEE_CLOUD_RUN_BODY` override, and inputs such as `{"input":"x"}` / `{"timeout":30}` round-tripped through the API's `parseRunStartRequest` with `-t`/`-m`/`-e`; `packages/dashboard/test/api.test.ts` checks the `startRun` request shape, its `/health` gate and legacy fallback, the UTF-8 base64 encoding of `envVars` and the same round-trip.
+- **MCP e2e harness requires every check to pass** — `tests/mcp-e2e/expected-failures.json` is now `[]`, so any of the 19 checks (`tools/list`, 17 tool calls and a `poll-count` assertion) failing fails `npm run test:mcp-e2e`; `abort-actor-run` also fails when `call-actor` with `waitSecs: 0` fails (its REST-started run is only aborted and cleaned up).
+- **MCP e2e acceptance harness** — new opt-in `npm run test:mcp-e2e` (standalone package in `tests/mcp-e2e/`, outside the npm workspaces, so it does not touch the root install, `npm test` or CI). It pushes a fixture actor, then drives the unmodified `@apify/actors-mcp-server@0.17.3` over stdio through a logging proxy against a live stack and runs 19 checks (`tools/list`, 17 tool calls and a `poll-count` assertion). Checks allowed to fail are listed in `expected-failures.json`; the run exits non-zero on any unlisted failure and on any listed check that passes, so the list can only shrink (it is empty since the MCP parity epic #106 landed).
+- **`waitForFinish` coverage** — fake-timer unit tests for the helper and route (including the 55 s cap, fractional values and a failing re-poll), real-socket tests for client disconnect (no further queries) and server shutdown, and an integration test asserting `apify-client`'s `run(id).waitForFinish()` makes fewer than 10 `GET /actor-runs/:id` requests for a run finished ~3 s later.
+- **Actor definition integration tests** — `packages/api/test/integration/actor-definition.int.test.ts` covers build-row storage, in-place updates, preservation when no definition is sent, carry-over to new builds (same-version / same-image preference on rollback, registry RUNNING builds ignored), `input`/`readme` key inheritance, the no-image 400, the input, whole-definition and passthrough-key size caps, NUL rejection, builds lists not returning the column, and migration idempotency.
+- **Store search tests (#119)** — `packages/api/test/store.test.ts` covers query parsing (defaults, limit clamping and the input-schema cap, ignored Apify filters), wildcard escaping, the SQL shape and the item shape; `test/integration/store.int.test.ts` runs `client.store().list({ search: 'echo' })` (apify-client 2.25) and the MCP server's `includeInputSchema` param, user isolation, literal `%` / `_` / `\` searches, username and `username/name` searches (another user's never match), multi-keyword searches, the case-insensitive `username` filter, huge offsets and repeated params, `lastRunStartedAt` from `started_at`, and paging (page-by-page results and run stats equal the single-page listing) against Postgres.
+- **Integration test app registers every `/v2` route** — route registration is extracted into `registerV2Routes()` (`packages/api/src/routes/index.ts`) and shared by `src/index.ts` and the integration test app, which previously hand-copied a subset and lacked the registry, users, schedules and scaler routes. No production behaviour change.
+- **Username slug rules tested in TypeScript and SQL from one table** — `generateUsername()` and the migration's backfill block share a case table (`test/username-cases.ts`); the integration test runs the real migration against a scratch database holding a pre-#110 `users` table, twice. `createTestUser()` now sets a unique `test-<id>` username, since the column is `NOT NULL`.
+- **Integration test app shares production's HTTP setup** — CORS, compression (gzip request bodies), the content-type parsers, the global error handler and the 10MB body limit move into `configureHttp()` (`packages/api/src/http-setup.ts`), used by both `src/index.ts` and the integration test app instead of a hand-copied subset. No production behaviour change.
+- **Run-event webhook matching locked across runner, API and scaler** — a runner test checks, from source, that the API's READY-abort delivery insert and the scaler's TIMED-OUT/FAILED reaper use the same webhook-matching `WHERE` clause (and delivery-row columns) as the runner's `triggerWebhooks`; an integration test runs all three against real Postgres with two users and checks that one user's webhooks never receive the other's run events; and the retry processor delivers such a row for a run that never started.
+- **Cross-user registry and `username~name` coverage** — unit tests for the resolver (each accepted form, a foreign username, names with `.` and `-`) and for every registry route returning 404 for another user's actor and for another actor's build ID; integration tests against Postgres cover the same plus `client.actor('alice/my-actor').get()` with `apify-client` 2.25, a 30-character username with a 100-character name, `%2F` arriving decoded in params, and `stats.lastRunStartedAt`. The integration test app uses the same `maxParamLength` as production, and `cleanDatabase()` now clears `actors.current_version_id` before deleting `actor_versions` (a non-cascading FK that made cleanup fail after versioned pushes).
+- **Default build and `/actor-builds` coverage (#117)** — unit tests for both routes under `/acts` and `/actors` (query shape, caller scoping, 404s, response shape including the unchanged dashboard fields) and fake-timer `waitForFinish` tests mirroring the run variant; `selectDefaultBuilds` batch tests. Integration tests with `apify-client` 2.25: `client.actor('alice/x').defaultBuild()` then `.get()` returns `actorDefinition.input`, rollback via re-push of v0.1 after v0.2, a `RUNNING` orphan not chosen, no-builds 404, another user's build ID 404, `buildNumber` in lists, and concurrent pushes of two versions of one actor (8 rounds) each recording a build with exactly one version tagged `latest` and matching `current_version_id`.
+
+### Docs
+
+- **MCP guide (`docs/mcp.md`)** — what works with `@apify/actors-mcp-server@0.17.3` (`--tools actors,runs,storage,get-actor-list,<username>/<actor>`; always pass `--tools`, the default set is `actors,docs`), setup for Claude Desktop, Claude Code and Cursor (each with `APIFY_API_BASE_URL`, `APIFY_TOKEN`, `TELEMETRY_ENABLED=false`), how to find your username, known limits (links to `apify.com`, unsupported tool categories, no Standby actors, large binary records linked via `api.apify.com`, tool-name rules, Node 22+, telemetry) and security (one revocable API key per agent; proxies may log the query string). Linked from the README and `docs/index.md`.
+- **Apify compatibility reference** — `docs/apify-compatibility.md` now covers actor addressing (`/v2/actors`, `username~name`, `username`), the run-start contract and the legacy wrapper body (kept as a documented extension) with its `{ "input": ... }` ambiguity, `waitForFinish` (clamped to 60, each request held at most 55 s) with DigitalOcean App Platform (100 s) and Render (100 min) request limits, `GET /v2/store`, `builds/default` and `/actor-builds/:id`, dataset `fields`/`omit`/`desc`, abort behaviour and the `page-not-found` envelope. `docs/api.md` is updated to match.
+- **Roadmap** — Platform MCP Phase 1 marked shipped in v1.7.0 in `ROADMAP.md` and `docs/roadmap.md`; Phase 2 (native Streamable-HTTP `/mcp` endpoint) and Phase 3 (OAuth for MCP clients) stay open under RFC #96.
+
+## [1.6.0] - 2026-08-05
+
+Disk-pressure protection for the runner fleet plus an Apify-parity fix on dataset reads: a full runner disk can no longer black-hole the READY queue, and `GET /v2/datasets/:id/items` without a `limit` now returns the whole dataset like real Apify does. Also: community feedback funnels, and the npm publish pipeline un-wedged (npm still served 1.0.1 while the repo was at 1.5.0).
+
+### Runner
+
+- **Disk admission gate** — a full runner disk fails every image pull in ~90s, and because work is runner-pull, a disk-full runner out-claims healthy capacity and drains the READY queue by fast-failing it while hiding the demand from the scaler (prod 2026-08-04/05: 104 failed runs, both 80 GB runner disks at 100%). At `RUNNER_DISK_CLAIM_MAX_PCT` (default 90%) disk usage the runner stops claiming and idles, letting the queue back up so the scaler's starvation escalation provisions healthy capacity. The threshold is validated into 1–100 at startup (`envInt` accepts 0, which would gate every claim and silently brick the runner).
+- **Registry-scoped image eviction** — at `RUNNER_DISK_EVICT_PCT` (default 80%) the periodic cleanup also removes unused **tagged** images, but only tags under the configured `IMAGE_REGISTRY` prefix: those are the only images with a guaranteed re-pull path, and exactly the fleet's growth source (dangling-only pruning never shrinks a fleet whose growth is new per-actor tags). Locally built images are never evicted — with no registry there is no re-pull path, so removal would be permanent. Per-tag non-forced removes let the daemon protect in-use images. Eviction must sit below the claim gate — enforced at startup with warn + clamp — and engaging the gate kicks cleanup immediately (debounced per episode) instead of waiting out the 30-minute sweep.
+- **Infra retry floor** — image-pull failures and missing-image container-create 404s are host problems, not actor bugs, so they now retry on a small platform floor (2 attempts, 60s delay) even when the actor has retries disabled; the floor never reduces a more generous actor policy. Pull errors are prefix-stamped at the failure site so transport-level errors (registry outage, DNS) classify correctly, and the rethrow always produces a real `Error` — a non-Error rejection previously crashed the failure handler itself, leaving the run un-terminalized.
+- `status_message` is sanitized of NUL bytes before the Postgres write — daemon error strings with NULs failed the UPDATE and shadowed the real failure cause.
+- Heartbeat now reports the disk usage ratio (feeds the gate, cleanup, and the dashboard's Runners page).
+
+### API
+
+- **`GET /v2/datasets/:id/items` without `limit` returns the full dataset (Apify parity)** — real Apify returns everything when `limit` is omitted; we defaulted to 100, silently truncating any Apify-compatible client that used the documented no-limit pattern (found in production: a consumer migrating actors from Apify ingested exactly 100 items per run from every source). With no `limit`, the whole dataset now streams via the same zero-materialization path as `?download=1`, as plain JSON with Apify-style pagination headers; `offset` is honored by skipping. An explicit `limit` keeps the existing paged path unchanged. This also fixes the dashboard's dataset download button, which was truncated to 100 items.
+
+### CLI & Community
+
+- **Community feedback funnels** — issue templates (bug report, feature request, and a low-friction deployment report), Discussions routing for questions, a PR template, README Community & Support section, and Open Collective funding links. The CLI shows a one-time post-first-push feedback note (TTY-only, `CRAWLEE_CLOUD_NO_FEEDBACK_NOTE=1` opt-out, never breaks a deploy); the note's shown-marker uses an exclusive create (`wx`, mode 0600) so the check-then-write race is closed.
+
+### CI
+
+- **npm publish pipeline fixed** — `npm install -g npm@latest` on the Node 20 runner has EBADENGINE-failed every tag publish since v1.1.0 (npm 12 raised its engine floor), so npm still served `@crawlee-cloud/cli@1.0.1`. The publish workflow now pins Node `^24.15.0`, encoding npm 12's documented floor while taking patch updates. This release is the first to publish cleanly again.
+
+### New environment variables
+
+- `RUNNER_DISK_CLAIM_MAX_PCT` (default `90`) — disk-used % at which the runner stops claiming runs.
+- `RUNNER_DISK_EVICT_PCT` (default `80`) — disk-used % at which cleanup also evicts unused registry-tagged actor images. Must be below the claim gate.
+- `CRAWLEE_CLOUD_NO_FEEDBACK_NOTE` (unset) — set to suppress the CLI's one-time post-push feedback note.
+
+### Docs
+
+- Roadmap: Python actor support (#95) and a platform MCP server (#96) opened as Proposed RFC discussions — no version commitment until they converge.
+- README: npm version badge for `@crawlee-cloud/cli`; vestigial pnpm workspace file removed.
+
+### Deploy notes
+
+- Drop-in: no schema migration, no required env-var changes. Redeploy the API (dataset streaming fix) and runners (disk gate — set `RUNNER_CLONE_REF=v1.6.0` or rebuild the runner image). The disk thresholds only need tuning if the defaults (90/80) don't fit your disk sizes.
+
+## [1.5.0] - 2026-07-26
+
+Safe actor deletion plus a hardening-and-testing release: force-delete with explicit dependency warnings, webhook SSRF loopback fixes, and the first enforced test-coverage floors across the monorepo.
+
+### API
+
+- **Safe actor deletion with `force`** — `DELETE /v2/acts/:actorId` now refuses to delete an actor that still has runs (409 `actor-has-runs`) instead of surfacing a raw FK 500. Passing `?force=true` (validated/coerced by a new Zod query schema) deletes the actor together with its **terminated** runs — active runs (READY / RUNNING / ABORTING) always block deletion, force or not. The whole operation runs in one transaction with tenant-scoped filters, and run deletion + webhook-delivery cleanup are folded into a single data-modifying CTE (`webhook_deliveries.run_id` has no FK to `runs`, so this closes an orphaned-deliveries race). The FK-violation 409 message branches on the force flag, so a force delete asks the caller to retry instead of telling them to set `force=true` again.
+
+### Security
+
+- **Webhook SSRF guard: loopback bypasses closed** — the guard blocked `127.0.0.1` but not the rest of `127.0.0.0/8`, and `http://[::1]/` slipped through because `URL.hostname` keeps the brackets on IPv6 literals so the `'::1'` comparison never matched. Both holes are closed.
+
+### Dashboard
+
+- Actor delete confirmation (list + detail pages, now one shared component) spells out what force deletion removes — runs, versions, builds, schedules, webhooks, storages — and always warns "This cannot be undone."
+- Ancillary query failures (actor labels, histogram) surface as deduplicated toast notifications instead of silently blanking data; transient API errors no longer wipe dashboard state.
+
+### Testing & CI
+
+- Coverage tooling: `test:coverage` scripts across the workspace with per-package enforced floors in CI (api lines ≥ 70 / branches ≥ 74; runner lines ≥ 30 / branches ≥ 78), to be ratcheted as coverage grows.
+- New suites: runner webhook delivery/retries, queue backpressure, heartbeat, config guard, and pure helpers (30% → 43% lines); api registry routes, request-queue branches, and retention; cli config, push helpers, and formatters; dashboard vitest bootstrap with its first tests (lib layer).
+
+### Dependencies
+
+- `next` 16.1.0 → 16.2.11 (dashboard), `find-my-way` 9.3.0 → 9.7.0, `fast-uri` 3.1.0 → 3.1.4.
+
+### Docs
+
+- Contributor Covenant v2.1 code of conduct; README caught up through the v1.4.0 cost features.
+
+## [1.4.0] - 2026-07-19
+
+Per-run cost lands in the runs list: the cost analysis introduced in 1.3.0 is now visible at a glance for every finished run, not just on the detail page. Read-only and additive — no runner, scaler, or placement changes.
+
+### API
+
+- **`GET /v2/actor-runs/costs?ids=a,b,c`** — batch your-cost for up to 50 runs per request, answered in two set-based queries (one for the runs, one sibling-overlap join covering every droplet-attributed run in the batch). Returns `{ costs: { [runId]: { yourCostUsd } } }`; unknown, other-user, and non-terminal ids are silently omitted — cost stays best-effort decoration, never an error. Repeated `?ids=` params are normalized instead of 500ing; >50 ids rejects with 400. Not part of the Apify v2 surface.
+- The three cost regimes (self-hosted → `$0`, droplet → actual-overlap share, unrecorded → `null`) moved into a shared `computeYourCostUsd()` helper used by both this endpoint and `GET /v2/actor-runs/:runId/cost`, so the two cannot drift.
+
+### Dashboard
+
+- **Cost column on the runs table** (between Items and Started): compact your-cost per finished run — `$0.0042`-style (4 decimals under a cent), `$0` for self-hosted, muted `—` for running/unrecorded/still-loading. Fed by one batch request per page; already-fetched runs are cached so the 5s poll only asks about newly-finished ones, and fetch failures retry next tick while cells stay `—`. The client chunks requests at 50 ids so it can never trip the server cap.
+- Run details now renders the Cost Analysis card above the fold, before the meta/console grid.
+
+## [1.3.1] - 2026-07-19
+
+Backfilled entry (see PR #61): dashboard Started column showed `createdAt` instead of `startedAt` (READY runs now show "queued"); resurrect clears `started_at` so a resurrected run doesn't report its previous life's start.
+
+## [1.3.0] - 2026-07-19
+
+Run cost analysis: see what each run actually cost you vs what Apify would have charged. Read-only and additive — no runner, scaler, or placement code changes in this release.
+
+### API
+
+- **`GET /v2/actor-runs/:runId/cost`** — per-run cost breakdown using **actual-overlap attribution**: a droplet bills a flat $/hr no matter how many containers it hosts, so a run's cost is its time-sliced share of the droplet-hours it consumed, split among the runs that actually overlapped on the same droplet (via the `runner_id` / `runner_price_hourly` stamps introduced in 1.2.0). Computed on read — never persisted — so still-running siblings and reaper-backdated zombies self-correct on the next request. Returns your cost, an Apify compute-unit estimate (1 CU = 1 GB × 1 h), both normalized to $/1,000 dataset items, and an `inputs` object (droplet price, overlap count, CU rate) so the UI explains the number instead of asserting it. Degrades honestly: `yourCostUsd: 0` for local-docker runs, `null` ("not recorded") for pre-1.2.0 runs or price-lookup failures. Not part of the Apify v2 surface.
+- Guards: `COALESCE(memory_mbytes, 1024)` against the nullable column; negative durations from runner-vs-DB clock skew clamp to zero; the sibling lookup crosses users by design but exposes only window timestamps.
+
+### Dashboard
+
+- **Cost Analysis card on run details** (terminal runs only): items scraped, your cost, same-run-on-Apify, and savings %, each with $/1k-items sub-lines. Variants: "$0.00 (self-hosted)" for local runs, "Not recorded" when attribution is missing, per-1k lines omitted for zero-item runs. Fetch errors render nothing — a cost hiccup never breaks the page. Keyed by run id so navigating between runs can't show a stale card.
+
+### New environment variables
+
+- `APIFY_CU_PRICE` (default `0.40`) — $/compute-unit for the Apify estimate (Starter plan; Scale: 0.30, Business: 0.25).
+
+## [1.2.2] - 2026-07-18
+
+Backfilled entry (see PR #60): self-heal runner-key split-brain on boot; dashboard body-less DELETE fix.
+
+## [1.2.1] - 2026-07-18
+
+Backfilled entry (see PR #59): remove bcrypt from the ingest hot path — verified-key cache + sha256-indexed API-key lookup.
+
+## [1.2.0] - 2026-07-16
+
+Memory-aware placement & incident hardening (entry backfilled — see PR #57 and the v1.2.0 GitHub release for the full inventory).
+
+### Scaler / Runner / API
+
+- **Memory-aware run placement**: claim-time admission by host memory headroom, container limits clamped to host capacity, scaler demand computed in droplet-shares (integer bin packing). Starvation protection on both sides (scaler escalation + claim-side drain) keyed to eligibility age.
+- **Fast dead-runner reap**: a destroyed runner's RUNNING rows are FAILED immediately via the claim-time `runner_id` stamp.
+- Control-plane OOM protection (`OOMScoreAdjust=-900`), `MemAvailable` claim backpressure.
+- Serialized + pipelined log writer with bounded flush; `followPull` surfaces swallowed image-pull errors; pull retries. Parallel-safe droplet naming.
+- **Cost-attribution groundwork**: `runner_id` / `runner_price_hourly` / `runner_provider` stamped at claim time; droplet $/hr resolved from DO `/v2/sizes` (daily cache, `SCALER_PRICE_HOURLY_OVERRIDE` escape hatch) and injected via cloud-init; `runs.peak_memory_mb` working-set sampling for per-actor right-sizing.
+
+### New environment variables
+
+- `SCALER_SCALE_UP_THRESHOLD` (default `0`), `SCALER_RUNNER_MEMORY_MB` (e.g. `3912` for s-2vcpu-4gb) — placement tuning.
+- `SCALER_PRICE_HOURLY_OVERRIDE` (unset by default) — force the droplet $/hr used for cost attribution instead of the DO API lookup.
+
+### Deploy notes
+
+- Deploy api first (PRE_DEPLOY migration), then runners via `RUNNER_CLONE_REF=v1.2.0`. Expect more droplets for 2048 MB-heavy bursts — that RAM demand is real; bigger droplets are the lever for high-memory throughput.
+
+## [1.1.1] - 2026-07-15
+
+Patch: reaped-run timestamps.
+
+### Scaler / API
+
+- **Zombie-run reaper stamps `finished_at` at the run's own deadline** (`started_at + timeout_secs`) instead of the reap moment. Zombies are discovered hours-to-days after their runner died; stamping `NOW()` made an 8h-dead run display an 8h runtime against a 3600s timeout on the run detail page and skewed duration stats. Matches Apify semantics (a timed-out run finishes at its timeout). Operators with already-reaped rows can normalize them with: `UPDATE runs SET finished_at = started_at + (COALESCE(timeout_secs,3600) * interval '1 second') WHERE status = 'TIMED-OUT' AND status_message LIKE '%reaped%' AND finished_at > started_at + (COALESCE(timeout_secs,3600) * interval '1 second');`
+
+## [1.1.0] - 2026-07-15
+
+Reliability release: closes every link in the zombie-run chain found in a live production incident (2026-07-09..14), where dead runners orphaned their claimed RUNNING rows as rows nothing ever timed out, and the orphans in turn inflated scaler demand and pinned a paid droplet fleet for days. Also fixes two observability gaps the incident autopsy exposed (invisible OOM kills, evaporating failure logs) and adds a prebuilt-image boot path that removes the ~4.5-minute cold-boot penalty per scale-up. Developed test-first; independently reviewed with an adversarial pass over concurrency and failure modes.
+
+### Scaler / API
+
+- **Dead-runner detection now survives Redis blips.** Heartbeat keys live in Redis with a 90s TTL, so a single managed-Redis failover made the whole fleet look dead for one tick — and the scaler hard-destroyed on that single tick, orphaning every claimed run (the incident's root cause). A runner is now condemned only after `SCALER_REAPER_MISS_TICKS` consecutive misses (default 3) AND `SCALER_REAPER_MISS_WINDOW_SECS` elapsed since the first miss (default 90s = one heartbeat TTL) — the time window holds even with multiple API replicas producing interleaved ticks or a lowered poll interval. Counters persist in Redis (`scaler:hb-misses`, self-cleaning TTL); corrupt or legacy-shaped state degrades to counting fresh, never to a false destroy.
+- **Zombie-run reaper.** `timeout_secs` was enforced only by the run's owning runner — when that runner died (scaler reap, process crash losing its in-memory claims), the RUNNING row overran forever (observed: 4 days against a 3600s timeout). Each tick, unclaimed RUNNING rows past their own timeout + pickup grace are flipped to `TIMED-OUT` (guarded `WHERE status = 'RUNNING'` — never overwrites `Actor.fail()`/abort). The terminal UPDATE and the `ACTOR.RUN.TIMED_OUT` webhook enqueue share one transaction on the advisory-lock connection, so a crash between them can't lose the delivery; deliveries are inserted `PENDING` with `next_retry_at = NOW()` for any live runner's retry processor to deliver (at-least-once). The run's Redis log tail is salvaged to its KV store as `RUN_LOG.txt` after commit, best-effort. Runs claimed by a live heartbeat are never touched, however old.
+- **Zombies no longer count as scaling demand.** `calculateDesiredRunners` now uses the live-claimed running count instead of the raw DB `RUNNING` count (which included zombies — the incident held `desired` at 6-8 for ~11 hours on zombie demand alone). The tick log surfaces divergence as `N running (M zombie)`.
+- **Prebuilt runner image boot.** New `RUNNER_IMAGE` env: when set, droplets boot the runner via `docker pull` (3-attempt retry) + `docker run -d --restart=always -v /var/run/docker.sock:...` instead of apt + git clone + npm install + build (~4.5 min measured per scale-up; pickup latency p50 was ~5 min). Same shell-injection posture as `RUNNER_CLONE_REF`: charset allow-list plus single-quoting, with the same injection test matrix. Unset → the git-clone path is unchanged. A `docker/Dockerfile.runner` already exists for building the image.
+- **Partial index `idx_runs_status_active`** on `runs(status) WHERE status IN ('READY','RUNNING')` — the scaler's 30s polls and the runner claim query stay index-assisted no matter how many terminal rows accumulate. Applied automatically by migrations.
+- **KV record PUT returns 404 instead of crashing** when a store id exists under another user (auto-create collision hit a non-null assertion → unhandled 500).
+
+### Runner
+
+- **OOM kills are finally visible.** `executeRun` inspects the container's `State.OOMKilled` before removal — exit codes alone can't distinguish OOM (the kernel yields 137 like `docker stop`, or SIGKILLs a child process and the container exits 1 like any crash). A live example: 7/8 failed runs of one production actor were OOM kills carrying an empty status message.
+- **`status_message` is set on every terminal update** (via `COALESCE` — a message from `Actor.fail()` is never overwritten): OOM (with the memory limit) > timeout (with the configured seconds) > exit code + the last ERROR-level log line (whitespace-collapsed, truncated at 300 chars).
+- **Failed-run logs survive.** The Redis log stream (`logs:<runId>`) has a 24h TTL and a 1000-line cap — failed runs older than a day were un-diagnosable. On `FAILED`/`TIMED-OUT`, the runner archives the full log to the run's default KV store as `RUN_LOG.txt`, best-effort.
+
+### New environment variables
+
+- `SCALER_REAPER_MISS_TICKS` (default 3), `SCALER_REAPER_MISS_WINDOW_SECS` (default 90) — dead-runner condemnation thresholds.
+- `RUNNER_IMAGE` (unset by default) — prebuilt runner image ref; enables the docker-mode boot path.
+
+### Deploy notes
+
+- On the first tick after deploy, the reaper terminalizes any accumulated zombie runs and enqueues their `TIMED_OUT` webhooks (throttled to 10 per 10s by the retry claimer) — warn webhook consumers expecting a quiet stream.
+- Runner builds that pre-date `runIds` in heartbeats read as claiming nothing; their runs are protected only by the pickup-grace window. Bump `RUNNER_CLONE_REF` (or adopt `RUNNER_IMAGE`) to a current runner promptly after deploying.
+
+## [1.0.1] - 2026-07-06
+
+Bug-fix release: runner lifecycle races and dashboard correctness. No schema changes, no new env vars, Apify v2 response shapes unchanged. Developed test-first; the claiming race was reproduced live against PG 16 before fixing.
+
+### Runner / API
+
+- **Resurrect actually works now.** `POST /v2/actor-runs/:id/resurrect` set the run to `RUNNING` — but runners claim exclusively `WHERE status = 'READY'` and nothing was published to Redis, so a resurrected run never executed, showed "running" forever, and (with `finished_at` nulled) was never reaped by retention. It now sets `READY`, clears the stale `exit_code`/`status_message` from the failed attempt, and publishes `run:new`.
+- **Abort now stops the container.** The abort endpoint only flipped the DB row; the container kept crawling until natural exit or `timeout_secs` (default 3600s), and its heartbeat claim blocked scaler scale-down the whole time — the "runner stays busy an extra hour after abort" report. The API publishes `run:abort`; the owning runner stops the container. The abort-during-image-pull and abort-vs-container-start windows are both covered: the runner marks the run aborted before attempting the stop, `executeRun` re-checks the mark after the pull and again after container create, and `stopRun` lists with `all: true` so created-but-unstarted containers are removed too.
+- **Run claiming is atomic.** The old two-statement claim (`SELECT ... FOR UPDATE SKIP LOCKED`, then a separate `UPDATE`) released its row lock at statement end under auto-commit; with `run:new` broadcast to every runner, two runners could both claim the same run and both spawn containers (reproduced live). Now a single `UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING *` — exactly one claimant wins.
+- **Webhook retries no longer double-deliver across runners.** Same race class: retries are now claimed by pushing `next_retry_at` forward 600s (> the 10 × 30s-timeout batch worst case) in the same statement that selects. Crash mid-delivery self-heals; at-least-once semantics preserved.
+- **Timer leak fixed.** `executeRun` leaked one live `setTimeout` per completed run (up to 1h each — hundreds on a busy runner, and a graceful shutdown that waits on them). Extracted to `waitWithTimeout()` which always clears its timer. Stop-after-timeout failures now keep `TIMED-OUT` instead of flipping the run `FAILED`, and the never-read full-container-log buffer fetch is gone.
+
+### Dashboard
+
+- **Actor detail page is correct on busy clusters.** `getActorRuns()` fetched the 50 most-recent runs across ALL actors and filtered client-side — an actor's "Total runs"/"Last run" could be empty or wrong whenever its runs fell outside that page. Now filtered server-side (`actorId`, limit 200). `findProducingRun()` similarly bumped to the 200 max page size.
+- **Run detail page no longer re-fetches the actor and webhooks every 2s poll tick** (~1,800 redundant calls/hour per open tab) — effects depend on stable `actId`/`run.id` primitives instead of the replaced `run` object.
+- **Navigating between runs no longer pins stale data.** Run-scoped lazy state (input, dataset preview, per-run webhooks, deliveries) resets on navigation, and the webhook fetch is gated on the loaded run matching the route param so the previous run's data can't be cached under the new run.
+- **Sign-out clears the auth cookie** the Next.js middleware trusts (previously only cleared `localStorage`, leaving protected routes passing for up to 7 days); the login cookie gains `SameSite=Lax` and `Secure` on https.
+
+### Deploy note
+
+During a rolling deploy, runners still on ≤1.0.0 (two-statement claim, no `run:abort` subscription) can double-claim runs against 1.0.1 runners until they drain.
+
+### Notes
+
+- The webhook-payload `resource.stats.datasetItemCount` parity item pencilled in for v1.0.1 in the 1.0.0 notes was not part of this bug-fix release; it moves to a follow-up.
+
+## [1.0.0] - 2026-06-06
+
+**Crawlee Cloud is now 1.0.** Public API and operator workflows committed: from this release forward, breaking changes go through MAJOR bumps per semver, and the Apify v2 compatibility surface is stable. The 0.9.x line stabilized into a multi-replica-safe, scale-down-correct, semantically-coloured operator console — this release adds the last two operator-quality items and draws the line under that work.
+
+### Dashboard
+
+- **Runs grid now shows live dataset item counts.** The previous "Dataset" column displayed the truncated dataset ID — operators had to click through and wait for the dataset detail page just to learn whether a run produced 12 items or 12,000. The column is now an "Items" cell showing the count (right-aligned, tabular-nums), still linked to `/datasets/:id` for one-click drill-in. `—` for runs with no default dataset; `?` is a defensive sentinel for the (shouldn't-happen) case of a dataset FK that didn't honor `ON DELETE SET NULL`.
+- **Actor detail page mirrors the new Items cell.** The runs sub-table on `/actors/:name` had its own "Dataset" column showing the truncated ID; it now matches the main runs grid so the 1.0 UI is consistent across both views.
+- **Dashboard home — SUCCESS · ALL-TIME tile reads green at ≥90%**, instead of brand orange. Throughput chart legend "OK" dot and bars also flip to green. The brand `--signal` (orange) stays the "right-now activity" colour (RUNNING NOW tile, button accents, focus rings); `--ok` (semantic green, added in v0.9.9) is now used for every "this is healthy" indicator so success state never collides with brand at a glance.
+- **Auto-refresh on the runs grid every 5s.** No more F5 / Cmd-R to see READY → RUNNING → SUCCEEDED transitions land. Re-fetches the current view (page + status filter, captured via a ref so the interval stays stable across renders without thrashing). Matches the existing 10s/POLL pattern on the dashboard home and runners pages. See "Notes" below for why this is polling rather than streaming.
+
+### API
+
+- **`/v2/actor-runs` (list, detail, **and mutating endpoints**) now returns `defaultDatasetItemCount`.** Wired via a single `LEFT JOIN datasets ON datasets.id = runs.default_dataset_id`. The mutating endpoints (PUT `/actor-runs/:id`, POST `/abort`, POST `/resurrect`) use a CTE pattern (`WITH updated AS (UPDATE … RETURNING *) SELECT u.*, d.item_count FROM updated u LEFT JOIN datasets d …`) so the JOIN is in the same statement as the UPDATE — keeps the response shape identical to LIST/GET. No N+1 round-trips for the dashboard. Apify-compatible — additional field is additive, not a breaking change. The WHERE-clause columns now carry an `r.` prefix because `datasets` shares `user_id` and `created_at` column names with `runs` — unqualified references would have errored.
+- **`stats.datasetItemCount` is now populated too** — the Apify-compat location for the same value. `apify-client` reads `run.stats.datasetItemCount`; our dashboard reads the top-level `defaultDatasetItemCount`. Both are kept in sync from the same joined column, so they never drift across the **runs API**. Always the live `datasets.item_count`, never the potentially-stale Crawlee SDK `requestsFinished` value from the ingested stats blob.
+- **Known follow-up (v1.0.1)**: the **webhook payload's `resource.stats` does NOT currently include `datasetItemCount`** — it's still built from the runner-ingested Crawlee statistics blob only. Webhook receivers that need the dataset item count should query `GET /v2/actor-runs/{resource.id}` from the payload's `resource.id`. Parity is planned for v1.0.1 — the fix requires the runner to query `datasets.item_count` at webhook-fire time, which it doesn't currently do. Documented at `docs/api.md`.
+
+### Tests
+
+- **API contract test** for the run-response shape: asserts `defaultDatasetItemCount` and `stats.datasetItemCount` are populated on LIST, and on the abort endpoint (the most representative of the three mutating handlers). Locks the 1.0-committed shape against the regression class the original PR introduced — where mutating endpoints diverged from LIST/GET because they bypassed the centralized JOIN.
+
+### Docs
+
+- **README** "What's new" headline now reflects v1.0.0 instead of the stale v0.8.0 callout, with a brief summary of the 0.9.x line that led into 1.0 and the drop-in upgrade note from 0.9.9.
+- **Roadmap** marks the v1.0.0 stability commitment as ✅ Shipped on 2026-06-06, lists the actual 0.9.x patch-line shipped releases, and re-frames the original "v1.0 wish list" as deferred candidates for v1.1 / v2.0 (zombie row reaper, DO provider pagination, shared workspace, etc.).
+- **`.env.example` / `.env.secure.example`**: `RUNNER_CLONE_REF` (added in v0.9.6, shell-injection hardened the same release) is now documented. The 1.0 surface commits "documented env vars are stable" — operators can now discover this knob from the env examples instead of source code.
+
+### Storage hygiene
+
+- **`DELETE /v2/datasets/:id` now cleans up the S3 prefix.** Pre-1.0, this handler only removed the PG row — the operator-facing dataset disappeared from the dashboard grid but the S3 objects (potentially gigabytes of scraped data) were left orphaned, with no tombstone for the retention reaper to pick up. Operators reasonably assumed their storage bill stopped growing; it didn't. The confirm dialog text on the dashboard (`/datasets`, `/datasets/:id`) was also misleading — it claimed items were deleted from S3, but only PG actually was. The handler now fires the same `deleteDatasetS3Prefix` helper that the retention path already uses. Fire-and-forget: an S3 failure logs but still returns 204, matching the retention path's "stale S3 prefix is just orphaned bytes" posture — operator-visible state (PG row gone) is the source of truth. Three regression tests added (success path, 404, S3-error path).
+- **`DELETE /v2/key-value-stores/:id` now cleans up the S3 prefix.** Symmetric fix — KV value blobs (often large: run state, screenshots, INPUT.json) were also leaked. Same fire-and-forget pattern, same three regression tests.
+
+### Dashboard
+
+- **Actors list page now has a delete affordance per card.** Every other resource list page (datasets, key-value stores, request queues, schedules, webhooks) already had list-page delete — actors was the odd one out. Click → confirm → call `deleteActor` → optimistic remove from the grid. The trash button is inline next to the ID chip in the top-right of each card, and uses `e.stopPropagation()` so clicking it doesn't also navigate to the actor detail page (the whole card is a link).
+
+### Notes for operators
+
+- **No schema migration, no env vars, no provider changes.** Upgrading from 0.9.9 to 1.0.0 is a drop-in.
+- **Why polling, not Postgres `LISTEN/NOTIFY` + SSE?** Considered. Polling at 5s buys 95% of the "live" feel for ~5% of the engineering cost: each operator's open tab issues **12-24 list-queries/minute** (one per tick on the `all` filter; up to two for multi-status filters like `failed` which fans out into `FAILED + TIMED-OUT`) against indexed columns — negligible cost. The 5s tick re-fetches only the current page; status-chip counts and actor metadata stay at their last-loaded values until the next mount / filter-change / explicit refresh, which is fine for an ops console where the operator is watching the table for transitions. `LISTEN/NOTIFY` + SSE would require: a long-lived DB connection per API replica (separate from the pool — `LISTEN` holds its own session), a trigger on `runs` UPDATE/INSERT, a Fastify SSE route with auth + reconnect handling, and a per-replica fan-out story since each replica only receives notifications it itself is `LISTEN`-ing for. Worth it once we feel the polling cost, not before — typical ops dashboards run at 5–10s polling for years without justifying the switch. The door stays open: if needed, the existing Redis pub/sub used for `run:new` runner notifications is a more natural source for SSE than PG NOTIFY.
+- **What "1.0" commits to.** The Apify v2 compatibility surface (run/dataset/KV/queue/build endpoints and their response shapes) is now stable. CLI commands (`crc push|run|call|logs|init|dev|status`) are stable. Operator env vars documented in `.env.example` and `.env.secure.example` are stable. Anything not in those surfaces (internal helpers, undocumented endpoints) may still change without a MAJOR bump.
+
+## [0.9.9] - 2026-06-06
+
+### Fixed
+
+- **Autoscaler scale-down freeze when a zombie RUNNING row exists.** Live production state observed at v0.9.8: `desired=10` held for 5+ hours with `ready=0, running=2`. Two interacting bugs in the scaler:
+  1. **`calculateDesiredRunners`** returned `currentRunners` whenever `ready <= scaleUpThreshold`, regardless of direction. The intent was hysteresis (don't scale UP on a trickle), but the unconditional return also suppressed scale-DOWN — so once a burst lifted the count, a long-running tail (`running > 0, ready == 0`) kept `totalDemand > 0` and pinned the cluster at high-water. The TODO block at the original site documented this and offered two fix shapes; the corrected Shape A is applied: `if (ready <= threshold && clamped > current && current >= minRunners) return current`. The `current >= minRunners` clause is load-bearing — it preserves the cold-start floor (otherwise a system below `min` with low demand could not bring its first runner up).
+
+  2. **`scalingLoop`** refreshed `scaler:last-activity` whenever `stats.total > 0`, where `stats.total` is a DB count that **includes zombie RUNNING rows**. Even after fix #1, the existing `idleTimeoutSecs` gate in `scalingLoop` kept blocking scale-down because `idleMs` stayed near zero forever — the math correctly said `desired < current`, but `scaleDown` was never called.
+
+     The activity gate now cross-references two sources of truth: which run IDs are RUNNING in the DB (with `started_at`), and which run IDs each live runner claims via its heartbeat (`heartbeat.ts:119` already publishes `runIds`). A RUNNING row counts as real work if either (a) some live heartbeat claims it, or (b) it was picked up within `PICKUP_GRACE_MS` (90s = 3× heartbeat interval) and the claim simply hasn't landed yet. Older RUNNING rows with no live claim are zombies and do not refresh activity.
+
+     This shape was reached after the initial v0.9.9 attempt — a naive `realActivity = stats.ready > 0 || runners.some(r => r.activeRuns > 0)` — was flagged on PR #52 (Codex P1) for opening a race window during legitimate pickup: when an idle cluster picks up a fresh run via Redis pub/sub (sub-second), the DB shows `RUNNING` immediately, but the runner's most recent heartbeat (up to ~30s stale) still reports `activeRuns: 0`. In that window the naive gate would have destroyed the just-busy runner mid-pickup. The runId+`started_at` correlation closes that window precisely without re-opening the zombie freeze.
+
+  Both fixes are required to clear the freeze. Verified by direct reproduction against the compiled artifact (`packages/api/dist/scaler/index.js`) prior to the patch and by 46 unit tests after (including the Codex P1 race-window regression).
+
+- **Defensive coercion in `calculateDesiredRunners`** for `NaN` / negative / non-finite inputs. The function decides how many droplets to spawn; a malformed `COUNT(*)` parse should not be able to feed unbounded numbers into the math. `Math.max(0, Number.isFinite(x) ? x : 0)` applied to `ready`, `running`, and `currentRunners`.
+
+### Added
+
+- **`scaler-decisions.test.ts`**: 5 new tests for `calculateDesiredRunners` (freeze repro, scale-down through threshold, hysteresis-up at threshold-equal demand, cold-start floor rule regression guard, NaN/negative input coercion) plus 6 new tests for the pure `countLiveRunning` correlation helper (heartbeat-claim path, fresh-pickup grace path, stale-zombie rejection, null `started_at`, mixed batch, empty input).
+- **`scaler-loop.test.ts`**: 4 new tests — zombie-RUNNING-no-live-runner must NOT refresh `LAST_ACTIVITY`; live-runner-claims-runId must refresh; pickup-race-with-stale-heartbeat must refresh AND must not destroy the just-busy runner (Codex #52 P1 regression); RUNNING row older than grace with no claim must NOT refresh.
+- **Heartbeat plumbing**: `getActiveRunners()` now also returns `claimedRunIds: Set<string>`. The heartbeat parser preserves `runIds` (was previously dropped — older runner builds publish all the other fields but no `runIds`; the scaler tolerates this and falls back to the `started_at` grace window).
+
+### Dashboard
+
+- **SUCCEEDED status chips are now green, not brand-orange.** A new semantic `--ok` token (`#1a7f37` light / `#3fb950` dark) decouples success state from the brand `--signal` (orange). Prior to this, SUCCEEDED, ABORTED (amber), and FAILED (vermilion in dark mode) all sat in nearby warm hues and were hard to distinguish at a scan. The brand `--signal` itself is unchanged — buttons, links, focus rings, CRC logo, and the throughput chart's "volume" bars stay orange. The change is scoped to the `success` Badge variant in `components/ui/badge.tsx`, so every consumer of `StatusChip` (runs list, run detail, builds, webhooks, actor detail) picks it up without further edits.
+
+### Notes for operators
+
+- **Behavioral change is minimal for healthy workloads.** The `idleTimeoutSecs` gate is unchanged — under steady load, `realActivity` evaluates true (via ready or active heartbeats), `LAST_ACTIVITY` refreshes, and scale-down stays blocked just like before. The only behavioral delta is in the zombie-tail case (the bug being fixed). No env vars added, no schema changes, no provider changes.
+- **Known follow-up for v0.9.10 / 1.0** (not blocking the freeze fix): a dedicated reaper that times out stale RUNNING rows whose effective `timeoutSecs + grace` has elapsed. The scaler is now resilient to such rows; the data-integrity cleanup is a separate hardening pass. Also worth fixing: `DigitalOceanProvider.listRunners()` pages at `per_page=100` with no pagination — a deployment with more than 100 tagged droplets silently underreports capacity.
+
+## [0.9.8] - 2026-06-05
+
+### Fixed
+
+- **`crc push` now forwards `actor.json` `defaultRunOptions` to the API (#50).** This was the real root cause behind reports that v0.9.7's "actor default_run_options propagation" fix didn't resolve 3600s scraper timeouts. End-to-end trace found the API fix at run-create was correct, but the CLI had two compounding bugs:
+  - `ActorJson` interface didn't model `defaultRunOptions` at all (TS stripped the field).
+  - Push payload hard-coded `defaultRunOptions: { image, envVars }` and never forwarded `timeoutSecs` / `memoryMbytes` / `build` from `actor.json`.
+    So `actor.default_run_options` in the DB stored only `{image, envVars}` and the API correctly fell through to the 3600 fallback. After this release, declaring `"defaultRunOptions": { "timeoutSecs": 7200, "memoryMbytes": 2048 }` in `actor.json` flows through `crc push` → DB → run creation → runner.
+
+### Added
+
+- **Existing-actor `default_run_options` used as baseline by `crc push`.** The API's `PUT /v2/acts/:id` handler replaces `default_run_options` JSON wholesale (not a deep merge), so without a baseline a push would silently revert dashboard-only edits to fields not declared in `actor.json`. The CLI now fetches the existing actor by name first and uses its `default_run_options` as the baseline. Precedence on the merged payload (later wins):
+
+  ```
+  existing dashboard state
+    < actor.json defaultRunOptions (deploy-time author intent)
+      < CLI-managed image / envVars (always asserted by push)
+  ```
+
+  Dashboard edits to fields `actor.json` doesn't declare survive `crc push`.
+
+### Hardening (bot-review fixes pre-merge)
+
+- **Name-based existence lookup replaces the 200-actor list scan** (Codex P2 on #50). Previously the CLI used `GET /v2/acts?limit=200` + `.find(...)` to determine if the actor existed. For accounts with more than 200 actors, an older actor being re-pushed would not appear in the first page → CLI took the "new actor" branch on its side → baseline fetch was skipped → POST upserted the actor by name and silently clobbered dashboard-only fields. Now uses `GET /v2/acts/${encodeURIComponent(actorName)}` (the route accepts id-or-name), eliminating the bug class entirely. Single API call serves both existence-check and baseline-fetch.
+- **Defensive optional chaining on API response parse** (Gemini medium on #50). `lookupData.data?.id`, `lookupData.data?.defaultRunOptions ?? {}` so a 200 with empty body doesn't crash the CLI.
+
+### Tests
+
+- 2 new integration tests in `packages/cli/test/integration/push-and-run.int.test.ts`, exercised against a real local stack (postgres + redis + minio + API on `localhost:3000`):
+  - `push forwards actor.json defaultRunOptions.timeoutSecs and memoryMbytes to the actor row` — seeds actor.json with `timeoutSecs=7200, memoryMbytes=2048, build=beta`; pushes; asserts GET reflects all three.
+  - `push without timeoutSecs in actor.json preserves a dashboard-set value` — pushes without `timeoutSecs`; simulates a dashboard PUT to `timeoutSecs=5400`; pushes again; asserts the dashboard value survives.
+
+### Migration
+
+- No schema changes. Operators with existing actors who want the new behavior must either:
+  - re-push after upgrading the CLI (so `actor.json`'s `defaultRunOptions.timeoutSecs` lands on the actor row), or
+  - edit timeout in the dashboard (saves to `default_run_options.timeoutSecs` directly via the existing PUT path).
+
+PRs in this release: #50.
+
+## [0.9.7] - 2026-06-04
+
+### Added
+
+- **API multi-replica safety via Postgres advisory locks (#47).** Adds `withAdvisoryLock(lockId, work)` primitive in `db/index.ts` with a discriminated union `{ acquired: true, result } | { acquired: false }` return shape and a `LOCK_IDS` registry under the `0xC0DE____` namespace. Applies leader election to four background subsystems so they each execute at most once per tick across N replicas:
+  - **Retention reaper** — refactored to use the helper (behavior-preserving, ~30 lines of inline lock plumbing removed).
+  - **Setup bootstrap** — `setupAdminUser` wrapped in `setupAdminUserGated`. The pre-existing N-replica race that silently accumulated orphan rows in `api_keys` on every deploy (no `UNIQUE(name)` constraint) now goes away.
+  - **Scaler** — `scalingLoop` body wrapped; `isScaling` intra-replica fast-path retained; 3-state `wasLeader` edge logging silent at steady state, loud on transitions, and force-clears to `undefined` on errors so the next successful tick re-establishes the edge.
+  - **Scheduler** — full rewrite: drops per-schedule `cron.schedule()` registrations and the `activeJobs` map / `register|reload|unregister|unregisterAllSchedules` / `getActiveScheduleCount` exports. Adds `runSchedulerTick` that polls the `schedules` table each `SCHEDULER_TICK_SECS` (default 30s) under `LOCK_IDS.scheduler`, fires due schedules and advances `next_run_at` via `cron-parser` (new dep). Routes pre-compute `next_run_at` at POST time so new schedules are fire-eligible from the next tick.
+- **`POST /v2/schedules` cron validation up-front** (#47 follow-up to bot review). PATCH route validates the cron expression _before_ the UPDATE, not after. Previously an invalid cron would persist to the DB and break every subsequent scheduler tick.
+- **Re-enable triggers `next_run_at` recompute** (#47 follow-up). Toggling a schedule from `is_enabled=false` → `true` recomputes `next_run_at` so the schedule doesn't fire immediately on a stale past timestamp.
+
+### Fixed
+
+- **Actor `default_run_options.timeoutSecs` / `memoryMbytes` now propagated to runs (#48).** Reported by a user whose scrapers timed out at exactly 3600s despite the actor being configured with `timeoutSecs: 7200`. Two surfaces:
+  - `POST /v2/acts/:id/runs` defaulted `timeout = 3600, memory = 1024` at destructure time, never consulting `actor.default_run_options`. Now resolves with fall-through: **request body override → actor config → 3600 / 1024 fallback**.
+  - Scheduler's `triggerScheduledRun` omitted `timeout_secs` / `memory_mbytes` from the run INSERT entirely, so scheduled runs always got the DB column defaults regardless of actor config. Now loads `actor.default_run_options` at fire time and binds both columns explicitly. Bails early if the actor was deleted between the schedule firing and the lookup (prevents orphan datasets/KV/queue rows + wasted S3 write).
+- **`CreateActorSchema.defaultRunOptions` now caps `timeoutSecs` (≤ 86400s) and `memoryMbytes` (≤ 16384 MB)** to match `ActorRunSchema`'s per-run caps. Previously uncapped — once #48's run propagation landed, an operator could bypass the run-time guardrail by saving `timeoutSecs: 200000` on the actor. Both schemas now enforce the same limits.
+- **Advisory-lock SQL parameters explicitly cast to `::bigint`** (#47 follow-up). Lock IDs in the `0xC0DE____` namespace exceed `INT4_MAX`; the explicit cast removes any risk of Postgres picking the `int4` overload and throwing "integer out of range" at runtime.
+
+### Security
+
+- **Plaintext containment on bootstrap race.** Closing the multi-replica setup race also closes a related observability footgun: previously N concurrent replicas each tried to create the admin row and runner-api-key row, with all-but-one failing on the unique-violation. The errors were caught and logged at `setup.ts:115` with the bare error object — depending on the pg driver version, that could include the offending SQL in the error message. The lock removes the race entirely; only one replica ever attempts the insert.
+
+### Migration
+
+- **No schema changes.** Existing `schedules` rows with `NULL next_run_at` get a warm-up backfill on first tick (next_run_at is populated, no firing). Maximum ≤ `SCHEDULER_TICK_SECS` delay before normal firing resumes for pre-upgrade rows only.
+
+### Breaking changes (operational)
+
+- **`GET /health/ready` no longer reports `schedulerJobs`.** The field counted in-process per-schedule cron registrations — a concept that doesn't exist in the new poll-based model. Operators wanting enabled-schedule counts should query the DB directly: `SELECT count(*) FROM schedules WHERE is_enabled = true`.
+
+### Deployment notes
+
+- **`PROXY_ENCRYPTION_KEY` and `SCHEDULER_TICK_SECS` must be set identically on every API replica.** Both processes hard-fail in production without `PROXY_ENCRYPTION_KEY`. `SCHEDULER_TICK_SECS` is optional (default 30); inconsistent values across replicas mean leader-election still works but observed tick cadence varies.
+- New deps: `cron-parser@^5` (one transitive-free dep, ~50 kB).
+- Documented in `.env.example` and `.env.secure.example`.
+
+PRs in this release: #47 (multi-replica), #48 (actor default timeout).
+
+## [0.9.6] - 2026-06-03
+
+### Added
+
+- **`RUNNER_CLONE_REF` env var on the scaler.** When set, the cloud-init template clones the specified git ref (tag or branch) instead of the default branch. Decouples runner version from upstream `main` merges, so a runner-runtime breaking change on `main` doesn't auto-detonate the next scaler-provisioned droplet. Example: setting `RUNNER_CLONE_REF=v0.9.5` pins all newly-spawned runners to that tag. Unset = unchanged historical behavior (clones default branch). `git clone --branch` refuses bare SHAs by design, so the operator picks tags or branches — not arbitrary commits — which keeps rollback unambiguous.
+
+### Note
+
+- Value is interpolated into the cloud-init bash heredoc unchanged. Same threat model as every other env var the scaler reads — operator-supplied, not user-supplied. A future hardening PR could add a regex guard (`/^[A-Za-z0-9._/-]+$/`) without breaking compat.
+
+## [0.9.5] - 2026-06-03
+
+### Fixed
+
+- **Scaler cloud-init now propagates `PROXY_ENCRYPTION_KEY` to scaled-up runners.** The cloud-init template that bootstraps a freshly-provisioned runner VM (`packages/api/src/scaler/index.ts`) only piped `IMAGE_REGISTRY*` env vars through. In v0.9.4, the runner gained a startup guard that hard-fails in production when `PROXY_ENCRYPTION_KEY` is unset (or, outside production, silently falls back to `sha256(API_SECRET)` — which would not match the API's encrypted records). Either way, scaled-up runners couldn't decrypt actor/user proxy columns. Now passed through alongside the existing registry vars. Single-host deployments are unaffected (operators set the env var directly on the runner process).
+
+### Known gap (not fixed in this patch)
+
+- `APIFY_PROXY_PASSWORD` / `APIFY_PROXY_HOSTNAME` / `APIFY_PROXY_PORT` are NOT yet propagated by the scaler cloud-init. Operators relying on the platform-default proxy tier in scaled deployments will need to extend the passthrough or use per-user / per-actor overrides (which DO work end-to-end on scaled runners after this fix, since they only require the encryption key).
+
+## [0.9.4] - 2026-06-02
+
+### Added
+
+- **Apify Proxy integration (`useApifyProxy=true` now works end-to-end).** Three-tier resolution at run start: per-actor override → per-user setting → platform default env. Actors written against Apify cloud with `proxyConfiguration.useApifyProxy: true` in their input now run unchanged — the SDK's standard env-injection path is preserved (`APIFY_PROXY_PASSWORD/HOSTNAME/PORT` injected only when a password resolves; absent vars activate the SDK's well-tested API fallback to `/v2/users/me`).
+- **`GET /v2/users/me` Apify-compat extension.** Switched from no-auth-always-anonymous to `optionalAuth` so the SDK fallback path resolves to the authed user's real proxy. Response embeds `{ proxy: { password, groups: [] } }` only when a password is configured — when unset, the `proxy` field is **omitted entirely** (matches the SDK's non-nullable `UserProxy.password` type, which a literal `null` would type-violate).
+- **`PUT /v2/users/me`** (new) and `proxyPassword` field on `PUT /v2/acts/:id` (existing route, extended) — three-state semantics: `undefined` no-op / `null` clears / string encrypts and stores. Asymmetric read/write surface: writes accept the plaintext, reads (`hasProxyPassword` on `/v2/users/me`'s caller-facing dashboard surface, `hasProxyOverride` on the actor row) return only a boolean.
+- **`POST /v2/acts`** now persists `proxyPassword` on both create and upsert (the field passed Zod validation but was silently dropped on insert/update in the initial implementation — caught by review).
+- **Dashboard panels.** `AUTH · APIFY PROXY` on settings page and `CONFIG · PROXY OVERRIDE` on actor detail. State machine: `[ not configured ] / [ set ]` with replace + revoke (account-level) or remove (per-actor). Write-only credential UI — the plaintext is never rendered, even though `/v2/users/me` returns it for SDK compat.
+- **Resilient decrypt.** A corrupted ciphertext or rotated key no longer 500s the SDK fallback or permanently FAILs every run for the affected actor/user. `GET /v2/users/me` server-logs and omits the proxy field; the runner's resolver `safeDecrypt()` skips the affected tier and falls through to the next one so runs proceed (typically without proxy, but at least they run).
+
+### Security
+
+- **AES-256-GCM encryption at rest** for `users.proxy_password_encrypted` and `actors.proxy_password_encrypted` columns. Storage format `v1:<base64-iv>:<base64-ciphertext>:<base64-authtag>` — the `v1:` prefix is the forward-compatibility hook so future key rotations or algorithm changes coexist with stored records without a migration. Per-record random IV (12 bytes, GCM standard), `setAuthTag` before `decipher.final()`, key length enforced.
+- **Key source.** `PROXY_ENCRYPTION_KEY` (64 hex chars / 32 bytes) preferred. Dev fallback to `sha256(API_SECRET)` so single-secret deployments work. **Production hard-fails** at API startup (`config-validator.ts`) and at runner startup (`config.ts` guard) if the explicit key is missing — silent fallback in production would cause API/runner key mismatches with broken-but-look-fine behavior. Both processes must use the same value.
+- **Robust key validation.** A 64-char non-hex string used to pass the length check, then `Buffer.from(s, 'hex')` would silently truncate at the first non-hex char and yield a < 32-byte AES key — runtime crypto failures despite "successful" startup. Validators now use `/^[0-9a-fA-F]{64}$/`; the crypto helper itself also decode-and-checks `buf.length === 32` for defense in depth.
+- **Plaintext containment.** Tests assert encrypted blobs (`/^v1:/` prefix) land in DB call args and the plaintext does not — for `/v2/users/me`, `PUT /v2/acts/:id`, **and** `POST /v2/acts` create + upsert paths. `formatActor()` returns only the boolean projection; the encrypted column never appears in any GET response.
+
+### Migration
+
+- New columns added idempotently: `users.proxy_password_encrypted TEXT NULL` and `actors.proxy_password_encrypted TEXT NULL`. No down-migration needed.
+
+### Deployment notes
+
+- Set `PROXY_ENCRYPTION_KEY` (64 hex chars / 32 bytes) **identically on both the API and runner processes** in production. Both hard-fail at startup without it. Generate with:
+
+  ```bash
+  node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+  ```
+
+### Known limitations / future work
+
+- `/v2/users/me` returns the proxy password of the user the _authenticating token_ is bound to. With the current runner-API-key model (single key, bound to the admin user), the SDK fallback path resolves to the admin's proxy in multi-tenant deployments. The env-injection path — the primary resolution channel — is unaffected. Per-actor-run user binding is a separate effort.
+- Custom (non-Apify) `proxyUrls`, per-run override, CLI `crc proxy` subcommand, key rotation tooling, and a pre-flight check that fails fast when `useApifyProxy=true` resolves to no password configured anywhere are all out of scope and tracked as follow-ups.
+
+## [0.9.3] - 2026-06-01
+
+### Added
+
+- **Per-run webhook scope filter on `GET /v2/webhooks`.** New `?scope` query param accepts `catalog` (default — actor-scoped + global, preserves existing operator-catalog behavior), `run` (per-run hooks only), `actor`, `global`, or `all`. Plus two context filters: `?runId=X` (a specific run's hooks) and `?runActorId=X` (per-run hooks across runs of an actor, via a subquery with `user_id` bound inside the subquery so a guessed actor id cannot enumerate another user's hooks). When `runId` or `runActorId` is set, scope auto-defaults to `all` instead of `catalog`. Invalid scopes return 400 with the valid-scope list and short-circuit before any DB query.
+- **`webhook_deliveries.request_body` column.** Stores the rendered JSON body actually sent to the receiver on the latest delivery attempt — distinct from `webhooks.payload_template` (which carries unresolved `{{placeholders}}`). Captured on every UPDATE path: success, private-URL refusal, HTTP error retry, network error retry, max-retries-exhausted, and the test endpoint. Persisted in both the runner (`attemptWebhookDelivery`) and the API (test endpoint) — `KEEP IN SYNC` pair.
+- **Secret redaction on stored `request_body`.** String values longer than 8 chars whose key matches `/auth|token|password|secret|cookie|signature|hmac|key$/i` are stored as `••• <last4>`. The receiver still gets the unredacted bytes — only the persisted copy is masked. `key$` (suffix-anchored) rather than bare `key` substring so resource id fields like `defaultKeyValueStoreId` are NOT false-positive-masked while credential-style keys (`apiKey`, `secretKey`, `accessKey`) still are. Capped at 4 KB on insert.
+- **Run detail page Webhooks tab.** Conditionally rendered when the run has per-run hooks (no dead tab on normal runs). Each hook is a card with headers (credential-like keys auto-masked using the same regex set as redaction), and a per-delivery panel showing **REQUEST BODY · sent** and **RESPONSE BODY · received** side-by-side, pretty-printed when JSON. The configured template only shows as a fallback when no deliveries exist yet — once a delivery exists, the rendered body is strictly more useful.
+- **Per-run history sub-section on the actor detail Webhooks tab.** Fed by `?scope=run&runActorId=<actor.id>`. Each row links to the originating run, where full payload + delivery detail is available.
+- **Catalog / Per-run tabs on `/webhooks`** with counts (probed via a `limit=1` request on the inactive scope, so the labels stay accurate without paging both lists). Per-run rows link to their originating run. Edit hidden for per-run rows (server rejects PUT on them via the `run_id IS NULL` guard); delete remains as a cancel-pending-delivery affordance.
+- **Webhook test button split.** Old "test" fired one synthetic event per subscribed event type — producing delivery logs that looked like a single run had triggered N webhooks, contradicting production semantics (one terminal status per run → one delivery per webhook). Now split into "test" (one event, mirrors production — defaults to the first subscribed event, matching the API's bare-`POST /v2/webhooks/:id/test` behavior) and "test all · N" (one delivery per subscribed event, only rendered for hooks subscribed to 2+ events).
+- **Shared `CopyButton` component** at `packages/dashboard/src/components/ui/copy-button.tsx`. Two variants: `inline` (icon-only, for end-of-row placement next to displayed IDs) and `button` (labeled, for the run Input tab JSON viewer). Stops event propagation + prevents default so it works correctly when nested inside a `<Link>` card. Applied across every ID display in the dashboard — actors (list + detail + builds tab + runs tab), builds (list), datasets (list + detail), key-value-stores (list + detail), request-queues (list + detail), runs (list + detail header + aside resource rows), webhooks (list), plus the run Input tab. Every copy passes the full unsliced ID; `.slice()` only affects display.
+
+### Changed
+
+- **Dashboard `/webhooks` page actor fetching hoisted to its own mount-only `useEffect`** instead of re-running on every pagination / search / tab switch. Actors are presentation data (resolving `actor_id` → name for catalog rows), not page data.
+
+### Fixed
+
+- **Defensive error coercion in the webhook-delivery network-error catch.** `(err as Error).message.slice(0, 1024)` would crash with a `TypeError` if a non-`Error` value was thrown (string, null, plain object) — leaving the delivery stuck `PENDING` forever because the catch handler itself threw before reaching `scheduleRetry`. Now wraps via `String(err instanceof Error ? err.message : err).slice(0, 1024)`. Fixed at `packages/runner/src/queue.ts:attemptWebhookDelivery`.
+
+### Tests
+
+- API webhook test count goes from 26 → 31. New coverage: `?scope=run` SQL shape, `?scope=bogus` 400 short-circuit (no DB query issued), `?runActorId` cross-user isolation (`run_id IN (SELECT id FROM runs WHERE user_id = $1 AND actor_id = ...)` bind order pinned by a regex match against the SQL), `?runId` auto-scope-relax.
+
+## [0.9.2] - 2026-05-04
+
+### Fixed
+
+- **CLI: `APIFY_TOKEN` and `APIFY_API_BASE_URL` no longer shadow a saved `crc login`.** `getConfig()` used to fall back from `CRAWLEE_CLOUD_TOKEN` to `APIFY_TOKEN` (and from `CRAWLEE_CLOUD_API_URL` to `APIFY_API_BASE_URL?.replace('/v2', '')`) — an undocumented migration affordance that took precedence over the on-disk profile. In any shell that already had `APIFY_TOKEN` exported (common when the same machine drives both Apify scrapers and a Crawlee Cloud install), `crc login` would succeed because login validates with the `--token` flag directly, and the very next `crc ls` would fail with "Invalid token" because `getConfig()` picked up the foreign Apify token and sent it to the Crawlee Cloud server. The terse "Invalid token" message users saw was the server's response body, faithfully relayed by `list.ts:81`. The CLI now only reads `CRAWLEE_CLOUD_*` env vars; the `APIFY_*` aliases are gone. Fixed at `packages/cli/src/utils/config.ts:getConfig()`.
+
+  **Migration:** anyone implicitly relying on the alias should either run `crc login` once or add `export CRAWLEE_CLOUD_TOKEN=$APIFY_TOKEN` to their shell rc. The runner's injection of `APIFY_TOKEN` / `APIFY_API_BASE_URL` _into actor containers_ (so existing Apify-SDK actors run unmodified on Crawlee Cloud) is untouched — that's a runtime feature, not a CLI auth fallback.
+
+### Added
+
+- **Per-run webhooks** — `POST /v2/acts/:actorId/runs` now accepts a `webhooks[]` array of `{ eventTypes, requestUrl, payloadTemplate?, headersTemplate? }` (max 20). Persisted as rows scoped via the new `webhooks.run_id` column with a `chk_webhooks_scope` CHECK that makes per-run and actor-scoped mutually exclusive, plus `ON DELETE CASCADE`. Admin `GET /webhooks` excludes per-run rows from the operator catalog; `PUT` rejects them; `DELETE` allows them as a cancel-pending-delivery escape hatch. Closes the per-run-webhooks Apify-compat gap (`docs/apify-compatibility.md`).
+- **`GET /v2/actor-runs/stats`** — single indexed query returning `total`, `running`, `succeeded`, `failed`, and `failed_last_24h`. Replaces the dashboard's old client-side aggregation that filtered the first page of `/v2/actor-runs` (capped at 50 rows), which silently under-counted past 50 runs total. Failure semantics: `FAILED ∪ TIMED-OUT` (TIMED-OUT is operationally a failure); `ABORTED` stays excluded as operator-cancellation. Locked in by a SQL-content assertion test so the grouping can't silently regress.
+- **`GET /v2/actor-runs/histogram?hours=24`** — server-side hourly bucket aggregation via `date_trunc('hour', ...)` + `generate_series` spine + `LEFT JOIN`, returning exactly N rows even for empty hours. The dashboard's "Runs · last 24h" chart now consumes this endpoint instead of building buckets client-side from a 50-row page (which silently dropped older buckets at scale). Same `FAILED ∪ TIMED-OUT` grouping as `/stats` so the chart's red caps and the "Failed · 24h" tile tell the same story.
+- **`SUPPORTED_WEBHOOK_EVENTS` const + tightened `eventTypes` Zod enum** for both `CreateWebhookSchema` (admin) and `RunWebhookSchema` (per-run). Subscriptions to `ACTOR.RUN.CREATED` or `ACTOR.RUN.RESURRECTED` (Apify defines them; Crawlee Cloud doesn't fire them yet) now fail with 400 instead of silently never delivering. Gap row in `docs/apify-compatibility.md` tracks the firing TODO for those two events.
+- **`--chart [N]` mode in `scripts/seed-stress-fixtures.ts`** — inserts N runs (default 100) with `created_at` jittered across the last 24h, status mix biased ~70% SUCCEEDED with FAILED/TIMED-OUT/RUNNING in the remainder. Lets the histogram be exercised locally without waiting on real activity.
+
+### Fixed
+
+- **Webhook event-type emission matches Apify's wire format.** Apify uses HYPHEN for `run.status` (`'TIMED-OUT'`) but UNDERSCORE for the event type (`'ACTOR.RUN.TIMED_OUT'`); both are intentional. Crawlee Cloud now mirrors both: status strings stay hyphen-form (Apify-canonical), event-type construction translates via `status.replace(/-/g, '_')` at the runner emission seam (`packages/runner/src/queue.ts:387`). Inverse translation in test-webhook delivery for synthetic-run shape parity.
+- **Hourly throughput chart rendering bug** — bucket div had no defined height, so the inner bar's `height: %` resolved to 0 against an auto-sized parent (`items-end` on the flex parent prevents the default stretch). Added `h-full` so the bucket fills the parent and percentage heights resolve correctly.
+- **Hourly throughput chart math bug** — the FAIL cap was double-scaled: `(failed/total) * h` was applied as a percent of the bar, but the bar was already `h%` of the bucket. Changed to `(failed/total) * 100` so the cap reads as the failure share of the bar.
+- **Pre-seeded chart buckets snap to the hour boundary.** Initial `useState` seed used `Date.now()` (subsecond), but the server returns hour-truncated ISO strings — mismatch caused all 24 React keys to change on the first server response, forcing a full bar remount. Now snaps via `setMinutes(0, 0, 0)`.
+- **Dashboard polling preserves chart state on transient API failure** rather than clearing the histogram to empty buckets. The previous catch handler returned `{ buckets: [] }` which set the state to empty on every polling glitch; histogram fetch now returns `null` on error and the setter is gated, so the last-known chart stays on screen.
+- **`formatBucketHour` uses `Math.floor` instead of `Math.round`** for "Xh ago" labels — buckets are hour-aligned, so the label flip should happen at the next hour boundary, not at the 30-minute mark.
+- **Runner no longer overwrites `ABORTED` with `FAILED` when a container kill surfaces as a thrown error.** The success path in `processRun` already had a `WHERE status = 'RUNNING'` guard with an extensive comment explaining the lifecycle invariant ("MUST NOT overwrite if `Actor.fail()` already set it") — but the `catch` block lacked the same guard, so an operator-initiated abort raced against the container's death throes could flip the run back to `FAILED`. The `catch` now mirrors the success path: same guard plus a re-read of the winning status so `triggerWebhooks` fires the right `ACTOR.RUN.*` event (e.g. `ACTOR.RUN.ABORTED`, not `ACTOR.RUN.FAILED`) and `maybeRetryRun` doesn't re-run an aborted job. Fixed at `packages/runner/src/queue.ts:processRun`.
+- **`GET /v2/webhooks/:webhookId` now surfaces `runId`** for per-run webhooks. The `WebhookRow` interface always carried `run_id`, but `formatWebhook` omitted it from the response — so operators debugging delivery had to query the DB directly to see which run a webhook was bound to. Always `null` for admin webhooks. Fixed at `packages/api/src/routes/webhooks.ts:formatWebhook`.
+- **`/v2/actor-runs/stats` `failed_last_24h` now uses the same hour-aligned 24h window as `/v2/actor-runs/histogram`** (`date_trunc('hour', NOW()) - INTERVAL '23 hours'`) instead of a rolling `NOW() - INTERVAL '24 hours'`. Both endpoints landed in this release; without the alignment, the "Failed · 24h" tile and the histogram's red caps could disagree by up to 59 minutes at the top of every hour. Pinned by an SQL-content assertion test.
+
+### Changed
+
+- **`resource.usageTotalUsd` field** in webhook payloads (always `0`) — Apify-shape parity placeholder until usage tracking lands. Mirrored across `packages/runner/src/queue.ts defaultPayload.resource` and `packages/api/src/routes/webhooks.ts buildWebhookPayload` (KEEP IN SYNC pair).
+
+### Tests
+
+- 269 → 277 passing tests on the api package (16 / 16 unchanged on the runner package). New coverage: per-run webhook INSERT, per-run rejection of unsupported events, admin rejection of unsupported events, stats endpoint shape, stats user-scoping, stats `FAILED ∪ TIMED-OUT` SQL pinning, stats hour-aligned 24h window pinning, histogram shape, histogram bind-param passthrough, histogram out-of-range hours rejection, per-run webhook surfacing `runId` on GET by id.
+
+## [0.9.1] - 2026-05-03
+
+### Added
+
+- **Apify-compatible webhook payload templating engine.** Custom `payload_template` strings now support both forms Apify documents — `"{{eventData}}"` (quoted, the entire string-cell is the variable) and `{{eventData}}` (unquoted, sits as a JSON value) — plus mid-string interpolation (`"text {{userId}} more"`) and dot-notation lookup (`{{eventData.actorRunId}}`, `{{resource.stats.runTimeSecs}}`). Substitution is now against the camelCase Apify-shape payload, not the raw snake_case run row, so templates copied from Apify's docs work unchanged. Implementation: a small character-walker tracks JSON-string state, replaces each `{{...}}` with a sentinel (bare inside strings, JSON-encoded in value position), then JSON.parses and walks the tree to substitute typed values. Engine duplicated in `packages/api/src/webhooks/apply-template.ts` and `packages/runner/src/webhook-template.ts` with `KEEP IN SYNC` headers + 16 + 10 mirrored unit tests; consolidation into a shared workspace lands in v1.0.
+- **Test webhook now applies the user's template.** `POST /v2/webhooks/:id/test` previously sent the default Apify-shape payload regardless of the user's `payload_template`. Operators could pass the test webhook and discover production was mangling the template only later. The test endpoint now runs the same engine production deliveries do, so dashboard "test webhook" exercises identical bytes to receivers.
+- **Server-side substring search** via `?q=<text>` on `/v2/{acts,datasets,key-value-stores,request-queues,schedules,webhooks}`. ILIKE on `(id, name)` for most resources; actors also search `title, description`; webhooks search `(id, description, request_url)` since they have no `name` column. User-typed LIKE metacharacters (`%`, `_`, `\`) are escaped via a small helper so `?q=100%25` matches the literal string `"100%"` rather than everything. Empty/whitespace `?q=` skips the WHERE clause so the index-only path stays cheap on no-op searches.
+- **Dashboard search now hits the API.** The four list pages with existing search inputs (actors, datasets, KV stores, request queues) drop their client-side `Array.filter` (which only filtered the visible 50 rows) and route through the new `?q=` URL param. New `useDebouncedSearch` hook (300 ms) keeps typing responsive without firing a fetch on every keystroke. Setting a new query resets `?page=` so a narrowing search doesn't strand the user on a now-out-of-range page. Search state lives in the URL alongside `?page=` — bookmarkable, shareable, browser back works.
+- **Stress-test fixture script** at `scripts/seed-stress-fixtures.ts` — bulk-inserts 5,000 each of unnamed datasets / KV / queues / runs plus 200 actors / 100 schedules / 100 webhooks via `generate_series` for QA at scale. Idempotent on re-run; `--teardown` removes everything with the `stress-` prefix in one pass.
+
+### Fixed
+
+- **Reaper no longer reaps actively-written-to unnamed resources.** v0.9.0's `reap*` predicates only checked `accessed_at`, but data-write paths (`POST /datasets/:id/items`, `PUT /key-value-stores/:id/records/:key`, request-queue mutations) bump `modified_at` only. So an actor pushing data into an unnamed dataset for 31 days could see the dataset reaped while writes were still landing. Each reap predicate now uses `GREATEST(accessed_at, modified_at) < NOW() - $1::int * INTERVAL '1 day'`, which fixes the gap in one place rather than retrofitting every writer.
+- **Dashboard counter tiles report the real total** rather than `items.length` capped at 1000. The home dashboard's "Actors" and "Datasets" tiles previously called `getActors({ limit: 1000 })` then reported `actors.items.length` — silently undercounting any tenant past 1,000. They now read `actors.total` from the API's parallel `COUNT(*)`, and the `limit: 1` request makes the call cheaper since the items are unused.
+
+### Changed
+
+- **Search-condition helper extracted to `packages/api/src/db/search.ts`.** The five-line ILIKE clause builder was duplicated across all six list routes; bot-review suggested centralizing. New `appendSearchCondition(where, params, q, columns)` mutates `params` and returns the new WHERE — each route now passes only its searchable columns.
+
+### Tests
+
+- 16 webhook-template engine cases on the api side + 10 on the runner side. Cover both Apify-doc forms (quoted lone-cell, unquoted value-position), mixed quoted/unquoted in one template, mid-string interpolation, dot notation, missing keys (lone → `null`, interpolation → `""`), and invalid-template fallback.
+- 6 cases for `escapeLikePattern`, 4 cases for `?q=` on actors, 1 for webhooks (different searchable columns).
+
+## [0.9.0] - 2026-05-03
+
+### Added
+
+- **Retention reaper**: a periodic in-process job that cleans up unnamed datasets, key-value stores, request queues, and finished runs past TTL — the "platform survives months of operation" gating concern. Each tick acquires a Postgres advisory lock on a pinned `pool.connect()` client, runs five SQL phases (runs → datasets → KV → queues → tombstone-prune) bounded by `RETENTION_BATCH_SIZE`, releases the lock, then performs S3 prefix deletion with bounded concurrency. CTE-with-recheck pattern keeps DELETE + tombstone INSERT atomic. New env vars: `RETENTION_ENABLED` (default `true`), `RETENTION_DAYS` (default `30`), `RETENTION_TOMBSTONE_DAYS` (default `365`), `RETENTION_BATCH_SIZE` (default `500`), `RETENTION_CRON` (default `0 3 * * *`).
+- **`retention_tombstones` audit table** — every reaped row leaves a tombstone with kind, id, name, user, reason, and original creation timestamp before being pruned at `RETENTION_TOMBSTONE_DAYS`.
+- **`GET /v2/system/retention/status`** (admin-only) returns reaper config, last-tick timestamp/elapsed, last-24h reap counts, and live tombstone row count. Backed by Redis tick-stats (cheap to read) plus a single COUNT(\*) over `retention_tombstones`.
+- **Dashboard retention status page** at `/retention` with auto-refresh every 30s — surfaces whether the reaper is running, when it last ticked, and what it pruned.
+- **Pagination on six dashboard list pages** (actors, datasets, KV stores, request queues, schedules, webhooks) at production scale. Verified against 5,029 datasets / 5,033 KV / 5,029 queues with ~5–12 ms p50 latency on first-page fetches. URL-driven via `?page=N` (1-indexed, omitted on page 1) so pages are bookmarkable, shareable, and editable in the address bar.
+- **Page X / Y indicator with editable page-number input** — type a page number, Enter or blur to jump, clamped to `[1, totalPages]`. Out-of-range URLs (`?page=999` on a 12-page list) render an explicit "Page 999 doesn't exist" error with a "go to page N" CTA, distinct from the empty-state UI.
+- **Stress-fixture script** (`scripts/seed-stress-fixtures.ts`) — bulk-inserts datasets/KV/queues/runs/actors/schedules/webhooks via `generate_series` for QA at scale. Idempotent on re-run; `--teardown` removes everything with the `stress-` prefix. ~5,000 rows per table land in <300 ms.
+- **Deployment recipes** under `docs/deployment/`: a hobby-tier docker-compose recipe and a DigitalOcean Spaces (S3-compatible) recipe, both end-to-end runnable.
+
+### Changed
+
+- **`runs.default_dataset_id` / `default_key_value_store_id` / `default_request_queue_id` FKs softened to `ON DELETE SET NULL`** — previously RESTRICT, which would have blocked the reaper from deleting unnamed default storage of finished runs without a separate cascade pass.
+- **Root list endpoints (`/v2/acts`, `/v2/datasets`, `/v2/key-value-stores`, `/v2/request-queues`, `/v2/schedules`, `/v2/webhooks`) now return a real Apify-shape pagination envelope** with `total` from a parallel `COUNT(*)` query, `count`/`offset`/`limit`/`items`. Previously each route hardcoded `LIMIT 100` with no offset and a fake `total = items.length`, which silently truncated for any account with >100 of the resource and made the "have I shown everything?" question unanswerable. Stable `ORDER BY created_at DESC, id DESC` tiebreaker keeps results stable across pages.
+- **Dashboard centralizes constants** in `packages/dashboard/src/lib/constants.ts`: `PAGE_SIZE`, `FETCH_ALL_LIMIT`, `LOG_TAIL_LIMIT`, `DATASET_PREVIEW_LIMIT`, `KV_KEYS_PREVIEW_LIMIT`, `POLL_RETENTION_MS`, `POLL_RUNNERS_MS`, `COPY_FEEDBACK_MS`, `APP_VERSION`. Sweeps 7 inline `const LIMIT = 50`, 7 `limit: 1000` magic-number callsites, polling cadences, and the previously-hardcoded `OPERATOR · v0.1` sidebar/login label (now sourced from `package.json`).
+- **Retention reaper releases the advisory lock before S3 cleanup**, not after. With `RETENTION_BATCH_SIZE=500` and ~50 ms per S3 LIST+DELETE round-trip, holding the lock through S3 would block sibling-instance DB phases for ~50 s under load — for no benefit, since the rows are already committed when each `reap*()` returns. Each `reap*()` now returns the IDs it deleted; `runReaperTick()` runs the five DB phases under the lock, releases, then runs `cleanupDatasetS3Prefixes` / `cleanupKVStoreS3Prefixes` with bounded concurrency (10).
+- **Retention cron callback wraps `runReaperTick()` in `.catch()`.** `pool.connect()` runs outside any try block in the reaper, so a transient DB outage at fire time would otherwise produce an unhandled rejection — fatal under Node 20+'s default `--unhandled-rejections=throw`.
+
+### Tests
+
+- 20 retention integration tests covering each phase, the orchestration tick, advisory-lock contention, the FK softening, and the admin status endpoint (200 for admin, 403 for non-admin).
+- 6 config-validation unit tests for the new `envCron` helper and the five retention env vars.
+
+## [0.8.6] - 2026-05-03
+
+### Fixed
+
+- **CLI: `crawlee-cloud push` header now shows the registry-qualified image runners pull**, not the internal local Docker tag. Previously `--ghcr` and `CRAWLEE_CLOUD_REGISTRY_URL` flows printed `crawlee-cloud/actor-<name>:<tag>` (a Docker daemon-only tag never published anywhere) at the top of the push output, while the actual deploy target only appeared mid-stream in the push spinner. CI logs and PR screenshots showed two different images on the same screen with no indication which one the platform actually stores. The header now uses the same `runtimeImage` value that gets sent to the API as `actor.defaultRunOptions.image`.
+
+### Infrastructure
+
+- **`publish-cli.yml` workflow now upgrades npm to a Trusted-Publishing-capable version (>=11.5.1) before publishing.** v0.8.5's first publish attempt 404'd from npm despite a valid OIDC token because Node 20's bundled npm 10.8.2 supports the OIDC handshake for sigstore provenance signing but not for the publish-credential exchange itself, which landed in npm 11.5.1. v0.8.5 was eventually published via a one-time `workflow_dispatch` from a debug branch with the upgrade applied; v0.8.6 will be the first release to take the clean tag-driven publish path end-to-end and confirm the fix.
+
+## [0.8.5] - 2026-05-02
+
+### Fixed
+
+- **API version on the dashboard and `/health` is correct on production deploys.** v0.8.4 and earlier reported `v0.0.0` (or `v1.0.0` on `/health`) when deployed on DigitalOcean App Platform, k8s containers, systemd units, or anywhere `node dist/index.js` is launched directly — `process.env.npm_package_version` is only set by `npm run *` invocations, and the previous fallback masked the missing value as a confidently-wrong version. The API now reads `package.json` from disk at module-load time via a small `version.ts` helper (`dist/version.js → ../package.json`) and serves the result on `/v2/system/info`'s `resource.version` and the legacy `GET /health`. Cached for the process lifetime; falls back to `0.0.0` only if `package.json` is genuinely unreadable (operator-spottable sentinel, not a default for normal operation).
+
+### Documentation
+
+- README now leads with a **Dashboard** section: hero shot of the operator console + a 3×2 grid showcasing Webhooks (test/debug UI), Run detail (live logs, runtime sidebar), Settings (live version, scaler state, storage health probes with latency), KV stores (click-to-expand inline JSON preview), Runs history, and Actors grid. ~900 KB of PNGs under `docs/screenshots/`. Helps prospective adopters evaluate the platform's maturity at a glance from the GitHub page.
+
+### Tests
+
+- New `packages/api/test/version.test.ts` (2 cases): asserts the helper returns the real `package.json` version (not the `0.0.0` fallback), and — using `vi.resetModules()` + dynamic import to actually exercise the load-time codepath — that the value doesn't depend on `process.env.npm_package_version`. Latter test would have caught the production bug at v0.8.0.
+
+## [0.8.4] - 2026-05-02
+
+### Fixed
+
+- **`/v2/system/info` execution defaults now reflect what runners actually use, per scaler provider.** v0.8.3 sourced the panel from API-process env, which is wrong in any split deploy (API and runners on different machines): the API host typically doesn't have `MAX_CONCURRENT_RUNS` / `DEFAULT_MEMORY_MB` / `DEFAULT_TIMEOUT_SECS` set at all, so the dashboard quietly returned the fallback defaults. Now keyed on `SCALER_ENABLED`:
+  - **Scaler ON** → memory/timeout come from a per-provider table (`PROVIDER_DEFAULTS` in `scaler/index.ts`) that mirrors what each provider's `createRunner` actually injects:
+    - `digitalocean`: 2048 / 3600 (cloud-init writes these explicitly)
+    - `local-docker`: 1024 / 3600 (matches the runner's own config fallbacks since the provider only injects `MAX_CONCURRENT_RUNS`)
+    - `noop`: 1024 / 3600
+    - unknown providers: 1024 / 3600 (honest fallback over a confident lie)
+  - **Scaler OFF** → API env (existing behavior, correct for single-host)
+- The `2048` / `3600` magic numbers in the DigitalOcean cloud-init heredoc are now `CLOUD_INIT_DEFAULT_MEMORY_MB` / `CLOUD_INIT_DEFAULT_TIMEOUT_SECS` exported constants — used in both the cloud-init template and the system route lookup so they can't drift apart.
+- Dashboard "Execution Defaults" footer now reflects the active path (`scaler/cloud-init (split deploy)` vs `API process env (single-host)`) so operators can interpret the values correctly. Field hints simplified — they no longer name specific env vars that may not apply.
+
+### Tests
+
+- 7 system tests now exercise each provider separately: scaler-on + local-docker, scaler-on + digitalocean, scaler-on + unknown provider, scaler-off + single-host. Same bug pattern can't slip back in unnoticed.
+
+## [0.8.3] - 2026-05-02
+
+### Added
+
+- **API: `GET /v2/system/info` endpoint** — aggregate the dashboard's Settings page consumes in one call: server version, Node version, live storage health probes (PostgreSQL / Redis / S3 with latency), execution defaults read from runner env (`MAX_CONCURRENT_RUNS`, `DEFAULT_MEMORY_MB`, `DEFAULT_TIMEOUT_SECS`), and a safe subset of scaler state (enabled, provider, min/max — no IPs, no tokens; full data stays admin-only at `/v2/scaler/status`). Authenticated, not admin-only.
+- **Dashboard: new "Server" panel on Settings** showing live version, Node version, scaler state, and queue limits — sourced from `/v2/system/info`.
+- **API: `POST /v2/webhooks/:id/test` endpoint** — fires a synthetic event at the webhook's configured URL. One shot, no retries, 10s timeout. Records the result in `webhook_deliveries` so the test attempt shows up in the same history operators already inspect. Payload mirrors the production format but sets `test: true` and uses sentinel run IDs so receivers can opt out of side effects. Returns the delivery row synchronously — UI shows the outcome without polling. Reuses the same private-URL SSRF guard as the runner.
+- **Dashboard: webhook test/debug UI on the Webhooks page**:
+  - **Test button** on each row fires the new endpoint and toasts the result.
+  - **Log button** expands a Deliveries drawer with the last N attempts: status badge, event type, HTTP code, attempt count, age, response/error body, next retry timestamp.
+  - **Last-seen indicator** on each row shows status of the most recent delivery once the drawer has been opened (green / red / muted dot).
+
+### Fixed
+
+- **Runner: macOS auto-translate warning is now visible in real time.** Previously the `[Runner] Rewriting actor APIFY_API_BASE_URL host -> host.docker.internal ...` warning was emitted via `console.warn`, which Node line-buffers when stderr is piped to a file (the `npm run start > log 2>&1` case). The warning sat in a buffer until the process exited, so operators triaging a stuck dev setup never saw it during normal operation. Switched to `process.stderr.write(...)`, which Node treats as synchronous on file descriptors and flushes immediately.
+- **Runner: removed duplicate `Starting run processor...` boot log.** Both `index.ts` and `queue.ts:startProcessing()` were logging the same line, producing two consecutive identical entries on every boot. Kept the one inside `startProcessing()` since it's closer to the action it announces.
+- **Dashboard: Storage Backends section no longer lies.** Previously rendered a hard-coded list of three backends (`PostgreSQL` / `Redis` / `MinIO`) all unconditionally tagged `connected`, regardless of whether the underlying service was reachable. Now reads live `storage` health from `/v2/system/info` and shows `connected` (with latency), `down` (with the failure reason on hover), or `checking` while the request is in flight.
+- **Dashboard: Execution Defaults are now real.** The three input fields (concurrency, memory, timeout) previously rendered hard-coded JSX literals (`defaultValue={10}`, `{1024}`, `{3600}`) regardless of server config — the footer text claimed "server-driven values" but they came from nowhere. Now read from `/v2/system/info`'s `executionDefaults`, sourced from `MAX_CONCURRENT_RUNS` / `DEFAULT_MEMORY_MB` / `DEFAULT_TIMEOUT_SECS` env vars. Read-only; stays read-only — these stay env-var-driven for now (writeable defaults would need a settings store and admin-only mutation route).
+- **API: `GET /v2/auth/api-keys` now returns camelCase fields.** Previously the route returned raw Postgres rows (`is_active`, `key_preview`, `last_used_at`), but the dashboard's `ApiKey` interface — and the rest of the API surface — uses camelCase. Result: `apiKeys.filter(k => k.isActive)` evaluated to `[]` for every key, hiding every active token from the Settings page. The list is now mapped through the same camelCase shape `formatWebhook`/`formatDelivery` use.
+- **Dashboard: `getWebhookDeliveries()` now hits the right URL.** The helper was calling `/v2/webhooks/:id/dispatches` (wrong path) and silently catching the 404 to return `[]`, which made the deliveries list permanently empty even when records existed. Path corrected to `/v2/webhooks/:id/deliveries` and the swallowed try/catch removed so failures surface.
+- **Dashboard: `WebhookDelivery` type now matches what the API actually returns.** Previously declared `statusCode` / `errorMessage` / `deliveredAt` — fields the API never returned. Real shape is `status` (PENDING/DELIVERED/FAILED), `attemptCount`, `maxAttempts`, `nextRetryAt`, `responseStatus`, `responseBody`, `finishedAt`. Locked into the type so the new drawer renders real values instead of `undefined`.
+
+### Refactored
+
+- `packages/api/src/health.ts`: extracted `runStorageHealthChecks()` and `StorageHealth` type so `/health/ready` (k8s probe) and `/v2/system/info` (dashboard) share one implementation. Single source of truth for what "healthy" means across surfaces.
+
+### Verified
+
+- Re-ran the local smoke test against the cuponation actor with `API_BASE_URL=http://localhost:3000` (the bad value the auto-translate is meant to handle). Warning now appears in `/tmp/crc-runner.log` on the next run, before the container is created. Run completed `SUCCEEDED` with the actor reaching the host API via `host.docker.internal`.
+
+## [0.8.2] - 2026-05-02
+
+### Fixed
+
+- **Runner: actor containers can now reach a host-running API on macOS dev setups.** When the runner runs on the host (the default `npm run dev` flow on a Mac) and spawns an actor container with `APIFY_API_BASE_URL=http://localhost:3000`, the actor previously failed because `localhost` inside the container is the container itself, not the host. The runner now auto-translates `localhost` and `127.0.0.1` to `host.docker.internal` on `os.platform() === 'darwin'` only — Linux is untouched, since `host.docker.internal` doesn't resolve there by default and production Linux deploys typically use a real service hostname. A one-time warning logs the rewrite so operators understand what's happening.
+- **Scaler: heartbeats now match by runner _name_ as a fallback, not just _id_.** Cloud-init can't always set `RUNNER_ID` to the provider id at boot (curl to the metadata service can fail, or the user-data path is racy). When that happens, the runner publishes its heartbeat keyed on `os.hostname()` — which providers typically set to the runner _name_ (DO droplet name, local-docker container name), not the id. Previously the scaler matched only by id and ip, so every healthy runner was marked dead after the reaper threshold and destroyed. Lookup is now `id → ip → name`. The DO cloud-init also opportunistically queries the metadata service for the droplet id and writes `RUNNER_ID=<id>` so the primary match works whenever the metadata fetch succeeds.
+- **Local-docker provider: strip the leading `/` from container names** so the value matches what `os.hostname()` returns inside the container (Docker prefixes `Names[0]` with `/`).
+
+### Added
+
+- **API: `GET /v2/actor-runs/:runId/log` (Apify-compat alias).** Returns the same plain-text payload as the canonical `/logs/raw` route. Apify's documented public endpoint is the singular form; tools like `apify-client` and curl scripts targeting `api.apify.com` now work unchanged when pointed at a self-hosted instance.
+
+### Documentation
+
+- `.env.example` now covers `API_BASE_URL` with explicit guidance for macOS dev (auto-translation), docker-compose (service name), and production (public DNS).
+
+### Tests
+
+- Added `packages/runner/test/translate.test.ts` covering Darwin auto-translation, Linux pass-through, and non-loopback hosts. Runner package now has a `test` script wired to vitest.
+- Added `/log` alias coverage in `packages/api/test/logs.test.ts` — verifies it returns identical bytes to `/logs/raw` and shares the same ownership 404 gate.
+
+## [0.8.1] - 2026-05-01
+
+### Security
+
+- **Scaler: TLS verification is no longer disabled by default on provisioned runners.** Previously `NODE_TLS_REJECT_UNAUTHORIZED=0` was hard-coded into the cloud-init script, making every outbound HTTPS call from a runner (API, S3, registries, actor scraping) MITM-vulnerable. The bypass is now opt-in via `SCALER_INSECURE_TLS=true`, and the API logs a startup warning when set. Operators relying on internal CAs / self-signed certs must explicitly opt in; otherwise upgrade is transparent.
+- Documented the cloud-init userData secret-exposure caveat: on `digitalocean` provider, `DATABASE_URL`, `REDIS_URL`, and registry tokens are inlined into user_data and readable from the DO metadata service by anything running on the VM. Tracked for an architectural fix in a future release; documented today so operators can apply network-level mitigations.
+
+### Performance
+
+- Replaced `redis.keys('runner:heartbeat:*')` with cursor-based `SCAN` in both `getActiveRunners` and `getScalerStatus`. `KEYS` is O(N) over the entire keyspace and blocks the Redis event loop — fine in tests, lethal on a shared Redis at scale.
+
+### Fixed
+
+- Scaler no longer over-provisions on transient `provider.listRunners()` failures. Previously the error was swallowed and an empty list returned, causing the scaler to think capacity was zero and create duplicate runners on the next tick. Errors now propagate to the loop's catch block, which logs and skips the tick.
+- `loadScalerConfig` rejects non-finite integer env vars (e.g. `SCALER_MAX_RUNNERS=abc`) and falls back to defaults instead of producing `NaN` and silently breaking comparisons. `MAX_RUNNERS` is also clamped to `>= MIN_RUNNERS`.
+- `LAST_ACTIVITY_KEY` now has a TTL (4× `idleTimeoutSecs`) so it ages out of Redis if the scaler is later disabled, rather than living forever.
+- `RUNNERS_KEY` TTL adapts to `pollIntervalSecs` (`max(120, pollIntervalSecs * 4)`). Previously hard-coded to 120s, which caused `getScalerStatus` to report an empty runner list when the poll interval exceeded 30s.
+
+### Documentation
+
+- Added an Auto-scaling section to `docs/runner.md` covering every `SCALER_*` env var, provider matrix, and operational notes.
+- `.env.example` and `.env.secure.example` now document the full scaler config surface, with `SCALER_INSECURE_TLS` and `METRICS_PUBLIC` flagged as security opt-outs.
+
+## [0.8.0] - 2026-05-01
+
+### Breaking
+
+- `GET /metrics` is now admin-only by default. Previously unauthenticated, the endpoint exposed process internals and per-route HTTP counters useful for fingerprinting a deployment. Self-hosted operators scraping `/metrics` with Prometheus must update their scrape config to send an admin JWT (or admin API key) in the `Authorization: Bearer ...` header. `/health`, `/health/live`, and `/health/ready` remain unauthenticated for k8s probes. Set `METRICS_PUBLIC=true` to opt out (see Added below).
+- `GET /v2/scaler/status` is now admin-only with no opt-out — the response includes runner IPs, cloud provider, and scaler config that have no public use case.
+
+### Added
+
+- **Auto-scaling**: new `local-docker` scaler provider for development and small self-hosted setups; reaper sweeps dead runners; image registry support (GHCR, Docker Hub) so new runners pull actor images on demand instead of requiring a local build.
+- **Build versioning**: actor versions and builds are tracked separately, with a partial unique index on `actor_versions(actor_id, build_tag)` to allow multiple builds per tag while keeping the active one unique.
+- **Run pagination**: scale-aware, stable pagination for run listings — keyset-based, holds steady under high write volume.
+- **CLI profiles**: `crc login --profile <name>` saves named credential sets; `crc profile list/use/rm` and `CRAWLEE_CLOUD_PROFILE=...` env override let you switch between local/staging/prod without re-logging-in.
+- **CLI `crc info`**: shows active profile, API URL, server reachability, and authenticated user. Exits non-zero on failure — usable as a CI gate.
+- **Actor default env vars and image** in `defaultRunOptions` — set per-actor defaults that apply to every run unless overridden at run time.
+- **Dashboard pages**: Builds, Schedules, Webhooks, Request Queues, Runners, Key-Value Store browser, mobile nav, toast/dialog/confirm UI primitives.
+- `METRICS_PUBLIC` env var (default `false`) — opt-in escape hatch for operators running Prometheus on a private network where the scrape job can't pass an `Authorization` header. When `METRICS_PUBLIC=true` and `NODE_ENV=production`, the API logs a startup warning. There is intentionally no equivalent flag for `/v2/scaler/status`.
+
+### Changed
+
+- Documentation moved from the website repo to `docs/` in this repo as the source of truth, with sync to the public site.
+- Dashboard migrated to Tailwind v4 utility names (`bg-signal`, `text-fail`, ...) and a unified warm-orange `--signal` color across themes.
+- ESLint: pedantic rules softened, real-bug rules kept strict.
+
+### Fixed
+
+- `apify-client` 404 contract: API responses now include `error.type='record-not-found'` so `catchNotFoundOrThrow` correctly falls through to `getOrCreate`.
+- Runner API key is regenerated when bound to a stale user, fixing a 404-on-own-storage failure mode after admin changes.
+- `PUT /v2/acts/:id` now persists `defaultRunOptions`, `maxRetries`, and `retryDelaySecs` correctly.
+- Dataset items return type narrowed at the consumer rather than the helper, unblocking dashboard CI.
+- Runner prefixes `actor-` when pulling from a configured registry, matching the build naming convention.
+
+## [0.7.0] - 2026-04-06
+
+Image registry & runner cleanup: scaler-provisioned runners can pull actor images on demand, and runner disks no longer fill up.
+
+### Added
+
+- Runner image registry support (GHCR / custom registry) so auto-scaled runners pull actor images instead of requiring a local build.
+- Periodic Docker cleanup on runners: exited containers, old images, and build cache are pruned on an interval.
+- CLI: `crc list` shows actors and runs; `crc push` gains remote build, GHCR, and upsert support.
+- DigitalOcean deployment workflow in CI.
+
+### Fixed
+
+- CLI `list` shows the last run status and the correct deployed timestamp.
+
+## [0.6.0] - 2026-03-19
+
+Cloud deployment: run the whole platform on DigitalOcean with automatic runner scaling.
+
+### Added
+
+- DigitalOcean deployment: App Platform (API + dashboard) plus a runner droplet, provisioned end-to-end by `deploy/digitalocean/setup.sh`.
+- Queue-based runner auto-scaler with a platform-agnostic provider interface (DigitalOcean provider included).
+- Runner heartbeat: CPU / memory / disk metrics published via Redis.
+- SSL auto-enabled for managed production Postgres; migrations run automatically before the API starts.
+
+## [0.5.0] - 2026-03-06
+
+Security & polish: lock the platform down ahead of wider use.
+
+### Security
+
+- Authentication middleware on every API route via a preHandler hook.
+- User-scoped resources: datasets, KV stores, request queues, and actors are isolated per user (IDOR protection).
+- Input validation: Zod schemas on all route inputs.
+- SSRF protection: webhook delivery to private / loopback / link-local addresses is blocked.
+
+## [0.4.0] - 2026-02-07
+
+Reliability & operations: production-grade stability primitives.
+
+### Added
+
+- Prometheus metrics module (`GET /metrics`) with HTTP and application counters.
+- Health check endpoints (`/health/live`, `/health/ready`) and API graceful shutdown.
+- Runner graceful shutdown with active-run draining.
+- Data cleanup and database backup / restore scripts.
+
+## [0.3.0] - 2026-01-27
+
+Production scraping at scale: schedules, webhooks, and retries.
+
+### Added
+
+- Cron scheduling: schedule CRUD routes (Zod-validated) backed by a node-cron scheduler module.
+- Webhooks: CRUD routes plus delivery tracking with exponential-backoff retry and a delivery-history endpoint.
+- Run retry policies: per-actor `max_retries` with delayed re-queue.
+- Actor environment variable support.
+- Schema: `schedules`, `webhook_deliveries`, and retry columns.
+
+## [0.2.0] - 2026-01-13
+
+CLI & developer experience: make the CLI the best way to work with the platform.
+
+### Added
+
+- CLI: `crc init` (scaffold new Actor projects from templates), `crc dev` (local development mode), `crc status`.
+- CLI auto-publish CI workflow with version bump.
+
+### Fixed
+
+- `crc init` zip extraction, plus assorted API bugs surfaced by the new commands.
+
+## [0.1.0] - 2025-12-26
+
+### Added
+
+#### Infrastructure (Sep 28)
+
+- Docker Compose orchestration for PostgreSQL, Redis, and MinIO
+- Separate dev and production configurations
+- Dockerfiles for API, Runner, and Actor base images
+
+#### API Server (Oct 5 - Oct 18)
+
+- Fastify server with Apify-compatible REST API
+- Dataset CRUD operations (`/v2/datasets`)
+- Key-value store support (`/v2/key-value-stores`)
+- Request queue with deduplication (`/v2/request-queues`)
+- Actor management routes (`/v2/acts`)
+- Run execution and status (`/v2/actor-runs`)
+- JWT authentication system
+- PostgreSQL integration for metadata
+- Redis for distributed locking
+- S3-compatible blob storage
+
+#### Runner (Oct 26)
+
+- Docker-based Actor execution
+- Job queue polling from Redis
+- Container lifecycle management
+- Log streaming to API
+- Resource limits and graceful shutdown
+
+#### Dashboard (Nov 9 - Dec 6)
+
+- Next.js application with App Router
+- Actor listing and management UI
+- Run execution with live logs
+- Dataset browser
+- Settings page
+- Responsive sidebar navigation
+
+#### CLI (Nov 22)
+
+- `crawlee-cloud login` - Server authentication
+- `crawlee-cloud push` - Push Actors to registry
+- `crawlee-cloud run` - Execute Actors with input
+- `crawlee-cloud logs` - Real-time log streaming
+
+#### Documentation (Dec 13)
+
+- Complete API reference
+- CLI usage guide
+- Dashboard overview
+- Deployment instructions
+- Runner configuration guide
+
+### Features
+
+- WebSocket streaming for real-time logs
+- Request queue deduplication by `uniqueKey`
+- Distributed locking for multiple workers
+- Cloud-agnostic S3-compatible storage

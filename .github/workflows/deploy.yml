@@ -1,0 +1,136 @@
+name: Deploy to DigitalOcean
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+
+  workflow_dispatch:
+    inputs:
+      deploy_api:
+        description: 'Deploy API + Dashboard (App Platform)'
+        type: boolean
+        default: true
+      deploy_runner:
+        description: 'Update Runner code on Droplet'
+        type: boolean
+        default: true
+      force_rebuild:
+        description: 'Force rebuild (skip Docker cache)'
+        type: boolean
+        default: false
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+
+  deploy-app:
+    needs: ci
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_api == 'true')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_TOKEN }}
+
+      - name: Trigger App Platform deployment
+        env:
+          DO_APP_ID: ${{ secrets.DO_APP_ID }}
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
+        run: |
+          if [[ "$FORCE_REBUILD" == "true" ]]; then
+            echo "Force rebuilding..."
+            doctl apps create-deployment "$DO_APP_ID" --force-rebuild --wait
+          else
+            echo "Creating deployment..."
+            doctl apps create-deployment "$DO_APP_ID" --wait
+          fi
+
+      - name: Verify deployment
+        env:
+          DO_APP_ID: ${{ secrets.DO_APP_ID }}
+        run: |
+          APP_URL=$(doctl apps get "$DO_APP_ID" -o json | jq -r '.[0].default_ingress')
+          echo "App URL: $APP_URL"
+
+          for i in $(seq 1 12); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL/health" 2>/dev/null || echo "000")
+            if [[ "$STATUS" == "200" ]]; then
+              echo "Health check passed"
+              exit 0
+            fi
+            echo "Waiting for health check... ($STATUS)"
+            sleep 10
+          done
+          echo "Health check failed after 2 minutes"
+          exit 1
+
+  deploy-runner:
+    needs: ci
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_runner == 'true')
+    steps:
+      - name: Update runner code and restart
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.RUNNER_IP }}
+          username: root
+          key: ${{ secrets.RUNNER_SSH_KEY }}
+          script: |
+            set -e
+            echo "=== Updating runner ==="
+            cd /opt/crawlee-cloud
+            git fetch origin main
+            git reset --hard origin/main
+            npm install
+            npm run build --workspace=@crawlee-cloud/runner
+            systemctl restart crawlee-runner
+            sleep 5
+            if systemctl is-active crawlee-runner >/dev/null 2>&1; then
+              echo "Runner restarted successfully"
+            else
+              echo "Runner failed to start!"
+              journalctl -u crawlee-runner --no-pager -n 20
+              exit 1
+            fi
+
+  summary:
+    needs: [deploy-app, deploy-runner]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Deployment summary
+        env:
+          APP_RESULT: ${{ needs.deploy-app.result }}
+          RUNNER_RESULT: ${{ needs.deploy-runner.result }}
+          TRIGGER: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          echo "## Deployment Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Component | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| API + Dashboard | $APP_RESULT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Runner | $RUNNER_RESULT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Triggered by: $TRIGGER" >> "$GITHUB_STEP_SUMMARY"
+          echo "Commit: $SHA" >> "$GITHUB_STEP_SUMMARY"
