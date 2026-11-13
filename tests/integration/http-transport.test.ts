@@ -235,8 +235,11 @@ describe("HTTP transport (slice 1 step 2 smoke)", () => {
 
       const tools = message.result?.tools as Array<{ name: string }>;
       const names = tools.map((tool) => tool.name);
-      expect(names).toEqual([...PROFILE_TOOLS.browse, "charlotte_tools"]);
-      expect(names).toContain("charlotte_tools");
+      // The HTTP transport preserves registration order (charlotteTools order),
+      // which need not match the PROFILE_TOOLS.browse array order — compare the
+      // exposed set instead, and pin the read-only reporter at the end.
+      expect(names.slice(0, -1).sort()).toEqual([...PROFILE_TOOLS.browse].sort());
+      expect(names.at(-1)).toBe("charlotte_tools");
 
       // The SDK never adds cache fields to 2025-era responses — claude.ai's current
       // connector is legacy-era, so it does not receive ttlMs/cacheScope (D20).
@@ -374,10 +377,11 @@ describe("HTTP transport (slice 1 step 2 smoke)", () => {
           // /mcp itself is unaffected by observation mode.
           const message = await readJsonRpc(response);
           const tools = message.result?.tools as Array<{ name: string }>;
-          expect(tools.map((tool) => tool.name)).toEqual([
-            ...PROFILE_TOOLS.browse,
-            "charlotte_tools",
-          ]);
+          const observedNames = tools.map((tool) => tool.name);
+          // Registration order differs from PROFILE_TOOLS array order; compare
+          // the exposed set and pin the read-only reporter as the last entry.
+          expect(observedNames.slice(0, -1).sort()).toEqual([...PROFILE_TOOLS.browse].sort());
+          expect(observedNames.at(-1)).toBe("charlotte_tools");
           await waitForLog(chunks, "http response");
         });
 

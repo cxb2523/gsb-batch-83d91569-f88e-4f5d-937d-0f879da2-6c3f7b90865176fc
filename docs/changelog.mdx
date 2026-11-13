@@ -9,6 +9,10 @@ This is Charlotte's canonical changelog — every release from v0.1.0 through th
 
 ## [Unreleased]
 
+### Added
+
+- **New `charlotte_batch_collect` tool for failure-tolerant multi-URL collection.** An agent can now submit 1–50 URLs in one call and receives a separate, auditable outcome per page instead of an all-or-nothing tool error: one page timing out or being refused by the navigation guard no longer discards the rest of the batch. Each result carries `status` (`ok`, `timeout`, `blocked`, or `error`); `ok` results include the page's structured representation at the chosen `detail` level (`minimal`/`summary`/`full`, default `summary`) with element IDs that remain usable by the interaction tools, while non-ok results carry a human-readable `reason`. Repeated URLs are collected once and marked `duplicate` with an occurrence count, so a re-submitted batch never bills the same page twice. The response reports `total`, `unique_count`, `success_count`, `failure_count`, and a `retry_urls` array containing every unsuccessful URL ready to be re-submitted verbatim. Invalid parameters (an empty `urls` array, more than 50 entries, or an unknown `detail`) are rejected before the browser is launched.
+
 Week of 2026-10-26: Charlotte moves to Puppeteer 25.16 and Chrome for Testing 156, because Chrome 145 no longer receives security fixes. One breaking change: Charlotte now requires Node.js 22.12 or later. Chrome 156 reports forms and some accessible names differently, which changes output and element IDs on some pages, and double-clicks now send one extra `click` event. The upgrade clears both accepted `extract-zip` advisories, and a lockfile bump clears a `body-parser` advisory that was reachable in HTTP mode. Hand-written HTTP clients must now send the `MCP-Protocol-Version` header on requests that use MCP protocol version 2026-07-28, and restarting `charlotte_dev_serve` no longer stalls for about 46 seconds.
 
 ### Changed

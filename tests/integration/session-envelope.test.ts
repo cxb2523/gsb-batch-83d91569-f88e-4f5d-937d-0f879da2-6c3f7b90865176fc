@@ -240,6 +240,20 @@ describe("session envelope: every tool result carries session_id", () => {
     // ─── meta-tool ───
     await callAndAssertEnvelope("charlotte_tools");
 
+    // ─── batch collection (navigation group). Placed last because it drives
+    // the active tab to its own URL, which would invalidate the interaction
+    // steps above that depend on interaction.html being loaded. ───
+    const batch = await callAndAssertEnvelope<{
+      total: number;
+      success_count: number;
+      failure_count: number;
+      results: Array<{ url: string; status: string }>;
+    }>("charlotte_batch_collect", { urls: [`${baseUrl}/simple.html`], detail: "minimal" });
+    expect(batch.total).toBe(1);
+    expect(batch.success_count).toBe(1);
+    expect(batch.failure_count).toBe(0);
+    expect(batch.results[0].status).toBe("ok");
+
     // ─── completeness: every tool the "full" profile exposes was exercised ───
     const expectedTools = new Set([...ALL_TOOL_NAMES, "charlotte_tools"]);
     expect(calledTools).toEqual(expectedTools);

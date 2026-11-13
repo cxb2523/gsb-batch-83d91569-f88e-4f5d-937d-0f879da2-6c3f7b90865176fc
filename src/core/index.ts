@@ -12,6 +12,7 @@
 import type { ToolDefinition } from "./types.js";
 import { evaluateTools } from "./evaluate.js";
 import { navigationTools } from "./navigation.js";
+import { batchCollectTools } from "./batch-collect.js";
 import { observationTools } from "./observation.js";
 import { interactionTools } from "./interaction.js";
 import { dialogTools } from "./dialog.js";
@@ -22,6 +23,7 @@ import { devModeTools } from "./dev-mode.js";
 export const charlotteTools: ToolDefinition[] = [
   ...evaluateTools,
   ...navigationTools,
+  ...batchCollectTools,
   ...observationTools,
   ...interactionTools,
   ...dialogTools,

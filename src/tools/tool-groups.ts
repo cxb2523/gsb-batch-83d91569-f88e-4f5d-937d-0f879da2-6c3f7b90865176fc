@@ -8,7 +8,13 @@
 // ─── Group definitions ───
 
 export const TOOL_GROUPS = {
-  navigation: ["charlotte_navigate", "charlotte_back", "charlotte_forward", "charlotte_reload"],
+  navigation: [
+    "charlotte_navigate",
+    "charlotte_batch_collect",
+    "charlotte_back",
+    "charlotte_forward",
+    "charlotte_reload",
+  ],
   observation: [
     "charlotte_observe",
     "charlotte_find",
@@ -81,6 +87,7 @@ export const PROFILE_TOOLS: Record<ToolProfile, string[]> = {
   browse: [
     // navigation (all)
     "charlotte_navigate",
+    "charlotte_batch_collect",
     "charlotte_back",
     "charlotte_forward",
     "charlotte_reload",
@@ -110,6 +117,7 @@ export const PROFILE_TOOLS: Record<ToolProfile, string[]> = {
   interact: [
     // navigation (all)
     "charlotte_navigate",
+    "charlotte_batch_collect",
     "charlotte_back",
     "charlotte_forward",
     "charlotte_reload",
@@ -149,6 +157,7 @@ export const PROFILE_TOOLS: Record<ToolProfile, string[]> = {
   develop: [
     // navigation (all)
     "charlotte_navigate",
+    "charlotte_batch_collect",
     "charlotte_back",
     "charlotte_forward",
     "charlotte_reload",
@@ -192,6 +201,7 @@ export const PROFILE_TOOLS: Record<ToolProfile, string[]> = {
   audit: [
     // navigation (all)
     "charlotte_navigate",
+    "charlotte_batch_collect",
     "charlotte_back",
     "charlotte_forward",
     "charlotte_reload",
@@ -249,7 +259,8 @@ export function getToolGroup(toolName: string): ToolGroupName | undefined {
 
 /** Description hints for each group, used in the meta-tool and server instructions. */
 export const GROUP_DESCRIPTIONS: Record<ToolGroupName, string> = {
-  navigation: "Page navigation (navigate, back, forward, reload)",
+  navigation:
+    "Page navigation (navigate, batch_collect for multi-URL batches, back, forward, reload)",
   observation: "Page inspection (observe, find, screenshot, diff)",
   interaction:
     "DOM interaction (click, click_at, type, select, toggle, submit, scroll, hover, drag, key/sequences, wait_for, upload, fill_form)",
