@@ -39,13 +39,20 @@ export { findChrome, getChromeVersion } from "./utils/chrome-finder";
 
 export {
   scrape,
+  scrapePaginated,
   detectBlock,
   ScrapeError,
+  DEFAULT_MAX_PAGES,
   type ScrapeOptions,
   type ScrapeResult,
   type ScrapeFormat,
   type ScrapeTier,
   type ScrapeAttempt,
+  type PaginationConfig,
+  type PaginatedScrapeOptions,
+  type PaginatedScrapeResult,
+  type PaginatedPage,
+  type PaginatedStoppedReason,
 } from "./scrape";
 export { htmlToMarkdown, treeToMarkdown, type MarkdownOptions, type MarkdownResult } from "./content/markdown";
 export { extractMetadata, type PageMetadata } from "./content/metadata";

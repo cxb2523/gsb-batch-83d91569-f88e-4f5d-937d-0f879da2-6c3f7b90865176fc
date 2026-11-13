@@ -172,6 +172,36 @@ page.attempts;  // [{ tier: "http", ok: false, reason: "needs JavaScript (empty 
 
 A challenge page is **never** returned as content: if every tier is blocked, `scrape()` throws a `ScrapeError` that carries the `attempts`.
 
+### `scrapePaginated()`: walk a whole list in one call
+
+Pagination on top of `scrape()`: give it the first page and how to find the next one, and it returns every page plus the reason the batch stopped. Block detection is the same `detectBlock` used by `scrape()` — no second heuristic. A failed page ends the run by rule but never throws; the page is recorded with `ok: false` and a `reason`, and all earlier pages are kept.
+
+```ts
+import { scrapePaginated } from "@eurafaeldecarvalho/browser-scraper";
+
+// Next-link mode: follow a CSS selector until it disappears or repeats.
+const byLink = await scrapePaginated({
+  url: "https://site.test/list?page=1",
+  nextLinkSelector: "a.next-page",
+  maxPages: 20,                       // optional, defaults to 20
+  formats: ["markdown", "metadata"],
+  strategy: "http",
+});
+
+// Template mode: page 1 is `url`, then {page} becomes 2, 3, 4 …
+const byTemplate = await scrapePaginated({
+  url: "https://site.test/list?page=1",
+  urlTemplate: "https://site.test/list?page={page}",
+  maxPages: 10,
+});
+
+byTemplate.pages;          // [{ page: 1, url, actualUrl, ok, tier, title, markdown, attempts, … }, …]
+byTemplate.stoppedReason;  // "reached max pages (10)" | "no next page" |
+                           // "duplicate page (…)" | "page 3 failed: HTTP 403"
+```
+
+`strategy`, `browser`, `browserOptions`, `http`, `markdown`, `waitUntil` and `timeoutMs` pass straight through to each `scrape()` call, so a single launched `Browser` can serve the whole batch.
+
 ### Accessibility snapshot + refs (what agents click on)
 
 ```ts
