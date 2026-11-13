@@ -497,9 +497,16 @@ async function doRefresh() {
   icon.style.animation = "spin .8s linear infinite";
   try {
     const r = await fetchJSON("/api/refresh", { method: "POST" });
-    showToast(
-      `✓ +${r.added} added, ${r.updated} updated, ${r.skipped} skipped`,
-    );
+    // Outcomes carry one count per per-file category; surface anything that
+    // did not reach the cache (parse failures, vanished files) so a refresh
+    // that "succeeded" but skipped problems is visibly different.
+    const oc = r.outcomes || {};
+    const caveats = [];
+    if (oc.parse_failed) caveats.push(`${oc.parse_failed} failed`);
+    if (oc.vanished) caveats.push(`${oc.vanished} vanished`);
+    const msg = `✓ +${r.added} added, ${r.updated} updated, ${r.skipped} skipped`
+      + (caveats.length ? ` — ${caveats.join(", ")}` : "");
+    showToast(msg);
     _summaryData = null;
     _projectsData = null;
     _sessionsData = null;

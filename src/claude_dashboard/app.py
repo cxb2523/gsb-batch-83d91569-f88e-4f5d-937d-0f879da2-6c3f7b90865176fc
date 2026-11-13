@@ -257,6 +257,10 @@ def api_refresh(prune: bool = Query(False)):
         "skipped": report.skipped,
         "pruned": report.pruned,
         "errors": len(report.errors),
+        # Per-category tally of every file the scan touched (main transcripts
+        # and subagent files). Counts only — the per-file paths/reasons in
+        # report.outcomes stay on the server.
+        "outcomes": report.outcome_counts(),
     }
 
 

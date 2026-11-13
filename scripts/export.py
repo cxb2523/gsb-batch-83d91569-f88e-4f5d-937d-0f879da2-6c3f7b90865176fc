@@ -53,7 +53,14 @@ def main() -> None:
     store = Store(DB_PATH)
     try:
         report = refresh(store)
-        print(f"Scan: +{report.added} added, {report.updated} updated, {report.skipped} skipped")
+        print(f"Scan: +{report.added} added, {report.updated} updated, "
+              f"{report.skipped} skipped, {report.pruned} pruned")
+        # Per-file trail: every discovered transcript (including subagent
+        # files) gets one line explaining its outcome, so a run is auditable
+        # from refresh.log without querying the DB.
+        for outcome in report.outcomes:
+            kind = "subagent" if outcome.is_subagent else "session"
+            print(f"  {outcome.outcome:<13} [{kind}] {outcome.path}: {outcome.reason}")
         if report.errors:
             for e in report.errors[:5]:
                 print(f"  warn: {e}")

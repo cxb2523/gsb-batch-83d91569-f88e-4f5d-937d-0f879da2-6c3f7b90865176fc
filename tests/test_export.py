@@ -104,7 +104,8 @@ def test_main_writes_redacted_static_bundle(export, tmp_path, monkeypatch, capsy
             "ended_at": "2026-05-10T09:30:00.000Z",
             "cost_usd": 1.0,
         })
-        return SimpleNamespace(added=1, updated=0, skipped=0, errors=[])
+        return SimpleNamespace(added=1, updated=0, skipped=0, pruned=0,
+                               errors=[], outcomes=[])
 
     monkeypatch.setattr(export, "refresh", fake_refresh)
 

@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Refresh now reports a per-file outcome trail (`RefreshReport.outcomes`):
+  every discovered transcript — main session files and their subagent files —
+  gets one `FileOutcome` recording its path, owning session, outcome category
+  (`added`, `updated`, `skipped`, `parse_failed`, `vanished`, `pruned`) and a
+  human-readable reason. Skip reasons distinguish an unchanged main transcript
+  from an unchanged subagent. The `added`/`updated`/`skipped`/`pruned`
+  counters keep their existing semantics. `scripts/export.py` prints the trail
+  to the refresh log, and `/api/refresh` exposes an `outcomes` category tally
+  (counts only — paths and reasons stay server-side).
+
+### Fixed
+- A subagent transcript that fails to parse no longer overwrites the parent
+  session with stats missing that subagent's contribution. The cached session
+  stats (including cost) are retained, neither the session's nor the
+  subagent's file-tracking row is updated, and the pricing rate revision is
+  not recorded — so the next refresh retries the failed file automatically.
+- Files that disappear mid-scan are now recorded explicitly as a non-error
+  `vanished` outcome instead of being silently dropped from the report; they
+  never count toward `errors`.
+
 ## [0.1.1] — 2026-08-14
 
 ### Fixed

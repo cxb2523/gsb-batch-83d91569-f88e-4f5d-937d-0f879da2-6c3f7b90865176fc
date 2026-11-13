@@ -231,6 +231,9 @@ def test_refresh_endpoint_reports_shape(client, tmp_path, monkeypatch):
     # errors is an integer count, never the raw error strings (which carry
     # filesystem paths / exception text) — see py/stack-trace-exposure fix.
     assert isinstance(body["errors"], int)
+    # Per-file outcome tally: category -> count, no paths or reasons leak.
+    assert isinstance(body["outcomes"], dict)
+    assert all(isinstance(v, int) for v in body["outcomes"].values())
 
 
 def test_put_setting_requires_project_path(client):
