@@ -56,6 +56,25 @@ class TTLCache:
         with self._lock:
             self._store.clear()
 
+    def stale_age_seconds(self, key):
+        """
+        Report how many seconds ago the entry for `key` expired.
+
+        Returns None when the key is absent or the entry is still fresh
+        (within its TTL); otherwise a non-negative float. This is a
+        read-only probe — it never removes or otherwise mutates the entry,
+        so get/set/clear behaviour and capacity eviction are unaffected.
+        """
+        now = time.time()
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                return None
+            expires_at, _ = entry
+            if now < expires_at:
+                return None
+            return max(0.0, now - expires_at)
+
 
 class RateLimiter:
     """

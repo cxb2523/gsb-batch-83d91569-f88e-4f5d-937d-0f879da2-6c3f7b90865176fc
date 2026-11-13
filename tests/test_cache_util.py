@@ -40,6 +40,36 @@ def test_cache_evicts_when_full():
     assert len(remaining) <= 2
 
 
+def test_stale_age_none_for_missing_and_fresh():
+    c = TTLCache(ttl=10)
+    assert c.stale_age_seconds("absent") is None
+    c.set("k", "v")
+    assert c.stale_age_seconds("k") is None  # still fresh
+
+
+def test_stale_age_reports_expiry_seconds():
+    c = TTLCache(ttl=0.05)
+    c.set("k", "v")
+    time.sleep(0.1)
+    age = c.stale_age_seconds("k")
+    assert age is not None
+    assert age >= 0.05
+    # The probe must be read-only: the expired entry stays available for a
+    # subsequent allow_stale get and is not evicted.
+    assert c.get("k", allow_stale=True) == "v"
+    assert c.stale_age_seconds("k") is not None
+
+
+def test_get_still_evicts_expired_entries():
+    # Existing get() semantics are preserved: a plain get() on an expired
+    # entry removes it and returns None.
+    c = TTLCache(ttl=0.05)
+    c.set("k", "v")
+    time.sleep(0.1)
+    assert c.get("k") is None
+    assert c.stale_age_seconds("k") is None
+
+
 def test_rate_limiter_allows_up_to_max():
     rl = RateLimiter(max_calls=3, period=60)
     assert rl.acquire() is True

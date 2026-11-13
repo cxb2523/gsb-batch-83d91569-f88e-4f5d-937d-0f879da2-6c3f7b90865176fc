@@ -142,21 +142,33 @@ def search_product(query: str, max_results: int = 10) -> str:
         max_results: So luong ket qua toi da
 
     Returns:
-        JSON string chua danh sach ket qua tim kiem
+        JSON string chua danh sach ket qua tim kiem. Moi phan hoi deu co
+        ``source_kind`` cho biet ket qua lay tu dau:
+          - "fresh":       du lieu moi (cache con han hoac vua goi DDGS that)
+          - "stale_cache": bi gioi han toc do, tam thoi dung lai cache da het han
+          - "rate_limited": bi gioi han toc do va khong co cache de dung tam
+          - "error":       qua trinh goi DDGS gap loi
     """
     query = (query or "").strip()
     if not query:
         return json.dumps({
             "success": False,
+            "source_kind": "error",
             "message": "Vui long nhap tu khoa tim kiem.",
             "results": []
         }, ensure_ascii=False)
 
     # 1) Serve from cache when possible (keyed by normalized query + max_results).
     cache_key = f"{query.lower()}::{max_results}"
-    cached = _search_cache.get(cache_key)
-    if cached is not None:
-        return cached
+
+    # A read-only probe first: checking expiry this way (instead of calling
+    # get(), which evicts expired entries) keeps an expired entry available as
+    # a stale fallback below. A still-fresh hit returns immediately and does
+    # NOT consume any rate-limit quota.
+    if _search_cache.stale_age_seconds(cache_key) is None:
+        cached = _search_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
     # 2) Rate-limit outbound search calls to avoid being blocked (HTTP 429).
     if not _rate_limiter.acquire():
@@ -164,24 +176,44 @@ def search_product(query: str, max_results: int = 10) -> str:
         # If we have a stale cached entry, prefer returning it over an error.
         stale = _search_cache.get(cache_key, allow_stale=True)
         if stale is not None:
-            return stale
+            payload = json.loads(stale)
+            stale_age = _search_cache.stale_age_seconds(cache_key)
+            payload["source_kind"] = "stale_cache"
+            payload["stale_age_seconds"] = max(0.0, float(stale_age or 0.0))
+            return json.dumps(payload, ensure_ascii=False)
         return json.dumps({
             "success": False,
+            "source_kind": "rate_limited",
             "query": query,
             "rate_limited": True,
             "message": f"Dang tim kiem qua nhanh. Vui long thu lai sau {retry_after}s.",
             "results": []
         }, ensure_ascii=False)
 
-    result_json = _do_search(query, max_results)
-
-    # 3) Only cache successful, non-empty responses.
+    # 3) Actually fetch from DuckDuckGo. Only this path consumes rate-limit
+    #    quota (handled by acquire() above) and only successful, non-empty
+    #    responses are written back to the cache.
     try:
-        parsed = json.loads(result_json)
-        if parsed.get("success") and parsed.get("total_results", 0) > 0:
-            _search_cache.set(cache_key, result_json)
-    except (json.JSONDecodeError, TypeError):
-        pass
+        result_json = _do_search(query, max_results)
+        payload = json.loads(result_json)
+    except Exception as e:
+        traceback.print_exc()
+        return json.dumps({
+            "success": False,
+            "source_kind": "error",
+            "message": f"Loi khi tim kiem: {str(e)}",
+            "results": []
+        }, ensure_ascii=False)
+
+    if payload.get("success") and payload.get("total_results", 0) > 0:
+        payload["source_kind"] = "fresh"
+        result_json = json.dumps(payload, ensure_ascii=False)
+        _search_cache.set(cache_key, result_json)
+    else:
+        # Empty results and failures are not cached; tag the response so the
+        # caller can still tell a real (but empty) fetch apart from an error.
+        payload["source_kind"] = "fresh" if payload.get("success") else "error"
+        result_json = json.dumps(payload, ensure_ascii=False)
 
     return result_json
 
