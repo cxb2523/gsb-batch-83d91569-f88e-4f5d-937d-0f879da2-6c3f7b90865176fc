@@ -12,6 +12,7 @@ import {
   listAllResults,
   listCrawls,
   stopCrawl,
+  summarizeCrawl,
   waitForCrawl,
   type CrawlWithResults,
 } from "../src/core/crawl-api.ts";
@@ -649,3 +650,192 @@ test("waitForCrawl returns the running crawl when the timeout runs out, and does
   assert.equal(c.crawl_id, "c_1");
   assert.ok(methods.every((m) => m === "GET"), "no stop call on timeout");
 });
+
+/** Route each request by URL and method; the first route returning a Response wins. */
+function routedFetch(routes: Array<(url: URL, init?: RequestInit) => Response | undefined>) {
+  const calls: Array<{ url: URL; method: string }> = [];
+  const impl = (async (u: string, init?: RequestInit) => {
+    const url = new URL(u);
+    calls.push({ url, method: init?.method ?? "GET" });
+    for (const route of routes) {
+      const res = route(url, init);
+      if (res) return res;
+    }
+    throw new Error(`no route for ${init?.method ?? "GET"} ${url}`);
+  }) as unknown as typeof fetch;
+  return { impl, calls };
+}
+
+const jsonRes = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
+
+const busyRes = () =>
+  new Response(JSON.stringify({ code: "crawl_busy", title: "Crawl busy", detail: "The stop could not be saved yet.", status: 503 }), {
+    status: 503,
+    headers: { "content-type": "application/problem+json", "retry-after": "1" },
+  });
+
+test("summarizeCrawl reads every result of a completed crawl and reports it complete, with the cap as a limit", async () => {
+  const { impl, calls } = routedFetch([
+    (url) =>
+      url.searchParams.get("cursor") === "c1"
+        ? jsonRes({
+            ...crawlBody,
+            status: "completed",
+            stop_reason: "max_items",
+            coverage: { pages_fetched: 2, pages_failed: 0, items_found: 2 },
+            results: [{ url: "https://example.com/product/2" }],
+            next_cursor: null,
+            brand_new_field: "kept",
+          })
+        : jsonRes({
+            ...crawlBody,
+            status: "completed",
+            stop_reason: "max_items",
+            coverage: { pages_fetched: 2, pages_failed: 0, items_found: 2 },
+            results: [{ url: "https://example.com/product/1" }],
+            next_cursor: "c1",
+          }),
+  ]);
+  const s = await summarizeCrawl("c_1", { apiKey: "k", fetchImpl: impl, sleepImpl: async () => {} });
+  assert.equal(s.status, "completed");
+  assert.equal(s.finished, true);
+  assert.equal(s.complete, true);
+  assert.equal(s.partial, false);
+  assert.deepEqual(s.incomplete_reasons, []);
+  assert.equal(s.incomplete_reason, undefined);
+  assert.equal(s.result_count, 2);
+  assert.equal(s.stop_reason, "max_items");
+  assert.equal(s.limit_reached, true, "a cap is reported as a limit, not a failure");
+  assert.equal(s.error, undefined);
+  assert.equal(s.coverage.items_found, 2);
+  assert.equal(s.next_command, "zenrows crawl results c_1");
+  assert.match(s.note ?? "", /max_items limit/);
+  assert.match(s.note ?? "", /cap, not a failure/);
+  assert.equal(s.crawl.brand_new_field, "kept", "unknown API fields pass through");
+  assert.equal((s.crawl as Record<string, unknown>).results, undefined, "the result page is not part of the crawl metadata");
+  assert.ok(calls.every((c) => c.method === "GET"), "no stop was attempted");
+});
+
+test("summarizeCrawl marks a wait that timed out with the crawl still running as incomplete, and says to wait", async () => {
+  const { impl } = routedFetch([
+    (url) =>
+      jsonRes({
+        ...crawlBody,
+        status: "running",
+        results: url.searchParams.get("cursor") === "c1" ? [] : [{ url: "https://example.com/product/1" }],
+        next_cursor: "c1",
+      }),
+  ]);
+  const s = await summarizeCrawl("c_1", { apiKey: "k", fetchImpl: impl, timeoutMs: 1, sleepImpl: async () => {} });
+  assert.equal(s.status, "running");
+  assert.equal(s.finished, false);
+  assert.equal(s.complete, false, "a running crawl is never complete");
+  assert.equal(s.partial, true);
+  assert.equal(s.incomplete_reason, "wait_timeout", "the timeout is the main reason");
+  assert.ok(s.incomplete_reasons.includes("wait_timeout"));
+  assert.ok(s.incomplete_reasons.includes("empty_page"), "its paging ended on an empty page");
+  assert.equal(s.result_count, 1);
+  assert.equal(s.next_command, "zenrows crawl wait c_1");
+  assert.match(s.note ?? "", /still running/);
+  assert.match(s.note ?? "", /zenrows crawl wait c_1/);
+});
+
+test("summarizeCrawl keeps the API's crawl_busy error when the stop's retries run out, and reports the partial read", async () => {
+  const { impl, calls } = routedFetch([
+    (url, init) => (init?.method === "POST" ? busyRes() : jsonRes({ ...crawlBody, status: "running", results: [{ url: "https://example.com/product/1" }], next_cursor: "c" })),
+  ]);
+  const { waits, sleepImpl } = recordSleep();
+  const s = await summarizeCrawl("c_1", { apiKey: "k", fetchImpl: impl, timeoutMs: 1, sleepImpl, stopWhenRunning: true });
+  assert.equal(s.stop?.requested, true);
+  assert.equal(s.stop?.saved, false);
+  assert.equal(s.stop?.error?.code, "crawl_busy");
+  assert.equal(s.stop?.error?.detail, "The stop could not be saved yet.", "the API's detail is kept verbatim");
+  assert.equal(s.error, undefined, "the crawl itself has no error: the refused stop keeps its own");
+  assert.equal(s.partial, true);
+  assert.equal(s.complete, false);
+  assert.ok(s.incomplete_reasons.includes("crawl_busy"));
+  assert.equal(s.next_command, "zenrows crawl stop c_1");
+  assert.match(s.note ?? "", /stop was not saved/);
+  assert.equal(calls.filter((c) => c.method === "POST").length, 4, "1 stop attempt + 3 retries");
+  assert.deepEqual(waits, [1000, 1000, 1000], "crawl_busy is retried after Retry-After, then reported");
+});
+
+test("summarizeCrawl reports a running crawl whose paging ends on an empty page as partial, never complete", async () => {
+  const { impl } = routedFetch([
+    (url) =>
+      jsonRes({
+        ...crawlBody,
+        status: "running",
+        results: url.searchParams.get("cursor") === "c1" ? [] : [{ url: "https://example.com/product/1" }],
+        next_cursor: "c1",
+      }),
+  ]);
+  const s = await summarizeCrawl("c_1", { apiKey: "k", fetchImpl: impl, timeoutMs: 1, sleepImpl: async () => {} });
+  assert.equal(s.complete, false);
+  assert.equal(s.partial, true);
+  assert.ok(s.incomplete_reasons.includes("empty_page"));
+  assert.equal(s.result_count, 1);
+  assert.equal(s.next_command, "zenrows crawl wait c_1");
+});
+
+test("summarizeCrawl keeps a wait that ran out partial even after it stops the crawl itself", async () => {
+  const { impl, calls } = routedFetch([
+    (url, init) =>
+      init?.method === "POST"
+        ? jsonRes({ crawl_id: "c_1", status: "stopped", stop_reason: "user" })
+        : url.searchParams.get("cursor") === "c1"
+          ? jsonRes({ ...crawlBody, status: "running", results: [], next_cursor: null })
+          : jsonRes({ ...crawlBody, status: "running", results: [{ url: "https://example.com/product/1" }], next_cursor: "c1" }),
+  ]);
+  const s = await summarizeCrawl("c_1", { apiKey: "k", fetchImpl: impl, timeoutMs: 1, sleepImpl: async () => {}, stopWhenRunning: true });
+  assert.equal(s.stop?.saved, true);
+  assert.equal(s.status, "stopped", "the saved stop's terminal status wins");
+  assert.equal(s.finished, true);
+  assert.equal(s.complete, false, "a wait that ran out never yields a complete read");
+  assert.equal(s.partial, true);
+  assert.ok(s.incomplete_reasons.includes("wait_timeout"));
+  assert.equal(calls.filter((c) => c.method === "POST").length, 1);
+});
+
+test("summarizeCrawl keeps a failed crawl's error code and detail, and points at get", async () => {
+  const { impl } = routedFetch([
+    () =>
+      jsonRes({
+        ...crawlBody,
+        status: "failed",
+        error: { code: "seed_unreachable", detail: "The start URL returned an empty page.", extra: "kept" },
+        results: [],
+        next_cursor: null,
+      }),
+  ]);
+  const s = await summarizeCrawl("c_1", { apiKey: "k", fetchImpl: impl, sleepImpl: async () => {} });
+  assert.equal(s.status, "failed");
+  assert.equal(s.complete, true, "an ended crawl with every page read is complete even when it failed");
+  assert.equal(s.error?.code, "seed_unreachable");
+  assert.equal(s.error?.detail, "The start URL returned an empty page.");
+  assert.equal(s.error?.extra, "kept", "unknown error fields pass through");
+  assert.equal(s.next_command, "zenrows crawl get c_1");
+  assert.match(s.note ?? "", /failed \(seed_unreachable/);
+});
+
+test("summarizeCrawl reports an ended crawl whose next_cursor still points at more results as partial", async () => {
+  const { impl } = routedFetch([
+    (url) =>
+      jsonRes({
+        ...crawlBody,
+        status: "stopped",
+        stop_reason: "user",
+        results: url.searchParams.get("cursor") === "c1" ? [] : [{ url: "https://example.com/product/1" }],
+        next_cursor: "c1",
+      }),
+  ]);
+  const s = await summarizeCrawl("c_1", { apiKey: "k", fetchImpl: impl, sleepImpl: async () => {} });
+  assert.equal(s.finished, true);
+  assert.equal(s.complete, false);
+  assert.equal(s.partial, true);
+  assert.ok(s.incomplete_reasons.includes("pending_results"));
+  assert.equal(s.stop_reason, "user");
+  assert.equal(s.limit_reached, false, "a user stop is not a cap");
+});
+

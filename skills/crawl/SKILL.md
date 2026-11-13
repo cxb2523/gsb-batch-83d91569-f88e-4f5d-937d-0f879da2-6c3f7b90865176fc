@@ -106,9 +106,29 @@ zenrows crawl create <url> --depth 1 --webhook https://example.com/hooks/zenrows
 ```
 zenrows crawl get <id>                       # status, coverage, stop_reason / error, one page of results
 zenrows crawl get <id> --cursor <c> --json   # the next page; keep polling with next_cursor
+zenrows crawl summary <id> [--timeout 600]   # wait, read every result, and print a verifiable wrap-up
+zenrows crawl summary <id> --stop-when-running  # also stop it if the wait runs out
 zenrows crawl list                           # your crawls, newest first (--cursor, --limit)
 zenrows crawl stop <id>                      # stop it; kept URLs stay readable
 ```
+
+`zenrows crawl summary <id>` is the command to end a run with when you need to
+know what you got and why it stopped. It waits for the end (or `--timeout`
+seconds, default 600), reads every result page, and prints one structure:
+`status`, `stop_reason`, `error.code` / `error.detail`, `result_count`,
+`coverage`, `complete`, `partial`, `incomplete_reasons`, and `next_command`.
+Read it before reporting a crawl's results:
+
+- `complete: true` means the crawl ended and every page of its results was read.
+  Anything else is partial and names its reason in `incomplete_reasons`:
+  `wait_timeout` (the crawl is still `running`; run `next_command`),
+  `crawl_busy` (the stop was refused, so it still runs; its API error is under
+  `stop.error`), `empty_page` (a running crawl's paging hit an empty page), or
+  `pending_results` (an ended crawl whose `next_cursor` still points at more).
+- `limit_reached: true` means `stop_reason` is `max_items` or `max_pages`: the
+  crawl hit a cap, it did not fail.
+- `failed`, and `stopped` on credits, exit 1 and keep the API's `error.code`
+  and `error.detail`; nothing is swallowed.
 
 A crawl ends `completed` (nothing left, or a cap hit: `stop_reason`
 `max_items` / `max_pages`), `stopped` or `failed` (`error.code` and
@@ -127,7 +147,9 @@ could use.
 
 With `--json`, `create`, `get`, `wait` and `stop` print
 `{ok, crawl_id, status, crawl}`; read `coverage`, `stop_reason` and `error`
-under `crawl`. `get` adds `results` and `next_cursor`. `download` prints
+under `crawl`. `get` adds `results` and `next_cursor`. `summary` prints the
+wrap-up fields above (all snake_case), with the crawl under `crawl` and a
+refused stop's error under `stop.error`. `download` prints
 `status: null` when the API sends no status.
 
 ## Limits

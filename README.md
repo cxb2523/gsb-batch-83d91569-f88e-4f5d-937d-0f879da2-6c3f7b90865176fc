@@ -284,6 +284,8 @@ zenrows crawl content <crawl-id> <content-id>           # one page's HTML
 zenrows crawl download <crawl-id>                       # NDJSON export (URLs + HTML) → <crawl-id>.jsonl
 zenrows crawl get <crawl-id>                            # status, coverage, stop reason, one page of results
 zenrows crawl wait <crawl-id>                           # wait for the end
+zenrows crawl summary <crawl-id>                        # wait, read every result, print a verifiable wrap-up
+zenrows crawl summary <crawl-id> --stop-when-running    # also stop it if the wait runs out
 zenrows crawl list                                      # your crawls, newest first
 zenrows crawl stop <crawl-id>                           # stop a running crawl
 ```
@@ -303,10 +305,24 @@ page (`--limit` is the page size); on a running crawl it returns the URLs kept
 so far, with `partial: true`. `download` reports the crawl's `status` (`null`
 when the API sends none), and `partial: true` while it runs.
 
+`summary` is the command to end a run with: it waits for the end (or
+`--timeout` seconds, default 600), reads every result page, and prints one
+wrap-up with `status`, `stop_reason`, `error.code` / `error.detail`,
+`result_count`, `coverage`, `complete` / `partial`, `incomplete_reasons` and
+`next_command`. `complete: true` only when the crawl ended and every page was
+read. Otherwise `incomplete_reasons` names why: `wait_timeout` (still `running`;
+run `next_command`), `crawl_busy` (a stop with `--stop-when-running` was refused,
+so it still runs; its API error is under `stop.error`), `empty_page` (a running
+crawl's paging hit an empty page), or `pending_results` (an ended crawl whose
+`next_cursor` still points at more). `limit_reached: true` means `stop_reason`
+was `max_items` or `max_pages`: a cap, not a failure. A `failed` crawl, or one
+stopped on credits, exits 1 and keeps the API's error code and detail.
+
 With `--json`, `create`, `get`, `wait` and `stop` print
 `{ok, crawl_id, status, crawl}`. The crawl object (with `coverage`,
 `stop_reason` and `error`) is under `crawl`. `get` adds `results` and
-`next_cursor`. All keys are snake_case.
+`next_cursor`. `summary` prints the wrap-up fields above, all snake_case, with
+the crawl under `crawl`. Unknown API fields pass through untouched.
 
 `wait`, and `create --follow`, poll until the crawl ends or `--timeout` seconds
 run out (default 600). When the time runs out, the command exits 0 and prints

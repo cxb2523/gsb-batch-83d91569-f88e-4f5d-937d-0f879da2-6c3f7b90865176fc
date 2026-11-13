@@ -71,6 +71,7 @@ and signal checks.
 | 9 | Content | by content id and by `content_url`: the same HTML |
 | 10 | Download | a status, and one line per result with `url`, `content_status`, `content` |
 | 11 | Stop | running → `stopped`, `stop_reason: user`; ended → answers as it ended |
+| 11b | Summary | waits, reads every result, and prints a wrap-up: `status`, `stop_reason`, `error`, `result_count`, `coverage`, `complete` / `partial` (with `incomplete_reasons`), and `next_command` (CLI: `zenrows crawl summary <id>`) |
 | 12 | Not found | 404 `crawl_not_found` (MCP, CLI: `CRAWL_NOT_FOUND` with `crawl_id` and `server_code`) |
 | 13 | Invalid input | `depth` 0 → 422 `invalid_parameter` (MCP, CLI: `CRAWL_INVALID_REQUEST`) |
 | 14 | Gated option | `output_format` json → 422 `invalid_parameter`; if it is accepted, the key is in a beta segment, not a bug |

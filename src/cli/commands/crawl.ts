@@ -23,10 +23,12 @@ import {
   listAllResults,
   listCrawls,
   stopCrawl,
+  summarizeCrawl,
   waitForCrawl,
   type Crawl,
   type CrawlResult,
   type CrawlStop,
+  type CrawlSummary,
   type CreateCrawlParams,
   type CreateCrawlWebhook,
   type CrawlWebhookEvent,
@@ -48,7 +50,7 @@ export const crawl: Command = {
   name: "crawl",
   summary: "Crawl a site from one start URL and collect the URLs behind it (new).",
   usage:
-    "zenrows crawl <create <url> [--depth N]|get <id>|list|results <id>|content <id> <content_id>|download <id>|stop <id>|wait <id>>",
+    "zenrows crawl <create <url> [--depth N]|get <id>|list|results <id>|summary <id> [--timeout s]|content <id> <content_id>|download <id>|stop <id>|wait <id>>",
   help: [
     "Crawl is new. Cloud (needs a key with Crawl access):",
     "  create <url> [flags]              start a crawl from one URL (returns at once)",
@@ -90,10 +92,14 @@ export const crawl: Command = {
     "  stop <id>                         stop a running crawl (an ended crawl answers as it ended)",
     "  wait <id> [--timeout <s>]         poll until the crawl ends or s seconds (default 600) run out;",
     "                                    a crawl still running then is printed, not stopped",
+    "  summary <id> [--timeout <s>]      wait for the end, read every result, and print a wrap-up:",
+    "                                    status, stop_reason, error code/detail, result count,",
+    "                                    complete/partial (and why), coverage and the next command",
+    "    --stop-when-running             stop the crawl if the wait runs out with it still running",
     "  --json                            print structured output: create/get/wait/stop print",
     "                                    {ok, crawl_id, status, crawl}; get adds results and next_cursor;",
-    "                                    a wait that runs out, or a completed crawl with patterns",
-    "                                    and 0 results, adds note",
+    "                                    summary adds the wrap-up fields; a wait that runs out, or a",
+    "                                    completed crawl with patterns and 0 results, adds note",
   ].join("\n"),
   async run(argv: string[], ctx: RunContext): Promise<number> {
     const [sub, ...rest] = argv;
@@ -107,6 +113,8 @@ export const crawl: Command = {
           return await listCmd(rest, ctx);
         case "results":
           return await resultsCmd(rest, ctx);
+        case "summary":
+          return await summaryCmd(rest, ctx);
         case "content":
           return await contentCmd(rest, ctx);
         case "download":
@@ -121,7 +129,7 @@ export const crawl: Command = {
             message: `Unknown crawl subcommand: ${sub ?? "(none)"}`,
             likely_cause: "Subcommand not recognized.",
             next_action:
-              "Use create <url> [--depth N] | get <id> | list | results <id> | content <id> <content_id> | download <id> | stop <id> | wait <id>.",
+              "Use create <url> [--depth N] | get <id> | list | results <id> | summary <id> | content <id> <content_id> | download <id> | stop <id> | wait <id>.",
             suggested_commands: ["zenrows crawl --help"],
           });
       }
@@ -304,6 +312,87 @@ function waitHeadline(c: Crawl): string {
 function waitNote(c: Crawl): string | undefined {
   if (isTerminal(c.status)) return undefined;
   return `The wait ran out and the crawl is still running. Run zenrows crawl wait ${c.crawl_id}.`;
+}
+
+async function summaryCmd(rest: string[], ctx: RunContext): Promise<number> {
+  const { values, positionals } = parse(rest, {
+    timeout: { type: "string" },
+    "stop-when-running": { type: "boolean" },
+    json: { type: "boolean" },
+  });
+  const json = ctx.json || values.json === true;
+  const id = requireId(positionals[0], "summary");
+  const timeoutMs = timeoutFlag(values.timeout);
+  const stopWhenRunning = values["stop-when-running"] === true;
+  assertUsable("crawl");
+  const apiKey = requireApiKey();
+  const summary = await summarizeCrawl(id, { apiKey, timeoutMs, stopWhenRunning });
+  return printSummary(summary, json);
+}
+
+/**
+ * Print the wrap-up of `crawl summary`. Structured under `--json`; human output
+ * names the outcome, the count, every reason the read is partial, and the next
+ * command. Returns 1 when the crawl failed or stopped on credits (as `get`
+ * does), else 0: a cap hit, a partial read and a crawl still running are
+ * outcomes, not errors.
+ */
+function printSummary(s: CrawlSummary, json: boolean): number {
+  const err = summaryFailure(s);
+  const stop_reason = s.stop_reason ? ` (${s.stop_reason})` : "";
+  const state = s.complete ? "complete" : "partial";
+  const coverage = `${s.coverage.items_found} item(s) found · ${s.coverage.pages_fetched} page(s) fetched · ${s.coverage.pages_failed} failed`;
+  if (json) {
+    log.out(
+      JSON.stringify(
+        {
+          ok: !err,
+          crawl_id: s.crawl_id,
+          status: s.status,
+          finished: s.finished,
+          complete: s.complete,
+          partial: s.partial,
+          ...(s.incomplete_reason ? { incomplete_reason: s.incomplete_reason } : {}),
+          incomplete_reasons: s.incomplete_reasons,
+          ...(s.stop_reason ? { stop_reason: s.stop_reason } : {}),
+          limit_reached: s.limit_reached,
+          ...(s.error ? { error: s.error } : {}),
+          ...(s.stop ? { stop: s.stop } : {}),
+          result_count: s.result_count,
+          coverage: s.coverage,
+          ...(s.note ? { note: s.note } : {}),
+          next_command: s.next_command,
+          crawl: s.crawl,
+          ...(err ? { failure: err.toJSON() } : {}),
+        },
+        null,
+        2,
+      ),
+    );
+    return err ? 1 : 0;
+  }
+  const line = `Crawl ${s.crawl_id}${stop_reason} · status: ${s.status} · results: ${s.result_count} (${state})`;
+  if (err) log.error(line);
+  else if (s.partial) log.warn(line);
+  else log.success(line);
+  log.info(`  ${coverage}`);
+  if (s.limit_reached) log.info(`  stopped at its ${s.stop_reason} cap: this is a limit, not a failure`);
+  if (s.error) log.info(`  error: ${s.error.code}${s.error.detail ? ` — ${s.error.detail}` : ""}`);
+  // The cap line above already says the crawl hit its limit; do not repeat it.
+  if (s.note && !(s.limit_reached && s.note === capNote(s))) log.warn(`  ${s.note}`);
+  log.dim(`  next: ${s.next_command}`);
+  if (err) printError(err, false);
+  return err ? 1 : 0;
+}
+
+/** The error of a summary whose crawl failed or stopped on credits, else null (same rules as `get`). */
+function summaryFailure(s: CrawlSummary): ToolkitError | null {
+  return crawlFailure({ crawl_id: s.crawl_id, status: s.status, ...(s.stop_reason ? { stop_reason: s.stop_reason } : {}), ...(s.error ? { error: s.error } : {}) });
+}
+
+/** The cap note the summary carries, so human output prints it once. */
+function capNote(s: CrawlSummary): string {
+  return `The crawl hit its ${s.stop_reason} limit: it ended with everything it kept. This is a cap, not a failure.`;
 }
 
 async function resultsCmd(rest: string[], ctx: RunContext): Promise<number> {

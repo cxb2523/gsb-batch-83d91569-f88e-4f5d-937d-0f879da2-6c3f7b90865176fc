@@ -82,6 +82,8 @@ export interface ToolkitErrorShape {
   suggested_commands?: string[];
   /** The API's own `code`, when the error came from an API answer that had one. */
   server_code?: string;
+  /** The API's own `detail` (RFC 9457) when it sent one, uncomposed. */
+  server_detail?: string;
   /** The crawl the error is about, once it exists. */
   crawl_id?: string;
   /** The Batch job the error is about, once it exists. */
@@ -103,6 +105,7 @@ export class ToolkitError extends Error {
   readonly next_action: string;
   readonly suggested_commands: string[];
   readonly server_code?: string;
+  readonly server_detail?: string;
   readonly crawl_id?: string;
   readonly job_id?: string;
   readonly idempotency_key?: string;
@@ -117,6 +120,7 @@ export class ToolkitError extends Error {
     this.next_action = shape.next_action;
     this.suggested_commands = shape.suggested_commands ?? [];
     this.server_code = shape.server_code;
+    this.server_detail = shape.server_detail;
     this.crawl_id = shape.crawl_id;
     this.job_id = shape.job_id;
     this.idempotency_key = shape.idempotency_key;
@@ -132,6 +136,7 @@ export class ToolkitError extends Error {
       next_action: this.next_action,
       suggested_commands: this.suggested_commands,
       ...(this.server_code ? { server_code: this.server_code } : {}),
+      ...(this.server_detail ? { server_detail: this.server_detail } : {}),
       ...(this.crawl_id ? { crawl_id: this.crawl_id } : {}),
       ...(this.job_id ? { job_id: this.job_id } : {}),
       ...(this.idempotency_key ? { idempotency_key: this.idempotency_key } : {}),

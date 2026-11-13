@@ -778,6 +778,134 @@ test("crawl wait that runs out exits 0 and prints the running crawl with the res
   );
 });
 
+test("crawl summary prints the wrap-up: complete on a completed crawl, and the cap as a limit", async () => {
+  const pages: Record<string, unknown> = {
+    "": {
+      ...crawlBody,
+      status: "completed",
+      stop_reason: "max_items",
+      coverage: { pages_fetched: 2, pages_failed: 0, items_found: 2 },
+      results: [{ url: "https://example.com/product/1" }],
+      next_cursor: "p2",
+    },
+    p2: { ...crawlBody, status: "completed", stop_reason: "max_items", coverage: { pages_fetched: 2, pages_failed: 0, items_found: 2 }, results: [{ url: "https://example.com/product/2" }], next_cursor: null },
+  };
+  await withCrawlWorkspace(
+    (url) => json(pages[url.searchParams.get("cursor") ?? ""]),
+    async () => {
+      const { code, out } = await run(["summary", "c_1"]);
+      assert.equal(code, 0);
+      assert.equal(out.ok, true);
+      assert.equal(out.status, "completed");
+      assert.equal(out.complete, true);
+      assert.equal(out.partial, false);
+      assert.deepEqual(out.incomplete_reasons, []);
+      assert.equal(out.result_count, 2);
+      assert.equal(out.stop_reason, "max_items");
+      assert.equal(out.limit_reached, true);
+      assert.equal(out.next_command, "zenrows crawl results c_1");
+    },
+  );
+});
+
+test("crawl summary on a wait that runs out prints running, partial, and the wait command; exit 0", async () => {
+  await withCrawlWorkspace(
+    (url) =>
+      json({
+        ...crawlBody,
+        status: "running",
+        results: url.searchParams.get("cursor") === "p2" ? [] : [{ url: "https://example.com/product/1" }],
+        next_cursor: "p2",
+      }),
+    async () => {
+      const { code, out } = await run(["summary", "c_1", "--timeout", "0.001"]);
+      assert.equal(code, 0, "a crawl still running is an outcome, not an error");
+      assert.equal(out.status, "running");
+      assert.equal(out.finished, false);
+      assert.equal(out.complete, false);
+      assert.equal(out.partial, true);
+      assert.equal(out.incomplete_reason, "wait_timeout");
+      assert.equal(out.next_command, "zenrows crawl wait c_1");
+      assert.match(out.note, /still running/);
+    },
+  );
+});
+
+test("crawl summary with --stop-when-running keeps a refused stop's crawl_busy error and says to stop again", async () => {
+  await withCrawlWorkspace(
+    (url, init) =>
+      init?.method === "POST"
+        ? json({ code: "crawl_busy", title: "Crawl busy", detail: "The stop could not be saved yet.", status: 503 }, 503, {
+            "content-type": "application/problem+json",
+            "retry-after": "1",
+          })
+        : json({ ...crawlBody, status: "running", results: [{ url: "https://example.com/product/1" }], next_cursor: "p2" }),
+    async () => {
+      const { code, out } = await run(["summary", "c_1", "--timeout", "0.001", "--stop-when-running"]);
+      assert.equal(code, 0);
+      assert.equal(out.partial, true);
+      assert.equal(out.complete, false);
+      assert.equal(out.stop.requested, true);
+      assert.equal(out.stop.saved, false);
+      assert.equal(out.stop.error.code, "crawl_busy", "the API's code is not swallowed");
+      assert.equal(out.next_command, "zenrows crawl stop c_1");
+      assert.match(out.note, /stop was not saved/);
+    },
+  );
+});
+
+test("crawl summary on a failed crawl exits 1 and keeps the API's error code", async () => {
+  await withCrawlWorkspace(
+    () => json({ ...crawlBody, status: "failed", error: { code: "seed_unreachable", detail: "The start URL returned an empty page." }, results: [], next_cursor: null }),
+    async () => {
+      const { code, out } = await run(["summary", "c_1"]);
+      assert.equal(code, 1);
+      assert.equal(out.ok, false);
+      assert.equal(out.status, "failed");
+      assert.equal(out.error.code, "seed_unreachable");
+      assert.equal(out.error.detail, "The start URL returned an empty page.");
+      assert.equal(out.failure.code, "CRAWL_FAILED");
+      assert.equal(out.failure.server_code, "seed_unreachable");
+      assert.equal(out.next_command, "zenrows crawl get c_1");
+    },
+  );
+});
+
+test("crawl summary on a crawl stopped on credits exits 1 with CRAWL_INSUFFICIENT_CREDITS, keeping the API code", async () => {
+  await withCrawlWorkspace(
+    () => json({ ...crawlBody, status: "stopped", error: { code: "insufficient_credits", detail: "The account ran out of credits." }, results: [], next_cursor: null }),
+    async () => {
+      const { code, out } = await run(["summary", "c_1"]);
+      assert.equal(code, 1);
+      assert.equal(out.status, "stopped");
+      assert.equal(out.error.code, "insufficient_credits", "the API's code is kept");
+      assert.equal(out.failure.code, "CRAWL_INSUFFICIENT_CREDITS");
+      assert.equal(out.failure.server_code, "insufficient_credits");
+    },
+  );
+});
+
+test("crawl summary human output names the outcome, count, reasons and next command", async () => {
+  await withCrawlWorkspace(
+    (url) =>
+      json({
+        ...crawlBody,
+        status: "running",
+        results: url.searchParams.get("cursor") === "p2" ? [] : [{ url: "https://example.com/product/1" }],
+        next_cursor: "p2",
+      }),
+    async () => {
+      const err = await captureErr(async () => {
+        const code = await crawl.run(["summary", "c_1", "--timeout", "0.001"], { json: false, yes: false });
+        assert.equal(code, 0);
+      });
+      assert.match(err, /results: 1 \(partial\)/);
+      assert.match(err, /still running/);
+      assert.match(err, /next: zenrows crawl wait c_1/);
+    },
+  );
+});
+
 test("unknown crawl subcommand is INVALID_USAGE", async () => {
   const { code, out } = await run(["discover"]);
   assert.equal(code, 1);

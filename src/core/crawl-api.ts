@@ -348,7 +348,13 @@ function problemToError(
   const throttled = status === 429 || (status === 503 && serverCode === "crawl_busy");
   const seconds = throttled && retryAfter && /^\d+$/.test(retryAfter.trim()) ? Number(retryAfter) : undefined;
   const err = classifyProblem(status, problem, body, request, serverCode, seconds);
-  return new ToolkitError({ ...err.toJSON(), server_code: serverCode, crawl_id: crawlId, retry_after: seconds });
+  return new ToolkitError({
+    ...err.toJSON(),
+    server_code: serverCode,
+    server_detail: problem.detail || problem.title || undefined,
+    crawl_id: crawlId,
+    retry_after: seconds,
+  });
 }
 
 function classifyProblem(
@@ -581,11 +587,13 @@ export function contentIdOf(result: CrawlResult): string | undefined {
  * Read every kept result, following `next_cursor`. While a crawl runs its
  * `next_cursor` is never null, so the read also ends at the first empty page;
  * `partial` is true when the crawl was still running or a cursor remains.
+ * `empty_page` says the read ended because a page had no rows (`partial` false
+ * then means the crawl itself ended), never because the cursor ran out.
  */
 export async function listAllResults(
   id: string,
   opts: CallOpts & { pageSize?: number },
-): Promise<{ crawl: CrawlWithResults; results: CrawlResult[]; partial: boolean }> {
+): Promise<{ crawl: CrawlWithResults; results: CrawlResult[]; partial: boolean; empty_page: boolean }> {
   const results: CrawlResult[] = [];
   let cursor: string | undefined;
   for (;;) {
@@ -595,7 +603,7 @@ export async function listAllResults(
     if (!rows.length || !page.next_cursor || page.next_cursor === cursor) {
       // Every page was read. The API keeps next_cursor set while URLs can still come: on a
       // running crawl, and for up to 10 minutes after a stop, from the pages still in flight.
-      return { crawl: page, results, partial: page.next_cursor != null };
+      return { crawl: page, results, partial: page.next_cursor != null, empty_page: rows.length === 0 };
     }
     cursor = page.next_cursor;
   }
@@ -618,3 +626,237 @@ export async function waitForCrawl(id: string, opts: CallOpts): Promise<CrawlWit
     delay = Math.min(delay * 1.5, 15_000);
   }
 }
+
+/**
+ * A crawl error as the API reported it: `code` and `detail`, plus any field the
+ * API adds later (passed through, not rejected).
+ */
+export interface CrawlErrorDetail {
+  code: string;
+  detail: string;
+  [k: string]: unknown;
+}
+
+/**
+ * Every reason a summary's results are not the crawl's full result set. More
+ * than one can apply: a wait can time out and its results read can then end on
+ * an empty page.
+ */
+export type CrawlIncompleteReason =
+  /** The wait ran out with the crawl still `running`; more results can still come. */
+  | "wait_timeout"
+  /** A stop answered `crawl_busy`: it was not saved and the crawl still runs. */
+  | "crawl_busy"
+  /** A page came back empty while the API still pointed at results it could add. */
+  | "empty_page"
+  /** The API still points at results this read did not reach (`next_cursor` remains). */
+  | "pending_results";
+
+/** The stop a summary attempted when the wait ran out (`stopWhenRunning`). */
+export interface CrawlStopOutcome {
+  requested: true;
+  /** False when the API answered `crawl_busy`: the stop was not saved and the crawl still runs. */
+  saved: boolean;
+  /** The stop's status when it was saved. */
+  status?: string;
+  /** The API's error, `crawl_busy` included, never swallowed. */
+  error?: CrawlErrorDetail;
+}
+
+/**
+ * The structured wrap-up of one crawl: how it ended, whether every result was
+ * read, and the command to run next. `complete` is true only for a crawl that
+ * ended with every page of results read; a `running` crawl, a stop that the API
+ * answered `crawl_busy`, and a read that ended on an empty page are all
+ * reported as incomplete, never as a full result set.
+ */
+export interface CrawlSummary {
+  crawl_id: string;
+  /** The crawl's status as last read: terminal, or `running` when the wait ran out. */
+  status: string;
+  /** True when the crawl reached a terminal status (`completed`, `stopped`, `failed`). */
+  finished: boolean;
+  /** True only when the crawl finished and every page of its results was read. */
+  complete: boolean;
+  /** True when the results read are, or may be, a subset of the crawl's results. */
+  partial: boolean;
+  /** The main reason the read is incomplete (the first of `incomplete_reasons`); absent when `complete`. */
+  incomplete_reason?: CrawlIncompleteReason;
+  /** Every reason the read is incomplete; empty exactly when `complete`. */
+  incomplete_reasons: CrawlIncompleteReason[];
+  /** max_items | max_pages | user, or any value the API adds later. */
+  stop_reason?: string;
+  /** True when `stop_reason` is `max_items` or `max_pages`: the crawl hit its cap, it did not fail. */
+  limit_reached: boolean;
+  /** The crawl's own error, verbatim (`failed`, or `stopped` on credits); unknown fields pass through. */
+  error?: CrawlErrorDetail;
+  /** The stop this summary attempted; set only with `stopWhenRunning` and a still-running wait. */
+  stop?: CrawlStopOutcome;
+  result_count: number;
+  coverage: CrawlCoverage;
+  /** A one-line reading of the outcome, in human words; absent when the crawl completed fully. */
+  note?: string;
+  /** The command to run next. */
+  next_command: string;
+  /** The crawl as the API last returned it (without the result page); unknown fields pass through. */
+  crawl: Crawl;
+}
+
+/** Options for `summarizeCrawl`: the call's auth/transport plus the wait and read knobs. */
+export interface CrawlSummaryParams extends CallOpts {
+  /** Page size of each results read (the API's default when unset). */
+  pageSize?: number;
+  /** Stop the crawl when the wait runs out with it still `running`. Default: leave it running. */
+  stopWhenRunning?: boolean;
+}
+
+/**
+ * Wait for a crawl to end (or the timeout), stop it when asked, then read every
+ * result, and describe the outcome in one structure: the final status,
+ * `stop_reason`, the API's `error.code` / `error.detail`, the result count, the
+ * `coverage`, whether the read is `complete`, and the command to run next.
+ *
+ * Incomplete reads are never reported as complete. They name their reason:
+ * a wait that timed out (`wait_timeout`), a stop the API refused with
+ * `crawl_busy` (`crawl_busy`, with the API's error kept), and a read that ended
+ * on an empty page while more could come (`empty_page`). A crawl that stopped
+ * on `max_items` / `max_pages` is a cap hit, reported with `limit_reached`.
+ */
+export async function summarizeCrawl(id: string, opts: CrawlSummaryParams): Promise<CrawlSummary> {
+  const transport: CallOpts = { apiKey: opts.apiKey, fetchImpl: opts.fetchImpl, sleepImpl: opts.sleepImpl };
+  const waited = await waitForCrawl(id, opts);
+
+  let stop: CrawlStopOutcome | undefined;
+  let stopBusy: ToolkitError | undefined;
+  if (!isTerminal(waited.status) && opts.stopWhenRunning) {
+    try {
+      const stopped = await stopCrawl(id, transport);
+      stop = { requested: true, saved: true, status: stopped.status };
+    } catch (err) {
+      // A refused stop is part of the outcome, not a failure of the summary: the
+      // crawl still runs, so nothing read after it can be called complete.
+      if (err instanceof ToolkitError && err.code === "CRAWL_BUSY") {
+        stopBusy = err;
+        stop = { requested: true, saved: false, error: busyError(err) };
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  // `listAllResults` reads each page through `getCrawl`, so its closing page is
+  // the freshest view of the crawl: its status, stop_reason, error and coverage.
+  const read = await listAllResults(id, { ...transport, pageSize: opts.pageSize });
+  const page = read.crawl;
+  // A saved stop answers at once; a read that still shows `running` right after
+  // it is the same crawl the stop ended, so the stop's terminal status wins.
+  let status = page.status ?? waited.status;
+  if (stop?.saved && stop.status && !isTerminal(status) && isTerminal(stop.status)) status = stop.status;
+  const running = !isTerminal(status);
+  // The wait is what makes a read trustworthy: one that ran out (or was refused
+  // a stop) means the crawl could still add results, so nothing read is complete.
+  // A stop that ends the crawl early does not make an ended wait's read complete.
+  const timedOut = !isTerminal(waited.status);
+  const partial = read.partial || running || timedOut || stopBusy !== undefined;
+
+  // One entry per way the read can fall short, so "not complete" is never reported
+  // without a reason. `wait_timeout` and `crawl_busy` both mean the crawl still
+  // runs; `empty_page` is a running crawl whose paging ended on a page with no
+  // rows; `pending_results` is an ended crawl whose `next_cursor` still points at
+  // more (pages in flight after a stop, for up to 10 minutes).
+  const incomplete_reasons: CrawlIncompleteReason[] = [];
+  if (stopBusy) incomplete_reasons.push("crawl_busy");
+  if (partial && timedOut) incomplete_reasons.push("wait_timeout");
+  if (running && read.empty_page) incomplete_reasons.push("empty_page");
+  if (!running && !stopBusy && read.partial) incomplete_reasons.push("pending_results");
+  // A partial read always names a reason; this is the catch-all for a status or
+  // cursor shape the cases above do not cover.
+  if (partial && !incomplete_reasons.length) incomplete_reasons.push("pending_results");
+
+  const stop_reason = (page.stop_reason ?? waited.stop_reason) || undefined;
+  const limit_reached = stop_reason === "max_items" || stop_reason === "max_pages";
+  // The crawl's own error, copied verbatim. A stop the API refused keeps its
+  // error under `stop.error`, so `error` always answers "how did the crawl end".
+  const error = crawlErrorOf(page);
+  const crawl = { ...page } as Record<string, unknown>;
+  // The read's last page is not part of the crawl metadata.
+  delete crawl.results;
+  delete crawl.next_cursor;
+
+  const next_command = stopBusy
+    ? `zenrows crawl stop ${id}`
+    : running
+      ? `zenrows crawl wait ${id}`
+      : status === "failed"
+        ? `zenrows crawl get ${id}`
+        : `zenrows crawl results ${id}`;
+
+  const summary: CrawlSummary = {
+    crawl_id: page.crawl_id ?? id,
+    status,
+    finished: !running,
+    complete: !partial,
+    partial,
+    ...(incomplete_reasons.length ? { incomplete_reason: incomplete_reasons[0] } : {}),
+    incomplete_reasons,
+    ...(stop_reason ? { stop_reason } : {}),
+    limit_reached,
+    ...(error ? { error } : {}),
+    ...(stop ? { stop } : {}),
+    result_count: read.results.length,
+    coverage: page.coverage ?? { pages_fetched: 0, pages_failed: 0, items_found: 0 },
+    next_command,
+    crawl: crawl as Crawl,
+  };
+  const note = summaryNote(summary);
+  if (note) summary.note = note;
+  return summary;
+}
+
+/** The crawl's own `error`, copied verbatim so fields the API adds later survive. */
+function crawlErrorOf(c: Crawl): CrawlErrorDetail | undefined {
+  return c.error ? { ...c.error } : undefined;
+}
+
+/** A refused stop as the summary's error: the API's `crawl_busy` code and detail, never swallowed. */
+function busyError(err: ToolkitError): CrawlErrorDetail {
+  return {
+    code: err.server_code ?? "crawl_busy",
+    detail: err.server_detail ?? err.likely_cause,
+    ...(err.retry_after !== undefined ? { retry_after: err.retry_after } : {}),
+  };
+}
+
+/**
+ * The one-line reading of a summary. Said in this order so the strongest cause
+ * comes first: a refused stop and a crawl still running both mean the results are
+ * partial no matter what `stop_reason` says; then the cap; then the error; then
+ * the stale-results case.
+ */
+function summaryNote(s: CrawlSummary): string | undefined {
+  const id = s.crawl_id;
+  if (s.stop && !s.stop.saved) {
+    return `The stop was not saved (${s.stop.error?.code ?? "crawl_busy"}): the crawl is still running and its results are partial. Retry with zenrows crawl stop ${id}.`;
+  }
+  if (!s.finished) {
+    return `The crawl is still running: these results are partial. Continue with zenrows crawl wait ${id}.`;
+  }
+  if (s.incomplete_reasons.includes("wait_timeout") && s.stop?.saved) {
+    return `The wait ran out and the crawl was stopped: it did not finish on its own, so these results are partial. Start a new crawl for the rest.`;
+  }
+  if (s.limit_reached) {
+    return `The crawl hit its ${s.stop_reason} limit: it ended with everything it kept. This is a cap, not a failure.`;
+  }
+  if (s.error) {
+    const why = `${s.error.code}${s.error.detail ? `: ${s.error.detail}` : ""}`;
+    return s.status === "failed" ? `The crawl failed (${why}).` : `The crawl stopped before it finished (${why}); the pages it fetched stay readable.`;
+  }
+  if (s.partial) {
+    return "The crawl ended, but pages fetched before the end can still add results: read the results again later.";
+  }
+  if (s.status === "completed" && s.result_count === 0) {
+    return "The crawl completed and kept no results.";
+  }
+  return undefined;
+}
+
