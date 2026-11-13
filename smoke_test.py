@@ -564,26 +564,44 @@ def _search_page(n):
     return json.dumps(payload)
 
 
-def _run(answers, pages=3, query=None, landing=None, **extra):
+def _run_in(tmp, answers, pages=3, query=None, landing=None, **extra):
+    """One shared-loop run with its output prefix inside `tmp` — which the
+    caller keeps, so a second run can --resume the first. Returns (rc, meta,
+    rows, ops, manifest, args, opened): the manifest as parsed dict (or
+    None), the args the run saw, and how many times open_ops was called."""
     import page_flow
+    args = types.SimpleNamespace(
+        pages=pages, retries=2, retry_delay=0, delay=0,
+        proxy_block_retries=2, out=os.path.join(tmp, "out"), format="json",
+        allow_empty=False, dump_html=None, url=None, cdp_endpoint=None,
+        concurrency=1)
+    for k, v in extra.items():
+        setattr(args, k, v)
+    ops = _FakeOps(answers, landing)
+    q = query or _q()
+    if q.mode == "ad":
+        args.pages = len(q.ads)
+    opened = []
+
+    def open_ops():
+        opened.append(1)
+        return ops
+
+    rc = page_flow.run_pages(open_ops, lambda o: None,
+                             lambda pages: ([], [], False), args, None, q, 1)
+
+    def load(suffix):
+        path = args.out + suffix
+        return json.load(open(path, encoding="utf-8")) if os.path.exists(path) else None
+
+    return (rc, load(".meta.json"), load(".json"), ops,
+            load(".pages.json"), args, len(opened))
+
+
+def _run(answers, pages=3, query=None, landing=None, **extra):
     with tempfile.TemporaryDirectory() as tmp:
-        args = types.SimpleNamespace(
-            pages=pages, retries=2, retry_delay=0, delay=0,
-            proxy_block_retries=2, out=os.path.join(tmp, "out"), format="json",
-            allow_empty=False, dump_html=None, url=None, cdp_endpoint=None,
-            concurrency=1)
-        for k, v in extra.items():
-            setattr(args, k, v)
-        ops = _FakeOps(answers, landing)
-        q = query or _q()
-        if q.mode == "ad":
-            args.pages = len(q.ads)
-        rc = page_flow.run_pages(lambda: ops, lambda o: None,
-                                 lambda pages: ([], [], False), args, None, q, 1)
-        meta_path = args.out + ".meta.json"
-        meta = json.load(open(meta_path)) if os.path.exists(meta_path) else None
-        rows = (json.load(open(args.out + ".json"))
-                if os.path.exists(args.out + ".json") else None)
+        rc, meta, rows, ops, _man, _args, _opened = _run_in(
+            tmp, answers, pages=pages, query=query, landing=landing, **extra)
     return rc, meta, rows, ops
 
 
@@ -656,6 +674,287 @@ def check_a_multi_page_run_merges_in_page_order_and_ends_on_data():
     equal("...page 3 is never asked for",
           [f for f in ops.fetches if f[0] == "search"], [("search", 1), ("search", 2)])
     equal("...and no row is written twice", len(rows), 5)
+
+
+# ---------------------------------------------------------------------------
+# The page manifest (<out>.pages.json) and --resume
+# ---------------------------------------------------------------------------
+
+def _manifest_entries(man):
+    return {e["page"]: e for e in (man or {}).get("pages", [])}
+
+
+def check_the_page_manifest_is_written_on_every_exit():
+    """The manifest exists and agrees with the exit code on 0, 6 and 5."""
+    with tempfile.TemporaryDirectory() as tmp:
+        # exit 0: every planned page fetched
+        answers = {("search", n): [(200, _search_page(n))] for n in (1, 2, 3)}
+        rc, meta, rows, ops, man, args, opened = _run_in(tmp, answers, pages=3)
+        equal("a complete run: exit 0", rc, 0)
+        entries = _manifest_entries(man)
+        equal("manifest: one entry per planned page", sorted(entries), [1, 2, 3])
+        check("...all success, each with its row count and no error",
+              all(e["status"] == "success" and e["rows"] == 5 and e["error"] is None
+                  for e in entries.values()), repr(entries))
+        check("...and the rows themselves, so a resume needs nothing else",
+              all(len(e.get("items", [])) == 5 for e in entries.values()))
+        equal("the site's own counts head the manifest",
+              (man["total_results"], man["pages_available"]), (1844, 40))
+        equal("...as does the currency the run read", man["currency"], "BRL")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # exit 6: page 2 unreadable, page 3 never attempted
+        moved = _with_renamed("search_gol_p2", "UniqueId")
+        answers = {("search", 1): [(200, _search_page(1))], ("search", 2): [(200, moved)]}
+        rc, meta, rows, ops, man, args, opened = _run_in(tmp, answers, pages=3)
+        equal("a partial run: exit 6", rc, 6)
+        entries = _manifest_entries(man)
+        equal("page 1 success, page 2 failed, page 3 not attempted",
+              [entries[n]["status"] for n in (1, 2, 3)],
+              ["success", "failed", "pending"])
+        check("the failure is named a site error",
+              (entries[2]["error"] or "").startswith("site-error:"),
+              repr(entries[2]["error"]))
+        equal("a failed page holds no rows", entries[2]["rows"], 0)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # exit 5: page 1 refused by the gateway, nothing gathered
+        answers = {("search", 1): [(fx_status("gateway_403"), fx("gateway_403"))]}
+        rc, meta, rows, ops, man, args, opened = _run_in(tmp, answers, pages=3)
+        equal("nothing gathered: exit 5", rc, 5)
+        equal("...no rows written", rows, None)
+        entries = _manifest_entries(man)
+        check("...but the manifest WAS written", bool(entries))
+        equal("page 1 failed, the rest not attempted",
+              [entries[n]["status"] for n in (1, 2, 3)],
+              ["failed", "pending", "pending"])
+        check("the refusal is named", "site-error:" in (entries[1]["error"] or ""),
+              repr(entries[1]["error"]))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # a transport failure is named differently from a refusal
+        answers = {("search", 1): [(200, _search_page(1))],
+                   ("search", 2): [(200, "this is not json")]}
+        rc, meta, rows, ops, man, args, opened = _run_in(tmp, answers, pages=2)
+        entries = _manifest_entries(man)
+        equal("a page that never came back as JSON: failed", entries[2]["status"], "failed")
+        check("...as a transport failure",
+              (entries[2]["error"] or "").startswith("transport:"),
+              repr(entries[2]["error"]))
+
+
+def check_ad_mode_writes_no_page_manifest():
+    q = _ad_q("detail_car_dealer")
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, meta, rows, ops, man, args, opened = _run_in(
+            tmp, {("detail", 1): [(200, fx("detail_car_dealer"))]}, query=q)
+        equal("the ad run itself works", rc, 0)
+        check("...and no page manifest is written for it",
+              not os.path.exists(args.out + ".pages.json"))
+
+
+def check_resume_fetches_only_the_missing_pages():
+    answers1 = {("search", 1): [(200, _search_page(1))],
+                ("search", 2): [(200, "this is not json")]}
+    answers2 = {("search", 2): [(200, _search_page(2))],
+                ("search", 3): [(200, _search_page(3))]}
+    with tempfile.TemporaryDirectory() as tmp:
+        rc1, _m, rows1, ops1, man1, args1, _o = _run_in(tmp, answers1, pages=3)
+        equal("first run: page 2 fails, exit 6", rc1, 6)
+        equal("...page 1's rows are kept", len(rows1), 5)
+        entries = _manifest_entries(man1)
+        equal("the manifest says so", [entries[n]["status"] for n in (1, 2, 3)],
+              ["success", "failed", "pending"])
+
+        rc2, meta2, rows2, ops2, man2, args2, _o = _run_in(
+            tmp, answers2, pages=3, resume=True)
+        equal("the resume completes the run: exit 0", rc2, 0)
+        equal("...and fetched ONLY the pages that were not successful",
+              [f for f in ops2.fetches if f[0] == "search"],
+              [("search", 2), ("search", 3)])
+        equal("the output is the union, in page order",
+              [r["page"] for r in rows2], [1] * 5 + [2] * 5 + [3] * 5)
+        check("no row of a carried page is counted twice",
+              len({r["sku"] for r in rows2}) == len(rows2))
+        check("carried rows keep the currency the first run read",
+              {r["currency"] for r in rows2} == {"BRL"})
+        entries2 = _manifest_entries(man2)
+        check("the manifest now shows every page successful",
+              all(e["status"] == "success" for e in entries2.values()), repr(entries2))
+        equal("...and the sidecar agrees: complete", meta2["status"], "complete")
+
+
+def check_resume_without_a_manifest_is_a_fresh_run():
+    answers = {("search", n): [(200, _search_page(n))] for n in (1, 2, 3)}
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, meta, rows, ops, man, args, opened = _run_in(tmp, answers, pages=3,
+                                                         resume=True)
+        equal("--resume with no manifest: a normal run, exit 0", rc, 0)
+        equal("...every page fetched", [f for f in ops.fetches if f[0] == "search"],
+              [("search", n) for n in (1, 2, 3)])
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "out.pages.json"), "w", encoding="utf-8") as f:
+            f.write("{ this is not json")
+        rc, meta, rows, ops, man, args, opened = _run_in(tmp, answers, pages=3,
+                                                         resume=True)
+        equal("--resume with an unparseable manifest: still a fresh run, no crash",
+              rc, 0)
+        equal("...every page fetched", len([f for f in ops.fetches if f[0] == "search"]), 3)
+    with tempfile.TemporaryDirectory() as tmp:
+        # valid JSON, but not a manifest's shape
+        with open(os.path.join(tmp, "out.pages.json"), "w", encoding="utf-8") as f:
+            json.dump({"pages": "not-a-list"}, f)
+        rc, meta, rows, ops, man, args, opened = _run_in(tmp, answers, pages=3,
+                                                         resume=True)
+        equal("--resume with a misshapen manifest: fresh run, no crash", rc, 0)
+
+
+def check_resume_with_everything_done_opens_no_browser():
+    import page_flow
+    answers = {("search", n): [(200, _search_page(n))] for n in (1, 2, 3)}
+    with tempfile.TemporaryDirectory() as tmp:
+        rc1, _m, rows1, _o, _man, _a, _op = _run_in(tmp, answers, pages=3)
+        equal("the first run completes", rc1, 0)
+        # The second run's fake site serves NOTHING: anything it asks for is
+        # a failure. If it asks for nothing, that is the point.
+        rc2, meta2, rows2, ops2, man2, args2, opened2 = _run_in(
+            tmp, {}, pages=3, resume=True)
+        equal("all pages already done: exit 0", rc2, 0)
+        equal("...the browser was never opened", opened2, 0)
+        equal("...no request was made", ops2.fetches, [])
+        equal("...and the output is the carried rows", len(rows2), 15)
+        # the engines' own early path agrees, before any proxy check
+        q = _q()
+        args2.query = q
+        equal("finish_if_resume_complete finishes the run",
+              page_flow.finish_if_resume_complete(args2, q), 0)
+    with tempfile.TemporaryDirectory() as tmp:
+        rc1, _m, _r, _o, _man, args1, _op = _run_in(tmp, answers, pages=3)
+        os.unlink(args1.out + ".pages.json")  # no manifest: nothing to finish from
+        args1.resume = True
+        equal("...and it stays out of the way without a usable manifest",
+              page_flow.finish_if_resume_complete(args1, _q()), None)
+
+
+def check_resume_still_plans_from_the_sites_own_page_count():
+    """--pages caps a resume too, and the manifest cannot inflate the plan."""
+    answers = {("search", n): [(200, _search_page(n))] for n in (1, 2, 3)}
+    with tempfile.TemporaryDirectory() as tmp:
+        rc1, _m, _r, _o, _man, _a, _op = _run_in(tmp, answers, pages=3)
+        equal("setup run completes 3 pages", rc1, 0)
+        # --pages 2 with pages 1-2 already done: nothing to fetch at all.
+        rc2, _m2, rows2, ops2, man2, _a2, opened2 = _run_in(tmp, {}, pages=2,
+                                                            resume=True)
+        equal("a smaller --pages is honoured: exit 0 without a browser",
+              (rc2, opened2), (0, 0))
+        equal("...and the output is still the union of completed pages",
+              len(rows2), 15)
+    with tempfile.TemporaryDirectory() as tmp:
+        rc1, _m, _r, _o, _man, args1, _op = _run_in(tmp, answers, pages=1)
+        # The manifest records the site's own count (40 pages). A resume
+        # asking for 2 fetches page 2 — and a resume asking for more than
+        # the site has is still capped by pages_to_plan (checked above).
+        more = {("search", 2): [(200, _search_page(2))]}
+        rc2, _m2, rows2, ops2, man2, _a2, _op2 = _run_in(tmp, more, pages=2,
+                                                         resume=True)
+        equal("resume plans from the recorded site count: page 2 fetched",
+              (rc2, [f for f in ops2.fetches if f[0] == "search"]),
+              (0, [("search", 2)]))
+        equal("the manifest's page count is the site's, not the request's",
+              man2["pages_available"], 40)
+
+
+def check_resume_works_through_the_concurrent_path():
+    """--resume with workers: only the missing pages reach the queue."""
+    import queue as _queue
+    import page_flow
+    with tempfile.TemporaryDirectory() as tmp:
+        answers1 = {("search", 1): [(200, _search_page(1))],
+                    ("search", 2): [(200, "this is not json")]}
+        rc1, _m, _r, _o, _man, _a, _op = _run_in(tmp, answers1, pages=3)
+        equal("setup run: page 2 failed, exit 6", rc1, 6)
+        answers2 = {("search", 2): [(200, _search_page(2))],
+                    ("search", 3): [(200, _search_page(3))]}
+        args = types.SimpleNamespace(
+            pages=3, retries=2, retry_delay=0, delay=0, proxy_block_retries=2,
+            out=os.path.join(tmp, "out"), format="json", allow_empty=False,
+            dump_html=None, url=None, cdp_endpoint=None, concurrency=2,
+            resume=True)
+        asked = []
+
+        def run_concurrently(page_nums):
+            asked.extend(page_nums)
+            work = _queue.Queue()
+            for n in page_nums:
+                work.put(n)
+            results, rlock, done = [], threading.Lock(), threading.Event()
+            t = threading.Thread(target=page_flow.worker_loop,
+                                 args=(_FakeOps(answers2), args, _q(), work,
+                                       results, rlock, done, "w1"))
+            t.start()
+            t.join()
+            left = []
+            while not work.empty():
+                left.append(work.get_nowait())
+            return results, sorted(left), done.is_set()
+
+        rc = page_flow.run_pages(lambda: _FakeOps(answers2), lambda o: None,
+                                 run_concurrently, args, None, _q(), 2)
+        equal("a concurrent resume completes: exit 0", rc, 0)
+        equal("...and the workers were asked ONLY for the missing pages",
+              asked, [2, 3])
+        rows = json.load(open(args.out + ".json", encoding="utf-8"))
+        equal("...the union, in page order",
+              [r["page"] for r in rows], [1] * 5 + [2] * 5 + [3] * 5)
+
+
+def check_a_manifest_with_duplicate_pages_last_one_wins():
+    import page_manifest
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "out.pages.json")
+        rows = [{"sku": "a1", "page": 1}, {"sku": "a2", "page": 1}]
+        payload = {"version": 1, "pages_available": 2, "total_results": 4,
+                   "currency": "BRL",
+                   "pages": [
+                       {"page": 1, "status": "failed", "rows": 0,
+                        "error": "refused: cloudfront"},
+                       {"page": 1, "status": "success", "rows": 2,
+                        "error": None, "items": rows},
+                       {"page": 2, "status": "pending", "rows": 0, "error": None}]}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        man = page_manifest.load(path)
+        equal("the later record of a duplicated page is the one kept",
+              man.entries[1]["status"], "success")
+        equal("...with its rows", len(man.entries[1]["items"]), 2)
+        # and the reverse order: a failure recorded LAST is what resume sees
+        payload["pages"] = list(reversed(payload["pages"]))
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        man = page_manifest.load(path)
+        equal("a failure recorded last wins too", man.entries[1]["status"], "failed")
+        # a success entry that holds no rows is not believed: skipping the
+        # page would silently drop its rows from the resumed output
+        payload["pages"] = [{"page": 1, "status": "success", "rows": 2,
+                             "error": None}]
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        equal("a success without items is not believed",
+              page_manifest.load(path).entries[1]["status"], "failed")
+    with tempfile.TemporaryDirectory() as tmp:
+        # a duplicated success entry must not double the page's rows
+        answers = {("search", 1): [(200, _search_page(1))]}
+        rc1, _m, _r, _o, _man, args1, _op = _run_in(tmp, answers, pages=1)
+        equal("setup run completes page 1", rc1, 0)
+        with open(args1.out + ".pages.json", encoding="utf-8") as f:
+            payload = json.load(f)
+        payload["pages"].append(dict(payload["pages"][0]))  # page 1 twice
+        with open(args1.out + ".pages.json", "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        rc2, _m2, rows2, ops2, _man2, _a2, opened2 = _run_in(tmp, {}, pages=1,
+                                                             resume=True)
+        equal("a duplicated success: still no refetch, exit 0", (rc2, opened2), (0, 0))
+        equal("...and the page's rows appear once", len(rows2), 5)
 
 
 def check_ad_mode_end_to_end():
@@ -1021,6 +1320,7 @@ CONTRACT_FLAGS = {
     "--twocaptcha-key", "--captcha-api", "--solve-captcha", "--min-score",
     "--cdp-endpoint", "--allow-empty", "--dump-html", "--headless", "--headful",
     "--fingerprint", "--fp-country", "--fp-tags", "--locale", "--mode",
+    "--resume",
 }
 SITE_FLAGS = {"--condition", "--state", "--make", "--model", "--sort",
               "--per-page", "--ads-file"}

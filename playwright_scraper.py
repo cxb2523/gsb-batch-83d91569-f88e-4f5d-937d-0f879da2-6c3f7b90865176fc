@@ -383,6 +383,9 @@ def _fetch_pages_concurrently(args, pool, query: Query, page_nums, concurrency: 
 
 
 def scrape(args) -> int:
+    done = page_flow.finish_if_resume_complete(args, args.query)
+    if done is not None:
+        return done
     pool = proxy_pool_from_args(args)
     if pool and args.cdp_endpoint:
         logger.warning("Ignoring --proxy/--proxy-file: with --cdp-endpoint the "
@@ -493,6 +496,12 @@ def parse_args(argv=None):
                         "no captcha on this site is solved (see --solve-captcha).")
     p.add_argument("--allow-empty", action="store_true",
                    help="Write output files even when 0 rows were found.")
+    p.add_argument("--resume", action="store_true",
+                   help="Search mode: read the page manifest <out>.pages.json "
+                        "written beside --out and fetch only the pages it does "
+                        "not mark successful; the output is the union of the "
+                        "manifest's completed pages and what this run fetches. "
+                        "With no usable manifest the run starts fresh.")
     p.add_argument("--fingerprint", action="store_true",
                    help="Apply a browser fingerprint from 2captcha's "
                         "Fingerprint API. Needs --twocaptcha-key. Ignored with "

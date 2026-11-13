@@ -99,6 +99,14 @@ site's own total, whether its cap bit, the ordering, the currency). See
 [`sample_output.json`](sample_output.json) and
 [`sample_output_ad.json`](sample_output_ad.json), cut from real runs.
 
+A search run also writes `webmotors_rows.pages.json`, a per-page manifest:
+which planned pages succeeded, which failed (and why — refused, transport,
+site error) and which were never attempted. Re-run with `--resume` and the
+same `--out` to fetch only the pages that are not already `success`; the
+output is the union of the manifest's completed pages and what the resume
+fetches, in page order. With nothing left to fetch, the run finishes
+without opening a browser.
+
 A search row has 41 columns and an advert row 50; both start with the
 family's `source, scraped_at, url, sku, title, price, currency`.
 

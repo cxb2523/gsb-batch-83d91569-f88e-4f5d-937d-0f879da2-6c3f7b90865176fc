@@ -25,6 +25,25 @@ said so at the top of its release notes.
 
 ### Added
 
+- `page_manifest.py`: every search run now writes `<out>.pages.json` beside
+  the output — one entry per planned page with its status (`success`,
+  `failed`, `pending`), its row count, the failure's kind (`refused:`,
+  `transport:`, `site-error:`) and, for a successful page, the rows
+  themselves. It is written on exit 0, 6 and 5 alike, and the page plan
+  still comes from the page count the site states on page 1.
+- `--resume` (all three engines, search mode): reads `<out>.pages.json` and
+  fetches only the pages it does not mark `success`. The output is the
+  union of the manifest's completed pages and what the run fetches, in page
+  order, with no page's rows counted twice (a page recorded twice in the
+  manifest is resolved last-wins). `--pages`, `--delay`, `--retries` and
+  the rest apply as before; with no usable manifest the run starts fresh
+  (logged, not a crash), and with every planned page already fetched it
+  finishes without opening a browser or touching the proxy.
+- Offline checks: the manifest on exit 0/6/5, a resume fetching only the
+  missing pages, a missing or corrupt manifest falling back to a fresh run,
+  a fully complete manifest opening no browser, `--pages` still capping a
+  resume, and duplicate page entries resolving last-wins.
+
 - `proxy_meter.py`: a per-run proxy traffic meter and budget for all three
   engines, held in the shared page loop (`page_flow`). It is active only
   through a local proxy.

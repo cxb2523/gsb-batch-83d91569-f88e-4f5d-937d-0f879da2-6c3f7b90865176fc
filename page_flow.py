@@ -36,6 +36,7 @@ from typing import Callable, List, Optional
 
 from output_writer import (dedupe_by_key, finish_run, finish_without_fetch,
                            SOURCE_DEFAULT)
+import page_manifest
 import proxy_check
 import proxy_meter
 from product_parser import (MAX_PAGES, ORIGIN_URL, ApiRequest, Query, BASE,
@@ -330,6 +331,105 @@ def query_summary(query: Query) -> dict:
             "ads_sha256": hashlib.sha256("\n".join(skus).encode()).hexdigest()}
 
 
+# ---------------------------------------------------------------------------
+# --resume: the per-page manifest (<out>.pages.json)
+# ---------------------------------------------------------------------------
+#
+# Every search run writes one (page_manifest's docstring says why and what
+# is in it). A run given --resume reads it back: pages it marks `success`
+# become PageOutcomes without being fetched, the run fetches only the rest,
+# and the output is the union of the two, in page order. The page count is
+# still planned from the total the site stated on page 1 — the manifest's
+# own record of it when page 1 itself is not re-fetched — so a manifest can
+# never make a run ask for a page beyond the site's own count.
+
+
+def _outcome_from_entry(e: dict, query: Query) -> "PageOutcome":
+    """A successful manifest entry as a PageOutcome, so carried pages and
+    freshly fetched ones merge through the same code path."""
+    return PageOutcome(page_num=e["page"],
+                       url=request_for(query, e["page"]).label,
+                       products=page_manifest.rows_from_entry(e, query.mode),
+                       state="content")
+
+
+def _resume_outcomes(args, query: Query):
+    """(carried outcomes, manifest) from <out>.pages.json; ([], None) when
+    there is no usable manifest — which means a fresh run, not an error."""
+    manifest = page_manifest.load(page_manifest.manifest_path(args.out))
+    if manifest is None:
+        return [], None
+    carried = [_outcome_from_entry(manifest.entries[n], query)
+               for n in manifest.successful_pages()]
+    first = next((o for o in carried if o.page_num == 1), None)
+    if first is not None:
+        # Page 1's counts head the manifest, so a resume that does not
+        # re-fetch it still plans from the site-stated page count.
+        first.total_available = manifest.total_results
+        first.pages_available = manifest.pages_available
+    if manifest.currency and not query.currency:
+        query.currency = manifest.currency
+    return carried, manifest
+
+
+def _resume_plan_complete(carried: List, args) -> Optional[int]:
+    """The plan when every planned page is already carried, else None."""
+    first = next((o for o in carried if o.page_num == 1), None)
+    if first is None or first.pages_available is None:
+        return None
+    plan = pages_to_plan(args.pages, first.pages_available)
+    done = {o.page_num for o in carried}
+    return plan if all(p in done for p in range(1, plan + 1)) else None
+
+
+def finish_if_resume_complete(args, query: Query) -> Optional[int]:
+    """--resume with every planned page already fetched: finish from the
+    manifest alone. None when the run must proceed normally.
+
+    Called by each engine BEFORE the proxy pre-check and before any browser
+    opens: a run with nothing left to fetch must not be failed by a dead
+    proxy it never needed, and must not spend a browser on nothing.
+    """
+    if query.mode != "search" or not getattr(args, "resume", False):
+        return None
+    carried, manifest = _resume_outcomes(args, query)
+    if manifest is None or not carried:
+        return None
+    plan = _resume_plan_complete(carried, args)
+    if plan is None:
+        return None
+    log.info("--resume: all %d planned page(s) are already fetched in %s — "
+             "finishing without opening a browser.", plan,
+             page_manifest.manifest_path(args.out))
+    return finish(args, query, carried, "completed", False)
+
+
+def _write_page_manifest(args, query: Query, outcomes: List,
+                         total_results: Optional[int],
+                         pages_available: Optional[int]) -> None:
+    """Write <out>.pages.json for a search run: one entry per planned page.
+
+    Called from finish(), which every search run reaches, so the manifest
+    exists on exit 0, 6 and 5 alike and agrees with what the exit code
+    claims: pages with no outcome are `pending` (planned, never attempted),
+    and a page with two outcomes keeps the LAST result.
+    """
+    by_page = {}
+    for oc in outcomes:
+        by_page[oc.page_num] = oc
+    plan = pages_to_plan(args.pages, pages_available)
+    entries = []
+    for n in sorted(set(by_page) | set(range(1, plan + 1))):
+        oc = by_page.get(n)
+        entries.append(page_manifest.entry_from_outcome(oc) if oc is not None
+                       else page_manifest.entry(n, page_manifest.PENDING))
+    page_manifest.write(
+        page_manifest.manifest_path(args.out),
+        query=query_summary(query), currency=query.currency,
+        total_results=total_results, pages_available=pages_available,
+        entries=entries)
+
+
 def finish(args, query: Query, outcomes: List, stop_reason: str,
            blocked: bool) -> int:
     """Merge the pages in PAGE order, write the output, return the exit code.
@@ -385,6 +485,10 @@ def finish(args, query: Query, outcomes: List, stop_reason: str,
         {c for o in outcomes for c in o.field_shortfall})
     extra = proxy_meter.finish(args, extra)
     last_ok = max([o.page_num for o in ok_pages] or [1])
+    if query.mode == "search":
+        # Beside the output, whatever the exit code: which pages this run
+        # holds, which it does not, and why. --resume reads it back.
+        _write_page_manifest(args, query, outcomes, total, available)
     return finish_run(
         rows, args.out, args.format, args.allow_empty,
         blocked=blocked, stop_reason=stop_reason,
@@ -767,6 +871,23 @@ def stop_on_refused_proxy(args, pool) -> Optional[int]:
     refused = proxy_check.gate(pool, BASE + "/")
     if refused is None:
         return None
+    if args.query.mode == "search":
+        # Exit 5 without a single request, and the manifest must still be
+        # there. The run learned nothing about any page, so an existing
+        # manifest's entries are KEPT and only never-recorded requested
+        # pages are added as pending — a dead proxy must not erase the
+        # record a --resume run is about to need.
+        path = page_manifest.manifest_path(args.out)
+        old = page_manifest.load(path)
+        entries = dict(old.entries) if old else {}
+        for n in range(1, args.pages + 1):
+            entries.setdefault(n, page_manifest.entry(n, page_manifest.PENDING))
+        page_manifest.write(
+            path, query=query_summary(args.query),
+            currency=old.currency if old else None,
+            total_results=old.total_results if old else None,
+            pages_available=old.pages_available if old else None,
+            entries=list(entries.values()))
     return finish_without_fetch(
         args.out, stop_reason=refused.stop_reason,
         pages_requested=args.pages,
@@ -787,6 +908,32 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
     """
     outcomes: List[PageOutcome] = []
     blocked, stop_reason = False, "completed"
+    # --resume: pages the manifest already marks successful are carried into
+    # the merge as outcomes and are not fetched again. No usable manifest is
+    # a fresh run, said out loud rather than crashing.
+    carried: List[PageOutcome] = []
+    if query.mode == "search" and getattr(args, "resume", False):
+        carried, manifest = _resume_outcomes(args, query)
+        if manifest is None:
+            log.info("--resume: no usable page manifest beside --out — "
+                     "treating this as a fresh run.")
+        elif carried:
+            log.info("--resume: page(s) %s already fetched ok in %s — only "
+                     "the rest will be requested.",
+                     ", ".join(str(o.page_num) for o in carried),
+                     page_manifest.manifest_path(args.out))
+    skip = {o.page_num for o in carried}
+    # Everything planned is already fetched: finish from the manifest
+    # alone, before a browser (or the meter) is even started. The engines
+    # check this again before their proxy pre-check; here it also covers a
+    # caller that drives run_pages directly.
+    if carried:
+        plan = _resume_plan_complete(carried, args)
+        if plan is not None:
+            log.info("--resume: all %d planned page(s) are already fetched "
+                     "in %s — finishing without opening a browser.", plan,
+                     page_manifest.manifest_path(args.out))
+            return finish(args, query, carried, "completed", False)
     # Before the first browser opens: each engine installs the meter on the
     # browsers it opens (every worker's too), and all of them count into
     # this one budget.
@@ -796,16 +943,20 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
     try:
         # Page 1 is always fetched alone: its total decides how many pages
         # there are to address, and its echo decides whether the site
-        # searched for what was asked at all.
-        first = fetch_one_page(ops, args, pool, query, 1, mask)
-        if first.filter_problem:
-            log.error("%s", first.filter_problem)
-            return 2
-        if first.ok:
-            read_currency(ops, args, query, mask)
-            for row in first.products:
-                row.currency = query.currency
-        outcomes.append(first)
+        # searched for what was asked at all. A carried page 1 already
+        # passed both checks in the run that fetched it.
+        if 1 in skip:
+            first = next(o for o in carried if o.page_num == 1)
+        else:
+            first = fetch_one_page(ops, args, pool, query, 1, mask)
+            if first.filter_problem:
+                log.error("%s", first.filter_problem)
+                return 2
+            if first.ok:
+                read_currency(ops, args, query, mask)
+                for row in first.products:
+                    row.currency = query.currency
+            outcomes.append(first)
         if not first.ok:
             stop_reason = stop_reason_for(first)
             blocked = first.blocked_by is not None
@@ -815,7 +966,8 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
                 log.info("Asked for %d page(s); the listing has %s. Fetching "
                          "all of them.", args.pages, first.pages_available)
             more_to_fetch = bool(first.products) or query.mode == "ad"
-            rest = list(range(2, plan + 1)) if more_to_fetch else []
+            rest = [n for n in range(2, plan + 1)
+                    if n not in skip] if more_to_fetch else []
             if rest and concurrency > 1:
                 close_ops(ops)
                 ops = None
@@ -859,7 +1011,12 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
     # requests after the cap were refused, so nothing after it was read.
     if meter is not None and meter.exceeded:
         stop_reason, blocked = proxy_meter.STOP_BUDGET_EXCEEDED, False
-    return finish(args, query, outcomes, stop_reason, blocked)
+    # Carried (already successful) pages and this run's outcomes, one entry
+    # per page: when a page appears twice, THIS run's result is the one
+    # kept, so no page's rows are ever counted twice.
+    merged = {o.page_num: o for o in carried}
+    merged.update((o.page_num, o) for o in outcomes)
+    return finish(args, query, list(merged.values()), stop_reason, blocked)
 
 
 def listing_ended(outcome: PageOutcome, seen) -> bool:
