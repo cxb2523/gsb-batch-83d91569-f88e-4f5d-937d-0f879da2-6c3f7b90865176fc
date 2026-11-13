@@ -72,7 +72,7 @@ hide:
 - It does not download from an arbitrary web page. It reads one catalog in one fixed shape. To save a live page, see [web-mirror](https://github.com/GeiserX/web-mirror) on [Related projects](related.md).
 - It does not ship working endpoints. You set them in the source.
 - It does not download the videos or audio themselves, only their subtitles.
-- `media-vtt.py` does not retry an item it marked `failed`; [Troubleshooting](troubleshooting.md#an-item-marked-failed-is-never-tried-again) says how to clear it.
+- `media-vtt.py` retries an item it marked `failed` until it accumulates `MAX_ATTEMPTS` consecutive failures, then marks it `exhausted` and skips it; [Troubleshooting](troubleshooting.md#an-item-is-exhausted) says how to revive one.
 
 ## Privacy
 

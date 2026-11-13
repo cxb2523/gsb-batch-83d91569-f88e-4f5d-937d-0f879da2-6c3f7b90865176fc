@@ -1,6 +1,7 @@
 """Comprehensive tests for media-download: media-vtt.py and publications-epub.py."""
 
 import gzip
+import io
 import json
 import os
 import re
@@ -369,16 +370,34 @@ class TestDownloadVttFiles:
                 media_vtt.download_vtt_files(media_info)
                 mock_links.assert_not_called()
 
-    def test_skips_already_failed(self, media_vtt, tmp_db):
+    def test_retries_previously_failed(self, media_vtt, tmp_db):
+        """A `failed` row is not terminal: the next run asks again."""
         media_vtt.setup_database(tmp_db)
         media_vtt.mark_vtt_as_downloaded(tmp_db, "pub1", 1, "mp4", "http://x.com/f.vtt", "failed")
 
         media_info = [("pub1", 1, "mp4", {"pubS": "pub1"})]
 
         with patch.object(media_vtt, "DB_PATH", tmp_db):
-            with patch.object(media_vtt, "get_pub_media_links") as mock_links:
+            with patch.object(media_vtt, "get_pub_media_links", return_value=None) as mock_links:
                 media_vtt.download_vtt_files(media_info)
+                mock_links.assert_called_once()
+
+    def test_skips_exhausted(self, media_vtt, tmp_db):
+        """An `exhausted` row is skipped without a new request."""
+        media_vtt.setup_database(tmp_db)
+        media_vtt.mark_vtt_as_downloaded(
+            tmp_db, "pub1", 1, "mp4", "http://x.com/f.vtt", "exhausted",
+            attempts=3, consecutive_failures=3,
+        )
+
+        media_info = [("pub1", 1, "mp4", {"pubS": "pub1"})]
+
+        with patch.object(media_vtt, "DB_PATH", tmp_db):
+            with patch.object(media_vtt, "get_pub_media_links") as mock_links:
+                stats = media_vtt.download_vtt_files(media_info)
                 mock_links.assert_not_called()
+        assert stats["exhausted"] == 1
+        assert stats["skipped"] == 0
 
     def test_downloads_vtt_successfully(self, media_vtt, tmp_db, tmp_dir):
         media_vtt.setup_database(tmp_db)
@@ -614,6 +633,339 @@ class TestDownloadVttFiles:
                 media_vtt.download_vtt_files(media_info)
 
         assert media_vtt.is_vtt_processed(tmp_db, "pub1", 1, "mp4") == "no_subtitles"
+
+
+class TestAttemptTracking:
+    """Tests for the attempts counter, the exhausted status and the run summary."""
+
+    MEDIA_LINKS = {
+        "files": {"S": {"MP4": [{"subtitles": {"url": "http://cdn.example.com/sub.vtt"}}]}}
+    }
+
+    def _fail_once(self, media_vtt, tmp_db):
+        media_info = [("pub1", 1, "mp4", {"pubS": "pub1"})]
+        with patch.object(media_vtt, "DB_PATH", tmp_db):
+            with patch.object(media_vtt, "get_pub_media_links", return_value=None):
+                return media_vtt.download_vtt_files(media_info)
+
+    def test_attempts_column_migrated_on_existing_db(self, media_vtt, tmp_db):
+        """An old-schema database gains attempts/consecutive_failures, default 0."""
+        conn = sqlite3.connect(tmp_db)
+        conn.execute(
+            """CREATE TABLE downloaded_vtts (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   identifier TEXT NOT NULL, track INTEGER NOT NULL,
+                   formatCode TEXT NOT NULL, vtt_url TEXT, status TEXT NOT NULL,
+                   UNIQUE(identifier, track, formatCode))"""
+        )
+        conn.execute(
+            "INSERT INTO downloaded_vtts (identifier, track, formatCode, status) "
+            "VALUES ('old', 1, 'mp4', 'success')"
+        )
+        conn.commit()
+        conn.close()
+
+        media_vtt.setup_database(tmp_db)
+
+        conn = sqlite3.connect(tmp_db)
+        columns = {r[1]: r for r in conn.execute("PRAGMA table_info(downloaded_vtts)")}
+        row = conn.execute(
+            "SELECT status, attempts, consecutive_failures FROM downloaded_vtts"
+        ).fetchone()
+        conn.close()
+        assert "attempts" in columns
+        assert "consecutive_failures" in columns
+        assert row == ("success", 0, 0)
+
+    def test_new_row_has_zero_attempts(self, media_vtt, tmp_db):
+        media_vtt.setup_database(tmp_db)
+        conn = sqlite3.connect(tmp_db)
+        conn.execute(
+            "INSERT INTO downloaded_vtts (identifier, track, formatCode, status) "
+            "VALUES ('x', 1, 'mp4', 'success')"
+        )
+        conn.commit()
+        attempts = conn.execute(
+            "SELECT attempts FROM downloaded_vtts WHERE identifier='x'"
+        ).fetchone()[0]
+        conn.close()
+        assert attempts == 0
+
+    def test_attempt_increments_before_request(self, media_vtt, tmp_db):
+        media_vtt.setup_database(tmp_db)
+        stats = self._fail_once(media_vtt, tmp_db)
+        conn = sqlite3.connect(tmp_db)
+        row = conn.execute(
+            "SELECT status, attempts, consecutive_failures FROM downloaded_vtts "
+            "WHERE identifier='pub1'"
+        ).fetchone()
+        conn.close()
+        assert row == ("failed", 1, 1)
+        assert stats["failed"] == 1
+
+    def test_failed_is_retried_on_next_run(self, media_vtt, tmp_db):
+        media_vtt.setup_database(tmp_db)
+        self._fail_once(media_vtt, tmp_db)
+
+        media_info = [("pub1", 1, "mp4", {"pubS": "pub1"})]
+        with patch.object(media_vtt, "DB_PATH", tmp_db):
+            with patch.object(media_vtt, "get_pub_media_links", return_value=None) as mock_links:
+                media_vtt.download_vtt_files(media_info)
+                mock_links.assert_called_once()
+
+        conn = sqlite3.connect(tmp_db)
+        row = conn.execute(
+            "SELECT status, attempts, consecutive_failures FROM downloaded_vtts "
+            "WHERE identifier='pub1'"
+        ).fetchone()
+        conn.close()
+        assert row == ("failed", 2, 2)
+
+    def test_becomes_exhausted_at_limit_and_is_skipped(self, media_vtt, tmp_db):
+        media_vtt.setup_database(tmp_db)
+        stats = None
+        for _ in range(3):
+            stats = self._fail_once(media_vtt, tmp_db)
+
+        assert stats["exhausted"] == 1
+        conn = sqlite3.connect(tmp_db)
+        row = conn.execute(
+            "SELECT status, attempts, consecutive_failures FROM downloaded_vtts "
+            "WHERE identifier='pub1'"
+        ).fetchone()
+        conn.close()
+        assert row == ("exhausted", 3, 3)
+
+        with patch.object(media_vtt, "DB_PATH", tmp_db):
+            with patch.object(media_vtt, "get_pub_media_links") as mock_links:
+                stats = media_vtt.download_vtt_files(
+                    [("pub1", 1, "mp4", {"pubS": "pub1"})]
+                )
+                mock_links.assert_not_called()
+        assert stats["exhausted"] == 1
+        assert stats["skipped"] == 0
+
+    def test_deleting_the_row_restarts_an_exhausted_item(self, media_vtt, tmp_db, tmp_dir):
+        media_vtt.setup_database(tmp_db)
+        media_vtt.mark_vtt_as_downloaded(
+            tmp_db, "pub1", 1, "mp4", None, "exhausted",
+            attempts=3, consecutive_failures=3,
+        )
+        conn = sqlite3.connect(tmp_db)
+        conn.execute("DELETE FROM downloaded_vtts WHERE identifier='pub1'")
+        conn.commit()
+        conn.close()
+
+        mock_resp = MagicMock()
+        mock_resp.content = b"WEBVTT\n"
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch.object(media_vtt, "DB_PATH", tmp_db):
+            with patch.object(media_vtt, "OUTPUT_PATH", tmp_dir):
+                with patch.object(media_vtt, "get_pub_media_links", return_value=self.MEDIA_LINKS):
+                    with patch.object(media_vtt.requests, "get", return_value=mock_resp):
+                        stats = media_vtt.download_vtt_files(
+                            [("pub1", 1, "mp4", {"pubS": "pub1"})]
+                        )
+        assert stats["success"] == 1
+        conn = sqlite3.connect(tmp_db)
+        row = conn.execute(
+            "SELECT status, attempts FROM downloaded_vtts WHERE identifier='pub1'"
+        ).fetchone()
+        conn.close()
+        assert row == ("success", 1)
+
+    def test_success_keeps_attempt_count(self, media_vtt, tmp_db, tmp_dir):
+        media_vtt.setup_database(tmp_db)
+        self._fail_once(media_vtt, tmp_db)
+
+        mock_resp = MagicMock()
+        mock_resp.content = b"WEBVTT\n"
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch.object(media_vtt, "DB_PATH", tmp_db):
+            with patch.object(media_vtt, "OUTPUT_PATH", tmp_dir):
+                with patch.object(media_vtt, "get_pub_media_links", return_value=self.MEDIA_LINKS):
+                    with patch.object(media_vtt.requests, "get", return_value=mock_resp):
+                        stats = media_vtt.download_vtt_files(
+                            [("pub1", 1, "mp4", {"pubS": "pub1"})]
+                        )
+
+        assert stats["success"] == 1
+        conn = sqlite3.connect(tmp_db)
+        row = conn.execute(
+            "SELECT status, attempts, consecutive_failures FROM downloaded_vtts "
+            "WHERE identifier='pub1'"
+        ).fetchone()
+        conn.close()
+        assert row == ("success", 2, 0)
+
+    def test_no_subtitles_keeps_attempt_count_and_is_asked_again(self, media_vtt, tmp_db):
+        media_vtt.setup_database(tmp_db)
+        links = {"files": {"S": {"MP4": [{"file": {"url": "http://x.com/v.mp4"}}]}}}
+
+        with patch.object(media_vtt, "DB_PATH", tmp_db):
+            with patch.object(media_vtt, "get_pub_media_links", return_value=links) as mock_links:
+                media_vtt.download_vtt_files([("pub1", 1, "mp4", {"pubS": "pub1"})])
+                conn = sqlite3.connect(tmp_db)
+                row = conn.execute(
+                    "SELECT status, attempts FROM downloaded_vtts WHERE identifier='pub1'"
+                ).fetchone()
+                conn.close()
+                assert row == ("no_subtitles", 1)
+
+                media_vtt.download_vtt_files([("pub1", 1, "mp4", {"pubS": "pub1"})])
+                assert mock_links.call_count == 2
+
+                conn = sqlite3.connect(tmp_db)
+                row = conn.execute(
+                    "SELECT status, attempts FROM downloaded_vtts WHERE identifier='pub1'"
+                ).fetchone()
+                conn.close()
+                assert row == ("no_subtitles", 2)
+
+    def test_max_attempts_from_environment(self):
+        mod = _load_media_vtt({"MAX_ATTEMPTS": "5"})
+        assert mod.MAX_ATTEMPTS == 5
+
+    def test_max_attempts_invalid_falls_back_to_three(self):
+        assert _load_media_vtt({"MAX_ATTEMPTS": "nope"}).MAX_ATTEMPTS == 3
+        assert _load_media_vtt({"MAX_ATTEMPTS": "0"}).MAX_ATTEMPTS == 3
+
+    def test_run_summary_counts(self, media_vtt, tmp_db, tmp_dir):
+        """A mixed run reports processed/success/no_subtitles/failed/skipped/exhausted."""
+        media_vtt.setup_database(tmp_db)
+        media_vtt.mark_vtt_as_downloaded(tmp_db, "done", 1, "mp4", None, "success")
+        media_vtt.mark_vtt_as_downloaded(
+            tmp_db, "gone", 1, "mp4", None, "exhausted",
+            attempts=3, consecutive_failures=3,
+        )
+        media_vtt.mark_vtt_as_downloaded(tmp_db, "nosub", 1, "mp4", None, "no_subtitles")
+
+        mock_resp = MagicMock()
+        mock_resp.content = b"WEBVTT\n"
+        mock_resp.raise_for_status = MagicMock()
+
+        def links(identifier, track, formatCode, key_parts):
+            if identifier == "nosub":
+                return {"files": {"S": {"MP4": [{"file": {"url": "http://x.com/v.mp4"}}]}}}
+            if identifier == "boom":
+                return None
+            return self.MEDIA_LINKS
+
+        media_info = [
+            ("done", 1, "mp4", {"pubS": "done"}),
+            ("gone", 1, "mp4", {"pubS": "gone"}),
+            ("nosub", 1, "mp4", {"pubS": "nosub"}),
+            ("boom", 1, "mp4", {"pubS": "boom"}),
+            ("fresh", 1, "mp4", {"pubS": "fresh"}),
+        ]
+
+        with patch.object(media_vtt, "DB_PATH", tmp_db):
+            with patch.object(media_vtt, "OUTPUT_PATH", tmp_dir):
+                with patch.object(media_vtt, "get_pub_media_links", side_effect=links):
+                    with patch.object(media_vtt.requests, "get", return_value=mock_resp):
+                        stats = media_vtt.download_vtt_files(media_info)
+
+        assert stats == {
+            "processed": 5,
+            "success": 1,
+            "no_subtitles": 1,
+            "failed": 1,
+            "skipped": 1,
+            "exhausted": 1,
+        }
+
+        with patch.object(media_vtt.logging, "info") as mock_info:
+            media_vtt.log_run_summary(stats)
+        message = mock_info.call_args[0][0]
+        for key in ("processed", "success", "no_subtitles", "failed", "skipped", "exhausted"):
+            assert key in message
+
+    def test_interrupted_run_leaves_retryable_failed_state(self, media_vtt, tmp_db, tmp_dir):
+        """increment_attempt stamps 'failed', so a crash never freezes the row."""
+        media_vtt.setup_database(tmp_db)
+        result = media_vtt.increment_attempt(tmp_db, "pub1", 1, "mp4")
+        assert result == (1, 0)
+        status, attempts, _ = media_vtt.get_vtt_state(tmp_db, "pub1", 1, "mp4")
+        assert (status, attempts) == ("failed", 1)
+
+
+class TestCatalogFailureHandling:
+    """The catalog stage must fail loudly, not silently yield zero items."""
+
+    def test_main_exits_nonzero_when_catalog_fails(self, tmp_db, tmp_dir):
+        mod = _load_media_vtt({"OUTPUT_PATH": tmp_dir, "DB_PATH": tmp_db})
+        with patch.object(mod, "download_extract_json", return_value=None) as mock_dl:
+            with patch.object(mod, "download_vtt_files") as mock_vtt:
+                with patch.object(mod.logging, "error") as mock_error:
+                    code = mod.main()
+        assert code == 1
+        mock_dl.assert_called_once()
+        mock_vtt.assert_not_called()
+        messages = " ".join(str(c) for c in mock_error.call_args_list)
+        assert "Catalog stage failed" in messages
+
+    def test_main_exits_nonzero_when_catalog_unavailable(self, tmp_db, tmp_dir):
+        mod = _load_media_vtt({"OUTPUT_PATH": tmp_dir, "DB_PATH": tmp_db})
+        with patch.object(mod.requests, "get", side_effect=Exception("Connection refused")):
+            with patch.object(mod, "download_vtt_files") as mock_vtt:
+                with patch.object(mod.logging, "error") as mock_error:
+                    code = mod.main()
+        assert code == 1
+        mock_vtt.assert_not_called()
+        messages = " ".join(str(c) for c in mock_error.call_args_list)
+        assert "Catalog stage failed while downloading" in messages
+
+    def test_main_exits_nonzero_on_bad_gzip(self, tmp_db, tmp_dir):
+        """A catalog that downloads but does not unpack is a catalog-stage failure."""
+        mod = _load_media_vtt({"OUTPUT_PATH": tmp_dir, "DB_PATH": tmp_db})
+        mock_response = MagicMock()
+        mock_response.content = b"not gzip at all"
+        mock_response.raise_for_status = MagicMock()
+        with patch.object(mod.requests, "get", return_value=mock_response):
+            with patch.object(mod, "download_vtt_files") as mock_vtt:
+                with patch.object(mod.logging, "error") as mock_error:
+                    code = mod.main()
+        assert code == 1
+        mock_vtt.assert_not_called()
+        messages = " ".join(str(c) for c in mock_error.call_args_list)
+        assert "Catalog stage failed while extracting" in messages
+        # A failed extraction leaves no half-written index for the next run.
+        assert not os.path.exists(os.path.join(tmp_dir, "S.json"))
+        assert not os.path.exists(os.path.join(tmp_dir, "S.json.gz"))
+
+    def test_main_exits_zero_on_success(self, tmp_db, tmp_dir):
+        mod = _load_media_vtt({"OUTPUT_PATH": tmp_dir, "DB_PATH": tmp_db})
+        with patch.object(mod, "download_extract_json", return_value="/tmp/S.json"):
+            with patch.object(mod, "extract_media_info", return_value=[]):
+                with patch.object(mod, "download_vtt_files", return_value={
+                    "processed": 0, "success": 0, "no_subtitles": 0,
+                    "failed": 0, "skipped": 0, "exhausted": 0,
+                }):
+                    assert mod.main() == 0
+
+    def test_catalog_read_but_no_media_items_succeeds(self, tmp_db, tmp_dir):
+        """Zero matches after a successful read is reported, not a nonzero exit."""
+        mod = _load_media_vtt({"OUTPUT_PATH": tmp_dir, "DB_PATH": tmp_db})
+        mock_response = MagicMock()
+        gz_payload = io.BytesIO()
+        with gzip.GzipFile(fileobj=gz_payload, mode="wb") as gz:
+            gz.write(b'{"type": "not-media"}\n')
+        mock_response.content = gz_payload.getvalue()
+        mock_response.raise_for_status = MagicMock()
+
+        with patch.object(mod.requests, "get", return_value=mock_response):
+            with patch.object(mod, "download_vtt_files", return_value={
+                "processed": 0, "success": 0, "no_subtitles": 0,
+                "failed": 0, "skipped": 0, "exhausted": 0,
+            }) as mock_vtt:
+                with patch.object(mod.logging, "warning") as mock_warning:
+                    code = mod.main()
+        assert code == 0
+        mock_vtt.assert_called_once_with([])
+        messages = " ".join(str(c) for c in mock_warning.call_args_list)
+        assert "no usable media-item entries" in messages
 
 
 class TestMediaVttMain:

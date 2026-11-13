@@ -10,6 +10,7 @@ Settings come from environment variables. The catalog's address is not a setting
 | `OUTPUT_PATH` | both | `/vtts/` (subtitles), `/epubs/` (EPUBs) | The folder the files are saved to. Created if missing. |
 | `DB_PATH` | both | `/vtts/media.db`, `/epubs/pubs.db` | The SQLite file that records what was fetched. Its folder is created if missing. |
 | `UNIT_DB_PATH` | `publications-epub.py` | `/app/db/unit.db` | The catalog's `unit.db`, read to turn `LANG` into a numeric language id. The script only reads it; the compose file mounts it read-only. |
+| `MAX_ATTEMPTS` | `media-vtt.py` | `3` | How many consecutive failures an item may collect before it becomes `exhausted` and is skipped. Must be 1 or more; anything else falls back to 3 with a warning. |
 
 `LANG` is also the variable your shell uses for its locale. Inside the containers the compose file sets it to `S`. Outside Docker, always set it on the command line, or the script asks the catalog for a language called `en_US.UTF-8`.
 

@@ -4,13 +4,14 @@ Two independent scripts, one catalog. Neither talks to the other; they share onl
 
 ## media-vtt.py: subtitles
 
-1. Creates `media.db` with a `downloaded_vtts` table if it does not exist.
-2. Downloads `<base>/<LANG>.json.gz`, unpacks it to `<LANG>.json` in the output folder and deletes the `.gz`.
-3. Reads the file line by line and keeps each object whose `type` is `media-item` and whose `o.keyParts` has an identifier (`pubS`, or else `docID`), a `track` and a `formatCode`.
-4. For each item, looks up `(identifier, track, formatCode)` in `media.db`. `success` and `failed` are skipped.
+1. Creates `media.db` with a `downloaded_vtts` table if it does not exist. An existing table gains the `attempts` and `consecutive_failures` counters in place, with `0` for every row already there.
+2. Downloads `<base>/<LANG>.json.gz`, unpacks it to `<LANG>.json` in the output folder and deletes the `.gz`. A failure here ends the run with exit code 1 and a `Catalog stage failed ...` log line; nothing after this step runs.
+3. Reads the file line by line and keeps each object whose `type` is `media-item` and whose `o.keyParts` has an identifier (`pubS`, or else `docID`), a `track` and a `formatCode`. The log line `Catalog read from ...` separates a read that found nothing from a catalog that never arrived.
+4. For each item, looks up `(identifier, track, formatCode)` in `media.db`. `success` and `exhausted` are skipped. `failed` is asked about again. `no_subtitles` is asked about again every run.
 5. Otherwise asks `<base>?langwritten=<LANG>&track=<track>&pub=<pubS>` (or `docid=<docID>`) and expects JSON with `files.<LANG>.<format>`: lists of file entries. The first entry, in any format, with a `subtitles.url` wins.
-6. Downloads that URL and saves it in the output folder under the last part of the URL's path, decoded. A network error is retried after 2 and 4 seconds; the third failure records `failed`.
-7. Records `success`, `no_subtitles` (no entry had subtitles) or `failed` (no answer, or no `files` in it).
+6. Before the request goes out, increments `attempts` (the lifetime count, kept for auditing). Downloads that URL and saves it in the output folder under the last part of the URL's path, decoded. A network error is retried after 2 and 4 seconds within the same run; the third failure counts as one failed attempt for this run.
+7. Records `success` (attempt count kept, `consecutive_failures` reset to 0), `no_subtitles` (no entry had subtitles; attempt count kept, `consecutive_failures` reset to 0), or `failed` (no answer, no `files` in it, or the download failed). Each `failed` run adds one to `consecutive_failures`; at `MAX_ATTEMPTS` (default 3, set by environment) the row becomes `exhausted` and is skipped. Deleting the row retries it from zero.
+8. Ends with one `Run summary:` line counting the entries processed, and their `success`, `no_subtitles`, `failed`, `skipped` and `exhausted` outcomes.
 
 ## publications-epub.py: EPUBs
 
@@ -24,7 +25,16 @@ Two independent scripts, one catalog. Neither talks to the other; they share onl
 
 ## State
 
-The two SQLite files are the only memory between runs. Delete a row and the next run fetches that item again; delete the file and the next run starts from nothing (files already in the folder are overwritten, not duplicated, because the names come from the catalog).
+The two SQLite files are the only memory between runs. For `media.db`, the `status` and `consecutive_failures` columns decide what happens next; `attempts` is a lifetime request counter that is kept on `success` and `no_subtitles` so a run can be audited.
+
+| Status | Next run |
+|---|---|
+| `success` | skipped |
+| `no_subtitles` | asked again |
+| `failed` | asked again, up to `MAX_ATTEMPTS` consecutive failures |
+| `exhausted` | skipped |
+
+Delete a row and the next run fetches that item again; delete the file and the next run starts from nothing (files already in the folder are overwritten, not duplicated, because the names come from the catalog).
 
 ## What talks to what
 

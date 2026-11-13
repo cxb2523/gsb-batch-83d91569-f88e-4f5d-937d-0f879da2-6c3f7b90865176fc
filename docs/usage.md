@@ -19,17 +19,20 @@ LANG=S OUTPUT_PATH=epubs DB_PATH=epubs/pubs.db UNIT_DB_PATH=db/unit.db python sr
 
 ## Run it again
 
-Each run downloads the whole catalog index again, then skips every item its SQLite file already marks as done. So a second run is quick and only fetches what the catalog added since. Nothing in the repository schedules a run; use your own scheduler (cron, a systemd timer, a scheduled container) if you want one.
+Each run downloads the whole catalog index again, then skips every item its SQLite file already marks as done. So a second run is quick and only fetches what the catalog added since, plus anything still retryable. Nothing in the repository schedules a run; use your own scheduler (cron, a systemd timer, a scheduled container) if you want one.
 
 What a second run does with each item, by the status the first run left:
 
 | Status | Script | Next run |
 |---|---|---|
 | `success` | `media-vtt.py` | skipped |
-| `failed` | `media-vtt.py` | skipped, never tried again (see [Troubleshooting](troubleshooting.md#an-item-marked-failed-is-never-tried-again)) |
+| `failed` | `media-vtt.py` | asked again, until `MAX_ATTEMPTS` consecutive failures turn it `exhausted` |
 | `no_subtitles` | `media-vtt.py` | asked again on every run |
+| `exhausted` | `media-vtt.py` | skipped; delete its row to retry it (see [Troubleshooting](troubleshooting.md#an-item-is-exhausted)) |
 | `processed` | `publications-epub.py` | skipped |
 | `no_epub`, `failed` | `publications-epub.py` | tried again |
+
+`media-vtt.py` exits `1` when the catalog archive cannot be downloaded or unpacked, and `0` otherwise. The failure is logged as `Catalog stage failed ...`, which is distinct from the run reading the catalog and matching no `media-item` entries.
 
 ## Reading the log
 
@@ -41,6 +44,7 @@ The log is at DEBUG level, so the HTTP requests show up as well. This is `media-
 - `Downloaded: vtts/demo_1_S.vtt`: a subtitle file saved under the name in its URL.
 - `No subtitles found for demo track 2 format V`: the catalog lists the item but has no subtitles for it in this language. It is recorded as `no_subtitles` and asked about again next run.
 - `Already successfully processed ..., skipping.`: the second run found the item in `media.db`.
+- `Run summary: processed=3 success=2 no_subtitles=1 failed=0 skipped=0 exhausted=0`: one line at the end of every run. `processed` counts catalog entries handled; the rest count how each ended. `skipped` is `success` items not asked about again; `exhausted` is items that reached the failure limit.
 
 The EPUB script logs `Processing publication 3/120: Symbol=..., TagNumber=..., sym=...` for each publication, then `Downloaded file to ...`, `No EPUB files found for ...`, or `Skipping already processed entry ...`.
 
@@ -53,6 +57,6 @@ The EPUB script logs `Processing publication 3/120: Symbol=..., TagNumber=..., s
 To see what was saved and what was not:
 
 ```bash
-sqlite3 vtts/media.db "select identifier, track, status from downloaded_vtts"
+sqlite3 vtts/media.db "select identifier, track, status, attempts, consecutive_failures from downloaded_vtts"
 sqlite3 epubs/pubs.db "select Symbol, TagNumber, State from PublicationState"
 ```
