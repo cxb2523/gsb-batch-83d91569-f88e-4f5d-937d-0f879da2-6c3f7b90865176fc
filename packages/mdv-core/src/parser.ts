@@ -1,7 +1,7 @@
 import MarkdownIt from "markdown-it";
 import { extractFrontmatterSafe } from "./frontmatter.js";
 import { parseInfoString } from "./infostring.js";
-import { parseCsvFull, parseJson, loadDataset, type Row } from "./data.js";
+import { parseCsvFull, parseJson, loadDatasetDeclaration, type Row } from "./data.js";
 import { preprocess, directiveFromText } from "./preprocess.js";
 import type { MdvDoc, MdvToken, ChartMeta } from "./ast.js";
 
@@ -24,11 +24,15 @@ async function resolveBlockData(
     const dataMap = (frontmatter.data as Record<string, unknown>) || {};
     // Object.hasOwn: a dataset name like "constructor" must not resolve through
     // the prototype chain into a Function.
-    const ref = typeof dataMap === "object" && dataMap && Object.hasOwn(dataMap, opts.data)
-      ? (dataMap as Record<string, unknown>)[opts.data]
-      : undefined;
-    if (typeof ref !== "string") throw new Error(`Dataset '${opts.data}' not declared in front-matter`);
-    const rows = await loadDataset(ref, baseDir, warnings);
+    const declared = typeof dataMap === "object" && dataMap && Object.hasOwn(dataMap, opts.data);
+    const ref = declared ? (dataMap as Record<string, unknown>)[opts.data] : undefined;
+    if (!declared) throw new Error(`Dataset '${opts.data}' not declared in front-matter`);
+    if (typeof ref !== "string" && !(ref && typeof ref === "object")) {
+      throw new Error(
+        `Dataset '${opts.data}' must be a local path string, a remote source object, or an array of those`,
+      );
+    }
+    const rows = await loadDatasetDeclaration(ref, baseDir, opts.data, warnings);
     return { rows, warnings };
   }
   if (format === "json") return { rows: parseJson(body), warnings };

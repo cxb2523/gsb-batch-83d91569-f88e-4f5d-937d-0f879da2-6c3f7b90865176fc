@@ -317,7 +317,8 @@ Deliberately out of scope — MDV is small on purpose.
 
 - No interactivity beyond hover tooltips.
 - No data transformations (no filter, group-by, compute, sort). Pre-aggregate your data.
-- No remote data (no URLs, APIs, databases). Local files only.
+- No database or API-query support. Named datasets can reference local files or
+  fetch `http(s)` CSV/JSON; that is the only network access.
 - No chart types beyond bar / line / pie / table / stat.
 - No per-block CSS overrides. Style via named styles only.
 

@@ -14,6 +14,13 @@ locale: en-US              # (reserved; en-US today)
 data:                      # named datasets (see Data guide)
   sales: ./data/sales.csv
   regions: ./data/regions.json
+  live:                    # remote source (http/https only)
+    url: https://example.com/api/sales.csv
+    timeoutMs: 5000
+  combined:                # ordered list: rows are concatenated
+    - ./data/sales.csv
+    - url: https://example.com/api/extra.json
+      format: json
 styles:                    # named styles (see Styles guide)
   callout:
     background: "#fff6e0"

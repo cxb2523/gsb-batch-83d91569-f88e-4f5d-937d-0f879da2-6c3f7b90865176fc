@@ -6,6 +6,16 @@ import { renderDocument } from "./render/html.js";
 export { parse } from "./parser.js";
 export { renderDocument as render } from "./render/html.js";
 export type { MdvDoc, MdvToken, ChartMeta, TableMeta, ContainerMeta, ErrorMeta } from "./ast.js";
+export {
+  loadDataset,
+  loadDatasetDeclaration,
+  type Row,
+  type DatasetSource,
+  type DatasetSourceEntry,
+  type RemoteDatasetSource,
+  DEFAULT_REMOTE_TIMEOUT_MS,
+  MAX_REMOTE_TIMEOUT_MS,
+} from "./data.js";
 export { THEMES, getTheme, type Theme } from "./themes.js";
 
 export interface RenderResult {

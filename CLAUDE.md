@@ -49,7 +49,7 @@ These are non-negotiable constraints agreed with the owner. Do not revisit them 
   - `:::` container directives for **styled regions and layout** (`::: callout`, `::: columns` / `::: col`, `::: toc`).
   - Info strings use `key=value` (quoted strings allowed). No JSON, no JS in options.
 - **Styling model**: built-in themes plus named styles that authors define in front-matter. Flat vocabulary only: color, spacing, typography, layout. No per-element overrides.
-- **Data**: inline CSV (the default), inline JSON (opt-in via `format=json`), or a named dataset referencing a local file (`./data/sales.csv`). **No URLs and no transformations.**
+- **Data**: inline CSV (the default), inline JSON (opt-in via `format=json`), or a named dataset referencing a local file (`./data/sales.csv`) or an `http(s)` remote source. Named datasets may list several sources whose rows are concatenated in order. **No transformations.**
 - **Visualizations**: `table`, `stat` (KPI cards), and `chart type=bar|line|pie` as inline SVG. Bar and line charts accept `yFormat=currency|percent|thousands`.
 - **Exports**: self-contained HTML (`mdv render`) and PDF (`mdv export --pdf`, via puppeteer).
 

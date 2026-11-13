@@ -4,6 +4,21 @@ All notable changes to MDV are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include behavior changes).
 
+## [Unreleased]
+
+### Added
+
+- **Remote and multi-source named datasets.** A front-matter `data:` entry may
+  now be a remote source object
+  (`{ url, format, headers, timeoutMs }`) fetched over `http(s)` with Node's
+  built-in `fetch` — no new runtime dependency — or an ordered array whose
+  entries are merged row-by-row. Failing sources (timeout, non-2xx HTTP,
+  network error, parse error, or a non-`http(s)` protocol) contribute a
+  warning naming the source and the reason while the rows that succeeded still
+  render; only when every source fails does the block fall back to its usual
+  error banner. CSV bodies keep the existing parser and ragged-row warnings.
+  Plain local-path strings behave exactly as before.
+
 ## [0.2.1] — 2026-10-11
 
 A security patch release. Upgrading is recommended for anyone rendering

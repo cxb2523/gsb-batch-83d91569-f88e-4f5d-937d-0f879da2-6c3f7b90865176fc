@@ -132,7 +132,8 @@ Explicitly **not** supported — don't try to shoehorn them in:
 
 - Interactivity beyond native `<title>` hover tooltips.
 - Data transformations (filter, group-by, compute, sort).
-- Remote data (URLs, APIs, DBs).
+- Remote data beyond a named dataset that fetches `http(s)` CSV/JSON (see
+  [data.md](data.md)); no direct database or API-query support in a block.
 - Scatter, area, stacked-bar, gantt, heatmap, sankey, or any other chart type.
 - Per-block CSS overrides.
 - Dual axes, secondary Y, log scale, annotations, trend lines.
