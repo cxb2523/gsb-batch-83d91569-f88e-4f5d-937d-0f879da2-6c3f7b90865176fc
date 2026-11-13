@@ -1,0 +1,343 @@
+# One real run against weibo.com. tests.yml (deliberately) never touches the
+# site or a credential; this is the workflow that does.
+#
+# It needs NO SECRET, and that is the point rather than a convenience.
+#
+# Every route this repo reads is open to an anonymous visitor cookie, which
+# the run mints for itself in about a second. Measured 2026-09-21 from a
+# datacenter address in Finland with no proxy and no key: the handshake
+# succeeded 5 times out of 5 and 100 requests in 83 seconds drew zero
+# refusals. The README's central claim is that you do not need to buy
+# anything to read these three modes — so this job runs that claim, from a
+# bare runner, every Monday. If Weibo ever puts the feed behind a login or
+# starts scoring datacenter addresses, the badge goes red on the next weekly run and
+# the claim is retested without anyone having to remember to.
+#
+# A canary that CAN pass without a credential must never be
+# gated on one. The inverse rule — a canary that cannot pass must SKIP
+# rather than fail — does not apply here, because this one can.
+#
+# BEFORE TRUSTING THE BADGE, dispatch this once by hand and read the log
+# (and dispatch it again after any change to the fetch path). The measurement above is from a Hetzner address in
+# Finland; a GitHub runner is a different network, and whether Weibo treats
+# it the same way is NOT something this repo has measured. The first
+# dispatch is what turns that into a fact. Note that `workflow_dispatch`
+# requires the workflow to exist on the DEFAULT branch — from a feature
+# branch `gh workflow run` answers "not found on the default branch", which
+# reads like a typo in the filename.
+
+name: canary
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hot-feed:
+    name: hot feed (no credentials)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run
+        id: run
+        run: |
+          # GitHub Actions runs `run:` steps under `bash -e`, so a non-zero
+          # command aborts the step BEFORE a following `echo exit_code=$?`
+          # and `continue-on-error` does not change that — it stops the step
+          # failing the job, not the shell's errexit.
+          set +e
+          python playwright_scraper.py \
+            --mode hot --pages 3 --delay 2 \
+            --format both --out canary --dump-html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Interpret the exit code
+        run: |
+          code="${{ steps.run.outputs.exit_code }}"
+          case "$code" in
+            0) echo "::notice::exit 0 — the feed was read with no credentials, "\
+                    "which is what the README claims." ;;
+            3) echo "::error::exit 3 — BLOCKED. Two candidate causes and they "\
+                    "want different answers: (a) Weibo now wants an account "\
+                    "for a route that was open, which is a real change worth "\
+                    "an issue; (b) this runner's address is scored while the "\
+                    "site is otherwise fine. Check the dumped response: a "\
+                    "login wall says so in its own words. Reproduce from a "\
+                    "residential address before concluding (a)." ;;
+            4) echo "::error::exit 4 — the feed was served and held nothing. "\
+                    "Served-but-empty is a parser question, not an access "\
+                    "one: read the dumped payload." ;;
+            5) echo "::error::exit 5 — nothing was gathered: a transport or "\
+                    "remote failure, or the feed was served and the parser "\
+                    "could not read it (stop_reason parser_found_nothing). "\
+                    "Read the sidecar and the dumped payload." ;;
+            6) echo "::error::exit 6 — partial. Some fetches failed; the "\
+                    "sidecar names which." ;;
+            *) echo "::error::exit $code" ;;
+          esac
+          exit "$code"
+
+      - name: Assert what the run actually produced
+        run: |
+          python - <<'PY'
+          import json, sys
+          rows = json.load(open("canary.json"))
+          meta = json.load(open("canary.meta.json"))
+          bad = []
+
+          def want(cond, msg):
+              if not cond:
+                  bad.append(msg)
+
+          want(meta["status"] == "complete",
+               f"status is {meta['status']!r}, not complete")
+          want(meta["mode"] == "hot", "mode")
+          want(meta["source"] == "weibo.com", "source")
+          # The hot feed is not addressable — it re-rolls rather than
+          # paginating — so three fetches is three fetches, and the stop
+          # reason must say so rather than claiming pagination ran out.
+          want(meta["stop_reason"] == "feed_not_addressable",
+               f"stop_reason is {meta['stop_reason']!r}")
+          want(meta["pages_completed"] == 3,
+               f"only {meta['pages_completed']} of 3 fetches completed")
+
+          # A floor, not an exact count: the feed served 9 or 10 posts per
+          # fetch across every run measured on 2026-09-21, and a number that
+          # varies between runs must not be written as an equality.
+          want(len(rows) >= 24, f"only {len(rows)} rows from 3 fetches")
+
+          # Columns the site fills on every post it serves.
+          for col in ("sku", "mid", "url", "title", "created_at", "author_id",
+                      "author_name", "attitudes_count", "text_source"):
+              missing = [r["sku"] for r in rows if r.get(col) in (None, "")]
+              want(not missing,
+                   f"{col} empty on {len(missing)} of {len(rows)} rows")
+
+          # page + position must be unique, or the column is worthless.
+          pairs = [(r["page"], r["position"]) for r in rows]
+          want(len(set(pairs)) == len(pairs), "page+position not unique")
+          want(len({r["sku"] for r in rows}) == len(rows), "sku not unique")
+
+          # The truncation trap. Rows may legitimately stay truncated when
+          # the recovery endpoint cannot be reached, but not many, and a
+          # row must never be written still carrying the mark.
+          left = sum(1 for r in rows if r["text_truncated"])
+          want(left <= max(2, len(rows) // 10),
+               f"{left} of {len(rows)} rows still hold truncated text")
+          want(not [r for r in rows
+                    if (r["title"] or "").rstrip().endswith("​")],
+               "a row was written still ending in a zero-width space")
+
+          # The display-strategy trap, asserted on the output itself.
+          want(all(isinstance(r["attitudes_count"], int) for r in rows),
+               "a like count is not an integer — display_text leaked in")
+
+          print(f"rows                {len(rows)}")
+          print(f"stop_reason         {meta['stop_reason']}")
+          print(f"long text flagged   {meta.get('long_text_flagged')}")
+          print(f"long text recovered {meta.get('long_text_recovered')}")
+          print(f"still truncated     {left}")
+          if bad:
+              print("\nFAILED:")
+              for b in bad:
+                  print("  -", b)
+              sys.exit(1)
+          print("\nok")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-hot
+          path: |
+            canary.json
+            canary.csv
+            canary.meta.json
+            canary_debug.*
+          if-no-files-found: warn
+
+  user-and-comments:
+    name: user + comments (no credentials)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          python -m playwright install --with-deps chromium
+
+      # A large institutional account, chosen on purpose: it posts daily, so
+      # the cursor has somewhere to walk, and it is an organisation rather
+      # than a private individual — a weekly automated read of one person's
+      # timeline is a different thing from reading a newspaper's.
+      - name: User mode
+        id: user
+        run: |
+          set +e
+          python playwright_scraper.py \
+            --mode user --url https://weibo.com/u/2803301701 \
+            --pages 3 --delay 2 --out canary_user
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Assert
+        run: |
+          code="${{ steps.user.outputs.exit_code }}"
+          [ "$code" = "0" ] || { echo "::error::user mode exited $code"; exit "$code"; }
+          python - <<'PY'
+          import json, sys
+          rows = json.load(open("canary_user.json"))
+          meta = json.load(open("canary_user.meta.json"))
+          bad = []
+          if len({r["author_id"] for r in rows}) != 1:
+              bad.append("a user run returned more than one author")
+          if len(rows) < 30:
+              bad.append(f"only {len(rows)} rows over 3 cursor pages")
+          if meta.get("statuses_claimed") is None:
+              bad.append("the sidecar does not record what the account claims "
+                         "— without it a 59-row file looks like the whole "
+                         "account instead of a slice of it")
+          if not all(r["author_followers"] for r in rows):
+              bad.append("follower count missing: the profile call did not "
+                         "run or did not thread through")
+          print(f"rows {len(rows)}  account {meta.get('account')}  "
+                f"claims {meta.get('statuses_claimed')} posts")
+          if bad:
+              for b in bad:
+                  print("FAILED:", b)
+              sys.exit(1)
+          print("ok")
+          PY
+
+      # Comments on one of the posts the user run just read, so no post id
+      # is hard-coded into the workflow: the most-commented row is picked.
+      - name: Comments mode
+        id: post
+        run: |
+          set +e
+          url=$(python -c "import json; rows=json.load(open('canary_user.json')); print(max(rows, key=lambda r: r.get('comments_count') or 0)['url'])")
+          echo "post: $url"
+          python playwright_scraper.py \
+            --mode post --url "$url" --pages 1 --out canary_post
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Assert comments
+        run: |
+          code="${{ steps.post.outputs.exit_code }}"
+          [ "$code" = "0" ] || { echo "::error::comments mode exited $code"; exit "$code"; }
+          python - <<'PY'
+          import json, sys
+          rows = json.load(open("canary_post.json"))
+          meta = json.load(open("canary_post.meta.json"))
+          bad = []
+          if meta["status"] != "complete":
+              bad.append(f"status {meta['status']!r}")
+          if len(rows) < 5:
+              bad.append(f"only {len(rows)} comments on the most-commented post")
+          if len({r["comment_id"] for r in rows}) != len(rows):
+              bad.append("comment_id not unique")
+          if len({r["parent_sku"] for r in rows}) != 1:
+              bad.append("comments of more than one post")
+          for col in ("comment_id", "title", "author_id", "created_at"):
+              missing = sum(1 for r in rows if r.get(col) in (None, ""))
+              if missing:
+                  bad.append(f"{col} empty on {missing} of {len(rows)} rows")
+          print(f"comments {len(rows)}  stop_reason {meta['stop_reason']}")
+          if bad:
+              for b in bad:
+                  print("FAILED:", b)
+              sys.exit(1)
+          print("ok")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-user
+          path: |
+            canary_user.json
+            canary_user.meta.json
+            canary_post.json
+            canary_post.meta.json
+          if-no-files-found: warn
+
+  browserless:
+    name: browserless CLI (no browser, no credentials)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # The README's first command. No Chromium is installed in this job, so
+      # a pass proves the plain-HTTPS path on its own.
+      - name: Run
+        id: run
+        run: |
+          set +e
+          python weibo_api.py --mode hot --pages 2 --delay 2 \
+            --format both --out canary_http
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Assert
+        run: |
+          code="${{ steps.run.outputs.exit_code }}"
+          [ "$code" = "0" ] || { echo "::error::weibo_api.py exited $code (3 blocked, 4 empty, 5 nothing obtained, 6 partial)"; exit 1; }
+          python - <<'PY'
+          import json, sys
+          rows = json.load(open("canary_http.json"))
+          meta = json.load(open("canary_http.meta.json"))
+          bad = []
+          if meta["status"] != "complete":
+              bad.append(f"status {meta['status']!r}")
+          if meta.get("transport") != "http":
+              bad.append("the sidecar does not say transport: http")
+          # A floor: about 10 posts per fetch, and the two fetches of a
+          # re-rolling feed can overlap.
+          if len(rows) < 10:
+              bad.append(f"only {len(rows)} rows from 2 fetches")
+          for col in ("sku", "mid", "url", "title", "author_id"):
+              missing = sum(1 for r in rows if r.get(col) in (None, ""))
+              if missing:
+                  bad.append(f"{col} empty on {missing} of {len(rows)} rows")
+          print(f"rows {len(rows)}  stop_reason {meta['stop_reason']}")
+          if bad:
+              for b in bad:
+                  print("FAILED:", b)
+              sys.exit(1)
+          print("ok")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-browserless
+          path: |
+            canary_http.json
+            canary_http.meta.json
+          if-no-files-found: warn
