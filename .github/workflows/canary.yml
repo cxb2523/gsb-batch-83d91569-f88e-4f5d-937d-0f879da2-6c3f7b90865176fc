@@ -1,0 +1,109 @@
+name: canary
+
+on:
+  schedule:
+    - cron: "41 6 * * 1"   # weekly, Mondays; avoid :00 so it doesn't pile up with everyone else's
+  workflow_dispatch: {}     # dispatch manually at least once before trusting the badge
+
+jobs:
+  # A real run: one public profile and its 3 most recent posts, with a local
+  # Playwright Chromium. It ALWAYS runs against the live site — a canary
+  # that skips has tested nothing:
+  #
+  # * with the INSTAGRAM_PROXY secret, through that (residential) proxy;
+  # * without it, direct from the GitHub runner. Whether Instagram serves a
+  #   datacentre address logged out has not been measured (see README), so
+  #   this run IS the measurement. If the runner is refused, the job goes
+  #   red with an ::error:: naming the missing INSTAGRAM_PROXY secret.
+  #
+  # `vars.INSTAGRAM_CANARY_ACCOUNT` overrides the account (default natgeo).
+  # Blocked, empty, partial and remote-error outcomes are all red.
+  canary:
+    runs-on: ubuntu-latest
+    env:
+      HAS_PROXY: ${{ secrets.INSTAGRAM_PROXY != '' }}
+      CANARY_ACCOUNT: ${{ vars.INSTAGRAM_CANARY_ACCOUNT || 'natgeo' }}
+      # Reaches the scraper through the environment only, never argv
+      # (env_config.py reads INSTAGRAM_PROXY; an empty value means unset).
+      INSTAGRAM_PROXY: ${{ secrets.INSTAGRAM_PROXY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Say which path this run takes
+        run: |
+          if [ "$HAS_PROXY" = "true" ]; then
+            echo "::notice::Live run through the INSTAGRAM_PROXY secret."
+          else
+            echo "::notice::No INSTAGRAM_PROXY secret: live run DIRECT from the GitHub runner (a datacentre address)."
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Playwright and Chromium
+        run: |
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: One profile and its 3 most recent posts
+        run: |
+          set +e
+          python3 playwright_scraper.py --url "$CANARY_ACCOUNT" --posts 3 \
+            --format json --out canary.json --dump-html --proxy-budget-mb 10
+          echo "canary_exit=$?" >> "$GITHUB_ENV"
+
+      # What the run sent through INSTAGRAM_PROXY, read from its sidecar; red
+      # when it stopped at the 10 MB budget (stop_reason proxy_budget_exceeded).
+      - name: Proxy traffic
+        if: always()
+        run: python3 .github/proxy_traffic_summary.py canary.json canary 10
+
+      - name: Require a complete run with full rows
+        run: |
+          python3 -c "
+          import json, os, sys, traceback
+          def annotate(kind, exc, tb):
+              traceback.print_exception(kind, exc, tb)
+              print('::error::canary row check failed: %s: %s' % (kind.__name__, str(exc)[:400].replace(chr(10), ' ')))
+          sys.excepthook = annotate
+          code = int(os.environ['canary_exit'])
+          print(f'exit {code}')
+          if code != 0:
+              if os.environ.get('HAS_PROXY') != 'true':
+                  print('::error::The direct run from the GitHub runner did not complete (exit %d). '
+                        'If it was refused (exit 3), set the INSTAGRAM_PROXY repo secret (a residential '
+                        'http://login:password@host:port proxy) so the canary can reach the site.' % code)
+              else:
+                  print('::error::canary exit %d through the INSTAGRAM_PROXY secret (1 crash, 3 blocked, 4 zero rows, 5 content never obtained, 6 partial). A proxy that rejects its credential (HTTP 407) or has no traffic left (HTTP 402) stops the run at its proxy pre-check with exit 5 and says so in the log above, so on exit 5 check the INSTAGRAM_PROXY secret first.' % code)
+              raise SystemExit(f'canary requires EXIT_OK=0, got {code}')
+          meta = json.load(open('canary.json.meta.json'))
+          print(json.dumps(meta, indent=2))
+          assert meta['status'] == 'complete' and meta['pages_completed'] == 4, meta
+          rows = json.load(open('canary.json'))
+          profiles = [r for r in rows if r['category'] == 'profile']
+          posts = [r for r in rows if r['category'] == 'post']
+          assert len(profiles) == 1 and len(posts) == 3, [r['sku'] for r in rows]
+          p = profiles[0]
+          # Only the embedded profile object fills these; a regression to a
+          # data-less shell or an og:-tag guess shows up here first.
+          assert p['sku'].startswith('instagram-user-') and p['follower_count'] and p['follower_count'] > 1000, p
+          # A logged-out profile embeds up to 12 timeline posts; the canary
+          # account has far more, so anything from 3 (what --posts asked
+          # for) to 12 means the timeline was read.
+          assert 3 <= len(json.loads(p['recent_posts_json'])) <= 12, p
+          for r in posts:
+              assert r['sku'].startswith('instagram-post-') and r['posted_at'] and r['media_type'], r
+              assert r['comment_count'] is not None and (r['like_count'] is not None or r['likes_hidden']), r
+              assert r['username'] == p['username'], r
+          print('canary: OK')
+          "
+
+      - name: Upload artifacts on every run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-${{ github.run_id }}
+          path: |
+            canary*.json
+            canary_debug_*.html
+          retention-days: 14
