@@ -1,0 +1,134 @@
+name: Bug report
+description: The scraper ran but the result was wrong, empty, or it crashed.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before anything else: never paste an API key, a proxy password or a
+        full `ws://user:pass@...` endpoint into a public issue.** The scrapers
+        mask credentials in their own logs, but raw HTML dumps and the Scraper
+        API's `x-debug` header do not. Replace them with `***`.
+
+        A few things answer most reports faster than we can:
+
+        - **Exit 3 with `region_unavailable`?** Google answered that Finance
+          is not served in your exit's COUNTRY (measured: an RU exit got
+          HTTP 403, US/DE/FR/HU/PL/CZ/AT were served). `--market` cannot get
+          past it; use an exit in a supported country. See
+          [TROUBLESHOOTING.md](../blob/main/TROUBLESHOOTING.md).
+        - **`unsupported_client` in the sidecar?** Google redirected a client
+          whose User-Agent does not look like a browser. Every engine sets
+          one, so something overrode it — check any UA or fingerprint option
+          before buying an exit. This is not a block.
+        - **Exit 3 with Google's interstitial?** That one is about the
+          address: rotate exits with a proxy pool, or use a Scraping Browser
+          endpoint.
+        - **`not_found`?** Check the symbol: `TICKER:EXCHANGE`
+          (`GOOGL:NASDAQ`) for listed instruments, `BASE-QUOTE` (`EUR-USD`,
+          `BTC-USD`) for pairs. `EURUSD:CURRENCY` is the common trap.
+        - **`market_cap` or `volume` null on an index, currency, crypto or
+          futures row?** Expected: Google writes `0` there for "none".
+        - **`movers` returns only a few rows per list?** Expected: the market
+          page publishes a preview of each list, not a ranking.
+        - **A column that used to be filled is null on every row while the
+          run says `complete`?** Worth this issue: a payload record changed
+          shape. Attach the `--dump-html` output.
+        - **`--pages 2` refused?** Expected: the site has no pagination.
+          Pass more `--symbols` instead.
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Which engine
+      options:
+        - playwright_scraper.py
+        - puppeteer_scraper.py
+        - selenium_scraper.py
+        - scraper_api_client.py
+        - fingerprint_client.py
+        - other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: browser_route
+    attributes:
+      label: How was the browser reached
+      options:
+        - A browser the script launched itself
+        - A remote browser over --cdp-endpoint
+        - No browser (scraper_api_client.py over plain HTTP)
+        - Not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: exit_code
+    attributes:
+      label: Exit code
+      description: >-
+        `echo $?` straight after the run. These mean specific things — 3 is
+        blocked, 4 is "the page was fetched and held nothing", 5 is "the
+        content was never obtained", 6 is partial. The table is in the
+        README.
+      placeholder: "4"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command
+      description: With credentials replaced by `***`.
+      render: shell
+      placeholder: |
+        python3 playwright_scraper.py --mode quote \
+          --symbols GOOGL:NASDAQ,BMW:ETR --out quotes
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: >-
+        The whole run, not just the last line — the useful detail is usually
+        upstream of the error. Credentials replaced by `***`.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      placeholder: >-
+        46 rows from --mode markets --market US, as the README measured.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Please run and paste:
+        ```
+        python3 -c "import sys, platform; print(sys.version, platform.platform())"
+        pip list 2>/dev/null | grep -Ei "playwright|pyppeteer|selenium|beautifulsoup4|requests|webdriver"
+        python3 smoke_test.py | tail -3
+        ```
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: The offline suite passes on my machine (`python3 smoke_test.py`)
+          required: true
+        - label: I removed every API key, password and credentialled URL from this report
+          required: true

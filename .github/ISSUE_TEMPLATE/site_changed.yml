@@ -1,0 +1,70 @@
+name: Site changed / parser broke
+description: Google Finance changed something and the parser no longer matches.
+labels: ["site-change"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most common way a scraper stops working, and it is worth
+        its own report because the fix is different from a code bug:
+        something on google.com/finance moved.
+
+        Useful to know before filing: this parser reads no DOM and no JSON-LD.
+        Every row comes out of the page's `AF_initDataCallback` blobs, and
+        each mode reads a different record inside them, found by its SHAPE
+        (never by its `ds:N` key, which shifts between URL variants). So a
+        breakage usually hits one mode and leaves the others alone, and the
+        sidecar's `status` can still say `complete` while a column is null on
+        every row.
+
+  - type: dropdown
+    id: what_broke
+    attributes:
+      label: What stopped matching
+      options:
+        - No rows at all in one mode on a page that visibly has data
+        - Rows come out but one column is null on every row
+        - A value is in the wrong column (e.g. volume vs headcount, high vs close)
+        - quote / markets / movers rows lost their prices
+        - financials lost a figure, or the quarters are mis-dated
+        - analysts lost the consensus or the buy/hold/sell split
+        - earnings lost the revenue or EPS estimates
+        - chart bars are missing or out of order
+        - A wrong symbol returns rows instead of not_found
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: Command or URL
+      description: >-
+        The mode, the symbols or URL, `--market`, and the exit country.
+      placeholder: "--mode earnings --market US (headless Chromium, no proxy, DE exit)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence from the page
+      description: |
+        Whichever of these you can get. A capture beats a description, and
+        `--dump-html` writes one on success as well as on failure.
+
+        - The dump itself (it holds the whole payload; it carries no
+          credentials, but check before attaching).
+        - The value the page SHOWS for the field that came out wrong, and for
+          which instrument and period.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it reproduces on a second engine, on a second market, and when
+        it last worked.

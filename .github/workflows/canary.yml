@@ -1,0 +1,515 @@
+name: canary
+
+# tests.yml (deliberately) never touches google.com — see its own header for
+# why. That leaves a real gap: a payload change on the site itself only shows
+# up when a user hits it and files an issue, while the offline badge stays
+# green throughout. This workflow is the other half — a real run against the
+# real site — so a site-side break is caught here first.
+#
+# THIS CANARY NEEDS NO SECRETS, AND THAT IS THE POINT
+# ---------------------------------------------------
+# It runs real scrapes from a bare GitHub runner, weekly (Mondays), and it is EXPECTED
+# TO BE GREEN. That is not a convenience — it is what keeps this repo's
+# central claim honest. The README says you need no key, no proxy and no
+# account to read this site; this workflow is that claim, under test, every
+# Monday. If Google ever puts it behind something, the badge goes red on the
+# next weekly run and the claim is retested without anyone having to remember to.
+#
+# Measured 2026-09-22 from one datacentre address, no credentials of any
+# kind: `--mode markets --market US` returned 46 rows with every one priced,
+# `--mode movers --market US` returned 11, and four symbols took 8.3 seconds.
+#
+# The family's rule is that a canary which CANNOT pass must skip rather than
+# fail, because a check that is always red teaches everyone to ignore checks.
+# The other half of that rule applies here: a canary that CAN pass without a
+# credential must never be gated on one.
+#
+# WHY MULTIPLE SYMBOLS RATHER THAN MULTIPLE PAGES
+# ------------------------------------------------
+# The family's template asks a canary for >= 3 PAGES, because with one page
+# pagination is never exercised and a silently-dead `?page=` convention stays
+# invisible. Google Finance does not paginate at all — a quote page is one
+# instrument and the market page carries its lists in full — so the thing
+# that needs exercising here is the SYMBOL loop, which is this repo's
+# equivalent unit of work. Hence `--symbols` with four entries: a run that
+# quietly stopped after the first would show up as a row count of 1.
+#
+# What a runner cannot test, and why there is no second job for it:
+#
+#   * the 2Captcha Scraper API and Scraping Browser paths, which need a
+#     credential. A job that needs a secret nobody has set would skip every
+#     day and test nothing, so it is documented in
+#     scraper_api_client.py's docstring instead.
+
+on:
+  schedule:
+    # Mid-morning New York, so the US market page is awake and its movers
+    # lists are populated rather than showing an overnight blank.
+    - cron: "41 14 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Scrape the US market page
+        id: markets
+        # `--market US` rather than no market at all, and that is the point
+        # of the run as much as the rows are: it asserts that a named market
+        # is reachable from an address that is not in it. A GitHub runner is
+        # in whatever region Microsoft put it, so if `gl` ever stopped
+        # selecting the market, this row set would quietly become some other
+        # country's and the sector venues below would catch it.
+        #
+        # set +e: GitHub Actions runs `run:` steps as `bash -e`, so without
+        # this a non-zero scraper exit aborts the script on THAT line and the
+        # `echo "exit_code=$?"` below never runs. continue-on-error only
+        # stops the step from failing the job; it does not touch errexit.
+        continue-on-error: true
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --mode markets --market US --retries 4 \
+            --out canary_markets --dump-html canary_markets.html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Scrape four instruments
+        id: quotes
+        # Four kinds on purpose — an equity, an index, a currency pair and a
+        # crypto pair — because each has its own record shape in the payload
+        # and the pair shape was found only when the currency and crypto
+        # captures parsed to zero rows while the others parsed cleanly.
+        continue-on-error: true
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --mode quote --symbols GOOGL:NASDAQ,.INX:INDEXSP,EUR-USD,BTC-USD \
+            --delay 2 --retries 4 \
+            --out canary_quotes --dump-html canary_quotes.html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Scrape the day's movers
+        id: movers
+        # Its own step rather than folded into the markets one: the movers
+        # lists are PREVIEWS the site rebuilds through the session, so a
+        # markets page that parses fine while the movers strip empties out
+        # is a distinct thing to see.
+        #
+        # This step is the reason the mode check in smoke_test.py was
+        # rewritten. The old check grepped the whole workflow for
+        # "--mode movers" and was satisfied by the header comment above,
+        # so this mode had never actually run here.
+        continue-on-error: true
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --mode movers --market US --retries 4 \
+            --out canary_movers --dump-html canary_movers.html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Scrape the upcoming earnings calendar
+        id: earnings
+        # The market page's calendar, which is geo-selected like every other
+        # list on it. Kept as its own step rather than folded into the
+        # markets one so a calendar that empties out is distinguishable from
+        # a market page that stopped parsing.
+        continue-on-error: true
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --mode earnings --market US --retries 4 \
+            --out canary_earnings --dump-html canary_earnings.html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Scrape one instrument's financials, analysts and chart
+        id: deep
+        # The four instrument modes read the SAME first response the quote
+        # mode fetches, so this is three page loads rather than three
+        # scrapes of three different things — and it is the only scheduled test
+        # that the payload's unlabelled financial slots still hold what
+        # they held when they were mapped. If Google reorders that array,
+        # nothing raises and nothing looks wrong; the assertions below are
+        # what would notice.
+        continue-on-error: true
+        run: |
+          set +e
+          code=0
+          for mode in financials analysts chart; do
+            python3 playwright_scraper.py \
+              --mode "$mode" --symbols GOOGL:NASDAQ --delay 2 --retries 4 \
+              --out "canary_$mode" --dump-html "canary_$mode.html"
+            rc=$?
+            [ "$rc" -eq 0 ] || code="$rc"
+          done
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Interpret the exit codes
+        id: verdict
+        # This canary needs no credential and is expected to reach the site
+        # from a bare runner, so a run that did NOT reach it tested nothing
+        # and must not end green: exit 3 (blocked) is an ERROR here. A green
+        # badge on a blocked run would say "the site still works" with no
+        # evidence. Exit 6 (partial: some symbols failed) is a warning, and
+        # the row checks below still run on what came back, so a partial
+        # run passes only if the data it did get is right.
+        #
+        # Exit 5 is a DEFECT here, not an access condition, and that differs
+        # from the siblings on purpose: they warn on it because their
+        # canaries use a remote API whose credential expires. This one uses
+        # none, so exit 5 is impossible rather than routine, and warning on
+        # it would be carrying another repo's excuse for a condition this one
+        # cannot have.
+        run: |
+          set -e
+          for pair in "markets:${{ steps.markets.outputs.exit_code }}" \
+                      "quotes:${{ steps.quotes.outputs.exit_code }}" \
+                      "movers:${{ steps.movers.outputs.exit_code }}" \
+                      "earnings:${{ steps.earnings.outputs.exit_code }}" \
+                      "deep:${{ steps.deep.outputs.exit_code }}"; do
+            name="${pair%%:*}"; code="${pair##*:}"
+            case "$code" in
+              0)
+                echo "OK — $name parsed from a live run." ;;
+              3)
+                echo "::error::$name was blocked before parsing (exit 3), so this run did not test the site. This canary needs no credential and reached the site from GitHub's runners until now: if it repeats, Google has begun refusing GitHub's ranges (or their region). Check the HTML dump: the /finance/beta/unsupported page would mean a User-Agent problem, not an address one."
+                echo "### $name did NOT test anything (exit 3, blocked)" >> "$GITHUB_STEP_SUMMARY"
+                exit 1 ;;
+              6)
+                echo "::warning::$name was partial (exit 6) — some rows were gathered and the run then stopped early. The sidecar names which fetches failed; the row checks below still run on what came back."
+                echo "### $name tested only PART of the run (exit 6)" >> "$GITHUB_STEP_SUMMARY" ;;
+              4)
+                echo "::error::$name ran fine but parsed 0 rows (exit 4). The AF_initDataCallback payload has moved or changed shape. This is the regression this canary exists to catch — the HTML dump in the artefacts tells you which. If the dump says 'Page Not Found', a symbol in the workflow is wrong rather than the parser."
+                exit 1 ;;
+              5)
+                echo "::error::$name reported exit 5 — the content was never obtained. This run uses no remote API and no credential, so unlike in the sibling repos this is a DEFECT here rather than an expired secret. Read the log."
+                exit 1 ;;
+              2)
+                echo "::error::$name got bad usage (exit 2) — the workflow's own arguments are wrong, not the site."
+                exit 1 ;;
+              *)
+                echo "::error::$name crashed (exit $code)."
+                exit 1 ;;
+            esac
+          done
+
+      - name: Check what the runs actually produced
+        # Thresholds are MEASURED figures with a margin, not round numbers
+        # someone liked. Each is the number from the live runs recorded in
+        # the README, floored enough to survive Google rotating which
+        # instruments it features without letting a half-empty page pass.
+        run: |
+          set -e
+          python3 - <<'PY'
+          import json
+
+          problems = []
+
+          def want(label, condition, detail=""):
+              if not condition:
+                  problems.append(f"{label}{(' — ' + detail) if detail else ''}")
+
+          # ---- the market page -------------------------------------------
+          meta = json.load(open("canary_markets.meta.json"))
+          rows = json.load(open("canary_markets.json"))
+
+          want("markets status is not complete (%s)" % meta.get("status"),
+               meta.get("status") == "complete",
+               "stop_reason=%s" % meta.get("stop_reason"))
+          want("the sidecar did not record the market (%s)" % meta.get("market"),
+               meta.get("market") == "US")
+          # 46 measured; 35 leaves room for Google dropping a strip without
+          # letting a half-parsed page through.
+          want("only %d market rows" % len(rows), len(rows) >= 35,
+               "measured 46 on 2026-09-22")
+
+          strips = {}
+          for r in rows:
+              strips.setdefault(r.get("listing"), []).append(r)
+          for strip in ("index", "sector", "currency", "crypto", "futures"):
+              want("the %s strip is missing" % strip, strip in strips,
+                   "all five were published on every capture; the currency, "
+                   "crypto and futures ones are what the retired "
+                   "/finance/markets/* URLs used to serve")
+
+          priced = sum(1 for r in rows if r.get("price") is not None)
+          share = 100.0 * priced / max(1, len(rows))
+          want("market price coverage %.0f%%" % share, share >= 95,
+               "46 of 46 rows carried a price when measured")
+
+          # `gl` really selected the US market. If it ever stops doing so,
+          # these venues become someone else's and the run is silently a
+          # different sample.
+          venues = {r.get("exchange") for r in rows
+                    if r.get("listing") == "sector"}
+          want("the sector strip is not the US one (%s)" % sorted(
+                   v for v in venues if v),
+               venues == {"INDEXCBOE"},
+               "gl=US selected CBOE sector indices when measured; STOXX here "
+               "would mean gl stopped picking the market")
+
+          # Zero is not a measurement — the sentinel Google writes where it
+          # means 'there is none'.
+          want("a row carries market_cap == 0",
+               not [r for r in rows if r.get("market_cap") == 0])
+          want("a row carries volume == 0",
+               not [r for r in rows if r.get("volume") == 0])
+
+          # ---- the symbol loop --------------------------------------------
+          qmeta = json.load(open("canary_quotes.meta.json"))
+          quotes = json.load(open("canary_quotes.json"))
+
+          # `partial` is allowed here and only here: one symbol dropping out
+          # is warned about below, and the rows that DID come back are still
+          # checked. A failed or missing run is not.
+          want("quote status is %s" % qmeta.get("status"),
+               qmeta.get("status") in ("complete", "partial"),
+               "stop_reason=%s" % qmeta.get("stop_reason"))
+          # THE check this job exists for: the symbol loop is this repo's
+          # equivalent of pagination, so a run that quietly stopped after
+          # the first symbol must be visible. But ONE symbol coming back
+          # empty is an access condition, not a defect — the first
+          # scheduled run lost BTC-USD, the same commit re-run passed, and
+          # five consecutive local fetches of that symbol returned a row.
+          # Failing on it would make this badge intermittently red, which
+          # teaches everyone to ignore it.
+          #
+          # So: some-but-not-all is a WARNING naming what is missing, and
+          # none-at-all or a wrong KIND is an error. That is the same split
+          # this job already applies to exit codes.
+          EXPECTED_KINDS = {"GOOGL:NASDAQ": "stock", ".INX:INDEXSP": "index",
+                            "EUR-USD": "currency", "BTC-USD": "crypto"}
+          got = {r.get("sku") for r in quotes}
+          absent = sorted(set(EXPECTED_KINDS) - got)
+          want("no symbol came back at all", quotes,
+               "the symbol loop produced nothing")
+          want("unexpected symbols came back (%s)" % sorted(got - set(EXPECTED_KINDS)),
+               not (got - set(EXPECTED_KINDS)),
+               "a symbol nobody asked for means the wrong page was read")
+          if absent:
+              print("::warning::%d of 4 symbols came back; missing %s. "
+                    "Reported as an access condition rather than a defect: "
+                    "a symbol dropping out for one run has been observed "
+                    "and cleared on a re-run of the same commit. If the "
+                    "SAME symbol is missing on consecutive days, that is a "
+                    "site change worth an issue."
+                    % (len(got), ", ".join(absent)))
+
+          # The kinds that DID come back must still be right — each has its
+          # own record shape in the payload, so a wrong one means the
+          # parser, not the network.
+          kinds = {r.get("sku"): r.get("instrument_type") for r in quotes}
+          wrong = {k: v for k, v in kinds.items() if EXPECTED_KINDS.get(k) != v}
+          want("instrument kinds are wrong (%s)" % wrong, not wrong,
+               "each of these has its own record shape in the payload")
+
+          # Each fetch must be numbered: `page` indexes the SYMBOL here, and
+          # every row claiming page 1 is the arithmetic bug a sibling
+          # shipped. Checked as "distinct and in range" so a missing symbol
+          # does not fail it for the wrong reason.
+          pages = sorted(r.get("page") for r in quotes)
+          want("the symbol index is not threaded through (%s)" % pages,
+               len(set(pages)) == len(pages)
+               and all(1 <= p <= 4 for p in pages if p is not None),
+               "every row claiming the same page is the bug this catches")
+          want("fewer fetches completed than symbols returned (%s)"
+               % qmeta.get("pages_completed"),
+               (qmeta.get("pages_completed") or 0) >= len(quotes))
+
+          # The rich record's own columns, which a list row does not carry.
+          equity = next((r for r in quotes
+                         if r.get("sku") == "GOOGL:NASDAQ"), {})
+          for col in ("open", "day_high", "day_low", "prev_close",
+                      "market_cap", "industry"):
+              want("the equity row has no %s" % col,
+                   equity.get(col) is not None,
+                   "a quote page publishes it; a list row does not")
+          # Volume is NOT a fixed requirement: before the US session opens
+          # Google publishes 0, which the parser nulls as "none" (zero is not
+          # a measurement). A dispatch at 07:00 UTC on 2026-10-15 failed on
+          # exactly that. A time-of-day value cannot be a parser threshold.
+          if equity and equity.get("volume") is None:
+              print("::notice::GOOGL volume is null — the session has not "
+                    "traded yet (Google publishes 0 before the open).")
+
+
+          # ---- the movers previews ----------------------------------------
+          mov = json.load(open("canary_movers.json"))
+          # 11 rows on the 2026-09-22 capture across three lists. Floored at
+          # 3 rather than 11: these are previews the site resizes through
+          # the session, and one list can legitimately be a single row.
+          want("only %d movers rows" % len(mov), len(mov) >= 3,
+               "measured 11 across three lists")
+          mov_lists = {r.get("listing") for r in mov}
+          want("movers carries an unexpected list (%s)" % sorted(
+                   l for l in mov_lists if l),
+               mov_lists <= {"gainers", "losers", "most_active",
+                             "movers_0", "movers_1", "movers_2"})
+          want("every movers row is priced",
+               all(r.get("price") is not None for r in mov))
+          # The positional labels hold only while gainers really are up and
+          # losers really are down; the parser downgrades to movers_N when
+          # they do not. Seeing the downgrade is worth knowing about.
+          if {"movers_0", "movers_1", "movers_2"} & mov_lists:
+              print("::warning::The movers lists stopped looking like "
+                    "gainers and losers, so the parser downgraded their "
+                    "labels to positional names. Google may have reordered "
+                    "the strip.")
+
+          # ---- the earnings calendar --------------------------------------
+          earn = json.load(open("canary_earnings.json"))
+          # 5 events on the 2026-09-22 capture. Floored at 1 rather than 5:
+          # a calendar legitimately empties out over a holiday, and a check
+          # that goes red every Christmas is one people learn to ignore.
+          want("the earnings calendar came back empty", len(earn) >= 1,
+               "5 events when measured; a quiet week is legitimate")
+          want("an event names no instrument",
+               all(e.get("sku") for e in earn))
+          want("an event has no date", all(e.get("event_date") for e in earn))
+          want("no event carries an estimate",
+               any(e.get("revenue_estimate") or e.get("eps_estimate")
+                   for e in earn),
+               "the two slots a not-yet-reported period carries")
+
+          # ---- the instrument modes ---------------------------------------
+          fin = json.load(open("canary_financials.json"))
+          ana = json.load(open("canary_analysts.json"))
+          cha = json.load(open("canary_chart.json"))
+
+          # Measured 90 / 44 / 99 on 2026-09-22. Floored, because Google
+          # legitimately adds a quarter, drops an analyst note or serves a
+          # short session — but not so far that a half-parsed payload
+          # passes.
+          want("only %d financial periods" % len(fin), len(fin) >= 60,
+               "measured 90 quarters back to 2004")
+          want("only %d analyst rows" % len(ana), len(ana) >= 10)
+          # The chart floor is the DAILY series alone, and the intraday
+          # series is asserted only when the session has actually produced
+          # one. Measured 2026-09-22: 99 bars when the previous session was
+          # complete (79 intraday + 20 daily), and 25 at 09:53 New York —
+          # twenty-three minutes after the opening bell — because the
+          # intraday series had five bars in it.
+          #
+          # This job runs at 10:41 New York, so a fixed floor of 60 would
+          # have been red every single morning, and red on every US market
+          # holiday besides. A check that is always red teaches everyone to
+          # ignore checks.
+          daily = [r for r in cha if r.get("interval") == "1d"]
+          intraday = [r for r in cha if r.get("interval") == "5m"]
+          want("only %d daily bars" % len(daily), len(daily) >= 15,
+               "about a month of them is published regardless of the hour")
+
+          # THE assertion this job exists for. The financial figures live in
+          # a 106-slot array with NO labels anywhere in the payload, so a
+          # reordering upstream would silently move every column. These are
+          # relationships rather than fixed numbers, so they survive a new
+          # quarter but not a reshuffle.
+          recent = [r for r in fin if r.get("detailed")]
+          want("no detailed periods came back", recent)
+          if recent:
+              q = recent[0]
+              for col in ("revenue", "net_income", "eps", "ebitda",
+                          "net_profit_margin", "effective_tax_rate",
+                          "operating_expense", "currency", "period_end"):
+                  want("the newest quarter has no %s" % col,
+                       q.get(col) is not None)
+              want("revenue is not a revenue-sized number (%s)" % q.get("revenue"),
+                   q.get("revenue", 0) > 1e9,
+                   "a quarterly revenue in the slot map's units")
+              want("net margin is not a percentage (%s)"
+                   % q.get("net_profit_margin"),
+                   0 < q.get("net_profit_margin", -1) <= 100)
+              want("effective tax rate is not a percentage (%s)"
+                   % q.get("effective_tax_rate"),
+                   0 <= q.get("effective_tax_rate", -1) <= 100)
+              want("EPS is not per-share sized (%s)" % q.get("eps"),
+                   0 < abs(q.get("eps", 0)) < 1000)
+              want("EBITDA is not below EPS (the two slots have swapped)",
+                   q.get("ebitda", 0) > abs(q.get("eps", 0)))
+
+          # The analyst split, whose slot order is the counter-intuitive one.
+          a0 = ana[0]
+          want("no consensus verdict", a0.get("consensus"))
+          counts = [a0.get(k) for k in ("buy_count", "hold_count", "sell_count")]
+          if all(c is not None for c in counts):
+              want("the buy/hold/sell split does not sum to the total",
+                   sum(counts) == a0.get("analysts_total"))
+          want("no 12-month target range",
+               a0.get("target_low") is not None
+               and a0.get("target_high") is not None
+               and a0.get("target_low") <= a0.get("target_high"))
+
+          # The intraday series, asserted only when the session has one —
+          # it is empty before the opening bell and on a market holiday, and
+          # neither is a defect.
+          if intraday:
+              want("intraday bars span more than one day (%s)"
+                   % sorted({r["ts"][:10] for r in intraday}),
+                   len({r["ts"][:10] for r in intraday}) == 1,
+                   "the five-minute series is one session")
+          else:
+              print("::notice::No intraday bars — the session has not opened "
+                    "or it is a market holiday. The daily series was checked.")
+          want("chart carries no recognised interval",
+               {r.get("interval") for r in cha} <= {"5m", "1d"}
+               and "1d" in {r.get("interval") for r in cha})
+          bad = [r for r in cha
+                 if not (r["low"] <= r["open"] <= r["high"]
+                         and r["low"] <= r["close"] <= r["high"])]
+          want("%d bars violate low <= open,close <= high" % len(bad), not bad,
+               "close is SECOND in the payload; a swap shows up here")
+          pairs = [(r.get("interval"), r.get("ts")) for r in cha]
+          want("a bar is duplicated across intervals",
+               len(set(pairs)) == len(pairs),
+               "the current session's daily bar shares its timestamp with "
+               "that session's last intraday bar")
+
+          if problems:
+              print("CANARY FAILED:")
+              for p in problems:
+                  print("  -", p)
+              raise SystemExit(1)
+          print("canary OK: %d market rows across %d strips, %d quotes, "
+                "%d financial periods, %d analyst rows, %d chart bars, "
+                "%d movers rows, %d earnings events, %.0f%% priced, complete"
+                % (len(rows), len(strips), len(quotes), len(fin), len(ana),
+                   len(cha), len(mov), len(earn), share))
+          print("           chart: %d daily + %d intraday bars"
+                % (len(daily), len(intraday)))
+          PY
+
+      - name: Upload the run's artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-run
+          path: |
+            canary_markets.json
+            canary_markets.csv
+            canary_markets.meta.json
+            canary_quotes.json
+            canary_quotes.csv
+            canary_quotes.meta.json
+            canary_financials.json
+            canary_analysts.json
+            canary_chart.json
+            canary_earnings.json
+            canary_movers.json
+            canary_*.meta.json
+            canary_*.html*
+          if-no-files-found: warn
+          retention-days: 14
