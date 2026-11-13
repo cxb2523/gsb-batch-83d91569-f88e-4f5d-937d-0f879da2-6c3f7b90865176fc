@@ -1,0 +1,475 @@
+From 4e87ae6dccf7f72d076a348787d4494ea5bdfa17 Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:12:37 -0500
+Subject: [PATCH 15/55] frame-stream
+
+Page.startFrameStream, updateFrameStream and stopFrameStream: uncompressed
+frames of the page written to named shared memory, one event signalled per
+frame, for a viewer that draws the page live. Windows only. The handler
+wiring rides in agent-snapshot (page_handler.*, Page.pdl).
+---
+ .../browser/devtools/devtools_frame_stream.cc | 297 ++++++++++++++++++
+ .../browser/devtools/devtools_frame_stream.h  | 147 +++++++++
+ 2 files changed, 444 insertions(+)
+ create mode 100644 content/browser/devtools/devtools_frame_stream.cc
+ create mode 100644 content/browser/devtools/devtools_frame_stream.h
+
+diff --git a/content/browser/devtools/devtools_frame_stream.cc b/content/browser/devtools/devtools_frame_stream.cc
+new file mode 100644
+index 0000000000..d88d990c4c
+--- /dev/null
++++ b/content/browser/devtools/devtools_frame_stream.cc
+@@ -0,0 +1,297 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "content/browser/devtools/devtools_frame_stream.h"
++
++#include <algorithm>
++#include <atomic>
++#include <limits>
++#include <new>
++#include <utility>
++
++#include "base/compiler_specific.h"
++#include "base/containers/span.h"
++#include "base/functional/bind.h"
++#include "base/numerics/safe_conversions.h"
++#include "base/rand_util.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/time/time.h"
++#include "content/browser/devtools/cdp_cursor_overlay.h"
++#include "content/browser/devtools/devtools_video_consumer.h"
++#include "media/base/video_frame.h"
++#include "media/base/video_types.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "third_party/skia/include/core/SkImageInfo.h"
++#include "ui/gfx/geometry/size_conversions.h"
++#include "ui/gfx/geometry/size_f.h"
++
++#if BUILDFLAG(IS_WIN)
++#include <windows.h>
++#endif
++
++namespace content {
++
++namespace {
++
++using SectionHeader = DevToolsFrameStream::SectionHeader;
++using SlotHeader = DevToolsFrameStream::SlotHeader;
++
++// The reader depends on these offsets; see Page.pdl.
++static_assert(offsetof(SectionHeader, slot_bytes) == 16);
++static_assert(offsetof(SectionHeader, latest) == 24);
++static_assert(offsetof(SectionHeader, slots) == 32);
++static_assert(sizeof(SlotHeader) == 32);
++static_assert(offsetof(SlotHeader, width) == 8);
++static_assert(offsetof(SlotHeader, stride) == 16);
++static_assert(offsetof(SlotHeader, timestamp_us) == 24);
++static_assert(sizeof(SectionHeader) <= DevToolsFrameStream::kHeaderSize);
++
++constexpr size_t kBytesPerPixel = 4;
++
++}  // namespace
++
++DevToolsFrameStream::DevToolsFrameStream(SurfaceSizeCallback surface_size,
++                                         CursorCallback cursor)
++    : surface_size_(std::move(surface_size)), cursor_(std::move(cursor)) {}
++
++DevToolsFrameStream::~DevToolsFrameStream() {
++  Release();
++}
++
++std::string DevToolsFrameStream::Start(const viz::FrameSinkId& frame_sink_id,
++                                       const gfx::Size& max_size,
++                                       int max_fps) {
++#if !BUILDFLAG(IS_WIN)
++  return "Frame streams are only available on Windows.";
++#else
++  if (view_) {
++    return "A frame stream is already running in this session.";
++  }
++
++  // The slots hold the page at its size now. A frame is never larger than the
++  // page, and a page that grows later is scaled to fit the slots it has.
++  const gfx::Size surface = surface_size_.Run();
++  slot_size_ = surface.IsEmpty() ? max_size : surface;
++  const uint64_t slot_bytes = static_cast<uint64_t>(slot_size_.width()) *
++                              static_cast<uint64_t>(slot_size_.height()) *
++                              kBytesPerPixel;
++  const uint64_t total = kHeaderSize + slot_bytes * kSlotCount;
++  if (slot_bytes == 0 ||
++      total > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
++    return "The page is too large to stream.";
++  }
++
++  // Named unguessably: the section is the viewer's to open, nobody else's.
++  std::array<uint8_t, 16> nonce;
++  base::RandBytes(nonce);
++  const std::string suffix = base::HexEncode(nonce);
++  section_name_ = "Local\\nd4j-frames-" + suffix;
++  event_name_ = "Local\\nd4j-frames-" + suffix + "-ready";
++
++  const std::wstring wide_section_name = base::UTF8ToWide(section_name_);
++  HANDLE mapping = ::CreateFileMappingW(
++      INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
++      static_cast<DWORD>(total >> 32), static_cast<DWORD>(total & 0xFFFFFFFF),
++      wide_section_name.c_str());
++  // Read at once: ERROR_ALREADY_EXISTS means another section has this name,
++  // and the next call would overwrite the error.
++  const DWORD created = ::GetLastError();
++  mapping_.Set(mapping);
++  if (!mapping_.is_valid() || created == ERROR_ALREADY_EXISTS) {
++    Release();
++    return "Could not create the frame section.";
++  }
++  void* view = ::MapViewOfFile(mapping_.get(), FILE_MAP_WRITE, 0, 0,
++                               static_cast<SIZE_T>(total));
++  if (!view) {
++    Release();
++    return "Could not map the frame section.";
++  }
++  view_ = static_cast<uint8_t*>(view);
++  view_size_ = static_cast<size_t>(total);
++  slot_bytes_ = static_cast<size_t>(slot_bytes);
++
++  // Auto-reset: a viewer that falls behind wakes once and reads the newest
++  // frame, rather than once per frame it missed.
++  event_.Set(::CreateEventW(nullptr, /*bManualReset=*/FALSE,
++                            /*bInitialState=*/FALSE,
++                            base::UTF8ToWide(event_name_).c_str()));
++  if (!event_.is_valid()) {
++    Release();
++    return "Could not create the frame event.";
++  }
++
++  SectionHeader* header = new (view_.get()) SectionHeader();
++  header->magic = kMagic;
++  header->version = kVersion;
++  header->slot_count = kSlotCount;
++  header->header_size = static_cast<uint32_t>(kHeaderSize);
++  header->slot_bytes = slot_bytes;
++
++  max_size_ = max_size;
++  consumer_ = std::make_unique<DevToolsVideoConsumer>(base::BindRepeating(
++      &DevToolsFrameStream::OnFrame, weak_factory_.GetWeakPtr()));
++  consumer_->SetFormat(media::PIXEL_FORMAT_ARGB);
++  consumer_->SetFrameSinkId(frame_sink_id);
++  consumer_->SetMinCapturePeriod(base::Seconds(1) /
++                                 std::clamp(max_fps, 1, kMaxFps));
++  ApplyLimits();
++  consumer_->StartCapture();
++  // A cursor drawn onto the frames moves over a page that may not change, and
++  // a still page sends none: its moves ask for them.
++  if (CdpCursorOverlay* cursor = cursor_.Run()) {
++    cursor_changed_ = cursor->AddChangedCallback(
++        base::BindRepeating(&DevToolsVideoConsumer::RequestRefreshFrame,
++                            base::Unretained(consumer_.get())));
++  }
++  return std::string();
++#endif
++}
++
++void DevToolsFrameStream::Update(const gfx::Size& max_size, int max_fps) {
++  if (!consumer_) {
++    return;
++  }
++  max_size_ = max_size;
++  consumer_->SetMinCapturePeriod(base::Seconds(1) /
++                                 std::clamp(max_fps, 1, kMaxFps));
++  ApplyLimits();
++}
++
++void DevToolsFrameStream::SetFrameSinkId(
++    const viz::FrameSinkId& frame_sink_id) {
++  if (consumer_) {
++    consumer_->SetFrameSinkId(frame_sink_id);
++  }
++}
++
++void DevToolsFrameStream::ApplyLimits() {
++  const gfx::Size surface = surface_size_.Run();
++  last_surface_size_ = surface;
++  if (surface.IsEmpty() || !consumer_) {
++    return;
++  }
++  const double fit_width = std::min(max_size_.width(), slot_size_.width()) /
++                           static_cast<double>(surface.width());
++  const double fit_height = std::min(max_size_.height(), slot_size_.height()) /
++                            static_cast<double>(surface.height());
++  const double scale = std::min({1.0, fit_width, fit_height});
++  // Floored, so a frame can never spill out of its slot.
++  gfx::Size frame =
++      gfx::ToFlooredSize(gfx::ScaleSize(gfx::SizeF(surface), scale));
++  frame.SetToMax(gfx::Size(1, 1));
++  consumer_->SetMinAndMaxFrameSize(frame, frame);
++}
++
++void DevToolsFrameStream::OnFrame(scoped_refptr<media::VideoFrame> frame) {
++  if (!view_) {
++    return;
++  }
++  const gfx::Size surface = surface_size_.Run();
++  if (surface.IsEmpty()) {
++    return;
++  }
++  if (surface != last_surface_size_) {
++    // The page was resized: this frame is sized for the old one, and the next
++    // comes at the new size.
++    ApplyLimits();
++    return;
++  }
++  if (frame->format() != media::PIXEL_FORMAT_ARGB) {
++    return;
++  }
++  const gfx::Size size = frame->visible_rect().size();
++  if (size.IsEmpty() || size.width() > slot_size_.width() ||
++      size.height() > slot_size_.height()) {
++    return;
++  }
++
++  const size_t row_bytes = static_cast<size_t>(size.width()) * kBytesPerPixel;
++  const size_t rows = static_cast<size_t>(size.height());
++  const size_t src_stride = base::checked_cast<size_t>(
++      frame->stride(media::VideoFrame::Plane::kARGB));
++  if (src_stride < row_bytes) {
++    return;
++  }
++  // SAFETY: the frame's visible ARGB plane holds |rows| rows |src_stride|
++  // bytes apart, the last of them at least |row_bytes| long.
++  const base::span<const uint8_t> src = UNSAFE_BUFFERS(
++      base::span(frame->visible_data(media::VideoFrame::Plane::kARGB),
++                 src_stride * (rows - 1) + row_bytes));
++  // SAFETY: |view_| maps |view_size_| bytes, set together in Start().
++  const base::span<uint8_t> section =
++      UNSAFE_BUFFERS(base::span(view_.get(), view_size_));
++  SectionHeader* header = reinterpret_cast<SectionHeader*>(section.data());
++
++  const int slot = (last_slot_ + 1) % kSlotCount;
++  SlotHeader& slot_header = header->slots[static_cast<size_t>(slot)];
++  const base::span<uint8_t> pixels = section.subspan(
++      kHeaderSize + static_cast<size_t>(slot) * slot_bytes_, slot_bytes_);
++
++  // Odd while the slot is being written, so a reader copying it at the same
++  // moment can tell its copy is torn.
++  const uint64_t sequence = ++frames_ * 2;
++  std::atomic_ref<uint64_t> slot_sequence(slot_header.sequence);
++  slot_sequence.store(sequence - 1, std::memory_order_relaxed);
++  std::atomic_thread_fence(std::memory_order_release);
++
++  for (size_t y = 0; y < rows; ++y) {
++    pixels.subspan(y * row_bytes, row_bytes)
++        .copy_from(src.subspan(y * src_stride, row_bytes));
++  }
++
++  // The same cursor Page.startScreencast draws, so a viewer of a session that
++  // shows one sees it too. The capture is in physical pixels, the cursor in
++  // DIPs.
++  if (CdpCursorOverlay* cursor = cursor_.Run()) {
++    const double scale_factor =
++        frame->metadata().device_scale_factor.value_or(1.0);
++    const double dip_width = surface.width() / scale_factor;
++    const double dip_height = surface.height() / scale_factor;
++    SkBitmap bitmap;
++    if (dip_width > 0 && dip_height > 0 &&
++        bitmap.installPixels(
++            SkImageInfo::MakeN32Premul(size.width(), size.height()),
++            pixels.data(), row_bytes)) {
++      cursor->CompositeCursorOnto(
++          bitmap, static_cast<float>(size.width() / dip_width),
++          static_cast<float>(size.height() / dip_height));
++    }
++  }
++
++  slot_header.width = static_cast<uint32_t>(size.width());
++  slot_header.height = static_cast<uint32_t>(size.height());
++  slot_header.stride = static_cast<uint32_t>(row_bytes);
++  slot_header.timestamp_us =
++      (base::Time::Now() - base::Time::UnixEpoch()).InMicroseconds();
++
++  slot_sequence.store(sequence, std::memory_order_release);
++  std::atomic_ref<uint64_t>(header->latest)
++      .store((sequence << 2) | static_cast<uint64_t>(slot),
++             std::memory_order_release);
++  last_slot_ = slot;
++
++#if BUILDFLAG(IS_WIN)
++  ::SetEvent(event_.get());
++#endif
++}
++
++void DevToolsFrameStream::Release() {
++  weak_factory_.InvalidateWeakPtrs();
++  cursor_changed_ = base::CallbackListSubscription();
++  consumer_.reset();
++#if BUILDFLAG(IS_WIN)
++  if (view_) {
++    ::UnmapViewOfFile(view_.get());
++  }
++  event_.Close();
++  mapping_.Close();
++#endif
++  view_ = nullptr;
++  view_size_ = 0;
++  slot_bytes_ = 0;
++}
++
++}  // namespace content
+diff --git a/content/browser/devtools/devtools_frame_stream.h b/content/browser/devtools/devtools_frame_stream.h
+new file mode 100644
+index 0000000000..2f257c101c
+--- /dev/null
++++ b/content/browser/devtools/devtools_frame_stream.h
+@@ -0,0 +1,147 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CONTENT_BROWSER_DEVTOOLS_DEVTOOLS_FRAME_STREAM_H_
++#define CONTENT_BROWSER_DEVTOOLS_DEVTOOLS_FRAME_STREAM_H_
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <string>
++
++#include "base/callback_list.h"
++#include "base/functional/callback.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/memory/weak_ptr.h"
++#include "build/build_config.h"
++#include "components/viz/common/surfaces/frame_sink_id.h"
++#include "content/common/content_export.h"
++#include "ui/gfx/geometry/size.h"
++
++#if BUILDFLAG(IS_WIN)
++#include "base/win/scoped_handle.h"
++#endif
++
++namespace media {
++class VideoFrame;
++}
++
++namespace content {
++
++class CdpCursorOverlay;
++class DevToolsVideoConsumer;
++
++// browser: Page.startFrameStream. Copies a page's captured frames,
++// uncompressed, into a named shared-memory section that a viewer in another
++// process maps directly, and signals a named event after each one.
++//
++// Page.startScreencast JPEG-encodes every frame and sends it base64 inside a
++// protocol event: about 230 KB of JSON per 1280x720 frame, on the connection
++// the automation itself uses. And however slowly its frames are acknowledged,
++// the capture underneath keeps running at 100 Hz, which on an animated page
++// costs most of a core. Here the capture itself runs at the viewer's rate, and
++// a frame costs one copy.
++//
++// Lives on the UI thread, owned by the PageHandler of the session that started
++// it, so it ends when that session detaches.
++class CONTENT_EXPORT DevToolsFrameStream {
++ public:
++  // The section layout, shared with its reader. Plain
++  // little-endian fields at fixed offsets, described in Page.pdl. A slot's
++  // sequence is odd while the slot is being written, and |latest| names the
++  // newest finished slot as sequence << 2 | slot.
++  struct SlotHeader {
++    uint64_t sequence;
++    uint32_t width;
++    uint32_t height;
++    uint32_t stride;
++    uint32_t reserved;
++    int64_t timestamp_us;
++  };
++  static constexpr int kSlotCount = 3;
++  struct SectionHeader {
++    uint32_t magic;
++    uint32_t version;
++    uint32_t slot_count;
++    uint32_t header_size;
++    uint64_t slot_bytes;
++    uint64_t latest;
++    std::array<SlotHeader, kSlotCount> slots;
++  };
++  static constexpr uint32_t kMagic = 0x4D52464E;  // "NFRM"
++  static constexpr uint32_t kVersion = 1;
++  static constexpr size_t kHeaderSize = 4096;
++  static constexpr int kMaxFps = 60;
++
++  // The page's size in physical pixels; empty while it has none.
++  using SurfaceSizeCallback = base::RepeatingCallback<gfx::Size()>;
++  // The cursor overlay to draw onto frames, or null when none is showing.
++  using CursorCallback = base::RepeatingCallback<CdpCursorOverlay*()>;
++
++  DevToolsFrameStream(SurfaceSizeCallback surface_size, CursorCallback cursor);
++  DevToolsFrameStream(const DevToolsFrameStream&) = delete;
++  DevToolsFrameStream& operator=(const DevToolsFrameStream&) = delete;
++  ~DevToolsFrameStream();
++
++  // Allocates the section and starts capturing |frame_sink_id|. Returns why it
++  // could not, or an empty string once it has started.
++  std::string Start(const viz::FrameSinkId& frame_sink_id,
++                    const gfx::Size& max_size,
++                    int max_fps);
++
++  // New limits for a running stream: a resized viewer, a new frame rate.
++  void Update(const gfx::Size& max_size, int max_fps);
++
++  // Follows the page to a new renderer, as a cross-process navigation does.
++  void SetFrameSinkId(const viz::FrameSinkId& frame_sink_id);
++
++  const std::string& section_name() const { return section_name_; }
++  const std::string& event_name() const { return event_name_; }
++  size_t section_size() const { return view_size_; }
++  const gfx::Size& slot_size() const { return slot_size_; }
++
++ private:
++  void OnFrame(scoped_refptr<media::VideoFrame> frame);
++
++  // Sizes the capture to fit the page within both the viewer's limit and the
++  // slots, never larger than the page.
++  void ApplyLimits();
++
++  void Release();
++
++  const SurfaceSizeCallback surface_size_;
++  const CursorCallback cursor_;
++  std::unique_ptr<DevToolsVideoConsumer> consumer_;
++  // Asks |consumer_| for a frame when the cursor drawn onto them changes.
++  // After it, so that it goes first.
++  base::CallbackListSubscription cursor_changed_;
++
++  gfx::Size max_size_;
++  gfx::Size slot_size_;
++  gfx::Size last_surface_size_;
++  uint64_t frames_ = 0;
++  int last_slot_ = kSlotCount - 1;
++
++  std::string section_name_;
++  std::string event_name_;
++#if BUILDFLAG(IS_WIN)
++  base::win::ScopedHandle mapping_;
++  base::win::ScopedHandle event_;
++#endif
++  // The mapped section. Not heap memory: it is mapped from the file mapping
++  // above and unmapped in Release().
++  raw_ptr<uint8_t> view_ = nullptr;
++  size_t view_size_ = 0;
++  // One slot's bytes, set with |view_size_|. The layout is never read back
++  // from the section: the viewer that maps it can write to it.
++  size_t slot_bytes_ = 0;
++
++  base::WeakPtrFactory<DevToolsFrameStream> weak_factory_{this};
++};
++
++}  // namespace content
++
++#endif  // CONTENT_BROWSER_DEVTOOLS_DEVTOOLS_FRAME_STREAM_H_
+-- 
+2.45.1.windows.1
+

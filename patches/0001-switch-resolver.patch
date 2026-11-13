@@ -1,0 +1,547 @@
+From d2c021dbab13682d5ddbdfdca1470733549f8051 Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:11:59 -0500
+Subject: [PATCH 01/55] switch-resolver
+
+browser switch resolver + component scaffolding and switches-dep plumbing.
+
+Riders: the fdlibm dependency and movement-persona sources in components/browser/BUILD.gn; the renderer switch forwarding in render_process_host_impl.cc; refresh-rate, private-clipboard, cancel-print-preview, cancel-payment-request and movement-persona switch declarations; chrome/browser/BUILD.gn carries stable-version's dependency.
+---
+ chrome/browser/BUILD.gn                       |   1 +
+ components/browser/BUILD.gn                   |  27 ++++
+ components/browser/browser_switches.cc        |  70 ++++++++
+ components/browser/browser_switches.h         |  39 +++++
+ components/browser/switch_resolver.cc         | 122 ++++++++++++++
+ components/browser/switch_resolver.h          | 150 ++++++++++++++++++
+ .../renderer_host/render_process_host_impl.cc |   6 +
+ content/public/browser/BUILD.gn               |   2 +
+ third_party/blink/common/BUILD.gn             |   1 +
+ third_party/blink/renderer/core/BUILD.gn      |   1 +
+ 10 files changed, 419 insertions(+)
+ create mode 100644 components/browser/BUILD.gn
+ create mode 100644 components/browser/browser_switches.cc
+ create mode 100644 components/browser/browser_switches.h
+ create mode 100644 components/browser/switch_resolver.cc
+ create mode 100644 components/browser/switch_resolver.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index a7a2110360..c88e20480b 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -2392,6 +2392,7 @@ source_set("browser") {
+     "//chrome/browser/visited_url_ranking:impl",
+     "//chrome/browser/vr",
+     "//chrome/browser/vr:impl",
++    "//components/browser:browser_switches",
+     "//components/certificate_transparency",
+     "//components/certificate_transparency:proto",
+     "//components/collaboration/internal",
+diff --git a/components/browser/BUILD.gn b/components/browser/BUILD.gn
+new file mode 100644
+index 0000000000..5ef5e52b97
+--- /dev/null
++++ b/components/browser/BUILD.gn
+@@ -0,0 +1,27 @@
++# Copyright 2026 The browser Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++component("browser_switches") {
++  sources = [
++    "browser_runtime.cc",
++    "browser_runtime.h",
++    "browser_switches.cc",
++    "browser_switches.h",
++    "default_voices.cc",
++    "default_voices.h",
++    "java_random.cc",
++    "java_random.h",
++    "movement_persona.cc",
++    "movement_persona.h",
++    "switch_resolver.cc",
++    "switch_resolver.h",
++  ]
++
++  defines = [ "IS_BROWSER_IMPL" ]
++
++  deps = [
++    "//base",
++    "//third_party/fdlibm",
++  ]
++}
+diff --git a/components/browser/browser_switches.cc b/components/browser/browser_switches.cc
+new file mode 100644
+index 0000000000..1b0283aead
+--- /dev/null
++++ b/components/browser/browser_switches.cc
+@@ -0,0 +1,70 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/browser/browser_switches.h"
++
++namespace switches {
++
++// Presence-only opt-out. The browser-defaults preset (telemetry off,
++// privacy-positive features; see browser::MaybeExpandBrowserDefaults) is
++// applied on every launch; this switch skips it so the browser behaves like
++// stock Chromium.
++const char kUseChromiumDefaults[] = "use-chromium-defaults";
++
++// Browser brand (e.g. "Chrome").
++const char kFingerprintBrand[] = "fingerprint-brand";
++
++// Browser major version (e.g. "145").
++const char kFingerprintBrandVersion[] = "fingerprint-brand-version";
++
++// Full browser version (e.g. "145.0.7309.92").
++const char kFingerprintBrandVersionLong[] = "fingerprint-brand-version-long";
++
++// Comma-separated hosts (subdomains included) that may use the software
++// secure PlayReady CDM in addition to primevideo.com and amazon.com; "*"
++// allows every origin. Other origins see the EME answers of stock Chrome.
++const char kSoftwarePlayreadySites[] = "software-playready-sites";
++
++// Presence-only. Draws a cursor overlay while a DevTools client is attached.
++const char kShowCdpCursor[] = "show-cdp-cursor";
++
++// Presence-only. navigator.credentials.create() and .get() with a publicKey
++// option short-circuit in the browser process before any platform
++// authenticator UI (Windows Hello, Touch ID) appears. After a random 1-5 s
++// delay, mimicking a user dismissing the prompt, the request rejects with
++// NotAllowedError, the same DOMException a site sees after a real cancel.
++// isUserVerifyingPlatformAuthenticatorAvailable() and
++// isConditionalMediationAvailable() keep their truthful answers so the site
++// sees no inconsistency between "authenticator available" and "declined".
++const char kAutoDeclineWebauthn[] = "auto-decline-webauthn";
++
++// Presence-only. The browser keeps its own in-memory clipboard instead of
++// the operating system's: copy, cut and paste -- keyboard shortcuts,
++// execCommand and the async Clipboard API alike -- work within this browser
++// process and never read or overwrite the clipboard of the person at the
++// machine, nor that of any other browser running beside it. The same
++// platform-independent clipboard headless mode always uses.
++const char kPrivateClipboard[] = "private-clipboard";
++
++// The seed of the pointer's human-movement persona (one identity, one
++// hand); an int64. Absent: derived from the master seed, or random.
++// Browser process only.
++const char kMovementPersonaSeed[] = "movement-persona-seed";
++
++// Presence-only. A page's window.print() runs Chrome's own scripted-print flow
++// -- beforeprint, print() blocked while the page is paused -- but no print
++// preview opens. After a random 1-4 s, the time a person takes to close a
++// preview they did not want, the preview is closed as the dialog's Cancel
++// closes it: the page gets afterprint and print() returns. Page.printToPDF is
++// unaffected.
++const char kCancelPrintPreview[] = "cancel-print-preview";
++
++// Presence-only. A page's PaymentRequest.show() opens Chrome's payment
++// sheet, which takes the tab's input while it is up. After a random 1-2 s,
++// the time a person takes to close a sheet they did not mean to open, it is
++// closed as its Cancel button closes it: show() rejects with Chrome's own
++// AbortError.
++const char kCancelPaymentRequest[] = "cancel-payment-request";
++
++}  // namespace switches
+diff --git a/components/browser/browser_switches.h b/components/browser/browser_switches.h
+new file mode 100644
+index 0000000000..ee993e8c8d
+--- /dev/null
++++ b/components/browser/browser_switches.h
+@@ -0,0 +1,39 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Command-line switches for the fingerprint surface. Each switch is
++// documented next to its definition in browser_switches.cc. Most value
++// switches also accept "auto" and "seed:<N>"; see switch_resolver.h.
++
++#ifndef COMPONENTS_BROWSER_BROWSER_SWITCHES_H_
++#define COMPONENTS_BROWSER_BROWSER_SWITCHES_H_
++
++#include "base/component_export.h"
++
++namespace switches {
++
++// Presets.
++COMPONENT_EXPORT(BROWSER) extern const char kUseChromiumDefaults[];
++
++// Brand and version.
++COMPONENT_EXPORT(BROWSER) extern const char kFingerprintBrand[];
++COMPONENT_EXPORT(BROWSER) extern const char kFingerprintBrandVersion[];
++COMPONENT_EXPORT(BROWSER) extern const char kFingerprintBrandVersionLong[];
++
++// Media.
++COMPONENT_EXPORT(BROWSER) extern const char kSoftwarePlayreadySites[];
++
++// Automation.
++COMPONENT_EXPORT(BROWSER) extern const char kShowCdpCursor[];
++COMPONENT_EXPORT(BROWSER) extern const char kAutoDeclineWebauthn[];
++COMPONENT_EXPORT(BROWSER) extern const char kPrivateClipboard[];
++COMPONENT_EXPORT(BROWSER) extern const char kMovementPersonaSeed[];
++COMPONENT_EXPORT(BROWSER) extern const char kCancelPrintPreview[];
++COMPONENT_EXPORT(BROWSER) extern const char kCancelPaymentRequest[];
++// dismiss-permission-prompts is in components/permissions/switches.h, beside
++// the stock deny-permission-prompts it replaces.
++
++}  // namespace switches
++
++#endif  // COMPONENTS_BROWSER_BROWSER_SWITCHES_H_
+diff --git a/components/browser/switch_resolver.cc b/components/browser/switch_resolver.cc
+new file mode 100644
+index 0000000000..994ec9e17b
+--- /dev/null
++++ b/components/browser/switch_resolver.cc
+@@ -0,0 +1,122 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/browser/switch_resolver.h"
++
++#include <optional>
++#include <string>
++#include <string_view>
++
++#include "base/command_line.h"
++#include "base/rand_util.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
++#include "components/browser/browser_switches.h"
++
++namespace browser {
++
++namespace {
++
++constexpr std::string_view kAutoLiteral = "auto";
++constexpr std::string_view kSeedPrefix = "seed:";
++
++// What the master seed switch said on the command line. Trivially
++// destructible, so it lives in a plain function-local static rather than
++// base::NoDestructor. Without the identity layer no switch is read, nothing
++// is requested, and MasterSeed() is a random seed.
++struct MasterSeedSwitch {
++  bool requested = false;
++  std::optional<int32_t> explicit_seed;
++};
++
++const MasterSeedSwitch& GetMasterSeedSwitch() {
++  static const MasterSeedSwitch state = []() {
++    MasterSeedSwitch s;
++    return s;
++  }();
++  return state;
++}
++
++}  // namespace
++
++uint32_t DeterministicBucket(int32_t seed, int32_t salt, uint32_t range) {
++  constexpr int64_t kKnuth = 2654435761LL;
++  const int64_t masked =
++      (static_cast<int64_t>(seed) * kKnuth + static_cast<int64_t>(salt)) &
++      0x7FFFFFFFLL;
++  return static_cast<uint32_t>(masked) % range;
++}
++
++float ResolveLinearNoiseSwitch(const char* switch_name,
++                               int32_t salt,
++                               double lo,
++                               double hi) {
++  return ResolveSwitch<float>(
++             switch_name,
++             [](const std::string& value) -> std::optional<float> {
++               double parsed = 0.0;
++               if (!base::StringToDouble(value, &parsed)) {
++                 return std::nullopt;
++               }
++               return static_cast<float>(parsed);
++             },
++             [salt, lo, hi](int32_t seed) -> float {
++               const uint32_t step = DeterministicBucket(seed, salt, 201);
++               return static_cast<float>(lo + step * (hi - lo) / 200.0);
++             },
++             /*fallback_when_absent=*/0.0f)
++      .value;
++}
++
++bool MasterSeedRequested() {
++  return GetMasterSeedSwitch().requested;
++}
++
++int32_t MasterSeed() {
++  // Thread-safe local-static initialization: base::RandUint64() runs at
++  // most once per process.
++  static const int32_t seed = []() {
++    const MasterSeedSwitch& s = GetMasterSeedSwitch();
++    if (s.explicit_seed.has_value()) {
++      return *s.explicit_seed;
++    }
++    // Masked to 31 bits so a random seed sits in the same non-negative
++    // range the launcher generates. Negative explicit seeds still work,
++    // since DeterministicBucket promotes to int64.
++    return static_cast<int32_t>(base::RandUint64() & 0x7FFFFFFFu);
++  }();
++  return seed;
++}
++
++namespace internal {
++
++RawSwitch ParseRawSwitch(const char* switch_name) {
++  RawSwitch out;
++  const base::CommandLine* cl = base::CommandLine::ForCurrentProcess();
++  if (!cl->HasSwitch(switch_name)) {
++    return out;
++  }
++  std::string raw = cl->GetSwitchValueASCII(switch_name);
++  if (raw == kAutoLiteral) {
++    out.mode = RawMode::kAuto;
++    return out;
++  }
++  int parsed = 0;
++  if (base::StartsWith(raw, kSeedPrefix) &&
++      base::StringToInt(std::string_view(raw).substr(kSeedPrefix.size()),
++                        &parsed)) {
++    out.mode = RawMode::kSeed;
++    out.seed = parsed;
++    return out;
++  }
++  // Anything else, including a "seed:" prefix with an unparseable suffix,
++  // is handed to the caller's explicit parser.
++  out.mode = RawMode::kExplicit;
++  out.explicit_value = std::move(raw);
++  return out;
++}
++
++}  // namespace internal
++
++}  // namespace browser
+diff --git a/components/browser/switch_resolver.h b/components/browser/switch_resolver.h
+new file mode 100644
+index 0000000000..436507ae3c
+--- /dev/null
++++ b/components/browser/switch_resolver.h
+@@ -0,0 +1,150 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Lets every fingerprint switch accept three input forms, an explicit value,
++// "auto" or "seed:<N>", without changing the explicit-value parse path.
++//
++// ResolveSwitch<T>() walks this hierarchy:
++//
++//   1. Explicit value (anything but "auto" / "seed:<N>"): parse_explicit()
++//      runs. A value that fails to parse counts as absent rather than
++//      falling through to derivation, so a typo never silently becomes a
++//      different spoofed value.
++//   2. "auto": derive_from_seed(MasterSeed()). Allocates the random master
++//      seed if none was requested.
++//   3. "seed:<N>": derive_from_seed(N).
++//   4. Absent with a master seed requested: derive_from_seed(MasterSeed()),
++//      unless inherit_from_master_seed is false. That opt-out is for
++//      surfaces that should not activate merely because a master seed
++//      exists (history length, media counts, screen, screen position, media
++//      features, connection); they then behave like (5).
++//   5. Absent with no master seed requested: fallback_when_absent, with no
++//      derivation and no RNG allocation. Stock behaviour for users who set
++//      no fingerprint switch at all.
++
++#ifndef COMPONENTS_BROWSER_SWITCH_RESOLVER_H_
++#define COMPONENTS_BROWSER_SWITCH_RESOLVER_H_
++
++#include <cstdint>
++#include <optional>
++#include <string>
++#include <utility>
++
++#include "base/component_export.h"
++#include "base/functional/function_ref.h"
++#include "base/notreached.h"
++
++namespace browser {
++
++// Salts for the deterministic per-surface derivations. Values below 79 are
++// shared with the launcher, which derives some surfaces itself, so a given
++// seed produces the same result on both sides; 41 (text rendering) and 61
++// are reserved there. Values from 79 on are browser-only, except 149
++// (the movement persona), which the launcher derives as well.
++// The movement persona (the hand); the launcher derives the same value
++// with its salt 149.
++inline constexpr int32_t kSaltMovementPersona = 149;
++
++// Returns a deterministic bucket in [0, range) by mixing `seed` and `salt`
++// with Knuth's multiplicative hash, `(seed * 2654435761 + salt) & 0x7FFFFFFF`
++// in 64-bit arithmetic, taken modulo `range`. The launcher reproduces it
++// bit for bit. `range` must be > 0.
++COMPONENT_EXPORT(BROWSER)
++uint32_t DeterministicBucket(int32_t seed, int32_t salt, uint32_t range);
++
++// Resolves a float noise-amplitude switch. An explicit value is parsed as a
++// decimal number; "auto", "seed:<N>" and an inherited master seed derive a
++// value in [lo, hi] in 201 linear steps from (seed, salt); an absent switch
++// resolves to 0 (noise off).
++COMPONENT_EXPORT(BROWSER)
++float ResolveLinearNoiseSwitch(const char* switch_name,
++                               int32_t salt,
++                               double lo,
++                               double hi);
++
++// True iff a master seed was requested on the command line (the identity
++// layer's seed switch, as "auto" or as an integer; never without that
++// layer). Per-switch resolvers branch on this when their own switch is
++// absent: it is the opt-in that lets them derive without changing stock
++// behaviour for users who set neither switch.
++COMPONENT_EXPORT(BROWSER) bool MasterSeedRequested();
++
++// Returns the master seed: the integer the seed switch named, else a random
++// seed allocated on the first call and cached for the process lifetime
++// ("auto", absent or unparseable). Gate on MasterSeedRequested() first
++// unless a random seed is acceptable.
++COMPONENT_EXPORT(BROWSER) int32_t MasterSeed();
++
++// Where a resolved value came from.
++enum class SwitchSource {
++  // Switch absent and no master seed requested; `value` is the fallback.
++  kAbsent,
++  // Switch had an explicit value that parsed successfully.
++  kExplicit,
++  // Switch was "auto", or absent with a master seed requested.
++  kAuto,
++  // Switch was "seed:<N>".
++  kSeedOverride,
++};
++
++template <typename T>
++struct ResolvedSwitch {
++  SwitchSource source;
++  T value;
++};
++
++namespace internal {
++
++// Classification of a single switch's raw command-line value.
++enum class RawMode {
++  kAbsent,
++  kAuto,
++  kSeed,      // "seed:<N>" with N parseable as int32
++  kExplicit,  // anything else
++};
++
++struct RawSwitch {
++  RawMode mode = RawMode::kAbsent;
++  std::string explicit_value;  // populated for kExplicit
++  int32_t seed = 0;            // populated for kSeed
++};
++
++COMPONENT_EXPORT(BROWSER) RawSwitch ParseRawSwitch(const char* switch_name);
++
++}  // namespace internal
++
++template <typename T>
++ResolvedSwitch<T> ResolveSwitch(
++    const char* switch_name,
++    base::FunctionRef<std::optional<T>(const std::string&)> parse_explicit,
++    base::FunctionRef<T(int32_t seed)> derive_from_seed,
++    T fallback_when_absent,
++    bool inherit_from_master_seed = true) {
++  const internal::RawSwitch raw = internal::ParseRawSwitch(switch_name);
++  switch (raw.mode) {
++    case internal::RawMode::kExplicit: {
++      std::optional<T> parsed = parse_explicit(raw.explicit_value);
++      if (parsed.has_value()) {
++        return {SwitchSource::kExplicit, std::move(*parsed)};
++      }
++      return {SwitchSource::kAbsent, std::move(fallback_when_absent)};
++    }
++    case internal::RawMode::kSeed:
++      return {SwitchSource::kSeedOverride, derive_from_seed(raw.seed)};
++    case internal::RawMode::kAuto:
++      // An explicit "auto" always derives: the user opted in for this
++      // surface specifically, whatever inherit_from_master_seed says.
++      return {SwitchSource::kAuto, derive_from_seed(MasterSeed())};
++    case internal::RawMode::kAbsent:
++      if (!inherit_from_master_seed || !MasterSeedRequested()) {
++        return {SwitchSource::kAbsent, std::move(fallback_when_absent)};
++      }
++      return {SwitchSource::kAuto, derive_from_seed(MasterSeed())};
++  }
++  NOTREACHED();
++}
++
++}  // namespace browser
++
++#endif  // COMPONENTS_BROWSER_SWITCH_RESOLVER_H_
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index 22bf8ff115..f899f273b4 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -73,6 +73,7 @@
+ #include "base/tracing/protos/chrome_track_event.pbzero.h"
+ #include "build/build_config.h"
+ #include "cc/base/switches.h"
++#include "components/browser/browser_switches.h"
+ #include "components/embedder_support/switches.h"
+ #include "components/input/features.h"
+ #include "components/input/utils.h"
+@@ -3928,6 +3929,11 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+       switches::kEnableWebGLDraftExtensions,
+       switches::kEnableWebGPUDeveloperFeatures,
+       switches::kFileUrlPathAlias,
++      // browser: fingerprint switches every renderer must see.
++      switches::kFingerprintBrand,
++      switches::kFingerprintBrandVersion,
++      switches::kFingerprintBrandVersionLong,
++      switches::kUseChromiumDefaults,
+       switches::kForceDeviceScaleFactor,
+       switches::kForceDisplayColorProfile,
+       switches::kForceHighContrast,
+diff --git a/content/public/browser/BUILD.gn b/content/public/browser/BUILD.gn
+index 790d665707..754771c43c 100644
+--- a/content/public/browser/BUILD.gn
++++ b/content/public/browser/BUILD.gn
+@@ -29,6 +29,7 @@ source_set("browser_sources") {
+   sources = [
+     "active_url_message_filter.cc",
+     "active_url_message_filter.h",
++    "agent_fetch_response_taker.h",
+     "allow_service_worker_result.cc",
+     "allow_service_worker_result.h",
+     "anchor_element_preconnect_delegate.h",
+@@ -631,6 +632,7 @@ source_set("browser_sources") {
+   ]
+   deps = [
+     "//cc",
++    "//components/browser:browser_switches",
+     "//components/input",
+     "//components/language_detection/content/browser",
+     "//components/language_detection/content/common",
+diff --git a/third_party/blink/common/BUILD.gn b/third_party/blink/common/BUILD.gn
+index 8e635b0da3..8ee96d888f 100644
+--- a/third_party/blink/common/BUILD.gn
++++ b/third_party/blink/common/BUILD.gn
+@@ -307,6 +307,7 @@ source_set("common") {
+     "//base",
+     "//build:android_buildflags",
+     "//build:chromecast_buildflags",
++    "//components/browser:browser_switches",
+     "//media/capture:capture_base",
+     "//media/capture/mojom:video_capture_mojom_support",
+     "//mojo/public/cpp/system",
+diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
+index 056bd22809..41f972c9c3 100644
+--- a/third_party/blink/renderer/core/BUILD.gn
++++ b/third_party/blink/renderer/core/BUILD.gn
+@@ -408,6 +408,7 @@ component("core") {
+     ":make_deprecation_info",
+     ":xml_ffi",
+     "//base",
++    "//components/browser:browser_switches",
+     "//components/paint_preview/common",
+     "//components/performance_manager/public/mojom:mojom_blink",
+     "//components/shared_highlighting/core/common",
+-- 
+2.45.1.windows.1
+

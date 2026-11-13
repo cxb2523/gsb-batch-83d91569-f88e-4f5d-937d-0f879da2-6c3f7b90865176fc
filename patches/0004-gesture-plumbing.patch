@@ -1,0 +1,147 @@
+From a51ea187c1ccc158a3cee883c46520df22a23e86 Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:12:03 -0500
+Subject: [PATCH 04/55] gesture-plumbing
+
+Synthetic-gesture overload that resolves its completion callback once
+events are dispatched, skipping the renderer input-processed round-trip.
+---
+ .../renderer_host/render_widget_host_impl.cc  | 18 ++++++++++-
+ .../renderer_host/render_widget_host_impl.h   |  5 ++++
+ .../input/synthetic_gesture_controller.cc     | 30 +++++++++++++++++++
+ .../input/synthetic_gesture_controller.h      | 10 +++++++
+ 4 files changed, 62 insertions(+), 1 deletion(-)
+
+diff --git a/content/browser/renderer_host/render_widget_host_impl.cc b/content/browser/renderer_host/render_widget_host_impl.cc
+index a5b440dabf..2919b16e23 100644
+--- a/content/browser/renderer_host/render_widget_host_impl.cc
++++ b/content/browser/renderer_host/render_widget_host_impl.cc
+@@ -1999,6 +1999,17 @@ void RenderWidgetHostImpl::QueueSyntheticGestureCompleteImmediately(
+   }
+ }
+ 
++// browser: completion-callback variant used by Input.dispatchMousePath.
++void RenderWidgetHostImpl::QueueSyntheticGestureCompleteImmediately(
++    std::unique_ptr<SyntheticGesture> synthetic_gesture,
++    base::OnceCallback<void(SyntheticGesture::Result)> on_complete) {
++  CreateSyntheticGestureControllerIfNecessary();
++  if (synthetic_gesture_controller_) {
++    synthetic_gesture_controller_->QueueSyntheticGestureCompleteImmediately(
++        std::move(synthetic_gesture), std::move(on_complete));
++  }
++}
++
+ void RenderWidgetHostImpl::EnsureReadyForSyntheticGestures(
+     base::OnceClosure on_ready) {
+   CreateSyntheticGestureControllerIfNecessary();
+@@ -3237,9 +3248,14 @@ void RenderWidgetHostImpl::StartDragging(
+ 
+   if (frame_tree_) {
+     bool intercepted = false;
++    // browser: where the move that started the drag was, on screen.
++    const gfx::PointF location_in_screen =
++        event_info
++            ? gfx::PointF(event_info->location.x(), event_info->location.y())
++            : gfx::PointF();
+     devtools_instrumentation::WillStartDragging(
+         frame_tree_->root(), filtered_data, std::move(drag_data),
+-        drag_operations_mask, &intercepted);
++        drag_operations_mask, &source_rfh, location_in_screen, &intercepted);
+     if (intercepted) {
+       return;
+     }
+diff --git a/content/browser/renderer_host/render_widget_host_impl.h b/content/browser/renderer_host/render_widget_host_impl.h
+index 47e44b2628..af35712799 100644
+--- a/content/browser/renderer_host/render_widget_host_impl.h
++++ b/content/browser/renderer_host/render_widget_host_impl.h
+@@ -662,6 +662,11 @@ class CONTENT_EXPORT RenderWidgetHostImpl
+       base::OnceCallback<void(SyntheticGesture::Result)> on_complete);
+   void QueueSyntheticGestureCompleteImmediately(
+       std::unique_ptr<SyntheticGesture> synthetic_gesture);
++  // browser: as above, but runs on_complete as soon as the gesture's events
++  // are dispatched, skipping the renderer input-processed round trip.
++  void QueueSyntheticGestureCompleteImmediately(
++      std::unique_ptr<SyntheticGesture> synthetic_gesture,
++      base::OnceCallback<void(SyntheticGesture::Result)> on_complete);
+ 
+   // Ensures the renderer is in a state ready to receive synthetic input. The
+   // SyntheticGestureController will normally ensure this before sending the
+diff --git a/content/common/input/synthetic_gesture_controller.cc b/content/common/input/synthetic_gesture_controller.cc
+index 9832b71ace..20b950e39c 100644
+--- a/content/common/input/synthetic_gesture_controller.cc
++++ b/content/common/input/synthetic_gesture_controller.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "content/common/input/synthetic_gesture_controller.h"
+ 
++#include <algorithm>
++#include <optional>
+ #include <utility>
+ 
+ #include "base/functional/bind.h"
+@@ -95,6 +97,14 @@ void SyntheticGestureController::QueueSyntheticGestureCompleteImmediately(
+   QueueSyntheticGesture(std::move(synthetic_gesture), base::DoNothing(), true);
+ }
+ 
++// browser: completion-callback variant.
++void SyntheticGestureController::QueueSyntheticGestureCompleteImmediately(
++    std::unique_ptr<SyntheticGesture> synthetic_gesture,
++    OnGestureCompleteCallback completion_callback) {
++  QueueSyntheticGesture(std::move(synthetic_gesture),
++                        std::move(completion_callback), true);
++}
++
+ void SyntheticGestureController::QueueSyntheticGesture(
+     std::unique_ptr<SyntheticGesture> synthetic_gesture,
+     OnGestureCompleteCallback completion_callback,
+@@ -121,6 +131,26 @@ void SyntheticGestureController::StartOrUpdateTimer() {
+   base::TimeDelta vsync_interval;
+   const SyntheticGesture& gesture = *pending_gesture_queue_.FrontGesture();
+ 
++  // browser: a gesture on its own clock is woken when its next event is due,
++  // not on the vsync grid: one wake per report, as a mouse's reports reach an
++  // idle UI thread one at a time.
++  if (const std::optional<base::TimeTicks> due = gesture.NextDispatchTime()) {
++    if (dispatch_timer_.IsRunning()) {
++      dispatch_timer_.Stop();
++    }
++    dispatch_timer_.Start(
++        FROM_HERE, std::max(*due, base::TimeTicks::Now()),
++        base::BindRepeating(
++            [](base::WeakPtr<SyntheticGestureController> weak_ptr) {
++              if (weak_ptr) {
++                weak_ptr->DispatchNextEvent(base::TimeTicks::Now());
++              }
++            },
++            weak_ptr_factory_.GetWeakPtr()),
++        base::subtle::DelayPolicy::kPrecise);
++    return;
++  }
++
+   gesture_target_->GetVSyncParameters(vsync_timebase, vsync_interval);
+   event_timebase_ =
+       vsync_timebase + base::Milliseconds(gesture.GetVsyncOffsetMs());
+diff --git a/content/common/input/synthetic_gesture_controller.h b/content/common/input/synthetic_gesture_controller.h
+index de6c3634a9..8947ec8de6 100644
+--- a/content/common/input/synthetic_gesture_controller.h
++++ b/content/common/input/synthetic_gesture_controller.h
+@@ -61,6 +61,16 @@ class CONTENT_EXPORT SyntheticGestureController {
+   void QueueSyntheticGestureCompleteImmediately(
+       std::unique_ptr<SyntheticGesture> synthetic_gesture);
+ 
++  // browser: like QueueSyntheticGesture(gesture, callback), but runs the
++  // completion callback as soon as the gesture's input events are dispatched,
++  // without the WaitForTargetAck round trip that waits for the renderer to
++  // process them. For latency-sensitive gestures such as cursor movement,
++  // where the caller does not depend on the events having been processed
++  // and that round trip can lag by seconds on a busy or occluded page.
++  void QueueSyntheticGestureCompleteImmediately(
++      std::unique_ptr<SyntheticGesture> synthetic_gesture,
++      OnGestureCompleteCallback completion_callback);
++
+   // Returns true if there are more gestures in the queue after processing the
+   // current one.
+   bool DispatchNextEvent(base::TimeTicks = base::TimeTicks::Now());
+-- 
+2.45.1.windows.1
+

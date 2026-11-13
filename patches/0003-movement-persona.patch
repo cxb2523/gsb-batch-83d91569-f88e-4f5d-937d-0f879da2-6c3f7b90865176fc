@@ -1,0 +1,553 @@
+From 8937adbcac105837542a7b646bcde6045ed34052 Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:12:01 -0500
+Subject: [PATCH 03/55] movement-persona
+
+The pointer's human-movement persona: a bit-exact port of the launcher's
+persona generator (31 fields drawn from java.util.Random(seed), approach
+hesitation, tremor harmonics) plus the hand's kinematics. Shared by the
+Input domain's humanized actions and by Browser.getFingerprint.
+---
+ components/browser/java_random.cc      | 102 +++++++++++++
+ components/browser/java_random.h       |  59 +++++++
+ components/browser/movement_persona.cc | 203 +++++++++++++++++++++++++
+ components/browser/movement_persona.h  | 142 +++++++++++++++++
+ 4 files changed, 506 insertions(+)
+ create mode 100644 components/browser/java_random.cc
+ create mode 100644 components/browser/java_random.h
+ create mode 100644 components/browser/movement_persona.cc
+ create mode 100644 components/browser/movement_persona.h
+
+diff --git a/components/browser/java_random.cc b/components/browser/java_random.cc
+new file mode 100644
+index 0000000000..59643a0032
+--- /dev/null
++++ b/components/browser/java_random.cc
+@@ -0,0 +1,102 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/browser/java_random.h"
++
++#include <cmath>
++
++#include "base/check_op.h"
++#include "third_party/fdlibm/ieee754.h"
++
++namespace browser {
++
++namespace {
++
++// java.util.Random's multiplier, addend and 48-bit mask.
++constexpr uint64_t kMultiplier = 0x5DEECE66DULL;
++constexpr uint64_t kAddend = 0xBULL;
++constexpr uint64_t kMask = (uint64_t{1} << 48) - 1;
++
++// Java's DOUBLE_UNIT, 0x1.0p-53.
++constexpr double kDoubleUnit = 1.0 / 9007199254740992.0;
++
++}  // namespace
++
++JavaRandom::JavaRandom(int64_t seed)
++    : state_((static_cast<uint64_t>(seed) ^ kMultiplier) & kMask) {}
++
++int32_t JavaRandom::Next(int bits) {
++  DCHECK_GE(bits, 1);
++  DCHECK_LE(bits, 32);
++  // The product overflows 64 bits for large states exactly as Java's long
++  // multiplication does; only the low 48 bits survive the mask on both sides.
++  state_ = (state_ * kMultiplier + kAddend) & kMask;
++  // Java: (int)(nextseed >>> (48 - bits)).
++  return static_cast<int32_t>(static_cast<uint32_t>(state_ >> (48 - bits)));
++}
++
++double JavaRandom::NextDouble() {
++  // Java: (((long)next(26) << 27) + next(27)) * DOUBLE_UNIT, next(26) drawn
++  // first. Both terms are non-negative, so the sum is the exact 53-bit
++  // integer Java forms, and scaling by 2^-53 is exact too.
++  const int64_t high = static_cast<int64_t>(Next(26)) << 27;
++  const int64_t low = Next(27);
++  return static_cast<double>(high + low) * kDoubleUnit;
++}
++
++int32_t JavaRandom::NextInt(int32_t bound) {
++  DCHECK_GT(bound, 0);
++  int32_t r = Next(31);
++  const int32_t m = bound - 1;
++  if ((bound & m) == 0) {
++    // A power of two: Java's (int)((bound * (long)r) >> 31).
++    return static_cast<int32_t>((static_cast<int64_t>(bound) * r) >> 31);
++  }
++  // Java: for (int u = r; u - (r = u % bound) + m < 0; u = next(31)) {}
++  // The test relies on Java's wrapping int arithmetic: it is negative only
++  // when u - r + m overflows, i.e. when u sits in the over-represented top
++  // band. Computed here in uint32 and read back as signed.
++  for (int32_t u = r;; u = Next(31)) {
++    r = u % bound;
++    const uint32_t wrapped = static_cast<uint32_t>(u) -
++                             static_cast<uint32_t>(r) +
++                             static_cast<uint32_t>(m);
++    if (static_cast<int32_t>(wrapped) >= 0) {
++      break;
++    }
++  }
++  return r;
++}
++
++int64_t JavaRandom::NextLong() {
++  // Java: ((long)next(32) << 32) + next(32). The second half stays signed
++  // ("it's okay that the bottom word remains signed"), and the add wraps.
++  const uint64_t high = static_cast<uint64_t>(static_cast<int64_t>(Next(32)))
++                        << 32;
++  const uint64_t low = static_cast<uint64_t>(static_cast<int64_t>(Next(32)));
++  return static_cast<int64_t>(high + low);
++}
++
++double JavaRandom::NextGaussian() {
++  if (have_next_gaussian_) {
++    have_next_gaussian_ = false;
++    return next_gaussian_;
++  }
++  // Knuth, TAOCP vol. 2, 3.4.1 algorithm C, as java.util.Random writes it.
++  double v1;
++  double v2;
++  double s;
++  do {
++    v1 = 2 * NextDouble() - 1;
++    v2 = 2 * NextDouble() - 1;
++    s = v1 * v1 + v2 * v2;
++  } while (s >= 1 || s == 0);
++  // Java: StrictMath.sqrt(-2 * StrictMath.log(s) / s).
++  const double multiplier = std::sqrt(-2 * fdlibm::log(s) / s);
++  next_gaussian_ = v2 * multiplier;
++  have_next_gaussian_ = true;
++  return v1 * multiplier;
++}
++
++}  // namespace browser
+diff --git a/components/browser/java_random.h b/components/browser/java_random.h
+new file mode 100644
+index 0000000000..34475063ad
+--- /dev/null
++++ b/components/browser/java_random.h
+@@ -0,0 +1,59 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_BROWSER_JAVA_RANDOM_H_
++#define COMPONENTS_BROWSER_JAVA_RANDOM_H_
++
++#include <cstdint>
++
++#include "base/component_export.h"
++
++namespace browser {
++
++// A bit-exact port of java.util.Random (JDK 23): the 48-bit linear
++// congruential generator and the draws the launcher's MovementPersona and its
++// derivations make from it. The launcher derives the pointer's human-movement
++// persona from java.util.Random(seed); the browser derives the same persona
++// from the same seed through this class, so a path planned on either side is
++// one hand. Every method consumes the stream exactly as Java's does, the
++// cached second value of nextGaussian included.
++//
++// Exactness rests on two build facts: the tree compiles with
++// -ffp-contract=off (no fused multiply-add may change a rounding), and
++// std::sqrt is correctly rounded, as StrictMath.sqrt is. The logarithm comes
++// from fdlibm, the library behind StrictMath.log.
++class COMPONENT_EXPORT(BROWSER) JavaRandom {
++ public:
++  // Java: new Random(seed). The seed is scrambled into the 48-bit state.
++  explicit JavaRandom(int64_t seed);
++
++  // Java's protected next(bits), 1 <= bits <= 32: advances the state and
++  // returns its top `bits` bits as an int, negative when bits == 32 and the
++  // top bit is set, as Java's (int) narrowing makes it.
++  int32_t Next(int bits);
++
++  // Uniform in [0, 1) from 53 random bits.
++  double NextDouble();
++
++  // Uniform in [0, bound), bound > 0: Java's power-of-two shortcut and its
++  // rejection loop, whose overflow test wraps in 32 bits.
++  int32_t NextInt(int32_t bound);
++
++  // Two 32-bit halves, the second sign-extended before the add, as Java's.
++  int64_t NextLong();
++
++  // Standard normal by the polar method. Each loop makes two values; the
++  // second is cached and returned by the next call without touching the
++  // stream.
++  double NextGaussian();
++
++ private:
++  uint64_t state_;
++  bool have_next_gaussian_ = false;
++  double next_gaussian_ = 0;
++};
++
++}  // namespace browser
++
++#endif  // COMPONENTS_BROWSER_JAVA_RANDOM_H_
+diff --git a/components/browser/movement_persona.cc b/components/browser/movement_persona.cc
+new file mode 100644
+index 0000000000..b94b92fa66
+--- /dev/null
++++ b/components/browser/movement_persona.cc
+@@ -0,0 +1,203 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/browser/movement_persona.h"
++
++#include <algorithm>
++#include <numbers>
++#include <string>
++
++#include "base/command_line.h"
++#include "base/rand_util.h"
++#include "base/strings/string_number_conversions.h"
++#include "components/browser/browser_switches.h"
++#include "components/browser/java_random.h"
++
++namespace browser {
++
++namespace {
++
++// The salts the launcher XORs into the persona seed for its two secondary
++// derivations: ApproachHesitation.SEED_SALT ("APPROAC") and
++// TremorGenerator.SEED_SALT ("TREMOR").
++constexpr int64_t kApproachSalt = 0x415050524F4143LL;
++constexpr int64_t kTremorSalt = 0x5452454D4F52LL;
++// The hand's kinematics' salt ("KINEMA") and the constants that derive its
++// last seven fields from the 31 persona fields.
++constexpr int64_t kKinemaSalt = 0x4B494E454D41LL;
++constexpr double kTauBase = 146.0;
++constexpr double kBetaLo = 0.16;
++constexpr double kBetaSpan = 0.1;
++constexpr double kNuMult = 1.6;
++constexpr double kSigmaLo = 0.14;
++constexpr double kPOverFactor = 0.7;
++
++// The reference: clamp(value, min, max) = min(max, max(min, value)).
++double Clamp(double value, double min, double max) {
++  return std::min(max, std::max(min, value));
++}
++
++// The reference's sampleUniform(random, min, max): one nextDouble.
++double SampleUniform(JavaRandom& random, double min, double max) {
++  return min + random.NextDouble() * (max - min);
++}
++
++// TremorGenerator's nine draws for one axis, in its order:
++// generateFrequencies (three nextGaussian), generateAmplitudes (three
++// nextDouble weights, normalised), generatePhases (three nextDouble).
++TremorHarmonics DrawTremorAxis(JavaRandom& rng,
++                               double center,
++                               double total_amplitude) {
++  TremorHarmonics axis;
++  for (double& freq : axis.freq) {
++    freq = Clamp(center + rng.NextGaussian() * 0.8, 8.0, 12.0);
++  }
++  std::array<double, 3> weights = {};
++  double sum = 0;
++  for (double& weight : weights) {
++    weight = 0.5 + rng.NextDouble();
++    sum += weight;
++  }
++  for (size_t i = 0; i < weights.size(); ++i) {
++    axis.amp[i] = total_amplitude * weights[i] / sum;
++  }
++  for (double& phase : axis.phase) {
++    phase = rng.NextDouble() * 2 * std::numbers::pi;
++  }
++  return axis;
++}
++
++}  // namespace
++
++// static
++MovementPersona MovementPersona::FromSeed(int64_t seed) {
++  MovementPersona p;
++  p.seed = seed;
++
++  // MovementPersona(long seed): the 31 draws, in the constructor's order.
++  JavaRandom random(seed);
++  p.speed_factor = SampleUniform(random, 0.7, 1.1);
++  p.curvature_bias = SampleUniform(random, -1.0, 1.0);
++  p.tremor_amplitude = SampleUniform(random, 0.3, 1.5);
++  p.tremor_frequency_center = SampleUniform(random, 8.0, 12.0);
++  p.click_offset_bias_x = SampleUniform(random, -2.0, 2.0);
++  p.click_offset_bias_y = SampleUniform(random, -2.0, 2.0);
++  p.pause_mean_ms = SampleUniform(random, 200.0, 600.0);
++  p.pause_log_sd = SampleUniform(random, 0.3, 0.6);
++  p.overshoot_probability = SampleUniform(random, 0.1, 0.4);
++  p.idle_drift_amplitude = SampleUniform(random, 0.5, 3.0);
++  // The one Gaussian; its cached second value is never read, but the polar
++  // loop behind it consumes the right nextDoubles.
++  p.peak_velocity_position =
++      Clamp(0.40 + random.NextGaussian() * 0.03, 0.35, 0.45);
++  p.fitts_a = SampleUniform(random, 150.0, 250.0);
++  p.fitts_b = SampleUniform(random, 120.0, 180.0);
++  p.fitts_noise = SampleUniform(random, 0.08, 0.15);
++  p.click_drift_amplitude = SampleUniform(random, 0.5, 2.0);
++  p.click_hold_mean_ms = SampleUniform(random, 80.0, 120.0);
++  p.click_hold_sd_ms = SampleUniform(random, 15.0, 30.0);
++  p.activity_density_threshold = SampleUniform(random, 8.0, 15.0);
++  p.keyboard_to_mouse_delay_ms = SampleUniform(random, 150.0, 400.0);
++  p.mouse_to_keyboard_delay_ms = SampleUniform(random, 100.0, 300.0);
++  p.post_idle_slowdown_threshold_ms = SampleUniform(random, 2000.0, 5000.0);
++  p.first_interaction_delay_ms = SampleUniform(random, 500.0, 2000.0);
++  p.drift_interval_ms = SampleUniform(random, 80.0, 150.0);
++  p.drift_radius = SampleUniform(random, 20.0, 50.0);
++  p.drift_correlation = SampleUniform(random, 0.6, 0.9);
++  p.grip_shift_interval_ms = SampleUniform(random, 5000.0, 15000.0);
++  p.grip_shift_size = SampleUniform(random, 5.0, 15.0);
++  p.scroll_momentum_decay = SampleUniform(random, 0.85, 0.95);
++  p.scroll_burst_length = 3 + random.NextInt(4);
++  p.scroll_cursor_drift_scale = SampleUniform(random, 0.5, 2.0);
++  // The polling rate stands in for the mouse hardware: 50 % 125 Hz, 30 %
++  // 250 Hz, 15 % 500 Hz, 5 % 1000 Hz.
++  const double rate_roll = random.NextDouble();
++  if (rate_roll < 0.50) {
++    p.polling_rate_hz = 125;
++  } else if (rate_roll < 0.80) {
++    p.polling_rate_hz = 250;
++  } else if (rate_roll < 0.95) {
++    p.polling_rate_hz = 500;
++  } else {
++    p.polling_rate_hz = 1000;
++  }
++
++  // ApproachHesitation(persona, random): Random(persona.seed() ^ SEED_SALT).
++  JavaRandom approach(seed ^ kApproachSalt);
++  p.approach_adjustments = 2 + approach.NextInt(3);
++  p.approach_amplitude_px = 1.0 + approach.NextDouble() * 2.0;
++  p.approach_near_stop_ms = 5.0 + approach.NextDouble() * 10.0;
++
++  // TremorGenerator(persona, noise): Random(persona.seed() ^ SEED_SALT), X's
++  // nine draws then Y's on the same stream. Any later draw on that stream
++  // comes after every harmonic, so nothing read here moves.
++  JavaRandom tremor(seed ^ kTremorSalt);
++  p.tremor_x =
++      DrawTremorAxis(tremor, p.tremor_frequency_center, p.tremor_amplitude);
++  p.tremor_y =
++      DrawTremorAxis(tremor, p.tremor_frequency_center, p.tremor_amplitude);
++  p.tremor_broadband_scale = p.tremor_amplitude * 0.1;
++
++  // The hand's kinematics: their own stream, after every persona
++  // draw, so no persona field moves.
++  JavaRandom kinema(seed ^ kKinemaSalt);
++  HandKinematics& k = p.kinematics;
++  k.aim_sd = SampleUniform(kinema, 0.295, 0.365);
++  k.aim_px = SampleUniform(kinema, 3.0, 8.0);
++  k.lat_ratio = SampleUniform(kinema, 0.31, 0.66);
++  k.tol = SampleUniform(kinema, 0.4, 0.9);
++  k.c_gain = SampleUniform(kinema, 0.5, 0.8);
++  k.q_lo = SampleUniform(kinema, 0.72, 0.82);
++  k.q_hi = SampleUniform(kinema, 0.84, 0.9);
++  k.stop_p = SampleUniform(kinema, 0.26, 0.46);
++  k.stop_ms = SampleUniform(kinema, 21.0, 66.0);
++  k.arc = SampleUniform(kinema, 0.19, 0.64);
++  k.arc_c = SampleUniform(kinema, 0.2, 0.5);
++  k.brake = SampleUniform(kinema, 0.0, 0.15);
++  k.brake_dmu = SampleUniform(kinema, 0.22, 0.34);
++  k.creep_p = SampleUniform(kinema, 0.28, 0.78);
++  k.creep_ms = SampleUniform(kinema, 25.0, 70.0);
++  k.jitter = SampleUniform(kinema, 0.15, 0.3);
++  k.drag_tempo = SampleUniform(kinema, 1.23, 1.43);
++  k.release_ms = SampleUniform(kinema, 90.0, 150.0);
++  k.latency_ms = SampleUniform(kinema, 70.0, 110.0);
++  k.sub_ms = SampleUniform(kinema, 100.0, 150.0);
++  k.gain_lo = SampleUniform(kinema, 0.6, 0.75);
++  k.gain_hi = SampleUniform(kinema, 0.825, 0.975);
++  k.sub_sigma = SampleUniform(kinema, 0.05, 0.11);
++  k.sub_q_lo = SampleUniform(kinema, 0.6, 0.75);
++  k.sub_q_hi = SampleUniform(kinema, 0.66, 0.81);
++  k.stop_px = SampleUniform(kinema, 0.1, 2.6);
++  k.tau100 = kTauBase * p.speed_factor / 0.9;
++  k.beta = kBetaLo + kBetaSpan * (p.fitts_b - 120.0) / 60.0;
++  k.nu = kNuMult * p.fitts_noise;
++  k.sigma = kSigmaLo + (0.45 - p.peak_velocity_position);
++  k.p_over = kPOverFactor * p.overshoot_probability;
++  k.dwell_median = 0.15 * p.pause_mean_ms;
++  k.dwell_logsd = 0.6 + p.pause_log_sd;
++
++  return p;
++}
++
++int64_t PersonaSeed() {
++  // Thread-safe local-static initialization: the command line is read and
++  // base::RandUint64() runs at most once per process.
++  static const int64_t seed = []() {
++    const base::CommandLine* cl = base::CommandLine::ForCurrentProcess();
++    if (cl->HasSwitch(switches::kMovementPersonaSeed)) {
++      int64_t given = 0;
++      if (base::StringToInt64(
++              cl->GetSwitchValueASCII(switches::kMovementPersonaSeed),
++              &given)) {
++        return given;
++      }
++      // An unparseable value counts as absent, as every other switch's does.
++    }
++    // No identity: a hand for this launch only, as the launcher draws one.
++    return static_cast<int64_t>(base::RandUint64());
++  }();
++  return seed;
++}
++
++}  // namespace browser
+diff --git a/components/browser/movement_persona.h b/components/browser/movement_persona.h
+new file mode 100644
+index 0000000000..c30c63a968
+--- /dev/null
++++ b/components/browser/movement_persona.h
+@@ -0,0 +1,142 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_BROWSER_MOVEMENT_PERSONA_H_
++#define COMPONENTS_BROWSER_MOVEMENT_PERSONA_H_
++
++#include <array>
++#include <cstdint>
++
++#include "base/component_export.h"
++
++namespace browser {
++
++// One axis of the physiological tremor: three sine harmonics, each with a
++// frequency (Hz), an amplitude (px) and a phase (radians).
++struct TremorHarmonics {
++  std::array<double, 3> freq = {};
++  std::array<double, 3> amp = {};
++  std::array<double, 3> phase = {};
++};
++
++// The hand's kinematics: the fields of the
++// lognormal stroke planner (content/browser/devtools/protocol/
++// human_path_planner.cc), drawn in this order from JavaRandom(seed ^
++// 0x4B494E454D41) ("KINEMA"), each lo + nextDouble() * (hi - lo), then seven
++// derived from the persona fields. Calibrated against SapiMouse by the
++// Python reference model, which holds the same ranges.
++struct HandKinematics {
++  double aim_sd = 0;     // the primary's miss sd at D 100 px, / 100
++  double aim_px = 0;     // plus this, px
++  double lat_ratio = 0;  // lateral / along miss sd
++  double tol = 0;        // a miss within tol x W/2 needs no correction
++  double c_gain = 0;  // a sub-movement's miss sd = aim_sd x c_gain x the miss
++  // The first sub-movement starts at the primary's F = U(q_lo, q_hi).
++  double q_lo = 0;
++  double q_hi = 0;
++  double stop_p = 0;      // P(a sub-movement waits for a full stop)
++  double stop_ms = 0;     // median of that stop, ms
++  double arc = 0;         // mean |sweep| of the primary at D = 500, rad
++  double arc_c = 0;       // sd of a sub-movement's sweep, rad
++  double brake = 0;       // the primary's antagonist share
++  double brake_dmu = 0;   // its log-delay
++  double creep_p = 0;     // P(an onset creep)
++  double creep_ms = 0;    // its lead, ms
++  double jitter = 0;      // speed-jitter depth
++  double drag_tempo = 0;  // time scale while a button is held
++  double release_ms = 0;  // median release dwell of a drag, ms
++  double latency_ms = 0;  // median press-to-move latency of a drag, ms
++  double sub_ms = 0;      // a homing sub-movement's span, ms
++  double gain_lo = 0;     // the share of the miss it takes: U(gain_lo, gain_hi)
++  double gain_hi = 0;
++  double sub_sigma = 0;  // its log response
++  // The next sub-movement starts at this one's F = U(sub_q_lo, sub_q_hi).
++  double sub_q_lo = 0;
++  double sub_q_hi = 0;
++  // Within this many px of its end for good, the hand stops there.
++  double stop_px = 0;
++  // Derived from the persona fields.
++  // The primary's span at 100 px, in ms: kTauBase * speed_factor / 0.9.
++  double tau100 = 0;
++  double beta = 0;          // how the span grows with distance: span ~ D^beta
++  double nu = 0;            // the per-movement log-sd of the primary's span
++  double sigma = 0;         // the primary's log response
++  double p_over = 0;        // P(the primary aims past the target)
++  double dwell_median = 0;  // median wait from the last move to a press, ms
++  double dwell_logsd = 0;   // its log-sd
++};
++
++// The pointer's human-movement persona: one identity, one hand. A bit-exact
++// port of the launcher's persona generator, whose 31
++// parameters are drawn in a fixed order from java.util.Random(seed), plus the
++// two per-persona derivations its movement pipeline makes from salted seeds:
++// the approach hesitation's parameters and the tremor's harmonics. Every draw
++// runs in launcher order even for fields no browser code reads, because each
++// later field depends on the stream position.
++struct COMPONENT_EXPORT(BROWSER) MovementPersona {
++  int64_t seed = 0;
++
++  // The 31 persona fields, in draw order.
++  double speed_factor = 0;                     // U in [0.7, 1.1)
++  double curvature_bias = 0;                   // U in [-1, 1)
++  double tremor_amplitude = 0;                 // U in [0.3, 1.5) px
++  double tremor_frequency_center = 0;          // U in [8, 12) Hz
++  double click_offset_bias_x = 0;              // U in [-2, 2) px
++  double click_offset_bias_y = 0;              // U in [-2, 2) px
++  double pause_mean_ms = 0;                    // U in [200, 600)
++  double pause_log_sd = 0;                     // U in [0.3, 0.6)
++  double overshoot_probability = 0;            // U in [0.1, 0.4)
++  double idle_drift_amplitude = 0;             // U in [0.5, 3.0) px
++  double peak_velocity_position = 0;           // clamp(0.40 + G*0.03, .35, .45)
++  double fitts_a = 0;                          // U in [150, 250) ms
++  double fitts_b = 0;                          // U in [120, 180) ms/bit
++  double fitts_noise = 0;                      // U in [0.08, 0.15)
++  double click_drift_amplitude = 0;            // U in [0.5, 2.0) px
++  double click_hold_mean_ms = 0;               // U in [80, 120)
++  double click_hold_sd_ms = 0;                 // U in [15, 30)
++  double activity_density_threshold = 0;       // U in [8, 15)
++  double keyboard_to_mouse_delay_ms = 0;       // U in [150, 400)
++  double mouse_to_keyboard_delay_ms = 0;       // U in [100, 300)
++  double post_idle_slowdown_threshold_ms = 0;  // U in [2000, 5000)
++  double first_interaction_delay_ms = 0;       // U in [500, 2000)
++  double drift_interval_ms = 0;                // U in [80, 150)
++  double drift_radius = 0;                     // U in [20, 50) px
++  double drift_correlation = 0;                // U in [0.6, 0.9)
++  double grip_shift_interval_ms = 0;           // U in [5000, 15000)
++  double grip_shift_size = 0;                  // U in [5, 15) px
++  double scroll_momentum_decay = 0;            // U in [0.85, 0.95)
++  int scroll_burst_length = 0;                 // 3 + nextInt(4): 3..6
++  double scroll_cursor_drift_scale = 0;        // U in [0.5, 2.0)
++  int polling_rate_hz = 0;                     // 125 | 250 | 500 | 1000
++
++  // ApproachHesitation's per-persona parameters, drawn in launcher order from
++  // JavaRandom(seed ^ 0x415050524F4143) ("APPROAC").
++  int approach_adjustments = 0;      // 2 + nextInt(3): 2..4 direction changes
++  double approach_amplitude_px = 0;  // 1 + U*2
++  double approach_near_stop_ms = 0;  // 5 + U*10
++
++  // TremorGenerator's per-persona harmonics, drawn in launcher order from
++  // JavaRandom(seed ^ 0x5452454D4F52) ("TREMOR"): X's three frequencies,
++  // three weights (turned into amplitudes) and three phases, then Y's. The
++  // Gaussian cache carries from X's frequencies to Y's.
++  TremorHarmonics tremor_x;
++  TremorHarmonics tremor_y;
++  double tremor_broadband_scale = 0;  // tremor_amplitude * 0.1
++
++  // The hand's kinematics, from their own salted stream.
++  HandKinematics kinematics;
++
++  static MovementPersona FromSeed(int64_t seed);
++};
++
++// The persona seed of this browser process, settled on the first call and
++// kept for the process lifetime:
++//   --movement-persona-seed=<int64>   -> that value (base::StringToInt64; an
++//                                        unparseable value counts as absent);
++//   else                              -> a random int64.
++COMPONENT_EXPORT(BROWSER) int64_t PersonaSeed();
++
++}  // namespace browser
++
++#endif  // COMPONENTS_BROWSER_MOVEMENT_PERSONA_H_
+-- 
+2.45.1.windows.1
+

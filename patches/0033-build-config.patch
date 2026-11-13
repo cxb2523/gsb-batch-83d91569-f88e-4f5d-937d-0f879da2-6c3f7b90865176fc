@@ -1,0 +1,63 @@
+From 207e8317f4a1fc49aa0ef1a56d89136a76b39b76 Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:13:47 -0500
+Subject: [PATCH 33/55] build-config
+
+gitignore adjustments for the custom build.
+---
+ .gitignore             | 5 ++---
+ third_party/.gitignore | 5 +++++
+ 2 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/.gitignore b/.gitignore
+index cb5831733f..aa7f419223 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -289,9 +289,7 @@ vs-chromium-project.txt
+ /tools/.bisect-builds-cache.json
+ /tools/cygprofile/*.wprgo
+ /tools/distcc
+-/tools/gn/bin/linux
+-/tools/gn/bin/mac
+-/tools/gn/bin/win
++/tools/gn/
+ /tools/histograms
+ /tools/json_schema_compiler/test/json_schema_compiler_tests.xml
+ /tools/metrics/actions/actions.old.xml
+@@ -304,6 +302,7 @@ vs-chromium-project.txt
+ /tools/skia_goldctl/
+ /tools/tryserver
+ /tools/win/link_limiter/build
++/third_party/git
+ /ui/file_manager/tsconfig.json
+ /ui/file_manager/integration_tests/tsconfig.json
+ /ui/keyboard/keyboard_mojom_bindings.xml
+diff --git a/third_party/.gitignore b/third_party/.gitignore
+index 33637b2b24..b91b60154a 100644
+--- a/third_party/.gitignore
++++ b/third_party/.gitignore
+@@ -56,6 +56,7 @@
+ /fuchsia-sdk/images
+ /fuchsia-sdk/images-internal
+ /fuchsia-sdk/sdk
++/git/
+ /glfw/src
+ /glslang/src
+ /gn/
+@@ -126,9 +127,13 @@
+ /qemu-linux-x64
+ /qemu-mac-x64
+ /readability/src
++/rust/
+ /rust-src
+ /rust-toolchain-intermediate
+ /rust-toolchain/
++/rust-toolchain-arm/
++/rust-toolchain-x64/
++/rust-toolchain-x86/
+ /scan-build/src
+ /scons-2.0.1
+ /screen-ai/*/*
+-- 
+2.45.1.windows.1
+

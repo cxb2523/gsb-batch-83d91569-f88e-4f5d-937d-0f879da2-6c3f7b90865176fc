@@ -1,0 +1,237 @@
+From 3491c9f601e91e5c6556e8ad6037d1131ca27b99 Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Sun, 1 Nov 2026 20:29:55 -0500
+Subject: [PATCH 3/3] compiled-script-callback
+
+Isolate::SetCompiledScriptCallback: the embedder is told about every script the engine compiles (id, source or wasm wire bytes, name, source URLs, how it came to be compiled), on the isolate's thread, without a debug delegate, so the compilation caches stay on and the page runs as it would without it. Scripts that failed to compile, side-effect-check scripts and scripts not subject to debugging are not reported. Consumed by blink's ScriptRecorder for Browser.startRecording at level full.
+---
+ include/v8-callbacks.h  | 53 ++++++++++++++++++++++++++++++++
+ include/v8-isolate.h    |  9 ++++++
+ src/api/api.cc          |  3 ++
+ src/debug/debug.cc      | 67 +++++++++++++++++++++++++++++++++++++++++
+ src/debug/debug.h       |  6 ++++
+ src/execution/isolate.h |  1 +
+ 6 files changed, 139 insertions(+)
+
+diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
+index efa9de29..f2253097 100644
+--- a/include/v8-callbacks.h
++++ b/include/v8-callbacks.h
+@@ -6,6 +6,7 @@
+ #define INCLUDE_V8_ISOLATE_CALLBACKS_H_
+ 
+ #include <stddef.h>
++#include <stdint.h>
+ 
+ #include <functional>
+ #include <string>
+@@ -274,6 +275,58 @@ using SetCrashKeyStringCallback =
+ using BeforeCallEnteredCallback = void (*)(Isolate*);
+ using CallCompletedCallback = void (*)(Isolate*);
+ 
++// --- Compiled Script Callback ---
++
++/**
++ * One script the engine compiled, as the embedder is told about it.
++ *
++ * Every field is valid only for the duration of the call, and every string
++ * is already flat, so reading one allocates nothing. `source` is the
++ * script's text for JavaScript; for WebAssembly the script has no text and
++ * `wasm_wire_bytes` holds the module instead. The same script may be reported
++ * more than once, since a compilation-cache hit rebinds it and a WebAssembly
++ * module reuses its script, so an embedder that keeps sources should recognise
++ * one it already has.
++ */
++struct CompiledScriptInfo {
++  // The engine's id for the script, unique within the isolate.
++  int script_id = 0;
++  // The script's text, or an empty handle for WebAssembly.
++  Local<String> source;
++  // The script's name or URL, and the //# sourceURL and //# sourceMappingURL
++  // it declared; any of them may be an empty handle.
++  Local<Value> name;
++  Local<Value> source_url;
++  Local<Value> source_mapping_url;
++  // The module's bytes, for WebAssembly only; empty otherwise.
++  const uint8_t* wasm_wire_bytes = nullptr;
++  size_t wasm_wire_bytes_length = 0;
++  // How it came to be compiled. A module is reported when it is linked, not
++  // when it is compiled, so one that never links is not reported at all.
++  bool is_module = false;
++  bool is_wasm = false;
++  bool is_eval = false;
++  bool is_wrapped = false;
++};
++
++/**
++ * Called for each script the engine compiles, on the isolate's own thread,
++ * with the isolate's context entered.
++ *
++ * Unlike a debug delegate, setting this changes nothing about how the engine
++ * runs: the compilation caches stay on and no source positions are collected.
++ * Scripts that failed to compile, scripts compiled during a side-effect
++ * check, and scripts the engine does not consider debuggable (its own
++ * natives, extensions, and scripts an inspector injected) are not reported.
++ *
++ * The callback runs without the guards a debugger would hold, so it must only
++ * read what it is given and copy it out: it must not call back into the
++ * engine, must not run script, and must not allocate engine objects. Set it
++ * on the isolate's own thread; the field is read without synchronisation.
++ */
++using CompiledScriptCallback = void (*)(Isolate* isolate,
++                                        const CompiledScriptInfo& script);
++
+ // --- Modify Code Generation From Strings Callback ---
+ struct ModifyCodeGenerationFromStringsResult {
+   // If true, proceed with the codegen algorithm. Otherwise, block it.
+diff --git a/include/v8-isolate.h b/include/v8-isolate.h
+index a352b5f0..6f9aba9f 100644
+--- a/include/v8-isolate.h
++++ b/include/v8-isolate.h
+@@ -1725,6 +1725,15 @@ class V8_EXPORT Isolate {
+    */
+   void AutomaticallyRestoreInitialHeapLimit(double threshold_percent = 0.5);
+ 
++  /**
++   * Set the callback to invoke for each script this isolate compiles.
++   *
++   * This is not a debugger: it leaves the compilation caches alone and
++   * collects no source positions, so a page runs exactly as it would without
++   * it. Pass nullptr to stop being told.
++   */
++  void SetCompiledScriptCallback(CompiledScriptCallback callback);
++
+   /**
+    * Set the callback to invoke to check if code generation from
+    * strings should be allowed.
+diff --git a/src/api/api.cc b/src/api/api.cc
+index 56867119..272900ac 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -11079,6 +11079,9 @@ CALLBACK_SETTER(IsJSApiWrapperNativeErrorCallback,
+ CALLBACK_SETTER(ArrayBufferDetachCallback, ArrayBufferDetachCallback,
+                 array_buffer_detach_callback)
+ 
++CALLBACK_SETTER(CompiledScriptCallback, CompiledScriptCallback,
++                compiled_script_callback)
++
+ void Isolate::InstallConditionalFeatures(Local<Context> context) {
+   v8::HandleScope handle_scope(this);
+   v8::Context::Scope context_scope(context);
+diff --git a/src/debug/debug.cc b/src/debug/debug.cc
+index def10a51..7d11b56b 100644
+--- a/src/debug/debug.cc
++++ b/src/debug/debug.cc
+@@ -2829,6 +2829,72 @@ void Debug::OnAfterCompile(DirectHandle<Script> script) {
+   ProcessCompileEvent(false, script);
+ }
+ 
++namespace {
++
++// A script's name or URL for the embedder's compiled-script callback: empty
++// when undefined, and a string flattened first (see ReportCompiledScript).
++v8::Local<v8::Value> CompiledScriptField(Isolate* isolate,
++                                         Tagged<Object> value) {
++  if (IsUndefined(value)) return {};
++  if (IsString(value)) {
++    return Utils::ToLocal(
++        String::Flatten(isolate, direct_handle(Cast<String>(value), isolate)));
++  }
++  return Utils::ToLocal(direct_handle(value, isolate));
++}
++
++}  // namespace
++
++void Debug::ReportCompiledScript(bool has_compile_error,
++                                 DirectHandle<Script> script) {
++  v8::CompiledScriptCallback callback = isolate_->compiled_script_callback();
++  if (callback == nullptr) return;
++  // A script that did not compile is not code that ran. The same funnel
++  // carries syntax errors and, through the JSON parser, a failing JSON.parse,
++  // whose script is the JSON text.
++  if (has_compile_error) return;
++  // A side-effect check compiles throwaway scripts and is meant to change
++  // nothing at all, so it is left alone: what it compiles is never the page's
++  // own code, and telling the embedder would have it act during the check.
++  if (isolate_->debug_execution_mode() == DebugInfo::kSideEffects) return;
++  // The filter the inspector applies: the engine's own natives, extensions
++  // and inspector-injected scripts are not the page's code.
++  if (!script->IsSubjectToDebugging()) return;
++
++  HandleScope scope(isolate_);
++  // Every string is flattened here, where allocating is allowed: reading one
++  // that is not flat allocates, and the callback must not.
++  v8::CompiledScriptInfo info;
++  info.script_id = script->id();
++  if (IsString(script->source())) {
++    info.source = Utils::ToLocal(String::Flatten(
++        isolate_, direct_handle(Cast<String>(script->source()), isolate_)));
++  }
++  info.name = CompiledScriptField(isolate_, script->name());
++  info.source_url = CompiledScriptField(isolate_, script->source_url());
++  info.source_mapping_url =
++      CompiledScriptField(isolate_, script->source_mapping_url());
++  info.is_module = script->origin_options().IsModule();
++  info.is_eval = script->has_eval_origin();
++  info.is_wrapped = script->is_wrapped();
++#if V8_ENABLE_WEBASSEMBLY
++  if (script->type() == Script::Type::kWasm) {
++    info.is_wasm = true;
++    // A wasm script carries no source; the module holds the bytes. The
++    // pointer is named so that it keeps the module alive until the callback
++    // has read them, which a temporary would not.
++    CppGCManaged<wasm::NativeModule>::Ptr native_module =
++        script->wasm_native_module();
++    auto wire_bytes = native_module->wire_bytes();
++    info.wasm_wire_bytes = wire_bytes.begin();
++    info.wasm_wire_bytes_length = wire_bytes.size();
++    callback(reinterpret_cast<v8::Isolate*>(isolate_), info);
++    return;
++  }
++#endif  // V8_ENABLE_WEBASSEMBLY
++  callback(reinterpret_cast<v8::Isolate*>(isolate_), info);
++}
++
+ void Debug::ProcessCompileEvent(bool has_compile_error,
+                                 DirectHandle<Script> script) {
+   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
+@@ -2837,6 +2903,7 @@ void Debug::ProcessCompileEvent(bool has_compile_error,
+   // Attach the correct debug id to the script. The debug id is used by the
+   // inspector to filter scripts by native context.
+   script->set_context_data(isolate_->native_context()->debug_context_id());
++  ReportCompiledScript(has_compile_error, script);
+   if (ignore_events()) return;
+   if (!script->IsSubjectToDebugging()) return;
+   if (!debug_delegate_) return;
+diff --git a/src/debug/debug.h b/src/debug/debug.h
+index 4a093800..7d41241c 100644
+--- a/src/debug/debug.h
++++ b/src/debug/debug.h
+@@ -538,6 +538,12 @@ class V8_EXPORT_PRIVATE Debug {
+ 
+   void ProcessCompileEvent(bool has_compile_error, DirectHandle<Script> script);
+ 
++  // Tells the embedder's compiled-script callback about a script, if one is
++  // set. Reads no debugger state and leaves the compilation caches alone, so
++  // it runs whether or not a debugger is attached.
++  void ReportCompiledScript(bool has_compile_error,
++                            DirectHandle<Script> script);
++
+   // Find the closest source position for a break point for a given position.
+   int FindBreakablePosition(Handle<DebugInfo> debug_info, int source_position);
+   // Instrument code to break at break points.
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index f8c0c95e..9dca6b38 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -514,6 +514,7 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
+     wasm_custom_descriptors_enabled_callback, nullptr)                      \
+   V(IsJSApiWrapperNativeErrorCallback,                                      \
+     is_js_api_wrapper_native_error_callback, nullptr)                       \
++  V(CompiledScriptCallback, compiled_script_callback, nullptr)              \
+   V(ArrayBufferDetachCallback, array_buffer_detach_callback, nullptr)       \
+   /* State for Relocatable. */                                              \
+   V(Relocatable*, relocatable_top, nullptr)                                 \
+-- 
+2.45.1.windows.1
+

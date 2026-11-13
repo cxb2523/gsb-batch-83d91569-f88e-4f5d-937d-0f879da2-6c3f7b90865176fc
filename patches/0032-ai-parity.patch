@@ -1,0 +1,460 @@
+From 605bb9a95024ca3d2b63b23b5f982bb0a8e3c8d1 Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:13:46 -0500
+Subject: [PATCH 32/55] ai-parity
+
+The built-in AI APIs answer as Chrome does, though this build ships no
+on-device model service: LanguageModel and Summarizer are downloadable
+where Chrome's own CPU rule admits the machine (15000 MB as
+navigator.deviceMemory reports it, 4 processors), and downloading once a
+page has started the download. create() without a user gesture fails as
+in Chrome; with one it waits on a download that never finishes, its
+monitor told the first progress (0). LanguageDetector uses Chrome's
+language detection model, which the build copies from the Chromium source
+(components/test/data/translate/valid_model.tflite) to LanguageDetection/
+beside the browser and packaging ships: downloadable until startup is
+complete, then available, as on a Chrome profile that has the model.
+---
+ chrome/browser/ai/ai_manager.cc               | 145 ++++++++++++++----
+ chrome/browser/ai/ai_manager.h                |  26 +++-
+ .../installer/mini_installer/chrome.release   |   6 +
+ chrome/tools/build/win/FILES.cfg              |   6 +
+ .../content/browser/BUILD.gn                  |  13 ++
+ .../content_language_detection_driver.cc      |  62 +++++++-
+ 6 files changed, 225 insertions(+), 33 deletions(-)
+
+diff --git a/chrome/browser/ai/ai_manager.cc b/chrome/browser/ai/ai_manager.cc
+index b45051579e..22d0f0d723 100644
+--- a/chrome/browser/ai/ai_manager.cc
++++ b/chrome/browser/ai/ai_manager.cc
+@@ -17,9 +17,11 @@
+ #include "base/functional/callback_helpers.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/metrics/histogram_functions.h"
++#include "base/no_destructor.h"
+ #include "base/notreached.h"
+ #include "base/strings/strcat.h"
+ #include "base/strings/stringprintf.h"
++#include "base/system/sys_info.h"
+ #include "base/task/task_traits.h"
+ #include "base/task/thread_pool.h"
+ #include "base/types/expected.h"
+@@ -48,6 +50,7 @@
+ #include "components/optimization_guide/core/model_execution/model_execution_util.h"
+ #include "components/optimization_guide/core/model_execution/on_device_capability.h"
+ #include "components/optimization_guide/core/model_execution/on_device_features.h"
++#include "components/optimization_guide/core/model_execution/on_device_model_download_progress_manager.h"
+ #include "components/optimization_guide/core/optimization_guide_enums.h"
+ #include "components/optimization_guide/core/optimization_guide_features.h"
+ #include "components/optimization_guide/core/optimization_guide_switches.h"
+@@ -69,6 +72,7 @@
+ #include "services/on_device_model/public/cpp/features.h"
+ #include "services/on_device_model/public/mojom/download_observer.mojom.h"
+ #include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
++#include "third_party/blink/public/common/device_memory/approximated_device_memory.h"
+ #include "third_party/blink/public/common/features_generated.h"
+ #include "third_party/blink/public/mojom/ai/ai_common.mojom.h"
+ #include "third_party/blink/public/mojom/ai/ai_language_model.mojom.h"
+@@ -694,6 +698,36 @@ std::string_view AILanguageModelSamplingModeToString(
+   NOTREACHED();
+ }
+ 
++// browser: the features whose model download a page has started, for the
++// whole browser as a download is (see
++// AIManager::AvailabilityWithoutService()).
++base::flat_set<optimization_guide::mojom::OnDeviceFeature>&
++StartedDownloadsWithoutService() {
++  static base::NoDestructor<
++      base::flat_set<optimization_guide::mojom::OnDeviceFeature>>
++      features;
++  return *features;
++}
++
++// browser: how many create() calls of one kind, and how many download
++// monitors, a document's AIManager holds without a model service. Beyond it
++// the oldest call is answered as stock Chromium answers every one, and the
++// oldest monitor is dropped.
++constexpr size_t kMaxStalledCreates = 32;
++
++template <typename Client>
++void HoldStalledCreate(mojo::RemoteSet<Client>& held,
++                       mojo::PendingRemote<Client> client) {
++  if (held.size() >= kMaxStalledCreates) {
++    const auto oldest = held.begin();
++    on_device_ai::SendClientRemoteError(
++        *oldest,
++        blink::mojom::AIManagerCreateClientError::kUnableToCreateSession);
++    held.Remove(oldest.id());
++  }
++  held.Add(std::move(client));
++}
++
+ }  // namespace
+ 
+ // Feature flag for enabling foundational models in the AI API, requires the
+@@ -723,6 +757,47 @@ void AIManager::AddReceiver(
+   receivers_.Add(this, std::move(receiver));
+ }
+ 
++// browser: this build ships no on-device model service, so a page sees what
++// a fresh Chrome that has not downloaded the model shows: downloadable where
++// Chrome's own CPU rule admits the machine
++// (services/on_device_model/public/cpp/cpu.cc: 15000 MB of memory and 4
++// processors; the memory is the one pages see, navigator.deviceMemory's
++// bucket, so the two agree), and downloading once a page has started the
++// download, which never ends.
++bool AIManager::IsOnDeviceModelEligible() const {
++  blink::ApproximatedDeviceMemory::Initialize();
++  return blink::ApproximatedDeviceMemory::GetApproximatedDeviceMemory() >= 16 &&
++         base::SysInfo::NumberOfProcessors() >= 4;
++}
++
++blink::mojom::ModelAvailabilityCheckResult
++AIManager::AvailabilityWithoutService(
++    std::optional<optimization_guide::mojom::OnDeviceFeature> feature) const {
++  if (!IsOnDeviceModelEligible()) {
++    return blink::mojom::ModelAvailabilityCheckResult::
++        kUnavailableModelNotEligible;
++  }
++  return feature && StartedDownloadsWithoutService().contains(*feature)
++             ? blink::mojom::ModelAvailabilityCheckResult::kDownloading
++             : blink::mojom::ModelAvailabilityCheckResult::kDownloadable;
++}
++
++void AIManager::StartDownloadWithoutService(
++    optimization_guide::mojom::OnDeviceFeature feature,
++    mojo::PendingRemote<on_device_model::mojom::DownloadObserver> monitor) {
++  StartedDownloadsWithoutService().insert(feature);
++  if (monitor) {
++    if (stalled_monitors_.size() >= kMaxStalledCreates) {
++      stalled_monitors_.Remove(stalled_monitors_.begin().id());
++    }
++    const mojo::RemoteSetElementId id =
++        stalled_monitors_.Add(std::move(monitor));
++    // A download's first update is zero (Blink's CreateMonitor).
++    stalled_monitors_.Get(id)->OnDownloadProgressUpdate(
++        0, optimization_guide::kNormalizedDownloadProgressMax);
++  }
++}
++
+ bool AIManager::IsPromptApiEnabled() const {
+   if (base::FeatureList::IsEnabled(blink::features::kAIPromptAPI)) {
+     return true;
+@@ -831,11 +906,12 @@ void AIManager::CreateLanguageModel(
+       browser_context_, optimization_guide::mojom::OnDeviceFeature::kPromptApi);
+ 
+   if (!model_broker_client_) {
+-    mojo::Remote<blink::mojom::AIManagerCreateLanguageModelClient>
+-        client_remote(std::move(client));
+-    on_device_ai::SendClientRemoteError(
+-        client_remote,
+-        blink::mojom::AIManagerCreateClientError::kUnableToCreateSession);
++    // browser: this build has no model service; the page waits as on a
++    // model download that has not finished.
++    HoldStalledCreate(stalled_language_models_, std::move(client));
++    StartDownloadWithoutService(
++        optimization_guide::mojom::OnDeviceFeature::kPromptApi,
++        std::move(monitor));
+     return;
+   }
+ 
+@@ -1122,11 +1198,12 @@ void AIManager::CreateSummarizer(
+       browser_context_, optimization_guide::mojom::OnDeviceFeature::kSummarize);
+ 
+   if (!model_broker_client_) {
+-    mojo::Remote<blink::mojom::AIManagerCreateSummarizerClient> client_remote(
+-        std::move(client));
+-    on_device_ai::SendClientRemoteError(
+-        client_remote,
+-        blink::mojom::AIManagerCreateClientError::kUnableToCreateSession);
++    // browser: this build has no model service; the page waits as on a
++    // model download that has not finished.
++    HoldStalledCreate(stalled_summarizers_, std::move(client));
++    StartDownloadWithoutService(
++        optimization_guide::mojom::OnDeviceFeature::kSummarize,
++        std::move(monitor));
+     return;
+   }
+ 
+@@ -1254,11 +1331,12 @@ void AIManager::CreateProofreader(
+       optimization_guide::mojom::OnDeviceFeature::kProofreaderApi);
+ 
+   if (!model_broker_client_) {
+-    mojo::Remote<blink::mojom::AIManagerCreateProofreaderClient> client_remote(
+-        std::move(client));
+-    on_device_ai::SendClientRemoteError(
+-        client_remote,
+-        blink::mojom::AIManagerCreateClientError::kUnableToCreateSession);
++    // browser: this build has no model service; the page waits as on a
++    // model download that has not finished.
++    HoldStalledCreate(stalled_proofreaders_, std::move(client));
++    StartDownloadWithoutService(
++        optimization_guide::mojom::OnDeviceFeature::kProofreaderApi,
++        std::move(monitor));
+     return;
+   }
+ 
+@@ -1406,11 +1484,12 @@ void AIManager::CreateWriter(
+       optimization_guide::mojom::OnDeviceFeature::kWritingAssistanceApi);
+ 
+   if (!model_broker_client_) {
+-    mojo::Remote<blink::mojom::AIManagerCreateWriterClient> client_remote(
+-        std::move(client));
+-    on_device_ai::SendClientRemoteError(
+-        client_remote,
+-        blink::mojom::AIManagerCreateClientError::kUnableToCreateSession);
++    // browser: this build has no model service; the page waits as on a
++    // model download that has not finished.
++    HoldStalledCreate(stalled_writers_, std::move(client));
++    StartDownloadWithoutService(
++        optimization_guide::mojom::OnDeviceFeature::kWritingAssistanceApi,
++        std::move(monitor));
+     return;
+   }
+ 
+@@ -1508,11 +1587,12 @@ void AIManager::CreateRewriter(
+       optimization_guide::mojom::OnDeviceFeature::kWritingAssistanceApi);
+ 
+   if (!model_broker_client_) {
+-    mojo::Remote<blink::mojom::AIManagerCreateRewriterClient> client_remote(
+-        std::move(client));
+-    on_device_ai::SendClientRemoteError(
+-        client_remote,
+-        blink::mojom::AIManagerCreateClientError::kUnableToCreateSession);
++    // browser: this build has no model service; the page waits as on a
++    // model download that has not finished.
++    HoldStalledCreate(stalled_rewriters_, std::move(client));
++    StartDownloadWithoutService(
++        optimization_guide::mojom::OnDeviceFeature::kWritingAssistanceApi,
++        std::move(monitor));
+     return;
+   }
+ 
+@@ -1556,8 +1636,9 @@ void AIManager::CanCreateSession(
+   StartModelPathValidationIfOverrideSet();
+ 
+   if (!model_broker_client_) {
+-    std::move(callback).Run(blink::mojom::ModelAvailabilityCheckResult::
+-                                kUnavailableServiceNotRunning);
++    // browser: this build has no model service; see
++    // AvailabilityWithoutService().
++    std::move(callback).Run(AvailabilityWithoutService(capability));
+     return;
+   }
+ 
+@@ -1582,8 +1663,9 @@ void AIManager::CanCreateSession(const std::string& use_case_string,
+   }
+ 
+   if (!model_broker_client_) {
+-    std::move(callback).Run(blink::mojom::ModelAvailabilityCheckResult::
+-                                kUnavailableServiceNotRunning);
++    // browser: this build has no model service; see
++    // AvailabilityWithoutService().
++    std::move(callback).Run(AvailabilityWithoutService(std::nullopt));
+     return;
+   }
+ 
+@@ -1620,8 +1702,9 @@ void AIManager::CanCreateSessionWithConfig(
+   StartModelPathValidationIfOverrideSet();
+ 
+   if (!model_broker_client_) {
+-    std::move(callback).Run(blink::mojom::ModelAvailabilityCheckResult::
+-                                kUnavailableServiceNotRunning);
++    // browser: this build has no model service; see
++    // AvailabilityWithoutService().
++    std::move(callback).Run(AvailabilityWithoutService(capability));
+     return;
+   }
+ 
+diff --git a/chrome/browser/ai/ai_manager.h b/chrome/browser/ai/ai_manager.h
+index 2b2e467ef8..1ba1cf92af 100644
+--- a/chrome/browser/ai/ai_manager.h
++++ b/chrome/browser/ai/ai_manager.h
+@@ -28,8 +28,9 @@
+ #include "mojo/public/cpp/base/proto_wrapper.h"
+ #include "mojo/public/cpp/bindings/pending_receiver.h"
+ #include "mojo/public/cpp/bindings/receiver_set.h"
++#include "mojo/public/cpp/bindings/remote_set.h"
+ #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-shared.h"
+-#include "services/on_device_model/public/mojom/download_observer.mojom-forward.h"
++#include "services/on_device_model/public/mojom/download_observer.mojom.h"
+ #include "third_party/blink/public/mojom/ai/ai_common.mojom-forward.h"
+ #include "third_party/blink/public/mojom/ai/ai_language_model.mojom-forward.h"
+ #include "third_party/blink/public/mojom/ai/ai_manager.mojom.h"
+@@ -163,6 +164,15 @@ class AIManager : public base::SupportsUserData::Data,
+  private:
+   bool IsPromptApiEnabled() const;
+ 
++  // browser: availability() and create() when this build's missing model
++  // service leaves `model_broker_client_` null; see the definitions.
++  bool IsOnDeviceModelEligible() const;
++  blink::mojom::ModelAvailabilityCheckResult AvailabilityWithoutService(
++      std::optional<optimization_guide::mojom::OnDeviceFeature> feature) const;
++  void StartDownloadWithoutService(
++      optimization_guide::mojom::OnDeviceFeature feature,
++      mojo::PendingRemote<on_device_model::mojom::DownloadObserver> monitor);
++
+   base::OnceCallback<void(std::unique_ptr<optimization_guide::OnDeviceSession>)>
+   CreateSummarizerSessionCallback(
+       blink::mojom::AISummarizerCreateOptionsPtr options,
+@@ -294,6 +304,20 @@ class AIManager : public base::SupportsUserData::Data,
+   // Features that have attempted initialization in this session.
+   base::flat_set<optimization_guide::mojom::OnDeviceFeature> tried_init_;
+ 
++  // browser: the create() calls held by StartDownloadWithoutService() and
++  // the monitors they were given, a bounded number of each (see
++  // kMaxStalledCreates); a set drops a remote when its page goes.
++  mojo::RemoteSet<blink::mojom::AIManagerCreateLanguageModelClient>
++      stalled_language_models_;
++  mojo::RemoteSet<blink::mojom::AIManagerCreateSummarizerClient>
++      stalled_summarizers_;
++  mojo::RemoteSet<blink::mojom::AIManagerCreateWriterClient> stalled_writers_;
++  mojo::RemoteSet<blink::mojom::AIManagerCreateRewriterClient>
++      stalled_rewriters_;
++  mojo::RemoteSet<blink::mojom::AIManagerCreateProofreaderClient>
++      stalled_proofreaders_;
++  mojo::RemoteSet<on_device_model::mojom::DownloadObserver> stalled_monitors_;
++
+   base::WeakPtrFactory<AIManager> weak_factory_{this};
+ };
+ 
+diff --git a/chrome/installer/mini_installer/chrome.release b/chrome/installer/mini_installer/chrome.release
+index 33e8546206..5171d0ee5a 100644
+--- a/chrome/installer/mini_installer/chrome.release
++++ b/chrome/installer/mini_installer/chrome.release
+@@ -65,6 +65,12 @@ MEIPreload\preloaded_data.pb: %(VersionDir)s\MEIPreload\
+ IwaKeyDistribution\iwa-key-distribution.pb: %(VersionDir)s\IwaKeyDistribution\
+ IwaKeyDistribution\manifest.json: %(VersionDir)s\IwaKeyDistribution\
+ 
++#
++# browser: the language detection model
++# (components/language_detection/content/browser/BUILD.gn)
++#
++LanguageDetection\model.tflite: %(VersionDir)s\LanguageDetection\
++
+ [HIDPI]
+ chrome_200_percent.pak: %(VersionDir)s\
+ 
+diff --git a/chrome/tools/build/win/FILES.cfg b/chrome/tools/build/win/FILES.cfg
+index 4ec098da14..8c9b408114 100644
+--- a/chrome/tools/build/win/FILES.cfg
++++ b/chrome/tools/build/win/FILES.cfg
+@@ -744,6 +744,12 @@ FILES = [
+     'filename': 'IwaKeyDistribution/manifest.json',
+     'buildtype': ['official'],
+   },
++  # browser: the language detection model
++  # (components/language_detection/content/browser/BUILD.gn):
++  {
++    'filename': 'LanguageDetection/model.tflite',
++    'buildtype': ['dev', 'official'],
++  },
+   # ChromeDriver binary:
+   {
+     'filename': 'chromedriver.exe',
+diff --git a/components/language_detection/content/browser/BUILD.gn b/components/language_detection/content/browser/BUILD.gn
+index b34d1d1359..4bed4eb017 100644
+--- a/components/language_detection/content/browser/BUILD.gn
++++ b/components/language_detection/content/browser/BUILD.gn
+@@ -14,6 +14,19 @@ static_library("browser") {
+     "//components/language_detection/core/browser:language_detection_model_service",
+     "//mojo/public/cpp/bindings",
+   ]
++
++  # browser: the model the driver opens when no model service delivers one,
++  # read beside the browser's module (base::DIR_ASSETS).
++  if (is_win || is_linux) {
++    data_deps = [ ":bundled_model" ]
++  }
++}
++
++# browser: Chrome's language detection model, which the test data holds byte
++# for byte. Packaging ships it with the browser (FILES.cfg, chrome.release).
++copy("bundled_model") {
++  sources = [ "//components/test/data/translate/valid_model.tflite" ]
++  outputs = [ "$root_out_dir/LanguageDetection/model.tflite" ]
+ }
+ 
+ source_set("unit_tests") {
+diff --git a/components/language_detection/content/browser/content_language_detection_driver.cc b/components/language_detection/content/browser/content_language_detection_driver.cc
+index 1833bd9623..58e0660dbe 100644
+--- a/components/language_detection/content/browser/content_language_detection_driver.cc
++++ b/components/language_detection/content/browser/content_language_detection_driver.cc
+@@ -7,13 +7,73 @@
+ #include <utility>
+ 
+ #include "base/files/file.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/no_destructor.h"
++#include "base/path_service.h"
++#include "base/task/thread_pool.h"
+ #include "components/language_detection/core/browser/language_detection_model_provider.h"
+ 
+ namespace language_detection {
+ 
++namespace {
++
++// browser: the language detection model this build ships, for drivers given
++// no model provider. The browser's own defaults switch the optimization guide
++// off (OptimizationHints), so no model service delivers the model Chrome
++// downloads. The build copies that model, which the test data holds byte for
++// byte (//components/test/data/translate/valid_model.tflite), to
++// LanguageDetection/model.tflite beside the browser's module. One provider
++// serves every profile and opens the file on a best-effort task, as Chrome's
++// model service opens its downloaded copy: such tasks wait until startup is
++// complete, so the detector answers "downloadable" until then and
++// "available" after, as on a Chrome profile that has the model. Without the
++// file the model is never set: "downloadable", with requests waiting as on a
++// download that has not finished.
++class BundledModelProvider : public LanguageDetectionModelProvider {
++ public:
++  BundledModelProvider()
++      : LanguageDetectionModelProvider(
++            base::ThreadPool::CreateSequencedTaskRunner(
++                {base::MayBlock(), base::TaskPriority::BEST_EFFORT})) {
++    base::FilePath dir;
++    if (!base::PathService::Get(base::DIR_ASSETS, &dir)) {
++      return;
++    }
++    const base::FilePath path =
++        dir.AppendASCII("LanguageDetection").AppendASCII("model.tflite");
++    // Unretained: the provider is never destroyed (see
++    // GetBundledModelProvider()).
++    base::ThreadPool::PostTaskAndReplyWithResult(
++        FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
++        base::BindOnce(&base::PathExists, path),
++        base::BindOnce(&BundledModelProvider::OnModelFileChecked,
++                       base::Unretained(this), path));
++  }
++
++ private:
++  void OnModelFileChecked(const base::FilePath& path, bool exists) {
++    if (exists) {
++      ReplaceModelFile(path);
++    }
++  }
++};
++
++LanguageDetectionModelProvider* GetBundledModelProvider() {
++  static base::NoDestructor<BundledModelProvider> provider;
++  return provider.get();
++}
++
++}  // namespace
++
++// browser: a driver given no model provider uses the model this build
++// ships.
+ ContentLanguageDetectionDriver::ContentLanguageDetectionDriver(
+     LanguageDetectionModelProvider* language_detection_model_provider)
+-    : language_detection_model_provider_(language_detection_model_provider) {}
++    : language_detection_model_provider_(language_detection_model_provider
++                                             ? language_detection_model_provider
++                                             : GetBundledModelProvider()) {}
+ 
+ ContentLanguageDetectionDriver::~ContentLanguageDetectionDriver() = default;
+ 
+-- 
+2.45.1.windows.1
+

@@ -1,0 +1,74 @@
+From 55d8edfba8cf42a5164da9f5c1e2e1f572ffd49c Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:13:40 -0500
+Subject: [PATCH 29/55] browser-defaults
+
+Browser default overrides: the browser-defaults preset is expanded before
+anything reads the command line (opt out with --use-chromium-defaults).
+Rider: chrome/BUILD.gn holds the public dependency (the production commit
+adds its own).
+---
+ chrome/BUILD.gn                    | 1 +
+ chrome/app/BUILD.gn                | 1 +
+ chrome/app/chrome_main_delegate.cc | 7 +++++++
+ 3 files changed, 9 insertions(+)
+
+diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
+index 268b874b1d..cb0590bc30 100644
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -1290,6 +1290,7 @@ if (is_win) {
+       "//chrome/common:buildflags",
+       "//chrome/common:version_header",
+       "//chrome/common/profiler",
++      "//components/browser:browser_switches",
+       "//components/crash/core/app",
+       "//components/memory_system",
+       "//components/policy:generated",
+diff --git a/chrome/app/BUILD.gn b/chrome/app/BUILD.gn
+index 0b362a0bbc..2f7dc8131b 100644
+--- a/chrome/app/BUILD.gn
++++ b/chrome/app/BUILD.gn
+@@ -165,6 +165,7 @@ static_library("test_support") {
+     "//chrome/gpu",
+     "//chrome/renderer",
+     "//chrome/utility",
++    "//components/browser:browser_switches",
+     "//components/crash/core/app",
+     "//components/crash/core/app:test_support",
+     "//components/devtools/devtools_pipe",
+diff --git a/chrome/app/chrome_main_delegate.cc b/chrome/app/chrome_main_delegate.cc
+index c6dfce70e6..52011779f8 100644
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -13,6 +13,7 @@
+ #include "base/check.h"
+ #include "base/command_line.h"
+ #include "base/compiler_specific.h"
++#include "base/containers/span.h"
+ #include "base/cpu.h"
+ #include "base/dcheck_is_on.h"
+ #include "base/features.h"
+@@ -59,6 +60,7 @@
+ #include "chrome/common/url_constants.h"
+ #include "chrome/grit/generated_resources.h"
+ #include "chrome/renderer/chrome_content_renderer_client.h"
++#include "components/browser/browser_runtime.h"
+ #include "components/component_updater/component_updater_paths.h"
+ #include "components/content_settings/core/common/content_settings_pattern.h"
+ #include "components/crash/core/app/crash_reporter_client.h"
+@@ -1175,6 +1177,11 @@ void ChromeMainDelegate::SetupTracing() {
+ }
+ 
+ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
++  // browser: expand the browser-defaults preset (opt out with
++  // --use-chromium-defaults) before anything else reads the command line.
++  // Browser process only.
++  browser::MaybeExpandBrowserDefaults();
++
+ #if BUILDFLAG(IS_CHROMEOS)
+   ash::BootTimesRecorder::Get()->SaveChromeMainStats();
+ #endif
+-- 
+2.45.1.windows.1
+

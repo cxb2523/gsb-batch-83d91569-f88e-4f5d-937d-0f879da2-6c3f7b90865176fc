@@ -1,0 +1,236 @@
+From 854e0ed1d14e6b241b9d53f5320ee82b5148e1cb Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:13:41 -0500
+Subject: [PATCH 30/55] headless-parity
+
+A headless browser reports what a headed one does. Its screen
+(--screen-info) is taken from the primary monitor -- pixels, work area,
+system scale, internal or external as the display path says -- unless a
+screen is given outright, and its window is maximized on it
+(--start-maximized) with a maximized window's frame: headless zooms a
+maximized window to the work area without Windows' outdent, so the window
+handler gives it no client insets. A page comparing screen, window and
+viewport sees a maximized window on a real desktop rather than headless's
+800x600 screen under a bigger window, or a window filling the work area
+with a restored window's borders. Applied after the seed-derived screen,
+which therefore stands when present (Windows only). Initial focus goes to
+the page rather than the location bar, which nobody types in headless, so
+document.hasFocus() is true as in a window someone is using; a protocol
+navigation never moves focus by itself.
+---
+ chrome/app/chrome_main_delegate.cc            | 110 ++++++++++++++++++
+ .../browser_web_contents_delegate.cc          |  15 +++
+ ui/views/win/hwnd_message_handler_headless.cc |   9 ++
+ 3 files changed, 134 insertions(+)
+
+diff --git a/chrome/app/chrome_main_delegate.cc b/chrome/app/chrome_main_delegate.cc
+index 52011779f8..0870014cf9 100644
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <stddef.h>
+ 
++#include <cmath>
+ #include <string>
+ #include <variant>
+ 
+@@ -33,7 +34,9 @@
+ #include "base/process/process_handle.h"
+ #include "base/profiler/thread_group_profiler.h"
+ #include "base/rand_util.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/strings/string_util.h"
++#include "base/strings/stringprintf.h"
+ #include "base/strings/sys_string_conversions.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/thread_pool/thread_pool_instance.h"
+@@ -102,6 +105,8 @@
+ #endif
+ 
+ #if BUILDFLAG(IS_WIN)
++#include <windows.h>
++
+ #include <malloc.h>
+ 
+ #include <algorithm>
+@@ -200,6 +205,7 @@
+ #include "chrome/gpu/chrome_content_gpu_client.h"  // nogncheck
+ #include "chrome/utility/chrome_content_utility_client.h"  // nogncheck
+ #include "components/devtools/devtools_pipe/devtools_pipe.h"  // nogncheck
++#include "ui/gfx/switches.h"                                  // nogncheck
+ 
+ #if BUILDFLAG(IS_WIN)
+ #include "chrome/browser/chrome_browser_main_win.h"  // nogncheck
+@@ -207,6 +213,8 @@
+ #include "chrome/browser/win/browser_util.h"  // nogncheck
+ #include "chrome/browser/win/isolated_browser/isolated_browser_support.h"  // nogncheck
+ #include "chrome/chrome_elf/chrome_elf_main.h"
++#include "ui/display/win/display_config_helper.h"  // nogncheck
++#include "ui/display/win/dpi.h"                    // nogncheck
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+ #if BUILDFLAG(IS_MAC)
+@@ -1176,11 +1184,113 @@ void ChromeMainDelegate::SetupTracing() {
+           std::move(tracing_factory), unwinder_type);
+ }
+ 
++namespace {
++
++#if !defined(BUILDING_CHROME_RENDERER)
++#if BUILDFLAG(IS_WIN)
++// browser: whether the primary monitor is the machine's own panel, by the
++// output technology of its display path. Nullopt when the system does not say.
++std::optional<bool> PrimaryMonitorIsInternal() {
++  constexpr POINT kOrigin = {0, 0};
++  const std::optional<DISPLAYCONFIG_PATH_INFO> path =
++      display::win::GetDisplayConfigPathInfo(
++          ::MonitorFromPoint(kOrigin, MONITOR_DEFAULTTOPRIMARY));
++  if (!path) {
++    return std::nullopt;
++  }
++  // The kinds display::win takes for a built-in panel.
++  switch (path->targetInfo.outputTechnology) {
++    case DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL:
++    case DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED:
++    case DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED:
++      return true;
++    default:
++      return false;
++  }
++}
++
++// browser: a headless browser's screen (--screen-info) and window from the
++// monitor the machine has, as a headed browser's come from it, unless a screen
++// was given outright. Left alone, headless reports an 800x600 screen at a ratio
++// of 1 under a window bigger than that screen, which no desktop has, so a page
++// that compares screen, window and viewport tells the two apart at once. The
++// primary monitor, where a headed browser opens its first window: its pixels,
++// its work area, the system scale (--force-device-scale-factor honoured), the
++// colour depth of 24 display::win reports for every monitor, and internal as
++// its output technology says (a battery standing in when it does not). The
++// window is maximized on it, as most are.
++void ApplyHeadlessScreenParity(base::CommandLine& command_line) {
++  if (command_line.HasSwitch(switches::kScreenInfo)) {
++    return;
++  }
++  const int width_px = ::GetSystemMetrics(SM_CXSCREEN);
++  const int height_px = ::GetSystemMetrics(SM_CYSCREEN);
++  RECT work_area = {};
++  const float scale = display::win::GetDPIScale();
++  // --screen-info refuses a ratio below 0.5 or one it cannot parse, and
++  // headless stops at that.
++  if (width_px <= 0 || height_px <= 0 || !std::isfinite(scale) ||
++      scale < 0.5f ||
++      !::SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0)) {
++    return;
++  }
++  // The work area as --screen-info takes it: insets from the screen's edges,
++  // in pixels. A taskbar can take any edge; an area the system reports past
++  // an edge counts as reaching it.
++  const int left = std::clamp(static_cast<int>(work_area.left), 0, width_px);
++  const int top = std::clamp(static_cast<int>(work_area.top), 0, height_px);
++  const int right = std::clamp(width_px - static_cast<int>(work_area.right), 0,
++                               width_px - left);
++  const int bottom = std::clamp(height_px - static_cast<int>(work_area.bottom),
++                                0, height_px - top);
++  // The machine's own panel or not, as the display says; when it does not,
++  // a machine with a battery is taken for a laptop on its own panel.
++  std::optional<bool> internal = PrimaryMonitorIsInternal();
++  if (!internal) {
++    SYSTEM_POWER_STATUS power = {};
++    internal = ::GetSystemPowerStatus(&power) &&
++               !(power.BatteryFlag & BATTERY_FLAG_NO_BATTERY);
++  }
++  command_line.AppendSwitchASCII(
++      switches::kScreenInfo,
++      base::StringPrintf(
++          "{%dx%d workAreaLeft=%d workAreaTop=%d "
++          "workAreaRight=%d workAreaBottom=%d colorDepth=24 "
++          "devicePixelRatio=%s isInternal=%s}",
++          width_px, height_px, left, top, right, bottom,
++          base::NumberToString(static_cast<double>(scale)).c_str(),
++          *internal ? "true" : "false"));
++  // Maximized: the window fills the work area at its corner, with the frame
++  // a maximized window has. A window merely sized to the work area keeps a
++  // restored window's borders, which no maximized window shows. An explicit
++  // size or position stands and leaves the window restored, as headed.
++  if (!command_line.HasSwitch(switches::kWindowSize) &&
++      !command_line.HasSwitch(switches::kWindowPosition)) {
++    command_line.AppendSwitch(switches::kStartMaximized);
++  }
++}
++#endif  // BUILDFLAG(IS_WIN)
++#endif  // !defined(BUILDING_CHROME_RENDERER)
++
++}  // namespace
++
+ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
+   // browser: expand the browser-defaults preset (opt out with
+   // --use-chromium-defaults) before anything else reads the command line.
+   // Browser process only.
+   browser::MaybeExpandBrowserDefaults();
++  base::CommandLine* startup_command_line =
++      base::CommandLine::ForCurrentProcess();
++  if (!startup_command_line->HasSwitch(switches::kProcessType)) {
++#if !defined(BUILDING_CHROME_RENDERER)
++    // browser: headless's own screen and window.
++    if (headless::IsHeadlessMode()) {
++#if BUILDFLAG(IS_WIN)
++      ApplyHeadlessScreenParity(*startup_command_line);
++#endif
++    }
++#endif
++  }
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+   ash::BootTimesRecorder::Get()->SaveChromeMainStats();
+diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
+index fbd11f0352..57f13908d9 100644
+--- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
++++ b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
+@@ -440,6 +440,21 @@ void BrowserWebContentsDelegate::SetFocusToLocationBar() {
+   // (2) This is called with |is_user_initiated| == false, because this is a
+   //     renderer initiated focus (this method is a WebContentsDelegate
+   //     override).
++  // browser: a headless window has no one to type in its location bar, and
++  // the page a person has reached holds the focus. Every decision to focus
++  // the bar by default ends here -- the startup about:blank (a content-side
++  // flag that bypasses ShouldFocusLocationBarByDefault), the new-tab page,
++  // a commit that expected the bar focused -- so the active page takes the
++  // focus instead, and document.hasFocus() answers as in a headed window
++  // someone is using. A protocol navigation never moves focus on its own,
++  // so without this the first tab's page would never hold the focus.
++  if (headless::IsHeadlessMode()) {
++    if (content::WebContents* active =
++            browser_->GetTabStripModel()->GetActiveWebContents()) {
++      active->Focus();
++    }
++    return;
++  }
+   window_->SetFocusToLocationBar(false);
+ }
+ 
+diff --git a/ui/views/win/hwnd_message_handler_headless.cc b/ui/views/win/hwnd_message_handler_headless.cc
+index c434bce087..0d53b6165c 100644
+--- a/ui/views/win/hwnd_message_handler_headless.cc
++++ b/ui/views/win/hwnd_message_handler_headless.cc
+@@ -481,6 +481,15 @@ void HWNDMessageHandlerHeadless::SizeConstraintsChanged() {
+ bool HWNDMessageHandlerHeadless::GetClientAreaInsets(
+     gfx::Insets* insets,
+     int frame_thickness) const {
++  // browser: Windows outdents a maximized window by the frame thickness on
++  // every edge, so its client area is the monitor's work area. A headless
++  // window is zoomed to the work area itself (GetZoomedWindowBounds()), so
++  // its whole window is the client area and it takes no insets, as a headed
++  // maximized window's client area is the work area.
++  if (IsMaximized()) {
++    *insets = gfx::Insets();
++    return true;
++  }
+   if (delegate_->GetClientAreaInsets(insets, frame_thickness)) {
+     return true;
+   }
+-- 
+2.45.1.windows.1
+

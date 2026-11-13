@@ -1,0 +1,309 @@
+From 442d0b9dd31046a7dd5e13ee988edac2cafb7ecc Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:13:36 -0500
+Subject: [PATCH 26/55] cancel-print-preview
+
+--cancel-print-preview: a scripted print preview is closed unseen after a
+short random delay, headed or headless, and the WebContents observer
+gains DidRequestScriptedPrint so the Input action-outcome watch can
+report it. The switch declaration rides in switch-resolver.
+---
+ chrome/browser/printing/BUILD.gn              |  1 +
+ chrome/browser/printing/DEPS                  |  1 +
+ chrome/browser/printing/print_view_manager.cc | 33 ++++++++++++
+ chrome/browser/printing/print_view_manager.h  |  4 ++
+ .../printing/print_view_manager_base.cc       |  6 +++
+ components/printing/browser/DEPS              |  1 +
+ components/printing/browser/headless/BUILD.gn |  1 +
+ .../headless/headless_print_manager.cc        | 54 +++++++++++++++++++
+ .../browser/headless/headless_print_manager.h | 10 ++++
+ .../public/browser/web_contents_observer.h    |  5 ++
+ 10 files changed, 116 insertions(+)
+
+diff --git a/chrome/browser/printing/BUILD.gn b/chrome/browser/printing/BUILD.gn
+index cefebfbe33..b44bbbba5b 100644
+--- a/chrome/browser/printing/BUILD.gn
++++ b/chrome/browser/printing/BUILD.gn
+@@ -210,6 +210,7 @@ if (enable_printing) {
+         "//chrome/browser/task_manager",
+         "//chrome/browser/ui/webui",
+         "//chrome/browser/ui/webui/print_preview",
++        "//components/browser:browser_switches",
+         "//components/cloud_devices/common",
+         "//components/guest_view/browser",
+         "//components/pref_registry",
+diff --git a/chrome/browser/printing/DEPS b/chrome/browser/printing/DEPS
+index 1f4600fbb9..dcef995adc 100644
+--- a/chrome/browser/printing/DEPS
++++ b/chrome/browser/printing/DEPS
+@@ -1,4 +1,5 @@
+ include_rules = [
++  "+components/browser/browser_switches.h",
+   "+pdf/pdf.h",  # Test only.
+ ]
+ 
+diff --git a/chrome/browser/printing/print_view_manager.cc b/chrome/browser/printing/print_view_manager.cc
+index 25f1aa604a..88a8aaf9bd 100644
+--- a/chrome/browser/printing/print_view_manager.cc
++++ b/chrome/browser/printing/print_view_manager.cc
+@@ -12,9 +12,12 @@
+ #include <vector>
+ 
+ #include "base/check.h"
++#include "base/command_line.h"
+ #include "base/functional/bind.h"
+ #include "base/no_destructor.h"
+ #include "base/observer_list.h"
++#include "base/rand_util.h"
++#include "base/task/single_thread_task_runner.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/bad_message.h"
+ #include "chrome/browser/printing/print_preview_dialog_controller.h"
+@@ -22,6 +25,7 @@
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/ui/webui/print_preview/print_preview_ui.h"
+ #include "chrome/common/pref_names.h"
++#include "components/browser/browser_switches.h"
+ #include "components/device_event_log/device_event_log.h"
+ #include "components/enterprise/buildflags/buildflags.h"
+ #include "components/prefs/pref_service.h"
+@@ -521,6 +525,10 @@ void PrintViewManager::SetupScriptedPrintPreview(
+     scripted_print_preview_rph_->SetBlocked(true);
+     scripted_print_preview_rph_set_blocked_ = true;
+   }
++
++  // browser: the page waits in print() from here; whoever watches the tab
++  // hears it now, not once the print ends.
++  web_contents()->DidRequestScriptedPrint(&rfh);
+ }
+ 
+ void PrintViewManager::ShowScriptedPrintPreview() {
+@@ -576,6 +584,19 @@ void PrintViewManager::OnScriptedPrintPreviewCallback(
+     }
+   }
+ 
++  // browser: --cancel-print-preview. Nobody is there to answer a preview, so
++  // none is shown; it is closed after a person's moment, by what closing the
++  // dialog runs. The page saw beforeprint and is blocked in print() until then.
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++          ::switches::kCancelPrintPreview)) {
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(&PrintViewManager::CloseUnseenPreview,
++                       weak_factory_.GetWeakPtr(), rfh_id),
++        base::RandTimeDelta(base::Seconds(1), base::Seconds(4)));
++    return;
++  }
++
+   auto* dialog_controller = PrintPreviewDialogController::GetInstance();
+   CHECK(dialog_controller);
+   mojom::RequestPrintPreviewParams params;
+@@ -587,6 +608,18 @@ void PrintViewManager::OnScriptedPrintPreviewCallback(
+   PrintPreviewAllowedForTesting();
+ }
+ 
++// browser: --cancel-print-preview.
++void PrintViewManager::CloseUnseenPreview(
++    content::GlobalRenderFrameHostId rfh_id) {
++  // A preview that ended some other way (its frame gone) and a new print()
++  // since must not be closed early by the old one's timer.
++  if (print_preview_state_ != SCRIPTED_PREVIEW || !print_preview_rfh_ ||
++      print_preview_rfh_->GetGlobalId() != rfh_id) {
++    return;
++  }
++  PrintPreviewDone();
++}
++
+ void PrintViewManager::RequestPrintPreview(
+     mojom::RequestPrintPreviewParamsPtr params) {
+   content::RenderFrameHost& rfh = CurrentTargetFrame();
+diff --git a/chrome/browser/printing/print_view_manager.h b/chrome/browser/printing/print_view_manager.h
+index fa223e1add..d455f1d7bc 100644
+--- a/chrome/browser/printing/print_view_manager.h
++++ b/chrome/browser/printing/print_view_manager.h
+@@ -130,6 +130,10 @@ class PrintViewManager : public PrintViewManagerBase,
+   void OnScriptedPrintPreviewCallback(content::GlobalRenderFrameHostId rfh_id,
+                                       bool should_proceed);
+ 
++  // browser: --cancel-print-preview closes the unseen preview for `rfh_id`, if
++  // it is still the one open.
++  void CloseUnseenPreview(content::GlobalRenderFrameHostId rfh_id);
++
+   // Helper method for RequestPrintPreview(), called from
+   // RejectPrintPreviewRequestIfRestricted(). Based on value of
+   // `should_proceed`, continues to show the print preview or cancels it.
+diff --git a/chrome/browser/printing/print_view_manager_base.cc b/chrome/browser/printing/print_view_manager_base.cc
+index b673362fe8..a61ee124f9 100644
+--- a/chrome/browser/printing/print_view_manager_base.cc
++++ b/chrome/browser/printing/print_view_manager_base.cc
+@@ -648,6 +648,12 @@ void PrintViewManagerBase::ScriptedPrint(mojom::ScriptedPrintParamsPtr params,
+   }
+ #endif  // BUILDFLAG(ENTERPRISE_CONTENT_ANALYSIS)
+ 
++  // browser: a page's print() with no preview (--disable-print-preview): the
++  // page waits in it from here, as under PrintViewManager's scripted preview.
++  if (params->is_scripted) {
++    web_contents()->DidRequestScriptedPrint(&render_frame_host);
++  }
++
+   CompleteScriptedPrint(&render_frame_host, std::move(params),
+                         std::move(callback));
+ }
+diff --git a/components/printing/browser/DEPS b/components/printing/browser/DEPS
+index 887dba3926..31b494937c 100644
+--- a/components/printing/browser/DEPS
++++ b/components/printing/browser/DEPS
+@@ -1,4 +1,5 @@
+ include_rules = [
++  "+components/browser/browser_switches.h",
+   "+components/crash/core/common",
+   "+components/discardable_memory/service",
+   "+components/enterprise/buildflags",
+diff --git a/components/printing/browser/headless/BUILD.gn b/components/printing/browser/headless/BUILD.gn
+index bf986b7ef3..7d9789a659 100644
+--- a/components/printing/browser/headless/BUILD.gn
++++ b/components/printing/browser/headless/BUILD.gn
+@@ -16,6 +16,7 @@ static_library("headless") {
+ 
+   deps = [
+     "//base",
++    "//components/browser:browser_switches",
+     "//components/printing/browser",
+     "//components/printing/browser/print_to_pdf",
+     "//printing",
+diff --git a/components/printing/browser/headless/headless_print_manager.cc b/components/printing/browser/headless/headless_print_manager.cc
+index 72e93543ab..2fdb856281 100644
+--- a/components/printing/browser/headless/headless_print_manager.cc
++++ b/components/printing/browser/headless/headless_print_manager.cc
+@@ -4,8 +4,15 @@
+ 
+ #include "components/printing/browser/headless/headless_print_manager.h"
+ 
++#include "base/command_line.h"
++#include "base/functional/bind.h"
+ #include "base/logging.h"
++#include "base/rand_util.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/time/time.h"
++#include "components/browser/browser_switches.h"
+ #include "components/printing/browser/print_to_pdf/pdf_print_result.h"
++#include "content/public/browser/web_contents.h"
+ #include "printing/mojom/print.mojom.h"
+ #include "printing/printing_utils.h"
+ 
+@@ -74,10 +81,57 @@ void HeadlessPrintManager::GetPrintPreviewParams(
+ 
+ void HeadlessPrintManager::SetupScriptedPrintPreview(
+     SetupScriptedPrintPreviewCallback callback) {
++  // browser: with --cancel-print-preview, print() pauses as it does in a
++  // headed browser -- a preview opened and closed unanswered after a moment --
++  // and the page is told it closed (afterprint); without the switch headless
++  // answers at once and never tells it. A second print() while one waits is
++  // answered at once, as PrintViewManager answers one while a preview is open.
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++          ::switches::kCancelPrintPreview) &&
++      !scripted_preview_callback_ && CurrentTargetFrame().IsActive()) {
++    content::RenderFrameHost& rfh = CurrentTargetFrame();
++    // A preview opening ends page fullscreen, as any dialog does
++    // (crbug.com/41322524) -- as PrintViewManager does it.
++    if (web_contents()->IsFullscreen()) {
++      auto weak_this = weak_factory_.GetWeakPtr();
++      web_contents()->ExitFullscreen(true);
++      if (!weak_this) {
++        return;
++      }
++    }
++    // Connected now, as PrintViewManager does for a renderer-initiated print.
++    GetPrintRenderFrame(&rfh);
++    scripted_preview_callback_ = std::move(callback);
++    scripted_preview_rfh_id_ = rfh.GetGlobalId();
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(&HeadlessPrintManager::CloseUnseenPreview,
++                       weak_factory_.GetWeakPtr(), scripted_preview_rfh_id_),
++        base::RandTimeDelta(base::Seconds(1), base::Seconds(4)));
++    // browser: the page waits in print() from here; whoever watches the
++    // tab hears it now, not once the print ends.
++    web_contents()->DidRequestScriptedPrint(&rfh);
++    return;
++  }
+   DLOG(ERROR) << "Scripted print preview is not supported";
+   std::move(callback).Run();
+ }
+ 
++// browser: --cancel-print-preview.
++void HeadlessPrintManager::CloseUnseenPreview(
++    content::GlobalRenderFrameHostId rfh_id) {
++  if (!scripted_preview_callback_ || scripted_preview_rfh_id_ != rfh_id) {
++    return;
++  }
++  // As PrintViewManager::PrintPreviewDone: the frame hears the preview closed
++  // (it dispatches afterprint), then the waiting print() returns.
++  content::RenderFrameHost* rfh = content::RenderFrameHost::FromID(rfh_id);
++  if (rfh && rfh->IsRenderFrameLive() && IsPrintRenderFrameConnected(rfh)) {
++    GetPrintRenderFrame(rfh)->OnPrintPreviewDialogClosed();
++  }
++  std::move(scripted_preview_callback_).Run();
++}
++
+ void HeadlessPrintManager::ShowScriptedPrintPreview() {
+   DLOG(ERROR) << "Scripted print preview is not supported";
+ }
+diff --git a/components/printing/browser/headless/headless_print_manager.h b/components/printing/browser/headless/headless_print_manager.h
+index 47b2871b4c..9e991e7a56 100644
+--- a/components/printing/browser/headless/headless_print_manager.h
++++ b/components/printing/browser/headless/headless_print_manager.h
+@@ -8,10 +8,12 @@
+ #include <memory>
+ #include <string>
+ 
++#include "base/memory/weak_ptr.h"
+ #include "build/build_config.h"
+ #include "components/printing/browser/print_manager.h"
+ #include "components/printing/browser/print_to_pdf/pdf_print_job.h"
+ #include "components/printing/common/print.mojom.h"
++#include "content/public/browser/global_routing_id.h"
+ #include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/web_contents_observer.h"
+ #include "content/public/browser/web_contents_user_data.h"
+@@ -64,6 +66,12 @@ class HeadlessPrintManager
+   void SetAccessibilityTree(
+       int32_t cookie,
+       const ui::AXTreeUpdate& accessibility_tree) override;
++
++  // browser: --cancel-print-preview. A scripted print waits as a preview a
++  // person closes unanswered does, then the frame is told it closed.
++  void CloseUnseenPreview(content::GlobalRenderFrameHostId rfh_id);
++  SetupScriptedPrintPreviewCallback scripted_preview_callback_;
++  content::GlobalRenderFrameHostId scripted_preview_rfh_id_;
+ #endif
+ #if BUILDFLAG(IS_ANDROID)
+   void SetupScriptedPrintAndroid(
+@@ -71,6 +79,8 @@ class HeadlessPrintManager
+   void PdfWritingDone(int page_count) override;
+ #endif
+ 
++  base::WeakPtrFactory<HeadlessPrintManager> weak_factory_{this};  // browser
++
+   WEB_CONTENTS_USER_DATA_KEY_DECL();
+ };
+ 
+diff --git a/content/public/browser/web_contents_observer.h b/content/public/browser/web_contents_observer.h
+index 18af23b6aa..c38f18d0f5 100644
+--- a/content/public/browser/web_contents_observer.h
++++ b/content/public/browser/web_contents_observer.h
+@@ -521,6 +521,11 @@ class CONTENT_EXPORT WebContentsObserver : public base::CheckedObserver {
+   // This method is invoked when the visible security state of the page changes.
+   virtual void DidChangeVisibleSecurityState() {}
+ 
++  // browser: a frame of this page called window.print() and the print manager
++  // took the request (WebContents::DidRequestScriptedPrint). The page waits in
++  // print() from now until the print ends.
++  virtual void DidRequestScriptedPrint(RenderFrameHost* render_frame_host) {}
++
+   // This method is invoked when content was loaded from an in-memory cache.
+   virtual void DidLoadResourceFromMemoryCache(
+       RenderFrameHost* render_frame_host,
+-- 
+2.45.1.windows.1
+

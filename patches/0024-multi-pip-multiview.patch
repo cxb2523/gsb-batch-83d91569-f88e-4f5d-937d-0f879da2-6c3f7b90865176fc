@@ -1,0 +1,3040 @@
+From 812f89184792a587e80777052d08fb1c8b55e6d2 Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:13:31 -0500
+Subject: [PATCH 24/55] multi-pip-multiview
+
+Video picture-in-picture windows from several tabs at once, each new one
+opening in the next free corner, and a chrome://multiview tab that tiles
+up to four of them with a Send to Multiview button in the media menu.
+Muted tabs keep their media session. This commit owns the content
+WebContents delegate and observer hooks it adds; the print and permission
+signals and the opener token in web_contents_impl.* ride here. The
+EnableTabMuting preset entry rides in runtime-accessors and the WebUI
+registration in browser-settings.
+---
+ chrome/app/generated_resources.grd            |   3 +
+ chrome/app/generated_resources.grd.gritdeps   |   1 +
+ chrome/app/multiview_strings.grdp             |  16 +
+ .../auto_picture_in_picture_tab_helper.cc     |  12 +-
+ .../picture_in_picture_window_manager.cc      | 189 ++++++-
+ .../picture_in_picture_window_manager.h       |  63 ++-
+ .../ui/browser_web_contents_delegate/BUILD.gn |   1 +
+ .../browser_web_contents_delegate.cc          |  16 +
+ .../browser_web_contents_delegate.h           |   3 +
+ .../views/autofill/popup/popup_view_utils.cc  |  14 +-
+ .../ui/views/frame/contents_web_view.cc       |  46 ++
+ .../ui/views/frame/contents_web_view.h        |  16 +
+ .../ui/views/global_media_controls/BUILD.gn   |   2 +
+ .../media_dialog_view.cc                      |  17 +-
+ chrome/browser/ui/views/overlay/BUILD.gn      |  13 +
+ .../overlay/multiview/multiview_grid_view.cc  | 462 ++++++++++++++++++
+ .../overlay/multiview/multiview_grid_view.h   | 116 +++++
+ .../views/overlay/multiview/multiview_host.cc | 383 +++++++++++++++
+ .../views/overlay/multiview/multiview_host.h  | 148 ++++++
+ .../views/overlay/multiview/multiview_tile.cc | 136 ++++++
+ .../views/overlay/multiview/multiview_tile.h  | 113 +++++
+ .../views/overlay/multiview/multiview_ui.cc   | 100 ++++
+ .../ui/views/overlay/multiview/multiview_ui.h |  33 ++
+ .../overlay/video_overlay_window_views.cc     |  93 +++-
+ .../overlay/video_overlay_window_views.h      |  15 +
+ chrome/browser/ui/webui/BUILD.gn              |   1 +
+ .../browser/ui/webui/chrome_web_ui_configs.cc |   3 +
+ .../views/media_item_ui_updated_view.cc       |  31 ++
+ .../public/views/media_item_ui_updated_view.h |  12 +
+ .../media/session/media_session_controller.cc |   8 +-
+ .../browser/web_contents/web_contents_impl.cc |  49 +-
+ .../browser/web_contents/web_contents_impl.h  |   7 +
+ content/public/browser/web_contents.h         |  16 +
+ .../public/browser/web_contents_delegate.cc   |  16 +
+ .../public/browser/web_contents_delegate.h    |  16 +
+ 35 files changed, 2131 insertions(+), 39 deletions(-)
+ create mode 100644 chrome/app/multiview_strings.grdp
+ create mode 100644 chrome/browser/ui/views/overlay/multiview/multiview_grid_view.cc
+ create mode 100644 chrome/browser/ui/views/overlay/multiview/multiview_grid_view.h
+ create mode 100644 chrome/browser/ui/views/overlay/multiview/multiview_host.cc
+ create mode 100644 chrome/browser/ui/views/overlay/multiview/multiview_host.h
+ create mode 100644 chrome/browser/ui/views/overlay/multiview/multiview_tile.cc
+ create mode 100644 chrome/browser/ui/views/overlay/multiview/multiview_tile.h
+ create mode 100644 chrome/browser/ui/views/overlay/multiview/multiview_ui.cc
+ create mode 100644 chrome/browser/ui/views/overlay/multiview/multiview_ui.h
+
+diff --git a/chrome/app/generated_resources.grd b/chrome/app/generated_resources.grd
+index 21e5fd0d92..4bf1527777 100644
+--- a/chrome/app/generated_resources.grd
++++ b/chrome/app/generated_resources.grd
+@@ -301,6 +301,9 @@ are declared in tools/grit/grit_args.gni.
+       <!-- Media Router specific strings -->
+       <part file="media_router_strings.grdp" />
+ 
++      <!-- Multiview specific strings -->
++      <part file="multiview_strings.grdp" />
++
+       <!-- Notebooks specific strings -->
+       <part file="notebooks_strings.grdp" />
+ 
+diff --git a/chrome/app/generated_resources.grd.gritdeps b/chrome/app/generated_resources.grd.gritdeps
+index 9aa7b11d7b..787660bc8a 100644
+--- a/chrome/app/generated_resources.grd.gritdeps
++++ b/chrome/app/generated_resources.grd.gritdeps
+@@ -12,6 +12,7 @@ chrome/app/glic_strings.grdp
+ chrome/app/gmc_strings.grdp
+ chrome/app/media_live_preview_strings.grdp
+ chrome/app/media_router_strings.grdp
++chrome/app/multiview_strings.grdp
+ chrome/app/nearby_share_strings.grdp
+ chrome/app/notebooks_strings.grdp
+ chrome/app/os_settings_search_tag_strings.grdp
+diff --git a/chrome/app/multiview_strings.grdp b/chrome/app/multiview_strings.grdp
+new file mode 100644
+index 0000000000..d0deda3988
+--- /dev/null
++++ b/chrome/app/multiview_strings.grdp
+@@ -0,0 +1,16 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Copyright 2026 The browser Authors
++     Use of this source code is governed by a BSD-style license that can be
++     found in the LICENSE file. -->
++<!-- Multiview strings (included from generated_resources.grd). -->
++<grit-part>
++  <message name="IDS_MULTIVIEW_TITLE" desc="Title of the Multiview tab, a browser tab that shows up to four videos from other tabs side by side.">
++    Multiview
++  </message>
++  <message name="IDS_MULTIVIEW_SEND_TO_MULTIVIEW" desc="Tooltip and accessible name of a button in the media controls dialog that moves a tab's video into the Multiview tab, a browser tab that shows up to four videos side by side.">
++    Send to Multiview
++  </message>
++  <message name="IDS_MULTIVIEW_PAGE_HINT" desc="Shown in the Multiview tab while it holds no videos. The Multiview tab is a browser tab that shows up to four videos from other tabs side by side. Explains how to add a video. The placeholder is the name of the button, which is shown in bold.">
++    Play a video in another tab, open the media controls in the toolbar, and choose <ph name="SEND_TO_MULTIVIEW_BUTTON">$1<ex>Send to Multiview</ex></ph>. Up to four videos play here side by side.
++  </message>
++</grit-part>
+diff --git a/chrome/browser/picture_in_picture/auto_picture_in_picture_tab_helper.cc b/chrome/browser/picture_in_picture/auto_picture_in_picture_tab_helper.cc
+index 359dba00ed..6039d66a90 100644
+--- a/chrome/browser/picture_in_picture/auto_picture_in_picture_tab_helper.cc
++++ b/chrome/browser/picture_in_picture/auto_picture_in_picture_tab_helper.cc
+@@ -640,7 +640,10 @@ void AutoPictureInPictureTabHelper::MaybeExitAutoPictureInPicture() {
+   }
+   is_in_auto_picture_in_picture_ = false;
+ 
+-  PictureInPictureWindowManager::GetInstance()->ExitPictureInPicture();
++  // browser: close only this tab's window; other tabs' video windows may be
++  // open too.
++  PictureInPictureWindowManager::GetInstance()
++      ->ExitPictureInPictureForWebContents(web_contents());
+ }
+ 
+ void AutoPictureInPictureTabHelper::MaybeStartOrStopObservers() {
+@@ -698,8 +701,11 @@ bool AutoPictureInPictureTabHelper::IsEligibleForAutoPictureInPicture(
+     return false;
+   }
+ 
+-  // Since nobody has a pip window, we shouldn't think we do.
+-  CHECK(!is_in_picture_in_picture_);
++  // browser: nobody has a pip window, but a tab whose video is in a Multiview
++  // tile is still in picture-in-picture.
++  if (is_in_picture_in_picture_) {
++    return false;
++  }
+ 
+   // The user may block autopip via a content setting. Also, if we're in an
+   // incognito or isolated mode window, then we should treat "ask" as "block".
+diff --git a/chrome/browser/picture_in_picture/picture_in_picture_window_manager.cc b/chrome/browser/picture_in_picture/picture_in_picture_window_manager.cc
+index b02065efac..eef814412c 100644
+--- a/chrome/browser/picture_in_picture/picture_in_picture_window_manager.cc
++++ b/chrome/browser/picture_in_picture/picture_in_picture_window_manager.cc
+@@ -4,6 +4,11 @@
+ 
+ #include "chrome/browser/picture_in_picture/picture_in_picture_window_manager.h"
+ 
++#include <algorithm>
++#include <utility>
++#include <vector>
++
++#include "base/auto_reset.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/numerics/safe_conversions.h"
+ #include "chrome/browser/picture_in_picture/picture_in_picture_bounds_cache.h"
+@@ -108,17 +113,35 @@ class PictureInPictureWindowManager::VideoWebContentsObserver final
+   ~VideoWebContentsObserver() final = default;
+ 
+   void PrimaryPageChanged(content::Page& page) final {
+-    // Closes the active Picture-in-Picture window if user navigates away.
+-    owner_->CloseWindowInternal();
++    // Closes the tab's Picture-in-Picture window if user navigates away.
++    // browser: the manager closes the window, current or older.
++    owner_->OnVideoWebContentsGone(this);
+   }
+ 
+-  void WebContentsDestroyed() final { owner_->CloseWindowInternal(); }
++  // browser: closes the tab's window, current or older, when the tab is
++  // destroyed.
++  void WebContentsDestroyed() final { owner_->OnVideoWebContentsGone(this); }
+ 
+  private:
+   // Owns |this|.
+   raw_ptr<PictureInPictureWindowManager> owner_ = nullptr;
+ };
+ 
++// browser: an older video window kept open beside the current one.
++PictureInPictureWindowManager::OtherVideoWindow::OtherVideoWindow(
++    content::PictureInPictureWindowController* controller,
++    std::unique_ptr<VideoWebContentsObserver> observer)
++    : controller(controller), observer(std::move(observer)) {}
++
++PictureInPictureWindowManager::OtherVideoWindow::OtherVideoWindow(
++    OtherVideoWindow&&) = default;
++
++PictureInPictureWindowManager::OtherVideoWindow&
++PictureInPictureWindowManager::OtherVideoWindow::operator=(OtherVideoWindow&&) =
++    default;
++
++PictureInPictureWindowManager::OtherVideoWindow::~OtherVideoWindow() = default;
++
+ // This web contents observer is used only for document PiP.
+ class PictureInPictureWindowManager::DocumentWebContentsObserver final
+     : public content::WebContentsObserver {
+@@ -144,6 +167,9 @@ void PictureInPictureWindowManager::EnterPictureInPictureWithController(
+     content::PictureInPictureWindowController* pip_window_controller) {
+   // If there was already a controller, close the existing window before
+   // creating the next one.
++  // browser: only video windows stay open next to each other; the older ones
++  // close too.
++  CloseOtherVideoWindows();
+   if (pip_window_controller_)
+     CloseWindowInternal();
+ 
+@@ -198,10 +224,26 @@ PictureInPictureWindowManager::EnterVideoPictureInPicture(
+   if (!pip_window_controller_ ||
+       pip_window_controller_->GetWebContents() != web_contents ||
+       !pip_window_controller_->GetWebContents()->HasPictureInPictureVideo()) {
+-    // If there was already a video PiP controller, close the existing window
+-    // before creating the next one.
+-    if (pip_window_controller_)
++    // browser: another tab's video window stays open next to the new one.
++    if (video_web_contents_observer_ &&
++        pip_window_controller_->GetWebContents() != web_contents &&
++        pip_window_controller_->GetWebContents()->HasPictureInPictureVideo()) {
++      other_video_windows_.emplace_back(
++          pip_window_controller_, std::move(video_web_contents_observer_));
++      pip_window_controller_ = nullptr;
++    } else if (pip_window_controller_) {
++      // If there was already a video PiP controller, close the existing window
++      // before creating the next one.
+       CloseWindowInternal();
++    }
++
++    // browser: when this tab already has an older window (it starts
++    // picture-in-picture for another of its videos), that window becomes the
++    // current one.
++    std::erase_if(other_video_windows_,
++                  [web_contents](const OtherVideoWindow& window) {
++                    return window.observer->web_contents() == web_contents;
++                  });
+ 
+     CreateWindowInternal(web_contents);
+   }
+@@ -215,7 +257,14 @@ PictureInPictureWindowManager::EnterVideoPictureInPicture(
+ 
+ bool PictureInPictureWindowManager::ExitPictureInPictureViaWindowUi(
+     UiBehavior behavior) {
+-  if (!pip_window_controller_) {
++  return ExitPictureInPictureViaWindowUi(behavior, pip_window_controller_);
++}
++
++// browser: the window of `controller`, which may be an older one.
++bool PictureInPictureWindowManager::ExitPictureInPictureViaWindowUi(
++    UiBehavior behavior,
++    content::PictureInPictureWindowController* controller) {
++  if (!controller) {
+     return false;
+   }
+ 
+@@ -223,20 +272,22 @@ bool PictureInPictureWindowManager::ExitPictureInPictureViaWindowUi(
+   // The user manually closed the pip window, so let the tab helper know in case
+   // the auto-pip permission dialog was visible.
+   if (auto* tab_helper = AutoPictureInPictureTabHelper::FromWebContents(
+-          pip_window_controller_->GetWebContents())) {
++          controller->GetWebContents())) {
+     tab_helper->OnUserClosedWindow();
+   }
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ 
++  // browser: closing ends the window's session, which comes back through
++  // `ExitPictureInPictureForWebContents()` to forget the window.
+   switch (behavior) {
+     case UiBehavior::kCloseWindowOnly:
+-      pip_window_controller_->Close(/*should_pause_video=*/false);
++      controller->Close(/*should_pause_video=*/false);
+       break;
+     case UiBehavior::kCloseWindowAndPauseVideo:
+-      pip_window_controller_->Close(/*should_pause_video=*/true);
++      controller->Close(/*should_pause_video=*/true);
+       break;
+     case UiBehavior::kCloseWindowAndFocusOpener:
+-      pip_window_controller_->CloseAndFocusInitiator();
++      controller->CloseAndFocusInitiator();
+       break;
+   }
+ 
+@@ -248,6 +299,8 @@ bool PictureInPictureWindowManager::ExitPictureInPictureViaWindowUi(
+ }
+ 
+ bool PictureInPictureWindowManager::ExitPictureInPicture() {
++  // browser: the older video windows first.
++  CloseOtherVideoWindows();
+   if (pip_window_controller_) {
+     CloseWindowInternal();
+     return true;
+@@ -260,6 +313,25 @@ bool PictureInPictureWindowManager::ExitPictureInPicture() {
+   return false;
+ }
+ 
++// browser: closes one tab's window, current or older.
++void PictureInPictureWindowManager::ExitPictureInPictureForWebContents(
++    content::WebContents* web_contents) {
++  if (CloseOtherVideoWindow(web_contents)) {
++    return;
++  }
++
++  // Nothing to do when the window is already gone, e.g. on the call that its
++  // own closing makes.
++  if (!pip_window_controller_ ||
++      (pip_window_controller_->GetWebContents() != web_contents &&
++       pip_window_controller_->GetChildWebContents() != web_contents)) {
++    return;
++  }
++
++  CloseWindowInternal();
++  PromoteOtherVideoWindow();
++}
++
+ // static
+ void PictureInPictureWindowManager::ExitPictureInPictureSoon() {
+   // Unretained is safe because we're a singleton.
+@@ -415,6 +487,19 @@ PictureInPictureWindowManager::GetPictureInPictureWindowBoundsInScreen() const {
+              : std::nullopt;
+ }
+ 
++// browser: the older video windows' bounds.
++std::vector<gfx::Rect>
++PictureInPictureWindowManager::GetOtherVideoWindowBoundsInScreen() const {
++  std::vector<gfx::Rect> bounds;
++  for (const OtherVideoWindow& window : other_video_windows_) {
++    if (std::optional<gfx::Rect> window_bounds =
++            window.controller->GetWindowBoundsInScreen()) {
++      bounds.push_back(*window_bounds);
++    }
++  }
++  return bounds;
++}
++
+ gfx::Rect PictureInPictureWindowManager::CalculateOuterWindowBounds(
+     const blink::mojom::PictureInPictureWindowOptions& pip_options,
+     const gfx::Size& minimum_outer_window_size,
+@@ -641,6 +726,8 @@ void PictureInPictureWindowManager::CreateWindowInternal(
+ }
+ 
+ void PictureInPictureWindowManager::CloseWindowInternal() {
++  // browser: no older window is promoted while this close re-enters the class.
++  base::AutoReset<bool> closing_window(&is_closing_window_, true);
+   video_web_contents_observer_.reset();
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+@@ -667,6 +754,56 @@ void PictureInPictureWindowManager::CloseWindowInternal() {
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ }
+ 
++// browser: a watched tab navigated or went away.
++void PictureInPictureWindowManager::OnVideoWebContentsGone(
++    VideoWebContentsObserver* observer) {
++  if (observer == video_web_contents_observer_.get()) {
++    CloseWindowInternal();
++    PromoteOtherVideoWindow();
++    return;
++  }
++  CloseOtherVideoWindow(observer->web_contents());
++}
++
++bool PictureInPictureWindowManager::CloseOtherVideoWindow(
++    content::WebContents* web_contents) {
++  auto it = std::ranges::find(other_video_windows_, web_contents,
++                              [](const OtherVideoWindow& window) {
++                                return window.observer->web_contents();
++                              });
++  if (it == other_video_windows_.end()) {
++    return false;
++  }
++
++  // Forget the window before closing it, so the call that closing makes back
++  // into `ExitPictureInPictureForWebContents()` finds nothing left to do.
++  content::PictureInPictureWindowController* controller = it->controller;
++  other_video_windows_.erase(it);
++  controller->Close(/*should_pause_video=*/false);
++  return true;
++}
++
++void PictureInPictureWindowManager::CloseOtherVideoWindows() {
++  // Same as above: forget all windows before closing any of them.
++  std::vector<OtherVideoWindow> windows;
++  windows.swap(other_video_windows_);
++  for (OtherVideoWindow& window : windows) {
++    window.controller->Close(/*should_pause_video=*/false);
++  }
++}
++
++void PictureInPictureWindowManager::PromoteOtherVideoWindow() {
++  if (pip_window_controller_ || is_closing_window_ ||
++      other_video_windows_.empty()) {
++    return;
++  }
++
++  OtherVideoWindow window = std::move(other_video_windows_.back());
++  other_video_windows_.pop_back();
++  pip_window_controller_ = window.controller;
++  video_web_contents_observer_ = std::move(window.observer);
++}
++
+ bool PictureInPictureWindowManager::IsPictureInPictureDisabled() const {
+ #if !BUILDFLAG(IS_ANDROID)
+   return number_of_existing_scoped_disallow_picture_in_pictures_ > 0;
+@@ -677,8 +814,9 @@ bool PictureInPictureWindowManager::IsPictureInPictureDisabled() const {
+ 
+ #if BUILDFLAG(IS_MAC)
+ void PictureInPictureWindowManager::OnAnyBrowserEnteredFullscreen() {
+-  if (picture_in_picture_window_) {
+-    picture_in_picture_window_->OnAnyBrowserEnteredFullscreen();
++  // browser: every open window.
++  for (PictureInPictureWindow* window : picture_in_picture_windows_) {
++    window->OnAnyBrowserEnteredFullscreen();
+   }
+ }
+ #endif  // BUILDFLAG(IS_MAC)
+@@ -841,18 +979,21 @@ void PictureInPictureWindowManager::OnScopedDisallowPictureInPictureDestroyed(
+ 
+ void PictureInPictureWindowManager::OnPictureInPictureWindowShown(
+     PictureInPictureWindow* window) {
+-  picture_in_picture_window_ = window;
++  // browser: one of several open windows.
++  if (std::ranges::find(picture_in_picture_windows_, window) ==
++      picture_in_picture_windows_.end()) {
++    picture_in_picture_windows_.push_back(window);
++  }
+   if (IsPictureInPictureForceTucked()) {
+-    picture_in_picture_window_->SetForcedTucking(true);
++    window->SetForcedTucking(true);
+     RecordPictureInPictureTucked(PictureInPictureTuckedType::kNewWindowTucked);
+   }
+ }
+ 
+ void PictureInPictureWindowManager::OnPictureInPictureWindowHidden(
+     PictureInPictureWindow* window) {
+-  if (picture_in_picture_window_ == window) {
+-    picture_in_picture_window_ = nullptr;
+-  }
++  // browser: one of several open windows.
++  std::erase(picture_in_picture_windows_, window);
+ }
+ 
+ bool PictureInPictureWindowManager::ShouldFileDialogTuckPictureInPicture(
+@@ -874,8 +1015,9 @@ bool PictureInPictureWindowManager::ShouldFileDialogTuckPictureInPicture(
+ void PictureInPictureWindowManager::OnScopedTuckPictureInPictureCreated(
+     base::PassKey<ScopedTuckPictureInPicture>) {
+   number_of_existing_scoped_tuck_picture_in_pictures_++;
+-  if (picture_in_picture_window_) {
+-    picture_in_picture_window_->SetForcedTucking(true);
++  // browser: every open window.
++  for (PictureInPictureWindow* window : picture_in_picture_windows_) {
++    window->SetForcedTucking(true);
+     RecordPictureInPictureTucked(
+         PictureInPictureTuckedType::kExistingWindowTucked);
+   }
+@@ -885,8 +1027,11 @@ void PictureInPictureWindowManager::OnScopedTuckPictureInPictureDestroyed(
+     base::PassKey<ScopedTuckPictureInPicture>) {
+   CHECK_NE(number_of_existing_scoped_tuck_picture_in_pictures_, 0u);
+   number_of_existing_scoped_tuck_picture_in_pictures_--;
+-  if (picture_in_picture_window_ && !IsPictureInPictureForceTucked()) {
+-    picture_in_picture_window_->SetForcedTucking(false);
++  // browser: every open window.
++  if (!IsPictureInPictureForceTucked()) {
++    for (PictureInPictureWindow* window : picture_in_picture_windows_) {
++      window->SetForcedTucking(false);
++    }
+   }
+ }
+ 
+diff --git a/chrome/browser/picture_in_picture/picture_in_picture_window_manager.h b/chrome/browser/picture_in_picture/picture_in_picture_window_manager.h
+index 063a8f7383..b312560276 100644
+--- a/chrome/browser/picture_in_picture/picture_in_picture_window_manager.h
++++ b/chrome/browser/picture_in_picture/picture_in_picture_window_manager.h
+@@ -6,7 +6,9 @@
+ #define CHROME_BROWSER_PICTURE_IN_PICTURE_PICTURE_IN_PICTURE_WINDOW_MANAGER_H_
+ 
+ #include <functional>
++#include <memory>
+ #include <optional>
++#include <vector>
+ 
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/singleton.h"
+@@ -54,6 +56,9 @@ struct NavigateParams;
+ // current Picture-in-Picture window and its PictureInPictureWindowController.
+ // The class also guarantees that only one window will be present per Chrome
+ // instances regardless of the number of windows, tabs, profiles, etc.
++// browser: video Picture-in-Picture windows are the exception: those of
++// different tabs stay open side by side. The newest one is the current
++// window; the older ones are kept in `other_video_windows_` until they close.
+ class PictureInPictureWindowManager {
+  public:
+   // Observer for PictureInPictureWindowManager events.
+@@ -114,6 +119,12 @@ class PictureInPictureWindowManager {
+   // window UI.
+   bool ExitPictureInPictureViaWindowUi(UiBehavior behavior);
+ 
++  // browser: same as above, for the window of `controller`, which may be one
++  // of the older video windows rather than the current one.
++  bool ExitPictureInPictureViaWindowUi(
++      UiBehavior behavior,
++      content::PictureInPictureWindowController* controller);
++
+   // Closes any existing picture-in-picture windows (video or document pip).
+   // Returns true if a picture-in-picture window was closed, and false if there
+   // were no picture-in-picture windows to close.
+@@ -126,6 +137,11 @@ class PictureInPictureWindowManager {
+   // not be a problem.
+   bool ExitPictureInPicture();
+ 
++  // browser: closes the picture-in-picture window of `web_contents` only,
++  // leaving the video windows of other tabs open. Does nothing if
++  // `web_contents` has no window.
++  void ExitPictureInPictureForWebContents(content::WebContents* web_contents);
++
+   // Exits picture in picture soon, but not before this call returns.  If
+   // picture in picture closes between now and then, that's okay.  Intended as a
+   // helper for callbacks and observers to avoid re-entrant calls during pip
+@@ -167,6 +183,10 @@ class PictureInPictureWindowManager {
+   // picture-in-picture if either of them is present.
+   std::optional<gfx::Rect> GetPictureInPictureWindowBoundsInScreen() const;
+ 
++  // browser: the window bounds of the older video picture-in-picture windows,
++  // every open window except the one above.
++  std::vector<gfx::Rect> GetOtherVideoWindowBoundsInScreen() const;
++
+   // Used for Document picture-in-picture windows only. The returned dimensions
+   // represent the outer window bounds.
+   // This method is called from the |BrowserNavigator|. Note that the window
+@@ -316,6 +336,21 @@ class PictureInPictureWindowManager {
+   class VideoWebContentsObserver;
+   class DocumentWebContentsObserver;
+ 
++  // browser: a video picture-in-picture window that stayed open when another
++  // tab opened one, with the observer that closes it when its tab navigates or
++  // goes away.
++  struct OtherVideoWindow {
++    OtherVideoWindow(content::PictureInPictureWindowController* controller,
++                     std::unique_ptr<VideoWebContentsObserver> observer);
++    OtherVideoWindow(OtherVideoWindow&&);
++    OtherVideoWindow& operator=(OtherVideoWindow&&);
++    ~OtherVideoWindow();
++
++    raw_ptr<content::PictureInPictureWindowController, DanglingUntriaged>
++        controller;
++    std::unique_ptr<VideoWebContentsObserver> observer;
++  };
++
+   // These values are persisted to logs. Entries should not be renumbered and
+   // numeric values should never be reused.
+   //
+@@ -363,6 +398,22 @@ class PictureInPictureWindowManager {
+   // This is suffixed with "Internal" to keep consistency with the method above.
+   void CloseWindowInternal();
+ 
++  // browser: called when the tab watched by `observer` navigates away or is
++  // destroyed. Closes that tab's video window, current or older.
++  void OnVideoWebContentsGone(VideoWebContentsObserver* observer);
++
++  // Closes and forgets the older video window of `web_contents`. Returns false
++  // if `web_contents` has no older video window.
++  bool CloseOtherVideoWindow(content::WebContents* web_contents);
++
++  // Closes and forgets all older video windows.
++  void CloseOtherVideoWindows();
++
++  // Makes the newest older video window the current one. Called after the
++  // current window closed, so that a current window exists whenever any
++  // window is open.
++  void PromoteOtherVideoWindow();
++
+   // Called when the document PiP parent web contents is being destroyed.
+   void DocumentWebContentsDestroyed();
+ 
+@@ -425,8 +476,8 @@ class PictureInPictureWindowManager {
+   // tucked.
+   uint32_t number_of_existing_scoped_tuck_picture_in_pictures_ = 0;
+ 
+-  // Pointer to the currently shown picture-in-picture window, if any.
+-  raw_ptr<PictureInPictureWindow> picture_in_picture_window_ = nullptr;
++  // browser: the currently shown picture-in-picture windows, newest last.
++  std::vector<raw_ptr<PictureInPictureWindow>> picture_in_picture_windows_;
+ 
+   std::unique_ptr<PictureInPictureWindowManagerUmaHelper> uma_helper_;
+ 
+@@ -442,6 +493,14 @@ class PictureInPictureWindowManager {
+ 
+   raw_ptr<content::PictureInPictureWindowController, DanglingUntriaged>
+       pip_window_controller_ = nullptr;
++
++  // browser: the older video windows, oldest first. Empty unless the current
++  // window is a video window too.
++  std::vector<OtherVideoWindow> other_video_windows_;
++
++  // True while `CloseWindowInternal()` runs. Closing a window re-enters this
++  // class, and no older window may be promoted until the close is done.
++  bool is_closing_window_ = false;
+ };
+ 
+ #endif  // CHROME_BROWSER_PICTURE_IN_PICTURE_PICTURE_IN_PICTURE_WINDOW_MANAGER_H_
+diff --git a/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn b/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn
+index d4dacf5897..67a90f131f 100644
+--- a/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn
++++ b/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn
+@@ -37,6 +37,7 @@ if (!is_android) {
+       "//chrome/browser/ui/views:status_bubble",
+       "//chrome/browser/ui/views/frame:browser_view_header",
+       "//chrome/browser/ui/views/frame:contents_web_view",
++      "//chrome/browser/ui/views/overlay",
+       "//chrome/browser/ui/web_applications",
+       "//components/find_in_page",
+       "//components/headless/console_message_logger",
+diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
+index 3bc40bcc91..fbd11f0352 100644
+--- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
++++ b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
+@@ -52,6 +52,7 @@
+ #include "chrome/browser/ui/unload_controller.h"
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+ #include "chrome/browser/ui/views/frame/contents_web_view.h"
++#include "chrome/browser/ui/views/overlay/multiview/multiview_host.h"
+ #include "chrome/browser/ui/views/status_bubble_views.h"
+ #include "chrome/browser/ui/web_applications/app_browser_controller.h"
+ #include "chrome/browser/web_applications/web_app_provider.h"
+@@ -300,6 +301,11 @@ BrowserWebContentsDelegate::~BrowserWebContentsDelegate() = default;
+ content::PictureInPictureResult
+ BrowserWebContentsDelegate::EnterPictureInPicture(
+     content::WebContents* web_contents) {
++  // browser: a tab sent to Multiview shows its video in a tile there, without
++  // a floating window.
++  if (MultiviewHost::ClaimPictureInPicture(web_contents)) {
++    return content::PictureInPictureResult::kSuccess;
++  }
+   return PictureInPictureWindowManager::GetInstance()
+       ->EnterVideoPictureInPicture(web_contents);
+ }
+@@ -308,6 +314,16 @@ void BrowserWebContentsDelegate::ExitPictureInPicture() {
+   PictureInPictureWindowManager::GetInstance()->ExitPictureInPicture();
+ }
+ 
++// browser: a Multiview tile or the floating window, whichever the tab has.
++void BrowserWebContentsDelegate::ExitPictureInPictureForWebContents(
++    content::WebContents* web_contents) {
++  if (MultiviewHost::ReleasePictureInPicture(web_contents)) {
++    return;
++  }
++  PictureInPictureWindowManager::GetInstance()
++      ->ExitPictureInPictureForWebContents(web_contents);
++}
++
+ content::KeyboardEventProcessingResult
+ BrowserWebContentsDelegate::PreHandleKeyboardEvent(
+     content::WebContents* source,
+diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h
+index 360d1abf0b..e2014816c9 100644
+--- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h
++++ b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h
+@@ -54,6 +54,9 @@ class BrowserWebContentsDelegate : public content::WebContentsDelegate {
+   content::PictureInPictureResult EnterPictureInPicture(
+       content::WebContents* web_contents) override;
+   void ExitPictureInPicture() override;
++  // browser: closes one tab's window (multi-pip-multiview).
++  void ExitPictureInPictureForWebContents(
++      content::WebContents* web_contents) override;
+   content::KeyboardEventProcessingResult PreHandleKeyboardEvent(
+       content::WebContents* source,
+       const input::NativeWebKeyboardEvent& event) override;
+diff --git a/chrome/browser/ui/views/autofill/popup/popup_view_utils.cc b/chrome/browser/ui/views/autofill/popup/popup_view_utils.cc
+index bac0916002..bbf081caab 100644
+--- a/chrome/browser/ui/views/autofill/popup/popup_view_utils.cc
++++ b/chrome/browser/ui/views/autofill/popup/popup_view_utils.cc
+@@ -298,10 +298,18 @@ bool BoundsOverlapWithOpenPermissionsPrompt(
+ }
+ 
+ bool BoundsOverlapWithPictureInPictureWindow(const gfx::Rect& screen_bounds) {
++  // browser: the older video windows count too.
++  PictureInPictureWindowManager* const manager =
++      PictureInPictureWindowManager::GetInstance();
+   std::optional<gfx::Rect> pip_window_bounds =
+-      PictureInPictureWindowManager::GetInstance()
+-          ->GetPictureInPictureWindowBoundsInScreen();
+-  return pip_window_bounds && pip_window_bounds->Intersects(screen_bounds);
++      manager->GetPictureInPictureWindowBoundsInScreen();
++  if (pip_window_bounds && pip_window_bounds->Intersects(screen_bounds)) {
++    return true;
++  }
++  return std::ranges::any_of(manager->GetOtherVideoWindowBoundsInScreen(),
++                             [&](const gfx::Rect& bounds) {
++                               return bounds.Intersects(screen_bounds);
++                             });
+ }
+ 
+ bool PopupMayExceedContentAreaBounds(content::WebContents* web_contents) {
+diff --git a/chrome/browser/ui/views/frame/contents_web_view.cc b/chrome/browser/ui/views/frame/contents_web_view.cc
+index e1d30f930b..831b751678 100644
+--- a/chrome/browser/ui/views/frame/contents_web_view.cc
++++ b/chrome/browser/ui/views/frame/contents_web_view.cc
+@@ -5,10 +5,12 @@
+ #include "chrome/browser/ui/views/frame/contents_web_view.h"
+ 
+ #include "base/debug/dump_without_crashing.h"
++#include "base/functional/bind.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/ui/color/chrome_color_id.h"
+ #include "chrome/browser/ui/views/frame/safe_invoke/safe_invoke.h"
+ #include "chrome/browser/ui/views/frame/web_contents_close_handler.h"
++#include "chrome/browser/ui/views/overlay/multiview/multiview_host.h"
+ #include "chrome/browser/ui/views/status_bubble_views.h"
+ #include "components/tabs/public/tab_interface.h"
+ #include "components/web_modal/web_contents_modal_dialog_manager.h"
+@@ -39,6 +41,10 @@ ContentsWebView::ContentsWebView(content::BrowserContext* browser_context)
+   status_bubble_ = std::make_unique<StatusBubbleViews>(this);
+   status_bubble_->Reposition();
+   web_contents_close_handler_ = std::make_unique<WebContentsCloseHandler>(this);
++  // browser: the Multiview grid follows the tab's host.
++  multiview_host_subscription_ =
++      MultiviewHost::AddHostChangedCallback(base::BindRepeating(
++          &ContentsWebView::UpdateMultiviewGrid, base::Unretained(this)));
+ }
+ 
+ ContentsWebView::~ContentsWebView() = default;
+@@ -147,6 +153,7 @@ void ContentsWebView::OnLetterboxingChanged() {
+ 
+ void ContentsWebView::SetWebContents(content::WebContents* web_contents) {
+   views::WebView::SetWebContents(web_contents);
++  UpdateMultiviewGrid();  // browser
+   if (web_contents == nullptr) {
+     status_bubble_.reset();
+     holder()->SetProperty(views::kIsBlockedByModalKey, false);
+@@ -273,5 +280,44 @@ void ContentsWebView::RenderViewReady() {
+   WebView::RenderViewReady();
+ }
+ 
++// browser: shows the Multiview grid in place of the web contents when the
++// tab hosts one.
++void ContentsWebView::UpdateMultiviewGrid(MultiviewHost* destroyed_host) {
++  MultiviewHost* host =
++      web_contents() ? MultiviewHost::FromWebContents(web_contents()) : nullptr;
++  if (host == destroyed_host) {
++    host = nullptr;
++  }
++  if (host == multiview_host_) {
++    return;
++  }
++  if (multiview_grid_) {
++    RemoveChildViewT(multiview_grid_.ExtractAsDangling());
++    holder()->SetVisible(true);
++  }
++  multiview_host_ = host;
++  if (host) {
++    multiview_grid_ = AddChildView(host->CreateGridView());
++    multiview_grid_->SetBoundsRect(GetLocalBounds());
++    ChildVisibilityChanged(multiview_grid_);
++  }
++}
++
++void ContentsWebView::OnBoundsChanged(const gfx::Rect& previous_bounds) {
++  views::WebView::OnBoundsChanged(previous_bounds);
++  if (multiview_grid_) {
++    multiview_grid_->SetBoundsRect(GetLocalBounds());
++  }
++}
++
++void ContentsWebView::ChildVisibilityChanged(views::View* child) {
++  views::WebView::ChildVisibilityChanged(child);
++  // While the grid shows videos it covers the page, and the page must not
++  // take the mouse events aimed at the grid.
++  if (child == multiview_grid_) {
++    holder()->SetVisible(!child->GetVisible());
++  }
++}
++
+ BEGIN_METADATA(ContentsWebView)
+ END_METADATA
+diff --git a/chrome/browser/ui/views/frame/contents_web_view.h b/chrome/browser/ui/views/frame/contents_web_view.h
+index 0dc0d4b8d3..2c0c82299a 100644
+--- a/chrome/browser/ui/views/frame/contents_web_view.h
++++ b/chrome/browser/ui/views/frame/contents_web_view.h
+@@ -7,6 +7,7 @@
+ 
+ #include <memory>
+ 
++#include "base/callback_list.h"
+ #include "base/memory/raw_ptr.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/ui/views/frame/web_contents_close_handler_delegate.h"
+@@ -16,6 +17,7 @@
+ #include "ui/gfx/geometry/rounded_corners_f.h"
+ #include "ui/views/controls/webview/webview.h"
+ 
++class MultiviewHost;  // browser
+ class StatusBubbleViews;
+ class WebContentsCloseHandler;
+ 
+@@ -81,6 +83,15 @@ class ContentsWebView : public views::WebView,
+ 
+  private:
+   void UpdateBackgroundColor();
++
++  // browser: shows the videos of a Multiview tab over its page. Called when
++  // the shown tab changes and when a Multiview host is created or destroyed.
++  void UpdateMultiviewGrid(MultiviewHost* destroyed_host = nullptr);
++
++  // views::WebView:
++  void OnBoundsChanged(const gfx::Rect& previous_bounds) override;
++  void ChildVisibilityChanged(views::View* child) override;
++
+   std::unique_ptr<StatusBubbleViews> status_bubble_;
+   std::unique_ptr<WebContentsCloseHandler> web_contents_close_handler_;
+ 
+@@ -89,6 +100,11 @@ class ContentsWebView : public views::WebView,
+   bool use_default_deadline_when_animating_ = false;
+ 
+   std::unique_ptr<ui::LayerTreeOwner> cloned_layer_tree_;
++
++  // browser: the Multiview host shown in this view, if any.
++  raw_ptr<MultiviewHost> multiview_host_ = nullptr;
++  raw_ptr<views::View> multiview_grid_ = nullptr;
++  base::CallbackListSubscription multiview_host_subscription_;
+ };
+ 
+ #endif  // CHROME_BROWSER_UI_VIEWS_FRAME_CONTENTS_WEB_VIEW_H_
+diff --git a/chrome/browser/ui/views/global_media_controls/BUILD.gn b/chrome/browser/ui/views/global_media_controls/BUILD.gn
+index 12e744f8d9..254aee593a 100644
+--- a/chrome/browser/ui/views/global_media_controls/BUILD.gn
++++ b/chrome/browser/ui/views/global_media_controls/BUILD.gn
+@@ -62,6 +62,7 @@ source_set("impl") {
+   ]
+   deps = [
+     ":global_media_controls",
++    "//chrome/app/vector_icons",
+     "//chrome/browser/feature_engagement",
+     "//chrome/browser/feedback",
+     "//chrome/browser/language",
+@@ -72,6 +73,7 @@ source_set("impl") {
+     "//chrome/browser/ui/views:layout_provider",
+     "//chrome/browser/ui/views/frame:browser_view_header",
+     "//chrome/browser/ui/views/media_router",
++    "//chrome/browser/ui/views/overlay",
+     "//components/language/core/browser",
+     "//components/live_caption:constants",
+     "//components/live_caption:utils",
+diff --git a/chrome/browser/ui/views/global_media_controls/media_dialog_view.cc b/chrome/browser/ui/views/global_media_controls/media_dialog_view.cc
+index 250792cdba..387928512f 100644
+--- a/chrome/browser/ui/views/global_media_controls/media_dialog_view.cc
++++ b/chrome/browser/ui/views/global_media_controls/media_dialog_view.cc
+@@ -12,6 +12,7 @@
+ #include "base/memory/raw_ptr.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/observer_list.h"
++#include "chrome/app/vector_icons/vector_icons.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/media/router/media_router_feature.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -23,6 +24,7 @@
+ #include "chrome/browser/ui/views/controls/rich_hover_button.h"
+ #include "chrome/browser/ui/views/global_media_controls/media_dialog_view_observer.h"
+ #include "chrome/browser/ui/views/global_media_controls/media_item_ui_helper.h"
++#include "chrome/browser/ui/views/overlay/multiview/multiview_host.h"
+ #include "chrome/grit/generated_resources.h"
+ #include "components/global_media_controls/public/constants.h"
+ #include "components/global_media_controls/public/media_item_manager.h"
+@@ -688,11 +690,24 @@ MediaDialogView::BuildMediaItemUIUpdatedView(
+     base::WeakPtr<media_message_center::MediaNotificationItem> item) {
+   bool show_devices =
+       entry_point_ == GlobalMediaControlsEntryPoint::kPresentation;
+-  return std::make_unique<global_media_controls::MediaItemUIUpdatedView>(
++  auto view = std::make_unique<global_media_controls::MediaItemUIUpdatedView>(
+       id, item, media_color_theme_,
+       BuildDeviceSelector(id, item, service_, service_, profile_, entry_point_,
+                           media_color_theme_, show_devices),
+       BuildFooter(id, item, profile_, media_color_theme_));
++  // browser: media playing in a tab can be sent to the Multiview tab.
++  if (content::MediaSession::GetWebContentsFromRequestId(id)) {
++    view->SetExtraPictureInPictureAction(
++        kGridViewIcon,
++        l10n_util::GetStringUTF16(IDS_MULTIVIEW_SEND_TO_MULTIVIEW),
++        base::BindRepeating(
++            [](const std::string& id) {
++              MultiviewHost::SendToMultiview(
++                  content::MediaSession::GetWebContentsFromRequestId(id));
++            },
++            id));
++  }
++  return view;
+ }
+ 
+ BEGIN_METADATA(MediaDialogView)
+diff --git a/chrome/browser/ui/views/overlay/BUILD.gn b/chrome/browser/ui/views/overlay/BUILD.gn
+index 5fda29ab24..03e113ca08 100644
+--- a/chrome/browser/ui/views/overlay/BUILD.gn
++++ b/chrome/browser/ui/views/overlay/BUILD.gn
+@@ -14,6 +14,8 @@ source_set("overlay") {
+     "constants.h",
+     "hang_up_button.h",
+     "minimize_button.h",
++    "multiview/multiview_host.h",
++    "multiview/multiview_ui.h",
+     "overlay_controls_fade_animation.h",
+     "overlay_window_image_button.h",
+     "overlay_window_live_caption_button.h",
+@@ -58,6 +60,12 @@ source_set("impl") {
+     "close_image_button.cc",
+     "hang_up_button.cc",
+     "minimize_button.cc",
++    "multiview/multiview_grid_view.cc",
++    "multiview/multiview_grid_view.h",
++    "multiview/multiview_host.cc",
++    "multiview/multiview_tile.cc",
++    "multiview/multiview_tile.h",
++    "multiview/multiview_ui.cc",
+     "overlay_controls_fade_animation.cc",
+     "overlay_window_image_button.cc",
+     "overlay_window_live_caption_button.cc",
+@@ -74,13 +82,18 @@ source_set("impl") {
+ 
+   deps = [
+     ":overlay",
++    "//cc",
+     "//chrome/browser/media",
+     "//chrome/browser/ui:browser_init_state",
+     "//chrome/browser/ui/color:color_headers",
+     "//chrome/browser/ui/global_media_controls",
++    "//chrome/browser/ui/navigator",
++    "//chrome/browser/ui/tabs:utils",
+     "//chrome/browser/ui/views:layout_provider",
+     "//chrome/browser/ui/views/picture_in_picture",
+     "//components/live_caption:constants",
++    "//components/tabs:public",
++    "//ui/compositor",
+   ]
+ 
+   # video_overlay_window_views.cc includes chrome/browser/ui/browser.h to read
+diff --git a/chrome/browser/ui/views/overlay/multiview/multiview_grid_view.cc b/chrome/browser/ui/views/overlay/multiview/multiview_grid_view.cc
+new file mode 100644
+index 0000000000..a78e9c664a
+--- /dev/null
++++ b/chrome/browser/ui/views/overlay/multiview/multiview_grid_view.cc
+@@ -0,0 +1,462 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/views/overlay/multiview/multiview_grid_view.h"
++
++#include <algorithm>
++#include <memory>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/functional/bind.h"
++#include "base/time/time.h"
++#include "cc/layers/deadline_policy.h"
++#include "chrome/browser/ui/tabs/tab_enums.h"
++#include "chrome/browser/ui/tabs/tab_muted_utils.h"
++#include "chrome/browser/ui/views/overlay/multiview/multiview_host.h"
++#include "chrome/browser/ui/views/overlay/multiview/multiview_tile.h"
++#include "chrome/grit/generated_resources.h"
++#include "components/vector_icons/vector_icons.h"
++#include "content/public/browser/video_picture_in_picture_window_controller.h"
++#include "content/public/browser/web_contents.h"
++#include "third_party/skia/include/core/SkColor.h"
++#include "ui/base/cursor/cursor.h"
++#include "ui/base/l10n/l10n_util.h"
++#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/base/models/image_model.h"
++#include "ui/compositor/compositor.h"
++#include "ui/compositor/layer.h"
++#include "ui/compositor/layer_surface.h"
++#include "ui/events/event.h"
++#include "ui/gfx/geometry/rect_conversions.h"
++#include "ui/gfx/geometry/rect_f.h"
++#include "ui/gfx/geometry/size_f.h"
++#include "ui/views/accessibility/view_accessibility.h"
++#include "ui/views/background.h"
++#include "ui/views/controls/button/image_button.h"
++#include "ui/views/controls/button/image_button_factory.h"
++#include "ui/views/widget/widget.h"
++
++namespace {
++
++// Space between tiles, in DIP.
++constexpr int kTileGap = 2;
++
++// How long the controls and the pointer stay after the mouse last moved over
++// a tile.
++constexpr base::TimeDelta kControlsHideDelay = base::Seconds(3);
++
++constexpr int kControlsHeight = 48;
++constexpr int kControlsPadding = 8;
++constexpr int kButtonSize = 36;
++constexpr int kIconSize = 20;
++constexpr SkColor kControlsBackground = SkColorSetA(SK_ColorBLACK, 0x99);
++
++void SetButtonIcon(views::ImageButton* button,
++                   const gfx::VectorIcon& icon,
++                   int tooltip_id) {
++  button->SetImageModel(
++      views::Button::STATE_NORMAL,
++      ui::ImageModel::FromVectorIcon(icon, SK_ColorWHITE, kIconSize));
++  const std::u16string tooltip = l10n_util::GetStringUTF16(tooltip_id);
++  button->SetTooltipText(tooltip);
++  button->GetViewAccessibility().SetName(tooltip);
++}
++
++std::unique_ptr<views::ImageButton> CreateControlButton(
++    views::Button::PressedCallback callback,
++    const gfx::VectorIcon& icon,
++    int tooltip_id) {
++  std::unique_ptr<views::ImageButton> button =
++      views::CreateVectorImageButton(std::move(callback));
++  SetButtonIcon(button.get(), icon, tooltip_id);
++  button->SetSize(gfx::Size(kButtonSize, kButtonSize));
++  return button;
++}
++
++// Returns the cell of each video in `area`, in order. Picks the grid of rows
++// and columns that shows the most video, where each video keeps its aspect
++// ratio inside its cell; on a tie it prefers fewer rows. A last row that is
++// not full is centered.
++std::vector<gfx::Rect> ComputeMultiviewCells(
++    const gfx::Size& area,
++    const std::vector<float>& aspect_ratios) {
++  const int count = static_cast<int>(aspect_ratios.size());
++  if (count == 0 || area.IsEmpty()) {
++    return {};
++  }
++
++  const auto cell_size = [&](int rows, int columns) {
++    return gfx::SizeF(
++        (area.width() - kTileGap * (columns - 1)) / static_cast<float>(columns),
++        (area.height() - kTileGap * (rows - 1)) / static_cast<float>(rows));
++  };
++
++  int best_rows = 1;
++  double best_shown = 0;
++  for (int rows = 1; rows <= count; ++rows) {
++    const int columns = (count + rows - 1) / rows;
++    // A shape with an empty row has the same cells as one with fewer rows.
++    if ((rows - 1) * columns >= count) {
++      continue;
++    }
++    const gfx::SizeF cell = cell_size(rows, columns);
++    if (cell.IsEmpty()) {
++      continue;
++    }
++    double shown = 0;
++    for (float ratio : aspect_ratios) {
++      const double width =
++          std::min<double>(cell.width(), cell.height() * ratio);
++      shown += width * width / ratio;
++    }
++    // Only a clearly larger area wins, so a tie keeps fewer rows.
++    if (shown > best_shown * 1.0001) {
++      best_shown = shown;
++      best_rows = rows;
++    }
++  }
++
++  const int columns = (count + best_rows - 1) / best_rows;
++  const gfx::SizeF cell = cell_size(best_rows, columns);
++  std::vector<gfx::Rect> cells;
++  cells.reserve(count);
++  for (int i = 0; i < count; ++i) {
++    const int row = i / columns;
++    const int in_row = std::min(columns, count - row * columns);
++    const float row_offset = (columns - in_row) * (cell.width() + kTileGap) / 2;
++    const gfx::RectF rect(
++        row_offset + (i % columns) * (cell.width() + kTileGap),
++        row * (cell.height() + kTileGap), cell.width(), cell.height());
++    cells.push_back(gfx::ToRoundedRect(rect));
++  }
++  return cells;
++}
++
++}  // namespace
++
++// MultiviewTileView -----------------------------------------------------------
++
++MultiviewTileView::MultiviewTileView(MultiviewTile* tile) : tile_(tile) {
++  tile_->SetView(this);
++  SetNotifyEnterExitOnChild(true);
++
++  auto video_view = std::make_unique<views::View>();
++  video_view->SetPaintToLayer(ui::LAYER_SURFACE);
++  video_view->layer()->AsSurface()->SetFallbackBackgroundColor(
++      SkColors::kBlack);
++  video_view->SetCanProcessEventsWithinSubtree(false);
++  video_view_ = AddChildView(std::move(video_view));
++
++  auto controls_view = std::make_unique<views::View>();
++  controls_view->SetPaintToLayer();
++  controls_view->layer()->SetFillsBoundsOpaquely(false);
++  controls_view->SetBackground(
++      views::CreateSolidBackground(kControlsBackground));
++  controls_view->SetVisible(false);
++  controls_view_ = AddChildView(std::move(controls_view));
++
++  play_pause_button_ = controls_view_->AddChildView(CreateControlButton(
++      base::BindRepeating(&MultiviewTileView::TogglePlayPause,
++                          base::Unretained(this)),
++      vector_icons::kPauseIcon, IDS_PICTURE_IN_PICTURE_PAUSE_CONTROL_TEXT));
++  mute_button_ = controls_view_->AddChildView(CreateControlButton(
++      base::BindRepeating(&MultiviewTileView::ToggleMute,
++                          base::Unretained(this)),
++      vector_icons::kVolumeUpIcon, IDS_PICTURE_IN_PICTURE_MUTE_TEXT));
++  controls_view_->AddChildView(
++      CreateControlButton(base::BindRepeating(&MultiviewTileView::BackToTab,
++                                              base::Unretained(this)),
++                          vector_icons::kBackToTabIcon,
++                          IDS_PICTURE_IN_PICTURE_BACK_TO_TAB_CONTROL_TEXT));
++  controls_view_->AddChildView(CreateControlButton(
++      base::BindRepeating(&MultiviewTileView::Remove, base::Unretained(this)),
++      vector_icons::kCloseIcon, IDS_PICTURE_IN_PICTURE_CLOSE_CONTROL_TEXT));
++
++  UpdateControls();
++}
++
++MultiviewTileView::~MultiviewTileView() {
++  UnregisterFrameSink();
++  if (tile_) {
++    tile_->SetView(nullptr);
++  }
++}
++
++void MultiviewTileView::OnTileDestroyed() {
++  UnregisterFrameSink();
++  tile_ = nullptr;
++}
++
++void MultiviewTileView::UpdateSurface() {
++  if (!tile_ || !tile_->surface_id().is_valid()) {
++    return;
++  }
++  if (tile_->surface_id().frame_sink_id() != frame_sink_id_) {
++    UnregisterFrameSink();
++    frame_sink_id_ = tile_->surface_id().frame_sink_id();
++    RegisterFrameSink();
++  }
++  video_view_->layer()->AsSurface()->SetShowSurface(
++      tile_->surface_id(), video_view_->size(),
++      cc::DeadlinePolicy::UseDefaultDeadline(),
++      /*stretch_content_to_fill_bounds=*/true);
++}
++
++void MultiviewTileView::UpdateControls() {
++  if (!tile_) {
++    return;
++  }
++  play_pause_button_->SetVisible(tile_->play_pause_visible());
++  if (tile_->playback_state() == MultiviewTile::kPlaying) {
++    SetButtonIcon(play_pause_button_, vector_icons::kPauseIcon,
++                  IDS_PICTURE_IN_PICTURE_PAUSE_CONTROL_TEXT);
++  } else {
++    SetButtonIcon(play_pause_button_, vector_icons::kPlayArrowIcon,
++                  IDS_PICTURE_IN_PICTURE_PLAY_CONTROL_TEXT);
++  }
++
++  content::WebContents* source = tile_->GetSource();
++  if (source && source->IsAudioMuted()) {
++    SetButtonIcon(mute_button_, vector_icons::kVolumeOffIcon,
++                  IDS_PICTURE_IN_PICTURE_UNMUTE_TEXT);
++  } else {
++    SetButtonIcon(mute_button_, vector_icons::kVolumeUpIcon,
++                  IDS_PICTURE_IN_PICTURE_MUTE_TEXT);
++  }
++  InvalidateLayout();
++}
++
++void MultiviewTileView::Layout(PassKey) {
++  const gfx::Rect video = GetVideoBounds();
++  video_view_->SetBoundsRect(video);
++  video_view_->layer()->AsSurface()->SetSurfaceSize(video.size());
++
++  controls_view_->SetBounds(video.x(), video.bottom() - kControlsHeight,
++                            video.width(), kControlsHeight);
++  // Playback buttons on the left, tab buttons on the right.
++  const int button_y = (kControlsHeight - kButtonSize) / 2;
++  int left = kControlsPadding;
++  int right = controls_view_->width() - kControlsPadding;
++  for (views::View* button : controls_view_->children()) {
++    if (!button->GetVisible()) {
++      continue;
++    }
++    if (button == play_pause_button_.get() || button == mute_button_.get()) {
++      button->SetPosition(gfx::Point(left, button_y));
++      left += kButtonSize;
++    } else {
++      right -= kButtonSize;
++      button->SetPosition(gfx::Point(right, button_y));
++    }
++  }
++
++  if (tile_ && GetWidget()) {
++    gfx::Rect video_in_screen = video;
++    views::View::ConvertRectToScreen(this, &video_in_screen);
++    tile_->SetVideoBoundsInScreen(video_in_screen);
++  }
++}
++
++void MultiviewTileView::AddedToWidget() {
++  RegisterFrameSink();
++  UpdateSurface();
++}
++
++void MultiviewTileView::RemovedFromWidget() {
++  UnregisterFrameSink();
++}
++
++// Moves over the controls go to the buttons instead; see OnMouseRested().
++void MultiviewTileView::OnMouseMoved(const ui::MouseEvent& event) {
++  // Windows also reports a move when a window opens or closes under a resting
++  // pointer, such as the full screen exit hint. Only a real move counts.
++  gfx::Point location = event.location();
++  views::View::ConvertPointToScreen(this, &location);
++  if (location == last_mouse_location_) {
++    return;
++  }
++  last_mouse_location_ = location;
++  ShowControlsForAWhile();
++}
++
++void MultiviewTileView::OnMouseExited(const ui::MouseEvent& event) {
++  HideControls();
++}
++
++ui::Cursor MultiviewTileView::GetCursor(const ui::MouseEvent& event) {
++  // Asked only while the pointer is over the video; the controls are hidden
++  // then only after the mouse has rested.
++  return controls_view_->GetVisible()
++             ? ui::Cursor()
++             : ui::Cursor(ui::mojom::CursorType::kNone);
++}
++
++gfx::Rect MultiviewTileView::GetVideoBounds() const {
++  const float ratio =
++      tile_ ? tile_->GetAspectRatio() : MultiviewTile::kDefaultAspectRatio;
++  const gfx::Rect area = GetLocalBounds();
++  gfx::SizeF video(area.width(), area.width() / ratio);
++  if (video.height() > area.height()) {
++    video = gfx::SizeF(area.height() * ratio, area.height());
++  }
++  return gfx::ToRoundedRect(
++      gfx::RectF(area.x() + (area.width() - video.width()) / 2,
++                 area.y() + (area.height() - video.height()) / 2, video.width(),
++                 video.height()));
++}
++
++void MultiviewTileView::RegisterFrameSink() {
++  if (compositor_ || !frame_sink_id_.is_valid() || !GetWidget() ||
++      !GetWidget()->GetCompositor()) {
++    return;
++  }
++  compositor_ = GetWidget()->GetCompositor();
++  compositor_->AddChildFrameSink(frame_sink_id_);
++  compositor_->AddObserver(this);
++}
++
++void MultiviewTileView::UnregisterFrameSink() {
++  if (!compositor_) {
++    return;
++  }
++  compositor_->RemoveObserver(this);
++  compositor_->RemoveChildFrameSink(frame_sink_id_);
++  compositor_ = nullptr;
++}
++
++void MultiviewTileView::OnCompositingShuttingDown(ui::Compositor* compositor) {
++  UnregisterFrameSink();
++}
++
++void MultiviewTileView::ShowControlsForAWhile() {
++  if (!controls_view_->GetVisible()) {
++    UpdateControls();
++    controls_view_->SetVisible(true);
++  }
++  hide_controls_timer_.Start(FROM_HERE, kControlsHideDelay,
++                             base::BindOnce(&MultiviewTileView::OnMouseRested,
++                                            base::Unretained(this)));
++}
++
++void MultiviewTileView::OnMouseRested() {
++  // As in video players, the controls stay while the pointer is on them.
++  if (controls_view_->IsMouseHovered()) {
++    ShowControlsForAWhile();
++    return;
++  }
++  HideControls();
++  // The pointer goes with the controls; the next move brings both back.
++  if (GetWidget()) {
++    GetWidget()->SetCursor(ui::Cursor(ui::mojom::CursorType::kNone));
++  }
++}
++
++void MultiviewTileView::HideControls() {
++  hide_controls_timer_.Stop();
++  controls_view_->SetVisible(false);
++}
++
++void MultiviewTileView::TogglePlayPause() {
++  if (!tile_) {
++    return;
++  }
++  const bool playing = tile_->controller()->TogglePlayPause();
++  tile_->SetPlaybackState(playing ? MultiviewTile::kPlaying
++                                  : MultiviewTile::kPaused);
++}
++
++void MultiviewTileView::ToggleMute() {
++  content::WebContents* source = tile_ ? tile_->GetSource() : nullptr;
++  if (!source) {
++    return;
++  }
++  // Mutes the whole tab, as its tab strip audio indicator does; the page
++  // can't tell.
++  SetTabAudioMuted(source, !source->IsAudioMuted(),
++                   TabMutedReason::kAudioIndicator, std::string());
++  UpdateControls();
++}
++
++void MultiviewTileView::BackToTab() {
++  if (tile_) {
++    tile_->controller()->CloseAndFocusInitiator();
++  }
++}
++
++void MultiviewTileView::Remove() {
++  if (tile_) {
++    tile_->controller()->Close(/*should_pause_video=*/false);
++  }
++}
++
++BEGIN_METADATA(MultiviewTileView)
++END_METADATA
++
++// MultiviewGridView -----------------------------------------------------------
++
++MultiviewGridView::MultiviewGridView(MultiviewHost* host) : host_(host) {
++  SetPaintToLayer();
++  SetBackground(views::CreateSolidBackground(SK_ColorBLACK));
++  host_->SetGridView(this);
++  Update();
++}
++
++MultiviewGridView::~MultiviewGridView() {
++  if (host_) {
++    host_->SetGridView(nullptr);
++  }
++}
++
++void MultiviewGridView::ClearHost() {
++  host_ = nullptr;
++  RemoveAllChildViews();
++  SetVisible(false);
++}
++
++void MultiviewGridView::Update() {
++  if (!host_) {
++    return;
++  }
++  std::vector<MultiviewTile*> shown;
++  for (MultiviewTile* tile : host_->tiles()) {
++    if (tile->is_shown()) {
++      shown.push_back(tile);
++    }
++  }
++  std::vector<MultiviewTile*> current;
++  for (views::View* child : children()) {
++    current.push_back(static_cast<MultiviewTileView*>(child)->tile());
++  }
++  if (current != shown) {
++    RemoveAllChildViews();
++    for (MultiviewTile* tile : shown) {
++      AddChildView(std::make_unique<MultiviewTileView>(tile));
++    }
++  }
++  SetVisible(!shown.empty());
++  // A video's aspect ratio may have changed even where its cell did not.
++  for (views::View* child : children()) {
++    child->InvalidateLayout();
++  }
++  InvalidateLayout();
++}
++
++void MultiviewGridView::Layout(PassKey) {
++  std::vector<float> aspect_ratios;
++  for (views::View* child : children()) {
++    MultiviewTile* tile = static_cast<MultiviewTileView*>(child)->tile();
++    aspect_ratios.push_back(tile ? tile->GetAspectRatio()
++                                 : MultiviewTile::kDefaultAspectRatio);
++  }
++  const std::vector<gfx::Rect> cells =
++      ComputeMultiviewCells(size(), aspect_ratios);
++  for (size_t i = 0; i < cells.size(); ++i) {
++    children()[i]->SetBoundsRect(cells[i]);
++  }
++}
++
++BEGIN_METADATA(MultiviewGridView)
++END_METADATA
+diff --git a/chrome/browser/ui/views/overlay/multiview/multiview_grid_view.h b/chrome/browser/ui/views/overlay/multiview/multiview_grid_view.h
+new file mode 100644
+index 0000000000..7dedbd1107
+--- /dev/null
++++ b/chrome/browser/ui/views/overlay/multiview/multiview_grid_view.h
+@@ -0,0 +1,116 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_OVERLAY_MULTIVIEW_MULTIVIEW_GRID_VIEW_H_
++#define CHROME_BROWSER_UI_VIEWS_OVERLAY_MULTIVIEW_MULTIVIEW_GRID_VIEW_H_
++
++#include <optional>
++
++#include "base/memory/raw_ptr.h"
++#include "base/timer/timer.h"
++#include "components/viz/common/surfaces/frame_sink_id.h"
++#include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/compositor/compositor_observer.h"
++#include "ui/gfx/geometry/point.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/views/view.h"
++
++namespace ui {
++class Compositor;
++}  // namespace ui
++
++namespace views {
++class ImageButton;
++}  // namespace views
++
++class MultiviewHost;
++class MultiviewTile;
++
++// One video in the Multiview tab: the video's compositor surface, letterboxed
++// in the tile. Moving the mouse over it shows its controls; once the mouse
++// rests for a few seconds, the controls and the pointer go away.
++class MultiviewTileView : public views::View, public ui::CompositorObserver {
++  METADATA_HEADER(MultiviewTileView, views::View)
++
++ public:
++  explicit MultiviewTileView(MultiviewTile* tile);
++  MultiviewTileView(const MultiviewTileView&) = delete;
++  MultiviewTileView& operator=(const MultiviewTileView&) = delete;
++  ~MultiviewTileView() override;
++
++  MultiviewTile* tile() const { return tile_; }
++
++  // Called by the tile.
++  void OnTileDestroyed();
++  void UpdateSurface();
++  void UpdateControls();
++
++  // views::View:
++  void Layout(PassKey) override;
++  void AddedToWidget() override;
++  void RemovedFromWidget() override;
++  void OnMouseMoved(const ui::MouseEvent& event) override;
++  void OnMouseExited(const ui::MouseEvent& event) override;
++  ui::Cursor GetCursor(const ui::MouseEvent& event) override;
++
++  // ui::CompositorObserver:
++  void OnCompositingShuttingDown(ui::Compositor* compositor) override;
++
++ private:
++  // The video's rect in this view, the largest that keeps its aspect ratio.
++  gfx::Rect GetVideoBounds() const;
++
++  // The window's compositor must know the video's frame sink to drive it.
++  void RegisterFrameSink();
++  void UnregisterFrameSink();
++
++  // Shows the controls until the mouse has rested for a few seconds.
++  void ShowControlsForAWhile();
++  void OnMouseRested();
++  void HideControls();
++
++  void TogglePlayPause();
++  void ToggleMute();
++  void BackToTab();
++  void Remove();
++
++  raw_ptr<MultiviewTile> tile_;
++  raw_ptr<views::View> video_view_ = nullptr;
++  raw_ptr<views::View> controls_view_ = nullptr;
++  raw_ptr<views::ImageButton> play_pause_button_ = nullptr;
++  raw_ptr<views::ImageButton> mute_button_ = nullptr;
++
++  raw_ptr<ui::Compositor> compositor_ = nullptr;
++  viz::FrameSinkId frame_sink_id_;
++
++  base::OneShotTimer hide_controls_timer_;
++  // In screen coordinates, to tell a real move from a repeated one.
++  std::optional<gfx::Point> last_mouse_location_;
++};
++
++// The videos of a Multiview tab, drawn over the tab's page while the tab is
++// shown. Hidden while there are no videos, so the page's hint shows.
++class MultiviewGridView : public views::View {
++  METADATA_HEADER(MultiviewGridView, views::View)
++
++ public:
++  explicit MultiviewGridView(MultiviewHost* host);
++  MultiviewGridView(const MultiviewGridView&) = delete;
++  MultiviewGridView& operator=(const MultiviewGridView&) = delete;
++  ~MultiviewGridView() override;
++
++  // Matches the tile views to the host's shown tiles and lays them out.
++  void Update();
++
++  // Called when the host goes away before this view.
++  void ClearHost();
++
++  // views::View:
++  void Layout(PassKey) override;
++
++ private:
++  raw_ptr<MultiviewHost> host_;
++};
++
++#endif  // CHROME_BROWSER_UI_VIEWS_OVERLAY_MULTIVIEW_MULTIVIEW_GRID_VIEW_H_
+diff --git a/chrome/browser/ui/views/overlay/multiview/multiview_host.cc b/chrome/browser/ui/views/overlay/multiview/multiview_host.cc
+new file mode 100644
+index 0000000000..09a84ffe3a
+--- /dev/null
++++ b/chrome/browser/ui/views/overlay/multiview/multiview_host.cc
+@@ -0,0 +1,383 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/views/overlay/multiview/multiview_host.h"
++
++#include <algorithm>
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/location.h"
++#include "base/no_destructor.h"
++#include "base/strings/strcat.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/time/time.h"
++#include "chrome/browser/picture_in_picture/picture_in_picture_window_manager.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/ui/browser_window/public/browser_collection.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
++#include "chrome/browser/ui/navigator/browser_navigator.h"
++#include "chrome/browser/ui/navigator/browser_navigator_params.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/browser/ui/views/overlay/multiview/multiview_grid_view.h"
++#include "chrome/browser/ui/views/overlay/multiview/multiview_tile.h"
++#include "chrome/browser/ui/views/overlay/video_overlay_window_views.h"
++#include "components/tabs/public/tab_interface.h"
++#include "content/public/browser/media_session.h"
++#include "content/public/browser/page.h"
++#include "content/public/browser/picture_in_picture_window_controller.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/video_picture_in_picture_window_controller.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/common/url_constants.h"
++#include "ui/base/base_window.h"
++#include "ui/base/page_transition_types.h"
++#include "ui/base/window_open_disposition.h"
++#include "url/gurl.h"
++#include "url/url_constants.h"
++
++namespace {
++
++// How long a sent tab may take to start picture-in-picture before its place
++// is given up, e.g. because its page has no single video to show.
++constexpr base::TimeDelta kPendingTimeout = base::Seconds(5);
++
++std::vector<MultiviewHost*>& Hosts() {
++  static base::NoDestructor<std::vector<MultiviewHost*>> hosts;
++  return *hosts;
++}
++
++base::RepeatingCallbackList<void(MultiviewHost*)>& HostChangedCallbacks() {
++  static base::NoDestructor<base::RepeatingCallbackList<void(MultiviewHost*)>>
++      callbacks;
++  return *callbacks;
++}
++
++bool IsMultiviewUrl(const GURL& url) {
++  return url.SchemeIs(content::kChromeUIScheme) &&
++         url.host() == kChromeUIMultiviewHost;
++}
++
++content::VideoPictureInPictureWindowController* GetController(
++    content::WebContents* source) {
++  return content::PictureInPictureWindowController::
++      GetOrCreateVideoPictureInPictureController(source);
++}
++
++void EnterPictureInPicture(base::WeakPtr<content::WebContents> source) {
++  if (source) {
++    content::MediaSession::Get(source.get())->EnterPictureInPicture();
++  }
++}
++
++}  // namespace
++
++// Watches a tab whose video is in a tile, and closes the tile when the tab
++// navigates away, as the window manager does for a floating window.
++class MultiviewHost::SourceObserver : public content::WebContentsObserver {
++ public:
++  SourceObserver(MultiviewHost* host, content::WebContents* source)
++      : content::WebContentsObserver(source), host_(host) {}
++
++  // content::WebContentsObserver:
++  void PrimaryPageChanged(content::Page& page) override {
++    // May delete `this`.
++    ReleasePictureInPicture(web_contents());
++  }
++  void WebContentsDestroyed() override {
++    // The controller destroys the tile with the tab. Deletes `this`.
++    host_->EraseClaimed(web_contents());
++  }
++
++ private:
++  const raw_ptr<MultiviewHost> host_;
++};
++
++MultiviewHost::MultiviewHost(content::WebContents* multiview_tab)
++    : content::WebContentsObserver(multiview_tab),
++      content::WebContentsUserData<MultiviewHost>(*multiview_tab) {
++  Hosts().push_back(this);
++}
++
++MultiviewHost::~MultiviewHost() {
++  weak_factory_.InvalidateWeakPtrs();
++  std::erase(Hosts(), this);
++  // Views showing this tab drop their grid.
++  HostChangedCallbacks().Notify(this);
++  if (grid_view_) {
++    grid_view_->ClearHost();
++  }
++
++  // The videos go back to their tabs and keep playing there.
++  std::vector<base::WeakPtr<content::WebContents>> sources;
++  for (const auto& observer : claimed_) {
++    sources.push_back(observer->web_contents()->GetWeakPtr());
++  }
++  claimed_.clear();
++  pending_.clear();
++  for (const auto& source : sources) {
++    if (source) {
++      GetController(source.get())->Close(/*should_pause_video=*/false);
++    }
++  }
++}
++
++// static
++void MultiviewHost::SendToMultiview(content::WebContents* source) {
++  if (!source || IsMultiviewUrl(source->GetLastCommittedURL())) {
++    return;
++  }
++  if (MultiviewHost* host = FindHostFor(source)) {
++    host->ShowTab();
++    return;
++  }
++  MultiviewHost* host = FindOrOpenHostFor(source);
++  if (!host) {
++    return;
++  }
++  host->ShowTab();
++  if (host->SourceCount() >= kMaxTiles) {
++    return;
++  }
++
++  // Close a floating window of `source` first, without pausing the video.
++  // This must happen before `source` is pending, or the end of that session
++  // would count as the end of the tile's.
++  PictureInPictureWindowManager::GetInstance()
++      ->ExitPictureInPictureForWebContents(source);
++
++  host->pending_.push_back(source->GetWeakPtr());
++  base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE,
++      base::BindOnce(&MultiviewHost::DropPending, host->GetWeakPtr(),
++                     source->GetWeakPtr()),
++      kPendingTimeout);
++
++  // The controller keeps its window between sessions, so a floating window
++  // has to be destroyed for the next session to get a tile.
++  VideoOverlayWindowViews::DestroyWindowFor(
++      GetController(source),
++      base::BindOnce(&EnterPictureInPicture, source->GetWeakPtr()));
++}
++
++// static
++bool MultiviewHost::ClaimPictureInPicture(content::WebContents* source) {
++  MultiviewHost* host = FindHostFor(source);
++  if (!host) {
++    return false;
++  }
++  if (host->IsClaimed(source)) {
++    // A new session of a tab whose video is already in a tile.
++    return true;
++  }
++  host->ErasePending(source);
++  // A floating window left from an earlier session would be reused.
++  if (VideoOverlayWindowViews::HasWindowFor(GetController(source))) {
++    return false;
++  }
++  host->claimed_.push_back(std::make_unique<SourceObserver>(host, source));
++  return true;
++}
++
++// static
++bool MultiviewHost::ReleasePictureInPicture(content::WebContents* source) {
++  MultiviewHost* host = FindHostFor(source);
++  if (!host || !host->IsClaimed(source)) {
++    return false;
++  }
++  host->EraseClaimed(source);
++  // Hides the tile, which then destroys itself. Does nothing if the tile is
++  // already hidden.
++  GetController(source)->Close(/*should_pause_video=*/false);
++  return true;
++}
++
++// static
++std::unique_ptr<content::VideoOverlayWindow> MultiviewHost::MaybeCreateTile(
++    content::VideoPictureInPictureWindowController* controller) {
++  MultiviewHost* host = FindHostFor(controller->GetWebContents());
++  if (!host || !host->IsClaimed(controller->GetWebContents())) {
++    return nullptr;
++  }
++  return std::make_unique<MultiviewTile>(controller);
++}
++
++// static
++MultiviewHost* MultiviewHost::AttachTile(MultiviewTile* tile) {
++  MultiviewHost* host = FindHostFor(tile->GetSource());
++  if (!host || !host->IsClaimed(tile->GetSource())) {
++    return nullptr;
++  }
++  if (!std::ranges::contains(host->tiles_, tile)) {
++    host->tiles_.push_back(tile);
++  }
++  return host;
++}
++
++// static
++base::CallbackListSubscription MultiviewHost::AddHostChangedCallback(
++    HostChangedCallback callback) {
++  return HostChangedCallbacks().Add(std::move(callback));
++}
++
++std::unique_ptr<views::View> MultiviewHost::CreateGridView() {
++  return std::make_unique<MultiviewGridView>(this);
++}
++
++void MultiviewHost::OnTileChanged() {
++  // Tiles change while their buttons are being pressed, so the grid updates
++  // afterwards.
++  if (grid_update_pending_) {
++    return;
++  }
++  grid_update_pending_ = true;
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(&MultiviewHost::UpdateGrid, GetWeakPtr()));
++}
++
++void MultiviewHost::RemoveTile(MultiviewTile* tile) {
++  std::erase(tiles_, tile);
++  OnTileChanged();
++}
++
++void MultiviewHost::SetGridView(MultiviewGridView* grid_view) {
++  grid_view_ = grid_view;
++}
++
++// static
++MultiviewHost* MultiviewHost::FindHostFor(content::WebContents* source) {
++  // An expired pending entry would match a null `source`.
++  if (!source) {
++    return nullptr;
++  }
++  for (MultiviewHost* host : Hosts()) {
++    if (host->IsPending(source) || host->IsClaimed(source)) {
++      return host;
++    }
++  }
++  return nullptr;
++}
++
++// static
++MultiviewHost* MultiviewHost::FindOrOpenHostFor(content::WebContents* source) {
++  Profile* const profile =
++      Profile::FromBrowserContext(source->GetBrowserContext());
++  content::WebContents* multiview_tab = nullptr;
++  GlobalBrowserCollection::GetInstance()->ForEach(
++      [&](BrowserWindowInterface* browser) {
++        if (browser->GetProfile() != profile) {
++          return true;
++        }
++        TabStripModel* const tab_strip = browser->GetTabStripModel();
++        for (int i = 0; i < tab_strip->count(); ++i) {
++          content::WebContents* const contents = tab_strip->GetWebContentsAt(i);
++          if (IsMultiviewUrl(contents->GetVisibleURL())) {
++            multiview_tab = contents;
++            return false;
++          }
++        }
++        return true;
++      },
++      BrowserCollection::Order::kActivation);
++
++  if (!multiview_tab) {
++    tabs::TabInterface* const tab =
++        tabs::TabInterface::MaybeGetFromContents(source);
++    if (!tab || !tab->GetBrowserWindowInterface()) {
++      return nullptr;
++    }
++    NavigateParams params(tab->GetBrowserWindowInterface(),
++                          GURL(base::StrCat({content::kChromeUIScheme,
++                                             url::kStandardSchemeSeparator,
++                                             kChromeUIMultiviewHost})),
++                          ui::PAGE_TRANSITION_AUTO_TOPLEVEL);
++    params.disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
++    Navigate(&params);
++    multiview_tab = params.navigated_or_inserted_contents;
++    if (!multiview_tab) {
++      return nullptr;
++    }
++  }
++
++  if (!FromWebContents(multiview_tab)) {
++    CreateForWebContents(multiview_tab);
++    // Only now can a view showing the tab find the host.
++    HostChangedCallbacks().Notify(nullptr);
++  }
++  return FromWebContents(multiview_tab);
++}
++
++bool MultiviewHost::IsPending(content::WebContents* source) const {
++  return std::ranges::any_of(
++      pending_, [source](const base::WeakPtr<content::WebContents>& pending) {
++        return pending.get() == source;
++      });
++}
++
++bool MultiviewHost::IsClaimed(content::WebContents* source) const {
++  return std::ranges::any_of(
++      claimed_, [source](const std::unique_ptr<SourceObserver>& observer) {
++        return observer->web_contents() == source;
++      });
++}
++
++size_t MultiviewHost::SourceCount() {
++  std::erase_if(pending_, [](const base::WeakPtr<content::WebContents>& p) {
++    return !p;
++  });
++  return pending_.size() + claimed_.size();
++}
++
++void MultiviewHost::ErasePending(content::WebContents* source) {
++  std::erase_if(pending_,
++                [source](const base::WeakPtr<content::WebContents>& pending) {
++                  return !pending || pending.get() == source;
++                });
++}
++
++void MultiviewHost::EraseClaimed(content::WebContents* source) {
++  std::erase_if(claimed_,
++                [source](const std::unique_ptr<SourceObserver>& observer) {
++                  return observer->web_contents() == source;
++                });
++}
++
++void MultiviewHost::ShowTab() {
++  tabs::TabInterface* const tab =
++      tabs::TabInterface::MaybeGetFromContents(web_contents());
++  BrowserWindowInterface* const browser =
++      tab ? tab->GetBrowserWindowInterface() : nullptr;
++  if (!browser) {
++    return;
++  }
++  TabStripModel* const tab_strip = browser->GetTabStripModel();
++  const int index = tab_strip->GetIndexOfWebContents(web_contents());
++  if (index != TabStripModel::kNoTab) {
++    tab_strip->ActivateTabAt(index);
++  }
++  browser->GetWindow()->Activate();
++}
++
++void MultiviewHost::DropPending(base::WeakPtr<content::WebContents> source) {
++  if (source) {
++    ErasePending(source.get());
++  }
++}
++
++void MultiviewHost::UpdateGrid() {
++  grid_update_pending_ = false;
++  if (grid_view_) {
++    grid_view_->Update();
++  }
++}
++
++void MultiviewHost::PrimaryPageChanged(content::Page& page) {
++  if (!IsMultiviewUrl(page.GetMainDocument().GetLastCommittedURL())) {
++    // The tab left the Multiview page. Deletes `this`.
++    web_contents()->RemoveUserData(UserDataKey());
++  }
++}
++
++WEB_CONTENTS_USER_DATA_KEY_IMPL(MultiviewHost);
+diff --git a/chrome/browser/ui/views/overlay/multiview/multiview_host.h b/chrome/browser/ui/views/overlay/multiview/multiview_host.h
+new file mode 100644
+index 0000000000..c703239063
+--- /dev/null
++++ b/chrome/browser/ui/views/overlay/multiview/multiview_host.h
+@@ -0,0 +1,148 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_OVERLAY_MULTIVIEW_MULTIVIEW_HOST_H_
++#define CHROME_BROWSER_UI_VIEWS_OVERLAY_MULTIVIEW_MULTIVIEW_HOST_H_
++
++#include <memory>
++#include <vector>
++
++#include "base/callback_list.h"
++#include "base/functional/callback_forward.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++
++namespace content {
++class VideoOverlayWindow;
++class VideoPictureInPictureWindowController;
++class WebContents;
++}  // namespace content
++
++namespace views {
++class View;
++}  // namespace views
++
++class MultiviewGridView;
++class MultiviewTile;
++
++// The host of the Multiview page, chrome://multiview.
++inline constexpr char kChromeUIMultiviewHost[] = "multiview";
++
++// Shows the videos of up to four other tabs side by side in one tab, the
++// Multiview tab. Each video is a picture-in-picture session whose window is a
++// tile in that tab instead of a floating window: the tab shows the video's own
++// compositor surface, so nothing is copied and protected video keeps playing.
++//
++// The host lives on the Multiview tab's WebContents and keeps the tiles; the
++// grid that draws them belongs to whichever ContentsWebView shows the tab, so
++// the tiles move, resize and minimize with the browser window.
++class MultiviewHost : public content::WebContentsObserver,
++                      public content::WebContentsUserData<MultiviewHost> {
++ public:
++  static constexpr size_t kMaxTiles = 4;
++
++  // Called with the host being destroyed, or with null after a host was
++  // created.
++  using HostChangedCallback =
++      base::RepeatingCallback<void(MultiviewHost* destroyed_host)>;
++
++  MultiviewHost(const MultiviewHost&) = delete;
++  MultiviewHost& operator=(const MultiviewHost&) = delete;
++  ~MultiviewHost() override;
++
++  // Shows the video of `source` in the Multiview tab of its profile, opening
++  // one next to `source` if there is none, and switches to that tab. Does
++  // nothing more when the tab already holds `kMaxTiles` videos.
++  static void SendToMultiview(content::WebContents* source);
++
++  // Called when `source` starts picture-in-picture. Returns true if the
++  // session belongs in a Multiview tile; no floating window may then be
++  // involved.
++  static bool ClaimPictureInPicture(content::WebContents* source);
++
++  // Called when the picture-in-picture session of `source` ends. Returns true
++  // if the session was in a Multiview tile, which is now closed.
++  static bool ReleasePictureInPicture(content::WebContents* source);
++
++  // Returns the window for a session that belongs in a tile, or null when the
++  // session gets a floating window.
++  static std::unique_ptr<content::VideoOverlayWindow> MaybeCreateTile(
++      content::VideoPictureInPictureWindowController* controller);
++
++  // Adds `tile` to the host that holds its tab and returns that host, or
++  // returns null if no Multiview tab holds it.
++  static MultiviewHost* AttachTile(MultiviewTile* tile);
++
++  static base::CallbackListSubscription AddHostChangedCallback(
++      HostChangedCallback callback);
++
++  base::WeakPtr<MultiviewHost> GetWeakPtr() {
++    return weak_factory_.GetWeakPtr();
++  }
++
++  // Creates the grid for the view that shows this host's tab.
++  std::unique_ptr<views::View> CreateGridView();
++
++  // The tiles in display order. Only tiles that are shown are drawn.
++  const std::vector<raw_ptr<MultiviewTile>>& tiles() const { return tiles_; }
++
++  // Called by tiles and the grid.
++  void OnTileChanged();
++  void RemoveTile(MultiviewTile* tile);
++  void SetGridView(MultiviewGridView* grid_view);
++
++ private:
++  friend class content::WebContentsUserData<MultiviewHost>;
++
++  explicit MultiviewHost(content::WebContents* multiview_tab);
++
++  // Returns the host whose tab holds, or is about to hold, `source`.
++  static MultiviewHost* FindHostFor(content::WebContents* source);
++
++  // Returns the Multiview tab of `source`'s profile, opening one next to
++  // `source` if needed.
++  static MultiviewHost* FindOrOpenHostFor(content::WebContents* source);
++
++  bool IsPending(content::WebContents* source) const;
++  bool IsClaimed(content::WebContents* source) const;
++  void ErasePending(content::WebContents* source);
++  void EraseClaimed(content::WebContents* source);
++
++  // The number of tabs held, pending or shown.
++  size_t SourceCount();
++
++  // Switches to this host's tab.
++  void ShowTab();
++
++  // Gives up the place of `source` if its session did not start in time.
++  void DropPending(base::WeakPtr<content::WebContents> source);
++
++  void UpdateGrid();
++
++  // content::WebContentsObserver:
++  void PrimaryPageChanged(content::Page& page) override;
++
++  class SourceObserver;
++
++  // Sent tabs whose session has not started yet.
++  std::vector<base::WeakPtr<content::WebContents>> pending_;
++
++  // Tabs whose session is shown here, each watched for navigation.
++  std::vector<std::unique_ptr<SourceObserver>> claimed_;
++
++  // Owned by the content picture-in-picture controllers; a tile removes itself
++  // when destroyed.
++  std::vector<raw_ptr<MultiviewTile>> tiles_;
++
++  raw_ptr<MultiviewGridView> grid_view_ = nullptr;
++  bool grid_update_pending_ = false;
++
++  base::WeakPtrFactory<MultiviewHost> weak_factory_{this};
++
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++
++#endif  // CHROME_BROWSER_UI_VIEWS_OVERLAY_MULTIVIEW_MULTIVIEW_HOST_H_
+diff --git a/chrome/browser/ui/views/overlay/multiview/multiview_tile.cc b/chrome/browser/ui/views/overlay/multiview/multiview_tile.cc
+new file mode 100644
+index 0000000000..b4a5141fe3
+--- /dev/null
++++ b/chrome/browser/ui/views/overlay/multiview/multiview_tile.cc
+@@ -0,0 +1,136 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/views/overlay/multiview/multiview_tile.h"
++
++#include "base/functional/bind.h"
++#include "base/location.h"
++#include "base/task/sequenced_task_runner.h"
++#include "chrome/browser/ui/views/overlay/multiview/multiview_grid_view.h"
++#include "chrome/browser/ui/views/overlay/multiview/multiview_host.h"
++#include "content/public/browser/video_picture_in_picture_window_controller.h"
++
++MultiviewTile::MultiviewTile(
++    content::VideoPictureInPictureWindowController* controller)
++    : controller_(controller) {}
++
++MultiviewTile::~MultiviewTile() {
++  if (view_) {
++    view_->OnTileDestroyed();
++  }
++  if (host_) {
++    host_->RemoveTile(this);
++  }
++}
++
++content::WebContents* MultiviewTile::GetSource() const {
++  return controller_->GetWebContents();
++}
++
++float MultiviewTile::GetAspectRatio() const {
++  if (natural_size_.IsEmpty()) {
++    return kDefaultAspectRatio;
++  }
++  return static_cast<float>(natural_size_.width()) / natural_size_.height();
++}
++
++void MultiviewTile::SetView(MultiviewTileView* view) {
++  view_ = view;
++}
++
++void MultiviewTile::SetVideoBoundsInScreen(const gfx::Rect& bounds) {
++  if (bounds == bounds_ || bounds.IsEmpty()) {
++    return;
++  }
++  const bool resized = bounds.size() != bounds_.size();
++  bounds_ = bounds;
++  if (resized) {
++    controller_->UpdateLayerBounds();
++  }
++}
++
++bool MultiviewTile::IsActive() const {
++  return false;
++}
++
++void MultiviewTile::Close() {
++  shown_ = false;
++  if (host_) {
++    host_->OnTileChanged();
++  }
++}
++
++void MultiviewTile::ShowInactive() {
++  destroy_weak_factory_.InvalidateWeakPtrs();
++  MultiviewHost* host = MultiviewHost::AttachTile(this);
++  if (!host) {
++    // The tab's session no longer belongs in a Multiview tab. This window
++    // can't float, so end the session; the next one gets a new window.
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&MultiviewTile::DestroyWindow,
++                                  destroy_weak_factory_.GetWeakPtr()));
++    return;
++  }
++  if (host_ && host_.get() != host) {
++    host_->RemoveTile(this);
++  }
++  host_ = host->GetWeakPtr();
++  shown_ = true;
++  host->OnTileChanged();
++}
++
++void MultiviewTile::Hide() {
++  shown_ = false;
++  if (host_) {
++    host_->OnTileChanged();
++  }
++  // Called while the controller closes the window, so destroy it afterwards.
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(&MultiviewTile::DestroyWindow,
++                                destroy_weak_factory_.GetWeakPtr()));
++}
++
++bool MultiviewTile::IsVisible() const {
++  return shown_;
++}
++
++gfx::Rect MultiviewTile::GetBounds() {
++  return bounds_;
++}
++
++void MultiviewTile::UpdateNaturalSize(const gfx::Size& natural_size) {
++  if (natural_size == natural_size_) {
++    return;
++  }
++  natural_size_ = natural_size;
++  if (host_) {
++    host_->OnTileChanged();
++  }
++}
++
++void MultiviewTile::SetPlaybackState(PlaybackState playback_state) {
++  playback_state_ = playback_state;
++  if (view_) {
++    view_->UpdateControls();
++  }
++}
++
++void MultiviewTile::SetPlayPauseButtonVisibility(bool is_visible) {
++  play_pause_visible_ = is_visible;
++  if (view_) {
++    view_->UpdateControls();
++  }
++}
++
++void MultiviewTile::SetSurfaceId(const viz::SurfaceId& surface_id) {
++  surface_id_ = surface_id;
++  if (view_) {
++    view_->UpdateSurface();
++  }
++}
++
++void MultiviewTile::DestroyWindow() {
++  // Deletes `this`.
++  controller_->OnWindowDestroyed(/*should_pause_video=*/false);
++}
+diff --git a/chrome/browser/ui/views/overlay/multiview/multiview_tile.h b/chrome/browser/ui/views/overlay/multiview/multiview_tile.h
+new file mode 100644
+index 0000000000..2b8955be0d
+--- /dev/null
++++ b/chrome/browser/ui/views/overlay/multiview/multiview_tile.h
+@@ -0,0 +1,113 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_OVERLAY_MULTIVIEW_MULTIVIEW_TILE_H_
++#define CHROME_BROWSER_UI_VIEWS_OVERLAY_MULTIVIEW_MULTIVIEW_TILE_H_
++
++#include <string>
++#include <vector>
++
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "components/viz/common/surfaces/surface_id.h"
++#include "content/public/browser/overlay_window.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/size.h"
++
++namespace content {
++class VideoPictureInPictureWindowController;
++class WebContents;
++}  // namespace content
++
++class MultiviewHost;
++class MultiviewTileView;
++
++// The picture-in-picture window of a video shown in the Multiview tab. The
++// content controller owns it as it would own a floating window. It keeps what
++// the tab needs to draw the video and passes changes on to the tile's view
++// while the Multiview tab is shown.
++class MultiviewTile : public content::VideoOverlayWindow {
++ public:
++  // Width divided by height of a video whose size is not known yet.
++  static constexpr float kDefaultAspectRatio = 16.0f / 9.0f;
++
++  explicit MultiviewTile(
++      content::VideoPictureInPictureWindowController* controller);
++  MultiviewTile(const MultiviewTile&) = delete;
++  MultiviewTile& operator=(const MultiviewTile&) = delete;
++  ~MultiviewTile() override;
++
++  content::VideoPictureInPictureWindowController* controller() const {
++    return controller_;
++  }
++  content::WebContents* GetSource() const;
++  bool is_shown() const { return shown_; }
++  const viz::SurfaceId& surface_id() const { return surface_id_; }
++  PlaybackState playback_state() const { return playback_state_; }
++  bool play_pause_visible() const { return play_pause_visible_; }
++
++  // Width divided by height of the video, 16:9 until the size is known.
++  float GetAspectRatio() const;
++
++  // Called by the view of this tile while it exists.
++  void SetView(MultiviewTileView* view);
++
++  // Called by the view when the video's place on screen changes. The page
++  // sees the size as the size of its picture-in-picture window.
++  void SetVideoBoundsInScreen(const gfx::Rect& bounds);
++
++  // content::VideoOverlayWindow:
++  bool IsActive() const override;
++  void Close() override;
++  void ShowInactive() override;
++  void Hide() override;
++  bool IsVisible() const override;
++  gfx::Rect GetBounds() override;
++  void UpdateNaturalSize(const gfx::Size& natural_size) override;
++  void SetPlaybackState(PlaybackState playback_state) override;
++  void SetPlayPauseButtonVisibility(bool is_visible) override;
++  void SetSkipAdButtonVisibility(bool is_visible) override {}
++  void SetNextTrackButtonVisibility(bool is_visible) override {}
++  void SetPreviousTrackButtonVisibility(bool is_visible) override {}
++  void SetHidePictureInPictureButtonVisibility(bool is_visible) override {}
++  void SetMicrophoneMuted(bool muted) override {}
++  void SetCameraState(bool turned_on) override {}
++  void SetMediaMuted(bool muted) override {}
++  void SetToggleMicrophoneButtonVisibility(bool is_visible) override {}
++  void SetToggleCameraButtonVisibility(bool is_visible) override {}
++  void SetHangUpButtonVisibility(bool is_visible) override {}
++  void SetNextSlideButtonVisibility(bool is_visible) override {}
++  void SetPreviousSlideButtonVisibility(bool is_visible) override {}
++  void SetMediaPosition(const media_session::MediaPosition& position) override {
++  }
++  void SetSourceTitle(const std::u16string& source_title) override {}
++  void SetFaviconImages(
++      const std::vector<media_session::MediaImage>& images) override {}
++  void SetSurfaceId(const viz::SurfaceId& surface_id) override;
++  void SetPlaybackControlsVisibility(bool is_visible) override {}
++  void SetImmersiveVideoOptions(
++      const content::ImmersiveOptions& options) override {}
++
++ private:
++  // Has the controller destroy this window, so that the tab's next
++  // picture-in-picture session gets a new one, which may be a floating window.
++  void DestroyWindow();
++
++  const raw_ptr<content::VideoPictureInPictureWindowController> controller_;
++  base::WeakPtr<MultiviewHost> host_;
++  raw_ptr<MultiviewTileView> view_ = nullptr;
++  bool shown_ = false;
++  viz::SurfaceId surface_id_;
++  gfx::Size natural_size_;
++  // Before the first layout the page is told a typical tile size.
++  gfx::Rect bounds_{0, 0, 640, 360};
++  PlaybackState playback_state_ = kPlaying;
++  bool play_pause_visible_ = false;
++
++  // Invalidated when the tile is shown again before a posted DestroyWindow()
++  // runs.
++  base::WeakPtrFactory<MultiviewTile> destroy_weak_factory_{this};
++};
++
++#endif  // CHROME_BROWSER_UI_VIEWS_OVERLAY_MULTIVIEW_MULTIVIEW_TILE_H_
+diff --git a/chrome/browser/ui/views/overlay/multiview/multiview_ui.cc b/chrome/browser/ui/views/overlay/multiview/multiview_ui.cc
+new file mode 100644
+index 0000000000..17134c79b9
+--- /dev/null
++++ b/chrome/browser/ui/views/overlay/multiview/multiview_ui.cc
+@@ -0,0 +1,100 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/views/overlay/multiview/multiview_ui.h"
++
++#include <string>
++#include <string_view>
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/i18n/rtl.h"
++#include "base/memory/ref_counted_memory.h"
++#include "base/strings/escape.h"
++#include "base/strings/strcat.h"
++#include "base/strings/utf_string_conversions.h"
++#include "chrome/browser/browser_process.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/grit/generated_resources.h"
++#include "content/public/browser/web_ui.h"
++#include "content/public/browser/web_ui_data_source.h"
++#include "ui/base/l10n/l10n_util.h"
++
++namespace {
++
++constexpr char kMainCss[] = R"CSS(html, body {
++  height: 100%;
++  margin: 0;
++}
++body {
++  align-items: center;
++  background: #000;
++  color: #9aa0a6;
++  display: flex;
++  font: 15px system-ui, sans-serif;
++  justify-content: center;
++  text-align: center;
++}
++p {
++  max-width: 420px;
++}
++)CSS";
++
++std::string Escape(std::u16string_view text) {
++  return base::EscapeForHTML(base::UTF16ToUTF8(text));
++}
++
++// Builds the page in the browser's language. The hint names the Send to
++// Multiview button in bold.
++std::string BuildMainHtml() {
++  const std::u16string button =
++      l10n_util::GetStringUTF16(IDS_MULTIVIEW_SEND_TO_MULTIVIEW);
++  size_t button_offset = 0;
++  const std::u16string hint = l10n_util::GetStringFUTF16(
++      IDS_MULTIVIEW_PAGE_HINT, button, &button_offset);
++  const std::u16string_view hint_view(hint);
++
++  return base::StrCat(
++      {"<!doctype html>\n<html dir=\"", base::i18n::IsRTL() ? "rtl" : "ltr",
++       "\" lang=\"",
++       base::EscapeForHTML(g_browser_process->GetApplicationLocale()),
++       "\">\n<head>\n<meta charset=\"utf-8\">\n"
++       "<meta name=\"color-scheme\" content=\"dark\">\n<title>",
++       Escape(l10n_util::GetStringUTF16(IDS_MULTIVIEW_TITLE)),
++       "</title>\n<link rel=\"stylesheet\" href=\"multiview.css\">\n"
++       "</head>\n<body>\n<p>",
++       Escape(hint_view.substr(0, button_offset)), "<b>", Escape(button),
++       "</b>", Escape(hint_view.substr(button_offset + button.size())),
++       "</p>\n</body>\n</html>\n"});
++}
++
++// The file a request asks for: its path without a query or fragment.
++std::string_view RequestedFile(std::string_view path) {
++  return path.substr(0, path.find_first_of("?#"));
++}
++
++bool ShouldHandleRequest(const std::string& path) {
++  const std::string_view file = RequestedFile(path);
++  return file.empty() || file == "multiview.css";
++}
++
++void HandleRequest(const std::string& path,
++                   content::WebUIDataSource::GotDataCallback callback) {
++  std::string body =
++      RequestedFile(path).empty() ? BuildMainHtml() : std::string(kMainCss);
++  std::move(callback).Run(
++      base::MakeRefCounted<base::RefCountedString>(std::move(body)));
++}
++
++}  // namespace
++
++MultiviewUI::MultiviewUI(content::WebUI* web_ui)
++    : content::WebUIController(web_ui) {
++  content::WebUIDataSource* source = content::WebUIDataSource::CreateAndAdd(
++      Profile::FromWebUI(web_ui), kChromeUIMultiviewHost);
++  source->SetRequestFilter(base::BindRepeating(&ShouldHandleRequest),
++                           base::BindRepeating(&HandleRequest));
++}
++
++MultiviewUI::~MultiviewUI() = default;
+diff --git a/chrome/browser/ui/views/overlay/multiview/multiview_ui.h b/chrome/browser/ui/views/overlay/multiview/multiview_ui.h
+new file mode 100644
+index 0000000000..a1032096af
+--- /dev/null
++++ b/chrome/browser/ui/views/overlay/multiview/multiview_ui.h
+@@ -0,0 +1,33 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_OVERLAY_MULTIVIEW_MULTIVIEW_UI_H_
++#define CHROME_BROWSER_UI_VIEWS_OVERLAY_MULTIVIEW_MULTIVIEW_UI_H_
++
++#include "chrome/browser/ui/views/overlay/multiview/multiview_host.h"
++#include "content/public/browser/web_ui_controller.h"
++#include "content/public/browser/webui_config.h"
++#include "content/public/common/url_constants.h"
++
++namespace content {
++class WebUI;
++}  // namespace content
++
++// chrome://multiview, the page of the Multiview tab. It only shows a hint
++// while the tab holds no videos; the videos are drawn over it by the browser.
++class MultiviewUI : public content::WebUIController {
++ public:
++  explicit MultiviewUI(content::WebUI* web_ui);
++  MultiviewUI(const MultiviewUI&) = delete;
++  MultiviewUI& operator=(const MultiviewUI&) = delete;
++  ~MultiviewUI() override;
++};
++
++class MultiviewUIConfig : public content::DefaultWebUIConfig<MultiviewUI> {
++ public:
++  MultiviewUIConfig()
++      : DefaultWebUIConfig(content::kChromeUIScheme, kChromeUIMultiviewHost) {}
++};
++
++#endif  // CHROME_BROWSER_UI_VIEWS_OVERLAY_MULTIVIEW_MULTIVIEW_UI_H_
+diff --git a/chrome/browser/ui/views/overlay/video_overlay_window_views.cc b/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
+index 0afdeb691c..9890db4357 100644
+--- a/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
++++ b/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
+@@ -4,17 +4,22 @@
+ 
+ #include "chrome/browser/ui/views/overlay/video_overlay_window_views.h"
+ 
++#include <algorithm>
++#include <map>
+ #include <memory>
+ #include <string>
++#include <vector>
+ 
+ #include "base/check.h"
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
+ #include "base/memory/ptr_util.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/no_destructor.h"
+ #include "base/notreached.h"
+ #include "base/strings/strcat.h"
+ #include "base/strings/utf_string_conversions.h"
++#include "base/task/sequenced_task_runner.h"
+ #include "base/time/time.h"
+ #include "base/timer/timer.h"
+ #include "build/build_config.h"
+@@ -33,6 +38,7 @@
+ #include "chrome/browser/ui/views/overlay/constants.h"
+ #include "chrome/browser/ui/views/overlay/hang_up_button.h"
+ #include "chrome/browser/ui/views/overlay/minimize_button.h"
++#include "chrome/browser/ui/views/overlay/multiview/multiview_host.h"
+ #include "chrome/browser/ui/views/overlay/overlay_controls_fade_animation.h"
+ #include "chrome/browser/ui/views/overlay/overlay_window_live_caption_button.h"
+ #include "chrome/browser/ui/views/overlay/overlay_window_live_caption_dialog.h"
+@@ -150,6 +156,18 @@ gfx::ImageSkia GetCorrectColorTypeImage(const SkBitmap& bitmap) {
+   return gfx::ImageSkia::CreateFrom1xBitmap(color_type_copy);
+ }
+ 
++// browser: the floating windows by their controller. A controller has at most
++// one.
++std::map<const content::VideoPictureInPictureWindowController*,
++         VideoOverlayWindowViews*>&
++WindowsByController() {
++  static base::NoDestructor<
++      std::map<const content::VideoPictureInPictureWindowController*,
++               VideoOverlayWindowViews*>>
++      windows;
++  return *windows;
++}
++
+ // Returns the quadrant the VideoOverlayWindowViews is primarily in on the
+ // current work area.
+ VideoOverlayWindowViews::WindowQuadrant GetCurrentWindowQuadrant(
+@@ -172,6 +190,34 @@ VideoOverlayWindowViews::WindowQuadrant GetCurrentWindowQuadrant(
+              : VideoOverlayWindowViews::WindowQuadrant::kBottomRight;
+ }
+ 
++// browser: where a new window of `window_size` opens: the first corner of
++// `work_area` that no other open video picture-in-picture window overlaps,
++// starting with the usual bottom-right one. When every corner is taken, the
++// window opens bottom-right, on top of the others.
++gfx::Point GetInitialWindowOrigin(const gfx::Rect& work_area,
++                                  const gfx::Size& window_size,
++                                  int margin) {
++  const int left = work_area.x() + margin;
++  const int top = work_area.y() + margin;
++  const int right = work_area.right() - window_size.width() - margin;
++  const int bottom = work_area.bottom() - window_size.height() - margin;
++  const gfx::Point corners[] = {
++      {right, bottom}, {left, bottom}, {right, top}, {left, top}};
++
++  const std::vector<gfx::Rect> other_windows =
++      PictureInPictureWindowManager::GetInstance()
++          ->GetOtherVideoWindowBoundsInScreen();
++  for (const gfx::Point& corner : corners) {
++    const gfx::Rect candidate(corner, window_size);
++    if (std::ranges::none_of(other_windows, [&](const gfx::Rect& other) {
++          return other.Intersects(candidate);
++        })) {
++      return corner;
++    }
++  }
++  return corners[0];
++}
++
+ template <typename T>
+ T* AddChildView(std::vector<std::unique_ptr<views::View>>* views,
+                 std::unique_ptr<T> child) {
+@@ -326,6 +372,7 @@ std::unique_ptr<VideoOverlayWindowViews> VideoOverlayWindowViews::Create(
+   // doesn't initialize the object fully.
+   auto overlay_window =
+       base::WrapUnique(new VideoOverlayWindowViews(controller));
++  WindowsByController()[controller] = overlay_window.get();  // browser
+ 
+   overlay_window->SetColorModeOverride(ui::ColorProviderKey::ColorMode::kDark);
+ 
+@@ -423,9 +470,37 @@ std::unique_ptr<VideoOverlayWindowViews> VideoOverlayWindowViews::Create(
+ // static
+ std::unique_ptr<content::VideoOverlayWindow> CreateVideoOverlayWindow(
+     content::VideoPictureInPictureWindowController* controller) {
++  // browser: the video of a tab sent to Multiview goes in a tile.
++  if (std::unique_ptr<content::VideoOverlayWindow> tile =
++          MultiviewHost::MaybeCreateTile(controller)) {
++    return tile;
++  }
+   return VideoOverlayWindowViews::Create(controller);
+ }
+ 
++// browser: lookup and teardown by controller (multi-pip-multiview).
++// static
++bool VideoOverlayWindowViews::HasWindowFor(
++    const content::VideoPictureInPictureWindowController* controller) {
++  return WindowsByController().contains(controller);
++}
++
++// static
++void VideoOverlayWindowViews::DestroyWindowFor(
++    content::VideoPictureInPictureWindowController* controller,
++    base::OnceClosure done) {
++  auto it = WindowsByController().find(controller);
++  if (it == WindowsByController().end()) {
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
++                                                             std::move(done));
++    return;
++  }
++  // Closing destroys the widget asynchronously, and the controller then
++  // destroys this object.
++  it->second->on_destroyed_ = std::move(done);
++  it->second->Close();
++}
++
+ VideoOverlayWindowViews::VideoOverlayWindowViews(
+     content::VideoPictureInPictureWindowController* controller)
+     : controller_(controller),
+@@ -448,6 +523,13 @@ VideoOverlayWindowViews::VideoOverlayWindowViews(
+ }
+ 
+ VideoOverlayWindowViews::~VideoOverlayWindowViews() {
++  // browser: forget this window; a pending DestroyWindowFor is answered.
++  WindowsByController().erase(controller_);
++  if (on_destroyed_) {
++    // The controller is still resetting its window.
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, std::move(on_destroyed_));
++  }
+   if (overlay_view_) {
+     overlay_view_->RemoveObserver(this);
+   }
+@@ -526,7 +608,7 @@ gfx::Rect VideoOverlayWindowViews::CalculateAndUpdateWindowBounds() {
+     // Make sure window is displayed entirely in the work area.
+     origin.SetToMin(default_origin);
+   } else {
+-    origin = default_origin;
++    origin = GetInitialWindowOrigin(work_area, window_size, buffer);  // browser
+   }
+ 
+   return gfx::Rect(origin, window_size);
+@@ -1118,7 +1200,8 @@ void VideoOverlayWindowViews::SetUpViews() {
+       [](VideoOverlayWindowViews* overlay) {
+         PictureInPictureWindowManager::GetInstance()
+             ->ExitPictureInPictureViaWindowUi(
+-                PictureInPictureWindowManager::UiBehavior::kCloseWindowOnly);
++                PictureInPictureWindowManager::UiBehavior::kCloseWindowOnly,
++                overlay->controller_.get());
+       },
+       base::Unretained(this)));
+ 
+@@ -1128,7 +1211,8 @@ void VideoOverlayWindowViews::SetUpViews() {
+             PictureInPictureWindowManager::GetInstance()
+                 ->ExitPictureInPictureViaWindowUi(
+                     PictureInPictureWindowManager::UiBehavior::
+-                        kCloseWindowAndFocusOpener);
++                        kCloseWindowAndFocusOpener,
++                    overlay->controller_.get());
+           },
+           base::Unretained(this)));
+ 
+@@ -2204,7 +2288,8 @@ void VideoOverlayWindowViews::CloseAndPauseIfAvailable() {
+   PictureInPictureWindowManager::GetInstance()->ExitPictureInPictureViaWindowUi(
+       should_pause_video
+           ? PictureInPictureWindowManager::UiBehavior::kCloseWindowAndPauseVideo
+-          : PictureInPictureWindowManager::UiBehavior::kCloseWindowOnly);
++          : PictureInPictureWindowManager::UiBehavior::kCloseWindowOnly,
++      controller_.get());
+ }
+ 
+ PlaybackImageButton*
+diff --git a/chrome/browser/ui/views/overlay/video_overlay_window_views.h b/chrome/browser/ui/views/overlay/video_overlay_window_views.h
+index 222a5167b5..43c4fb1214 100644
+--- a/chrome/browser/ui/views/overlay/video_overlay_window_views.h
++++ b/chrome/browser/ui/views/overlay/video_overlay_window_views.h
+@@ -7,6 +7,7 @@
+ 
+ #include <optional>
+ 
++#include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/timer/timer.h"
+@@ -68,6 +69,17 @@ class VideoOverlayWindowViews : public content::VideoOverlayWindow,
+   static std::unique_ptr<VideoOverlayWindowViews> Create(
+       content::VideoPictureInPictureWindowController* controller);
+ 
++  // browser: whether `controller` has a floating window, shown or not. The
++  // controller keeps its window between sessions and reuses it.
++  static bool HasWindowFor(
++      const content::VideoPictureInPictureWindowController* controller);
++
++  // Destroys the floating window of `controller`, if any, so its next session
++  // gets a new window, then runs `done`.
++  static void DestroyWindowFor(
++      content::VideoPictureInPictureWindowController* controller,
++      base::OnceClosure done);
++
+   VideoOverlayWindowViews(const VideoOverlayWindowViews&) = delete;
+   VideoOverlayWindowViews& operator=(const VideoOverlayWindowViews&) = delete;
+ 
+@@ -410,6 +422,9 @@ class VideoOverlayWindowViews : public content::VideoOverlayWindow,
+   // Not owned; |controller_| owns |this|.
+   raw_ptr<content::VideoPictureInPictureWindowController> controller_;
+ 
++  // browser: run once this window is destroyed; see DestroyWindowFor().
++  base::OnceClosure on_destroyed_;
++
+   // Whether or not the play/pause button will be shown.
+   bool show_play_pause_button_ = false;
+ 
+diff --git a/chrome/browser/ui/webui/BUILD.gn b/chrome/browser/ui/webui/BUILD.gn
+index 7341632b43..55a46d2abb 100644
+--- a/chrome/browser/ui/webui/BUILD.gn
++++ b/chrome/browser/ui/webui/BUILD.gn
+@@ -165,6 +165,7 @@ source_set("configs") {
+ 
+   if (is_win || is_mac || is_linux || is_chromeos) {
+     deps += [
++      "//chrome/browser/ui/views/overlay",
+       "//chrome/browser/ui/webui/settings",
+       "//chrome/browser/ui/webui/signin",
+       "//chrome/browser/ui/webui/skills",
+diff --git a/chrome/browser/ui/webui/chrome_web_ui_configs.cc b/chrome/browser/ui/webui/chrome_web_ui_configs.cc
+index 139fecebd5..081903d1b7 100644
+--- a/chrome/browser/ui/webui/chrome_web_ui_configs.cc
++++ b/chrome/browser/ui/webui/chrome_web_ui_configs.cc
+@@ -84,6 +84,7 @@
+ #include "chrome/browser/actor/ui/actor_overlay_ui.h"
+ #include "chrome/browser/contextual_cueing/internals/contextual_cueing_internals_ui.h"
+ #include "chrome/browser/ui/tabs/tab_group_home/tab_group_home_ui.h"
++#include "chrome/browser/ui/views/overlay/multiview/multiview_ui.h"
+ #include "chrome/browser/ui/webui/webui_toolbar/webui_toolbar_ui.h"
+ #include "chrome/browser/ui/webui_browser/webui_browser_ui.h"
+ #if !BUILDFLAG(IS_CHROMEOS)
+@@ -379,6 +380,8 @@ void RegisterChromeWebUIConfigs() {
+   map.AddWebUIConfig(std::make_unique<IwaDevUIConfig>());
+   map.AddWebUIConfig(
+       std::make_unique<media_router::MediaRouterInternalsUIConfig>());
++  // browser: chrome://multiview, the tab that shows videos side by side.
++  map.AddWebUIConfig(std::make_unique<MultiviewUIConfig>());
+   map.AddWebUIConfig(
+       std::make_unique<
+           multistep_filter_internals::MultistepFilterInternalsUIConfig>());
+diff --git a/components/global_media_controls/public/views/media_item_ui_updated_view.cc b/components/global_media_controls/public/views/media_item_ui_updated_view.cc
+index ed993ebdc9..5e2f449d49 100644
+--- a/components/global_media_controls/public/views/media_item_ui_updated_view.cc
++++ b/components/global_media_controls/public/views/media_item_ui_updated_view.cc
+@@ -173,6 +173,16 @@ MediaItemUIUpdatedView::MediaItemUIUpdatedView(
+           : vector_icons::kPictureInPictureAltOldIcon,
+       IDS_MEDIA_MESSAGE_CENTER_MEDIA_NOTIFICATION_ACTION_ENTER_PIP);
+ 
++  // browser: create the embedder's extra picture-in-picture button, hidden
++  // until SetExtraPictureInPictureAction() configures it.
++  extra_picture_in_picture_button_ = CreateMediaActionButton(
++      source_row, kEmptyMediaActionButtonId,
++      features::IsRoundedIconsEnabled()
++          ? vector_icons::kPictureInPictureAltIcon
++          : vector_icons::kPictureInPictureAltOldIcon,
++      IDS_MEDIA_MESSAGE_CENTER_MEDIA_NOTIFICATION_ACTION_ENTER_PIP);
++  extra_picture_in_picture_button_->SetVisible(false);
++
+   // Create the casting indicator view which is visible when footer view is
+   // shown.
+   casting_indicator_view_ =
+@@ -694,11 +704,32 @@ void MediaItemUIUpdatedView::UpdateMediaActionButtonsVisibility() {
+     }
+   }
+ 
++  // browser: the extra button shows with the picture-in-picture one.
++  const bool show_extra_button = has_extra_picture_in_picture_action_ &&
++                                 picture_in_picture_button_->GetVisible();
++  if (show_extra_button != extra_picture_in_picture_button_->GetVisible()) {
++    extra_picture_in_picture_button_->SetVisible(show_extra_button);
++    should_invalidate_layout = true;
++  }
++
+   if (should_invalidate_layout) {
+     InvalidateLayout();
+   }
+ }
+ 
++// browser: the embedder's extra action (multi-pip-multiview).
++void MediaItemUIUpdatedView::SetExtraPictureInPictureAction(
++    const gfx::VectorIcon& icon,
++    const std::u16string& tooltip,
++    base::RepeatingClosure callback) {
++  extra_picture_in_picture_button_->UpdateIcon(icon);
++  extra_picture_in_picture_button_->SetTooltipText(tooltip);
++  extra_picture_in_picture_button_->GetViewAccessibility().SetName(tooltip);
++  extra_picture_in_picture_button_->SetCallback(std::move(callback));
++  has_extra_picture_in_picture_action_ = true;
++  UpdateMediaActionButtonsVisibility();
++}
++
+ void MediaItemUIUpdatedView::UpdateTimestampLabelsVisibility() {
+   current_timestamp_label_->SetVisible(drag_state_ == DragState::kDragStarted);
+   duration_timestamp_label_->SetVisible(drag_state_ == DragState::kDragStarted);
+diff --git a/components/global_media_controls/public/views/media_item_ui_updated_view.h b/components/global_media_controls/public/views/media_item_ui_updated_view.h
+index 099ceb36eb..240e1c1dc3 100644
+--- a/components/global_media_controls/public/views/media_item_ui_updated_view.h
++++ b/components/global_media_controls/public/views/media_item_ui_updated_view.h
+@@ -5,8 +5,10 @@
+ #ifndef COMPONENTS_GLOBAL_MEDIA_CONTROLS_PUBLIC_VIEWS_MEDIA_ITEM_UI_UPDATED_VIEW_H_
+ #define COMPONENTS_GLOBAL_MEDIA_CONTROLS_PUBLIC_VIEWS_MEDIA_ITEM_UI_UPDATED_VIEW_H_
+ 
++#include <string>
+ #include <vector>
+ 
++#include "base/functional/callback_forward.h"
+ #include "base/memory/raw_ptr.h"
+ #include "components/global_media_controls/public/media_item_ui.h"
+ #include "components/global_media_controls/public/views/media_action_button.h"
+@@ -120,6 +122,13 @@ class COMPONENT_EXPORT(GLOBAL_MEDIA_CONTROLS) MediaItemUIUpdatedView
+   MediaActionButton* GetMediaActionButton(
+       media_session::mojom::MediaSessionAction action);
+ 
++  // browser: shows an extra button next to the picture-in-picture button,
++  // whenever that one shows, that runs `callback`. The embedder supplies the
++  // icon and text since the action is its own.
++  void SetExtraPictureInPictureAction(const gfx::VectorIcon& icon,
++                                      const std::u16string& tooltip,
++                                      base::RepeatingClosure callback);
++
+   // Helper functions for testing:
+   views::ImageView* GetArtworkViewForTesting();
+   views::ImageView* GetFaviconViewForTesting();
+@@ -220,6 +229,9 @@ class COMPONENT_EXPORT(GLOBAL_MEDIA_CONTROLS) MediaItemUIUpdatedView
+   raw_ptr<MediaActionButton> save_video_frame_button_ = nullptr;
+   raw_ptr<MediaActionButton> start_casting_button_ = nullptr;
+   raw_ptr<MediaActionButton> picture_in_picture_button_ = nullptr;
++  // browser: the extra action's button and whether one was set.
++  raw_ptr<MediaActionButton> extra_picture_in_picture_button_ = nullptr;
++  bool has_extra_picture_in_picture_action_ = false;
+   raw_ptr<MediaActionButton> play_pause_button_ = nullptr;
+ 
+   // Init parameters.
+diff --git a/content/browser/media/session/media_session_controller.cc b/content/browser/media/session/media_session_controller.cc
+index 6bc8cbbe2f..e48fbb5d4c 100644
+--- a/content/browser/media/session/media_session_controller.cc
++++ b/content/browser/media/session/media_session_controller.cc
+@@ -286,9 +286,11 @@ bool MediaSessionController::IsMediaSessionNeeded() const {
+     return true;
+   }
+ 
+-  // We want to make sure we do not request audio focus on a muted tab as it
+-  // would break user expectations by pausing/ducking other playbacks.
+-  return has_audio_ && !web_contents_->IsAudioMuted();
++  // browser: a muted tab keeps its media session, so its media stays listed in
++  // the media controls and can still be sent to picture-in-picture. Stock
++  // Chromium drops it so it cannot pause or duck other playback, but audio
++  // focus is only enforced on ChromeOS.
++  return has_audio_;
+ }
+ 
+ bool MediaSessionController::AddOrRemovePlayer() {
+diff --git a/content/browser/web_contents/web_contents_impl.cc b/content/browser/web_contents/web_contents_impl.cc
+index f038e08ea0..001101520f 100644
+--- a/content/browser/web_contents/web_contents_impl.cc
++++ b/content/browser/web_contents/web_contents_impl.cc
+@@ -77,6 +77,7 @@
+ #include "content/browser/compositor/surface_utils.h"
+ #include "content/browser/declarative_performance_observer/declarative_performance_observer_coordinator.h"
+ #include "content/browser/device_posture/device_posture_provider_impl.h"
++#include "content/browser/devtools/devtools_instrumentation.h"
+ #include "content/browser/devtools/protocol/page_handler.h"
+ #include "content/browser/devtools/render_frame_devtools_agent_host.h"
+ #include "content/browser/display_cutout/display_cutout_host_impl.h"
+@@ -3974,6 +3975,33 @@ void WebContentsImpl::DidChangeVisibleSecurityState() {
+       &WebContentsObserver::DidChangeVisibleSecurityState);
+ }
+ 
++// browser: print and permission signals for the action-outcome watch
++// (cancel-print-preview, dismiss-permission-prompts).
++void WebContentsImpl::DidRequestScriptedPrint(
++    RenderFrameHost* render_frame_host) {
++  observers_.NotifyObservers(&WebContentsObserver::DidRequestScriptedPrint,
++                             render_frame_host);
++}
++
++void WebContentsImpl::DidDismissUnseenPermissionPrompt(
++    RenderFrameHost* render_frame_host,
++    const std::vector<std::string>& permissions,
++    const url::Origin& origin,
++    base::TimeDelta shown_for) {
++  RenderFrameHostImpl* rfh =
++      render_frame_host ? static_cast<RenderFrameHostImpl*>(render_frame_host)
++                        : GetPrimaryMainFrame();
++  if (!rfh) {
++    return;
++  }
++  // Whether a frame of another origin than the top page's asked.
++  const bool cross_origin = !origin.IsSameOriginWith(
++      rfh->GetOutermostMainFrame()->GetLastCommittedOrigin());
++  devtools_instrumentation::DidDismissPermissionPrompt(
++      rfh, permissions, origin.Serialize(), cross_origin,
++      shown_for.InMillisecondsF());
++}
++
+ const blink::web_pref::WebPreferences WebContentsImpl::ComputeWebPreferences(
+     RenderFrameHostImpl* main_frame) {
+   OPTIONAL_TRACE_EVENT0("browser", "WebContentsImpl::ComputeWebPreferences");
+@@ -7050,6 +7078,25 @@ WebContents* WebContentsImpl::OpenURL(
+   WebContents* new_contents = delegate_->OpenURLFromTab(
+       this, params, std::move(navigation_handle_callback));
+ 
++  // browser: a tab a page opened with no opener of its own -- a ctrl+click, a
++  // middle-click, "open in new tab" -- still records, for DevTools alone,
++  // which page opened it (Target info's openerFrameId: the opening page's main
++  // frame), so an automation client can tell the tabs it opened from another
++  // client's. window.open sets the same token; nothing a page can see is
++  // drawn from it. The source frame may have gone during the call; the weak
++  // pointer says so.
++  if (new_contents && new_contents != this && weak_source_rfh &&
++      params.disposition != WindowOpenDisposition::CURRENT_TAB &&
++      new_contents->GetController().IsInitialNavigation()) {
++    FrameTreeNode* new_root = static_cast<WebContentsImpl*>(new_contents)
++                                  ->GetPrimaryFrameTree()
++                                  .root();
++    if (!new_root->opener_devtools_frame_token()) {
++      new_root->SetOpenerDevtoolsFrameToken(
++          weak_source_rfh->GetOutermostMainFrame()->devtools_frame_token());
++    }
++  }
++
+   if (new_contents && weak_source_rfh && new_contents != this) {
+     observers_.NotifyObservers(
+         &WebContentsObserver::DidOpenRequestedURL, new_contents,
+@@ -12343,7 +12390,7 @@ PictureInPictureResult WebContentsImpl::EnterPictureInPicture() {
+ void WebContentsImpl::ExitPictureInPicture() {
+   OPTIONAL_TRACE_EVENT0("content", "WebContentsImpl::ExitPictureInPicture");
+   if (delegate_) {
+-    delegate_->ExitPictureInPicture();
++    delegate_->ExitPictureInPictureForWebContents(this);  // browser
+   }
+ }
+ 
+diff --git a/content/browser/web_contents/web_contents_impl.h b/content/browser/web_contents/web_contents_impl.h
+index fef4c035f6..1c8a7f5437 100644
+--- a/content/browser/web_contents/web_contents_impl.h
++++ b/content/browser/web_contents/web_contents_impl.h
+@@ -532,6 +532,13 @@ class CONTENT_EXPORT WebContentsImpl
+   std::vector<WebContents*> GetInnerWebContents() override;
+   WebContentsImpl* GetResponsibleWebContents() override;
+   void DidChangeVisibleSecurityState() override;
++  // browser: print and permission signals (see the .cc).
++  void DidRequestScriptedPrint(RenderFrameHost* render_frame_host) override;
++  void DidDismissUnseenPermissionPrompt(
++      RenderFrameHost* render_frame_host,
++      const std::vector<std::string>& permissions,
++      const url::Origin& origin,
++      base::TimeDelta shown_for) override;
+   void SyncRendererPrefs() override;
+   void Stop() override;
+   void SetPageFrozen(bool frozen) override;
+diff --git a/content/public/browser/web_contents.h b/content/public/browser/web_contents.h
+index 29358322a5..a24c5b3840 100644
+--- a/content/public/browser/web_contents.h
++++ b/content/public/browser/web_contents.h
+@@ -1159,6 +1159,22 @@ class WebContents : public PageNavigator, public base::SupportsUserData {
+   // Invoked when visible security state changes.
+   virtual void DidChangeVisibleSecurityState() = 0;
+ 
++  // browser: a frame of this page called window.print() and the print manager
++  // took the request. The page waits in print() from now until the print ends;
++  // observers hear it now (WebContentsObserver::DidRequestScriptedPrint).
++  virtual void DidRequestScriptedPrint(RenderFrameHost* render_frame_host) = 0;
++
++  // browser: the browser closed a permission prompt of this page unanswered,
++  // as a person closing it would (--dismiss-permission-prompts): `permissions`
++  // by Chrome's names for them, asked by `origin` from `render_frame_host`
++  // (null: the page's main frame), after the prompt stood `shown_for`. The
++  // page's DevTools clients hear it (Input.permissionPromptDismissed).
++  virtual void DidDismissUnseenPermissionPrompt(
++      RenderFrameHost* render_frame_host,
++      const std::vector<std::string>& permissions,
++      const url::Origin& origin,
++      base::TimeDelta shown_for) = 0;
++
+   // Sends the current preferences to all renderer processes for the current
+   // page.
+   virtual void SyncRendererPrefs() = 0;
+diff --git a/content/public/browser/web_contents_delegate.cc b/content/public/browser/web_contents_delegate.cc
+index 2de5b3392b..dee5f0085a 100644
+--- a/content/public/browser/web_contents_delegate.cc
++++ b/content/public/browser/web_contents_delegate.cc
+@@ -420,6 +420,12 @@ PictureInPictureResult WebContentsDelegate::EnterPictureInPicture(
+   return PictureInPictureResult::kNotSupported;
+ }
+ 
++// browser: per-tab exit; the default forwards (multi-pip-multiview).
++void WebContentsDelegate::ExitPictureInPictureForWebContents(
++    WebContents* web_contents) {
++  ExitPictureInPicture();
++}
++
+ std::optional<gfx::Rect> WebContentsDelegate::GetWindowBoundsInScreen() {
+   return std::nullopt;
+ }
+@@ -539,4 +545,14 @@ void WebContentsDelegate::RequestImmersivePlaybackConfirmation(
+   std::move(callback).Run(std::move(result));
+ }
+ 
++// browser: only the delegate of a Browser.agentFetch page overrides these
++// (agent-fetch).
++bool WebContentsDelegate::IsAgentFetchContents() {
++  return false;
++}
++
++AgentFetchResponseTaker* WebContentsDelegate::GetAgentFetchResponseTaker() {
++  return nullptr;
++}
++
+ }  // namespace content
+diff --git a/content/public/browser/web_contents_delegate.h b/content/public/browser/web_contents_delegate.h
+index cd03383472..c39c9b3159 100644
+--- a/content/public/browser/web_contents_delegate.h
++++ b/content/public/browser/web_contents_delegate.h
+@@ -105,6 +105,7 @@ enum class ProtocolHandlerSecurityLevel;
+ 
+ namespace content {
+ 
++class AgentFetchResponseTaker;  // browser
+ class AudioStreamBrokerFactory;
+ #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_APPLE)
+ class ColorChooser;
+@@ -811,6 +812,11 @@ class CONTENT_EXPORT WebContentsDelegate {
+   // Picture-in-Picture mode has ended.
+   virtual void ExitPictureInPicture() {}
+ 
++  // browser: same as above, naming the WebContents whose Picture-in-Picture
++  // mode ended, for delegates that show the windows of several WebContents at
++  // once. The default calls `ExitPictureInPicture()`.
++  virtual void ExitPictureInPictureForWebContents(WebContents* web_contents);
++
+ #if BUILDFLAG(IS_ANDROID)
+   // Updates information to determine whether a user gesture should carryover to
+   // future navigations. This is needed so navigations within a certain
+@@ -975,6 +981,16 @@ class CONTENT_EXPORT WebContentsDelegate {
+       const ImmersiveOptions& default_options,
+       base::OnceCallback<void(ImmersivePlaybackConfirmationResult)> callback);
+ 
++  // browser: whether this WebContents is a Browser.agentFetch page. Such a
++  // page is kept out of DevTools target discovery, never launches an
++  // external protocol handler, and keeps its responses from MIME-handler
++  // extensions.
++  virtual bool IsAgentFetchContents();
++
++  // browser: the taker of this WebContents' top-level navigation responses,
++  // or null. See agent_fetch_response_taker.h.
++  virtual AgentFetchResponseTaker* GetAgentFetchResponseTaker();
++
+  protected:
+   virtual ~WebContentsDelegate();
+ 
+-- 
+2.45.1.windows.1
+

@@ -1,0 +1,69 @@
+From 976701ef5cff8ed7836c527178ddaf2cd3f4454c Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:13:32 -0500
+Subject: [PATCH 25/55] private-clipboard
+
+--private-clipboard: a headed browser gets the headless in-memory
+clipboard, so nothing a page or Input.dispatchPaste puts there reaches the
+system clipboard. The switch declaration rides in switch-resolver.
+---
+ chrome/browser/headless/BUILD.gn                         | 1 +
+ chrome/browser/headless/DEPS                             | 1 +
+ .../headless/chrome_browser_main_extra_parts_headless.cc | 9 ++++++++-
+ 3 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/chrome/browser/headless/BUILD.gn b/chrome/browser/headless/BUILD.gn
+index 0d83cc4c30..a541fd5282 100644
+--- a/chrome/browser/headless/BUILD.gn
++++ b/chrome/browser/headless/BUILD.gn
+@@ -102,6 +102,7 @@ if (!is_android) {
+       ":headless",
+       "//base",
+       "//chrome/browser:main_extra_parts",
++      "//components/browser:browser_switches",
+       "//components/headless/clipboard",
+     ]
+   }
+diff --git a/chrome/browser/headless/DEPS b/chrome/browser/headless/DEPS
+index e28d99e2fb..a50769cfd7 100644
+--- a/chrome/browser/headless/DEPS
++++ b/chrome/browser/headless/DEPS
+@@ -1,6 +1,7 @@
+ include_rules = [
+   "-chrome/browser",
+   "+chrome/browser/headless",
++  "+components/browser/browser_switches.h",
+   "+components/headless",
+ ]
+ 
+diff --git a/chrome/browser/headless/chrome_browser_main_extra_parts_headless.cc b/chrome/browser/headless/chrome_browser_main_extra_parts_headless.cc
+index e08b97b89c..601a13d934 100644
+--- a/chrome/browser/headless/chrome_browser_main_extra_parts_headless.cc
++++ b/chrome/browser/headless/chrome_browser_main_extra_parts_headless.cc
+@@ -4,7 +4,9 @@
+ 
+ #include "chrome/browser/headless/chrome_browser_main_extra_parts_headless.h"
+ 
++#include "base/command_line.h"
+ #include "chrome/browser/headless/headless_mode_util.h"
++#include "components/browser/browser_switches.h"
+ #include "components/headless/clipboard/headless_clipboard.h"
+ 
+ namespace headless {
+@@ -17,7 +19,12 @@ ChromeBrowserMainExtraPartsHeadless::~ChromeBrowserMainExtraPartsHeadless() =
+ void ChromeBrowserMainExtraPartsHeadless::PreBrowserStart() {
+   // Headless mode uses platform independent clipboard which we need to set
+   // before generic clipboard implementation sets the platform specific one.
+-  if (IsHeadlessMode()) {
++  // browser: so does a headed browser asked to keep its clipboard to itself
++  // (--private-clipboard). Otherwise an agent pressing Ctrl+V pastes whatever
++  // the person at the machine last copied, and a page's "Copy" button can
++  // overwrite it.
++  if (IsHeadlessMode() || base::CommandLine::ForCurrentProcess()->HasSwitch(
++                              ::switches::kPrivateClipboard)) {
+     SetHeadlessClipboardForCurrentThread();
+   }
+ }
+-- 
+2.45.1.windows.1
+

@@ -1,0 +1,608 @@
+From 9bce31e35fa60e9e212268518e449c74e1f85674 Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:12:26 -0500
+Subject: [PATCH 13/55] cursor-overlay
+
+CDP screencast cursor overlay compositing. Its page_handler.cc/.h wiring
+rides in agent-snapshot, which dominates that file; its BUILD.gn sources and
+input_handler member ride in keyboard-typing.
+
+One overlay per tab (WebContentsUserData), redrawn through DevToolsVideoConsumer::RequestRefreshFrame; the frame-stream's change callback rides in devtools_video_consumer.*.
+---
+ .../browser/devtools/cdp_cursor_overlay.cc    | 352 ++++++++++++++++++
+ content/browser/devtools/cdp_cursor_overlay.h | 130 +++++++
+ .../devtools/devtools_video_consumer.cc       |  27 ++
+ .../devtools/devtools_video_consumer.h        |  15 +
+ 4 files changed, 524 insertions(+)
+ create mode 100644 content/browser/devtools/cdp_cursor_overlay.cc
+ create mode 100644 content/browser/devtools/cdp_cursor_overlay.h
+
+diff --git a/content/browser/devtools/cdp_cursor_overlay.cc b/content/browser/devtools/cdp_cursor_overlay.cc
+new file mode 100644
+index 0000000000..dd1239206e
+--- /dev/null
++++ b/content/browser/devtools/cdp_cursor_overlay.cc
+@@ -0,0 +1,352 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "content/browser/devtools/cdp_cursor_overlay.h"
++
++#include <algorithm>
++#include <cmath>
++#include <utility>
++
++#include "base/command_line.h"
++#include "base/numerics/safe_conversions.h"
++#include "components/browser/browser_switches.h"
++#include "content/browser/renderer_host/render_frame_host_impl.h"
++#include "content/browser/renderer_host/render_widget_host_impl.h"
++#include "content/browser/renderer_host/render_widget_host_view_base.h"
++#include "content/browser/web_contents/web_contents_impl.h"
++#include "third_party/blink/public/common/input/web_input_event.h"
++#include "third_party/blink/public/common/input/web_mouse_event.h"
++#include "third_party/skia/include/core/SkCanvas.h"
++#include "third_party/skia/include/core/SkPaint.h"
++#include "third_party/skia/include/core/SkPathBuilder.h"
++#include "ui/aura/window.h"
++#include "ui/compositor/layer.h"
++#include "ui/compositor/layer_textured.h"
++#include "ui/compositor/paint_context.h"
++#include "ui/compositor/paint_recorder.h"
++#include "ui/gfx/canvas.h"
++#include "ui/gfx/geometry/point.h"
++
++namespace content {
++
++namespace {
++
++constexpr int kCursorSize = 32;
++constexpr int kRippleRadius = 16;
++constexpr base::TimeDelta kClickAnimationDuration = base::Milliseconds(400);
++
++constexpr SkColor kCursorColor = SK_ColorWHITE;
++constexpr SkColor kClickColor = SkColorSetRGB(255, 165, 0);
++constexpr SkColor kRippleColor = SkColorSetARGB(100, 255, 165, 0);
++
++// The arrow, in a 32 x 32 box with the hotspot at the origin.
++SkPath CursorPath() {
++  return SkPathBuilder()
++      .moveTo(0, 0)
++      .lineTo(0, 24)
++      .lineTo(6, 18)
++      .lineTo(10, 26)
++      .lineTo(14, 24)
++      .lineTo(9, 16)
++      .lineTo(16, 16)
++      .close()
++      .detach();
++}
++
++// The origin of a layer drawn at `pos`: truncated toward zero, as a cast
++// would, and held within the int range, so a point far off the page cannot
++// overflow.
++gfx::Point LayerOrigin(const gfx::PointF& pos) {
++  return gfx::Point(base::saturated_cast<int>(pos.x()),
++                    base::saturated_cast<int>(pos.y()));
++}
++
++}  // namespace
++
++class CdpCursorOverlay::CursorLayerDelegate : public ui::LayerDelegate {
++ public:
++  explicit CursorLayerDelegate(CdpCursorOverlay* owner) : owner_(owner) {}
++  void OnPaintLayer(const ui::PaintContext& context) override {
++    owner_->PaintCursor(context);
++  }
++  void OnDeviceScaleFactorChanged(float, float) override {
++    if (owner_->cursor_layer_) {
++      owner_->cursor_layer_->SchedulePaint(
++          gfx::Rect(owner_->cursor_layer_->size()));
++    }
++  }
++
++ private:
++  raw_ptr<CdpCursorOverlay> owner_;
++};
++
++class CdpCursorOverlay::ClickLayerDelegate : public ui::LayerDelegate {
++ public:
++  explicit ClickLayerDelegate(CdpCursorOverlay* owner) : owner_(owner) {}
++  void OnPaintLayer(const ui::PaintContext& context) override {
++    owner_->PaintClickRipple(context);
++  }
++  void OnDeviceScaleFactorChanged(float, float) override {}
++
++ private:
++  raw_ptr<CdpCursorOverlay> owner_;
++};
++
++// static
++CdpCursorOverlay* CdpCursorOverlay::ForWebContents(WebContents* web_contents) {
++  if (!web_contents || !base::CommandLine::ForCurrentProcess()->HasSwitch(
++                           switches::kShowCdpCursor)) {
++    return nullptr;
++  }
++  return GetOrCreateForWebContents(web_contents);
++}
++
++CdpCursorOverlay::CdpCursorOverlay(WebContents* web_contents)
++    : WebContentsObserver(web_contents),
++      WebContentsUserData<CdpCursorOverlay>(*web_contents) {}
++
++CdpCursorOverlay::~CdpCursorOverlay() {
++  Detach();
++}
++
++void CdpCursorOverlay::Follow() {
++  auto* contents = static_cast<WebContentsImpl*>(web_contents());
++  RenderFrameHostImpl* main_frame =
++      contents ? contents->GetPrimaryMainFrame() : nullptr;
++  RenderWidgetHostImpl* widget_host =
++      main_frame ? main_frame->GetRenderWidgetHost() : nullptr;
++  RenderWidgetHostViewBase* view =
++      widget_host ? widget_host->GetView() : nullptr;
++  if (!view || view->IsRenderWidgetHostViewChildFrame()) {
++    return;
++  }
++  aura::Window* window = view->GetNativeView();
++  if (!window || window == attached_window_) {
++    return;  // nowhere to draw yet, or drawing there already
++  }
++  AttachTo(widget_host, window);
++}
++
++void CdpCursorOverlay::RenderFrameHostChanged(RenderFrameHost* old_host,
++                                              RenderFrameHost* new_host) {
++  // A cross-process navigation gives the tab a new top-level view; the cursor
++  // goes with it, where it was.
++  if (new_host && new_host->IsInPrimaryMainFrame()) {
++    Follow();
++  }
++}
++
++void CdpCursorOverlay::PrimaryPageChanged(Page& page) {
++  Follow();
++}
++
++void CdpCursorOverlay::RenderViewReady() {
++  Follow();  // a view that had no window when last asked
++}
++
++base::CallbackListSubscription CdpCursorOverlay::AddChangedCallback(
++    base::RepeatingClosure callback) {
++  return changed_callbacks_.Add(std::move(callback));
++}
++
++void CdpCursorOverlay::AttachTo(RenderWidgetHostImpl* widget_host,
++                                aura::Window* window) {
++  Detach();
++
++  // The router sees every mouse event, including ones routed into OOPIFs.
++  if (widget_host->delegate()) {
++    if (auto* router = widget_host->delegate()->GetInputEventRouter()) {
++      router_ = router->GetWeakPtr();
++      router->AddMouseEventRouteObserver(this);
++    }
++  }
++
++  attached_window_ = window;
++  window->AddObserver(this);
++
++  cursor_delegate_ = std::make_unique<CursorLayerDelegate>(this);
++  click_delegate_ = std::make_unique<ClickLayerDelegate>(this);
++
++  cursor_layer_ = std::make_unique<ui::LayerTextured>();
++  // Where the pointer was: a new view after a navigation keeps it in place.
++  cursor_layer_->SetBounds(gfx::Rect(LayerOrigin(current_pos_),
++                                     gfx::Size(kCursorSize, kCursorSize)));
++  cursor_layer_->set_delegate(cursor_delegate_.get());
++  cursor_layer_->SetFillsBoundsOpaquely(false);
++  cursor_layer_->SetVisible(true);
++  cursor_layer_->SetName("CdpCursorOverlay");
++
++  click_layer_ = std::make_unique<ui::LayerTextured>();
++  click_layer_->set_delegate(click_delegate_.get());
++  click_layer_->SetFillsBoundsOpaquely(false);
++  click_layer_->SetVisible(false);
++  click_layer_->SetName("CdpCursorClickRipple");
++
++  // Above the page content.
++  window->layer()->Add(cursor_layer_.get());
++  window->layer()->StackAtTop(cursor_layer_.get());
++  window->layer()->Add(click_layer_.get());
++  window->layer()->StackAtTop(click_layer_.get());
++}
++
++void CdpCursorOverlay::Detach() {
++  // The click ripple's timer runs on: a click that navigates re-attaches
++  // within its 400 ms, and only the timer's end gives the cursor back its
++  // resting color.
++  if (router_) {
++    router_->RemoveMouseEventRouteObserver(this);
++  }
++  router_.reset();
++
++  if (attached_window_) {
++    attached_window_->RemoveObserver(this);
++    if (cursor_layer_ && cursor_layer_->parent()) {
++      cursor_layer_->parent()->Remove(cursor_layer_.get());
++    }
++    if (click_layer_ && click_layer_->parent()) {
++      click_layer_->parent()->Remove(click_layer_.get());
++    }
++    attached_window_ = nullptr;
++  }
++
++  cursor_layer_.reset();
++  click_layer_.reset();
++  cursor_delegate_.reset();
++  click_delegate_.reset();
++}
++
++void CdpCursorOverlay::UpdatePosition(float dip_x, float dip_y, bool is_click) {
++  MoveCursorTo(dip_x, dip_y);
++  if (is_click) {
++    StartClickAnimation();
++  }
++}
++
++void CdpCursorOverlay::OnMouseEventRouted(const blink::WebMouseEvent& event) {
++  MoveCursorTo(event.PositionInWidget().x(), event.PositionInWidget().y());
++  if (event.GetType() == blink::WebInputEvent::Type::kMouseDown) {
++    StartClickAnimation();
++  }
++}
++
++void CdpCursorOverlay::OnWindowDestroying(aura::Window* window) {
++  Detach();
++}
++
++void CdpCursorOverlay::MoveCursorTo(float dip_x, float dip_y) {
++  // A point that is not finite is nowhere on the page: the cursor stays where
++  // it was.
++  if (!std::isfinite(dip_x) || !std::isfinite(dip_y)) {
++    return;
++  }
++  const gfx::PointF pos(dip_x, dip_y);
++  if (pos == current_pos_) {
++    return;  // a press, a release, or a still drag's dragover
++  }
++  current_pos_ = pos;
++  if (cursor_layer_) {
++    cursor_layer_->SetBounds(gfx::Rect(LayerOrigin(current_pos_),
++                                       gfx::Size(kCursorSize, kCursorSize)));
++  }
++  changed_callbacks_.Notify();
++}
++
++void CdpCursorOverlay::PaintCursor(const ui::PaintContext& context) {
++  ui::PaintRecorder recorder(context, cursor_layer_->size());
++  gfx::Canvas* canvas = recorder.canvas();
++  const SkPath path = CursorPath();
++
++  cc::PaintFlags fill;
++  fill.setColor(is_clicking_ ? kClickColor : kCursorColor);
++  fill.setAntiAlias(true);
++  fill.setStyle(cc::PaintFlags::kFill_Style);
++  canvas->DrawPath(path, fill);
++
++  cc::PaintFlags stroke;
++  stroke.setColor(SK_ColorBLACK);
++  stroke.setAntiAlias(true);
++  stroke.setStyle(cc::PaintFlags::kStroke_Style);
++  stroke.setStrokeWidth(1.0f);
++  canvas->DrawPath(path, stroke);
++}
++
++void CdpCursorOverlay::PaintClickRipple(const ui::PaintContext& context) {
++  const gfx::Size ripple_size(kRippleRadius * 2, kRippleRadius * 2);
++  ui::PaintRecorder recorder(context, ripple_size);
++
++  cc::PaintFlags flags;
++  flags.setColor(kRippleColor);
++  flags.setAntiAlias(true);
++  flags.setStyle(cc::PaintFlags::kFill_Style);
++  recorder.canvas()->DrawCircle(gfx::PointF(kRippleRadius, kRippleRadius),
++                                static_cast<float>(kRippleRadius), flags);
++}
++
++void CdpCursorOverlay::StartClickAnimation() {
++  is_clicking_ = true;
++  if (cursor_layer_) {
++    cursor_layer_->SchedulePaint(gfx::Rect(cursor_layer_->size()));
++  }
++  if (click_layer_) {
++    gfx::Point ripple_origin = LayerOrigin(current_pos_);
++    ripple_origin.Offset(-kRippleRadius, -kRippleRadius);
++    click_layer_->SetBounds(gfx::Rect(
++        ripple_origin, gfx::Size(kRippleRadius * 2, kRippleRadius * 2)));
++    click_layer_->SetVisible(true);
++    click_layer_->SchedulePaint(gfx::Rect(click_layer_->size()));
++  }
++  click_timer_.Start(FROM_HERE, kClickAnimationDuration,
++                     base::BindOnce(&CdpCursorOverlay::OnClickAnimationEnd,
++                                    base::Unretained(this)));
++  changed_callbacks_.Notify();
++}
++
++void CdpCursorOverlay::OnClickAnimationEnd() {
++  is_clicking_ = false;
++  if (cursor_layer_) {
++    cursor_layer_->SchedulePaint(gfx::Rect(cursor_layer_->size()));
++  }
++  if (click_layer_) {
++    click_layer_->SetVisible(false);
++  }
++  changed_callbacks_.Notify();
++}
++
++void CdpCursorOverlay::CompositeCursorOnto(SkBitmap& bitmap,
++                                           float scale_x,
++                                           float scale_y) {
++  SkCanvas canvas(bitmap);
++  const float x = current_pos_.x() * scale_x;
++  const float y = current_pos_.y() * scale_y;
++  const float cursor_scale = std::min(scale_x, scale_y);
++
++  canvas.save();
++  canvas.translate(x, y);
++  canvas.scale(cursor_scale, cursor_scale);
++  const SkPath path = CursorPath();
++
++  SkPaint fill;
++  fill.setColor(is_clicking_ ? kClickColor : kCursorColor);
++  fill.setAntiAlias(true);
++  canvas.drawPath(path, fill);
++
++  SkPaint stroke;
++  stroke.setColor(SK_ColorBLACK);
++  stroke.setAntiAlias(true);
++  stroke.setStyle(SkPaint::kStroke_Style);
++  stroke.setStrokeWidth(1.0f);
++  canvas.drawPath(path, stroke);
++  canvas.restore();
++
++  if (is_clicking_) {
++    SkPaint ripple;
++    ripple.setColor(kRippleColor);
++    ripple.setAntiAlias(true);
++    canvas.drawCircle(x, y, kRippleRadius * cursor_scale, ripple);
++  }
++}
++
++WEB_CONTENTS_USER_DATA_KEY_IMPL(CdpCursorOverlay);
++
++}  // namespace content
+diff --git a/content/browser/devtools/cdp_cursor_overlay.h b/content/browser/devtools/cdp_cursor_overlay.h
+new file mode 100644
+index 0000000000..9c6fd3c7c9
+--- /dev/null
++++ b/content/browser/devtools/cdp_cursor_overlay.h
+@@ -0,0 +1,130 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CONTENT_BROWSER_DEVTOOLS_CDP_CURSOR_OVERLAY_H_
++#define CONTENT_BROWSER_DEVTOOLS_CDP_CURSOR_OVERLAY_H_
++
++#include <memory>
++
++#include "base/callback_list.h"
++#include "base/functional/callback.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/timer/timer.h"
++#include "components/input/render_widget_host_input_event_router.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "ui/aura/window_observer.h"
++#include "ui/compositor/layer_delegate.h"
++#include "ui/gfx/geometry/point_f.h"
++
++namespace aura {
++class Window;
++}
++
++namespace ui {
++class Layer;
++}
++
++namespace content {
++
++class Page;
++class RenderFrameHost;
++class RenderWidgetHostImpl;
++
++// Draws a visible cursor on a ui::Layer above a tab's page while
++// --show-cdp-cursor is set, so an observer can follow synthetic input. The
++// layer is the browser's own, over the page rather than in it: the page never
++// sees it, and nor does a screenshot, which copies only the page's surface.
++// Page.startScreencast and Page.startFrameStream draw it onto their frames.
++//
++// One per tab, shared by every DevTools session attached to it: a viewer's
++// session and an iframe's move the one cursor rather than adding their own.
++// Mouse positions come from the RenderWidgetHostInputEventRouter
++// (dispatchMousePath, including events routed into OOPIFs) and from
++// InputHandler directly for the input that bypasses it: dispatchMouseEvent,
++// and a drag's dragovers.
++class CdpCursorOverlay
++    : public WebContentsObserver,
++      public WebContentsUserData<CdpCursorOverlay>,
++      public aura::WindowObserver,
++      public input::RenderWidgetHostInputEventRouter::MouseEventRouteObserver {
++ public:
++  // The tab's overlay, made on first use; null without --show-cdp-cursor.
++  static CdpCursorOverlay* ForWebContents(WebContents* web_contents);
++
++  ~CdpCursorOverlay() override;
++
++  CdpCursorOverlay(const CdpCursorOverlay&) = delete;
++  CdpCursorOverlay& operator=(const CdpCursorOverlay&) = delete;
++
++  // Draws over the top-level view of the tab's primary page, whichever frame
++  // the asking session is on: an iframe draws inside its page's window, and a
++  // speculative or prerendered page is not on screen.
++  void Follow();
++
++  // For input that bypasses the router; a point in the tab's root view.
++  void UpdatePosition(float dip_x, float dip_y, bool is_click);
++
++  // Draws the cursor onto a screencast frame. The scale factors convert the
++  // DIP cursor position to bitmap pixels.
++  void CompositeCursorOnto(SkBitmap& bitmap, float scale_x, float scale_y);
++
++  // Runs |callback| whenever the cursor moves or its click ripple starts or
++  // ends. A capture that draws the cursor asks for a frame then: a cursor
++  // moving over a still page damages nothing, so nothing new is captured.
++  base::CallbackListSubscription AddChangedCallback(
++      base::RepeatingClosure callback);
++
++  // WebContentsObserver: the primary page's view can change under it.
++  void RenderFrameHostChanged(RenderFrameHost* old_host,
++                              RenderFrameHost* new_host) override;
++  void PrimaryPageChanged(Page& page) override;
++  void RenderViewReady() override;
++
++  // input::RenderWidgetHostInputEventRouter::MouseEventRouteObserver:
++  void OnMouseEventRouted(const blink::WebMouseEvent& event) override;
++
++  // aura::WindowObserver:
++  void OnWindowDestroying(aura::Window* window) override;
++
++ private:
++  friend class WebContentsUserData<CdpCursorOverlay>;
++  class CursorLayerDelegate;
++  class ClickLayerDelegate;
++
++  explicit CdpCursorOverlay(WebContents* web_contents);
++
++  void AttachTo(RenderWidgetHostImpl* widget_host, aura::Window* window);
++  void Detach();
++
++  void MoveCursorTo(float dip_x, float dip_y);
++  void PaintCursor(const ui::PaintContext& context);
++  void PaintClickRipple(const ui::PaintContext& context);
++  void StartClickAnimation();
++  void OnClickAnimationEnd();
++
++  std::unique_ptr<CursorLayerDelegate> cursor_delegate_;
++  std::unique_ptr<ClickLayerDelegate> click_delegate_;
++  std::unique_ptr<ui::Layer> cursor_layer_;
++  std::unique_ptr<ui::Layer> click_layer_;
++  base::OneShotTimer click_timer_;
++
++  // Weak, not raw: the router belongs to the tab's WebContents, which can be
++  // destroyed before this overlay is detached.
++  base::WeakPtr<input::RenderWidgetHostInputEventRouter> router_;
++  raw_ptr<aura::Window> attached_window_ = nullptr;
++
++  gfx::PointF current_pos_;
++  bool is_clicking_ = false;
++
++  base::RepeatingClosureList changed_callbacks_;
++
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++
++}  // namespace content
++
++#endif  // CONTENT_BROWSER_DEVTOOLS_CDP_CURSOR_OVERLAY_H_
+diff --git a/content/browser/devtools/devtools_video_consumer.cc b/content/browser/devtools/devtools_video_consumer.cc
+index 47660a1a9a..2438145d58 100644
+--- a/content/browser/devtools/devtools_video_consumer.cc
++++ b/content/browser/devtools/devtools_video_consumer.cc
+@@ -73,6 +73,7 @@ void DevToolsVideoConsumer::StartCapture() {
+ }
+ 
+ void DevToolsVideoConsumer::StopCapture() {
++  refresh_timer_.Stop();  // browser
+   if (!capturer_)
+     return;
+   capturer_.reset();
+@@ -112,6 +113,32 @@ void DevToolsVideoConsumer::SetFormat(media::VideoPixelFormat format) {
+   }
+ }
+ 
++// browser: a cursor moving over a still page is a request per mouse event;
++// the capturer would refuse most of them as too soon and retry on its own.
++void DevToolsVideoConsumer::RequestRefreshFrame() {
++  if (!capturer_ || refresh_timer_.IsRunning()) {
++    return;
++  }
++  const base::TimeDelta wait =
++      last_refresh_request_ + min_capture_period_ - base::TimeTicks::Now();
++  if (wait.is_positive()) {
++    refresh_timer_.Start(
++        FROM_HERE, wait,
++        base::BindOnce(&DevToolsVideoConsumer::SendRefreshFrameRequest,
++                       base::Unretained(this)));
++    return;
++  }
++  SendRefreshFrameRequest();
++}
++
++void DevToolsVideoConsumer::SendRefreshFrameRequest() {
++  if (!capturer_) {
++    return;
++  }
++  last_refresh_request_ = base::TimeTicks::Now();
++  capturer_->RequestRefreshFrame();
++}
++
+ void DevToolsVideoConsumer::InnerStartCapture(
+     std::unique_ptr<viz::ClientFrameSinkVideoCapturer> capturer) {
+   capturer_ = std::move(capturer);
+diff --git a/content/browser/devtools/devtools_video_consumer.h b/content/browser/devtools/devtools_video_consumer.h
+index 549877b42f..6a36acec08 100644
+--- a/content/browser/devtools/devtools_video_consumer.h
++++ b/content/browser/devtools/devtools_video_consumer.h
+@@ -8,6 +8,7 @@
+ #include <memory>
+ 
+ #include "base/time/time.h"
++#include "base/timer/timer.h"
+ #include "components/viz/host/client_frame_sink_video_capturer.h"
+ #include "content/common/content_export.h"
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+@@ -52,6 +53,12 @@ class CONTENT_EXPORT DevToolsVideoConsumer
+                              gfx::Size max_frame_size);
+   void SetFormat(media::VideoPixelFormat format);
+ 
++  // browser: asks for a frame of the page as it is now, though nothing in it
++  // has changed: something drawn onto frames afterwards (the cursor overlay)
++  // has. At most one request goes out per min capture period; one made
++  // inside it goes when the period ends.
++  void RequestRefreshFrame();
++
+  private:
+   friend class DevToolsVideoConsumerTest;
+ 
+@@ -65,6 +72,9 @@ class CONTENT_EXPORT DevToolsVideoConsumer
+   bool IsValidMinAndMaxFrameSize(gfx::Size min_frame_size,
+                                  gfx::Size max_frame_size);
+ 
++  // browser: RequestRefreshFrame's request, when its wait is over.
++  void SendRefreshFrameRequest();
++
+   // viz::mojom::FrameSinkVideoConsumer:
+   void OnFrameCaptured(
+       ::media::mojom::VideoBufferHandlePtr data,
+@@ -96,6 +106,11 @@ class CONTENT_EXPORT DevToolsVideoConsumer
+ 
+   // If |capturer_| is alive, then we are currently capturing.
+   std::unique_ptr<viz::ClientFrameSinkVideoCapturer> capturer_;
++
++  // browser: when RequestRefreshFrame last asked, and its wait for the end of
++  // the min capture period.
++  base::TimeTicks last_refresh_request_;
++  base::OneShotTimer refresh_timer_;
+ };
+ 
+ }  // namespace content
+-- 
+2.45.1.windows.1
+

@@ -1,0 +1,234 @@
+From 3347fd9e4afe948209419c3227cef978274ff895 Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:11:59 -0500
+Subject: [PATCH 02/55] runtime-accessors
+
+browser runtime accessors.
+
+Rider: the EnableTabMuting preset entry (multi-pip-multiview); --enable-features is merged like --disable-features. The preset no longer disables ServiceWorkerPaymentApps (Google Pay and window.PaymentManager as in Chrome).
+---
+ components/browser/browser_runtime.cc | 160 ++++++++++++++++++++++++++
+ components/browser/browser_runtime.h  |  44 +++++++
+ 2 files changed, 204 insertions(+)
+ create mode 100644 components/browser/browser_runtime.cc
+ create mode 100644 components/browser/browser_runtime.h
+
+diff --git a/components/browser/browser_runtime.cc b/components/browser/browser_runtime.cc
+new file mode 100644
+index 0000000000..88a407be56
+--- /dev/null
++++ b/components/browser/browser_runtime.cc
+@@ -0,0 +1,160 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/browser/browser_runtime.h"
++
++#include <cstdint>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <utility>
++
++#include "base/command_line.h"
++#include "base/functional/function_ref.h"
++#include "base/no_destructor.h"
++#include "base/strings/strcat.h"
++#include "base/strings/string_util.h"
++#include "base/version_info/version_info_values.h"
++#include "components/browser/browser_switches.h"
++#include "components/browser/switch_resolver.h"
++
++namespace browser {
++
++namespace {
++
++// Explicit values of the string switches are taken verbatim.
++std::optional<std::string> Verbatim(const std::string& value) {
++  return value;
++}
++
++std::string ResolveStringSwitch(
++    const char* switch_name,
++    base::FunctionRef<std::string(int32_t seed)> derive_from_seed,
++    std::string fallback_when_absent = std::string()) {
++  return ResolveSwitch<std::string>(switch_name, Verbatim, derive_from_seed,
++                                    std::move(fallback_when_absent))
++      .value;
++}
++
++// The brand identity is on unless --use-chromium-defaults asks for stock
++// Chromium: pages then see Google Chrome at the real version, with or
++// without a fingerprint seed. The browser process forwards the switch to
++// every renderer, so each process answers the same way.
++bool ChromiumDefaultsRequested() {
++  static const bool requested =
++      base::CommandLine::ForCurrentProcess()->HasSwitch(
++          switches::kUseChromiumDefaults);
++  return requested;
++}
++
++}  // namespace
++
++const std::string& SpoofedBrand() {
++  static const base::NoDestructor<std::string> value(ResolveStringSwitch(
++      switches::kFingerprintBrand,
++      [](int32_t) { return std::string("Chrome"); },
++      ChromiumDefaultsRequested() ? std::string() : std::string("Chrome")));
++  return *value;
++}
++
++const std::string& SpoofedBrandVersion() {
++  static const base::NoDestructor<std::string> value([] {
++    constexpr std::string_view kVersion = PRODUCT_VERSION;
++    const std::string major(kVersion.substr(0, kVersion.find('.')));
++    return ResolveStringSwitch(
++        switches::kFingerprintBrandVersion, [&major](int32_t) { return major; },
++        ChromiumDefaultsRequested() ? std::string() : major);
++  }());
++  return *value;
++}
++
++const std::string& SpoofedBrandVersionLong() {
++  static const base::NoDestructor<std::string> value(ResolveStringSwitch(
++      switches::kFingerprintBrandVersionLong,
++      [](int32_t) { return std::string(PRODUCT_VERSION); },
++      ChromiumDefaultsRequested() ? std::string()
++                                  : std::string(PRODUCT_VERSION)));
++  return *value;
++}
++
++bool BrandSpoofActive() {
++  static const bool active = !SpoofedBrand().empty() ||
++                             !SpoofedBrandVersion().empty() ||
++                             !SpoofedBrandVersionLong().empty();
++  return active;
++}
++
++void MaybeExpandBrowserDefaults() {
++  base::CommandLine* cl = base::CommandLine::ForCurrentProcess();
++  // Child processes carry --type=<process type>; they receive features
++  // through FeatureList propagation rather than by re-expansion here.
++  if (cl->HasSwitch("type") || cl->HasSwitch(switches::kUseChromiumDefaults)) {
++    return;
++  }
++
++  // Presence-only switches. Only the ones the user has not set are added.
++  static constexpr const char* const kPresenceOnly[] = {
++      "no-first-run",
++      "no-default-browser-check",
++      "no-pings",
++      "disable-background-networking",
++      "disable-client-side-phishing-detection",
++      "disable-sync",
++      "disable-domain-reliability",
++      "disable-breakpad",
++      "disable-field-trial-config",
++      "metrics-recording-only",
++      "disable-default-apps",
++      "disable-prompt-on-repost",
++      "disable-search-engine-choice-screen",
++      "disable-password-generation",
++      "no-service-autorun",
++      "use-mock-keychain",
++      "hide-crash-restore-bubble",
++  };
++  for (const char* name : kPresenceOnly) {
++    if (!cl->HasSwitch(name)) {
++      cl->AppendSwitch(name);
++    }
++  }
++
++  // Value switches. An empty value disables the URL for the first two.
++  static constexpr std::pair<const char*, const char*> kKeyValue[] = {
++      {"connectivity-check-url", ""},
++      {"variations-server-url", ""},
++      {"password-store", "basic"},
++  };
++  for (const auto& [name, value] : kKeyValue) {
++    if (!cl->HasSwitch(name)) {
++      cl->AppendSwitchASCII(name, value);
++    }
++  }
++
++  // --enable-features and --disable-features are merged: AppendSwitchASCII
++  // replaces the value, so the existing list is read first. A feature named
++  // in both lists stays disabled, so --disable-features can undo a bundled
++  // enable. MV2 extension support comes from the ungoogled-chromium
++  // extensions-manifestv2 patch, not from these lists.
++  //
++  // EnableTabMuting: clicking a tab's audio indicator mutes that tab only.
++  // AimEnabled: AI Mode in the address bar, whose eligibility service asks
++  // www.google.com at every launch; nothing a page can see.
++  static constexpr std::string_view kBundledEnable = "EnableTabMuting";
++  static constexpr std::string_view kBundledDisable =
++      "OptimizationHints,CertificateTransparencyComponentUpdater,"
++      "AutofillServerCommunication,SafeBrowsing,PasswordLeakDetection,"
++      "InterestFeedContentSuggestions,CrashReporting,"
++      "DestroyProfileOnBrowserClose,LensOverlay,AimEnabled";
++  const auto merge_feature_list = [cl](const char* name,
++                                       std::string_view bundled) {
++    const std::string existing = cl->GetSwitchValueASCII(name);
++    cl->AppendSwitchASCII(name, existing.empty()
++                                    ? std::string(bundled)
++                                    : base::StrCat({existing, ",", bundled}));
++  };
++  merge_feature_list("enable-features", kBundledEnable);
++  merge_feature_list("disable-features", kBundledDisable);
++}
++
++}  // namespace browser
+diff --git a/components/browser/browser_runtime.h b/components/browser/browser_runtime.h
+new file mode 100644
+index 0000000000..9893852072
+--- /dev/null
++++ b/components/browser/browser_runtime.h
+@@ -0,0 +1,44 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_BROWSER_BROWSER_RUNTIME_H_
++#define COMPONENTS_BROWSER_BROWSER_RUNTIME_H_
++
++#include <string>
++
++#include "base/component_export.h"
++
++namespace browser {
++
++// Cached accessors for the string-valued spoof switches. The first call
++// resolves the switch (see switch_resolver.h) and caches the result for the
++// process lifetime; later calls are a pointer dereference. Each returns an
++// empty string when the switch is absent, so call sites branch on
++// `!value.empty()`.
++
++// Brand and version. An explicit switch value is returned verbatim; the
++// derived forms are "Chrome", the major component of PRODUCT_VERSION and
++// the full PRODUCT_VERSION respectively. Without a switch and without a
++// seed the same derived forms apply, so the browser reports itself as
++// Google Chrome by default; --use-chromium-defaults leaves all three empty.
++COMPONENT_EXPORT(BROWSER) const std::string& SpoofedBrand();
++COMPONENT_EXPORT(BROWSER) const std::string& SpoofedBrandVersion();
++COMPONENT_EXPORT(BROWSER) const std::string& SpoofedBrandVersionLong();
++
++// True when any of the three brand accessors is non-empty. Cached so hot
++// paths (e.g. mediaCapabilities.decodingInfo) pay a single bool load.
++COMPONENT_EXPORT(BROWSER) bool BrandSpoofActive();
++
++// Browser process only. Unless --use-chromium-defaults is present, appends
++// the preset of telemetry-off switches, privacy-positive feature flags and
++// convenience features to the current command line. User-supplied switches
++// are never overwritten, and --enable-features and --disable-features are
++// merged with any existing value.
++// Must run before FeatureList initialization; the hook site is
++// ChromeMainDelegate::BasicStartupComplete.
++COMPONENT_EXPORT(BROWSER) void MaybeExpandBrowserDefaults();
++
++}  // namespace browser
++
++#endif  // COMPONENTS_BROWSER_BROWSER_RUNTIME_H_
+-- 
+2.45.1.windows.1
+

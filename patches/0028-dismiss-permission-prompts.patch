@@ -1,0 +1,283 @@
+From 385a5ad4f966b3b0d07957e5029182d9063ae562 Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:13:39 -0500
+Subject: [PATCH 28/55] dismiss-permission-prompts
+
+--dismiss-permission-prompts: permission prompts, File System Access
+prompts included, are built unseen and dismissed after a short random
+delay, and Input.permissionPromptDismissed tells the client. The event's
+declaration rides in input-actions (Input.pdl, input_handler.*).
+---
+ ...ystem_access_permission_request_manager.cc | 37 ++++++++
+ .../permissions/permission_request_manager.cc | 92 ++++++++++++++++++-
+ .../permissions/permission_request_manager.h  |  7 ++
+ components/permissions/switches.cc            | 11 +++
+ components/permissions/switches.h             |  1 +
+ 5 files changed, 146 insertions(+), 2 deletions(-)
+
+diff --git a/chrome/browser/file_system_access/file_system_access_permission_request_manager.cc b/chrome/browser/file_system_access/file_system_access_permission_request_manager.cc
+index d55873f6f1..3a87659655 100644
+--- a/chrome/browser/file_system_access/file_system_access_permission_request_manager.cc
++++ b/chrome/browser/file_system_access/file_system_access_permission_request_manager.cc
+@@ -5,12 +5,18 @@
+ #include "chrome/browser/file_system_access/file_system_access_permission_request_manager.h"
+ 
+ #include "base/command_line.h"
++#include "base/functional/bind.h"
++#include "base/rand_util.h"
++#include "base/task/single_thread_task_runner.h"
+ #include "chrome/browser/ui/file_system_access/file_system_access_dialogs.h"
+ #include "chrome/browser/ui/file_system_access/file_system_access_permission_dialog.h"
+ #include "components/permissions/permission_util.h"
+ #include "components/permissions/switches.h"
+ #include "content/public/browser/browser_task_traits.h"
+ #include "content/public/browser/browser_thread.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/weak_document_ptr.h"
++#include "content/public/browser/web_contents.h"
+ 
+ namespace {
+ 
+@@ -99,6 +105,37 @@ void FileSystemAccessPermissionRequestManager::AddRequest(
+     return;
+   }
+ 
++  // browser: --dismiss-permission-prompts closes this prompt too, unseen and
++  // unanswered, after the moment a person takes to read it and close it.
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++          permissions::switches::kDismissPermissionPrompts)) {
++    const base::TimeDelta delay =
++        base::RandTimeDelta(base::Seconds(1), base::Seconds(5));
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(
++            [](base::OnceCallback<void(permissions::PermissionAction)> done,
++               base::ScopedClosureRunner fullscreen_block,
++               content::WeakDocumentPtr page, const url::Origin& origin,
++               base::TimeDelta shown_for) {
++              // browser: the page's DevTools clients hear it, as for the
++              // permission prompts -- while the document it came from is
++              // still the page's, not once the page has gone elsewhere.
++              content::RenderFrameHost* main = page.AsRenderFrameHostIfValid();
++              if (main && main->IsActive() && main->IsInPrimaryMainFrame()) {
++                content::WebContents::FromRenderFrameHost(main)
++                    ->DidDismissUnseenPermissionPrompt(main, {"file_system"},
++                                                       origin, shown_for);
++              }
++              std::move(done).Run(permissions::PermissionAction::DISMISSED);
++            },
++            std::move(callback), std::move(fullscreen_block),
++            web_contents()->GetPrimaryMainFrame()->GetWeakDocumentPtr(),
++            data.origin, delay),
++        delay);
++    return;
++  }
++
+   // Check if any pending requests are identical to the new request.
+   if (current_request_ && RequestsAreIdentical(current_request_->data, data)) {
+     current_request_->callbacks.push_back(std::move(callback));
+diff --git a/components/permissions/permission_request_manager.cc b/components/permissions/permission_request_manager.cc
+index f331f4df78..8a5e9f6a49 100644
+--- a/components/permissions/permission_request_manager.cc
++++ b/components/permissions/permission_request_manager.cc
+@@ -187,6 +187,46 @@ tabs::TabInterface* GetTabInterface(content::WebContents* web_contents) {
+ #endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
++// browser: --dismiss-permission-prompts closes every prompt unanswered after
++// the time a person takes to read one and close it.
++constexpr base::TimeDelta kUnseenPromptMinDelay = base::Seconds(1);
++constexpr base::TimeDelta kUnseenPromptMaxDelay = base::Seconds(5);
++
++bool ShouldDismissPrompts() {
++  return base::CommandLine::ForCurrentProcess()->HasSwitch(
++      switches::kDismissPermissionPrompts);
++}
++
++// The prompt a person would see, never drawn. It answers the manager as an
++// anchored bubble does, so the request runs the usual course up to the
++// dismissal.
++class UnseenPermissionPrompt : public PermissionPrompt {
++ public:
++  UnseenPermissionPrompt() = default;
++  UnseenPermissionPrompt(const UnseenPermissionPrompt&) = delete;
++  UnseenPermissionPrompt& operator=(const UnseenPermissionPrompt&) = delete;
++  ~UnseenPermissionPrompt() override = default;
++
++  bool UpdateAnchor() override { return true; }
++  TabSwitchingBehavior GetTabSwitchingBehavior() override {
++    return TabSwitchingBehavior::kDestroyPromptButKeepRequestPending;
++  }
++  PermissionPromptDisposition GetPromptDisposition() const override {
++    return PermissionPromptDisposition::ANCHORED_BUBBLE;
++  }
++  bool IsAskPrompt() const override { return true; }
++  std::optional<gfx::Rect> GetViewBoundsInScreen() const override {
++    return std::nullopt;
++  }
++  std::vector<ElementAnchoredBubbleVariant> GetPromptVariants() const override {
++    return {};
++  }
++  std::optional<feature_params::PermissionElementPromptPosition>
++  GetPromptPosition() const override {
++    return std::nullopt;
++  }
++};
++
+ }  // namespace
+ 
+ // PermissionRequestManager ----------------------------------------------------
+@@ -227,7 +267,10 @@ void PermissionRequestManager::AddRequest(
+     return;
+   }
+ 
+-  if (display::Screen::Get()->IsHeadless()) {
++  // browser: a headless browser asked to close prompts unanswered closes them
++  // as a headed one does, after a moment. Headless denies at once and stores
++  // the refusal, both of which a page can tell from a headed browser.
++  if (display::Screen::Get()->IsHeadless() && !ShouldDismissPrompts()) {
+     request->PermissionDenied();
+     return;
+   }
+@@ -930,7 +973,12 @@ bool PermissionRequestManager::RecreateView() {
+     }
+     CalculateCurrentVariantForEmbeddedPrompt();
+   }
+-  view_ = view_factory_.Run(web_contents(), this);
++  // browser: --dismiss-permission-prompts builds a prompt nobody sees.
++  if (ShouldDismissPrompts()) {
++    view_ = std::make_unique<UnseenPermissionPrompt>();
++  } else {
++    view_ = view_factory_.Run(web_contents(), this);
++  }
+   if (!view_) {
+     current_request_prompt_disposition_ =
+         PermissionPromptDisposition::NONE_VISIBLE;
+@@ -1330,12 +1378,50 @@ void PermissionRequestManager::ShowPrompt() {
+   // `NotifyPromptAdded` if failure is reached before the prompt is rendered.
+   NotifyPromptAdded();
+ 
++  // browser: and dismisses it after a short random delay.
++  if (ShouldDismissPrompts()) {
++    unseen_prompt_timer_.Start(
++        FROM_HERE,
++        base::RandTimeDelta(kUnseenPromptMinDelay, kUnseenPromptMaxDelay),
++        base::BindOnce(&PermissionRequestManager::DismissUnseenPrompt,
++                       base::Unretained(this)));
++  }
++
+   // If in testing mode, automatically respond to the bubble that was shown.
+   if (auto_response_for_test_ != NONE) {
+     DoAutoResponseForTesting();
+   }
+ }
+ 
++// browser: --dismiss-permission-prompts.
++void PermissionRequestManager::DismissUnseenPrompt() {
++  // Gone already (answered, navigated away, or put away with its hidden tab,
++  // which shows it again, and restarts this, when the tab returns).
++  if (!IsRequestInProgress() || !view_) {
++    return;
++  }
++  // browser: the page's DevTools clients hear what was asked, by whom and how
++  // long the prompt stood, as it is closed.
++  std::vector<std::string> asked;
++  for (const auto& request : requests_) {
++    asked.emplace_back(PermissionKeyForRequestType(request->request_type()));
++  }
++  const PermissionRequest& first = *requests_.front();
++  content::RenderFrameHost* asker =
++      content::RenderFrameHost::FromID(first.get_requesting_frame_id());
++  // The asking frame's own origin: the requesting origin is the top page's
++  // for a delegated permission (location, camera, ...); for top-level
++  // storage access, the site asked about.
++  const url::Origin origin =
++      asker && first.request_type() != RequestType::kTopLevelStorageAccess
++          ? asker->GetLastCommittedOrigin()
++          : url::Origin::Create(first.requesting_origin());
++  // How long it stood: the delay this timer ran, set as it was shown.
++  web_contents()->DidDismissUnseenPermissionPrompt(
++      asker, asked, origin, unseen_prompt_timer_.GetCurrentDelay());
++  Dismiss(/*prompt_options=*/std::monostate());
++}
++
+ void PermissionRequestManager::SetHatsShownCallback(
+     base::OnceCallback<void()> callback) {
+   hats_shown_callback_ = std::move(callback);
+@@ -1354,6 +1440,7 @@ void PermissionRequestManager::ResetViewStateForCurrentRequest() {
+   for (const auto& selector : permission_ui_selectors_) {
+     selector->Cancel();
+   }
++  unseen_prompt_timer_.Stop();  // browser
+ 
+   current_request_already_displayed_ = false;
+   current_request_first_display_time_ = base::Time();
+@@ -1512,6 +1599,7 @@ void PermissionRequestManager::CleanUpRequests() {
+   // No need to execute the preignore logic as we canceling currently active
+   // requests anyway.
+   preignore_timer_.Stop();
++  unseen_prompt_timer_.Stop();  // browser
+ 
+   for (; !pending_permission_requests_.IsEmpty();
+        pending_permission_requests_.Pop()) {
+diff --git a/components/permissions/permission_request_manager.h b/components/permissions/permission_request_manager.h
+index 86dbfe3884..aff29c6460 100644
+--- a/components/permissions/permission_request_manager.h
++++ b/components/permissions/permission_request_manager.h
+@@ -496,6 +496,10 @@ class PermissionRequestManager
+ 
+   void DoAutoResponseForTesting();
+ 
++  // browser: --dismiss-permission-prompts dismisses the prompt nobody sees, if
++  // it is still up.
++  void DismissUnseenPrompt();
++
+   void PreIgnoreQuietPromptInternal();
+ 
+   // Returns true if there is a request in progress that is for exclusive
+@@ -701,6 +705,9 @@ class PermissionRequestManager
+   // as a quiet chip.
+   base::OneShotTimer preignore_timer_;
+ 
++  // browser: --dismiss-permission-prompts, when the unseen prompt is dismissed.
++  base::OneShotTimer unseen_prompt_timer_;
++
+   std::optional<base::OnceCallback<void()>> hats_shown_callback_;
+ 
+   // Holds the position of the current prompt, only relevant for permission
+diff --git a/components/permissions/switches.cc b/components/permissions/switches.cc
+index 3cc801e827..e5fedcb525 100644
+--- a/components/permissions/switches.cc
++++ b/components/permissions/switches.cc
+@@ -11,5 +11,16 @@ namespace switches {
+ // prompts.
+ const char kDenyPermissionPrompts[] = "deny-permission-prompts";
+ 
++// browser: --dismiss-permission-prompts.
++// Presence-only. Permission requests are queued and shown as usual, except
++// that the prompt is never drawn: after a random 1-5 s, the time a person takes
++// to read a prompt and close it, it is dismissed. No decision is stored for the
++// site; as after a person's dismissals, three of them put it under the 7-day
++// embargo. A request from a background tab waits for the tab to be shown, as
++// the prompt itself would. Also covers File System Access prompts.
++// deny-permission-prompts denies in the same call and persists the block,
++// exactly as headless mode does.
++const char kDismissPermissionPrompts[] = "dismiss-permission-prompts";
++
+ }  // namespace switches
+ }  // namespace permissions
+diff --git a/components/permissions/switches.h b/components/permissions/switches.h
+index 44cf0d2f57..74634200fb 100644
+--- a/components/permissions/switches.h
++++ b/components/permissions/switches.h
+@@ -9,6 +9,7 @@ namespace permissions {
+ namespace switches {
+ 
+ extern const char kDenyPermissionPrompts[];
++extern const char kDismissPermissionPrompts[];  // browser
+ 
+ }  // namespace switches
+ }  // namespace permissions
+-- 
+2.45.1.windows.1
+

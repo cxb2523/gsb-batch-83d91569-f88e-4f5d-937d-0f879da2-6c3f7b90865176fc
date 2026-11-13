@@ -1,0 +1,491 @@
+From cefebea4690df5083876169c2be64fbe03f2aeea Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:13:44 -0500
+Subject: [PATCH 31/55] stable-version
+
+The full version in the user agent's client hints is the Chrome release
+of this major version that the stable channel serves now, not the one the
+build was cut from. The list of served releases
+(versionhistory.googleapis.com) is fetched at most once a day and kept
+beside the default user data directory; each profile draws one by rollout
+share, never older than the one it reported before, applied through
+--fingerprint-brand-version-long. Never another major version; not with
+--use-chromium-defaults or an explicit brand version. The request goes
+through the system network context, so a --proxy-server on the command
+line carries it; it is made whatever --disable-background-networking says,
+and only --use-chromium-defaults or an explicit brand version turns it off.
+---
+ chrome/app/chrome_main_delegate.cc            |   6 +
+ chrome/browser/BUILD.gn                       |   1 +
+ chrome/browser/chrome_browser_main.cc         |   6 +
+ chrome/browser/stable_version/BUILD.gn        |  19 ++
+ chrome/browser/stable_version/DEPS            |   3 +
+ .../browser/stable_version/stable_version.cc  | 307 ++++++++++++++++++
+ .../browser/stable_version/stable_version.h   |  45 +++
+ 7 files changed, 387 insertions(+)
+ create mode 100644 chrome/browser/stable_version/BUILD.gn
+ create mode 100644 chrome/browser/stable_version/DEPS
+ create mode 100644 chrome/browser/stable_version/stable_version.cc
+ create mode 100644 chrome/browser/stable_version/stable_version.h
+
+diff --git a/chrome/app/chrome_main_delegate.cc b/chrome/app/chrome_main_delegate.cc
+index 0870014cf9..6616583e7c 100644
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -201,6 +201,7 @@
+ #include "chrome/browser/headless/headless_mode_util.h"  // nogncheck
+ #include "chrome/browser/lifetime/browser_shutdown.h"  // nogncheck
+ #include "chrome/browser/metrics/chrome_feature_list_creator.h"  // nogncheck
++#include "chrome/browser/stable_version/stable_version.h"        // nogncheck
+ #include "chrome/browser/startup_data.h"  // nogncheck
+ #include "chrome/gpu/chrome_content_gpu_client.h"  // nogncheck
+ #include "chrome/utility/chrome_content_utility_client.h"  // nogncheck
+@@ -1282,6 +1283,11 @@ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
+   base::CommandLine* startup_command_line =
+       base::CommandLine::ForCurrentProcess();
+   if (!startup_command_line->HasSwitch(switches::kProcessType)) {
++#if !defined(BUILDING_CHROME_RENDERER)
++    // browser: the Chrome release the stable channel serves now, as the
++    // full version, before anything reads the user agent.
++    stable_version::ApplyServedVersion(*startup_command_line);
++#endif
+ #if !defined(BUILDING_CHROME_RENDERER)
+     // browser: headless's own screen and window.
+     if (headless::IsHeadlessMode()) {
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index c88e20480b..6ad28e2929 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1040,6 +1040,7 @@ source_set("core") {
+     "//chrome/browser/speech",
+     "//chrome/browser/spellchecker",
+     "//chrome/browser/ssl",
++    "//chrome/browser/stable_version",
+     "//chrome/browser/status_icons",
+     "//chrome/browser/subresource_filter",
+     "//chrome/browser/supervised_user",
+diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
+index b2619baa8f..b0568cad9b 100644
+--- a/chrome/browser/chrome_browser_main.cc
++++ b/chrome/browser/chrome_browser_main.cc
+@@ -69,6 +69,7 @@
+ #include "chrome/browser/segmentation_platform/chrome_browser_main_extra_parts_segmentation_platform.h"
+ #include "chrome/browser/sessions/chrome_serialized_navigation_driver.h"
+ #include "chrome/browser/shell_integration.h"
++#include "chrome/browser/stable_version/stable_version.h"
+ #include "chrome/browser/startup_data.h"
+ #include "chrome/browser/translate/chrome_translate_client.h"
+ #include "chrome/browser/translate/translate_service.h"
+@@ -1730,6 +1731,11 @@ void ChromeBrowserMainParts::PostBrowserStart() {
+ 
+   browser_process_->browser_policy_connector()->OnBrowserStarted();
+ 
++  // browser: keep the list of Chrome releases the stable channel serves
++  // current, for the full version the next launch reports.
++  stable_version::RefreshServedReleasesIfStale(
++      browser_process_->shared_url_loader_factory());
++
+ #if BUILDFLAG(ENABLE_PROCESS_SINGLETON)
+   // Allow ProcessSingleton to process messages.
+   // This is done here instead of just relying on the main message loop's start
+diff --git a/chrome/browser/stable_version/BUILD.gn b/chrome/browser/stable_version/BUILD.gn
+new file mode 100644
+index 0000000000..58585e77d2
+--- /dev/null
++++ b/chrome/browser/stable_version/BUILD.gn
+@@ -0,0 +1,19 @@
++# Copyright 2026 The browser Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++source_set("stable_version") {
++  sources = [
++    "stable_version.cc",
++    "stable_version.h",
++  ]
++  deps = [
++    "//base",
++    "//chrome/common:constants",
++    "//chrome/common:non_code_constants",
++    "//components/browser:browser_switches",
++    "//net",
++    "//services/network/public/cpp",
++    "//url",
++  ]
++}
+diff --git a/chrome/browser/stable_version/DEPS b/chrome/browser/stable_version/DEPS
+new file mode 100644
+index 0000000000..5f513a9615
+--- /dev/null
++++ b/chrome/browser/stable_version/DEPS
+@@ -0,0 +1,3 @@
++include_rules = [
++  "+components/browser/browser_switches.h",
++]
+diff --git a/chrome/browser/stable_version/stable_version.cc b/chrome/browser/stable_version/stable_version.cc
+new file mode 100644
+index 0000000000..eddf43cca7
+--- /dev/null
++++ b/chrome/browser/stable_version/stable_version.cc
+@@ -0,0 +1,307 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/stable_version/stable_version.h"
++
++#include <cstdint>
++#include <limits>
++#include <memory>
++#include <optional>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/command_line.h"
++#include "base/files/file.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/files/important_file_writer.h"
++#include "base/functional/bind.h"
++#include "base/hash/hash.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/strings/string_util.h"
++#include "base/task/thread_pool.h"
++#include "base/time/time.h"
++#include "base/values.h"
++#include "base/version.h"
++#include "base/version_info/version_info.h"
++#include "chrome/common/chrome_paths_internal.h"
++#include "chrome/common/chrome_switches.h"
++#include "components/browser/browser_switches.h"
++#include "net/traffic_annotation/network_traffic_annotation.h"
++#include "services/network/public/cpp/resource_request.h"
++#include "services/network/public/cpp/shared_url_loader_factory.h"
++#include "services/network/public/cpp/simple_url_loader.h"
++#include "url/gurl.h"
++
++namespace stable_version {
++
++namespace {
++
++// Chrome's public release history: every Windows 64-bit stable release that
++// is served now, with the share of installs each is rolled out to.
++constexpr char kReleasesUrl[] =
++    "https://versionhistory.googleapis.com/v1/chrome/platforms/win64/"
++    "channels/stable/versions/all/releases?filter=endtime=none";
++
++// The machine-wide list, beside the default user data directory, and the
++// version a profile last reported, in its own user data directory.
++constexpr base::FilePath::CharType kReleasesFileName[] =
++    FILE_PATH_LITERAL("Served Chrome Releases");
++constexpr base::FilePath::CharType kReportedFileName[] =
++    FILE_PATH_LITERAL("Reported Chrome Version");
++
++constexpr base::TimeDelta kRefreshAfter = base::Days(1);
++constexpr size_t kMaxListBytes = 256 * 1024;
++constexpr size_t kMaxReportedBytes = 64;
++
++constexpr net::NetworkTrafficAnnotationTag kTrafficAnnotation =
++    net::DefineNetworkTrafficAnnotation("served_chrome_releases", R"(
++        semantics {
++          sender: "Served Chrome Releases"
++          description:
++            "Fetches the list of Chrome releases the stable channel serves "
++            "now, so that the full version the browser reports is a current "
++            "one of its own major version."
++          trigger: "Browser startup, at most once a day."
++          data: "None."
++          destination: GOOGLE_OWNED_SERVICE
++        }
++        policy {
++          cookies_allowed: NO
++          setting: "Not made with --use-chromium-defaults."
++          policy_exception_justification: "Not implemented."
++        })");
++
++struct Release {
++  base::Version version;
++  double share = 0;
++};
++
++std::optional<base::FilePath> ReleasesFilePath() {
++  base::FilePath user_data_dir;
++  if (!chrome::GetDefaultUserDataDirectory(&user_data_dir)) {
++    return std::nullopt;
++  }
++  return user_data_dir.DirName().Append(kReleasesFileName);
++}
++
++// A full version of this build's major version, in four components.
++bool IsOfThisMajor(const base::Version& version) {
++  return version.IsValid() && version.components().size() == 4 &&
++         version.components()[0] ==
++             static_cast<uint32_t>(version_info::GetMajorVersionNumberAsInt());
++}
++
++// The served releases of this major version in the release history's answer,
++// or in the kept list, which has the same shape. The shares are those of the
++// installs already on this major version (the group named after it); while a
++// major version is new and has no such group, those of any group.
++std::vector<Release> ReleasesOfThisMajor(const base::DictValue& answer) {
++  const base::ListValue* releases = answer.FindList("releases");
++  if (!releases) {
++    return {};
++  }
++  const std::string own_group = version_info::GetMajorVersionNumber();
++  std::vector<Release> in_own_group;
++  std::vector<Release> in_any_group;
++  for (const base::Value& entry : *releases) {
++    const base::DictValue* release = entry.GetIfDict();
++    if (!release) {
++      continue;
++    }
++    const std::string* version = release->FindString("version");
++    const std::optional<double> share = release->FindDouble("fraction");
++    if (!version || !share || *share <= 0) {
++      continue;
++    }
++    Release parsed{base::Version(*version), *share};
++    if (!IsOfThisMajor(parsed.version)) {
++      continue;
++    }
++    const std::string* group = release->FindString("fractionGroup");
++    if (group && *group == own_group) {
++      in_own_group.push_back(parsed);
++    }
++    in_any_group.push_back(std::move(parsed));
++  }
++  return in_own_group.empty() ? in_any_group : in_own_group;
++}
++
++// The release a profile reports: drawn by the rollout shares from a number its
++// directory gives, so a profile keeps its release while the list stays the
++// same, and never older than the one it reported before, since an installed
++// browser does not go back.
++std::optional<base::Version> PickForProfile(
++    const std::vector<Release>& releases,
++    const base::FilePath& user_data_dir,
++    const std::optional<base::Version>& reported_before) {
++  double total = 0;
++  for (const Release& release : releases) {
++    total += release.share;
++  }
++  if (total <= 0) {
++    return reported_before;
++  }
++  const double position =
++      base::PersistentHash(user_data_dir.AsUTF8Unsafe()) /
++      (static_cast<double>(std::numeric_limits<uint32_t>::max()) + 1.0) * total;
++  const base::Version* picked = &releases.back().version;
++  double reached = 0;
++  for (const Release& release : releases) {
++    reached += release.share;
++    if (position < reached) {
++      picked = &release.version;
++      break;
++    }
++  }
++  if (reported_before && *reported_before > *picked) {
++    return reported_before;
++  }
++  return *picked;
++}
++
++// Missing, more than a day old, or dated in the future (a clock set back),
++// which would otherwise never age.
++bool IsStale(const base::FilePath& path) {
++  base::File::Info info;
++  if (!base::GetFileInfo(path, &info)) {
++    return true;
++  }
++  const base::TimeDelta age = base::Time::Now() - info.last_modified;
++  return age > kRefreshAfter || age.is_negative();
++}
++
++void WriteReleases(const base::FilePath& path, const std::string& json) {
++  if (base::CreateDirectory(path.DirName())) {
++    base::ImportantFileWriter::WriteFileAtomically(path, json);
++  }
++}
++
++void OnReleasesFetched(std::unique_ptr<network::SimpleURLLoader> loader,
++                       const base::FilePath& path,
++                       std::optional<std::string> body) {
++  if (!body) {
++    return;
++  }
++  const std::optional<base::DictValue> answer =
++      base::JSONReader::ReadDict(*body, base::JSON_PARSE_RFC);
++  if (!answer) {
++    return;
++  }
++  const std::vector<Release> releases = ReleasesOfThisMajor(*answer);
++  if (releases.empty()) {
++    // An answer with nothing usable leaves the kept list as it is.
++    return;
++  }
++  // Kept in the answer's own shape, this major version's releases only.
++  base::ListValue kept;
++  for (const Release& release : releases) {
++    base::DictValue entry;
++    entry.Set("version", release.version.GetString());
++    entry.Set("fraction", release.share);
++    entry.Set("fractionGroup", version_info::GetMajorVersionNumber());
++    kept.Append(std::move(entry));
++  }
++  base::DictValue list;
++  list.Set("releases", std::move(kept));
++  const std::optional<std::string> json = base::WriteJson(list);
++  if (!json) {
++    return;
++  }
++  base::ThreadPool::PostTask(
++      FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
++      base::BindOnce(&WriteReleases, path, *json));
++}
++
++void FetchIfStale(
++    scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
++    const base::FilePath& path,
++    bool stale) {
++  if (!stale) {
++    return;
++  }
++  auto request = std::make_unique<network::ResourceRequest>();
++  request->url = GURL(kReleasesUrl);
++  request->method = "GET";
++  request->credentials_mode = network::mojom::CredentialsMode::kOmit;
++  std::unique_ptr<network::SimpleURLLoader> loader =
++      network::SimpleURLLoader::Create(std::move(request), kTrafficAnnotation);
++  network::SimpleURLLoader* loader_ptr = loader.get();
++  loader_ptr->DownloadToString(
++      url_loader_factory.get(),
++      base::BindOnce(&OnReleasesFetched, std::move(loader), path),
++      kMaxListBytes);
++}
++
++}  // namespace
++
++void ApplyServedVersion(base::CommandLine& command_line) {
++  if (command_line.HasSwitch(switches::kUseChromiumDefaults) ||
++      command_line.HasSwitch(switches::kFingerprintBrandVersion) ||
++      command_line.HasSwitch(switches::kFingerprintBrandVersionLong)) {
++    return;
++  }
++  const std::optional<base::FilePath> releases_path = ReleasesFilePath();
++  std::string releases_json;
++  if (!releases_path || !base::ReadFileToStringWithMaxSize(
++                            *releases_path, &releases_json, kMaxListBytes)) {
++    return;
++  }
++  const std::optional<base::DictValue> releases =
++      base::JSONReader::ReadDict(releases_json, base::JSON_PARSE_RFC);
++  if (!releases) {
++    return;
++  }
++
++  base::FilePath user_data_dir =
++      command_line.GetSwitchValuePath(switches::kUserDataDir);
++  if (user_data_dir.empty() &&
++      !chrome::GetDefaultUserDataDirectory(&user_data_dir)) {
++    return;
++  }
++  const base::FilePath reported_path = user_data_dir.Append(kReportedFileName);
++  std::string reported;
++  std::optional<base::Version> reported_before;
++  if (base::ReadFileToStringWithMaxSize(reported_path, &reported,
++                                        kMaxReportedBytes)) {
++    base::Version before(base::TrimWhitespaceASCII(reported, base::TRIM_ALL));
++    if (IsOfThisMajor(before)) {
++      reported_before = std::move(before);
++    }
++  }
++
++  const std::optional<base::Version> version = PickForProfile(
++      ReleasesOfThisMajor(*releases), user_data_dir, reported_before);
++  if (!version) {
++    return;
++  }
++  const std::string text = version->GetString();
++  if (!reported_before || text != reported_before->GetString()) {
++    // The profile remembers it, so a later list never takes it back.
++    if (base::CreateDirectory(user_data_dir)) {
++      base::WriteFile(reported_path, text);
++    }
++  }
++  command_line.AppendSwitchASCII(switches::kFingerprintBrandVersionLong, text);
++}
++
++void RefreshServedReleasesIfStale(
++    scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory) {
++  if (!url_loader_factory || base::CommandLine::ForCurrentProcess()->HasSwitch(
++                                 switches::kUseChromiumDefaults)) {
++    return;
++  }
++  const std::optional<base::FilePath> path = ReleasesFilePath();
++  if (!path) {
++    return;
++  }
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
++      base::BindOnce(&IsStale, *path),
++      base::BindOnce(&FetchIfStale, std::move(url_loader_factory), *path));
++}
++
++}  // namespace stable_version
+diff --git a/chrome/browser/stable_version/stable_version.h b/chrome/browser/stable_version/stable_version.h
+new file mode 100644
+index 0000000000..f434c9bfdb
+--- /dev/null
++++ b/chrome/browser/stable_version/stable_version.h
+@@ -0,0 +1,45 @@
++// Copyright 2026 The browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_STABLE_VERSION_STABLE_VERSION_H_
++#define CHROME_BROWSER_STABLE_VERSION_STABLE_VERSION_H_
++
++#include "base/memory/scoped_refptr.h"
++
++namespace base {
++class CommandLine;
++}  // namespace base
++
++namespace network {
++class SharedURLLoaderFactory;
++}  // namespace network
++
++// The full version the browser reports (the user agent's client hints) is the
++// Chrome release of this major version that the stable channel serves now,
++// not the release this build was cut from, which a week of rollouts leaves
++// behind. The list of served releases is fetched at most once a day and kept
++// beside the default user data directory for every profile on the machine.
++// The request goes through the system network context: a --proxy-server on
++// the command line carries it, a proxy set by an extension or a profile
++// does not. It is made whatever --disable-background-networking says (the
++// browser's own defaults set that switch); --use-chromium-defaults or an
++// explicit brand version is what turns it off.
++namespace stable_version {
++
++// Browser process, before anything reads the user agent. Unless a brand
++// version is given outright or --use-chromium-defaults asks for stock
++// Chromium, appends --fingerprint-brand-version-long with a served release of
++// this major version: drawn for the profile by the releases' rollout shares,
++// and never older than the one the profile reported before. Does nothing
++// until a list has been fetched.
++void ApplyServedVersion(base::CommandLine& command_line);
++
++// Browser process, after startup. Fetches the list of served releases in the
++// background when the kept one is missing or more than a day old.
++void RefreshServedReleasesIfStale(
++    scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory);
++
++}  // namespace stable_version
++
++#endif  // CHROME_BROWSER_STABLE_VERSION_STABLE_VERSION_H_
+-- 
+2.45.1.windows.1
+

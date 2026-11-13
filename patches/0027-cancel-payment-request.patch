@@ -1,0 +1,79 @@
+From 4fc4234c8faea7c367b523f0c84e342d5cdae6a7 Mon Sep 17 00:00:00 2001
+From: The browser Authors <noreply@browser.invalid>
+Date: Mon, 2 Nov 2026 17:13:37 -0500
+Subject: [PATCH 27/55] cancel-payment-request
+
+--cancel-payment-request: a payment sheet a page opens is closed unseen
+after a random 1-2 s, as its Cancel button closes it, so a tab-modal sheet
+nobody can see does not hold the tab's input; show() rejects with
+Chrome's own AbortError. The switch declaration rides in switch-resolver.
+---
+ components/payments/content/BUILD.gn            |  1 +
+ components/payments/content/DEPS                |  1 +
+ .../content/payment_request_display_manager.cc  | 17 +++++++++++++++++
+ 3 files changed, 19 insertions(+)
+
+diff --git a/components/payments/content/BUILD.gn b/components/payments/content/BUILD.gn
+index b26023b5ef..34b56171e3 100644
+--- a/components/payments/content/BUILD.gn
++++ b/components/payments/content/BUILD.gn
+@@ -64,6 +64,7 @@ static_library("content") {
+     ":utils",
+     "//base",
+     "//components/autofill/core/browser",
++    "//components/browser:browser_switches",
+     "//components/keyed_service/content",
+     "//components/payments/content/browser_binding",
+     "//components/payments/content/utility",
+diff --git a/components/payments/content/DEPS b/components/payments/content/DEPS
+index 3c6c34a36a..41bc3ea1b5 100644
+--- a/components/payments/content/DEPS
++++ b/components/payments/content/DEPS
+@@ -5,6 +5,7 @@ include_rules = [
+   "+chromeos/components/payments",
+   "+components/autofill",
+   "+components/back_forward_cache",
++  "+components/browser/browser_switches.h",
+   "+components/keyed_service/content",
+   "+components/link_header_util",
+   "+components/keyed_service/core",
+diff --git a/components/payments/content/payment_request_display_manager.cc b/components/payments/content/payment_request_display_manager.cc
+index acf6fcfb4b..be6a901870 100644
+--- a/components/payments/content/payment_request_display_manager.cc
++++ b/components/payments/content/payment_request_display_manager.cc
+@@ -7,8 +7,15 @@
+ #include <optional>
+ 
+ #include "base/check.h"
++#include "base/command_line.h"
++#include "base/functional/bind.h"
+ #include "base/metrics/histogram_functions.h"
++#include "base/rand_util.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/time/time.h"
++#include "components/browser/browser_switches.h"
+ #include "components/payments/content/content_payment_request_delegate.h"
++#include "components/payments/content/payment_request.h"
+ #include "content/public/browser/render_frame_host.h"
+ #include "url/origin.h"
+ 
+@@ -79,6 +86,16 @@ void PaymentRequestDisplayManager::DisplayHandle::Show(
+   was_shown_ = true;
+   if (delegate_)
+     delegate_->ShowDialog(request);
++  // browser: --cancel-payment-request. The sheet is tab-modal: while it is up
++  // the page takes no input, and an unattended browser has nobody to close
++  // it. After a random 1-2 s it is closed as its Cancel button closes it,
++  // and show() rejects with Chrome's own AbortError.
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++          switches::kCancelPaymentRequest)) {
++    base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE, base::BindOnce(&PaymentRequest::OnUserCancelled, request),
++        base::RandTimeDelta(base::Seconds(1), base::Seconds(2)));
++  }
+ }
+ 
+ void PaymentRequestDisplayManager::DisplayHandle::Retry() {
+-- 
+2.45.1.windows.1
+
