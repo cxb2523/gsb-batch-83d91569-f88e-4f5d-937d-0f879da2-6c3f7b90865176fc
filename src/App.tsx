@@ -22,11 +22,9 @@ import {
   type ParquetData,
   type ParquetSource,
 } from "@/lib/parquet"
-import {
-  validateParquetUrl,
-  fileNameFromUrl,
-  isLikelyCorsError,
-} from "@/lib/parquet-url"
+import { validateParquetUrl, fileNameFromUrl } from "@/lib/parquet-url"
+import { buildLoadFailure, type LoadFailure } from "@/lib/remote-errors"
+import { appendBatch, nextBatchSize } from "@/lib/pagination"
 
 type ViewMode = "data" | "schema"
 
@@ -36,14 +34,14 @@ export default function App() {
   const [currentSource, setCurrentSource] = useState<ParquetSource | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [errorIsCors, setErrorIsCors] = useState(false)
+  const [initialError, setInitialError] = useState<LoadFailure | null>(null)
+  const [loadMoreError, setLoadMoreError] = useState<LoadFailure | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>("data")
 
   const loadSource = useCallback(async (source: ParquetSource, name: string) => {
     setIsLoading(true)
-    setError(null)
-    setErrorIsCors(false)
+    setInitialError(null)
+    setLoadMoreError(null)
 
     try {
       // Determine initial load size based on file size (unknown for URLs, so be conservative)
@@ -56,10 +54,9 @@ export default function App() {
       setCurrentSource(source)
     } catch (err) {
       console.error("Error reading parquet file:", err)
-      setError(
-        err instanceof Error ? err.message : "Failed to read parquet file"
-      )
-      setErrorIsCors(!(source instanceof File) && isLikelyCorsError(err))
+      // Local files can't be retried remotely — buildLoadFailure leaves info
+      // null for them, so the error card renders no retry entry.
+      setInitialError(buildLoadFailure(err, !(source instanceof File)))
     } finally {
       setIsLoading(false)
     }
@@ -75,6 +72,13 @@ export default function App() {
     [loadSource]
   )
 
+  // Re-run the most recent initial load. Only offered for temporary remote
+  // failures; on success loadSource repopulates `data`, restoring the view.
+  const handleRetryInitialLoad = useCallback(() => {
+    if (!currentSource || isLoading) return
+    loadSource(currentSource, fileName)
+  }, [currentSource, fileName, isLoading, loadSource])
+
   // Support deep links: ?url=https://... opens the file on page load
   useEffect(() => {
     const param = new URLSearchParams(window.location.search).get("url")
@@ -87,40 +91,44 @@ export default function App() {
   }, [handleUrlSelect])
 
   const handleLoadMore = useCallback(async () => {
-    if (!currentSource || !data || !data.hasMore) return
+    if (!currentSource || !data || !data.hasMore || isLoadingMore) return
 
     setIsLoadingMore(true)
     try {
-      const fileSize = data.metadata.fileSize
-      const batchSize = fileSize === null || fileSize > 10 * 1024 * 1024 ? 500 : 1000
-      const { rows: newRows, loadedRows, hasMore } = await loadMoreParquetData(
+      const batchSize = nextBatchSize(data.metadata.fileSize)
+      // `data.loadedRows` is the offset of the failed (or next) batch: on
+      // retry this re-requests exactly the rows that never arrived, never the
+      // rows already shown.
+      const batch = await loadMoreParquetData(
         currentSource,
         data.loadedRows,
         batchSize
       )
 
-      setData({
-        ...data,
-        rows: [...data.rows, ...newRows],
-        loadedRows,
-        hasMore,
-      })
+      // appendBatch only runs after a successful fetch: on failure the
+      // existing rows, loadedRows and remaining count are left untouched.
+      setData((prev) =>
+        prev
+          ? { ...prev, ...appendBatch(prev, batch, data.loadedRows) }
+          : prev
+      )
+      setLoadMoreError(null)
     } catch (err) {
       console.error("Error loading more data:", err)
-      setError(
-        err instanceof Error ? err.message : "Failed to load more data"
+      setLoadMoreError(
+        buildLoadFailure(err, !(currentSource instanceof File))
       )
     } finally {
       setIsLoadingMore(false)
     }
-  }, [currentSource, data])
+  }, [currentSource, data, isLoadingMore])
 
   const handleReset = useCallback(() => {
     setData(null)
     setFileName("")
     setCurrentSource(null)
-    setError(null)
-    setErrorIsCors(false)
+    setInitialError(null)
+    setLoadMoreError(null)
     setViewMode("data")
   }, [])
 
@@ -176,7 +184,20 @@ export default function App() {
 
             <UrlInput onUrlSubmit={handleUrlSelect} isLoading={isLoading} />
 
-            {error && <LoadErrorCard message={error} isCors={errorIsCors} />}
+            {initialError && (
+              <LoadErrorCard
+                message={initialError.message}
+                info={initialError.info}
+                // Retry only for temporary remote failures; permanent link
+                // failures and local-file errors pass no handler.
+                onRetry={
+                  initialError.info?.kind === "temporary"
+                    ? handleRetryInitialLoad
+                    : undefined
+                }
+                isRetrying={isLoading}
+              />
+            )}
           </div>
         )}
 
@@ -258,32 +279,56 @@ export default function App() {
                   <div className="space-y-4">
                     <DataTable data={data} />
 
-                    {/* Load More Button */}
-                    {data.hasMore && (
-                      <div className="flex items-center justify-center gap-4 pt-4">
-                        <Button
-                          onClick={handleLoadMore}
-                          disabled={isLoadingMore}
-                          variant="outline"
-                          className="gap-2"
-                        >
-                          {isLoadingMore ? (
-                            <>
-                              <Loader2 className="w-4 h-4 animate-spin" />
-                              Loading...
-                            </>
-                          ) : (
-                            <>
-                              <Download className="w-4 h-4" />
-                              Load More Rows
-                            </>
-                          )}
-                        </Button>
-                        <span className="text-sm text-muted-foreground">
-                          {(data.metadata.numRows - data.loadedRows).toLocaleString()} rows remaining
-                        </span>
-                      </div>
+                    {/* Inline failure: rows already loaded stay rendered above.
+                        Permanent link failures remove the retry entry. */}
+                    {loadMoreError && (
+                      <LoadErrorCard
+                        message={loadMoreError.message}
+                        info={loadMoreError.info}
+                        onRetry={
+                          loadMoreError.info?.kind === "temporary"
+                            ? handleLoadMore
+                            : undefined
+                        }
+                        isRetrying={isLoadingMore}
+                      />
                     )}
+
+                    {/* Load More Button — hidden while a temporary failure is
+                        shown (the card owns the retry), disabled permanently
+                        when the link has expired. */}
+                    {data.hasMore &&
+                      !(
+                        loadMoreError &&
+                        loadMoreError.info?.kind === "temporary"
+                      ) && (
+                        <div className="flex items-center justify-center gap-4 pt-4">
+                          <Button
+                            onClick={handleLoadMore}
+                            disabled={
+                              isLoadingMore ||
+                              loadMoreError?.info?.kind === "permanent"
+                            }
+                            variant="outline"
+                            className="gap-2"
+                          >
+                            {isLoadingMore ? (
+                              <>
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                                Loading...
+                              </>
+                            ) : (
+                              <>
+                                <Download className="w-4 h-4" />
+                                Load More Rows
+                              </>
+                            )}
+                          </Button>
+                          <span className="text-sm text-muted-foreground">
+                            {(data.metadata.numRows - data.loadedRows).toLocaleString()} rows remaining
+                          </span>
+                        </div>
+                      )}
                   </div>
                 ) : (
                   <SchemaViewer schema={data.metadata.schema} />

@@ -1,28 +1,120 @@
 import { useCallback, useState } from "react"
-import { ShieldAlert, AlertCircle, Copy, Check } from "lucide-react"
+import {
+  ShieldAlert,
+  AlertCircle,
+  Link2Off,
+  CloudOff,
+  Copy,
+  Check,
+  RefreshCw,
+  Loader2,
+} from "lucide-react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { s3CorsSnippet } from "@/lib/parquet-url"
+import type { RemoteErrorInfo } from "@/lib/remote-errors"
 
 interface LoadErrorCardProps {
-  /** Raw error message from the failed load (e.g. "Failed to fetch"). */
+  /** Raw error message from the failed load. */
   message: string
-  /** Whether the failure looks like a cross-origin (CORS) block. */
-  isCors: boolean
+  /**
+   * Classification for remote sources. Null/undefined for local files and
+   * unclassified errors, which never get a retry entry.
+   */
+  info?: RemoteErrorInfo | null
+  /** Retry handler; only rendered for temporary remote failures. */
+  onRetry?: () => void
+  /** Disables the retry button and shows an in-progress state. */
+  isRetrying?: boolean
 }
 
-export function LoadErrorCard({ message, isCors }: LoadErrorCardProps) {
-  if (isCors) {
-    return <CorsErrorCard />
+export function LoadErrorCard({
+  message,
+  info,
+  onRetry,
+  isRetrying = false,
+}: LoadErrorCardProps) {
+  // Cross-origin blocks keep their dedicated, actionable guidance card.
+  if (info?.isCors) {
+    return <CorsErrorCard onRetry={onRetry} isRetrying={isRetrying} />
   }
 
+  if (info?.kind === "permanent") {
+    return (
+      <Card className="border-destructive/50 bg-destructive/5">
+        <CardContent className="flex items-start gap-3 p-4">
+          <Link2Off className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
+          <div className="space-y-1">
+            <p className="text-sm font-medium text-destructive">
+              This link is no longer valid
+            </p>
+            <p className="text-sm text-muted-foreground break-words">
+              {info.message}
+            </p>
+            <p className="text-sm text-muted-foreground">{info.hint}</p>
+            <p className="text-xs text-muted-foreground break-words">
+              Server response: {message}
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  if (info?.kind === "temporary") {
+    return (
+      <Card className="border-amber-500/50 bg-amber-500/5">
+        <CardContent className="flex items-start gap-3 p-4">
+          <CloudOff className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+          <div className="space-y-2">
+            <div className="space-y-1">
+              <p className="text-sm font-medium text-amber-800">
+                Temporary connection problem
+              </p>
+              <p className="text-sm text-muted-foreground break-words">
+                {info.message}
+              </p>
+              <p className="text-sm text-muted-foreground">{info.hint}</p>
+              <p className="text-xs text-muted-foreground break-words">
+                Details: {message}
+              </p>
+            </div>
+            {onRetry && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onRetry}
+                disabled={isRetrying}
+                aria-busy={isRetrying}
+                className="gap-2"
+              >
+                {isRetrying ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Retrying…
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="h-4 w-4" />
+                    Try again
+                  </>
+                )}
+              </Button>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  // Local files and anything unclassified: plain error, no retry entry.
   return (
     <Card className="border-destructive/50 bg-destructive/5">
       <CardContent className="flex items-start gap-3 p-4">
         <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
         <div className="space-y-1">
           <p className="text-sm font-medium text-destructive">
-            Couldn't open this file
+            Couldn&apos;t open this file
           </p>
           <p className="text-sm text-muted-foreground break-words">{message}</p>
         </div>
@@ -31,7 +123,12 @@ export function LoadErrorCard({ message, isCors }: LoadErrorCardProps) {
   )
 }
 
-function CorsErrorCard() {
+interface CorsErrorCardProps {
+  onRetry?: () => void
+  isRetrying?: boolean
+}
+
+function CorsErrorCard({ onRetry, isRetrying = false }: CorsErrorCardProps) {
   const origin = window.location.origin
   const snippet = s3CorsSnippet(origin)
   const [copied, setCopied] = useState(false)
@@ -110,6 +207,29 @@ function CorsErrorCard() {
             must include <code className="rounded bg-muted px-1 py-0.5">Content-Range</code>{" "}
             or the file size won't show.
           </p>
+
+          {onRetry && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onRetry}
+              disabled={isRetrying}
+              aria-busy={isRetrying}
+              className="gap-2"
+            >
+              {isRetrying ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Retrying…
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="h-4 w-4" />
+                  Try again
+                </>
+              )}
+            </Button>
+          )}
         </div>
       </CardContent>
     </Card>

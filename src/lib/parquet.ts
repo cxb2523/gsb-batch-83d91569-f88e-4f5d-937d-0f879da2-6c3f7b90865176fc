@@ -3,6 +3,7 @@ import { DataType, tableFromIPC } from "apache-arrow"
 // @ts-ignore - WASM import
 import wasmUrl from "parquet-wasm/esm/parquet_wasm_bg.wasm?url"
 import { epochMsToIso } from "./dates"
+import { RemoteHttpError } from "./remote-errors"
 
 export interface ParquetSchema {
   name: string
@@ -64,9 +65,7 @@ async function probeUrl(url: string): Promise<void> {
   const res = await fetch(url, { headers: { Range: "bytes=0-0" } })
   // 206 = range honored, 200 = full body (range ignored) — both are readable.
   if (res.status !== 206 && res.status !== 200) {
-    throw new Error(
-      `The server returned ${res.status} ${res.statusText} for this URL.`
-    )
+    throw new RemoteHttpError(res.status, res.statusText)
   }
 }
 
