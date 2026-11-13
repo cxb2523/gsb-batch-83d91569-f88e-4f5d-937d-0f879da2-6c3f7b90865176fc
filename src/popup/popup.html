@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src https://dns.google https://cloudflare-dns.com https://api.github.com https://rdap.org"
+    />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="header">
+      <svg
+        class="logo"
+        viewBox="0 0 22 22"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+      >
+        <rect width="22" height="22" rx="5" fill="#6366f1" />
+        <path
+          d="M5 8l6 4.2L17 8M5 8v6h12V8H5z"
+          stroke="#fff"
+          stroke-width="1.4"
+          stroke-linejoin="round"
+        />
+      </svg>
+      <span class="title">Trawl</span>
+      <span class="privacy-badge">100% local</span>
+    </div>
+
+    <div class="controls">
+      <select id="mode">
+        <option value="html">Full HTML source</option>
+        <option value="text">Visible text</option>
+      </select>
+      <button id="run">Collect</button>
+    </div>
+
+    <div class="results" id="results">
+      <div class="results-header">
+        <span class="badge" id="count"></span>
+        <div class="results-actions">
+          <button id="copy">Copy</button>
+          <select id="export-format" class="export-select">
+            <option value="" disabled selected>Export</option>
+            <option value="csv">CSV</option>
+            <option value="json">JSON</option>
+            <option value="tsv">Tab-separated</option>
+            <option value="vcard">vCard</option>
+          </select>
+        </div>
+      </div>
+      <pre id="out"></pre>
+    </div>
+
+    <div class="extras" id="extras"></div>
+
+    <details class="discovery-panel" id="urls-panel">
+      <summary class="discovery-toggle">
+        URLs on Page
+        <span class="badge urls-count" id="urls-count"></span>
+      </summary>
+      <div class="discovery-content">
+        <div class="urls-toolbar">
+          <button id="urls-run" class="btn btn-sm urls-run-btn">Extract</button>
+          <div class="urls-sort" role="group" aria-label="Sort URLs">
+            <button
+              type="button"
+              id="urls-sort-alpha"
+              class="urls-sort-btn"
+              data-mode="alpha"
+            >
+              A&ndash;Z
+            </button>
+            <button
+              type="button"
+              id="urls-sort-page"
+              class="urls-sort-btn"
+              data-mode="pageOrder"
+            >
+              Page
+            </button>
+          </div>
+          <button
+            type="button"
+            id="urls-filter-toggle"
+            class="urls-filter-toggle"
+            aria-label="Filters"
+            title="Filters"
+          >
+            &#9881;
+          </button>
+          <button id="urls-copy" class="urls-copy-btn">Copy</button>
+          <select id="urls-export" class="export-select urls-export">
+            <option value="" disabled selected>Export</option>
+            <option value="txt">TXT</option>
+            <option value="csv">CSV</option>
+            <option value="json">JSON</option>
+          </select>
+        </div>
+        <div class="urls-filters" id="urls-filters" hidden>
+          <label class="urls-filter-row">
+            <span class="discovery-label">Visibility</span>
+            <select id="urls-visibility" class="urls-filter-select">
+              <option value="visible">Visible (default)</option>
+              <option value="all">All (incl. hidden)</option>
+              <option value="viewport">In viewport only</option>
+            </select>
+          </label>
+          <label class="urls-filter-row">
+            <span class="discovery-label">Sources</span>
+            <select id="urls-source" class="urls-filter-select">
+              <option value="anchors">Anchors only</option>
+              <option value="comprehensive">Comprehensive (default)</option>
+              <option value="everything">Everything (incl. head)</option>
+            </select>
+          </label>
+        </div>
+        <div id="urls-list" class="urls-list" hidden></div>
+        <div id="urls-empty" class="empty urls-empty" hidden>
+          Click Extract to scan this page.
+        </div>
+      </div>
+    </details>
+
+    <details class="discovery-panel" id="discovery-panel">
+      <summary class="discovery-toggle">Discover contacts</summary>
+      <div class="discovery-content">
+        <div class="discovery-section">
+          <label class="discovery-label">Guess email patterns</label>
+          <div class="discovery-row">
+            <input
+              type="text"
+              id="disc-first"
+              placeholder="First name"
+              class="discovery-input"
+            />
+            <input
+              type="text"
+              id="disc-last"
+              placeholder="Last name"
+              class="discovery-input"
+            />
+          </div>
+          <button id="disc-guess" class="btn btn-sm">Generate</button>
+          <pre id="disc-guess-out" class="discovery-out"></pre>
+        </div>
+        <div class="discovery-section">
+          <label class="discovery-label">Role addresses for domain</label>
+          <button id="disc-roles" class="btn btn-sm">Show roles</button>
+          <pre id="disc-roles-out" class="discovery-out"></pre>
+        </div>
+        <div class="discovery-section">
+          <label class="discovery-label"
+            >Linked pages (contact/about/team)</label
+          >
+          <button id="disc-links" class="btn btn-sm">Scan links</button>
+          <pre id="disc-links-out" class="discovery-out"></pre>
+        </div>
+        <div class="discovery-section">
+          <label class="discovery-label">GitHub user emails</label>
+          <div class="discovery-row">
+            <input
+              type="text"
+              id="disc-github"
+              placeholder="GitHub username"
+              class="discovery-input"
+            />
+          </div>
+          <button id="disc-github-btn" class="btn btn-sm">Fetch</button>
+          <pre id="disc-github-out" class="discovery-out"></pre>
+        </div>
+      </div>
+    </details>
+
+    <details class="discovery-panel" id="page-intel-panel">
+      <summary class="discovery-toggle">Page intelligence</summary>
+      <div class="discovery-content">
+        <div class="discovery-section">
+          <label class="discovery-label">Page type</label>
+          <span id="page-type" class="page-intel-value">-</span>
+        </div>
+        <div class="discovery-section">
+          <label class="discovery-label">Social links</label>
+          <pre id="page-social" class="discovery-out"></pre>
+        </div>
+        <div class="discovery-section">
+          <label class="discovery-label">Related pages</label>
+          <pre id="page-related" class="discovery-out"></pre>
+        </div>
+        <div class="discovery-section">
+          <label class="discovery-label">Domain info (WHOIS)</label>
+          <button id="page-whois-btn" class="btn btn-sm">Lookup</button>
+          <pre id="page-whois" class="discovery-out"></pre>
+        </div>
+      </div>
+    </details>
+
+    <details class="discovery-panel" id="settings-panel">
+      <summary class="discovery-toggle">Settings</summary>
+      <div class="discovery-content">
+        <div class="discovery-section">
+          <label class="toggle-row">
+            <input type="checkbox" id="auto-scan-toggle" />
+            <span class="toggle-switch"></span>
+            <span class="discovery-label" style="display: inline; margin: 0"
+              >Auto-scan pages</span
+            >
+          </label>
+          <div class="setting-hint">
+            Extract emails automatically when pages finish loading
+          </div>
+        </div>
+        <div class="discovery-section">
+          <label class="discovery-label">Allowlist domains</label>
+          <div class="setting-hint">
+            Only auto-scan these domains (one per line, leave empty for all)
+          </div>
+          <textarea
+            id="allowlist"
+            class="discovery-input domain-list"
+            rows="3"
+            placeholder="example.com&#10;company.org"
+          ></textarea>
+        </div>
+        <div class="discovery-section">
+          <label class="discovery-label">Blocklist domains</label>
+          <div class="setting-hint">
+            Never auto-scan these domains (one per line)
+          </div>
+          <textarea
+            id="blocklist"
+            class="discovery-input domain-list"
+            rows="3"
+            placeholder="internal.corp&#10;localhost"
+          ></textarea>
+        </div>
+      </div>
+    </details>
+
+    <div class="footer">
+      <button id="dashboard" class="footer-btn">Dashboard</button>
+    </div>
+
+    <script type="module" src="popup.ts"></script>
+  </body>
+</html>

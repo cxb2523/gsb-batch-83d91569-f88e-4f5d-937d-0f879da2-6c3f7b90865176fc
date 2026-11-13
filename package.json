@@ -1,0 +1,30 @@
+{
+  "dependencies": {
+    "loglevel": "^1.9.2",
+    "zod": "^4.3.6"
+  },
+  "description": "Zero-cloud email intelligence tool. Extract, validate, and discover email addresses from any web page.",
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.4.0",
+    "@types/bun": "^1.3.10",
+    "@types/chrome": "^0.1.38",
+    "knip": "^5.88.0",
+    "oxlint": "^1.56.0",
+    "prettier": "^3.8.1",
+    "vite": "^8.0.0"
+  },
+  "name": "trawl",
+  "peerDependencies": {
+    "typescript": "^5.9.3 || ^6.0.0"
+  },
+  "private": true,
+  "scripts": {
+    "build": "vite build",
+    "check": "oxlint --fix --fix-suggestions && knip",
+    "start": "vite",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "type": "module",
+  "version": "1.1.0"
+}

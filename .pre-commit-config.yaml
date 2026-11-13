@@ -1,0 +1,83 @@
+repos:
+  - repo: https://github.com/oxc-project/mirrors-oxlint
+    rev: 58bd4c1c837e2c8974e3560b1cdc2ef5df179ac2 # frozen: v1.52.0
+    hooks:
+      - id: oxlint
+        verbose: false
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # frozen: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=5000"]
+        exclude: |
+          (?x)^(
+            assets/.*
+          )$
+      - id: check-ast
+      - id: check-builtin-literals
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-shebang-scripts-are-executable
+      - id: check-symlinks
+      - id: check-toml
+      - id: check-vcs-permalinks
+      - id: check-yaml
+        args:
+          - --allow-multiple-documents
+      - id: destroyed-symlinks
+      - id: detect-aws-credentials
+        args:
+          - --allow-missing-credentials
+      - id: detect-private-key
+        exclude: |
+          (?x)^(
+            .github/workflows/ci.yml
+          )$
+      - id: end-of-file-fixer
+        exclude: |
+          (?x)^(
+          )$
+      - id: fix-byte-order-marker
+      - id: mixed-line-ending
+      - id: pretty-format-json
+        args:
+          - --autofix
+        exclude: |
+          (?x)^(
+            manifest.json|
+            .oxlintrc.json|
+            renovate.json
+          )$
+      - id: trailing-whitespace
+  - repo: https://github.com/alessandrojcm/commitlint-pre-commit-hook
+    rev: 1f6454da22d006d5bb0d2e65c96c43c23c8a534f # frozen: v9.24.0
+    hooks:
+      - id: commitlint
+        language: node
+        stages: [commit-msg]
+        additional_dependencies: ["@commitlint/config-conventional@21.2.4"]
+  - repo: https://github.com/rhysd/actionlint
+    rev: 393031adb9afb225ee52ae2ccd7a5af5525e03e8 # frozen: v1.7.11
+    hooks:
+      - id: actionlint
+  - repo: local
+    hooks:
+      - id: prettier
+        name: prettier
+        language: system
+        pass_filenames: true
+        entry: bunx prettier -u --write
+      - id: typecheck
+        name: typecheck
+        language: system
+        pass_filenames: false
+        entry: bunx tsc --noEmit
+        types: [ts]
+      - id: bun-check
+        name: bun-check
+        language: system
+        pass_filenames: false
+        entry: bun run check
+        always_run: true
