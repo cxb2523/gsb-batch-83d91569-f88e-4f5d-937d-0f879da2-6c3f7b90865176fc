@@ -245,6 +245,30 @@ export interface DatasetLink {
   readonly joinType: JoinType;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// WORKSHEET COLLECTION TYPES
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * How the collection of one worksheet from a workbook ended. Every sheet the
+ * parser found gets exactly one outcome, so the user can reconcile what they
+ * uploaded against what was actually analysed: nothing is silently dropped.
+ */
+export type SheetOutcomeStatus = 'collected' | 'failed' | 'not-selected';
+
+export interface SheetOutcome {
+  readonly fileName: string;
+  readonly sheetName: string;
+  readonly status: SheetOutcomeStatus;
+  /**
+   * Why the sheet failed (e.g. it was empty), or a caveat attached to a
+   * collected sheet (e.g. it exceeded the row limit and was truncated).
+   */
+  readonly reason?: string;
+  readonly rowCount?: number;
+  readonly columnCount?: number;
+}
+
 export interface PrismState {
   // File state (legacy single file)
   file: {
@@ -265,6 +289,13 @@ export interface PrismState {
   datasets: Dataset[];
   datasetLinks: DatasetLink[];
   activeDatasetId: string | null;
+  /**
+   * Per-worksheet audit trail of workbook ingestion: every sheet of every
+   * workbook the user confirmed is listed as collected, failed (with a
+   * reason) or not selected. Sheets that never entered a dataset still show
+   * up here, which is what makes silent drops impossible.
+   */
+  sheetOutcomes: SheetOutcome[];
   
   // Processing state
   processing: ProcessingProgress;
@@ -295,6 +326,17 @@ export interface PrismState {
   
   // Multi-dataset actions
   addDataset: (file: File) => Promise<void>;
+  /**
+   * Validate an Excel file and return its worksheet names so the UI can offer
+   * them for selection. Returns an empty list (and sets `error`) on failure.
+   */
+  prepareWorkbook: (file: File) => Promise<string[]>;
+  /**
+   * Collect the selected worksheets of a workbook, one dataset per sheet.
+   * Every sheet of the workbook gets a SheetOutcome; a failing sheet does not
+   * stop the others. If nothing could be collected, `error` is set.
+   */
+  addWorkbookSheets: (file: File, sheetNames: string[]) => Promise<SheetOutcome[]>;
   removeDataset: (id: string) => void;
   setActiveDataset: (id: string) => void;
   addDatasetLink: (link: Omit<DatasetLink, 'id'>) => void;

@@ -8,7 +8,7 @@
 import React, { useState, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { clsx } from 'clsx';
-import type { Dataset, DatasetLink, JoinType } from '@/types';
+import type { Dataset, DatasetLink, JoinType, SheetOutcome } from '@/types';
 import { MAX_FILE_SIZE } from '@/security/validator';
 import { usePrismStore } from '@/stores/prismStore';
 
@@ -17,6 +17,13 @@ import { usePrismStore } from '@/stores/prismStore';
 // ═══════════════════════════════════════════════════════════════════════════
 
 // No external props needed - component connects to store directly
+
+/** A workbook whose sheets are awaiting the user's selection before collection. */
+interface PendingWorkbook {
+  file: File;
+  sheets: string[];
+  selected: Set<string>;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ICONS
@@ -336,6 +343,111 @@ const LinkDisplay: React.FC<LinkDisplayProps> = ({ link, datasets, onRemove }) =
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
+// WORKSHEET SELECTION COMPONENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface SheetSelectionProps {
+  workbook: PendingWorkbook;
+  isBusy: boolean;
+  onToggle: (sheetName: string) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+const SheetSelection: React.FC<SheetSelectionProps> = ({
+  workbook,
+  isBusy,
+  onToggle,
+  onConfirm,
+  onCancel,
+}) => (
+  <div className="glass-card p-6 space-y-4">
+    <div>
+      <h4 className="font-semibold text-lg text-slate-900 dark:text-slate-100">
+        Select worksheets from {workbook.file.name}
+      </h4>
+      <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+        This workbook has {workbook.sheets.length}{' '}
+        {workbook.sheets.length === 1 ? 'worksheet' : 'worksheets'}. Each selected
+        sheet is added as its own dataset; unselected sheets are reported as not
+        selected and are not analysed.
+      </p>
+    </div>
+    <ul className="space-y-2">
+      {workbook.sheets.map((name) => (
+        <li key={name}>
+          <label className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
+            <input
+              type="checkbox"
+              checked={workbook.selected.has(name)}
+              onChange={() => onToggle(name)}
+              disabled={isBusy}
+              className="w-4 h-4 rounded accent-prism-500"
+            />
+            <span className="font-medium text-slate-700 dark:text-slate-300">
+              {name}
+            </span>
+          </label>
+        </li>
+      ))}
+    </ul>
+    <div className="flex justify-end gap-3">
+      <button type="button" onClick={onCancel} disabled={isBusy} className="btn-secondary">
+        Cancel
+      </button>
+      <button
+        type="button"
+        onClick={onConfirm}
+        disabled={isBusy || workbook.selected.size === 0}
+        className="btn-primary"
+      >
+        {isBusy
+          ? 'Collecting...'
+          : `Add ${workbook.selected.size} ${workbook.selected.size === 1 ? 'worksheet' : 'worksheets'}`}
+      </button>
+    </div>
+  </div>
+);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WORKSHEET OUTCOME COMPONENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SheetOutcomeRow: React.FC<{ outcome: SheetOutcome }> = ({ outcome }) => (
+  <li className="flex items-start gap-3 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50">
+    <span
+      className={clsx(
+        'mt-0.5 px-2 py-0.5 rounded text-xs font-semibold uppercase',
+        outcome.status === 'collected' &&
+          'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300',
+        outcome.status === 'failed' &&
+          'bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-300',
+        outcome.status === 'not-selected' &&
+          'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300'
+      )}
+    >
+      {outcome.status === 'collected' && 'Collected'}
+      {outcome.status === 'failed' && 'Failed'}
+      {outcome.status === 'not-selected' && 'Not selected'}
+    </span>
+    <div className="flex-1 min-w-0">
+      <p className="text-sm font-medium text-slate-700 dark:text-slate-300 truncate">
+        {outcome.fileName} · {outcome.sheetName}
+      </p>
+      {outcome.status === 'collected' && (
+        <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+          {outcome.rowCount?.toLocaleString()} rows • {outcome.columnCount} columns
+          {outcome.reason ? ` — ${outcome.reason}` : ''}
+        </p>
+      )}
+      {outcome.status === 'failed' && (
+        <p className="text-xs text-red-600 dark:text-red-400 mt-0.5">{outcome.reason}</p>
+      )}
+    </div>
+  </li>
+);
+
+// ═══════════════════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -345,6 +457,9 @@ export const DatasetManager: React.FC = () => {
   const links = usePrismStore(state => state.datasetLinks);
   const processing = usePrismStore(state => state.processing);
   const addDataset = usePrismStore(state => state.addDataset);
+  const prepareWorkbook = usePrismStore(state => state.prepareWorkbook);
+  const addWorkbookSheets = usePrismStore(state => state.addWorkbookSheets);
+  const sheetOutcomes = usePrismStore(state => state.sheetOutcomes);
   const removeDataset = usePrismStore(state => state.removeDataset);
   const addDatasetLink = usePrismStore(state => state.addDatasetLink);
   const removeDatasetLink = usePrismStore(state => state.removeDatasetLink);
@@ -354,14 +469,48 @@ export const DatasetManager: React.FC = () => {
 
   const [showLinkBuilder, setShowLinkBuilder] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [pendingWorkbook, setPendingWorkbook] = useState<PendingWorkbook | null>(null);
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     setIsUploading(true);
     for (const file of acceptedFiles) {
-      await addDataset(file);
+      const ext = file.name.toLowerCase().split('.').pop();
+      if (ext === 'xlsx' || ext === 'xls') {
+        // Excel workbooks can hold several sheets: list them and let the user
+        // choose which to collect instead of silently taking the first one.
+        const sheets = await prepareWorkbook(file);
+        if (sheets.length > 0) {
+          setPendingWorkbook({ file, sheets, selected: new Set(sheets) });
+        }
+      } else {
+        await addDataset(file);
+      }
     }
     setIsUploading(false);
-  }, [addDataset]);
+  }, [addDataset, prepareWorkbook]);
+
+  const toggleSheet = useCallback((sheetName: string) => {
+    setPendingWorkbook((current) => {
+      if (!current) return current;
+      const selected = new Set(current.selected);
+      if (selected.has(sheetName)) {
+        selected.delete(sheetName);
+      } else {
+        selected.add(sheetName);
+      }
+      return { ...current, selected };
+    });
+  }, []);
+
+  const confirmSheets = useCallback(async () => {
+    if (!pendingWorkbook) return;
+    setIsUploading(true);
+    // Keep workbook order, not click order, so outcomes reconcile with the file.
+    const chosen = pendingWorkbook.sheets.filter((s) => pendingWorkbook.selected.has(s));
+    await addWorkbookSheets(pendingWorkbook.file, chosen);
+    setPendingWorkbook(null);
+    setIsUploading(false);
+  }, [pendingWorkbook, addWorkbookSheets]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -428,6 +577,35 @@ export const DatasetManager: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Worksheet Selection (multi-sheet workbooks) */}
+      {pendingWorkbook && (
+        <SheetSelection
+          workbook={pendingWorkbook}
+          isBusy={isUploading || isProcessing}
+          onToggle={toggleSheet}
+          onConfirm={confirmSheets}
+          onCancel={() => setPendingWorkbook(null)}
+        />
+      )}
+
+      {/* Per-worksheet collection outcomes */}
+      {sheetOutcomes.length > 0 && (
+        <div className="space-y-3">
+          <h4 className="font-medium text-slate-900 dark:text-slate-100 flex items-center gap-2">
+            <TableIcon />
+            Worksheet Collection Results ({sheetOutcomes.length})
+          </h4>
+          <ul className="space-y-2" aria-live="polite">
+            {sheetOutcomes.map((outcome, index) => (
+              <SheetOutcomeRow
+                key={`${outcome.fileName} · ${outcome.sheetName} · ${index}`}
+                outcome={outcome}
+              />
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Datasets Grid */}
       {datasets.length > 0 && (

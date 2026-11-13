@@ -60,6 +60,7 @@ const initialState = {
   datasets: [] as import('@/types').Dataset[],
   datasetLinks: [] as import('@/types').DatasetLink[],
   activeDatasetId: null as string | null,
+  sheetOutcomes: [] as import('@/types').SheetOutcome[],
   
   processing: initialProgress,
   error: null as ProcessingError | null,
@@ -107,50 +108,48 @@ interface ParseResult {
   notices: string[];
 }
 
+/** One worksheet of a parsed workbook, as CSV, plus a truncation flag. */
+interface ParsedSheet {
+  name: string;
+  /** CSV of the sheet, or null when this sheet alone could not be converted. */
+  csv: string | null;
+  /** Why csv is null. */
+  error?: string;
+  truncated: boolean;
+}
+
 /**
- * Parse a workbook and return its first sheet as CSV.
+ * Rows spanned by a sheet's declared range. XLSX_READ_OPTIONS caps parsing at
+ * MAX_SHEET_ROWS, so a sheet whose range still spans the cap was truncated
+ * (a sheet with exactly MAX_SHEET_ROWS rows is a benign false positive).
+ */
+function sheetRowCount(sheet: unknown): number {
+  const ref = (sheet as { '!ref'?: unknown })['!ref'];
+  if (typeof ref !== 'string') return 0;
+  const rows = Array.from(ref.matchAll(/[A-Z]+(\d+)/gi), (m) => parseInt(m[1]!, 10));
+  if (rows.length === 0) return 0;
+  if (rows.length === 1) return rows[0]!;
+  return rows[1]! - rows[0]! + 1;
+}
+
+/**
+ * Run `fn` against the SheetJS parser behind the Object.prototype tripwire.
  *
  * Security: this now runs SheetJS 0.20.3, vendored in public/vendor/ and loaded
  * on demand by src/lib/sheetjs-loader.ts. The previous npm build, xlsx@0.18.5,
  * was frozen and unpatchable, carrying prototype pollution (GHSA-4r6h-8v6p-xvw6)
  * reachable through exactly this call on bytes the user just dragged in.
  *
- * The Object.prototype bracket below is kept even though 0.20.3 fixes that
- * advisory. It costs a set construction per upload, it is the only thing
- * standing between a future parser regression and the rest of the application,
- * and this parser's whole job is chewing on hostile input.
+ * The Object.prototype bracket is kept even though 0.20.3 fixes that advisory.
+ * It costs a set construction per upload, it is the only thing standing between
+ * a future parser regression and the rest of the application, and this parser's
+ * whole job is chewing on hostile input.
  */
-async function readWorkbookAsCsv(buffer: ArrayBuffer): Promise<ParseResult> {
+async function withParserGuard<T>(fn: (XLSX: import('@/lib/sheetjs-loader').SheetJS) => T | Promise<T>): Promise<T> {
   const XLSX = await loadSheetJS();
   const prototypeKeysBefore = new Set<PropertyKey>(Reflect.ownKeys(Object.prototype));
-
   try {
-    const workbook = XLSX.read(buffer, XLSX_READ_OPTIONS);
-
-    const sheetName = workbook.SheetNames[0];
-    if (!sheetName) {
-      throw new Error('Excel file has no sheets');
-    }
-    const sheet = workbook.Sheets[sheetName];
-    if (!sheet) {
-      throw new Error('Could not read sheet');
-    }
-
-    // Only the first worksheet is analysed. Saying nothing about the others was
-    // the most likely source of a silently wrong answer in the product: a user
-    // whose data sits on sheet 2 got a confident analysis of sheet 1.
-    const notices: string[] = [];
-    if (workbook.SheetNames.length > 1) {
-      const skipped = workbook.SheetNames.slice(1);
-      notices.push(
-        `This workbook has ${workbook.SheetNames.length} worksheets. ` +
-          `Only "${sheetName}" was analysed. ` +
-          `Not analysed: ${skipped.map((s) => `"${s}"`).join(', ')}. ` +
-          `To analyse another sheet, save it as its own file and upload that.`
-      );
-    }
-
-    return { content: XLSX.utils.sheet_to_csv(sheet), notices };
+    return await fn(XLSX);
   } finally {
     for (const key of Reflect.ownKeys(Object.prototype)) {
       if (!prototypeKeysBefore.has(key)) {
@@ -158,6 +157,94 @@ async function readWorkbookAsCsv(buffer: ArrayBuffer): Promise<ParseResult> {
       }
     }
   }
+}
+
+/**
+ * Parse a workbook and return every worksheet as CSV.
+ *
+ * Each sheet is converted independently so that one malformed sheet cannot
+ * take the others down with it: a sheet whose CSV conversion throws is
+ * reported by name and the remaining sheets are still returned.
+ */
+async function readWorkbookSheets(buffer: ArrayBuffer): Promise<ParsedSheet[]> {
+  return withParserGuard((XLSX) => {
+    const workbook = XLSX.read(buffer, XLSX_READ_OPTIONS);
+
+    if (workbook.SheetNames.length === 0) {
+      throw new Error('Excel file has no sheets');
+    }
+
+    return workbook.SheetNames.map((name) => {
+      const truncated = sheetRowCount(workbook.Sheets[name]) >= MAX_SHEET_ROWS;
+      try {
+        const sheet = workbook.Sheets[name];
+        if (!sheet) {
+          throw new Error('sheet is missing from the parsed workbook');
+        }
+        return { name, csv: XLSX.utils.sheet_to_csv(sheet), truncated };
+      } catch (error) {
+        // One bad sheet must not take the rest of the workbook down with it.
+        return {
+          name,
+          csv: null,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          truncated,
+        };
+      }
+    });
+  });
+}
+
+/**
+ * List the worksheet names of an Excel file without converting any of them,
+ * so the UI can offer a selection before anything is collected.
+ */
+export async function listWorkbookSheets(file: File): Promise<string[]> {
+  return withParserGuard(async (XLSX) => {
+    const workbook = XLSX.read(await file.arrayBuffer(), XLSX_READ_OPTIONS);
+    if (workbook.SheetNames.length === 0) {
+      throw new Error('Excel file has no sheets');
+    }
+    return workbook.SheetNames;
+  });
+}
+
+/**
+ * Parse a workbook and return its first sheet as CSV, for the legacy
+ * single-file path. Multi-sheet workbooks get a notice naming the sheets
+ * that were not analysed; the Dataset Manager path (addWorkbookSheets) lets
+ * the user collect every sheet instead.
+ */
+async function readWorkbookAsCsv(buffer: ArrayBuffer): Promise<ParseResult> {
+  const sheets = await readWorkbookSheets(buffer);
+  const first = sheets[0]!; // readWorkbookSheets throws when there are none
+  if (first.csv === null) {
+    throw new Error(`Could not read sheet "${first.name}": ${first.error ?? 'Unknown error'}`);
+  }
+
+  // Only the first worksheet is analysed on this path. Saying nothing about
+  // the others was the most likely source of a silently wrong answer in the
+  // product: a user whose data sits on sheet 2 got a confident analysis of
+  // sheet 1.
+  const notices: string[] = [];
+  if (sheets.length > 1) {
+    const skipped = sheets.slice(1).map((s) => s.name);
+    notices.push(
+      `This workbook has ${sheets.length} worksheets. ` +
+        `Only "${first.name}" was analysed. ` +
+        `Not analysed: ${skipped.map((s) => `"${s}"`).join(', ')}. ` +
+        `To analyse another sheet, save it as its own file and upload that, ` +
+        `or use Link Datasets mode, where every worksheet can be collected.`
+    );
+  }
+  if (first.truncated) {
+    notices.push(
+      `Worksheet "${first.name}" exceeded the ${MAX_SHEET_ROWS.toLocaleString()}-row ` +
+        `limit and was truncated.`
+    );
+  }
+
+  return { content: first.csv, notices };
 }
 
 /**
@@ -632,6 +719,158 @@ export const usePrismStore = create<PrismState>((set, get) => ({
           recoverable: true,
         },
       });
+    }
+  },
+
+  /**
+   * Validate an Excel file and list its worksheets so the user can choose
+   * which ones to collect. Returns [] (and sets `error`) on failure.
+   */
+  prepareWorkbook: async (file: File) => {
+    const validationResult = await validateFile(file);
+
+    if (!validationResult.isValid) {
+      set({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: validationResult.error || 'File validation failed',
+          recoverable: true,
+        },
+      });
+      return [];
+    }
+
+    try {
+      return await listWorkbookSheets(file);
+    } catch (error) {
+      set({
+        error: {
+          code: 'FILE_ERROR',
+          message: error instanceof Error ? error.message : 'Unknown error',
+          recoverable: true,
+        },
+      });
+      return [];
+    }
+  },
+
+  /**
+   * Collect the selected worksheets of a workbook into the dataset list.
+   *
+   * Every sheet of the workbook ends up in `sheetOutcomes` exactly once:
+   * collected (with its own header/row counts), failed (with the reason), or
+   * not-selected. A sheet that fails to parse does not stop the others; only
+   * when nothing at all could be collected is the overall `error` set.
+   */
+  addWorkbookSheets: async (file: File, sheetNames: string[]) => {
+    const validationResult = await validateFile(file);
+
+    if (!validationResult.isValid) {
+      set({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: validationResult.error || 'File validation failed',
+          recoverable: true,
+        },
+      });
+      return [];
+    }
+
+    try {
+      const sheets = await readWorkbookSheets(await file.arrayBuffer());
+      const selected = new Set(sheetNames);
+
+      const outcomes: import('@/types').SheetOutcome[] = [];
+      const newDatasets: import('@/types').Dataset[] = [];
+      const truncationNotices: string[] = [];
+
+      for (const sheet of sheets) {
+        if (!selected.has(sheet.name)) {
+          outcomes.push({ fileName: file.name, sheetName: sheet.name, status: 'not-selected' });
+          continue;
+        }
+
+        if (sheet.csv === null) {
+          outcomes.push({
+            fileName: file.name,
+            sheetName: sheet.name,
+            status: 'failed',
+            reason: sheet.error ?? 'Unknown error',
+          });
+          continue;
+        }
+
+        try {
+          // Same RFC 4180 header/row accounting as every other upload path.
+          const { columns, rowCount } = readCsvShape(sheet.csv);
+
+          newDatasets.push({
+            id: crypto.randomUUID(),
+            name: `${file.name} · ${sheet.name}`,
+            metadata: validationResult.metadata!,
+            content: sheet.csv,
+            columns,
+            rowCount,
+            isActive: get().datasets.length === 0 && newDatasets.length === 0,
+          });
+
+          const truncationReason = sheet.truncated
+            ? `Worksheet exceeded the ${MAX_SHEET_ROWS.toLocaleString()}-row limit and was truncated.`
+            : undefined;
+          if (truncationReason) {
+            truncationNotices.push(`"${sheet.name}" in ${file.name}: ${truncationReason}`);
+          }
+          outcomes.push({
+            fileName: file.name,
+            sheetName: sheet.name,
+            status: 'collected',
+            rowCount,
+            columnCount: columns.length,
+            ...(truncationReason ? { reason: truncationReason } : {}),
+          });
+        } catch (error) {
+          outcomes.push({
+            fileName: file.name,
+            sheetName: sheet.name,
+            status: 'failed',
+            reason: error instanceof Error ? error.message : 'Unknown error',
+          });
+        }
+      }
+
+      set((state) => ({
+        datasets: [...state.datasets, ...newDatasets],
+        activeDatasetId: state.activeDatasetId ?? newDatasets[0]?.id ?? null,
+        sheetOutcomes: [...state.sheetOutcomes, ...outcomes],
+        ...(truncationNotices.length > 0
+          ? { file: { ...state.file, notices: [...state.file.notices, ...truncationNotices] } }
+          : {}),
+      }));
+
+      // All-or-nothing failure gets one explicit error rather than a silent
+      // empty result; partial failure stays visible per-sheet in the outcomes.
+      if (newDatasets.length === 0) {
+        const failed = outcomes.filter((o) => o.status === 'failed');
+        const message =
+          failed.length > 0
+            ? `No worksheets could be collected from ${file.name}: ` +
+              failed.map((f) => `"${f.sheetName}" — ${f.reason}`).join('; ')
+            : `No worksheets were selected in ${file.name}.`;
+        set({
+          error: { code: 'FILE_ERROR', message, recoverable: true },
+        });
+      }
+
+      return outcomes;
+    } catch (error) {
+      set({
+        error: {
+          code: 'FILE_ERROR',
+          message: error instanceof Error ? error.message : 'Unknown error',
+          recoverable: true,
+        },
+      });
+      return [];
     }
   },
 
