@@ -156,7 +156,29 @@ Camoufox: a real Firefox with a patched fingerprint, geoip-aligned to the exit.
 python3 "$SKILL/scripts/antibot.py" https://target/path --proxy "$PROXY_URL" --out page.html
 # or let it take its own exit: --country US   · --profile <name> keeps the warm session
 # --wait is a ceiling (default 35 s), not a sleep: it stops as soon as the challenge clears
+# --report run.json  · machine-checkable result of this run (see below)
 ```
+
+**Run report (`--report <path>`).** Without it nothing changes and no extra file is written.
+With it, every run — including the failure exits — ends by writing JSON the collector can
+branch on instead of guessing from an exit code alone:
+
+| field | meaning |
+|-|-|
+| `url` | the target URL that was fetched |
+| `title` | the page's final title (empty when no page was ever loaded) |
+| `html_bytes` | byte count of the HTML actually written to `--out` or stdout — counted from that exact output, never recomputed |
+| `cleared` | `true` only when the challenge markers were gone; `false` on the interstitial, on a failed rotation, and when the browser could not start |
+| `rotations` | how many times the exit was actually rotated during the run |
+| `rotate_failed` / `rotate_error` | a rotation request that failed: recorded here, and the run stops retrying instead of swallowing it |
+| `error` | populated on the environment/fatal paths (`no_local_browser: …`, provisioning failures) |
+| `exit_code` | the code the process actually exits with |
+
+The boundaries are deliberate: real page → `cleared: true`, exit `0`; challenge still on the
+page at the deadline → `cleared: false`, exit `5` (the bytes are the interstitial, do not parse
+them); a rotation request fails → `rotate_failed: true`, no further retries, never `cleared`;
+the browser cannot start → exit `3`, but the report is still written first so an environment
+problem is distinguishable from a challenge that simply did not pass.
 
 Verified against a live Cloudflare challenge and bot.sannysoft.com: `navigator.webdriver` absent, real
 Firefox fingerprint, residential exit.

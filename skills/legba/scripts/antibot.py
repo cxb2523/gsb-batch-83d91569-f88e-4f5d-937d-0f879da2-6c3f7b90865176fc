@@ -5,7 +5,7 @@
 #   python3 antibot.py <url> --country US                             # residential exit, fresh session
 #   python3 antibot.py <url> --profile acme                           # WARM persistent profile (keeps cf_clearance)
 #   python3 antibot.py <url> --proxy http://u:p@host:port             # reuse a proxy you hold
-#   [--wait 35000] [--out page.html] [--screenshot shot.png]
+#   [--wait 35000] [--out page.html] [--screenshot shot.png] [--report run.json]
 import sys, os, json, time, argparse, urllib.request, urllib.error, glob
 from urllib.parse import urlparse
 
@@ -29,7 +29,18 @@ NO_LOCAL_BROWSER_EXIT = 3
 CHALLENGE_UNCLEARED_EXIT = 5
 
 
-def no_local_browser(reason):
+class FatalRunError(Exception):
+    """The run cannot continue at all (no key, API unreachable, provision refused).
+
+    Carries the exact text the script used to print before exiting, so the
+    user-facing message and the exit code stay what they were."""
+
+
+class NoLocalBrowserError(Exception):
+    """Rung 3 cannot run on this machine, so no page was ever fetched."""
+
+
+def no_local_browser_message(reason):
     """Rung 3 cannot run here. Say what to do instead, and stop.
 
     This is the common case on a locked-down box: no compiler, no sudo, a
@@ -38,7 +49,7 @@ def no_local_browser(reason):
     names rung 4 -- which installs nothing because the browser is ours, not this
     machine's -- and what to tell the user if their plan does not include it."""
     here = os.path.dirname(os.path.abspath(__file__))
-    sys.stderr.write(f"""# rung 3 unavailable: {reason}
+    return f"""# rung 3 unavailable: {reason}
 #
 # Camoufox cannot run on this machine. Do not retry the install; it will fail the
 # same way. Go to rung 4 instead -- Legba's own browser, nothing to install:
@@ -51,14 +62,8 @@ def no_local_browser(reason):
 # exit (rungs 1 and 2, one session at a time) but not the hosted browser. Give
 # the user the 402's own message -- it names the limit and the upgrade link --
 # and stop. Do not keep trying rungs 1 to 3 on a page that defeated them.
-""")
-    sys.exit(NO_LOCAL_BROWSER_EXIT)
+"""
 
-
-try:
-    from camoufox.sync_api import Camoufox
-except Exception as e:  # noqa: BLE001 — a broken install raises more than ImportError
-    no_local_browser(f"camoufox is not importable here ({type(e).__name__}: {e})")
 
 ROTATE_ATTEMPTS = int(os.environ.get("LEGBA_ANTIBOT_ROTATE_ATTEMPTS", "2"))
 GOTO_ATTEMPTS = 4
@@ -94,7 +99,7 @@ def resolve_key():
             except OSError: pass
             sys.stderr.write(f"# saved key to {KEY_FILE}\n")
     if not k:
-        sys.exit(
+        raise FatalRunError(
             "No Legba API key found. Legba is a hosted service: the exits and the browser\n"
             "are ours, so nothing here works without a key.\n\n"
             "Ask the user for theirs, once. If they have no account:\n"
@@ -122,122 +127,183 @@ def api(path, method="GET"):
         except ValueError:
             return e.code, {"error": raw[:200]}
     except urllib.error.URLError as e:
-        sys.exit(f"cannot reach {API}: {e.reason}")
+        raise FatalRunError(f"cannot reach {API}: {e.reason}")
 
-ap = argparse.ArgumentParser()
-ap.add_argument("url")
-ap.add_argument("--proxy"); ap.add_argument("--country", default="US")
-ap.add_argument("--client-id", default="default"); ap.add_argument("--profile")
-ap.add_argument("--wait", type=int, default=35000)
-ap.add_argument("--out"); ap.add_argument("--screenshot")
-a = ap.parse_args()
 
-proxy = None; provisioned = None; cleared = False
-try:
-    if a.proxy:
-        u = urlparse(a.proxy)
-        proxy = {"server": f"{u.scheme}://{u.hostname}:{u.port}", "username": u.username, "password": u.password}
-    else:
-        API_KEY = resolve_key()
-        st, body = api(f"/proxy?country={a.country}&client_id={a.client_id}")
-        if st != 200: sys.exit(f"provision {st}: {body}")
-        provisioned = body; sp = body["rules"]["singleProxy"]; auth = body["auth"]
-        port = sp.get("port") or (443 if sp["scheme"] == "https" else 80)
-        proxy = {"server": f'{sp["scheme"]}://{sp["host"]}:{port}', "username": auth["username"], "password": auth["password"]}
-        sys.stderr.write(f'# exit {body.get("exit_ip")} ({body.get("exit_city")}, {body.get("ip_type")})\n')
-
-    def make(geoip):
-        opts = dict(headless=True, humanize=True, proxy=proxy, geoip=geoip)
-        if a.profile:
-            udd = os.path.expanduser(f"~/.cache/camoufox-profiles/{a.profile}"); os.makedirs(udd, exist_ok=True)
-            return Camoufox(persistent_context=True, user_data_dir=udd, **opts)
-        return Camoufox(**opts)
-
+def write_report(path, data):
+    """Write the JSON run report. Best effort: a report that cannot be written
+    must not change the run's own exit code or its page output."""
+    if not path:
+        return
     try:
-        cf = make(bool(proxy))
-        ctx = cf.__enter__()
-    except Exception:
-        # Second try without geoip: that alignment is the part most likely to
-        # fail on its own. If the browser itself will not come up, the machine
-        # cannot host rung 3 at all, whatever the reason.
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        sys.stderr.write(f"# wrote report {path}\n")
+    except OSError as e:
+        sys.stderr.write(f"# could not write report {path}: {e}\n")
+
+
+def main(argv=None):
+    global API_KEY
+    ap = argparse.ArgumentParser()
+    ap.add_argument("url")
+    ap.add_argument("--proxy"); ap.add_argument("--country", default="US")
+    ap.add_argument("--client-id", default="default"); ap.add_argument("--profile")
+    ap.add_argument("--wait", type=int, default=35000)
+    ap.add_argument("--out"); ap.add_argument("--screenshot")
+    ap.add_argument("--report", metavar="PATH",
+                    help="write a JSON run report: URL, final title, HTML byte count, "
+                         "cleared flag, rotations, and the process exit code")
+    a = ap.parse_args(argv)
+
+    # html_bytes starts at 0: on the exit-3 paths no page is ever fetched, and
+    # the report must still say so rather than guess.
+    report = {
+        "url": a.url,
+        "title": "",
+        "html_bytes": 0,
+        "cleared": False,
+        "rotations": 0,
+        "rotate_failed": False,
+        "rotate_error": None,
+        "error": None,
+        "exit_code": None,
+    }
+    proxy = None; provisioned = None; cleared = False
+    title = ""; payload = b""; exit_code = 1
+    cf = None; page = None
+    try:
         try:
-            cf = make(False); ctx = cf.__enter__()
-        except Exception as e:  # noqa: BLE001
-            no_local_browser(f"the browser would not start ({type(e).__name__}: "
-                             f"{str(e).splitlines()[0][:120]})")
-    try:
-        page = ctx.new_page()
+            from camoufox.sync_api import Camoufox
+        except Exception as e:  # noqa: BLE001 — a broken install raises more than ImportError
+            raise NoLocalBrowserError(f"camoufox is not importable here ({type(e).__name__}: {e})")
 
-        def load_and_wait():
-            """Load the page and wait for any anti-bot interstitial to clear.
+        if a.proxy:
+            u = urlparse(a.proxy)
+            proxy = {"server": f"{u.scheme}://{u.hostname}:{u.port}", "username": u.username, "password": u.password}
+        else:
+            API_KEY = resolve_key()
+            st, body = api(f"/proxy?country={a.country}&client_id={a.client_id}")
+            if st != 200: raise FatalRunError(f"provision {st}: {body}")
+            provisioned = body; sp = body["rules"]["singleProxy"]; auth = body["auth"]
+            port = sp.get("port") or (443 if sp["scheme"] == "https" else 80)
+            proxy = {"server": f'{sp["scheme"]}://{sp["host"]}:{port}', "username": auth["username"], "password": auth["password"]}
+            sys.stderr.write(f'# exit {body.get("exit_ip")} ({body.get("exit_city")}, {body.get("ip_type")})\n')
 
-            Waits on the markup, not the title: the title briefly reads
-            "Loading <url>" and then the real one while the body is still the
-            challenge. Returns True once the real page is there."""
-            for try_n in range(GOTO_ATTEMPTS):
-                try:
-                    page.goto(a.url, wait_until="domcontentloaded", timeout=60000)
-                    break
-                except Exception as e:
-                    if try_n == GOTO_ATTEMPTS - 1:
-                        raise
-                    sys.stderr.write(f"# navigation failed ({str(e).splitlines()[0][:60]}), retrying\n")
-                    page.wait_for_timeout(2500)
-            deadline = time.time() + a.wait / 1000
-            while time.time() < deadline:
-                page.wait_for_timeout(1000)
-                try:
-                    seen = ((page.title() or "") + " " + (page.inner_text("body") or "")).lower()
-                except Exception:  # noqa: BLE001 — mid-navigation; look again next tick
-                    continue
-                if seen.strip() and not any(m in seen for m in CHALLENGE_MARKERS):
+        def make(geoip):
+            opts = dict(headless=True, humanize=True, proxy=proxy, geoip=geoip)
+            if a.profile:
+                udd = os.path.expanduser(f"~/.cache/camoufox-profiles/{a.profile}"); os.makedirs(udd, exist_ok=True)
+                return Camoufox(persistent_context=True, user_data_dir=udd, **opts)
+            return Camoufox(**opts)
+
+        try:
+            cf = make(bool(proxy))
+            ctx = cf.__enter__()
+        except Exception:
+            # Second try without geoip: that alignment is the part most likely to
+            # fail on its own. If the browser itself will not come up, the machine
+            # cannot host rung 3 at all, whatever the reason.
+            try:
+                cf = make(False); ctx = cf.__enter__()
+            except Exception as e:  # noqa: BLE001
+                raise NoLocalBrowserError(f"the browser would not start ({type(e).__name__}: "
+                                          f"{str(e).splitlines()[0][:120]})")
+        try:
+            page = ctx.new_page()
+
+            def load_and_wait():
+                """Load the page and wait for any anti-bot interstitial to clear.
+
+                Waits on the markup, not the title: the title briefly reads
+                "Loading <url>" and then the real one while the body is still the
+                challenge. Returns True once the real page is there."""
+                for try_n in range(GOTO_ATTEMPTS):
                     try:
-                        page.wait_for_load_state("networkidle", timeout=15000)
-                    except Exception:
-                        pass
-                    # Settle. A single unchanged tick is not enough: an app that
-                    # renders its shell first, then fetches what you actually came
-                    # for, pauses in between, and a page handed back during that
-                    # pause is a page with no content on it. Wait for the size to
-                    # hold still twice running before believing it.
-                    last, stable = -1, 0
-                    for _ in range(25):
-                        size = len(page.content() or "")
-                        if size == last:
-                            stable += 1
-                            if stable >= 3:
-                                break
-                        else:
-                            stable = 0
-                        last = size
-                        page.wait_for_timeout(1500)
-                    return True
-            return False
+                        page.goto(a.url, wait_until="domcontentloaded", timeout=60000)
+                        break
+                    except Exception as e:
+                        if try_n == GOTO_ATTEMPTS - 1:
+                            raise
+                        sys.stderr.write(f"# navigation failed ({str(e).splitlines()[0][:60]}), retrying\n")
+                        page.wait_for_timeout(2500)
+                deadline = time.time() + a.wait / 1000
+                while time.time() < deadline:
+                    page.wait_for_timeout(1000)
+                    try:
+                        seen = ((page.title() or "") + " " + (page.inner_text("body") or "")).lower()
+                    except Exception:  # noqa: BLE001 — mid-navigation; look again next tick
+                        continue
+                    if seen.strip() and not any(m in seen for m in CHALLENGE_MARKERS):
+                        try:
+                            page.wait_for_load_state("networkidle", timeout=15000)
+                        except Exception:
+                            pass
+                        # Settle. A single unchanged tick is not enough: an app that
+                        # renders its shell first, then fetches what you actually came
+                        # for, pauses in between, and a page handed back during that
+                        # pause is a page with no content on it. Wait for the size to
+                        # hold still twice running before believing it.
+                        last, stable = -1, 0
+                        for _ in range(25):
+                            size = len(page.content() or "")
+                            if size == last:
+                                stable += 1
+                                if stable >= 3:
+                                    break
+                            else:
+                                stable = 0
+                            last = size
+                            page.wait_for_timeout(1500)
+                        return True
+                return False
 
-        for attempt in range(ROTATE_ATTEMPTS + 1 if provisioned else 1):
-            if attempt:
-                try:
-                    api(f'/proxy/{provisioned["proxy_id"]}/rotate', "POST")
+            for attempt in range(ROTATE_ATTEMPTS + 1 if provisioned else 1):
+                if attempt:
+                    # A failed rotation is a recorded stop, not a swallowed
+                    # retry: do not ask the same exit again, and never report
+                    # cleared on the strength of a page the broken rotation
+                    # never gave us.
+                    rotate_error = None
+                    try:
+                        rstatus, rbody = api(f'/proxy/{provisioned["proxy_id"]}/rotate', "POST")
+                        if rstatus != 200:
+                            rotate_error = f"rotate {rstatus}: {rbody}"
+                    except FatalRunError as e:
+                        rotate_error = str(e)
+                    if rotate_error is not None:
+                        report["rotate_failed"] = True
+                        report["rotate_error"] = str(rotate_error)[:200]
+                        sys.stderr.write(f"# rotate failed: {rotate_error}\n")
+                        break
+                    report["rotations"] += 1
                     sys.stderr.write(f"# challenge persisted — rotated exit, retry {attempt}\n")
-                except Exception as e:
-                    sys.stderr.write(f"# rotate failed: {e}\n"); break
-            if load_and_wait():
-                cleared = True
-                break
-        title = page.title() or ""
-        html = page.content()
-        if a.screenshot: page.screenshot(path=a.screenshot)
-        sys.stderr.write(f"# title: {title[:80]} | {len(html)} bytes\n")
-        if a.out:
-            with open(a.out, "w") as f:
-                f.write(html)
-            sys.stderr.write(f"# wrote {a.out}\n")
-        else: sys.stdout.write(html)
-        if not cleared:
-            # The page above is the interstitial, not the target. Say so loudly:
-            # handing it back with a success code is how an agent ends up
-            # parsing "Just a moment..." as the answer.
-            sys.stderr.write(f"""# the anti-bot challenge did not clear in {a.wait} ms.
+                if load_and_wait():
+                    cleared = True
+                    break
+            title = page.title() or ""
+            html = page.content()
+            if a.screenshot: page.screenshot(path=a.screenshot)
+            sys.stderr.write(f"# title: {title[:80]} | {len(html)} bytes\n")
+            # Encode once, write those exact bytes, count those exact bytes:
+            # the report's html_bytes is the length of what --out or stdout
+            # actually received, never a second, separately computed number.
+            payload = html.encode("utf-8")
+            if a.out:
+                with open(a.out, "wb") as f:
+                    f.write(payload)
+                sys.stderr.write(f"# wrote {a.out}\n")
+            else:
+                sys.stdout.buffer.write(payload)
+            if not cleared:
+                # The page above is the interstitial, not the target. Say so loudly:
+                # handing it back with a success code is how an agent ends up
+                # parsing "Just a moment..." as the answer.
+                sys.stderr.write(f"""# the anti-bot challenge did not clear in {a.wait} ms.
 # What you have is the challenge page, NOT the page you asked for -- do not parse it.
 # Rung 3 has done all it can here. Go to rung 4, Legba's own browser, where a
 # person can take over and finish the check:
@@ -248,16 +314,47 @@ try:
 # A longer --wait rarely helps: a challenge that has not cleared by now is
 # asking for a human, not for more time.
 """)
+        finally:
+            if page is not None:
+                try: page.close()
+                except Exception: pass
+            if cf is not None:
+                try: cf.__exit__(None, None, None)
+                except Exception: pass
+        exit_code = 0 if cleared else CHALLENGE_UNCLEARED_EXIT
+    except NoLocalBrowserError as e:
+        sys.stderr.write(no_local_browser_message(str(e)))
+        report["error"] = f"no_local_browser: {e}"
+        exit_code = NO_LOCAL_BROWSER_EXIT
+    except FatalRunError as e:
+        sys.stderr.write(str(e) + "\n")
+        report["error"] = str(e)[:300]
+        exit_code = 1
+    except Exception as e:  # noqa: BLE001 — last resort: still leave the collector a report
+        sys.stderr.write(f"unexpected failure: {type(e).__name__}: {e}\n")
+        report["error"] = f"{type(e).__name__}: {str(e)[:260]}"
+        exit_code = 1
     finally:
-        try: page.close()
-        except Exception: pass
-        try: cf.__exit__(None, None, None)
-        except Exception: pass
-finally:
-    if provisioned:
-        try: api(f'/proxy/{provisioned["proxy_id"]}/release', "POST"); sys.stderr.write(f'# released {provisioned["proxy_id"]}\n')
-        except Exception as e: sys.stderr.write(f"# release failed: {e}\n")
+        if provisioned:
+            try:
+                api(f'/proxy/{provisioned["proxy_id"]}/release', "POST")
+                sys.stderr.write(f'# released {provisioned["proxy_id"]}\n')
+            except Exception as e: sys.stderr.write(f"# release failed: {e}\n")
 
-sys.stdout.flush()
-sys.stderr.flush()
-os._exit(0 if cleared else CHALLENGE_UNCLEARED_EXIT)
+    report["title"] = title
+    report["html_bytes"] = len(payload)
+    report["cleared"] = cleared
+    report["exit_code"] = exit_code
+    # Including the exit-3 path: the report lands before the process stops, so
+    # the collector can tell an environment failure from an uncleared challenge.
+    write_report(a.report, report)
+    return exit_code
+
+
+if __name__ == "__main__":
+    code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # os._exit on purpose: Camoufox's background threads can hold the interpreter
+    # open after an otherwise finished run. The report is already closed above.
+    os._exit(code)
