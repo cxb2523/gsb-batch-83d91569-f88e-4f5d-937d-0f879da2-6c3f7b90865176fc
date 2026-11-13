@@ -326,6 +326,21 @@ traffic: 3.2 MB of 10 MB budget`, and the sidecar records `proxy_bytes`,
 records them in `<out>.latest_attempt.meta.json`, leaving the data and
 `<out>.meta.json` as they were.
 
+**What the stop did to each search** is in the sidecar's `searches` list,
+one entry per search in input order. Besides the row count and the
+library's total, every entry carries `ending`:
+
+| `ending` | Meaning |
+|---|---|
+| `complete` | read to its own end, or to `--max-results` (its own `stop` says which) |
+| `budget_stopped` | the proxy budget ran out while it was still paginating: `stop` is `proxy_budget_exceeded`, `rows` is exactly how many ads were read before the stop, and those rows are in the output |
+| `not_attempted` | the run stopped before this search's first navigation: no page was opened and `rows` is 0 |
+| `failed` | blocked, stalled, not painted, fetch or parse error (`failed_urls` has its reason) |
+
+`attempted` and `budget_stopped` are also on each entry, so a consumer
+need not parse `ending`. A run under its budget has no `budget_stopped`
+entry and `proxy_budget_exceeded: false`.
+
 The count is an estimate of the tunnelled payload — request line, headers
 and body sent, response headers and body as received (compressed) — not
 the proxy's invoice: TLS records, the `CONNECT` exchange, WebSocket frames
@@ -361,8 +376,11 @@ at once with exit 5.
 
 Every run writes `<out>` and `<out>.meta.json`: status, `stop_reason`,
 the search URLs, per search the ads read, the library's own total, how
-many scrolls and why it stopped (`limit`, `end`, `stalled`, `no_scroll`,
-`empty`), failed searches with reasons (`failed_pages`; searches never
+many scrolls, why it stopped (`limit`, `end`, `stalled`, `no_scroll`,
+`empty`, `proxy_budget_exceeded`) and how it ended (`ending`: `complete`,
+`budget_stopped`, `not_attempted`, `failed` — see
+[Proxy traffic](#proxy-traffic-pre-check-and-media)), failed searches with
+reasons (`failed_pages`; searches never
 fetched because the run stopped early are listed in `unattempted_pages`
 instead), whether `--max-results` capped
 it, solves spent, and a hash of the output file. A run that collects

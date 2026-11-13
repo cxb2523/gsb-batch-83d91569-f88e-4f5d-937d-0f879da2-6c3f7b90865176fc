@@ -104,14 +104,30 @@ class SearchOutcome:
     rows: List[Product] = field(default_factory=list)
     state: str = "unknown"          # content | empty | login | loading | parse_error | unknown
     blocked: bool = False
-    failure: Optional[str] = None   # fetch_error | not_painted | stalled | proxy_pool_exhausted | remote_api_error | parse_error
+    failure: Optional[str] = None   # fetch_error | not_painted | stalled | proxy_pool_exhausted | remote_api_error | parse_error | not_attempted | proxy_budget_exceeded
     total_results: Optional[int] = None
     has_next_page: Optional[bool] = None
     scrolls: int = 0
     rejected: int = 0
-    stop: Optional[str] = None      # limit | end | stalled | no_scroll | empty
-    details: Optional[str] = None   # with --details: done | rate_limited | no_request | unsupported | error
+    stop: Optional[str] = None      # limit | end | stalled | no_scroll | empty | proxy_budget_exceeded | not_attempted
+    details: Optional[str] = None   # with --details: done | rate_limited | no_request | unsupported | error | proxy_budget_exceeded
     details_read: int = 0
+    attempted: bool = True          # False: the run stopped before this search's first navigation
+    budget_stopped: bool = False    # --proxy-budget-mb ended this search while it was scrolling
+
+    def ending(self) -> str:
+        """How this search ended, in one word for the sidecar: `complete`
+        (read to its own end or the --max-results limit), `budget_stopped`
+        (the proxy budget ran out while it was scrolling — the rows read
+        so far are kept), `not_attempted` (the run stopped before it) or
+        `failed` (blocked, stalled, fetch error, ...)."""
+        if not self.attempted or self.failure == "not_attempted":
+            return "not_attempted"
+        if self.budget_stopped:
+            return "budget_stopped"
+        if self.failure or self.blocked:
+            return "failed"
+        return "complete"
 
 
 # --------------------------------------------------------------------------- #
@@ -306,10 +322,16 @@ async def _scroll(engine: Engine, session: PageSession, collector: ap.Collector,
         height = max(height, new_height)
     if collector.full:
         outcome.stop = "limit"
-    elif _meter.exceeded():
-        outcome.stop = outcome.failure = _meter.STOP_REASON
     elif collector.has_next_page is False:
         outcome.stop = "end"
+    elif _meter.exceeded():
+        # The proxy budget ran out while this search was still paginating:
+        # the rows read so far are kept and this search says so itself.
+        outcome.stop = outcome.failure = _meter.STOP_REASON
+        outcome.budget_stopped = True
+        _log.warning("%s: the proxy budget was spent after %d ads (%d scrolls) — stopping mid-scroll, the "
+                     "rows read so far are kept (stop_reason %s).", outcome.url, len(collector.rows),
+                     outcome.scrolls, _meter.STOP_REASON)
     else:
         outcome.stop = "stalled"
         outcome.failure = "stalled"
@@ -331,6 +353,13 @@ async def _details(engine: Engine, args, session: PageSession, collector: ap.Col
     if not getattr(engine, "can_details", False):
         outcome.details = "unsupported"
         _log.info("%s: --details needs a live page; this mode reads the search results only.", outcome.url)
+        return
+    if _meter.exceeded():
+        # The click itself sends a details request through the proxy; once
+        # the budget is spent no further details request may leave.
+        outcome.details = _meter.STOP_REASON
+        _log.warning("%s: the proxy budget is spent — details are left empty for all %d ads.",
+                     outcome.url, len(collector.rows))
         return
     await session.take_requests()  # anything the search itself sent is not ours
     # The button exists only once the result list is drawn, which can be
@@ -405,6 +434,14 @@ async def fetch_search(engine: Engine, args, url: str, index: int, proxy_pool) -
     """One search: open it, wait for it to paint, read the embedded batch,
     scroll for the rest. Every failure is a typed outcome, never a raise."""
     outcome = SearchOutcome(url=url)
+    if _meter.exceeded():
+        # The budget was already spent (e.g. by the pre-check) before this
+        # search's first navigation: nothing is opened and no request is sent.
+        outcome.failure = outcome.stop = "not_attempted"
+        outcome.attempted = False
+        _log.warning("%s: not attempted — the proxy budget is already spent (stop_reason %s).",
+                     url, _meter.STOP_REASON)
+        return outcome
     proxy = proxy_pool.next() if proxy_pool is not None else None
     if proxy_pool is not None and proxy is None:
         outcome.failure = "proxy_pool_exhausted"
@@ -439,7 +476,13 @@ async def fetch_search(engine: Engine, args, url: str, index: int, proxy_pool) -
                 if attempt < args.retries:
                     await engine.sleep(args.retry_delay)
         if last_error == _meter.STOP_REASON:
+            # The budget ran out between navigation attempts: this search was
+            # started, so it is budget-stopped rather than never attempted.
             outcome.failure = _meter.STOP_REASON
+            outcome.stop = _meter.STOP_REASON
+            outcome.budget_stopped = True
+            _log.warning("%s: the proxy budget was spent before the page loaded — no rows read (stop_reason %s).",
+                         url, _meter.STOP_REASON)
             return outcome
         if last_error is not None:
             _log.error("%s permanently failed to load: %s", url, last_error)
@@ -551,7 +594,8 @@ async def run(engine: Engine, args, *, urls: List[str], proxy_pool, client, star
             if proxy_pool is None and consecutive_blocks >= STOP_AFTER_CONSECUTIVE_BLOCKS:
                 _log.error("%d blocked answers in a row from the same exit — stopping instead of asking again. "
                            "Rerun later, or with --proxy-file to rotate exits.", consecutive_blocks)
-            outcomes.extend(SearchOutcome(url=u, failure="not_attempted") for u in urls[i:])
+            outcomes.extend(SearchOutcome(url=u, failure="not_attempted", stop="not_attempted", attempted=False)
+                            for u in urls[i:])
             break
         if i < len(urls):
             await engine.sleep(args.delay_between_pages)
@@ -578,6 +622,7 @@ def finish_searches(args, outcomes: List[SearchOutcome], *, engine_name: str, ur
             failures.append({"url": o.url, "reason": o.failure or "blocked"})
     searches = [{"url": o.url, "state": o.state, "rows": len(o.rows), "total_results": o.total_results,
                  "has_next_page": o.has_next_page, "scrolls": o.scrolls, "stop": o.stop or o.failure,
+                 "ending": o.ending(), "attempted": o.attempted, "budget_stopped": o.budget_stopped,
                  "details": o.details, "details_read": o.details_read}
                 for o in outcomes]
     totals = [o.total_results for o in outcomes if o.total_results is not None]

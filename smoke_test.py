@@ -2016,7 +2016,7 @@ class _MeteredEngine(_FakeEngine):
         return session
 
 
-def _metered_run(by_url, urls, *, budget_mb, cost, active=True, argv=()):
+def _metered_run(by_url, urls, *, budget_mb, cost, active=True, argv=(), precharge=0):
     import contextlib
     import io
     args = playwright_scraper.build_arg_parser().parse_args(
@@ -2024,6 +2024,8 @@ def _metered_run(by_url, urls, *, budget_mb, cost, active=True, argv=()):
          "--proxy-budget-mb", str(budget_mb), *argv])
     args._solve_budget = page_flow.SolveBudget(0)
     proxy_meter.start(args.proxy_budget_mb, active=active)
+    if precharge:  # e.g. the proxy pre-check's HEAD, before the first search
+        proxy_meter.current().add(precharge)
     engine = _MeteredEngine(by_url, cost)
     err = io.StringIO()
     try:
@@ -2057,6 +2059,34 @@ def _():
     assert meta["unattempted_pages"] == [2] and meta["searches"][0]["stop"] == "proxy_budget_exceeded", meta
     assert err.count("Proxy traffic: 0.0 MB of 0.001 MB budget") == 1, err[-500:]
     assert attempt is None, "a run that wrote its rows has nothing to put in the attempt sidecar"
+
+
+@check("proxy budget: the sidecar is checkable per search — each one ends `complete`, `budget_stopped` (rows read before the stop kept, counted, with its own stop reason) or `not_attempted`; no scroll or search after the stop")
+def _():
+    rc, meta, _attempt, rows, engine, _err = _metered_run(
+        {_NIKE_URL: _nike_with_scrolls(), "*": _nike_with_scrolls()}, [_NIKE_URL, _SECOND_URL],
+        budget_mb=0.001, cost=400)
+    first, second = meta["searches"]
+    assert (first["ending"], first["attempted"], first["budget_stopped"]) == ("budget_stopped", True, True), first
+    assert first["stop"] == "proxy_budget_exceeded" and first["rows"] == len(rows) and first["rows"] > 6, (first, len(rows))
+    assert (second["ending"], second["attempted"], second["budget_stopped"], second["rows"]) == \
+        ("not_attempted", False, False, 0), second
+    assert len(engine.sessions) == 1 and engine.sessions[0].scrolled == 2, "nothing after the stop"
+    rc, meta, _attempt, rows, _engine, _err = _metered_run(
+        {_NIKE_URL: _nike_with_scrolls(2)}, [_NIKE_URL], budget_mb=10, cost=1000, argv=["--max-results", "6"])
+    assert meta["searches"][0]["ending"] == "complete" and meta["searches"][0]["rows"] == len(rows) == 6, meta
+
+
+@check("proxy budget: a run whose budget is already spent starts no browser at all — every search is not_attempted, no rows are written, exit 5, and the attempt sidecar still lists each search")
+def _():
+    rc, meta, attempt, rows, engine, err = _metered_run(
+        {"*": {"html": _fx("loading_amazon")}}, [_NIKE_URL, _SECOND_URL], budget_mb=0.001, cost=5000,
+        precharge=2000)
+    assert rc == output_writer.EXIT_REMOTE_API_ERROR and engine.sessions == [], (rc, engine.sessions)
+    assert [s["ending"] for s in attempt["searches"]] == ["not_attempted", "not_attempted"], attempt["searches"]
+    assert attempt["unattempted_pages"] == [1, 2] and rows == [] and meta is None, attempt
+    assert (attempt["proxy_bytes"], attempt["proxy_budget_bytes"], attempt["proxy_budget_exceeded"]) == \
+        (2000, 1000, True), attempt
 
 
 @check("proxy budget: spent before any row was read -> exit 5 (not 4, not 3); the previous data and .meta.json stay, and <out>.latest_attempt.meta.json records stop_reason proxy_budget_exceeded with the byte count")

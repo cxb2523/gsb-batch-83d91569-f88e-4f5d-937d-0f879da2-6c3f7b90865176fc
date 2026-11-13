@@ -29,7 +29,11 @@ The budget (`--proxy-budget-mb`, default 10, 0 = unlimited): once the
 running total goes past it, the engine stops fetching new pages, any request
 the browser still tries is aborted, the rows already gathered are kept, and
 the run ends with stop_reason `proxy_budget_exceeded` — exit 6 when it has
-rows, 5 when it has none. It never silently goes on.
+rows, 5 when it has none. It never silently goes on. The sidecar's
+`searches` list accounts for every search even so (`page_flow`): `complete`,
+`budget_stopped` (the stop landed mid-pagination: the rows read before it
+are counted and kept) or `not_attempted` (never started), plus the run's
+`proxy_bytes`, `proxy_budget_bytes` and `proxy_budget_exceeded`.
 """
 
 from __future__ import annotations

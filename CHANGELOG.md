@@ -25,6 +25,12 @@ that changes a default is called out at the top of its entry.
 > proxied run that collects nothing now writes
 > `<out>.latest_attempt.meta.json` with its outcome and byte count. Not
 > applied over `--cdp-endpoint`, with `--scraper-api` or with no proxy.
+> The sidecar's `searches` list now says what the stop did to EVERY
+> search (`ending`: `complete` / `budget_stopped` / `not_attempted` /
+> `failed`, plus `attempted`, `budget_stopped` and the rows read before
+> the stop), and a search stopped mid-pagination keeps every row read
+> before the stop. A run whose budget is already spent opens no browser
+> at all.
 
 ### Added
 
@@ -47,6 +53,16 @@ that changes a default is called out at the top of its entry.
   with one `Proxy traffic: X.X MB of Y MB budget` line. New flag
   `--proxy-budget-mb` (default 10). The proxy pre-check's own `HEAD` is
   counted too.
+- Per-search accounting of a proxy-budget stop: every sidecar `searches`
+  entry now records `ending` (`complete`, `budget_stopped`,
+  `not_attempted` or `failed`), `attempted` and `budget_stopped`, so a
+  stopped run says which searches were read to the end, which stopped
+  mid-pagination with how many rows kept, and which were never started.
+  A search stopped mid-pagination has its own `stop:
+  proxy_budget_exceeded`. Offline coverage in
+  `tests/test_budget_stop_accounting.py` drives the shared loop with a
+  fake session and a fake meter: budget enough, a stop on the second
+  scroll, and a budget already spent before the first search.
 - CI only: the canary passes `--proxy-budget-mb 10`, writes `**canary**:
   proxy traffic X.X MB of 10 MB` to the job summary, and fails with
   `::error::stopped: proxy budget 10 MB exceeded` when the run hit the
