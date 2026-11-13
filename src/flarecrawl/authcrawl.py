@@ -174,17 +174,32 @@ class AuthenticatedCrawler:
         """Best-effort sitemap-first seeding.
 
         Failures are swallowed — sitemap absence is the common case.
+        A summary of per-sitemap outcomes is logged at DEBUG so a
+        truncated run (budget exhausted) or a broken child sitemap is
+        visible without changing crawl behaviour.
         """
         try:
-            from .sitemap import discover_sitemap_urls
+            from .sitemap import discover_sitemap_urls_with_report
 
             ua = self._config.user_agent or DEFAULT_USER_AGENT
-            entries = await discover_sitemap_urls(
+            report = await discover_sitemap_urls_with_report(
                 self._config.seed_url, client=session, user_agent=ua
             )
+            entries = report.entries
         except Exception as exc:  # pragma: no cover — best-effort
             logger.debug("sitemap discovery failed: %r", exc)
             return
+        if report.failed or report.not_attempted:
+            logger.debug(
+                "sitemap discovery for %s: %d entries, %d sitemap(s) fetched, "
+                "%d failed, %d not attempted (max_sitemaps=%d)",
+                self._config.seed_url,
+                len(entries),
+                report.attempted_count,
+                len(report.failed),
+                len(report.not_attempted),
+                report.max_sitemaps,
+            )
         for entry in entries:
             if not _should_crawl(
                 entry.url,

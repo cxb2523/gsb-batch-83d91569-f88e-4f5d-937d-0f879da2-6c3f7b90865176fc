@@ -7,7 +7,13 @@ import asyncio
 import httpx
 import pytest
 
-from flarecrawl._http import ensure_client, origin, polite_get
+from flarecrawl._http import (
+    FetchFailure,
+    ensure_client,
+    origin,
+    polite_get,
+    polite_get_detailed,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -104,9 +110,86 @@ def test_polite_get_sets_user_agent_header() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ensure_client()
+# polite_get_detailed() — distinguishes transport failure from size cap
 # ---------------------------------------------------------------------------
-def test_ensure_client_owns_when_passed_none() -> None:
+def test_polite_get_detailed_ok_has_no_failure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="ok")
+
+    async def run():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as c:
+            resp, failure = await polite_get_detailed(
+                "https://example.com/", client=c, user_agent="TestBot"
+            )
+            assert resp is not None
+            assert failure is None
+
+    asyncio.run(run())
+
+
+def test_polite_get_detailed_transport_error_kind() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("timeout", request=request)
+
+    async def run():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as c:
+            resp, failure = await polite_get_detailed(
+                "https://example.com/", client=c, user_agent="TestBot"
+            )
+            assert resp is None
+            assert isinstance(failure, FetchFailure)
+            assert failure.kind == "request_error"
+            assert "ConnectTimeout" in failure.detail
+
+    asyncio.run(run())
+
+
+def test_polite_get_detailed_oversize_kind() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, text="payload", headers={"content-length": "999999"}
+        )
+
+    async def run():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as c:
+            resp, failure = await polite_get_detailed(
+                "https://example.com/",
+                client=c,
+                user_agent="TestBot",
+                max_bytes=1000,
+            )
+            assert resp is None
+            assert isinstance(failure, FetchFailure)
+            assert failure.kind == "too_large"
+            assert "999999" in failure.detail
+
+    asyncio.run(run())
+
+
+def test_polite_get_detailed_4xx_is_a_response_not_a_failure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    async def run():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as c:
+            resp, failure = await polite_get_detailed(
+                "https://example.com/", client=c, user_agent="TestBot"
+            )
+            assert failure is None
+            assert resp is not None and resp.status_code == 404
+
+    asyncio.run(run())
+
+
+
     async def run():
         async with ensure_client(None) as (c, owns):
             assert owns is True

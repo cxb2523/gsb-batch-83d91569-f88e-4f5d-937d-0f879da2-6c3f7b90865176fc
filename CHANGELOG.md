@@ -14,6 +14,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Craft CMS on CDN-cached sites:** matches the SEOmatic generator and `/cpresources/`
   asset paths (src/href only); never the bare word "Craft".
 - **Quandoo:** scriptSrc `quandoo\.\w+` (regional hosts), merged from Fathom's overlay.
+- **Per-sitemap outcome report for `discover_sitemap_urls`.** New
+  `flarecrawl.sitemap.discover_sitemap_urls_with_report()` returns the same entry
+  list as `discover_sitemap_urls()` plus a `SitemapReport` with one
+  `SitemapAttempt` per unique child sitemap — `ok`, `http_error`,
+  `request_error`, `too_large`, `parse_error`, or `not_attempted` (queued but
+  skipped because the `max_sitemaps` budget ran out). Nested-index children are
+  recorded too, the robots.txt fetch gets its own `RobotsOutcome`, and
+  `max_sitemaps` now counts only sitemaps actually fetched (duplicate URLs are
+  fetched and counted once). `discover_sitemap_urls()` keeps its original
+  signature, return value, and ordering; `authcrawl` seeding logs a DEBUG
+  summary when a run was truncated or a child failed.
 
 ### Fixed
 
