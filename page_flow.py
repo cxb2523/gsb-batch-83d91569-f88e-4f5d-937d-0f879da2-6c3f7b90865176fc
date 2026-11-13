@@ -36,6 +36,7 @@ close — and no JavaScript crosses this boundary.
 from __future__ import annotations
 
 import logging as _logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path as _Path
 from typing import List, Optional
@@ -44,8 +45,9 @@ from typing import Protocol as _Protocol
 import page_parser as pp
 from captcha_solver import detect_from_html
 from output_writer import Product
+from output_writer import DIRECT_PROXY_LABEL
 from output_writer import finish_run as _finish_run
-from proxy_pool import is_proxy_dead_error as _is_proxy_dead_error, redact_credentials as _redact
+from proxy_pool import Proxy, is_proxy_dead_error as _is_proxy_dead_error, redact_credentials as _redact
 
 _log = _logging.getLogger("page_flow")
 
@@ -86,6 +88,21 @@ class PageOutcome:
     posts_found: int = 0
     exact_likes: Optional[str] = None  # ok | no_ads | failed (with --exact-likes)
     rejected: int = 0
+    # Per-Page proxy trace (the .proxy-trace.json sidecar is built from
+    # these). proxies_used holds every exit the Page was actually opened
+    # on, in order, masked as scheme://login=***@host:port — a password
+    # never reaches it; proxy_switches counts moves from one exit to
+    # another inside this Page's own retries. Empty for a Page that was
+    # never opened (pool exhausted, not attempted, over the limit).
+    proxies_used: List[str] = field(default_factory=list)
+    proxy_switches: int = 0
+
+
+def proxy_label(proxy: Optional[Proxy]) -> str:
+    """The masked identity of an exit for the proxy trace sidecar: host
+    and port stay (that is what distinguishes one exit from another), the
+    password is always replaced; None means a direct connection."""
+    return proxy.masked() if proxy is not None else DIRECT_PROXY_LABEL
 
 
 # --------------------------------------------------------------------------- #
@@ -239,6 +256,9 @@ async def _exact_likes(engine: Engine, args, outcome: PageOutcome, proxy_pool) -
     if proxy_pool is not None and proxy is None:
         outcome.exact_likes = "failed"
         return
+    label = proxy_label(proxy)
+    if label not in outcome.proxies_used:
+        outcome.proxies_used.append(label)  # the Ad Library lookup is a separate opening of this same Page
     try:
         session = await engine.open(proxy)
     except Exception as exc:  # noqa: BLE001
@@ -276,12 +296,19 @@ async def _exact_likes(engine: Engine, args, outcome: PageOutcome, proxy_pool) -
 async def fetch_page(engine: Engine, args, url: str, index: int, proxy_pool) -> PageOutcome:
     """One Page address: open it, wait for it to paint, read the header,
     the intro card and (with --posts) the posts. Every failure is a typed
-    outcome, never a raise."""
+    outcome, never a raise.
+
+    With a proxy pool, a navigation that fails against a dead exit
+    (PROXY_DEAD_MARKERS) rotates to the NEXT exit within the same Page's
+    retry budget instead of re-asking the dead one: the exit that actually
+    finished the Page, every exit tried first, and how many times the exit
+    changed are all recorded on the outcome for the proxy trace sidecar."""
     outcome = PageOutcome(url=url)
     proxy = proxy_pool.next() if proxy_pool is not None else None
     if proxy_pool is not None and proxy is None:
         outcome.failure = "proxy_pool_exhausted"
         return outcome
+    outcome.proxies_used.append(proxy_label(proxy))
     _log.info("Opening %s (proxy: %s)", url, proxy.masked() if proxy else "(none — direct, or the --cdp-endpoint session's own exit)")
     try:
         session = await engine.open(proxy)
@@ -299,8 +326,26 @@ async def fetch_page(engine: Engine, args, url: str, index: int, proxy_pool) -> 
             except Exception as exc:  # noqa: BLE001 — every remote call must be bounded and reported
                 last_error = _redact(str(exc)).splitlines()[0] if str(exc) else type(exc).__name__
                 if proxy_pool is not None and proxy is not None and _is_proxy_dead_error(last_error):
+                    # A dead exit is a property of the PROXY, not the Page:
+                    # mark it, then spend the remaining attempts on another
+                    # exit rather than re-asking one that cannot answer.
                     proxy_pool.report_failure(proxy, dead=True)
                     _log.warning("Proxy reported dead: %s", last_error)
+                    if attempt < args.retries:
+                        next_proxy = proxy_pool.next()
+                        if next_proxy is None:
+                            _log.error("Proxy pool exhausted while rotating for %s — the Page is left unread.", url)
+                            outcome.failure = "proxy_pool_exhausted"
+                            return outcome
+                        try:
+                            await session.close()
+                        except Exception as close_exc:  # noqa: BLE001 — cleanup only
+                            _log.warning("Session cleanup failed: %s", _redact(str(close_exc)))
+                        session = await engine.open(next_proxy)
+                        if proxy_label(next_proxy) != proxy_label(proxy):
+                            outcome.proxy_switches += 1
+                            outcome.proxies_used.append(proxy_label(next_proxy))
+                        proxy = next_proxy
                 else:
                     _log.warning("Navigation attempt %d/%d for %s failed: %s", attempt + 1, args.retries + 1, url, last_error)
                 if getattr(engine, "fatal", None):
@@ -434,6 +479,44 @@ async def run(engine: Engine, args, *, urls: List[str], proxy_pool, client, star
     return finish_pages(args, outcomes, engine_name=engine.name, urls=urls, started_at=started_at)
 
 
+def _trace_result(o: PageOutcome) -> str:
+    """The five-way ending the proxy trace sidecar promises per Page."""
+    if o.not_found:
+        return "not_found"
+    if o.not_a_page:
+        return "not_a_page"
+    if o.failure in ("not_attempted", "over_limit"):
+        return "not_attempted"
+    if o.failure or o.blocked:
+        return "failed"
+    return "ok"
+
+
+def build_proxy_trace(outcomes: List[PageOutcome], *, engine_name: str, urls: List[str], started_at: float) -> dict:
+    """The .proxy-trace.json payload: one record per INPUT address, in
+    input order — including every Page the run never opened (an exhausted
+    pool, the stop-after-blocks guard or --max-results), so operations can
+    tell a refused exit from a Page never attempted. Proxy identities are
+    masked at record time (proxy_label); a direct run is labelled
+    'direct'."""
+    pages = []
+    for o in outcomes:
+        pages.append({
+            "url": o.url,
+            "result": _trace_result(o),
+            "reason": o.failure or ("blocked" if o.blocked else None),
+            "proxies_used": list(o.proxies_used),
+            "proxy_switches": o.proxy_switches,
+        })
+    return {
+        "engine": engine_name,
+        "pages_requested": len(urls),
+        "started_at": started_at,
+        "finished_at": time.time(),
+        "pages": pages,
+    }
+
+
 def finish_pages(args, outcomes: List[PageOutcome], *, engine_name: str, urls: List[str], started_at: float) -> int:
     products: List[Product] = []
     seen = set()
@@ -454,6 +537,7 @@ def finish_pages(args, outcomes: List[PageOutcome], *, engine_name: str, urls: L
               "state": o.state, "rows": len(o.rows), "posts_shown": o.posts_found, "exact_likes": o.exact_likes,
               "result": ("not_found" if o.not_found else "not_a_page" if o.not_a_page else o.failure
                          or ("blocked" if o.blocked else "ok"))} for o in outcomes]
+    proxy_trace = build_proxy_trace(outcomes, engine_name=engine_name, urls=urls, started_at=started_at)
     return finish(args, products=products, blocked=any(o.blocked for o in outcomes),
                   remote_api_error=any(o.failure == "remote_api_error" for o in outcomes), engine_name=engine_name,
                   urls=urls, started_at=started_at,
@@ -462,7 +546,7 @@ def finish_pages(args, outcomes: List[PageOutcome], *, engine_name: str, urls: L
                   failed_pages=failed_pages, failures=failures, capped=capped, pages=pages,
                   not_found=[o.url for o in outcomes if o.not_found],
                   not_a_page=[o.url for o in outcomes if o.not_a_page],
-                  rejected_rows=sum(o.rejected for o in outcomes))
+                  rejected_rows=sum(o.rejected for o in outcomes), proxy_trace=proxy_trace)
 
 
 _INCOMPLETE_REASONS = ("not_painted", "parse_error", "proxy_pool_exhausted")
@@ -471,7 +555,7 @@ _INCOMPLETE_REASONS = ("not_painted", "parse_error", "proxy_pool_exhausted")
 def finish(args, *, products: List[Product], blocked: bool, remote_api_error: bool, engine_name: str,
            urls: List[str], started_at: float, pages_completed: int, failed_pages: List[int],
            pages_requested: Optional[int] = None, failures=None, capped: bool = False, pages=None, not_found=None, not_a_page=None,
-           rejected_rows: int = 0) -> int:
+           rejected_rows: int = 0, proxy_trace: Optional[dict] = None) -> int:
     budget = getattr(args, "_solve_budget", None)
     selection = {"mode": "pages", "urls": urls, "posts": args.posts, "exact_likes": bool(getattr(args, "exact_likes", False)),
                  "max_results": args.max_results}
@@ -485,7 +569,7 @@ def finish(args, *, products: List[Product], blocked: bool, remote_api_error: bo
         allow_empty=args.allow_empty, started_at=started_at, price_confirmed_pct=None,
         max_results=args.max_results, rejected_rows=rejected_rows,
         incomplete_reason=next((f["reason"] for f in (failures or []) if f["reason"] in _INCOMPLETE_REASONS), None),
-        capped=capped, extra_meta=extra,
+        capped=capped, extra_meta=extra, proxy_trace=proxy_trace,
     )
 
 

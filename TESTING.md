@@ -152,3 +152,30 @@ partial run is red. Dispatch it once by hand and read the step results.
 Every row in the tables above has a date and a number. Add the open items
 from the top of this file to the table as they are run, and update the
 README's claims from the same runs.
+
+## 10. The per-Page proxy trace sidecar (offline)
+
+`tests/test_proxy_trace.py` exercises the `.proxy-trace.json` sidecar
+without a browser or a network: a scripted fake engine and the real
+`ProxyPool` over synthetic local `Proxy` objects. The covered cases are
+the acceptance ones —
+
+1. a single Page on a direct connection (no `--proxy`): the record ends
+   `ok` with `proxies_used: ["direct"]` and zero switches;
+2. an exit refused between two Pages is killed and the second Page is
+   read on the next exit (records show each Page's masked exit), and a
+   dead `ERR_PROXY_CONNECTION_FAILED` exit rotates *within* one Page's
+   retry budget, counted as one switch with both exits listed in order;
+3. once every exit is dead, the next Page ends
+   `proxy_pool_exhausted`, every remaining input is `not_attempted` with
+   an empty exit list, and the run still returns exit 6 with the rows it
+   already read;
+4. a run that reads not a single Page writes no output, no `.meta.json`
+   and no trace, leaving a previous good run's three files
+   byte-identical;
+5. a credentialed proxy's record contains host, port and `login=***` but
+   never the password; a `not_found` Page under `--allow-empty` is still
+   traced.
+
+Run it directly (`python tests/test_proxy_trace.py`) or through the
+suite (`python -m unittest discover -s tests`).

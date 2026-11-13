@@ -8,6 +8,27 @@ that changes a default is called out at the top of its entry.
 
 ## [Unreleased]
 
+### Added
+
+- Every run that publishes an output now also writes a per-Page proxy
+  trace sidecar, `<out>.proxy-trace.json`, alongside the output and the
+  unchanged `<out>.meta.json`. It carries one record per input address —
+  input URL, ending (`ok`, `not_found`, `not_a_page`, `failed` or
+  `not_attempted`), the failure reason when one applies, every exit the
+  Page was actually opened on in order, and how many times the exit
+  changed while reading that Page. Exits are masked
+  (`scheme://login=***@host:port` — never the password); a run without a
+  proxy is labelled `direct`. Pages a run never opened because the pool
+  was exhausted (or it stopped after consecutive blocks, or
+  `--max-results` was reached) are present as `not_attempted` with an
+  empty exit list, so a refused exit (site throttling) is distinguishable
+  from a dead proxy. A dead exit now rotates to the next one within the
+  same Page's retry budget instead of being re-asked. The result file,
+  the `.meta.json` fields and every exit code are unchanged; like the
+  other sidecars, the trace is not written for a run that read nothing
+  without `--allow-empty`, so a previous good output and its trace are
+  never overwritten.
+
 ### Changed
 
 - CI only: the canary now runs weekly (Mondays 06:41 UTC) and on a manual dispatch, with its optional secret `FACEBOOK_PROXY` passed on every run; the daily schedule is removed.

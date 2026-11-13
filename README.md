@@ -25,8 +25,10 @@ counts.
   read. All three engines and the browserless Scraper API mode were run
   live.
 - **Honest results.** A missing Page, a block or a partial run says so in
-  its exit code and a `.meta.json` file next to the output. A run that
-  finds nothing never overwrites your last good data.
+  its exit code and a `.meta.json` file next to the output; a
+  `.proxy-trace.json` sidecar records, per Page, which (masked) proxy exit
+  read it or why it was not read. A run that finds nothing never overwrites
+  your last good data.
 - **Three browser engines** (Playwright, Puppeteer, Selenium) running one
   shared fetch loop, a browserless **Scraper API** mode, rotating proxies,
   2Captcha's **Scraping Browser API** over CDP, and a run-to-run diff tool.
@@ -233,7 +235,15 @@ a page that is not facebook.com's under 401/403/429), never as a missing
 Page. Without a proxy pool it stops after 3 blocked answers in a row and
 reports the rest as `not_attempted`. To read more: rotate residential
 exits with `--proxy-file`, and keep `--delay-between-pages` at 2 seconds
-or more.
+or more. A proxy that fails to connect (`ERR_PROXY_*`) is counted against
+that exit and, after `--proxy-block-retries` such answers, removed from
+the pool; within a Page's retry budget the next attempt opens on the
+next exit rather than re-asking the dead one. The
+`.proxy-trace.json` sidecar makes the difference visible afterwards:
+`blocked` on an exit that still works is the site throttling it, whereas
+exits dying on `ERR_PROXY_*` are proxy failures, and once every exit is
+dead the remaining Pages are `not_attempted` (a partial run keeps the
+rows already read, exit 6).
 
 **A datacentre address is what the weekly canary measures**: it runs
 from a GitHub runner with no proxy and goes red if facebook.com refuses
@@ -262,6 +272,25 @@ and how many posts it showed, `not_found_urls`, `not_a_page_urls`,
 failed addresses with reasons, whether `--max-results` capped the list,
 solves spent, and a hash of the output file. A run that collects nothing
 writes neither, so it never replaces your previous good file.
+
+A run that publishes an output also writes a third file,
+`<out>.proxy-trace.json`: one record per **input** Page address, in
+input order, describing which exit actually read it. Each record has the
+input `url`, the ending — `ok`, `not_found`, `not_a_page`, `failed` or
+`not_attempted` — the failure `reason` when there is one, `proxies_used`
+(every exit the Page was opened on, in order) and `proxy_switches` (how
+many times the exit changed while reading that Page). Exit identities are
+masked as `scheme://login=***@host:port` — the password is never written;
+a run with no proxy is labelled `direct`. A Page the run never opened —
+the pool was exhausted, the run stopped after three blocked answers in a
+row, or `--max-results` was reached — is still present, ending
+`not_attempted` with an empty exit list. Read it together with the
+ending: a `blocked` record against one still-live exit points at site
+throttling, while repeated `ERR_PROXY_*` switches point at the proxies
+themselves. The result file and `.meta.json` keep their exact fields and
+the exit codes below are unchanged; like `.meta.json`, the trace is not
+written by a run that read nothing without `--allow-empty`, so a previous
+good trace is never replaced by an empty one.
 
 | Exit | Meaning |
 |---|---|

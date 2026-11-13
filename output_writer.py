@@ -292,6 +292,27 @@ def write_meta(
 
 
 # --------------------------------------------------------------------------- #
+# Per-Page proxy trace sidecar
+# --------------------------------------------------------------------------- #
+# Written ONLY as a separate sidecar — the result file and .meta.json keep
+# their exact fields. A run without a proxy pool labels every exit as this.
+DIRECT_PROXY_LABEL = "direct"
+PROXY_TRACE_SUFFIX = ".proxy-trace.json"
+
+
+def proxy_trace_path_for(out_path: str) -> str:
+    return f"{out_path}{PROXY_TRACE_SUFFIX}"
+
+
+def write_proxy_trace(out_path: str, payload: dict) -> None:
+    """Atomically write the per-Page proxy trace sidecar. Same publication
+    guarantee as write_meta(): a crash or a full disk halfway through leaves
+    the previous trace (and the previous good output) untouched."""
+    with _atomic_text(proxy_trace_path_for(out_path)) as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=2)
+
+
+# --------------------------------------------------------------------------- #
 # finish_run — the single place every engine calls to decide exit code,
 # whether to write output at all, and whether to write a sidecar. Keeping
 # this in one shared function is what stops the three engines' exit-code
@@ -319,6 +340,7 @@ def finish_run(
     total_results: Optional[int] = None,
     incomplete_reason: Optional[str] = None,
     capped: Optional[bool] = None,
+    proxy_trace: Optional[dict] = None,
 ) -> int:
     """Decide status/exit code, write output + sidecar (or neither), return
     the process exit code. NEVER writes a sidecar for a failed run, and
@@ -400,4 +422,10 @@ def finish_run(
         price_confirmed_pct=price_confirmed_pct, started_at=started_at,
         extra=extra or None,
     )
+    # The per-Page proxy trace is its own sidecar: it shares this run's
+    # publication gate exactly (a zero-product run without --allow-empty
+    # returned above and wrote nothing), so a run that read not a single
+    # Page never replaces the previous good output's trace either.
+    if proxy_trace is not None:
+        write_proxy_trace(out_path, proxy_trace)
     return exit_code
