@@ -115,15 +115,25 @@ describe('web fetch', () => {
         const first = mockWebFetch();
         await appTester(App.creates.webFetch.operation.perform, getBundle({
             url: 'https://www.example.com',
-            headers: { '': 'orphan-value', ' ': 'x', 'Accept-Language': 'fr-FR' },
+            headers: {
+                '': 'orphan-value',
+                ' ': 'x',
+                '\t': 'tab-name',
+                'Accept-Language': 'fr-FR',
+                // A real name with an empty value is still a named header and must be kept.
+                'X-Empty-Value': '',
+            },
         }));
-        expect(first.getRequestBody().headers).to.eql({ 'Accept-Language': 'fr-FR' });
+        expect(first.getRequestBody().headers).to.eql({
+            'Accept-Language': 'fr-FR',
+            'X-Empty-Value': '',
+        });
         first.scope.done();
 
         const second = mockWebFetch();
         await appTester(App.creates.webFetch.operation.perform, getBundle({
             url: 'https://www.example.com',
-            headers: { '': '' },
+            headers: { '': '', '   ': 'whitespace-only' },
         }));
         expect(second.getRequestBody()).to.not.have.property('headers');
         second.scope.done();
@@ -184,12 +194,39 @@ describe('web fetch', () => {
         expect(scope.isDone()).to.eql(false);
     });
 
+    it('rejects URLs joined by whitespace as well as commas, without calling the Actor (mocked)', async () => {
+        const { scope } = mockWebFetch();
+
+        await Promise.all([
+            // A line-item field can also be joined by spaces or newlines, the separator must not
+            // hide the second URL just because there is no comma.
+            'https://a.example http://b.example',
+            'https://a.example\nhttp://b.example',
+            // Upper-case scheme has to match the separator regex too.
+            'https://a.example, HTTPS://b.example',
+        ].map((url) => expect(
+            appTester(App.creates.webFetch.operation.perform, getBundle({ url })),
+        ).to.be.rejectedWith(/Web Fetch accepts one URL/)));
+
+        expect(scope.isDone()).to.eql(false);
+    });
+
     it('rejects a URL without an http(s) scheme without calling the Actor (mocked)', async () => {
         const { scope } = mockWebFetch();
 
-        await Promise.all(['www.example.com', 'ftp://example.com/file.txt', '', '   '].map((url) => expect(
+        await Promise.all(['www.example.com', 'ftp://example.com/file.txt', '', '   ', '\t\n'].map((url) => expect(
             appTester(App.creates.webFetch.operation.perform, getBundle({ url })),
         ).to.be.rejectedWith(/is not a valid URL.*http:\/\/ or https:\/\//)));
+
+        expect(scope.isDone()).to.eql(false);
+    });
+
+    it('rejects a non-string URL without calling the Actor (mocked)', async () => {
+        const { scope } = mockWebFetch();
+
+        await Promise.all([null, undefined, 12345].map((url) => expect(
+            appTester(App.creates.webFetch.operation.perform, getBundle({ url })),
+        ).to.be.rejectedWith(/is not a valid URL/)));
 
         expect(scope.isDone()).to.eql(false);
     });
@@ -213,10 +250,30 @@ describe('web fetch', () => {
         // Zaps created before the option existed have no value for it, and must fail too.
         const { scope } = mockWebFetch({ body, times: 2 });
 
-        await Promise.all([undefined, true].map((failOnErrorStatus) => expect(appTester(App.creates.webFetch.operation.perform, getBundle({
-            url: 'https://www.example.com/missing',
-            failOnErrorStatus,
-        }))).to.be.rejectedWith(/www\.example\.com\/missing responded with HTTP status 404 \(page title: .*404 Error - Document not found/)));
+        await Promise.all([undefined, true].map((failOnErrorStatus) => expect(appTester(
+            App.creates.webFetch.operation.perform,
+            getBundle({ url: 'https://www.example.com/missing', failOnErrorStatus }),
+        )).to.be.rejectedWith(
+            // The message names the requested URL, the status code and the page title from metadata.
+            /www\.example\.com\/missing responded with HTTP status 404 \(page title: .*404 Error - Document not found/,
+        )));
+
+        scope.done();
+    });
+
+    it('omits the page-title fragment from the error when the response metadata has no title (mocked)', async () => {
+        const body = _.merge(getMockWebFetchResponse(), {
+            fetch: { httpStatusCode: 503 },
+            metadata: { title: null },
+        });
+        const { scope } = mockWebFetch({ body });
+
+        const promise = appTester(App.creates.webFetch.operation.perform, getBundle({
+            url: 'https://www.example.com/down',
+        }));
+
+        await expect(promise).to.be.rejectedWith(/www\.example\.com\/down responded with HTTP status 503\./);
+        await expect(promise).to.be.rejectedWith(/^(?!.*page title).*$/s);
 
         scope.done();
     });
@@ -231,7 +288,8 @@ describe('web fetch', () => {
             getBundle({ url: 'https://www.example.com/missing', failOnErrorStatus }),
         )));
 
-        testResults.forEach((testResult) => expect(testResult.fetch.httpStatusCode).to.eql(404));
+        // The response is returned as-is, including the error status, instead of throwing.
+        testResults.forEach((testResult) => expect(testResult).to.eql(body));
         scope.done();
     });
 
@@ -269,28 +327,83 @@ describe('web fetch', () => {
     it('does not retry an upstream fetch error and does not report it as an Apify API error (mocked)', async () => {
         // Web Fetch reports a failure of the target website with a 5xx status, which must not be
         // handled as a retryable Apify API error - Web Fetch already retries the fetch internally.
-        const { getCallCount } = mockWebFetchError(502, 'UPSTREAM_FETCH_ERROR', 'The target URL could not be reached.', 4);
+        const { getCallCount, scope } = mockWebFetchError(
+            502,
+            'UPSTREAM_FETCH_ERROR',
+            'The target URL could not be reached.',
+            4,
+        );
 
-        await expect(appTester(App.creates.webFetch.operation.perform, getBundle({
+        const promise = appTester(App.creates.webFetch.operation.perform, getBundle({
             url: 'https://www.zz-this-page-doesn-not-exists-xx.com',
             format_markdown: true,
-        }))).to.be.rejectedWith(/The target URL could not be reached/);
+        }));
+
+        await expect(promise).to.be.rejectedWith(/The target URL could not be reached/);
+        // The flat { code, error } envelope keeps the Actor's code and the raw error text, and never
+        // falls through to the generic "Apify API encountered an internal server error" message.
+        await expect(promise).to.be.rejectedWith(/UPSTREAM_FETCH_ERROR/);
+        await expect(promise).to.be.rejectedWith(/^(?!.*internal server error).*$/s);
+
+        // A single call proves the 5xx flat error is not a RetryableError and is not retried.
+        expect(getCallCount()).to.eql(1);
+        // The interceptor allowed four calls; three staying unused is what proves there was no retry.
+        expect(scope.isDone()).to.eql(false);
+    });
+
+    it('keeps the FETCH_TIMEOUT code and text of an upstream timeout without retrying (mocked)', async () => {
+        // Same flat-envelope rule as UPSTREAM_FETCH_ERROR: the 504 FETCH_TIMEOUT describes the target
+        // website and must surface the Actor's own message instead of the generic Apify API error.
+        const { getCallCount, scope } = mockWebFetchError(
+            504,
+            'FETCH_TIMEOUT',
+            'The target website timed out after 120 seconds.',
+            4,
+        );
+
+        const promise = appTester(App.creates.webFetch.operation.perform, getBundle({
+            url: 'https://www.example.com/slow',
+            format_markdown: true,
+        }));
+
+        await expect(promise).to.be.rejectedWith(/The target website timed out after 120 seconds/);
+        await expect(promise).to.be.rejectedWith(/FETCH_TIMEOUT/);
+        await expect(promise).to.be.rejectedWith(/^(?!.*internal server error).*$/s);
 
         expect(getCallCount()).to.eql(1);
+        expect(scope.isDone()).to.eql(false);
     });
 
     it('surfaces the Actor timeout message and does not replace it with the client-side one (mocked)', async () => {
         // The Actor allows 2 minutes per fetch and reports its own timeout as 504 FETCH_TIMEOUT.
         // That is a different failure from cutting the request off ourselves after
         // WEB_FETCH_TIMEOUT_MILLIS, so the Actor's message has to reach the user unchanged.
-        const { scope } = mockWebFetchError(504, 'FETCH_TIMEOUT', 'The target website timed out after 120 seconds.');
+        const { getCallCount, scope } = mockWebFetchError(504, 'FETCH_TIMEOUT', 'The target website timed out after 120 seconds.');
 
         await expect(appTester(App.creates.webFetch.operation.perform, getBundle({
             url: 'https://www.example.com/slow',
             format_markdown: true,
         }))).to.be.rejectedWith(/The target website timed out after 120 seconds/);
 
+        // The flat 504 is the target site's timeout, not an Apify API outage, so it is not retried.
+        expect(getCallCount()).to.eql(1);
         scope.done();
+    });
+
+    it('falls back to generic handling when an error response is not the flat { code, error } envelope (mocked)', async () => {
+        // parseWebFetchError only recognizes the flat string { code, error } body. A 5xx with any
+        // other shape is treated as a genuine Apify API error: it is retried and never surfaced as
+        // the (absent) Web Fetch error text.
+        const { getCallCount, scope } = mockWebFetch({ status: 502, body: { somethingElse: true }, times: 4 });
+
+        await expect(appTester(App.creates.webFetch.operation.perform, getBundle({
+            url: 'https://www.example.com',
+            format_markdown: true,
+        }))).to.be.rejectedWith(/Apify API encountered an internal server error/);
+
+        // wrapRequestWithRetries allows three attempts in total; the fourth allowed call stays unused.
+        expect(getCallCount()).to.eql(3);
+        expect(scope.isDone()).to.eql(false);
     });
 
     // This one waits out the full WEB_FETCH_TIMEOUT_MILLIS, because the timeout is enforced by the
