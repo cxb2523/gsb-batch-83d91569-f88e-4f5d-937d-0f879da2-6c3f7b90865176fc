@@ -1,0 +1,56 @@
+{
+  "name": "hasdata-mcp",
+  "version": "1.0.0",
+  "description": "Comprehensive MCP server for web scraping and data extraction. Tools including Google Search, Amazon, Walmart, Zillow, TikTok, YouTube, and more.",
+  "type": "module",
+  "main": "src/index.js",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "hasdata",
+    "web-scraping",
+    "data-extraction",
+    "serp-api",
+    "google-search",
+    "google-maps",
+    "google-flights",
+    "google-trends",
+    "amazon-api",
+    "amazon-scraper",
+    "shopify-scraper",
+    "ecommerce-tools",
+    "zillow",
+    "redfin",
+    "airbnb-scraping",
+    "real-estate-data",
+    "instagram-data",
+    "indeed-scraper",
+    "glassdoor-api",
+    "job-market-analysis",
+    "yelp-reviews",
+    "yellowpages",
+    "bing-serp",
+    "structured-data",
+    "ai-agents"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HasData/hasdata-mcp.git"
+  },
+  "homepage": "https://hasdata.com",
+  "author": "HasData",
+  "license": "MIT",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "mcp": {
+    "title": "HasData",
+    "description": "MCP server for web scraping and data extraction",
+    "transport": "http",
+    "url": "https://mcp.hasdata.com/mcp"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.1"
+  }
+}
