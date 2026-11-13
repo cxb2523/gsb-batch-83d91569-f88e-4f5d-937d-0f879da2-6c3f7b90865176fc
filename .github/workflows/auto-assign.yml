@@ -1,0 +1,106 @@
+name: Auto Assign Contributor
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    if: |
+      !github.event.issue.pull_request &&
+      github.event.comment.user.login != github.repository_owner &&
+      github.event.comment.user.type != 'Bot'
+    permissions:
+      issues: write
+    steps:
+      - name: Auto-assign volunteer
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            function isExplicitVolunteerRequest(commentBody) {
+              if (!commentBody) {
+                return false;
+              }
+              const text = String(commentBody)
+                .toLowerCase()
+                .replace(/[\u2018\u2019]/g, "'");
+
+              // /assign or /assign me as a command token, not "/assignment"
+              if (/(?:^|\s)\/assign(?:\s+me)?\b/.test(text)) {
+                return true;
+              }
+
+              const patterns = [
+                // "please assign me" / "assign me to this" — not "don't assign me"
+                /(?<!\bdon't\s+)(?<!\bdont\s+)(?<!\bdo\s+not\s+)(?<!\bnever\s+)\b(?:please\s+)?assign\s+me\b/,
+                /\b(?:please\s+)?assign\s+(?:this|it)(?:\s+issue)?\s+to\s+me\b/,
+                // "I'd like to work on this"
+                /\bi(?:'d|\s+would)\s+like\s+to\s+work\s+on\s+this\b/,
+                /\bi(?:'d|\s+would)\s+like\s+to\s+take\s+this\b/,
+                // "I can take this" / pick this up — not "if I can pick this up"
+                /(?<!\bif\s+)\bi\s+can\s+take\s+this\b/,
+                /(?<!\bif\s+)\bi\s+can\s+work\s+on\s+this\b/,
+                /(?<!\bif\s+)\bi\s+can\s+pick\s+this\s+up\b/,
+                // "can I take this?" / "can I work on this"
+                /\bcan\s+i\s+take\s+this\b/,
+                /\bcan\s+i\s+work(?:\s+on)?\s+this\b/,
+                // "I'll pick this up"
+                /\bi(?:'ll|\s+will)\s+pick\s+this\s+up\b/,
+                /\bi(?:'ll|\s+will)\s+take\s+this\b/,
+                /\binterested\s+in\s+working\s+on\s+this\b/
+              ];
+              return patterns.some((re) => re.test(text));
+            }
+
+            // Skip when the commenter is already assigned, or when anyone else is.
+            function skipReasonForAssignees(commenter, assigneeLogins) {
+              const assignees = assigneeLogins || [];
+              if (assignees.includes(commenter)) {
+                return `${commenter} is already assigned.`;
+              }
+              if (assignees.length > 0) {
+                return `Skipping auto-assign for ${commenter}: issue already assigned to ${assignees.join(', ')}.`;
+              }
+              return null;
+            }
+
+            if (!isExplicitVolunteerRequest(context.payload.comment.body)) {
+              return;
+            }
+
+            const issueNumber = context.payload.issue.number;
+            const commenter = context.payload.comment.user.login;
+            const assignees = (context.payload.issue.assignees || []).map(a => a.login);
+            const skipReason = skipReasonForAssignees(commenter, assignees);
+            if (skipReason) {
+              console.log(skipReason);
+              return;
+            }
+
+            const reply = [
+              `Hi @${commenter}! Thanks for offering to help.`,
+              '',
+              `You're assigned to this issue! Feel free to open a pull request whenever you have a solution ready. If you need any guidance or have questions, ask away right here.`,
+              '',
+              `Happy coding! 🚀`
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: reply
+            });
+
+            try {
+              await github.rest.issues.addAssignees({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                assignees: [commenter]
+              });
+            } catch (err) {
+              console.log(`Could not add assignee directly: ${err.message}`);
+            }

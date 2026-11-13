@@ -1,0 +1,2175 @@
+#!/usr/bin/env python3
+"""Build and install this repository's skill library using Python 3.11+."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+import tempfile
+import zipfile
+from pathlib import Path, PurePosixPath
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # New in Python 3.11; older interpreters would show a traceback.
+    sys.exit(
+        f"Maintainer Skills Lab needs Python 3.11 or newer; this is {sys.version.split()[0]}.\n"
+        f"Run it with a newer interpreter, for example: python3.13 {sys.argv[0]}"
+    )
+
+ROOT = Path(__file__).resolve().parents[1]
+TARGETS = {
+    "codex": (".agents/skills", ".codex/agents", ".toml"),
+    "claude": (".claude/skills", ".claude/agents", ".md"),
+    "cursor": (".cursor/skills", ".cursor/agents", ".md"),
+    "opencode": (".opencode/skills", ".opencode/agents", ".md"),
+    "windsurf": (".windsurf/skills", ".windsurf/agents", ".md"),
+    # Gemini CLI / Google Antigravity: target id is gemini; skills discovery uses
+    # .gemini/antigravity/skills/<name>/SKILL.md (agents under .gemini/antigravity/agents/).
+    "gemini": (".gemini/antigravity/skills", ".gemini/antigravity/agents", ".md"),
+}
+# Copilot installs a single consolidated instructions file; Grok Bot is sync/build only.
+# Zed and Continue install flat prompt files (no separate agents directory).
+# Cline installs a consolidated .roomodes custom modes definition file.
+EXPORT_TARGETS = (*TARGETS, "grok-bot", "copilot", "zed", "continue", "cline")
+INSTALL_TARGETS = (*TARGETS, "copilot", "zed", "continue", "cline")
+PROVIDER_LABELS = {
+    "codex": "Codex",
+    "claude": "Claude Code",
+    "cursor": "Cursor",
+    "opencode": "OpenCode",
+    "windsurf": "Windsurf",
+    "gemini": "Gemini",
+    "grok-bot": "Grok Bot",
+    "copilot": "Copilot",
+    "zed": "Zed",
+    "continue": "Continue",
+    "cline": "Cline",
+}
+COPILOT_SKILLS = ("mkl-review-pr", "mkl-write-regression", "mkl-write-maintainer-reply")
+COPILOT_INSTRUCTIONS = ".github/copilot-instructions.md"
+COPILOT_TOKEN_BUDGET = 800
+COPILOT_PARAGRAPHS_PER_SKILL = 2
+CLINE_ROOMODES = ".roomodes"
+WINDSURF_RULES = ".windsurfrules"
+WINDSURF_SKILLS = COPILOT_SKILLS
+ZED_PROMPTS = ".zed/prompts"
+CONTINUE_PROMPTS = ".continue/prompts"
+FLAT_PROMPT_TARGETS = frozenset({"zed", "continue"})
+CANONICAL_PREAMBLE_FILE = "assets/canonical_preamble.md"
+MIN_CANONICAL_PREAMBLE_TOKENS = 512
+PREAMBLE_TARGETS = frozenset({"codex", "claude", "cursor", "opencode"})
+NAME = re.compile(r"mkl-[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+SHA256 = re.compile(r"[a-f0-9]{64}\Z")
+HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+FENCE_OPEN = re.compile(r"^( {0,3})(```+|~~~+)(.*)$")
+
+
+def load_canonical_preamble(root: Path = ROOT) -> str:
+    """Load the shared canonical maintainer preamble for cross-skill KV-cache sharing."""
+    path = root / CANONICAL_PREAMBLE_FILE
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8").replace("\r\n", "\n").strip()
+
+
+def inject_canonical_preamble(content: str, preamble: str) -> str:
+    """Inject canonical static preamble deterministically after YAML frontmatter."""
+    if not preamble:
+        return content
+    if preamble in content:
+        return content
+    if content.startswith("---\n"):
+        end = content.find("\n---\n", 4)
+        if end != -1:
+            frontmatter = content[: end + 5]
+            rest = content[end + 5 :].lstrip("\n")
+            return f"{frontmatter}\n{preamble}\n\n{rest}"
+    return f"{preamble}\n\n{content}"
+
+
+class KitError(Exception):
+    """Expected input, source, or installation conflict."""
+
+
+def _compact_table_line(line: str) -> str:
+    """Reduce padding inside GFM table rows; leave other lines untouched."""
+    stripped = line.strip()
+    if not stripped.startswith("|") or stripped.count("|") < 2:
+        return line.rstrip(" \t")
+    cells = stripped.split("|")
+    if cells[0] != "" or cells[-1] != "":
+        return line.rstrip(" \t")
+    lead = line[: len(line) - len(line.lstrip(" \t"))]
+    return lead + "| " + " | ".join(cell.strip() for cell in cells[1:-1]) + " |"
+
+
+def _minify_markdown_segment(text: str) -> str:
+    text = HTML_COMMENT.sub("", text)
+    lines = [_compact_table_line(line) for line in text.split("\n")]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
+
+
+def minify_markdown(text: str) -> str:
+    """Shrink markdown for LLM prompts; keep fenced code blocks byte-for-byte."""
+    lines = text.split("\n")
+    offsets: list[int] = []
+    position = 0
+    for index, line in enumerate(lines):
+        offsets.append(position)
+        position += len(line)
+        if index < len(lines) - 1:
+            position += 1
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(lines):
+        open_match = FENCE_OPEN.match(lines[index])
+        if open_match is None:
+            index += 1
+            continue
+        marker = open_match.group(2)[0]
+        fence_len = len(open_match.group(2))
+        close = re.compile(rf"^( {{0,3}})({re.escape(marker)}{{{fence_len},}})[ \t]*$")
+        start = index
+        index += 1
+        closed = False
+        while index < len(lines):
+            if close.match(lines[index]):
+                index += 1
+                closed = True
+                break
+            index += 1
+        if closed:
+            end_offset = offsets[index - 1] + len(lines[index - 1])
+        else:
+            end_offset = len(text)
+        spans.append((offsets[start], end_offset))
+    if not spans:
+        return _minify_markdown_segment(text)
+    protected = []
+    fences: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        protected.append(text[cursor:start])
+        token = f"@@FENCE{len(fences)}@@"
+        fences.append(text[start:end])
+        protected.append(token)
+        cursor = end
+    protected.append(text[cursor:])
+    minified = _minify_markdown_segment("".join(protected))
+    for index, fence in enumerate(fences):
+        minified = minified.replace(f"@@FENCE{index}@@", fence, 1)
+    return minified
+
+
+def _maybe_minify_markdown_bytes(data: bytes, relative: str, minify: bool) -> bytes:
+    if not minify or not relative.endswith(".md"):
+        return data
+    try:
+        return minify_markdown(data.decode("utf-8")).encode("utf-8")
+    except UnicodeDecodeError:
+        return data
+
+
+def markdown_to_xml(
+    markdown_text: str,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    preserve_frontmatter: bool = False,
+) -> str:
+    """Convert Markdown skill instructions into structured semantic XML for frontier models."""
+    lines = markdown_text.split("\n")
+    fences: list[str] = []
+
+    in_fence = False
+    fence_marker = ""
+    fence_len = 0
+    fence_buf: list[str] = []
+    new_lines: list[str] = []
+
+    for line in lines:
+        if not in_fence:
+            m = FENCE_OPEN.match(line)
+            if m:
+                in_fence = True
+                fence_marker = m.group(2)[0]
+                fence_len = len(m.group(2))
+                fence_buf = [line]
+            else:
+                new_lines.append(line)
+        else:
+            fence_buf.append(line)
+            close = re.compile(rf"^( {{0,3}})({re.escape(fence_marker)}{{{fence_len},}})[ \t]*$")
+            if close.match(line):
+                token = f"@@FENCE{len(fences)}@@"
+                fences.append("\n".join(fence_buf))
+                new_lines.append(token)
+                in_fence = False
+                fence_marker = ""
+                fence_buf = []
+    if in_fence:
+        token = f"@@FENCE{len(fences)}@@"
+        fences.append("\n".join(fence_buf))
+        new_lines.append(token)
+
+    text = "\n".join(new_lines)
+
+    meta_name = name
+    meta_desc = description
+    raw_frontmatter = ""
+    if text.startswith("---\n"):
+        end = text.find("\n---\n", 4)
+        if end != -1:
+            raw_frontmatter = text[: end + 4]
+            header = text[4:end]
+            text = text[end + 5 :]
+            for hline in header.split("\n"):
+                hline = hline.strip()
+                if hline.startswith("name:"):
+                    val = hline.split(":", 1)[1].strip().strip("\"'")
+                    if not meta_name:
+                        meta_name = val
+                elif hline.startswith("description:"):
+                    val = hline.split(":", 1)[1].strip().strip("\"'")
+                    if not meta_desc:
+                        meta_desc = val
+
+    lines = text.strip().split("\n")
+    title = ""
+    body_lines: list[str] = []
+    found_h1 = False
+    for line in lines:
+        if not found_h1 and line.startswith("# "):
+            title = line[2:].strip()
+            found_h1 = True
+        else:
+            body_lines.append(line)
+
+    if not meta_name:
+        if title:
+            meta_name = re.sub(r"[^a-zA-Z0-9]+", "-", title).strip("-").lower()
+        else:
+            meta_name = "skill"
+
+    body_text = "\n".join(body_lines).strip()
+    section_splits = re.split(r"\n(?=## )", "\n" + body_text)
+    preamble = section_splits[0].strip()
+    sections = section_splits[1:] if len(section_splits) > 1 else []
+
+    if not meta_desc and preamble:
+        paras = [p.strip() for p in preamble.split("\n\n") if p.strip()]
+        if paras:
+            meta_desc = paras[0]
+            preamble = "\n\n".join(paras[1:]).strip()
+
+    xml_parts: list[str] = []
+    xml_parts.append(f'<skill name="{meta_name}">')
+    if meta_desc:
+        xml_parts.append(f"  <description>{meta_desc}</description>")
+
+    def restore(s: str) -> str:
+        for idx, f in enumerate(fences):
+            s = s.replace(f"@@FENCE{idx}@@", f)
+        return s
+
+    def indent(content: str, spaces: int = 2) -> str:
+        sp = " " * spaces
+        return "\n".join((sp + line if line.strip() else line) for line in content.split("\n"))
+
+    if not sections and preamble:
+        paras = [p.strip() for p in preamble.split("\n\n") if p.strip()]
+        if len(paras) == 1:
+            xml_parts.append("  <instructions>")
+            xml_parts.append(indent(restore(paras[0]), 4))
+            xml_parts.append("  </instructions>")
+        else:
+            xml_parts.append("  <context>")
+            xml_parts.append(indent(restore(paras[0]), 4))
+            xml_parts.append("  </context>")
+            middle_paras = []
+            example_para = None
+            for p in paras[1:]:
+                if any(
+                    k in p.lower()
+                    for k in (
+                        "runnable example",
+                        "worked example",
+                        "example implementation",
+                        "examples/",
+                    )
+                ):
+                    example_para = p
+                else:
+                    middle_paras.append(p)
+            if middle_paras:
+                xml_parts.append("  <instructions>")
+                xml_parts.append(indent(restore("\n\n".join(middle_paras)), 4))
+                xml_parts.append("  </instructions>")
+            if example_para:
+                xml_parts.append('  <example type="reference">')
+                xml_parts.append(indent(restore(example_para), 4))
+                xml_parts.append("  </example>")
+    elif preamble:
+        xml_parts.append("  <context>")
+        xml_parts.append(indent(restore(preamble), 4))
+        xml_parts.append("  </context>")
+
+    consecutive_numbered_steps: list[tuple[str, str]] = []
+
+    def flush_numbered_steps() -> None:
+        if not consecutive_numbered_steps:
+            return
+        xml_parts.append("  <workflow>")
+        for sname, scontent in consecutive_numbered_steps:
+            xml_parts.append(f'    <step name="{sname}">')
+            xml_parts.append(indent(restore(scontent), 6))
+            xml_parts.append("    </step>")
+        xml_parts.append("  </workflow>")
+        consecutive_numbered_steps.clear()
+
+    for sec in sections:
+        sec = sec.strip()
+        if not sec:
+            continue
+        sec_lines = sec.split("\n")
+        h2 = sec_lines[0].removeprefix("##").strip()
+        sec_content = "\n".join(sec_lines[1:]).strip()
+
+        h2_lower = h2.lower()
+        clean_name = re.sub(r"^\d+\.\s*", "", h2)
+        slug = re.sub(r"[^a-zA-Z0-9]+", "-", clean_name).strip("-").lower()
+
+        is_numbered_h2 = bool(re.match(r"^\d+\.", h2))
+
+        if is_numbered_h2 and any(
+            k in h2_lower
+            for k in (
+                "step",
+                "stage",
+                "extract",
+                "scan",
+                "isolate",
+                "apply",
+                "execute",
+                "verify",
+                "author",
+                "pipeline",
+                "select",
+                "inspect",
+            )
+        ):
+            consecutive_numbered_steps.append((slug, sec_content))
+            continue
+        flush_numbered_steps()
+
+        if "example" in h2_lower:
+            attr = ' type="authored"' if ("authored" in h2_lower or "worked" in h2_lower) else ""
+            xml_parts.append(f"  <example{attr}>")
+            xml_parts.append(indent(restore(sec_content), 4))
+            xml_parts.append("  </example>")
+        elif any(
+            k in h2_lower
+            for k in ("constraint", "rule", "negative", "anti-pattern", "budget", "stopping")
+        ):
+            xml_parts.append("  <constraints>")
+            items = []
+            for line in sec_content.split("\n"):
+                m = re.match(r"^\s*[-*]\s+(.*)", line)
+                if m:
+                    items.append(f"    <rule>{m.group(1)}</rule>")
+                else:
+                    items.append(indent(line, 4))
+            xml_parts.append(restore("\n".join(items)))
+            xml_parts.append("  </constraints>")
+        elif any(
+            k in h2_lower
+            for k in (
+                "workflow",
+                "protocol",
+                "turn budget",
+                "procedure",
+                "pipeline",
+                "handoff",
+                "stage",
+            )
+        ):
+            step_matches = list(
+                re.finditer(r"^\s*(\d+)\.\s+(\*\*([^*]+)\*\*:\s*)?(.*)", sec_content, re.MULTILINE)
+            )
+            if step_matches and len(step_matches) >= 2:
+                xml_parts.append("  <workflow>")
+                sub_parts = []
+                lines_in = sec_content.split("\n")
+                curr_step = None
+                curr_lines: list[str] = []
+                for line_item in lines_in:
+                    m = re.match(r"^\s*(\d+)\.\s+(\*\*([^*]+)\*\*:\s*)?(.*)", line_item)
+                    if m:
+                        if curr_step is not None:
+                            sub_parts.append(f"    <step{curr_step}>")
+                            step_body = restore("\n".join(curr_lines)).strip()
+                            if "\n" not in step_body:
+                                sub_parts[-1] = f"    <step{curr_step}>{step_body}</step>"
+                            else:
+                                sub_parts.append(indent(step_body, 6))
+                                sub_parts.append("    </step>")
+                        step_tag_name = m.group(3)
+                        attr = (
+                            f' name="{re.sub(r"[^a-zA-Z0-9]+", "-", step_tag_name).strip("-").lower()}"'
+                            if step_tag_name
+                            else ""
+                        )
+                        curr_step = attr
+                        curr_lines = [m.group(4)] if m.group(4) else []
+                    elif curr_step is not None:
+                        curr_lines.append(line_item)
+                if curr_step is not None:
+                    step_body = restore("\n".join(curr_lines)).strip()
+                    if "\n" not in step_body:
+                        sub_parts.append(f"    <step{curr_step}>{step_body}</step>")
+                    else:
+                        sub_parts.append(f"    <step{curr_step}>")
+                        sub_parts.append(indent(step_body, 6))
+                        sub_parts.append("    </step>")
+                xml_parts.extend(sub_parts)
+                xml_parts.append("  </workflow>")
+            else:
+                xml_parts.append(f'  <workflow name="{slug}">')
+                xml_parts.append(indent(restore(sec_content), 4))
+                xml_parts.append("  </workflow>")
+        elif any(k in h2_lower for k in ("verif", "checklist")):
+            xml_parts.append(f'  <verification name="{slug}">')
+            xml_parts.append(indent(restore(sec_content), 4))
+            xml_parts.append("  </verification>")
+        else:
+            xml_parts.append(f'  <section name="{slug}">')
+            xml_parts.append(indent(restore(sec_content), 4))
+            xml_parts.append("  </section>")
+
+    flush_numbered_steps()
+    xml_parts.append("</skill>")
+
+    xml_str = "\n".join(xml_parts) + "\n"
+    if preserve_frontmatter and raw_frontmatter:
+        return raw_frontmatter + "\n\n" + xml_str
+    return xml_str
+
+
+def canonical_bytes(data: bytes) -> bytes:
+    """Treat Git's text line-ending conversion as content-preserving."""
+    if b"\x00" in data:
+        return data
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+    return data.replace(b"\r\n", b"\n")
+
+
+def digest(data: bytes) -> str:
+    return hashlib.sha256(canonical_bytes(data)).hexdigest()
+
+
+MAX_DESCRIPTION_TOKENS = 60
+MAX_SKILL_BODY_TOKENS = 1000
+SOFT_SKILL_BODY_TOKENS = 600
+MAX_AGENT_INSTRUCTIONS_TOKENS = 400
+MAX_AGENT_EXPANDED_TOKENS = 3000
+MAX_SUBAGENT_STARTUP_TOKENS = 600
+
+SUBAGENT_HANDOFF_INSTRUCTIONS = """## Subagent Handoff Protocol
+
+When operating as a delegated subagent or receiving a task handoff:
+1. Accept structured task input conforming to `mkl-subagent-handoff/v1`.
+2. Execute strictly within the designated `scope_paths` and constraints.
+3. Terminate by returning a concise JSON handoff artifact:
+```json
+{
+  "protocol": "mkl-subagent-handoff/v1",
+  "status": "COMPLETED | FAILED | BLOCKED",
+  "verdict": "APPROVED | REJECTED | NEEDS_INFO",
+  "summary": "<concise summary under 100 words>",
+  "findings": [],
+  "artifacts": {}
+}
+```
+Do not accumulate conversational history or emit unnecessary conversational pleasantries."""
+
+
+def approximate_tokens(text: str) -> int:
+    """Rough English token estimate used for size budgets when tiktoken is unavailable."""
+    return max(1, (len(text) + 3) // 4)
+
+
+def count_tokens(text: str, encoding: str = "cl100k_base") -> int:
+    """Calculate token count using tiktoken if installed, or approximate_tokens."""
+    if not text:
+        return 0
+    try:
+        import tiktoken
+
+        return len(tiktoken.get_encoding(encoding).encode(text))
+    except Exception:
+        return approximate_tokens(text)
+
+
+def skill_metadata(path: Path) -> tuple[dict[str, str], str]:
+    """Our source files intentionally use only JSON-quoted YAML scalars.
+
+    This is a valid, small subset of YAML, not a general Agent Skills validator.
+    Reject other frontmatter instead of silently interpreting it differently.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0] != "---":
+        raise KitError(f"{path}: missing frontmatter")
+    try:
+        end = lines.index("---", 1)
+    except ValueError as exc:
+        raise KitError(f"{path}: unclosed frontmatter") from exc
+    metadata = {}
+    for line in lines[1:end]:
+        key, separator, value = line.partition(":")
+        if not separator or key not in {"name", "description", "globs"} or key in metadata:
+            raise KitError(f"{path}: unsupported or duplicate metadata field")
+        try:
+            parsed = json.loads(value.strip())
+        except json.JSONDecodeError as exc:
+            if key in {"name", "description"}:
+                raise KitError(f"{path}: use a double-quoted string for {key}") from exc
+            raise KitError(f"{path}: use valid JSON syntax for {key}") from exc
+        if key in {"name", "description"}:
+            if not isinstance(parsed, str) or not parsed.strip() or "\n" in parsed:
+                raise KitError(f"{path}: {key} must be a nonempty, single-line string")
+            metadata[key] = parsed
+        elif key == "globs":
+            if (
+                not isinstance(parsed, list)
+                or not parsed
+                or any(not isinstance(item, str) or not item.strip() for item in parsed)
+            ):
+                raise KitError(f"{path}: globs must be a nonempty list of strings")
+            metadata[key] = parsed
+    if not {"name", "description"}.issubset(metadata):
+        raise KitError(f"{path}: name and description are required")
+    if not NAME.fullmatch(metadata["name"]) or len(metadata["name"]) > 64:
+        raise KitError(f"{path}: invalid namespaced skill name")
+    if path.parent.name != metadata["name"] or len(metadata["description"]) > 1024:
+        raise KitError(f"{path}: directory/name mismatch or oversized description")
+    desc_tokens = count_tokens(metadata["description"])
+    if desc_tokens > MAX_DESCRIPTION_TOKENS:
+        raise KitError(
+            f"{path}: description exceeds token budget ({desc_tokens} > {MAX_DESCRIPTION_TOKENS} tokens)"
+        )
+    body = "\n".join(lines[end + 1 :]).strip()
+    if not body:
+        raise KitError(f"{path}: empty skill body")
+    return metadata, body
+
+
+def source_files(directory: Path) -> dict[str, bytes]:
+    if directory.is_symlink():
+        raise KitError(f"Source directory must not be a symlink: {directory}")
+    files = {}
+    for path in sorted(directory.rglob("*")):
+        if path.is_symlink():
+            raise KitError(f"Source symlinks are unsupported: {path}")
+        if path.is_file():
+            relative = path.relative_to(directory).as_posix()
+            if "__pycache__" in path.parts or path.suffix == ".pyc":
+                continue
+            files[relative] = path.read_bytes()
+    return files
+
+
+def load_library(root: Path = ROOT) -> tuple[dict, dict]:
+    skills = {}
+    for path in sorted((root / "skills").glob("*/SKILL.md")):
+        metadata, body = skill_metadata(path)
+        skills[metadata["name"]] = {**metadata, "body": body, "files": source_files(path.parent)}
+    if not skills:
+        raise KitError("No skills found")
+    agents = {}
+    for path in sorted((root / "agents").glob("*.toml")):
+        if path.is_symlink():
+            raise KitError(f"Source symlinks are unsupported: {path}")
+        agent = tomllib.loads(path.read_text(encoding="utf-8"))
+        allowed_keys = {"name", "description", "instructions", "skills", "mode"}
+        required_keys = {"name", "description", "instructions", "skills"}
+        if not required_keys.issubset(set(agent)) or not set(agent).issubset(allowed_keys):
+            raise KitError(
+                f"{path}: expected name, description, instructions, skills (optional: mode)"
+            )
+        if any(
+            not isinstance(agent[key], str) or not agent[key].strip()
+            for key in ("name", "description", "instructions")
+        ):
+            raise KitError(f"{path}: invalid agent text")
+        if not NAME.fullmatch(agent["name"]) or path.stem != agent["name"]:
+            raise KitError(f"{path}: invalid agent name")
+        if not isinstance(agent["skills"], list) or not agent["skills"]:
+            raise KitError(f"{path}: skills must be a nonempty list")
+        if any(not isinstance(item, str) or item not in skills for item in agent["skills"]):
+            raise KitError(f"{path}: unknown skill dependency")
+        if len(set(agent["skills"])) != len(agent["skills"]):
+            raise KitError(f"{path}: repeated skill dependency")
+        if "mode" in agent and agent["mode"] not in {"full", "subagent", "lazy"}:
+            raise KitError(f"{path}: mode must be 'full', 'subagent', or 'lazy'")
+        agents[agent["name"]] = agent
+    if not agents:
+        raise KitError("No agent profiles found")
+    return skills, agents
+
+
+def check_library(
+    root: Path = ROOT,
+    *,
+    max_body_tokens: int = MAX_SKILL_BODY_TOKENS,
+    max_desc_tokens: int = MAX_DESCRIPTION_TOKENS,
+    max_agent_instructions_tokens: int = MAX_AGENT_INSTRUCTIONS_TOKENS,
+) -> dict:
+    skills, agents = load_library(root)
+    warnings: list[str] = []
+
+    for name, skill in skills.items():
+        desc = skill.get("description", "")
+        desc_tokens = count_tokens(desc)
+        if desc_tokens > max_desc_tokens:
+            raise KitError(
+                f"skills/{name}/SKILL.md: description exceeds token budget ({desc_tokens} > {max_desc_tokens} tokens)"
+            )
+        body = skill.get("body", "")
+        body_tokens = count_tokens(body)
+        if body_tokens > max_body_tokens:
+            raise KitError(
+                f"skills/{name}/SKILL.md exceeds body token budget ({body_tokens} > {max_body_tokens} tokens). "
+                "Consider condensing instructions or splitting into focused workflows."
+            )
+        if body_tokens > SOFT_SKILL_BODY_TOKENS:
+            warnings.append(
+                f"skills/{name}: body has {body_tokens} tokens (> {SOFT_SKILL_BODY_TOKENS} soft budget)"
+            )
+
+    for name, agent in agents.items():
+        instructions = agent.get("instructions", "")
+        inst_tokens = count_tokens(instructions)
+        if inst_tokens > max_agent_instructions_tokens:
+            raise KitError(
+                f"agents/{name}: instructions exceed token budget ({inst_tokens} > {max_agent_instructions_tokens} tokens)"
+            )
+        if agent.get("mode") == "subagent":
+            lazy_manifest = skill_lazy_manifest(agent.get("skills", []), skills)
+            startup_tokens = (
+                inst_tokens
+                + count_tokens(lazy_manifest)
+                + count_tokens(SUBAGENT_HANDOFF_INSTRUCTIONS)
+            )
+            if startup_tokens > MAX_SUBAGENT_STARTUP_TOKENS:
+                raise KitError(
+                    f"agents/{name}: subagent startup tokens exceed {MAX_SUBAGENT_STARTUP_TOKENS} budget "
+                    f"({startup_tokens} > {MAX_SUBAGENT_STARTUP_TOKENS} tokens)"
+                )
+
+    return {
+        "valid": True,
+        "skills_checked": len(skills),
+        "agents_checked": len(agents),
+        "max_body_tokens": max_body_tokens,
+        "max_desc_tokens": max_desc_tokens,
+        "warnings": warnings,
+    }
+
+
+def skill_lazy_manifest(sorted_skills: list[str], skills: dict, target: str = "") -> str:
+    if not sorted_skills:
+        return ""
+    path_template = (
+        f"{TARGETS[target][0]}/{{skill}}/SKILL.md"
+        if target in TARGETS
+        else "skills/{skill}/SKILL.md"
+    )
+
+    lines = [
+        "## Available Skills (Progressive Disclosure)",
+        "",
+        "When your task requires one of the following specialized skills, load its complete "
+        "workflow instructions using your file reading tool:",
+    ]
+    for skill in sorted_skills:
+        desc = skills[skill]["description"]
+        path = path_template.format(skill=skill)
+        lines.append(f"- `{skill}`: {desc} (Load: `{path}`)")
+    return "\n".join(lines)
+
+
+def agent_body(
+    agent: dict,
+    skills: dict,
+    *,
+    skills_first: bool = False,
+    mode: str = "full",
+    target: str = "",
+    preamble: str = "",
+) -> str:
+    # Embed dependencies so an exported agent does not need another skill
+    # to be implicitly loaded by the client.
+    # Skills are deterministically ordered lexically for prompt caching prefix stability.
+    sorted_skills = sorted(agent["skills"])
+    is_subagent = agent.get("mode") == "subagent" or mode == "lazy"
+    if is_subagent:
+        skills_content = skill_lazy_manifest(sorted_skills, skills, target=target)
+    else:
+        skills_content = "\n\n".join(skills[skill]["body"] for skill in sorted_skills)
+
+    instructions = agent["instructions"]
+    if agent.get("mode") == "subagent":
+        instructions = instructions + "\n\n" + SUBAGENT_HANDOFF_INSTRUCTIONS
+
+    if skills_first:
+        content = skills_content + "\n\n## Instructions\n\n" + instructions
+    else:
+        content = instructions + "\n\n" + skills_content
+    if preamble:
+        return preamble + "\n\n" + content
+    return content
+
+
+def skill_excerpt(body: str, paragraphs: int = COPILOT_PARAGRAPHS_PER_SKILL) -> str:
+    """Take leading body paragraphs verbatim; do not rewrite skill text."""
+    parts = []
+    for block in body.split("\n\n"):
+        block = block.strip()
+        if not block or block.startswith("#"):
+            continue
+        parts.append(block)
+        if len(parts) >= paragraphs:
+            break
+    if not parts:
+        raise KitError("Skill body has no excerptable paragraphs")
+    return "\n\n".join(parts)
+
+
+def build_copilot_instructions(skills: dict) -> str:
+    """Compile selected core skills into one compact Copilot instructions file."""
+    missing = [name for name in COPILOT_SKILLS if name not in skills]
+    if missing:
+        raise KitError(f"Missing Copilot source skills: {', '.join(missing)}")
+    sections = [
+        "# Maintainer Skills Lab",
+        "",
+        "Compact project guidance for GitHub Copilot, compiled from selected "
+        "source skills. Prefer concrete defects, focused regression tests, and "
+        "calm evidence-based replies.",
+        "",
+    ]
+    for name in COPILOT_SKILLS:
+        skill = skills[name]
+        sections += [
+            f"## {name}",
+            "",
+            skill["description"],
+            "",
+            skill_excerpt(skill["body"]),
+            "",
+        ]
+    content = "\n".join(sections).rstrip() + "\n"
+    if approximate_tokens(content) > COPILOT_TOKEN_BUDGET:
+        raise KitError(f"Copilot instructions exceed the {COPILOT_TOKEN_BUDGET}-token budget")
+    return content
+
+
+def build_windsurf_rules(skills: dict) -> str:
+    """Compile selected core skills into one Windsurf project rules file."""
+    missing = [name for name in WINDSURF_SKILLS if name not in skills]
+    if missing:
+        raise KitError(f"Missing Windsurf source skills: {', '.join(missing)}")
+    sections = [
+        "# Maintainer Skills Lab",
+        "",
+        "Project rules for Windsurf Cascade, compiled from selected source "
+        "skills. Prefer concrete defects, focused regression tests, and calm "
+        "evidence-based replies.",
+        "",
+    ]
+    for name in WINDSURF_SKILLS:
+        skill = skills[name]
+        sections += [
+            f"## {name}",
+            "",
+            skill["description"],
+            "",
+            skill_excerpt(skill["body"]),
+            "",
+        ]
+    return "\n".join(sections).rstrip() + "\n"
+
+
+def build_zed_prompt(name: str, skill: dict) -> str:
+    """One Zed Assistant prompt per skill; keep skill prose unchanged."""
+    return (
+        "<!-- Attach context with /file or /tab in the Zed Assistant panel. -->\n\n"
+        f"# {name}\n\n"
+        f"{skill['description']}\n\n"
+        f"{skill['body'].rstrip()}\n"
+    )
+
+
+def build_continue_prompt(name: str, skill: dict) -> str:
+    """One Continue slash-command prompt per skill; keep skill prose unchanged."""
+    return (
+        "---\n"
+        f"name: {json.dumps(name)}\n"
+        f"description: {json.dumps(skill['description'], ensure_ascii=False)}\n"
+        "invokable: true\n"
+        "---\n\n"
+        f"# {name}\n\n"
+        f"{skill['description']}\n\n"
+        f"{skill['body'].rstrip()}\n\n"
+        "{{{ input }}}\n"
+    )
+
+
+def build_roomodes(agents: dict, skills: dict, *, minify: bool = False, mode: str = "full") -> str:
+    """Compile agent profiles into a valid Roo Code / Cline .roomodes JSON configuration."""
+    modes = []
+    for name in sorted(agents):
+        agent = agents[name]
+        instructions = agent_body(agent, skills, mode=mode, target="cline")
+        if minify:
+            instructions = minify_markdown(instructions)
+        modes.append(
+            {
+                "slug": agent["name"],
+                "name": agent["name"],
+                "roleDefinition": agent["description"],
+                "groups": ["read", "edit", "browser", "command", "mcp"],
+                "customInstructions": instructions,
+            }
+        )
+    return json.dumps({"customModes": modes}, indent=2, ensure_ascii=False) + "\n"
+
+
+def export_files(
+    target: str, root: Path = ROOT, *, minify: bool = False, mode: str = "full"
+) -> dict[str, bytes]:
+    skills, agents = load_library(root)
+    if target == "copilot":
+        return {COPILOT_INSTRUCTIONS: build_copilot_instructions(skills).encode("utf-8")}
+    if target == "cline":
+        return {
+            CLINE_ROOMODES: build_roomodes(agents, skills, minify=minify, mode=mode).encode("utf-8")
+        }
+    if target == "zed":
+        # Zed has no separate agents directory; emit one Assistant prompt per skill.
+        files = {}
+        for name, skill in skills.items():
+            content = build_zed_prompt(name, skill)
+            if minify:
+                content = minify_markdown(content)
+            files[f"{ZED_PROMPTS}/{name}.md"] = content.encode("utf-8")
+        return files
+    if target == "continue":
+        # Continue has no separate agents directory; emit one invokable .prompt per skill.
+        files = {}
+        for name, skill in skills.items():
+            content = build_continue_prompt(name, skill)
+            if minify:
+                content = minify_markdown(content)
+            files[f"{CONTINUE_PROMPTS}/{name}.prompt"] = content.encode("utf-8")
+        return files
+    if target == "grok-bot":
+        files = source_files(root / "grok-bot")
+        if not files:
+            raise KitError("Missing Grok Bot setup recipes")
+        exports = {
+            f"grok-bot/{name}": _maybe_minify_markdown_bytes(data, name, minify)
+            for name, data in files.items()
+        }
+        for kind, items in (("skills", skills), ("agents", agents)):
+            for name, item in items.items():
+                body = (
+                    item["body"]
+                    if kind == "skills"
+                    else agent_body(item, skills, mode=mode, target="grok-bot")
+                )
+                content = (
+                    f"# {name}\n\n{item['description']}\n\n"
+                    "## Use in Grok Bot\n\n"
+                    "This is a Markdown setup recipe for Grok Bot (SpaceXAI). "
+                    "It has not been evaluated in a live Bot.\n\n"
+                    "1. Open an existing Bot or create one with this job.\n"
+                    "2. Give it the workflow below with a concrete task and the required "
+                    "inputs or supporting files. Choose the access and approval limits.\n"
+                    "3. Run the task once and inspect its output against the workflow checks.\n"
+                    f'4. Ask: "Save this validated workflow as a skill called {name}."\n'
+                    "5. Check that the skill is enabled for this Bot in "
+                    "Settings → Plugins → Yours, then invoke it from the `/` menu.\n\n"
+                    "An agent recipe combines its source instructions and dependent skills "
+                    "below. Copying this file does not create a Bot or routine.\n\n"
+                    "Reference: [Grok Bot skills and routines]"
+                    "(https://docs.x.ai/grok-bot/skills-routines-and-automations).\n\n"
+                    "## Workflow\n\n" + body + "\n"
+                )
+                if minify:
+                    content = minify_markdown(content)
+                exports[f"{kind}/{name}.md"] = content.encode("utf-8")
+        return exports
+    skill_dir, agent_dir, extension = TARGETS[target]
+    preamble = load_canonical_preamble(root) if target in PREAMBLE_TARGETS else ""
+    files = {}
+    for name, skill in skills.items():
+        for relative, data in skill["files"].items():
+            if relative == "SKILL.md":
+                text = data.decode("utf-8")
+                if target == "claude":
+                    xml_data = markdown_to_xml(text, preserve_frontmatter=True)
+                    injected = inject_canonical_preamble(xml_data, preamble)
+                    files[f"{skill_dir}/{name}/{relative}"] = _maybe_minify_markdown_bytes(
+                        injected.encode("utf-8"), relative, minify
+                    )
+                elif target in PREAMBLE_TARGETS:
+                    injected = inject_canonical_preamble(text, preamble)
+                    files[f"{skill_dir}/{name}/{relative}"] = _maybe_minify_markdown_bytes(
+                        injected.encode("utf-8"), relative, minify
+                    )
+                else:
+                    files[f"{skill_dir}/{name}/{relative}"] = _maybe_minify_markdown_bytes(
+                        data, relative, minify
+                    )
+            else:
+                files[f"{skill_dir}/{name}/{relative}"] = _maybe_minify_markdown_bytes(
+                    data, relative, minify
+                )
+        if target == "cursor" and "globs" in skill:
+            globs_json = json.dumps(skill["globs"])
+            mdc_header = (
+                "---\n"
+                f"description: {json.dumps(skill['description'], ensure_ascii=False)}\n"
+                f"globs: {globs_json}\n"
+                "alwaysApply: false\n"
+                "---\n\n"
+            )
+            mdc_content = mdc_header + skill["body"] + "\n"
+            if minify:
+                mdc_content = minify_markdown(mdc_content)
+            files[f".cursor/rules/{name}.mdc"] = mdc_content.encode("utf-8")
+    for name, agent in agents.items():
+        skills_first = target in ("claude", "cursor")
+        body = agent_body(
+            agent,
+            skills,
+            skills_first=skills_first,
+            mode=mode,
+            target=target,
+            preamble=preamble,
+        )
+        if minify:
+            body = minify_markdown(body)
+        if target == "codex":
+            content = (
+                "\n".join(
+                    f"{key} = {json.dumps(value, ensure_ascii=False)}"
+                    for key, value in {
+                        "name": name,
+                        "description": agent["description"],
+                        "developer_instructions": body,
+                    }.items()
+                )
+                + "\n"
+            )
+        elif target == "opencode":
+            content = (
+                "---\n"
+                f"description: {json.dumps(agent['description'], ensure_ascii=False)}\n"
+                'mode: "subagent"\n'
+                "---\n\n" + body + "\n"
+            )
+        elif target == "claude":
+            content = (
+                "---\n"
+                f"name: {json.dumps(name)}\n"
+                f"description: {json.dumps(agent['description'], ensure_ascii=False)}\n"
+                'cache_control: {"type": "ephemeral"}\n'
+                "---\n\n" + body + "\n"
+            )
+        else:
+            content = (
+                "---\n"
+                f"name: {json.dumps(name)}\n"
+                f"description: {json.dumps(agent['description'], ensure_ascii=False)}\n"
+                "---\n\n" + body + "\n"
+            )
+        if minify and extension == ".md":
+            content = minify_markdown(content)
+        files[f"{agent_dir}/{name}{extension}"] = content.encode("utf-8")
+    if target == "windsurf":
+        rules = build_windsurf_rules(skills)
+        if minify:
+            rules = minify_markdown(rules)
+        files[WINDSURF_RULES] = rules.encode("utf-8")
+    return files
+
+
+def provider_instructions(target: str) -> str:
+    if target == "copilot":
+        return (
+            "Install a compact `.github/copilot-instructions.md` compiled from core "
+            "maintainer skills (PR review, regression tests, and maintainer replies). "
+            "GitHub Copilot loads this file for Chat and PR review across VS Code, "
+            "JetBrains, and GitHub.com.\n\n"
+            "For conflict detection, updates, and removal, use the installer from "
+            "the source clone:\n\n"
+            "```sh\n"
+            "python3 tools/kit.py install --target copilot --project /existing/project\n"
+            "```\n\n"
+            "The installer writes one file and does not support `--skill` selection. "
+            "Live-client discovery and task outcomes have not yet been evaluated.\n"
+        )
+    if target == "zed":
+        return (
+            "Install Markdown prompt templates into `.zed/prompts/` for the Zed "
+            "Assistant panel (accessible via `/`). Each skill becomes one "
+            "`mkl-*.md` file. Zed has no separate agents directory, so agent "
+            "profiles are not exported.\n\n"
+            "For conflict detection, updates, and removal, use the installer from "
+            "the source clone:\n\n"
+            "```sh\n"
+            "python3 tools/kit.py install --target zed --project /existing/project\n"
+            "```\n\n"
+            "The installer reads the canonical source and installs every skill prompt "
+            "by default. Add `--skill mkl-humanize` to install or update only that "
+            "prompt; repeat `--skill` to select more. Other prompts are preserved.\n\n"
+            "Generated prompts include a short header comment mentioning `/file` and "
+            "`/tab` for attaching context; skill prose is unchanged. Live-client "
+            "discovery and task outcomes have not yet been evaluated.\n"
+        )
+    if target == "continue":
+        return (
+            "Install Continue.dev prompt files into `.continue/prompts/` as invokable "
+            "slash commands (type `/` in Chat, Plan, or Agent mode). Each skill becomes "
+            "one `mkl-*.prompt` file with YAML frontmatter (`name`, `description`, "
+            "`invokable: true`) and a `{{{ input }}}` placeholder for extra instructions. "
+            "Continue has no separate agents directory here, so agent profiles are not "
+            "exported.\n\n"
+            "For conflict detection, updates, and removal, use the installer from "
+            "the source clone:\n\n"
+            "```sh\n"
+            "python3 tools/kit.py install --target continue --project /existing/project\n"
+            "```\n\n"
+            "The installer reads the canonical source and installs every skill prompt "
+            "by default. Add `--skill mkl-humanize` to install or update only that "
+            "prompt; repeat `--skill` to select more. Other prompts are preserved.\n\n"
+            "Skill prose is unchanged aside from frontmatter and the input placeholder. "
+            "Live-client discovery and task outcomes have not yet been evaluated.\n"
+        )
+    if target == "cline":
+        return (
+            "Install a consolidated `.roomodes` custom modes definition file for Cline and "
+            "Roo Code. Each agent profile becomes a dedicated custom mode with its embedded "
+            "maintainer skills in `customInstructions`.\n\n"
+            "For conflict detection, updates, and removal, use the installer from "
+            "the source clone:\n\n"
+            "```sh\n"
+            "python3 tools/kit.py install --target cline --project /existing/project\n"
+            "```\n\n"
+            "The installer writes `.roomodes` at the project root and does not support "
+            "`--skill` selection. Live-client discovery and task outcomes have not yet been evaluated.\n"
+        )
+    if target == "grok-bot":
+        return (
+            "Follow [the setup guide](grok-bot/README.md) to configure a Bot and "
+            "save its skills. Every library skill and agent has a Markdown recipe "
+            "under `skills/` or `agents/`. These require manual setup in Grok Bot "
+            "(SpaceXAI); they are not automatic Bot imports.\n"
+        )
+    skill_dir, agent_dir, extension = TARGETS[target]
+    return (
+        f"Copy the selected `mkl-*` skill folders into `{skill_dir}/` and agent "
+        f"files into `{agent_dir}/` in your project, keeping the paths shown here. "
+        f"Agent files use `{extension}`. Check existing files before copying.\n\n"
+        "For conflict detection, updates, and removal, use the installer from "
+        "the source clone:\n\n"
+        "```sh\n"
+        f"python3 tools/kit.py install --target {target} --project /existing/project\n"
+        "```\n\n"
+        "The installer reads the canonical source and installs the full library by default. "
+        "Add `--skill mkl-humanize` to install or update only that skill; repeat `--skill` "
+        "to select more. Other skills and native agents are preserved. Use the same "
+        "selection with `uninstall` to remove only unchanged files owned for those skills.\n\n"
+        + (
+            "OpenCode 1.18.30 discovery and agent loading were checked on macOS arm64, "
+            "including a skill copied to `.agents/skills/` (the Skills CLI "
+            "`--agent opencode` path). Model task outcomes remain unevaluated. See "
+            "`examples/opencode/README.md` in the source clone for the repeatable "
+            "check and its limits.\n"
+            if target == "opencode"
+            else "Live-client discovery and task outcomes have not yet been evaluated.\n"
+        )
+        + (
+            "\nOpenCode derives agent names from filenames; agents use `mode: subagent`. "
+            "Try `@mkl-writing-editor` with a draft after installing the full library. "
+            "For a skill-only install, ask OpenCode to load `mkl-humanize` using its skill tool. "
+            "Model and permissions remain controlled by your OpenCode configuration. "
+            "No config file or plugin is installed. Avoid duplicate skill names in "
+            "`.agents/skills/` and `.claude/skills/`, which OpenCode can also discover.\n\n"
+            "References: [skills](https://opencode.ai/docs/skills), "
+            "[agents](https://opencode.ai/docs/agents).\n"
+            if target == "opencode"
+            else ""
+        )
+        + (
+            "\nAlso writes a consolidated `.windsurfrules` at the project root with "
+            "verbatim excerpts from core maintainer skills (PR review, regression "
+            "tests, and maintainer replies) for Cascade single-file rules. "
+            "Skill-only installs omit that file and keep or update only the selected "
+            "`.windsurf/skills/` directories.\n"
+            if target == "windsurf"
+            else ""
+        )
+        + (
+            "\nTarget id is `gemini` (not `antigravity`). Skills use Antigravity / "
+            "Gemini CLI discovery paths under `.gemini/antigravity/skills/`; agents "
+            "install beside them under `.gemini/antigravity/agents/` as Markdown "
+            "profiles with `name`/`description` frontmatter.\n"
+            if target == "gemini"
+            else ""
+        )
+    )
+
+
+def provider_files(
+    root: Path = ROOT, *, minify: bool = False, mode: str = "full"
+) -> dict[str, bytes]:
+    """The checked-in, browsable catalogue uses the same exports as ZIPs/install."""
+    files = {}
+    for target in EXPORT_TARGETS:
+        files.update(
+            {
+                f"{target}/{name}": data
+                for name, data in export_files(target, root, minify=minify, mode=mode).items()
+            }
+        )
+        readme = (
+            f"# {target}\n\n"
+            "[All providers and source links](../README.md)\n\n"
+            + provider_instructions(target)
+            + "\nGenerated by `python3 tools/kit.py sync`. Edit the source, then regenerate.\n"
+        )
+        if minify:
+            readme = minify_markdown(readme)
+        files[f"{target}/README.md"] = readme.encode("utf-8")
+    skills, agents = load_library(root)
+    labels = [PROVIDER_LABELS[target] for target in EXPORT_TARGETS]
+    lines = [
+        "# Choose your provider",
+        "",
+        "One source workflow produces each provider version below. These files are",
+        "generated by `python3 tools/kit.py sync`; CI checks that they match the source.",
+        "",
+        " | ".join(f"[{target}]({target}/README.md)" for target in EXPORT_TARGETS),
+        "",
+        "Codex, Claude Code, Cursor, OpenCode, Windsurf, Gemini, Zed, Continue, and",
+        "Cline get native files. Gemini installs under `.gemini/antigravity/` for",
+        "Antigravity / Gemini CLI skill discovery. Windsurf also gets a consolidated",
+        "`.windsurfrules` from core skills. Zed gets Assistant prompts under",
+        "`.zed/prompts/` (no separate agents directory). Continue gets invokable",
+        "prompts under `.continue/prompts/` (agents skipped; catalogue shows —).",
+        "Cline gets a consolidated `.roomodes` custom modes file (skills embedded;",
+        "catalogue shows —). Grok Bot (SpaceXAI) gets a Markdown setup recipe for every",
+        "skill and agent. Copilot gets one compact `.github/copilot-instructions.md`",
+        "compiled from core skills. Format checks do not establish live-client behavior.",
+    ]
+    for kind, items in (("skills", skills), ("agents", agents)):
+        lines += [
+            "",
+            f"## {kind.title()}",
+            "",
+            "| Source | " + " | ".join(labels) + " |",
+            "| --- | " + " | ".join("---" for _ in labels) + " |",
+        ]
+        for name in items:
+            source = f"skills/{name}/SKILL.md" if kind == "skills" else f"agents/{name}.toml"
+            links = [f"[{name}](../{source})"]
+            for target in EXPORT_TARGETS:
+                if target == "copilot":
+                    if kind == "skills" and name in COPILOT_SKILLS:
+                        links.append(f"[copilot](copilot/{COPILOT_INSTRUCTIONS})")
+                    else:
+                        links.append("—")
+                    continue
+                if target == "cline":
+                    if kind == "agents":
+                        links.append(f"[cline](cline/{CLINE_ROOMODES})")
+                    else:
+                        links.append("—")
+                    continue
+                if target == "zed":
+                    # Zed exports skill prompts only; agents have no home in `.zed/`.
+                    if kind == "skills":
+                        links.append(f"[zed](zed/{ZED_PROMPTS}/{name}.md)")
+                    else:
+                        links.append("—")
+                    continue
+                if target == "continue":
+                    # Continue exports skill prompts only; agents are skipped.
+                    if kind == "skills":
+                        links.append(f"[continue](continue/{CONTINUE_PROMPTS}/{name}.prompt)")
+                    else:
+                        links.append("—")
+                    continue
+                if target == "grok-bot":
+                    relative = f"{kind}/{name}.md"
+                else:
+                    skill_dir, agent_dir, extension = TARGETS[target]
+                    relative = (
+                        f"{skill_dir}/{name}/SKILL.md"
+                        if kind == "skills"
+                        else f"{agent_dir}/{name}{extension}"
+                    )
+                links.append(f"[{target}]({target}/{relative})")
+            lines.append("| " + " | ".join(links) + " |")
+    catalogue = "\n".join(lines) + "\n"
+    if minify:
+        catalogue = minify_markdown(catalogue)
+    files["README.md"] = catalogue.encode("utf-8")
+    return files
+
+
+def provider_path(relative: str) -> bool:
+    if not isinstance(relative, str):
+        return False
+    path = PurePosixPath(relative)
+    if path.is_absolute() or ".." in path.parts or "\\" in relative:
+        return False
+    if path.as_posix() != relative:
+        return False
+    if relative == "README.md":
+        return True
+    target, separator, rest = relative.partition("/")
+    if not separator or target not in (*EXPORT_TARGETS, "groq"):
+        return False
+    if rest == "README.md":
+        return True
+    if target in TARGETS:
+        return managed_path(rest, target)
+    if target in FLAT_PROMPT_TARGETS:
+        return managed_path(rest, target)
+    if target == "copilot":
+        return rest == COPILOT_INSTRUCTIONS
+    if target == "cline":
+        return rest == CLINE_ROOMODES
+    # Accept retired Groq paths only so sync can remove unchanged, manifest-owned files.
+    if target == "groq" or path.parts[1] in {"skills", "agents"}:
+        return (
+            len(path.parts) == 3
+            and path.parts[1] in {"skills", "agents"}
+            and path.suffix == (".json" if target == "groq" else ".md")
+            and NAME.fullmatch(path.stem) is not None
+        )
+    return rest.startswith("grok-bot/") and len(path.parts) >= 3
+
+
+def sync_providers(
+    root: Path = ROOT, check: bool = False, *, minify: bool = False, mode: str = "full"
+) -> dict:
+    root = root.resolve()
+    destination = checked_path(root, "providers")
+    if destination.exists() and not destination.is_dir():
+        raise KitError("providers must be a directory")
+    desired = provider_files(root, minify=minify, mode=mode)
+    manifest = checked_path(root, "providers/.manifest.json")
+    old = {}
+    if manifest.exists():
+        state = json.loads(manifest.read_text(encoding="utf-8"))
+        if not isinstance(state, dict) or state.get("schema_version") != 1:
+            raise KitError("Invalid provider manifest")
+        old = state.get("files")
+        if not isinstance(old, dict) or any(
+            not provider_path(name) or not isinstance(sha, str) or not SHA256.fullmatch(sha)
+            for name, sha in old.items()
+        ):
+            raise KitError("Invalid provider manifest paths or hashes")
+    writes, removals = {}, []
+    for relative in sorted(set(desired) | set(old)):
+        if not provider_path(relative):
+            raise KitError(f"Invalid provider path: {relative}")
+        path = checked_path(root, f"providers/{relative}")
+        current = current_digest(path)
+        wanted = digest(desired[relative]) if relative in desired else None
+        if current is not None and current != wanted and current != old.get(relative):
+            raise KitError(
+                f"Edited or unmanaged provider file: {relative}; preserve edits in the source "
+                "or restore the generated file before syncing"
+            )
+        if relative in desired and current != wanted:
+            writes[relative] = desired[relative]
+        elif relative not in desired and current is not None:
+            removals.append(relative)
+    state_bytes = (
+        json.dumps(
+            {"schema_version": 1, "files": {name: digest(data) for name, data in desired.items()}},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
+    manifest_changed = not manifest.exists() or canonical_bytes(
+        manifest.read_bytes()
+    ) != canonical_bytes(state_bytes)
+    if not check:
+        for relative, data in writes.items():
+            atomic_write(checked_path(root, f"providers/{relative}"), data)
+        for relative in removals:
+            checked_path(root, f"providers/{relative}").unlink()
+        if manifest_changed:
+            atomic_write(manifest, state_bytes)
+        # Drop only now-empty directories left by removals; keep occupied parents.
+        for relative in removals:
+            directory = checked_path(root, f"providers/{relative}").parent
+            while directory != destination and destination in directory.parents:
+                try:
+                    directory.rmdir()
+                except OSError:
+                    break
+                directory = directory.parent
+    return {
+        "up_to_date": not check or not (writes or removals or manifest_changed),
+        "check": check,
+        "written": sorted(writes),
+        "removed": removals,
+        "manifest_changed": manifest_changed,
+    }
+
+
+def managed_path(relative: str, target: str) -> bool:
+    if not isinstance(relative, str):
+        return False
+    path = PurePosixPath(relative)
+    if path.is_absolute() or ".." in path.parts or "\\" in relative:
+        return False
+    if path.as_posix() != relative:
+        return False
+    if target == "copilot":
+        return relative == COPILOT_INSTRUCTIONS
+    if target == "cline":
+        return relative == CLINE_ROOMODES
+    if target == "zed":
+        return (
+            path.parent.as_posix() == ZED_PROMPTS
+            and path.suffix == ".md"
+            and NAME.fullmatch(path.stem) is not None
+        )
+    if target == "continue":
+        return (
+            path.parent.as_posix() == CONTINUE_PROMPTS
+            and path.suffix == ".prompt"
+            and NAME.fullmatch(path.stem) is not None
+        )
+    if target == "windsurf" and relative == WINDSURF_RULES:
+        return True
+    if (
+        target == "cursor"
+        and path.parent.as_posix() == ".cursor/rules"
+        and path.suffix == ".mdc"
+        and NAME.fullmatch(path.stem) is not None
+    ):
+        return True
+    skill_dir, agent_dir, extension = TARGETS[target]
+    try:
+        parts = path.relative_to(skill_dir).parts
+        if len(parts) >= 2 and NAME.fullmatch(parts[0]):
+            return True
+    except ValueError:
+        pass
+    return (
+        path.parent.as_posix() == agent_dir
+        and path.suffix == extension
+        and NAME.fullmatch(path.stem) is not None
+    )
+
+
+def checked_path(project: Path, relative: str) -> Path:
+    path = project / relative
+    for candidate in [path, *path.parents]:
+        if candidate == project:
+            break
+        if candidate.is_symlink():
+            raise KitError(f"Refusing symlink in installation path: {candidate}")
+        if candidate != path and candidate.exists() and not candidate.is_dir():
+            raise KitError(f"Parent is not a directory: {candidate}")
+    return path
+
+
+def installed_state(project: Path, target: str) -> tuple[Path, dict[str, str]]:
+    path = checked_path(project, f".maintainer-skills-lab/{target}.json")
+    if not path.exists():
+        return path, {}
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(state, dict)
+        or state.get("schema_version") != 1
+        or state.get("target") != target
+        or not isinstance(state.get("files"), dict)
+    ):
+        raise KitError(f"Invalid install manifest: {path}")
+    for relative, checksum in state["files"].items():
+        if (
+            not managed_path(relative, target)
+            or not isinstance(checksum, str)
+            or not SHA256.fullmatch(checksum)
+        ):
+            raise KitError(f"Invalid owned file in install manifest: {relative}")
+    return path, state["files"]
+
+
+def current_digest(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise KitError(f"Expected a file: {path}")
+    return digest(path.read_bytes())
+
+
+def atomic_write(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(data)
+        temporary.chmod(0o644)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def skill_prefixes(target: str, skill_names: list[str] | None) -> tuple[str, ...] | None:
+    if skill_names is None:
+        return None
+    if target in {"copilot", "cline"}:
+        raise KitError(f"{target} exports a single instructions file; --skill is unsupported")
+    if not skill_names or any(
+        not isinstance(name, str) or not NAME.fullmatch(name) for name in skill_names
+    ):
+        raise KitError("Select at least one valid mkl-* skill name")
+    if target == "zed":
+        return tuple(f"{ZED_PROMPTS}/{name}.md" for name in sorted(set(skill_names)))
+    if target == "continue":
+        return tuple(f"{CONTINUE_PROMPTS}/{name}.prompt" for name in sorted(set(skill_names)))
+    if target == "cursor":
+        prefixes = []
+        for name in sorted(set(skill_names)):
+            prefixes.append(f"{TARGETS[target][0]}/{name}/")
+            prefixes.append(f".cursor/rules/{name}.mdc")
+        return tuple(prefixes)
+    return tuple(f"{TARGETS[target][0]}/{name}/" for name in sorted(set(skill_names)))
+
+
+def manifest_bytes(target: str, owned: dict[str, str]) -> bytes:
+    state = {"schema_version": 1, "target": target, "files": owned}
+    return (json.dumps(state, indent=2, sort_keys=True) + "\n").encode()
+
+
+def install(
+    target: str,
+    project: Path,
+    root: Path = ROOT,
+    dry_run: bool = False,
+    *,
+    skill_names: list[str] | None = None,
+    mode: str = "full",
+) -> dict:
+    project = project.resolve()
+    if not project.is_dir():
+        raise KitError(f"Project directory does not exist: {project}")
+    prefixes = skill_prefixes(target, skill_names)
+    desired = export_files(target, root, mode=mode)
+    if prefixes is not None:
+        if target in FLAT_PROMPT_TARGETS:
+            for relative in prefixes:
+                if relative not in desired:
+                    raise KitError(f"Unknown source skill: {PurePosixPath(relative).stem}")
+            desired = {name: data for name, data in desired.items() if name in prefixes}
+        else:
+            for name in sorted(set(skill_names)):
+                prefix = f"{TARGETS[target][0]}/{name}/"
+                if prefix + "SKILL.md" not in desired:
+                    raise KitError(f"Unknown source skill: {name}")
+            desired = {name: data for name, data in desired.items() if name.startswith(prefixes)}
+    manifest_path, old = installed_state(project, target)
+    # Keep other workflows' ownership hashes, even when their local files were edited.
+    owned = {
+        name: sha
+        for name, sha in old.items()
+        if prefixes is not None and not name.startswith(prefixes)
+    }
+    old = {name: sha for name, sha in old.items() if name not in owned}
+    writes, removals, retained = {}, [], []
+    # Preflight every selected path before creating directories or changing files.
+    for relative in sorted(set(desired) | set(old)):
+        if not managed_path(relative, target):
+            raise KitError(f"Invalid installation path: {relative}")
+        path = checked_path(project, relative)
+        current = current_digest(path)
+        if relative not in desired:
+            if current is not None and current != old[relative]:
+                raise KitError(f"Locally modified, refusing removal: {relative}")
+            if current is not None:
+                removals.append(relative)
+            continue
+        wanted = digest(desired[relative])
+        if current is None:
+            writes[relative] = desired[relative]
+            owned[relative] = wanted
+        elif current == wanted:
+            if relative in old:
+                owned[relative] = wanted
+            else:
+                # An identical pre-existing file remains owned by the user.
+                retained.append(relative)
+        elif relative in old and current == old[relative]:
+            writes[relative] = desired[relative]
+            owned[relative] = wanted
+        else:
+            raise KitError(f"Existing or locally modified file conflicts: {relative}")
+    state_bytes = manifest_bytes(target, owned)
+    manifest_changed = (bool(owned) or manifest_path.exists()) and (
+        not manifest_path.exists()
+        or canonical_bytes(manifest_path.read_bytes()) != canonical_bytes(state_bytes)
+    )
+    if not dry_run:
+        for relative, data in writes.items():
+            atomic_write(checked_path(project, relative), data)
+        for relative in removals:
+            checked_path(project, relative).unlink()
+        if manifest_changed:
+            atomic_write(manifest_path, state_bytes)
+    return {
+        "target": target,
+        "selected_skills": sorted(set(skill_names)) if skill_names is not None else None,
+        "project": str(project),
+        "dry_run": dry_run,
+        "written": sorted(writes),
+        "removed": removals,
+        "identical_unmanaged": retained,
+        "manifest_changed": manifest_changed,
+    }
+
+
+def uninstall(
+    target: str,
+    project: Path,
+    dry_run: bool = False,
+    *,
+    skill_names: list[str] | None = None,
+) -> dict:
+    project = project.resolve()
+    if not project.is_dir():
+        raise KitError(f"Project directory does not exist: {project}")
+    prefixes = skill_prefixes(target, skill_names)
+    manifest_path, old = installed_state(project, target)
+    kept = {}
+    removals = []
+    for relative, checksum in old.items():
+        if prefixes is not None and not relative.startswith(prefixes):
+            kept[relative] = checksum
+            continue
+        path = checked_path(project, relative)
+        current = current_digest(path)
+        if current is not None and current != checksum:
+            raise KitError(f"Locally modified, refusing removal: {relative}")
+        if current is not None:
+            removals.append(relative)
+    manifest_changed = manifest_path.exists() and (prefixes is None or kept != old)
+    if not dry_run:
+        for relative in removals:
+            checked_path(project, relative).unlink()
+        if manifest_changed:
+            if kept:
+                atomic_write(manifest_path, manifest_bytes(target, kept))
+            else:
+                manifest_path.unlink()
+        # Remove only now-empty directories below our known installation roots.
+        for relative in removals:
+            directory = (project / relative).parent
+            while directory != project:
+                try:
+                    directory.rmdir()
+                except OSError:
+                    break
+                directory = directory.parent
+        try:
+            manifest_path.parent.rmdir()
+        except OSError:
+            pass
+    return {
+        "target": target,
+        "selected_skills": sorted(set(skill_names)) if skill_names is not None else None,
+        "dry_run": dry_run,
+        "removed": sorted(removals),
+        "manifest_changed": manifest_changed,
+    }
+
+
+def build(
+    target: str, output: Path, root: Path = ROOT, *, minify: bool = False, mode: str = "full"
+) -> Path:
+    files = export_files(target, root, minify=minify, mode=mode)
+    prefix = f"maintainer-skills-lab-{target}"
+    instructions = (
+        "# Installation\n\nExtract this archive into a temporary directory.\n\n"
+        + provider_instructions(target)
+        + "\nSource: https://github.com/00200200/maintainer-skills-lab\n"
+    )
+    if minify:
+        instructions = minify_markdown(instructions)
+    files["INSTALL.md"] = instructions.encode()
+    files["LICENSE"] = (root / "LICENSE").read_bytes()
+    output.mkdir(parents=True, exist_ok=True)
+    archive = output / f"{prefix}.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as handle:
+        for name, data in sorted(files.items()):
+            entry = zipfile.ZipInfo(f"{prefix}/{name}", (2026, 1, 1, 0, 0, 0))
+            entry.create_system = 3
+            entry.external_attr = 0o100644 << 16
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            handle.writestr(entry, data)
+    return archive
+
+
+def profile_tokens(
+    target: str = "all",
+    *,
+    root: Path = ROOT,
+    encoding: str = "cl100k_base",
+    threshold_tokens: int = 800,
+    threshold_desc_tokens: int = 60,
+    sort_by: str = "desc-tokens",
+    mode: str = "full",
+) -> dict:
+    skills, agents = load_library(root)
+
+    tiktoken_active = False
+    try:
+        import tiktoken
+
+        tiktoken.get_encoding(encoding)
+        tiktoken_active = True
+    except Exception:
+        pass
+
+    skills_data = []
+    total_skills_tokens = 0
+    total_desc_tokens = 0
+
+    for name, skill in skills.items():
+        desc = skill.get("description", "")
+        desc_tok = count_tokens(desc, encoding=encoding)
+        desc_chars = len(desc)
+
+        file_tokens = 0
+        body_tokens = 0
+        for fname, fbytes in skill["files"].items():
+            ftext = fbytes.decode("utf-8", errors="replace")
+            tok = count_tokens(ftext, encoding=encoding)
+            file_tokens += tok
+            if fname == "SKILL.md":
+                body_tokens = tok
+
+        total_tokens = file_tokens
+        total_skills_tokens += total_tokens
+        total_desc_tokens += desc_tok
+
+        warnings = []
+        if total_tokens > threshold_tokens:
+            warnings.append(f"body > {threshold_tokens} tokens")
+        if desc_tok > threshold_desc_tokens:
+            warnings.append(f"desc > {threshold_desc_tokens} tokens")
+
+        skills_data.append(
+            {
+                "name": name,
+                "tokens": total_tokens,
+                "body_tokens": body_tokens,
+                "desc_tokens": desc_tok,
+                "desc_characters": desc_chars,
+                "warnings": warnings,
+            }
+        )
+
+    if sort_by == "desc-tokens":
+        skills_data.sort(key=lambda s: s["desc_tokens"], reverse=True)
+    elif sort_by == "tokens":
+        skills_data.sort(key=lambda s: s["tokens"], reverse=True)
+    elif sort_by == "name":
+        skills_data.sort(key=lambda s: s["name"])
+
+    # Agent profiling
+    agents_data = []
+    for name, agent in agents.items():
+        instructions = agent.get("instructions", "")
+        if agent.get("mode") == "subagent":
+            instructions = instructions + "\n\n" + SUBAGENT_HANDOFF_INSTRUCTIONS
+        inst_tokens = count_tokens(instructions, encoding=encoding)
+        referenced_skills = agent.get("skills", [])
+        if agent.get("mode") == "subagent" or mode == "lazy":
+            lazy_manifest = skill_lazy_manifest(referenced_skills, skills)
+            ref_tokens = count_tokens(lazy_manifest, encoding=encoding)
+        else:
+            ref_tokens = sum(
+                next((s["tokens"] for s in skills_data if s["name"] == rname), 0)
+                for rname in referenced_skills
+            )
+        agents_data.append(
+            {
+                "name": name,
+                "instructions_tokens": inst_tokens,
+                "referenced_skills_count": len(referenced_skills),
+                "referenced_skills_tokens": ref_tokens,
+                "total_tokens": inst_tokens + ref_tokens,
+                "mode": agent.get("mode", "full"),
+            }
+        )
+    agents_data.sort(key=lambda a: a["total_tokens"], reverse=True)
+
+    # Baseline names floor vs full descriptions ceiling
+    names_concat = ", ".join(skills.keys())
+    names_only_tokens = count_tokens(names_concat, encoding=encoding)
+
+    # Target export bundles
+    targets_data = {}
+    selected_targets = EXPORT_TARGETS if target == "all" else [target]
+    for tgt in selected_targets:
+        tfiles = export_files(tgt, root, mode=mode)
+        tgt_tokens = sum(
+            count_tokens(data.decode("utf-8", errors="replace"), encoding=encoding)
+            for data in tfiles.values()
+        )
+        targets_data[tgt] = {
+            "files": len(tfiles),
+            "total_tokens": tgt_tokens,
+        }
+
+    return {
+        "encoding": encoding if tiktoken_active else f"{encoding} (heuristic ~4 chars/tok)",
+        "skills": skills_data,
+        "agents": agents_data,
+        "targets": targets_data,
+        "summary": {
+            "skills_count": len(skills),
+            "agents_count": len(agents),
+            "names_only_floor_tokens": names_only_tokens,
+            "descriptions_ceiling_tokens": total_desc_tokens,
+            "skills_total_tokens": total_skills_tokens,
+        },
+    }
+
+
+def format_tokens_table(profile: dict) -> str:
+    lines = []
+    lines.append(f"Maintainer Skills Lab — Token Profiler [{profile['encoding']}]")
+    lines.append("")
+    lines.append("Skills (ordered by actionable description token cost):")
+    lines.append("-" * 78)
+    lines.append(
+        f"{'Skill Name':<32} {'Tokens':>8} {'Body':>8} {'Desc Tok':>9} {'Chars':>6}  Status"
+    )
+    lines.append("-" * 78)
+    for s in profile["skills"]:
+        warn_str = "⚠️  " + ", ".join(s["warnings"]) if s["warnings"] else "✅ OK"
+        lines.append(
+            f"{s['name']:<32} {s['tokens']:>8} {s['body_tokens']:>8} {s['desc_tokens']:>9} {s['desc_characters']:>6}  {warn_str}"
+        )
+    lines.append("-" * 78)
+    sm = profile["summary"]
+    lines.append(
+        f"Floor Context (names only): {sm['names_only_floor_tokens']} tok | "
+        f"Descriptions overhead: {sm['descriptions_ceiling_tokens']} tok | "
+        f"Full library: {sm['skills_total_tokens']} tok"
+    )
+    lines.append("")
+
+    if profile["agents"]:
+        lines.append("Agent Profiles:")
+        lines.append("-" * 68)
+        lines.append(f"{'Agent':<24} {'Instructions':>14} {'Skills (count)':>14} {'Total Tok':>12}")
+        lines.append("-" * 68)
+        for a in profile["agents"]:
+            sk_info = f"{a['referenced_skills_tokens']} ({a['referenced_skills_count']})"
+            lines.append(
+                f"{a['name']:<24} {a['instructions_tokens']:>14} {sk_info:>14} {a['total_tokens']:>12}"
+            )
+        lines.append("-" * 68)
+        lines.append("")
+
+    if profile["targets"]:
+        lines.append("Target Export Bundles:")
+        lines.append("-" * 46)
+        lines.append(f"{'Target Provider':<22} {'Files':>8} {'Tokens':>12}")
+        lines.append("-" * 46)
+        for tgt, data in profile["targets"].items():
+            label = PROVIDER_LABELS.get(tgt, tgt)
+            lines.append(f"{label:<22} {data['files']:>8} {data['total_tokens']:>12}")
+        lines.append("-" * 46)
+
+    return "\n".join(lines)
+
+
+def check_prefix_normalization(root: Path = ROOT) -> dict:
+    """Verify deterministic prefix normalization and cross-skill KV-cache sharing."""
+    preamble = load_canonical_preamble(root)
+    issues = []
+    if not preamble:
+        issues.append(f"Missing or empty canonical preamble at {CANONICAL_PREAMBLE_FILE}")
+        return {
+            "prefix_normalized": False,
+            "issues": issues,
+            "preamble_tokens": 0,
+            "min_tokens_required": MIN_CANONICAL_PREAMBLE_TOKENS,
+            "checked_targets": sorted(PREAMBLE_TARGETS),
+            "checked_skills": 0,
+            "checked_agents": 0,
+        }
+
+    preamble_tokens = count_tokens(preamble)
+    if preamble_tokens < MIN_CANONICAL_PREAMBLE_TOKENS:
+        issues.append(
+            f"Canonical preamble has {preamble_tokens} tokens, which is less than the required minimum of {MIN_CANONICAL_PREAMBLE_TOKENS} tokens"
+        )
+
+    timestamp_pattern = re.compile(r"\b20\d\d-[01]\d-[0-3]\dT[0-2]\d:[0-5]\d:[0-5]\d\b")
+    if timestamp_pattern.search(preamble):
+        issues.append("Volatile ISO timestamp found in canonical preamble")
+
+    skills, agents = load_library(root)
+
+    for target in sorted(PREAMBLE_TARGETS):
+        exported = export_files(target, root)
+        skill_dir, agent_dir, extension = TARGETS[target]
+
+        # 1. Verify every exported skill contains the canonical preamble immediately after frontmatter
+        for name in skills:
+            skill_path = f"{skill_dir}/{name}/SKILL.md"
+            if skill_path not in exported:
+                issues.append(f"{target} export is missing skill file: {skill_path}")
+                continue
+            content = exported[skill_path].decode("utf-8")
+            if preamble not in content:
+                issues.append(f"{target} skill '{name}' is missing canonical preamble")
+            else:
+                end_fm = content.find("\n---\n")
+                if end_fm == -1:
+                    issues.append(f"{target} skill '{name}' is missing closing frontmatter")
+                else:
+                    after_fm = content[end_fm + 5 :].lstrip("\n")
+                    if not after_fm.startswith(preamble):
+                        issues.append(
+                            f"{target} skill '{name}' does not position canonical preamble immediately after frontmatter boundary"
+                        )
+
+        # 2. Verify every exported agent contains the canonical preamble
+        for name in agents:
+            agent_path = f"{agent_dir}/{name}{extension}"
+            if agent_path not in exported:
+                issues.append(f"{target} export is missing agent file: {agent_path}")
+                continue
+            content = exported[agent_path].decode("utf-8")
+            if extension == ".toml":
+                agent_doc = tomllib.loads(content)
+                agent_text = agent_doc.get("developer_instructions", "")
+            else:
+                agent_text = content
+            if preamble not in agent_text:
+                issues.append(f"{target} agent '{name}' is missing canonical preamble")
+
+    return {
+        "prefix_normalized": len(issues) == 0,
+        "issues": issues,
+        "preamble_tokens": preamble_tokens,
+        "min_tokens_required": MIN_CANONICAL_PREAMBLE_TOKENS,
+        "checked_targets": sorted(PREAMBLE_TARGETS),
+        "checked_skills": len(skills),
+        "checked_agents": len(agents),
+    }
+
+
+def check_cache_friendliness(root: Path = ROOT) -> dict:
+    """Verify KV-cache prefix alignment, deterministic sorting, and absence of volatile tokens."""
+    skills, agents = load_library(root)
+    issues = []
+
+    # 1. Verify strict lexical sorting of skills within each agent profile
+    for name, agent in agents.items():
+        if agent["skills"] != sorted(agent["skills"]):
+            issues.append(f"Agent '{name}' skills are not in lexical order: {agent['skills']}")
+
+    # 2. Verify Claude Code and Cursor agent exports structure static skill definitions ahead of variable instructions
+    for target in ("claude", "cursor"):
+        exported = export_files(target, root)
+        skill_dir, agent_dir, extension = TARGETS[target]
+        for name, agent in agents.items():
+            content = exported[f"{agent_dir}/{name}{extension}"].decode("utf-8")
+            if agent["skills"]:
+                first_skill = sorted(agent["skills"])[0]
+                first_skill_sample = skills[first_skill]["body"].strip().split("\n", 1)[0]
+                if "## Instructions" not in content:
+                    issues.append(f"{target} agent '{name}' is missing '## Instructions' separator")
+                elif first_skill_sample in content:
+                    if content.index("## Instructions") < content.index(first_skill_sample):
+                        issues.append(
+                            f"{target} agent '{name}' does not place static skills ahead of instructions"
+                        )
+
+    # 3. Verify Claude Code agent config includes prompt caching cache_control marker
+    claude_files = export_files("claude", root)
+    for name in agents:
+        content = claude_files[f".claude/agents/{name}.md"].decode("utf-8")
+        if 'cache_control: {"type": "ephemeral"}' not in content:
+            issues.append(f"Claude agent '{name}' missing cache_control marker")
+
+    # 4. Verify no dynamic timestamps or volatile metadata in any exported files
+    timestamp_pattern = re.compile(r"\b20\d\d-[01]\d-[0-3]\dT[0-2]\d:[0-5]\d:[0-5]\d\b")
+    for target in EXPORT_TARGETS:
+        target_files = export_files(target, root)
+        for path_name, data in target_files.items():
+            if timestamp_pattern.search(data.decode("utf-8", errors="replace")):
+                issues.append(f"Volatile ISO timestamp found in {target} export: {path_name}")
+
+    # 5. Verify deterministic prefix normalization across client export targets
+    prefix_report = check_prefix_normalization(root)
+    if not prefix_report["prefix_normalized"]:
+        issues.extend(prefix_report["issues"])
+
+    return {
+        "cache_friendly": len(issues) == 0,
+        "issues": issues,
+        "checked_agents": len(agents),
+        "checked_targets": sorted({"claude", "cursor"} | PREAMBLE_TARGETS),
+        "prefix_normalization": prefix_report,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("list", help="List source skills and native agents")
+    check_parser = commands.add_parser(
+        "check", help="Validate this library and generate exports in memory"
+    )
+    check_parser.add_argument(
+        "--mode",
+        choices=["full", "lazy"],
+        default="full",
+        help="Agent export mode: full (inlined skills) or lazy (progressive disclosure index)",
+    )
+    check_parser.add_argument(
+        "--cache-prefix",
+        "--cache-check",
+        dest="cache_check",
+        action="store_true",
+        help="Validate prompt caching and KV-cache prefix alignment constraints",
+    )
+    check_parser.add_argument(
+        "--max-skill-tokens",
+        type=int,
+        default=MAX_SKILL_BODY_TOKENS,
+        help=f"Hard budget for skill body tokens (default: {MAX_SKILL_BODY_TOKENS})",
+    )
+    check_parser.add_argument(
+        "--max-desc-tokens",
+        type=int,
+        default=MAX_DESCRIPTION_TOKENS,
+        help=f"Hard budget for skill description tokens (default: {MAX_DESCRIPTION_TOKENS})",
+    )
+    sync_parser = commands.add_parser("sync", help="Regenerate the browsable provider catalogue")
+    sync_parser.add_argument("--check", action="store_true", help="Fail on drift without writing")
+    sync_parser.add_argument(
+        "--mode",
+        choices=["full", "lazy"],
+        default="full",
+        help="Agent export mode: full (inlined skills) or lazy (progressive disclosure index)",
+    )
+    sync_parser.add_argument(
+        "--minify",
+        action="store_true",
+        help="Minify exported markdown (whitespace, tables, HTML comments)",
+    )
+    build_parser = commands.add_parser("build", help="Build deterministic installation archives")
+    build_parser.add_argument(
+        "--target", choices=[*EXPORT_TARGETS, "roo", "roomodes", "all"], default="all"
+    )
+    build_parser.add_argument("--output", type=Path, default=ROOT / "dist")
+    build_parser.add_argument(
+        "--mode",
+        choices=["full", "lazy"],
+        default="full",
+        help="Agent export mode: full (inlined skills) or lazy (progressive disclosure index)",
+    )
+    build_parser.add_argument(
+        "--minify",
+        action="store_true",
+        help="Minify exported markdown (whitespace, tables, HTML comments)",
+    )
+    tokens_parser = commands.add_parser(
+        "tokens", help="Benchmark skill and agent context token consumption"
+    )
+    tokens_parser.add_argument("--json", action="store_true", help="Output structured JSON")
+    tokens_parser.add_argument(
+        "--mode",
+        choices=["full", "lazy"],
+        default="full",
+        help="Agent export mode: full (inlined skills) or lazy (progressive disclosure index)",
+    )
+    tokens_parser.add_argument(
+        "--target",
+        choices=[*EXPORT_TARGETS, "roo", "roomodes", "all"],
+        default="all",
+        help="Filter token profile by target client export",
+    )
+    tokens_parser.add_argument(
+        "--sort-by",
+        choices=["tokens", "desc-tokens", "name"],
+        default="desc-tokens",
+        help="Sort skills by total tokens, description tokens, or name (default: desc-tokens)",
+    )
+    tokens_parser.add_argument(
+        "--threshold-tokens",
+        type=int,
+        default=800,
+        help="Warning threshold for skill total tokens (default: 800)",
+    )
+    tokens_parser.add_argument(
+        "--threshold-desc-tokens",
+        type=int,
+        default=60,
+        help="Warning threshold for description tokens (default: 60)",
+    )
+    for action in ("install", "uninstall"):
+        action_parser = commands.add_parser(action, help=f"{action.title()} in one project")
+        action_parser.add_argument(
+            "--target", choices=[*INSTALL_TARGETS, "roo", "roomodes"], required=True
+        )
+        action_parser.add_argument("--project", type=Path, required=True)
+        action_parser.add_argument("--dry-run", action="store_true")
+        if action == "install":
+            action_parser.add_argument(
+                "--mode",
+                choices=["full", "lazy"],
+                default="full",
+                help="Agent export mode: full (inlined skills) or lazy (progressive disclosure index)",
+            )
+        action_parser.add_argument(
+            "--skill",
+            dest="skill_names",
+            action="append",
+            metavar="NAME",
+            help="Limit changes to this skill; repeat to select more. Other workflows are preserved.",
+        )
+    args = parser.parse_args(argv)
+    if getattr(args, "target", None) in {"roo", "roomodes"}:
+        args.target = "cline"
+    try:
+        if args.command == "list":
+            skills, agents = load_library()
+            print(
+                json.dumps(
+                    {
+                        "skills": [
+                            {"name": s["name"], "description": s["description"]}
+                            for s in skills.values()
+                        ],
+                        "agents": list(agents.values()),
+                    },
+                    indent=2,
+                )
+            )
+        elif args.command == "check":
+            skills, agents = load_library()
+            budget_report = check_library(
+                max_body_tokens=args.max_skill_tokens,
+                max_desc_tokens=args.max_desc_tokens,
+            )
+            counts = {
+                target: len(export_files(target, mode=args.mode)) for target in EXPORT_TARGETS
+            }
+            cache_report = check_cache_friendliness()
+            print(
+                json.dumps(
+                    {
+                        "skills": len(skills),
+                        "agents": len(agents),
+                        "export_files": counts,
+                        "cache_friendliness": cache_report,
+                        "token_budget": budget_report,
+                        "validation": "source-and-export checks only; no live-agent runs",
+                    },
+                    indent=2,
+                )
+            )
+            if not cache_report["cache_friendly"] or not budget_report["valid"]:
+                return 1
+        elif args.command == "sync":
+            result = sync_providers(check=args.check, minify=args.minify, mode=args.mode)
+            print(json.dumps(result, indent=2))
+            if args.check and not result["up_to_date"]:
+                return 1
+        elif args.command == "build":
+            targets = EXPORT_TARGETS if args.target == "all" else [args.target]
+            print(
+                json.dumps(
+                    {
+                        "archives": [
+                            str(build(target, args.output, minify=args.minify, mode=args.mode))
+                            for target in targets
+                        ]
+                    },
+                    indent=2,
+                )
+            )
+        elif args.command == "tokens":
+            profile = profile_tokens(
+                target=args.target,
+                threshold_tokens=args.threshold_tokens,
+                threshold_desc_tokens=args.threshold_desc_tokens,
+                sort_by=args.sort_by,
+                mode=args.mode,
+            )
+            if args.json:
+                print(json.dumps(profile, indent=2))
+            else:
+                print(format_tokens_table(profile))
+        elif args.command == "install":
+            print(
+                json.dumps(
+                    install(
+                        args.target,
+                        args.project,
+                        dry_run=args.dry_run,
+                        skill_names=args.skill_names,
+                        mode=args.mode,
+                    ),
+                    indent=2,
+                )
+            )
+        else:
+            print(
+                json.dumps(
+                    uninstall(
+                        args.target, args.project, args.dry_run, skill_names=args.skill_names
+                    ),
+                    indent=2,
+                )
+            )
+    except (KitError, OSError, ValueError) as exc:
+        print(f"kit: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

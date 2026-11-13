@@ -1,0 +1,121 @@
+# mkl-bisect-regression
+
+Pinpoint regressions using automated git bisect test scripts with zero prompt token waste.
+
+## Use in Grok Bot
+
+This is a Markdown setup recipe for Grok Bot (SpaceXAI). It has not been evaluated in a live Bot.
+
+1. Open an existing Bot or create one with this job.
+2. Give it the workflow below with a concrete task and the required inputs or supporting files. Choose the access and approval limits.
+3. Run the task once and inspect its output against the workflow checks.
+4. Ask: "Save this validated workflow as a skill called mkl-bisect-regression."
+5. Check that the skill is enabled for this Bot in Settings → Plugins → Yours, then invoke it from the `/` menu.
+
+An agent recipe combines its source instructions and dependent skills below. Copying this file does not create a Bot or routine.
+
+Reference: [Grok Bot skills and routines](https://docs.x.ai/grok-bot/skills-routines-and-automations).
+
+## Workflow
+
+# Pinpoint regressions with automated git bisect
+
+When a bug or regression appears between releases or commits, never manually read commit diffs across history. Reading hundreds of commits burns tens of thousands of LLM prompt tokens, causes hallucinated attributions, and exhausts context.
+
+Instead, leverage Git's binary search: `git bisect run <test_script>`. The local shell automatically tests commits in $\mathcal{O}(\log_2 N)$ steps with zero intermediate tokens sent to the model. Inspect only the single culprit commit diff.
+
+## 1. Author a standalone bisect test script
+
+Author an executable script (`bisect_test.sh`) returning standard Git exit codes:
+- **`0` (Good)**: Commit is good (bug absent).
+- **`1` through `124`, `126` through `255` (Bad)**: Commit is bad (regression observed).
+- **`125` (Skip)**: Commit untestable (broken build, syntax error unrelated to bug). Git picks an adjacent commit.
+
+### Flakiness and build mitigation in the script
+
+1. **Trap compilation/build failures**: Return `125` if compilation or dependencies fail so Git skips intermediate broken commits.
+2. **Loop flaky checks**: If timing-sensitive, run the test 3 to 5 times. If any run fails, exit `1`.
+3. **Clean artifacts**: Remove transient caches between runs.
+
+```bash
+#!/usr/bin/env bash
+set -e
+
+# 1. Skip untestable commits
+if ! python3 -m py_compile $(git ls-files '*.py') >/dev/null 2>&1; then
+    exit 125
+fi
+
+# 2. Run targeted test (repeat 3x to rule out flakiness)
+for i in {1..3}; do
+    if ! python3 -m pytest tests/test_regression.py -q >/dev/null 2>&1; then
+        exit 1
+    fi
+done
+
+exit 0
+```
+
+```bash
+chmod +x bisect_test.sh
+```
+
+## 2. Execute automated git bisect
+
+Identify the known good commit/tag and bad commit (`HEAD`):
+
+```bash
+git bisect start <bad_commit> <good_commit>
+git bisect run ./bisect_test.sh
+```
+
+Git runs the test at each pivot and identifies the culprit:
+```text
+<commit_sha> is the first bad commit
+```
+
+Always reset the bisect session afterward:
+```bash
+git bisect reset
+```
+
+## 3. Targeted culprit analysis
+
+Inspect only the breaking commit's changes:
+```bash
+git show --stat <commit_sha>
+git show <commit_sha>
+```
+
+Analyze the exact causal mechanism:
+- Which logic, type conversion, or assumption changed?
+- Was an invariant broken, a default altered, or an edge case dropped?
+- Author a minimal regression test before proposing the fix.
+
+## 4. Worked example: Memory leak
+
+To bisect a memory regression between `v2.4.0` and `HEAD`:
+
+1. Write `test_leak.sh`:
+```bash
+#!/usr/bin/env bash
+pip install -e . -q >/dev/null 2>&1 || exit 125
+python3 -c "
+import worker, tracemalloc
+tracemalloc.start()
+worker.process_batch(size=1000)
+_, peak = tracemalloc.get_traced_memory()
+tracemalloc.stop()
+if peak > 50 * 1024 * 1024:
+    raise SystemExit(1)
+"
+```
+
+2. Run bisect and reset:
+```bash
+chmod +x test_leak.sh
+git bisect start HEAD v2.4.0
+git bisect run ./test_leak.sh
+git bisect reset
+```
+Inspect the single breaking commit diff and fix the root cause.

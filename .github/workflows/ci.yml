@@ -1,0 +1,106 @@
+name: Validate library
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  opencode-discovery:
+    name: OpenCode 1.18.30 discovery (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Install the pinned Linux client into runner temporary storage
+        run: >-
+          npm install --prefix "$RUNNER_TEMP/opencode-client"
+          --ignore-scripts --no-audit --no-fund opencode-linux-x64@1.18.30
+      - name: Check client discovery without starting a model session
+        shell: bash
+        run: |
+          python examples/opencode/check.py \
+            --opencode "$RUNNER_TEMP/opencode-client/node_modules/opencode-linux-x64/bin/opencode" \
+            | tee "$RUNNER_TEMP/opencode-discovery.json"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: opencode-discovery-linux
+          path: ${{ runner.temp }}/opencode-discovery.json
+          if-no-files-found: error
+  skills-cli-install:
+    name: Skills CLI 1.5.26 Humanizer install (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Install the pinned Skills CLI into runner temporary storage
+        run: >-
+          npm install --prefix "$RUNNER_TEMP/skills-cli"
+          --ignore-scripts --no-audit --no-fund skills@1.5.26
+      - name: Check Humanizer copy, checker, and removal without a model session
+        shell: bash
+        run: |
+          python examples/skills-cli/check.py \
+            --node "$(command -v node)" \
+            --skills "$RUNNER_TEMP/skills-cli/node_modules/skills/bin/cli.mjs" \
+            | tee "$RUNNER_TEMP/skills-cli-install.json"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: skills-cli-install-linux
+          path: ${{ runner.temp }}/skills-cli-install.json
+          if-no-files-found: error
+  checks:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Lint the Python implementation
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.11'
+        run: |
+          python -m pip install ruff==0.16.7
+          python -m ruff check tools tests examples
+          python -m ruff format --check tools tests examples
+      - name: Validate source and exports
+        run: python tools/kit.py check
+      - name: Check provider folders match the source
+        run: python tools/kit.py sync --check
+      - name: Run installation and example tests
+        run: python -m unittest discover -s tests -v
+      - name: Run the regression example
+        run: python examples/bugfix/run.py --json
+      - name: Run the Humanizer checker demo
+        run: python examples/writing/run.py --json
+      - name: Run the offline Skill Watch example
+        run: python examples/skill-watch/run.py
+      - name: Check Skill Watch over MCP stdio
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.11'
+        run: |
+          python -m pip install mcp==2.2.0
+          python examples/skill-watch/check_mcp.py
+      - name: Build all client bundles
+        run: python tools/kit.py build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: client-bundles-${{ matrix.os }}-${{ matrix.python }}
+          path: dist/*.zip

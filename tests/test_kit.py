@@ -1,0 +1,1712 @@
+import importlib.util
+import json
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+import unittest
+import zipfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("kit", ROOT / "tools/kit.py")
+kit = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(kit)
+
+
+def snapshot(directory):
+    return {
+        path.relative_to(directory).as_posix(): path.read_bytes()
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+
+
+def humanizer_files(prefix):
+    """Installed paths for every file in the Humanizer source folder, sorted like the kit."""
+    return sorted(f"{prefix}/{name}" for name in kit.source_files(ROOT / "skills/mkl-humanize"))
+
+
+def copy_library(destination):
+    for name in ("skills", "agents", "grok-bot", "assets"):
+        if (ROOT / name).is_dir():
+            shutil.copytree(ROOT / name, destination / name)
+    shutil.copyfile(ROOT / "LICENSE", destination / "LICENSE")
+
+
+class LibraryTests(unittest.TestCase):
+    def test_native_agents_embed_their_workflows(self):
+        skills, agents = kit.load_library()
+        self.assertTrue(skills)
+        self.assertTrue(agents)
+        for target in kit.TARGETS:
+            files = kit.export_files(target)
+            skill_dir, agent_dir, extension = kit.TARGETS[target]
+            for name, skill in skills.items():
+                if target == "claude":
+                    self.assertIn(b"<skill", files[f"{skill_dir}/{name}/SKILL.md"])
+                elif target in kit.PREAMBLE_TARGETS:
+                    self.assertIn(b"Canonical Preamble", files[f"{skill_dir}/{name}/SKILL.md"])
+                else:
+                    self.assertEqual(
+                        files[f"{skill_dir}/{name}/SKILL.md"], skill["files"]["SKILL.md"]
+                    )
+            for name, agent in agents.items():
+                content = files[f"{agent_dir}/{name}{extension}"].decode()
+                if target == "codex":
+                    parsed = tomllib.loads(content)
+                    self.assertEqual(set(parsed), {"name", "description", "developer_instructions"})
+                    body = parsed["developer_instructions"]
+                else:
+                    _, header, body = content.split("---", 2)
+                    parsed = {
+                        line.split(":", 1)[0]: json.loads(line.split(":", 1)[1])
+                        for line in header.strip().splitlines()
+                    }
+                if target == "opencode":
+                    self.assertEqual(set(parsed), {"description", "mode"})
+                    self.assertEqual(parsed["mode"], "subagent")
+                    self.assertEqual(parsed["description"], agent["description"])
+                if agent.get("mode") == "subagent":
+                    for dependency in agent["skills"]:
+                        self.assertIn(dependency, body)
+                    self.assertIn("Subagent Handoff Protocol", body)
+                else:
+                    for dependency in agent["skills"]:
+                        self.assertIn(skills[dependency]["body"], body)
+
+    def test_profile_performance_skill_attributes(self):
+        skills, _ = kit.load_library()
+        self.assertIn("mkl-profile-performance", skills)
+        perf_skill = skills["mkl-profile-performance"]
+        self.assertEqual(perf_skill["name"], "mkl-profile-performance")
+        self.assertIn("cProfile", perf_skill["description"])
+        self.assertIn("tottime", perf_skill["body"])
+        self.assertIn("cumtime", perf_skill["body"])
+        self.assertIn("ncalls", perf_skill["body"])
+
+    def test_bisect_regression_skill_attributes(self):
+        skills, _ = kit.load_library()
+        self.assertIn("mkl-bisect-regression", skills)
+        bisect_skill = skills["mkl-bisect-regression"]
+        self.assertEqual(bisect_skill["name"], "mkl-bisect-regression")
+        self.assertIn("bisect", bisect_skill["description"])
+        self.assertIn("git bisect run", bisect_skill["body"])
+        self.assertIn("exit 125", bisect_skill["body"])
+        self.assertIn("bisect_test.sh", bisect_skill["body"])
+
+    def test_audit_cve_skill_attributes(self):
+        skills, _ = kit.load_library()
+        self.assertIn("mkl-audit-cve", skills)
+        cve_skill = skills["mkl-audit-cve"]
+        self.assertEqual(cve_skill["name"], "mkl-audit-cve")
+        self.assertIn("Audit CVE advisories", cve_skill["description"])
+        self.assertIn("Targeted Extraction", cve_skill["body"])
+        self.assertIn("Usage Verification", cve_skill["body"])
+        self.assertIn("Low Immediate Risk / Trivial Upgrade", cve_skill["body"])
+        self.assertIn("High Immediate Risk / Active Vulnerability", cve_skill["body"])
+
+    def test_generate_changelog_skill_attributes(self):
+        skills, _ = kit.load_library()
+        self.assertIn("mkl-generate-changelog", skills)
+        changelog_skill = skills["mkl-generate-changelog"]
+        self.assertEqual(changelog_skill["name"], "mkl-generate-changelog")
+        self.assertIn("changelogs and release notes", changelog_skill["description"])
+        self.assertIn("Log Extraction", changelog_skill["body"])
+        self.assertIn("Breaking Changes", changelog_skill["body"])
+        self.assertIn("400 words", changelog_skill["body"])
+
+    def test_prune_context_skill_attributes(self):
+        skills, agents = kit.load_library()
+        self.assertIn("mkl-prune-context", skills)
+        prune_skill = skills["mkl-prune-context"]
+        self.assertEqual(prune_skill["name"], "mkl-prune-context")
+        self.assertIn("Prune verbose histories", prune_skill["description"])
+        self.assertIn("Compact Session Handoff", prune_skill["body"])
+        self.assertIn("Retain vs. Discard", prune_skill["body"])
+        self.assertIn("Anti-pattern (Lossy Pruning)", prune_skill["body"])
+        self.assertIn("mkl-prune-context", agents["mkl-bug-investigator"]["skills"])
+
+    def test_unknown_dependency_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            copy_library(root)
+            path = root / "agents/mkl-bug-investigator.toml"
+            path.write_text(path.read_text().replace('"mkl-triage-issue"', '"mkl-absent"'))
+            with self.assertRaisesRegex(kit.KitError, "unknown skill dependency"):
+                kit.load_library(root)
+
+    def test_name_must_match_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            copy_library(root)
+            path = root / "skills/mkl-review-pr/SKILL.md"
+            path.write_text(path.read_text().replace('name: "mkl-review-pr"', 'name: "mkl-other"'))
+            with self.assertRaisesRegex(kit.KitError, "mismatch"):
+                kit.load_library(root)
+
+    def test_unsupported_frontmatter_is_explicit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "mkl-example/SKILL.md"
+            path.parent.mkdir()
+            path.write_text('---\nname: "mkl-example"\ndescription: |\n  multiline\n---\nBody\n')
+            with self.assertRaisesRegex(kit.KitError, "double-quoted"):
+                kit.skill_metadata(path)
+
+    def test_skill_metadata_globs_parsing_and_validation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "mkl-example/SKILL.md"
+            path.parent.mkdir()
+            # Valid globs
+            path.write_text(
+                '---\nname: "mkl-example"\ndescription: "A skill with globs"\nglobs: ["*.py", "*.ipynb"]\n---\nBody\n'
+            )
+            metadata, body = kit.skill_metadata(path)
+            self.assertEqual(metadata["name"], "mkl-example")
+            self.assertEqual(metadata["globs"], ["*.py", "*.ipynb"])
+            self.assertEqual(body, "Body")
+
+            # Malformed JSON syntax for globs
+            path.write_text(
+                '---\nname: "mkl-example"\ndescription: "A skill with globs"\nglobs: [*.py]\n---\nBody\n'
+            )
+            with self.assertRaisesRegex(kit.KitError, "valid JSON syntax for globs"):
+                kit.skill_metadata(path)
+
+            # Not a list
+            path.write_text(
+                '---\nname: "mkl-example"\ndescription: "A skill with globs"\nglobs: "*.py"\n---\nBody\n'
+            )
+            with self.assertRaisesRegex(kit.KitError, "globs must be a nonempty list of strings"):
+                kit.skill_metadata(path)
+
+            # Empty list
+            path.write_text(
+                '---\nname: "mkl-example"\ndescription: "A skill with globs"\nglobs: []\n---\nBody\n'
+            )
+            with self.assertRaisesRegex(kit.KitError, "globs must be a nonempty list of strings"):
+                kit.skill_metadata(path)
+
+            # Non-string element
+            path.write_text(
+                '---\nname: "mkl-example"\ndescription: "A skill with globs"\nglobs: [123]\n---\nBody\n'
+            )
+            with self.assertRaisesRegex(kit.KitError, "globs must be a nonempty list of strings"):
+                kit.skill_metadata(path)
+
+            # Empty string element
+            path.write_text(
+                '---\nname: "mkl-example"\ndescription: "A skill with globs"\nglobs: ["   "]\n---\nBody\n'
+            )
+            with self.assertRaisesRegex(kit.KitError, "globs must be a nonempty list of strings"):
+                kit.skill_metadata(path)
+
+    def test_cursor_mdc_rules_generated_for_skills_with_globs(self):
+        files = kit.export_files("cursor")
+        self.assertIn(".cursor/rules/mkl-localize-pl-en.mdc", files)
+        self.assertIn(".cursor/rules/mkl-debug-ml-training.mdc", files)
+        self.assertIn(".cursor/rules/mkl-review-dependency.mdc", files)
+        self.assertNotIn(".cursor/rules/mkl-review-pr.mdc", files)
+
+        content = files[".cursor/rules/mkl-localize-pl-en.mdc"].decode("utf-8")
+        self.assertTrue(content.startswith("---\n"))
+        self.assertIn(
+            'globs: ["*.po", "*.mo", "*.json", "locales/**", "i18n/**", "*.properties", "*.arb"]',
+            content,
+        )
+        self.assertIn("alwaysApply: false", content)
+        self.assertIn("# Localize between Polish and English", content)
+
+    def test_managed_path_and_skill_prefixes_for_cursor_rules(self):
+        self.assertTrue(kit.managed_path(".cursor/rules/mkl-localize-pl-en.mdc", "cursor"))
+        self.assertFalse(kit.managed_path(".cursor/rules/invalid_name.mdc", "cursor"))
+        self.assertFalse(kit.managed_path(".cursor/rules/unrelated.txt", "cursor"))
+        prefixes = kit.skill_prefixes("cursor", ["mkl-localize-pl-en"])
+        self.assertIn(".cursor/rules/mkl-localize-pl-en.mdc", prefixes)
+        self.assertIn(".cursor/skills/mkl-localize-pl-en/", prefixes)
+
+    def test_source_symlinks_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            copy_library(root)
+            (root / "skills/mkl-review-pr/external.txt").symlink_to(root / "LICENSE")
+            with self.assertRaisesRegex(kit.KitError, "symlinks"):
+                kit.load_library(root)
+
+    def test_archives_are_reproducible_and_contained(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for target in kit.EXPORT_TARGETS:
+                archive = kit.build(target, Path(temporary))
+                initial = archive.read_bytes()
+                kit.build(target, Path(temporary))
+                self.assertEqual(initial, archive.read_bytes())
+                with zipfile.ZipFile(archive) as handle:
+                    self.assertIsNone(handle.testzip())
+                    for name in handle.namelist():
+                        self.assertTrue(name.startswith(f"maintainer-skills-lab-{target}/"))
+                        self.assertNotIn("..", Path(name).parts)
+                    self.assertIn(f"maintainer-skills-lab-{target}/LICENSE", handle.namelist())
+
+
+class MinifyMarkdownTests(unittest.TestCase):
+    def test_preserves_fenced_code_byte_for_byte(self):
+        fence = "```python\ndef f():\n    return 1\n\n\nx =  |  padded  |\n<!-- keep -->\n```"
+        text = f"# Title\n\n\nIntro   \n\n{fence}\n\n\nDone\n"
+        result = kit.minify_markdown(text)
+        self.assertIn(fence, result)
+        self.assertNotIn("Intro   ", result)
+        self.assertIn("# Title\n\nIntro\n\n```", result)
+        self.assertIn("```\n\nDone\n", result)
+
+    def test_strips_html_comments_outside_fences(self):
+        text = "Hello <!-- hidden note --> world\n<!--\nmultiline\n-->\nEnd\n"
+        result = kit.minify_markdown(text)
+        self.assertNotIn("hidden", result)
+        self.assertNotIn("multiline", result)
+        self.assertNotIn("<!--", result)
+        self.assertIn("Hello", result)
+        self.assertIn("world", result)
+        self.assertIn("End", result)
+
+    def test_collapses_blank_lines_and_trailing_spaces(self):
+        text = "A  \n\n\n\nB   \n"
+        self.assertEqual(kit.minify_markdown(text), "A\n\nB\n")
+
+    def test_compacts_table_padding(self):
+        text = "|  Cell 1   |   Cell 2   |\n| --- | --- |\n|  a  |  b  |\n"
+        result = kit.minify_markdown(text)
+        self.assertIn("| Cell 1 | Cell 2 |", result)
+        self.assertIn("| a | b |", result)
+        self.assertNotIn("|  Cell 1   |", result)
+
+    def test_headers_and_semantic_text_remain(self):
+        text = "## Steps\n\n\n1. One\n2. Two\n"
+        result = kit.minify_markdown(text)
+        self.assertIn("## Steps", result)
+        self.assertIn("1. One", result)
+        self.assertIn("2. Two", result)
+
+    def test_sync_minify_check_reports_drift_then_matches(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            copy_library(root)
+            source = root / "skills/mkl-humanize/SKILL.md"
+            source.write_text(
+                source.read_text() + "\n\n\n<!-- maintainer note -->\n|  padded  |  cells  |\n"
+            )
+            kit.sync_providers(root)
+            before = snapshot(root)
+            preview = kit.sync_providers(root, check=True, minify=True)
+            self.assertFalse(preview["up_to_date"])
+            self.assertEqual(snapshot(root), before)
+            kit.sync_providers(root, minify=True)
+            checked = kit.sync_providers(root, check=True, minify=True)
+            self.assertTrue(checked["up_to_date"])
+            self.assertEqual(checked["written"], [])
+            exported = (root / "providers/claude/.claude/skills/mkl-humanize/SKILL.md").read_text()
+            self.assertNotIn("maintainer note", exported)
+            self.assertIn("| padded | cells |", exported)
+
+
+class ProviderTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        copy_library(self.root)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_grok_recipes_embed_source_and_agent_dependencies(self):
+        skills, agents = kit.load_library(self.root)
+        files = kit.export_files("grok-bot", self.root)
+        for kind, items in (("skills", skills), ("agents", agents)):
+            for name, item in items.items():
+                content = files[f"{kind}/{name}.md"].decode()
+                if kind == "skills":
+                    self.assertIn(item["body"], content)
+                else:
+                    self.assertIn(item["instructions"], content)
+                    if item.get("mode") == "subagent":
+                        for dependency in item["skills"]:
+                            self.assertIn(dependency, content)
+                        self.assertIn("Subagent Handoff Protocol", content)
+                    else:
+                        for dependency in item["skills"]:
+                            self.assertIn(skills[dependency]["body"], content)
+        self.assertNotIn("groq", kit.EXPORT_TARGETS)
+
+    def test_windsurf_exports_skills_agents_and_consolidated_rules(self):
+        skills, agents = kit.load_library(self.root)
+        files = kit.export_files("windsurf", self.root)
+        skill_dir, agent_dir, extension = kit.TARGETS["windsurf"]
+        self.assertEqual(
+            (skill_dir, agent_dir, extension), (".windsurf/skills", ".windsurf/agents", ".md")
+        )
+        for name in skills:
+            self.assertEqual(
+                files[f"{skill_dir}/{name}/SKILL.md"], skills[name]["files"]["SKILL.md"]
+            )
+        for name in agents:
+            self.assertIn(f"{agent_dir}/{name}{extension}", files)
+        self.assertIn(kit.WINDSURF_RULES, files)
+        content = files[kit.WINDSURF_RULES].decode()
+        for name in kit.WINDSURF_SKILLS:
+            self.assertIn(f"## {name}", content)
+            self.assertIn(skills[name]["description"], content)
+            excerpt = kit.skill_excerpt(skills[name]["body"])
+            self.assertIn(excerpt, content)
+            self.assertNotIn(skills[name]["body"], content)
+        kit.sync_providers(self.root)
+        exported = self.root / "providers/windsurf" / kit.WINDSURF_RULES
+        self.assertEqual(exported.read_bytes(), files[kit.WINDSURF_RULES])
+        catalogue = (self.root / "providers/README.md").read_text()
+        self.assertIn("[windsurf](windsurf/README.md)", catalogue)
+        self.assertIn("Windsurf", catalogue)
+
+    def test_gemini_exports_antigravity_skills_and_agents(self):
+        skills, agents = kit.load_library(self.root)
+        files = kit.export_files("gemini", self.root)
+        skill_dir, agent_dir, extension = kit.TARGETS["gemini"]
+        self.assertEqual(
+            (skill_dir, agent_dir, extension),
+            (".gemini/antigravity/skills", ".gemini/antigravity/agents", ".md"),
+        )
+        self.assertNotIn("antigravity", kit.TARGETS)
+        self.assertIn("gemini", kit.INSTALL_TARGETS)
+        self.assertIn("gemini", kit.EXPORT_TARGETS)
+        for name in skills:
+            relative = f"{skill_dir}/{name}/SKILL.md"
+            self.assertEqual(files[relative], skills[name]["files"]["SKILL.md"])
+            content = files[relative].decode()
+            self.assertTrue(content.startswith("---\n"))
+            self.assertIn(f'name: "{name}"', content)
+            self.assertIn("description:", content)
+        for name, agent in agents.items():
+            relative = f"{agent_dir}/{name}{extension}"
+            self.assertIn(relative, files)
+            content = files[relative].decode()
+            self.assertTrue(content.startswith("---\n"))
+            self.assertIn(f'name: "{name}"', content)
+            self.assertIn(agent["description"], content)
+        kit.sync_providers(self.root)
+        exported = self.root / "providers/gemini/.gemini/antigravity/skills/mkl-humanize/SKILL.md"
+        self.assertEqual(
+            exported.read_bytes(),
+            files[f"{skill_dir}/mkl-humanize/SKILL.md"],
+        )
+        catalogue = (self.root / "providers/README.md").read_text()
+        self.assertIn("[gemini](gemini/README.md)", catalogue)
+        self.assertIn("Gemini", catalogue)
+        self.assertIn(".gemini/antigravity/", catalogue)
+
+    def test_zed_exports_assistant_prompts_without_agents(self):
+        kit.sync_providers(self.root)
+        files = kit.export_files("zed", self.root)
+        self.assertIn("zed", kit.INSTALL_TARGETS)
+        self.assertIn("zed", kit.EXPORT_TARGETS)
+        self.assertTrue(all(name.startswith(f"{kit.ZED_PROMPTS}/") for name in files))
+        self.assertTrue(all(name.endswith(".md") for name in files))
+        skills, agents = kit.load_library(self.root)
+        self.assertEqual(len(files), len(skills))
+        self.assertFalse(any("/agents/" in name for name in files))
+        prompt = files[f"{kit.ZED_PROMPTS}/mkl-humanize.md"].decode()
+        self.assertIn("/file", prompt)
+        self.assertIn("/tab", prompt)
+        self.assertIn(skills["mkl-humanize"]["description"], prompt)
+        self.assertIn(skills["mkl-humanize"]["body"].rstrip(), prompt)
+        for name in agents:
+            self.assertNotIn(f"{kit.ZED_PROMPTS}/{name}.md", files)
+        exported = self.root / "providers/zed/.zed/prompts/mkl-humanize.md"
+        self.assertEqual(exported.read_bytes(), files[f"{kit.ZED_PROMPTS}/mkl-humanize.md"])
+        catalogue = (self.root / "providers/README.md").read_text()
+        self.assertIn("[zed](zed/README.md)", catalogue)
+        self.assertIn(".zed/prompts/", catalogue)
+        agent_section = catalogue.split("## Agents", 1)[1]
+        writing = next(line for line in agent_section.splitlines() if "mkl-writing-editor" in line)
+        self.assertIn("| — |", writing)
+
+    def test_continue_exports_invokable_prompts_without_agents(self):
+        kit.sync_providers(self.root)
+        files = kit.export_files("continue", self.root)
+        self.assertIn("continue", kit.INSTALL_TARGETS)
+        self.assertIn("continue", kit.EXPORT_TARGETS)
+        self.assertTrue(all(name.startswith(f"{kit.CONTINUE_PROMPTS}/") for name in files))
+        self.assertTrue(all(name.endswith(".prompt") for name in files))
+        skills, agents = kit.load_library(self.root)
+        self.assertEqual(len(files), len(skills))
+        self.assertFalse(any("/agents/" in name for name in files))
+        prompt = files[f"{kit.CONTINUE_PROMPTS}/mkl-humanize.prompt"].decode()
+        self.assertTrue(prompt.startswith("---\n"))
+        self.assertIn('name: "mkl-humanize"', prompt)
+        self.assertIn("description:", prompt)
+        self.assertIn("invokable: true", prompt)
+        self.assertIn("{{{ input }}}", prompt)
+        self.assertIn(skills["mkl-humanize"]["description"], prompt)
+        self.assertIn(skills["mkl-humanize"]["body"].rstrip(), prompt)
+        for name in agents:
+            self.assertNotIn(f"{kit.CONTINUE_PROMPTS}/{name}.prompt", files)
+        exported = self.root / "providers/continue/.continue/prompts/mkl-humanize.prompt"
+        self.assertEqual(
+            exported.read_bytes(),
+            files[f"{kit.CONTINUE_PROMPTS}/mkl-humanize.prompt"],
+        )
+        catalogue = (self.root / "providers/README.md").read_text()
+        self.assertIn("[continue](continue/README.md)", catalogue)
+        self.assertIn(".continue/prompts/", catalogue)
+        agent_section = catalogue.split("## Agents", 1)[1]
+        writing = next(line for line in agent_section.splitlines() if "mkl-writing-editor" in line)
+        self.assertIn("| — |", writing)
+
+    def test_copilot_instructions_use_verbatim_skill_excerpts(self):
+        skills, _agents = kit.load_library(self.root)
+        files = kit.export_files("copilot", self.root)
+        self.assertEqual(set(files), {kit.COPILOT_INSTRUCTIONS})
+        content = files[kit.COPILOT_INSTRUCTIONS].decode()
+        self.assertLessEqual(kit.approximate_tokens(content), kit.COPILOT_TOKEN_BUDGET)
+        for name in kit.COPILOT_SKILLS:
+            self.assertIn(f"## {name}", content)
+            self.assertIn(skills[name]["description"], content)
+            excerpt = kit.skill_excerpt(skills[name]["body"])
+            self.assertIn(excerpt, content)
+            # Compact export keeps excerpts; it does not embed full skill bodies.
+            self.assertNotIn(skills[name]["body"], content)
+        kit.sync_providers(self.root)
+        exported = self.root / "providers/copilot" / kit.COPILOT_INSTRUCTIONS
+        self.assertEqual(exported.read_bytes(), files[kit.COPILOT_INSTRUCTIONS])
+        catalogue = (self.root / "providers/README.md").read_text()
+        self.assertIn("[copilot](copilot/README.md)", catalogue)
+        self.assertIn(f"[copilot](copilot/{kit.COPILOT_INSTRUCTIONS})", catalogue)
+
+    def test_cline_exports_valid_roomodes(self):
+        skills, agents = kit.load_library(self.root)
+        files = kit.export_files("cline", self.root)
+        self.assertEqual(set(files), {kit.CLINE_ROOMODES})
+        payload = json.loads(files[kit.CLINE_ROOMODES].decode())
+        self.assertIn("customModes", payload)
+        self.assertEqual(len(payload["customModes"]), len(agents))
+        for mode in payload["customModes"]:
+            self.assertIn("slug", mode)
+            self.assertIn(mode["slug"], agents)
+            self.assertIn("name", mode)
+            self.assertIn("roleDefinition", mode)
+            self.assertEqual(mode["groups"], ["read", "edit", "browser", "command", "mcp"])
+            self.assertIn("customInstructions", mode)
+            agent = agents[mode["slug"]]
+            self.assertEqual(mode["roleDefinition"], agent["description"])
+            if agent.get("mode") == "subagent":
+                for dep in agent["skills"]:
+                    self.assertIn(dep, mode["customInstructions"])
+                self.assertIn("Subagent Handoff Protocol", mode["customInstructions"])
+            else:
+                for dep in agent["skills"]:
+                    self.assertIn(skills[dep]["body"], mode["customInstructions"])
+        kit.sync_providers(self.root)
+        exported = self.root / "providers/cline" / kit.CLINE_ROOMODES
+        self.assertEqual(exported.read_bytes(), files[kit.CLINE_ROOMODES])
+        catalogue = (self.root / "providers/README.md").read_text()
+        self.assertIn("[cline](cline/README.md)", catalogue)
+        self.assertIn(f"[cline](cline/{kit.CLINE_ROOMODES})", catalogue)
+
+    def test_retired_groq_exports_removed_only_when_unchanged(self):
+        kit.sync_providers(self.root)
+        old_files = {
+            "groq/README.md": b"Old Groq guide",
+            "groq/skills/mkl-humanize.json": b'{"messages": []}',
+            "groq/agents/mkl-writing-editor.json": b'{"messages": []}',
+        }
+        manifest = self.root / "providers/.manifest.json"
+        state = json.loads(manifest.read_text())
+        for name, data in old_files.items():
+            path = self.root / "providers" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            state["files"][name] = kit.digest(data)
+        manifest.write_text(json.dumps(state))
+        changed = self.root / "providers/groq/skills/mkl-humanize.json"
+        changed.write_text("User changes")
+        before = snapshot(self.root)
+        with self.assertRaisesRegex(kit.KitError, "Edited or unmanaged"):
+            kit.sync_providers(self.root)
+        self.assertEqual(snapshot(self.root), before)
+        changed.write_bytes(old_files["groq/skills/mkl-humanize.json"])
+        preview = kit.sync_providers(self.root, check=True)
+        self.assertEqual(set(preview["removed"]), set(old_files))
+        self.assertTrue(changed.exists())
+        result = kit.sync_providers(self.root)
+        self.assertEqual(set(result["removed"]), set(old_files))
+        self.assertTrue(all(not (self.root / "providers" / name).exists() for name in old_files))
+
+    def test_sync_check_is_read_only_and_repeated_sync_keeps_mtimes(self):
+        initial = snapshot(self.root)
+        self.assertFalse(kit.sync_providers(self.root, check=True)["up_to_date"])
+        self.assertEqual(snapshot(self.root), initial)
+        kit.sync_providers(self.root)
+        generated = snapshot(self.root / "providers")
+        manifest = json.loads(generated.pop(".manifest.json"))
+        self.assertEqual(generated, kit.provider_files(self.root))
+        self.assertEqual(
+            manifest["files"], {name: kit.digest(data) for name, data in generated.items()}
+        )
+        initial = snapshot(self.root)
+        mtimes = {p: p.stat().st_mtime_ns for p in self.root.rglob("*") if p.is_file()}
+        for check in (True, False):
+            result = kit.sync_providers(self.root, check=check)
+            self.assertTrue(result["up_to_date"])
+            self.assertEqual(result["written"], [])
+            self.assertEqual(snapshot(self.root), initial)
+            self.assertEqual(mtimes, {p: p.stat().st_mtime_ns for p in mtimes})
+
+    def test_sync_accepts_git_line_ending_conversion(self):
+        kit.sync_providers(self.root)
+        for path in (self.root / "providers").rglob("*"):
+            if path.is_file():
+                data = path.read_bytes().replace(b"\r\n", b"\n")
+                path.write_bytes(data.replace(b"\n", b"\r\n"))
+        result = kit.sync_providers(self.root, check=True)
+        self.assertTrue(result["up_to_date"])
+        self.assertEqual(result["written"], [])
+
+    def test_one_source_edit_updates_all_providers_and_dependent_agents(self):
+        kit.sync_providers(self.root)
+        before = snapshot(self.root / "providers")
+        source = self.root / "skills/mkl-humanize/SKILL.md"
+        detail = "\nPreserve the exact quotation: „Żółć, 2 MB”.\n"
+        source.write_text(source.read_text() + detail)
+        preview = kit.sync_providers(self.root, check=True)
+        self.assertFalse(preview["up_to_date"])
+        self.assertEqual(snapshot(self.root / "providers"), before)
+        result = kit.sync_providers(self.root)
+        expected = {
+            "codex/.agents/skills/mkl-humanize/SKILL.md",
+            "codex/.codex/agents/mkl-writing-editor.toml",
+            "claude/.claude/skills/mkl-humanize/SKILL.md",
+            "claude/.claude/agents/mkl-writing-editor.md",
+            "cursor/.cursor/skills/mkl-humanize/SKILL.md",
+            "cursor/.cursor/agents/mkl-writing-editor.md",
+            "opencode/.opencode/skills/mkl-humanize/SKILL.md",
+            "opencode/.opencode/agents/mkl-writing-editor.md",
+            "windsurf/.windsurf/skills/mkl-humanize/SKILL.md",
+            "windsurf/.windsurf/agents/mkl-writing-editor.md",
+            "gemini/.gemini/antigravity/skills/mkl-humanize/SKILL.md",
+            "gemini/.gemini/antigravity/agents/mkl-writing-editor.md",
+            "grok-bot/skills/mkl-humanize.md",
+            "grok-bot/agents/mkl-writing-editor.md",
+            "zed/.zed/prompts/mkl-humanize.md",
+            "continue/.continue/prompts/mkl-humanize.prompt",
+            "cline/.roomodes",
+        }
+        self.assertEqual(set(result["written"]), expected)
+        after = snapshot(self.root / "providers")
+        self.assertEqual(
+            {name for name in before if before[name] != after[name]},
+            expected | {".manifest.json"},
+        )
+        native = tomllib.loads(after["codex/.codex/agents/mkl-writing-editor.toml"].decode())
+        self.assertIn(detail.strip(), native["developer_instructions"])
+        grok = after["grok-bot/agents/mkl-writing-editor.md"].decode()
+        self.assertIn(detail.strip(), grok)
+        cline_mode = after["cline/.roomodes"].decode()
+        self.assertIn(detail.strip(), cline_mode)
+
+    def test_removed_source_cleans_only_owned_exports(self):
+        kit.sync_providers(self.root)
+        note = self.root / "providers/local-notes.txt"
+        note.write_text("Keep this unrelated file")
+        shutil.rmtree(self.root / "skills/mkl-write-tutorial")
+        result = kit.sync_providers(self.root)
+        self.assertEqual(
+            set(result["removed"]),
+            {
+                "codex/.agents/skills/mkl-write-tutorial/SKILL.md",
+                "claude/.claude/skills/mkl-write-tutorial/SKILL.md",
+                "cursor/.cursor/skills/mkl-write-tutorial/SKILL.md",
+                "opencode/.opencode/skills/mkl-write-tutorial/SKILL.md",
+                "windsurf/.windsurf/skills/mkl-write-tutorial/SKILL.md",
+                "gemini/.gemini/antigravity/skills/mkl-write-tutorial/SKILL.md",
+                "grok-bot/skills/mkl-write-tutorial.md",
+                "zed/.zed/prompts/mkl-write-tutorial.md",
+                "continue/.continue/prompts/mkl-write-tutorial.prompt",
+            },
+        )
+        self.assertEqual(note.read_text(), "Keep this unrelated file")
+        self.assertNotIn("mkl-write-tutorial", (self.root / "providers/README.md").read_text())
+        for relative in (
+            "codex/.agents/skills/mkl-write-tutorial",
+            "claude/.claude/skills/mkl-write-tutorial",
+            "cursor/.cursor/skills/mkl-write-tutorial",
+            "opencode/.opencode/skills/mkl-write-tutorial",
+            "windsurf/.windsurf/skills/mkl-write-tutorial",
+            "gemini/.gemini/antigravity/skills/mkl-write-tutorial",
+        ):
+            self.assertFalse(
+                (self.root / "providers" / relative).exists(),
+                f"empty skill directory left behind: {relative}",
+            )
+
+    def test_sync_removes_empty_nested_dirs_but_keeps_occupied_parents(self):
+        resource = self.root / "skills/mkl-write-tutorial/references/style.txt"
+        resource.parent.mkdir(parents=True)
+        resource.write_text("supporting note\n")
+        kit.sync_providers(self.root)
+        neighbor = self.root / "providers/codex/.agents/skills/keep-me.txt"
+        neighbor.write_text("unrelated neighbor\n")
+        shutil.rmtree(self.root / "skills/mkl-write-tutorial")
+        result = kit.sync_providers(self.root)
+        self.assertIn(
+            "codex/.agents/skills/mkl-write-tutorial/references/style.txt",
+            result["removed"],
+        )
+        self.assertFalse((self.root / "providers/codex/.agents/skills/mkl-write-tutorial").exists())
+        self.assertFalse(
+            (self.root / "providers/opencode/.opencode/skills/mkl-write-tutorial").exists()
+        )
+        self.assertEqual(neighbor.read_text(), "unrelated neighbor\n")
+        self.assertTrue((self.root / "providers/codex/.agents/skills").is_dir())
+
+    def test_local_provider_edits_block_writes_and_obsolete_removal(self):
+        kit.sync_providers(self.root)
+        path = self.root / "providers/grok-bot/skills/mkl-write-tutorial.md"
+        path.write_text("My edited prompt")
+        for remove_source in (False, True):
+            if remove_source:
+                shutil.rmtree(self.root / "skills/mkl-write-tutorial")
+            before = snapshot(self.root)
+            with self.assertRaisesRegex(kit.KitError, "Edited or unmanaged"):
+                kit.sync_providers(self.root)
+            self.assertEqual(snapshot(self.root), before)
+
+    def test_symlink_destination_and_tampered_manifest_are_rejected(self):
+        with tempfile.TemporaryDirectory() as outside:
+            destination = self.root / "providers"
+            destination.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(kit.KitError, "symlink"):
+                kit.sync_providers(self.root)
+            self.assertEqual(list(Path(outside).iterdir()), [])
+            destination.unlink()
+        kit.sync_providers(self.root)
+        path = self.root / "providers/.manifest.json"
+        state = json.loads(path.read_text())
+        state["files"]["../LICENSE"] = kit.digest((self.root / "LICENSE").read_bytes())
+        path.write_text(json.dumps(state))
+        before = snapshot(self.root)
+        with self.assertRaisesRegex(kit.KitError, "Invalid provider manifest"):
+            kit.sync_providers(self.root)
+        self.assertEqual(snapshot(self.root), before)
+
+    def test_catalogue_links_resolve_to_sources_and_exports(self):
+        kit.sync_providers(self.root)
+        for relative in ["README.md", *(f"{target}/README.md" for target in kit.EXPORT_TARGETS)]:
+            path = self.root / "providers" / relative
+            for link in re.findall(r"\]\(([^)]+)\)", path.read_text()):
+                if "://" not in link:
+                    self.assertTrue((path.parent / link).is_file(), (path, link))
+
+    def test_cli_check_fails_on_drift_without_writing(self):
+        script = self.root / "tools/kit.py"
+        script.parent.mkdir()
+        shutil.copyfile(ROOT / "tools/kit.py", script)
+        command = [sys.executable, str(script), "sync", "--check"]
+        before = snapshot(self.root)
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertFalse(json.loads(result.stdout)["up_to_date"])
+        self.assertEqual(snapshot(self.root), before)
+        kit.sync_providers(self.root)
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        source = self.root / "skills/mkl-humanize/SKILL.md"
+        source.write_text(source.read_text() + "\nKeep the original meaning.\n")
+        before = snapshot(self.root)
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(snapshot(self.root), before)
+
+
+class InstallationTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.project = Path(self.temporary.name)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_opencode_cli_preserves_config_and_unowned_agent(self):
+        config = self.project / "opencode.json"
+        config.write_text('{"permission":{"edit":"ask"}}\n')
+        own_agent = self.project / ".opencode/agents/custom.md"
+        own_agent.parent.mkdir(parents=True)
+        own_agent.write_text("User-owned agent")
+        original = snapshot(self.project)
+        command = [sys.executable, str(ROOT / "tools/kit.py")]
+        options = ["--target", "opencode", "--project", str(self.project)]
+        for action in ("install", "uninstall"):
+            result = subprocess.run(
+                [*command, action, *options], capture_output=True, text=True, check=False
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            if action == "install":
+                self.assertTrue((self.project / ".opencode/skills/mkl-humanize/SKILL.md").is_file())
+                self.assertTrue((self.project / ".opencode/agents/mkl-writing-editor.md").is_file())
+            self.assertEqual(config.read_bytes(), original["opencode.json"])
+            self.assertEqual(own_agent.read_bytes(), original[".opencode/agents/custom.md"])
+        self.assertEqual(snapshot(self.project), original)
+
+    def test_each_target_installs_and_uninstalls(self):
+        for target in kit.TARGETS:
+            with self.subTest(target=target):
+                result = kit.install(target, self.project)
+                exported = kit.export_files(target)
+                self.assertEqual(set(result["written"]), set(exported))
+                installed = snapshot(self.project)
+                manifest = installed.pop(f".maintainer-skills-lab/{target}.json")
+                self.assertEqual(installed, exported)
+                self.assertEqual(
+                    json.loads(manifest)["files"],
+                    {name: kit.digest(content) for name, content in exported.items()},
+                )
+                kit.uninstall(target, self.project)
+                self.assertEqual(snapshot(self.project), {})
+
+    def test_windsurf_full_install_includes_rules_skill_only_omits_them(self):
+        exported = kit.export_files("windsurf")
+        result = kit.install("windsurf", self.project)
+        self.assertIn(kit.WINDSURF_RULES, result["written"])
+        self.assertEqual(
+            (self.project / kit.WINDSURF_RULES).read_bytes(),
+            exported[kit.WINDSURF_RULES],
+        )
+        kit.uninstall("windsurf", self.project)
+        self.assertEqual(snapshot(self.project), {})
+        selected = kit.install("windsurf", self.project, skill_names=["mkl-humanize"])
+        self.assertNotIn(kit.WINDSURF_RULES, selected["written"])
+        self.assertFalse((self.project / kit.WINDSURF_RULES).exists())
+        kit.uninstall("windsurf", self.project, skill_names=["mkl-humanize"])
+        self.assertEqual(list(self.project.iterdir()), [])
+
+    def test_copilot_install_uninstall_and_rejects_skill_selection(self):
+        exported = kit.export_files("copilot")
+        result = kit.install("copilot", self.project)
+        self.assertEqual(set(result["written"]), set(exported))
+        path = self.project / kit.COPILOT_INSTRUCTIONS
+        self.assertEqual(path.read_bytes(), exported[kit.COPILOT_INSTRUCTIONS])
+        with self.assertRaisesRegex(kit.KitError, "--skill is unsupported"):
+            kit.install("copilot", self.project, skill_names=["mkl-review-pr"])
+        command = [
+            sys.executable,
+            str(ROOT / "tools/kit.py"),
+            "install",
+            "--target",
+            "copilot",
+            "--project",
+            str(self.project),
+        ]
+        cli = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertEqual(cli.returncode, 0, cli.stderr)
+        kit.uninstall("copilot", self.project)
+        self.assertEqual(snapshot(self.project), {})
+
+    def test_cline_install_uninstall_and_rejects_skill_selection(self):
+        exported = kit.export_files("cline")
+        result = kit.install("cline", self.project)
+        self.assertEqual(set(result["written"]), set(exported))
+        path = self.project / kit.CLINE_ROOMODES
+        self.assertEqual(path.read_bytes(), exported[kit.CLINE_ROOMODES])
+        with self.assertRaisesRegex(kit.KitError, "--skill is unsupported"):
+            kit.install("cline", self.project, skill_names=["mkl-review-pr"])
+        command = [
+            sys.executable,
+            str(ROOT / "tools/kit.py"),
+            "install",
+            "--target",
+            "cline",
+            "--project",
+            str(self.project),
+        ]
+        cli = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertEqual(cli.returncode, 0, cli.stderr)
+        # Test alias --target roo
+        command_roo = [
+            sys.executable,
+            str(ROOT / "tools/kit.py"),
+            "install",
+            "--target",
+            "roo",
+            "--project",
+            str(self.project),
+        ]
+        cli_roo = subprocess.run(command_roo, capture_output=True, text=True, check=False)
+        self.assertEqual(cli_roo.returncode, 0, cli_roo.stderr)
+        kit.uninstall("cline", self.project)
+        self.assertEqual(snapshot(self.project), {})
+
+    def test_zed_install_uninstall_and_skill_selection(self):
+        exported = kit.export_files("zed")
+        result = kit.install("zed", self.project)
+        self.assertEqual(set(result["written"]), set(exported))
+        prompt = self.project / kit.ZED_PROMPTS / "mkl-humanize.md"
+        self.assertTrue(prompt.is_file())
+        self.assertIn("/file", prompt.read_text())
+        self.assertFalse((self.project / ".zed/agents").exists())
+        kit.uninstall("zed", self.project)
+        selected = kit.install("zed", self.project, skill_names=["mkl-humanize"])
+        self.assertEqual(selected["written"], [f"{kit.ZED_PROMPTS}/mkl-humanize.md"])
+        self.assertTrue(prompt.is_file())
+        self.assertFalse((self.project / kit.ZED_PROMPTS / "mkl-review-pr.md").exists())
+        kit.uninstall("zed", self.project, skill_names=["mkl-humanize"])
+        self.assertFalse(prompt.exists())
+
+    def test_continue_install_uninstall_and_skill_selection(self):
+        exported = kit.export_files("continue")
+        result = kit.install("continue", self.project)
+        self.assertEqual(set(result["written"]), set(exported))
+        prompt = self.project / kit.CONTINUE_PROMPTS / "mkl-humanize.prompt"
+        self.assertTrue(prompt.is_file())
+        text = prompt.read_text()
+        self.assertIn("invokable: true", text)
+        self.assertIn("{{{ input }}}", text)
+        self.assertFalse((self.project / ".continue/agents").exists())
+        kit.uninstall("continue", self.project)
+        selected = kit.install("continue", self.project, skill_names=["mkl-humanize"])
+        self.assertEqual(selected["written"], [f"{kit.CONTINUE_PROMPTS}/mkl-humanize.prompt"])
+        self.assertTrue(prompt.is_file())
+        self.assertFalse((self.project / kit.CONTINUE_PROMPTS / "mkl-review-pr.prompt").exists())
+        kit.uninstall("continue", self.project, skill_names=["mkl-humanize"])
+        self.assertFalse(prompt.exists())
+
+    def test_dry_run_has_no_side_effects(self):
+        result = kit.install("codex", self.project, dry_run=True)
+        self.assertEqual(set(result["written"]), set(kit.export_files("codex")))
+        self.assertEqual(list(self.project.iterdir()), [])
+
+    def test_second_install_is_noop_and_keeps_configuration(self):
+        config = self.project / ".codex/config.toml"
+        config.parent.mkdir()
+        config.write_text('model = "user-selected-model"\n')
+        kit.install("codex", self.project)
+        initial = snapshot(self.project)
+        mtimes = {
+            str(path): path.stat().st_mtime_ns for path in self.project.rglob("*") if path.is_file()
+        }
+        result = kit.install("codex", self.project)
+        self.assertEqual(result["written"], [])
+        self.assertFalse(result["manifest_changed"])
+        self.assertEqual(initial, snapshot(self.project))
+        self.assertEqual(
+            mtimes,
+            {
+                str(path): path.stat().st_mtime_ns
+                for path in self.project.rglob("*")
+                if path.is_file()
+            },
+        )
+        kit.uninstall("codex", self.project)
+        self.assertEqual(
+            snapshot(self.project), {".codex/config.toml": b'model = "user-selected-model"\n'}
+        )
+
+    def test_unmanaged_conflict_is_detected_before_any_write(self):
+        relative = max(kit.export_files("claude"))
+        path = self.project / relative
+        path.parent.mkdir(parents=True)
+        path.write_text("My existing skill")
+        initial = snapshot(self.project)
+        with self.assertRaisesRegex(kit.KitError, "conflicts"):
+            kit.install("claude", self.project)
+        self.assertEqual(initial, snapshot(self.project))
+        self.assertFalse((self.project / ".maintainer-skills-lab").exists())
+
+    def test_identical_unmanaged_file_is_not_claimed_or_removed(self):
+        files = kit.export_files("cursor")
+        relative = next(iter(files))
+        path = self.project / relative
+        path.parent.mkdir(parents=True)
+        path.write_bytes(files[relative])
+        result = kit.install("cursor", self.project)
+        self.assertIn(relative, result["identical_unmanaged"])
+        kit.uninstall("cursor", self.project)
+        self.assertEqual(snapshot(self.project), {relative: files[relative]})
+
+    def test_local_edits_block_install_and_uninstall(self):
+        kit.install("codex", self.project)
+        relative = next(iter(kit.export_files("codex")))
+        path = self.project / relative
+        path.write_text("Locally edited instructions")
+        initial = snapshot(self.project)
+        for action in (kit.install, kit.uninstall):
+            with self.assertRaises(kit.KitError):
+                action("codex", self.project)
+            self.assertEqual(initial, snapshot(self.project))
+
+    def test_upgrade_removes_only_owned_unchanged_resources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            copy_library(root)
+            extra = root / "skills/mkl-review-pr/assets/note.txt"
+            extra.parent.mkdir()
+            extra.write_text("Old resource")
+            kit.install("claude", self.project, root)
+            extra.unlink()
+            skill = root / "skills/mkl-review-pr/SKILL.md"
+            skill.write_text(skill.read_text() + "\nNew workflow detail.\n")
+            result = kit.install("claude", self.project, root)
+            self.assertEqual(result["removed"], [".claude/skills/mkl-review-pr/assets/note.txt"])
+            self.assertIn(".claude/skills/mkl-review-pr/SKILL.md", result["written"])
+            kit.uninstall("claude", self.project)
+            self.assertEqual(snapshot(self.project), {})
+
+    def test_modified_obsolete_resource_blocks_whole_upgrade(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            copy_library(root)
+            extra = root / "skills/mkl-review-pr/note.txt"
+            extra.write_text("Old resource")
+            kit.install("codex", self.project, root)
+            (self.project / ".agents/skills/mkl-review-pr/note.txt").write_text("User edits")
+            extra.unlink()
+            initial = snapshot(self.project)
+            with self.assertRaisesRegex(kit.KitError, "refusing removal"):
+                kit.install("codex", self.project, root)
+            self.assertEqual(initial, snapshot(self.project))
+
+    def test_symlink_parent_cannot_redirect_install(self):
+        with tempfile.TemporaryDirectory() as outside:
+            (self.project / ".agents").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(kit.KitError, "symlink"):
+                kit.install("codex", self.project)
+            self.assertEqual(list(Path(outside).iterdir()), [])
+
+    def test_symlink_owned_file_is_not_removed(self):
+        kit.install("codex", self.project)
+        relative = next(iter(kit.export_files("codex")))
+        path = self.project / relative
+        path.unlink()
+        outside = self.project / "keep.txt"
+        outside.write_text("Do not remove")
+        path.symlink_to(outside)
+        with self.assertRaisesRegex(kit.KitError, "symlink"):
+            kit.uninstall("codex", self.project)
+        self.assertEqual(outside.read_text(), "Do not remove")
+
+    def test_tampered_manifest_rejected(self):
+        kit.install("codex", self.project)
+        path = self.project / ".maintainer-skills-lab/codex.json"
+        state = json.loads(path.read_text())
+        state["files"]["../../keep.txt"] = "0" * 64
+        path.write_text(json.dumps(state))
+        initial = snapshot(self.project)
+        with self.assertRaisesRegex(kit.KitError, "Invalid owned file"):
+            kit.uninstall("codex", self.project)
+        self.assertEqual(initial, snapshot(self.project))
+
+    def test_uninstall_dry_run_preserves_everything(self):
+        kit.install("claude", self.project)
+        initial = snapshot(self.project)
+        self.assertEqual(
+            set(kit.uninstall("claude", self.project, dry_run=True)["removed"]),
+            set(kit.export_files("claude")),
+        )
+        self.assertEqual(initial, snapshot(self.project))
+
+    def test_cli_input_error_is_concise_and_nonzero(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "tools/kit.py"),
+                "install",
+                "--target",
+                "codex",
+                "--project",
+                str(self.project / "missing"),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("does not exist", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+
+class SelectedInstallationTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name) / "source"
+        self.project = Path(temporary.name) / "project"
+        self.root.mkdir()
+        self.project.mkdir()
+        copy_library(self.root)
+
+    def test_one_skill_includes_resources_without_installing_agents_for_each_target(self):
+        resource = self.root / "skills/mkl-humanize/references/style.txt"
+        resource.parent.mkdir(exist_ok=True)
+        resource.write_text("A supporting reference")
+        for target, (skill_dir, agent_dir, _) in kit.TARGETS.items():
+            with self.subTest(target=target):
+                result = kit.install(target, self.project, self.root, skill_names=["mkl-humanize"])
+                expected = {
+                    *humanizer_files(f"{skill_dir}/mkl-humanize"),
+                    f"{skill_dir}/mkl-humanize/references/style.txt",
+                }
+                self.assertEqual(set(result["written"]), expected)
+                self.assertFalse((self.project / agent_dir).exists())
+                manifest = json.loads(
+                    (self.project / f".maintainer-skills-lab/{target}.json").read_text()
+                )
+                self.assertEqual(set(manifest["files"]), expected)
+                kit.uninstall(target, self.project, skill_names=["mkl-humanize"])
+                self.assertEqual(list(self.project.iterdir()), [])
+
+    def test_cursor_selected_install_and_uninstall_with_globs(self):
+        result = kit.install("cursor", self.project, self.root, skill_names=["mkl-localize-pl-en"])
+        expected = {
+            ".cursor/skills/mkl-localize-pl-en/SKILL.md",
+            ".cursor/rules/mkl-localize-pl-en.mdc",
+        }
+        self.assertEqual(set(result["written"]), expected)
+        manifest = json.loads((self.project / ".maintainer-skills-lab/cursor.json").read_text())
+        self.assertEqual(set(manifest["files"]), expected)
+        self.assertTrue((self.project / ".cursor/rules/mkl-localize-pl-en.mdc").is_file())
+
+        un_result = kit.uninstall("cursor", self.project, skill_names=["mkl-localize-pl-en"])
+        self.assertEqual(set(un_result["removed"]), expected)
+        self.assertFalse((self.project / ".cursor/rules").exists())
+        self.assertFalse((self.project / ".cursor/skills").exists())
+
+    def test_adding_a_skill_preserves_other_owned_edits_and_hashes(self):
+        kit.install("codex", self.project, self.root, skill_names=["mkl-humanize"])
+        first = self.project / ".agents/skills/mkl-humanize/SKILL.md"
+        first.write_text("My local Humanizer changes")
+        mtime = first.stat().st_mtime_ns
+        _, before = kit.installed_state(self.project, "codex")
+        result = kit.install("codex", self.project, self.root, skill_names=["mkl-match-voice"])
+        self.assertEqual(result["removed"], [])
+        self.assertEqual(result["written"], [".agents/skills/mkl-match-voice/SKILL.md"])
+        self.assertEqual(first.read_text(), "My local Humanizer changes")
+        self.assertEqual(first.stat().st_mtime_ns, mtime)
+        _, after = kit.installed_state(self.project, "codex")
+        self.assertTrue(before.items() <= after.items())
+        # Retaining an old hash must not hide these edits from a later full operation.
+        with self.assertRaisesRegex(kit.KitError, "Locally modified"):
+            kit.uninstall("codex", self.project)
+
+    def test_selected_update_removes_obsolete_resources_but_preserves_agent_and_other_skills(self):
+        resource = self.root / "skills/mkl-humanize/old.txt"
+        resource.write_text("An obsolete resource")
+        kit.install("claude", self.project, self.root)
+        source = self.root / "skills/mkl-humanize/SKILL.md"
+        source.write_text(source.read_text() + "\nA new writing constraint.\n")
+        resource.unlink()
+        other = self.project / ".claude/skills/mkl-match-voice/SKILL.md"
+        other.write_text("Local voice guidance")
+        before = snapshot(self.project)
+        result = kit.install("claude", self.project, self.root, skill_names=["mkl-humanize"])
+        self.assertEqual(result["removed"], [".claude/skills/mkl-humanize/old.txt"])
+        self.assertEqual(result["written"], [".claude/skills/mkl-humanize/SKILL.md"])
+        after = snapshot(self.project)
+        for name, data in before.items():
+            if not name.startswith((".claude/skills/mkl-humanize/", ".maintainer-skills-lab/")):
+                self.assertEqual(after[name], data, name)
+        self.assertEqual(
+            (self.project / ".claude/skills/mkl-humanize/SKILL.md").read_bytes(),
+            kit.export_files("claude", self.root)[".claude/skills/mkl-humanize/SKILL.md"],
+        )
+
+    def test_selected_dry_runs_and_repeated_install_preserve_files_and_mtimes(self):
+        names = ["mkl-humanize", "mkl-match-voice", "mkl-humanize"]
+        result = kit.install("cursor", self.project, self.root, dry_run=True, skill_names=names)
+        self.assertEqual(
+            len(result["written"]), len(humanizer_files("")) + 1
+        )  # Humanizer's files plus mkl-match-voice/SKILL.md.
+        self.assertEqual(result["selected_skills"], ["mkl-humanize", "mkl-match-voice"])
+        self.assertEqual(list(self.project.iterdir()), [])
+        kit.install("cursor", self.project, self.root, skill_names=names)
+        before = snapshot(self.project)
+        mtimes = {
+            path: path.stat().st_mtime_ns for path in self.project.rglob("*") if path.is_file()
+        }
+        result = kit.install("cursor", self.project, self.root, skill_names=names)
+        self.assertEqual(result["written"], [])
+        self.assertFalse(result["manifest_changed"])
+        preview = kit.uninstall("cursor", self.project, dry_run=True, skill_names=["mkl-humanize"])
+        self.assertEqual(preview["removed"], humanizer_files(".cursor/skills/mkl-humanize"))
+        self.assertEqual(snapshot(self.project), before)
+        self.assertEqual({path: path.stat().st_mtime_ns for path in mtimes}, mtimes)
+
+    def test_selected_conflict_prevents_all_writes(self):
+        conflict = self.project / ".agents/skills/mkl-match-voice/SKILL.md"
+        conflict.parent.mkdir(parents=True)
+        conflict.write_text("An unowned skill")
+        before = snapshot(self.project)
+        with self.assertRaisesRegex(kit.KitError, "conflicts"):
+            kit.install(
+                "codex", self.project, self.root, skill_names=["mkl-humanize", "mkl-match-voice"]
+            )
+        self.assertEqual(snapshot(self.project), before)
+        self.assertFalse((self.project / ".maintainer-skills-lab").exists())
+
+    def test_selected_modified_file_and_obsolete_resource_block_changes(self):
+        source = self.root / "skills/mkl-humanize/old.txt"
+        source.write_text("Original")
+        kit.install("codex", self.project, self.root, skill_names=["mkl-humanize"])
+        (self.project / ".agents/skills/mkl-humanize/old.txt").write_text("Local edits")
+        source.unlink()
+        before = snapshot(self.project)
+        for action in (kit.install, kit.uninstall):
+            with (
+                self.subTest(action=action.__name__),
+                self.assertRaisesRegex(kit.KitError, "refusing removal"),
+            ):
+                if action is kit.install:
+                    action("codex", self.project, self.root, skill_names=["mkl-humanize"])
+                else:
+                    action("codex", self.project, skill_names=["mkl-humanize"])
+            self.assertEqual(snapshot(self.project), before)
+
+    def test_selected_uninstall_preserves_other_workflows_and_can_remove_retired_skill(self):
+        similar = self.root / "skills/mkl-humanize-extra/SKILL.md"
+        similar.parent.mkdir()
+        similar.write_text(
+            '---\nname: "mkl-humanize-extra"\ndescription: "Adjacent name fixture"\n---\nKeep me.\n'
+        )
+        kit.install("codex", self.project, self.root)
+        shutil.rmtree(self.root / "skills/mkl-humanize")
+        other = self.project / ".agents/skills/mkl-match-voice/SKILL.md"
+        other.write_text("Local voice edits")
+        before = snapshot(self.project)
+        result = kit.uninstall("codex", self.project, skill_names=["mkl-humanize"])
+        humanizer = humanizer_files(".agents/skills/mkl-humanize")
+        self.assertEqual(result["removed"], humanizer)
+        after = snapshot(self.project)
+        for name, data in before.items():
+            if name not in (*humanizer, ".maintainer-skills-lab/codex.json"):
+                self.assertEqual(after[name], data, name)
+        _, owned = kit.installed_state(self.project, "codex")
+        self.assertNotIn(".agents/skills/mkl-humanize/SKILL.md", owned)
+        self.assertIn(".agents/skills/mkl-humanize-extra/SKILL.md", owned)
+        self.assertTrue(any(name.startswith(".codex/agents/") for name in owned))
+        again = kit.uninstall("codex", self.project, skill_names=["mkl-humanize"])
+        self.assertEqual(again["removed"], [])
+        self.assertFalse(again["manifest_changed"])
+        self.assertEqual(snapshot(self.project), after)
+
+    def test_selected_identical_unmanaged_file_is_not_adopted_or_removed(self):
+        destination = self.project / ".cursor/skills/mkl-humanize/SKILL.md"
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(
+            kit.export_files("cursor", self.root)[".cursor/skills/mkl-humanize/SKILL.md"]
+        )
+        before = snapshot(self.project)
+        result = kit.install("cursor", self.project, self.root, skill_names=["mkl-humanize"])
+        self.assertEqual(result["identical_unmanaged"], [".cursor/skills/mkl-humanize/SKILL.md"])
+        kit.uninstall("cursor", self.project, skill_names=["mkl-humanize"])
+        self.assertEqual(snapshot(self.project), before)
+
+    def test_invalid_and_unknown_selections_make_no_changes(self):
+        for names in (
+            [],
+            ["../escape"],
+            ["mkl-humanize/../../escape"],
+            ["humanize"],
+            ["mkl-missing"],
+        ):
+            with self.subTest(names=names), self.assertRaises(kit.KitError):
+                kit.install("codex", self.project, self.root, skill_names=names)
+            self.assertEqual(list(self.project.iterdir()), [])
+        with self.assertRaises(kit.KitError):
+            kit.uninstall("codex", self.project, skill_names=["../escape"])
+
+    def test_full_install_after_selection_expands_to_complete_library(self):
+        kit.install("claude", self.project, self.root, skill_names=["mkl-humanize"])
+        kit.install("claude", self.project, self.root)
+        installed = snapshot(self.project)
+        installed.pop(".maintainer-skills-lab/claude.json")
+        self.assertEqual(installed, kit.export_files("claude", self.root))
+        kit.uninstall("claude", self.project)
+        self.assertEqual(list(self.project.iterdir()), [])
+
+    def test_cli_can_install_two_skills_then_remove_just_one(self):
+        def run(action, *options):
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "tools/kit.py"),
+                    action,
+                    "--target",
+                    "codex",
+                    "--project",
+                    str(self.project),
+                    *options,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+
+        run("install", "--skill", "mkl-humanize", "--skill", "mkl-match-voice")
+        result = run("uninstall", "--skill", "mkl-humanize")
+        self.assertEqual(result["removed"], humanizer_files(".agents/skills/mkl-humanize"))
+        self.assertTrue((self.project / ".agents/skills/mkl-match-voice/SKILL.md").exists())
+        self.assertFalse((self.project / ".codex/agents").exists())
+
+
+class MarketplaceTests(unittest.TestCase):
+    """The Claude Code marketplace points at checked-in exports; it is not a client run."""
+
+    def setUp(self):
+        self.marketplace = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text())
+        self.plugins = {plugin["name"]: plugin for plugin in self.marketplace["plugins"]}
+
+    def test_plugins_use_generated_exports_and_existing_sources(self):
+        self.assertEqual(set(self.plugins), {"maintainer-skills-lab", "mkl-humanize"})
+        self.assertEqual(len(self.plugins), len(self.marketplace["plugins"]))
+        for plugin in self.plugins.values():
+            self.assertTrue(plugin["source"].startswith("./"), plugin)
+            self.assertIs(plugin["strict"], False)
+            self.assertTrue((ROOT / plugin["source"]).is_dir(), plugin)
+        library = ROOT / self.plugins["maintainer-skills-lab"]["source"]
+        self.assertEqual(library, ROOT / "providers/claude/.claude")
+        self.assertEqual(
+            snapshot(library),
+            {
+                name.removeprefix(".claude/"): data
+                for name, data in kit.export_files("claude").items()
+            },
+        )
+        humanizer = ROOT / self.plugins["mkl-humanize"]["source"]
+        self.assertEqual(humanizer, ROOT / "skills/mkl-humanize")
+        self.assertTrue((humanizer / "SKILL.md").is_file())
+
+    def test_library_description_counts_match_the_source(self):
+        skills, agents = kit.load_library()
+        description = self.plugins["maintainer-skills-lab"]["description"]
+        counts = f"{len(skills)} maintainer skills and {len(agents)} agent profiles"
+        self.assertIn(counts, description)
+
+
+class SkillsCliWorkflowTests(unittest.TestCase):
+    """Linux CI must run the pinned Skills CLI diagnostic; this is not a client run."""
+
+    def test_linux_ci_runs_the_pinned_skills_cli_diagnostic(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        spec = importlib.util.spec_from_file_location(
+            "skills_cli_check", ROOT / "examples/skills-cli/check.py"
+        )
+        check = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(check)
+        self.assertIn(f"skills@{check.VERSION}", workflow)
+        self.assertIn("python examples/skills-cli/check.py", workflow)
+        self.assertIn("skills-cli-install-linux", workflow)
+
+
+class MarkdownToXmlTests(unittest.TestCase):
+    """Semantic XML tagging for frontier model provider exports."""
+
+    def test_markdown_to_xml_with_frontmatter(self):
+        source = (ROOT / "skills/mkl-reproduce-bug/SKILL.md").read_text()
+        xml = kit.markdown_to_xml(source)
+        self.assertTrue(xml.startswith('<skill name="mkl-reproduce-bug">'))
+        self.assertIn("<description>", xml)
+        self.assertIn("</description>", xml)
+        self.assertIn("<context>", xml)
+        self.assertIn("<instructions>", xml)
+        self.assertIn('<example type="reference">', xml)
+        self.assertTrue(xml.strip().endswith("</skill>"))
+
+    def test_markdown_to_xml_preserve_frontmatter(self):
+        source = (ROOT / "skills/mkl-reproduce-bug/SKILL.md").read_text()
+        xml = kit.markdown_to_xml(source, preserve_frontmatter=True)
+        self.assertTrue(xml.startswith("---\n"))
+        self.assertIn('name: "mkl-reproduce-bug"', xml)
+        self.assertIn('<skill name="mkl-reproduce-bug">', xml)
+        self.assertTrue(xml.strip().endswith("</skill>"))
+
+    def test_markdown_to_xml_workflow_and_steps(self):
+        md = (
+            "# Sample Workflow Skill\n\n"
+            "An introductory description.\n\n"
+            "## Workflow\n\n"
+            "1. **reproduce**: Write a minimal standalone reproduction script.\n"
+            "2. **verify**: Run without project dependencies where possible.\n"
+        )
+        xml = kit.markdown_to_xml(md)
+        self.assertIn('<skill name="sample-workflow-skill">', xml)
+        self.assertIn("<description>An introductory description.</description>", xml)
+        self.assertIn("<workflow>", xml)
+        self.assertIn(
+            '<step name="reproduce">Write a minimal standalone reproduction script.</step>',
+            xml,
+        )
+        self.assertIn(
+            '<step name="verify">Run without project dependencies where possible.</step>',
+            xml,
+        )
+        self.assertIn("</workflow>", xml)
+
+    def test_markdown_to_xml_constraints_and_rules(self):
+        md = (
+            "# Rule Skill\n\n"
+            "Skill for enforcing constraints.\n\n"
+            "## Negative Constraints\n\n"
+            "- Never apply a blanket reshape.\n"
+            "- Always verify test execution exit codes.\n"
+        )
+        xml = kit.markdown_to_xml(md)
+        self.assertIn("<constraints>", xml)
+        self.assertIn("<rule>Never apply a blanket reshape.</rule>", xml)
+        self.assertIn("<rule>Always verify test execution exit codes.</rule>", xml)
+        self.assertIn("</constraints>", xml)
+
+    def test_markdown_to_xml_preserves_code_fences_verbatim(self):
+        code_block = (
+            "```python\n"
+            "def check_repro():\n"
+            "    # This is a comment, not a markdown heading\n"
+            "    return True\n"
+            "```"
+        )
+        md = f"# Code Skill\n\nCode explanation.\n\n## Example\n\n{code_block}\n"
+        xml = kit.markdown_to_xml(md)
+        self.assertIn("def check_repro():", xml)
+        self.assertIn("# This is a comment, not a markdown heading", xml)
+
+    def test_claude_export_generates_xml_structured_skills(self):
+        claude_files = kit.export_files("claude")
+        skills, _ = kit.load_library()
+        for name in skills:
+            path = f".claude/skills/{name}/SKILL.md"
+            self.assertIn(path, claude_files)
+            content = claude_files[path].decode("utf-8")
+            self.assertTrue(content.startswith("---\n"), f"{name} missing frontmatter")
+            self.assertIn(f'<skill name="{name}">', content)
+            self.assertIn("</skill>", content)
+
+
+class PromptCachingTests(unittest.TestCase):
+    def test_check_cache_friendliness_passes_on_library(self):
+        report = kit.check_cache_friendliness()
+        self.assertTrue(
+            report["cache_friendly"], f"Cache friendliness issues found: {report['issues']}"
+        )
+        self.assertEqual(report["issues"], [])
+        self.assertEqual(report["checked_agents"], 9)
+
+    def test_claude_agents_include_cache_control_and_skills_first(self):
+        claude_files = kit.export_files("claude")
+        skills, agents = kit.load_library()
+        for name, agent in agents.items():
+            path = f".claude/agents/{name}.md"
+            self.assertIn(path, claude_files)
+            text = claude_files[path].decode("utf-8")
+            self.assertIn('cache_control: {"type": "ephemeral"}', text)
+            if agent["skills"]:
+                first_skill = sorted(agent["skills"])[0]
+                if agent.get("mode") == "subagent":
+                    self.assertIn(f"`{first_skill}`", text)
+                    self.assertIn("## Instructions", text)
+                    self.assertLess(text.index(f"`{first_skill}`"), text.index("## Instructions"))
+                else:
+                    first_heading = skills[first_skill]["body"].strip().split("\n", 1)[0]
+                    self.assertIn(first_heading, text)
+                    self.assertIn("## Instructions", text)
+                    self.assertLess(text.index(first_heading), text.index("## Instructions"))
+
+    def test_cursor_agents_structure_skills_first(self):
+        cursor_files = kit.export_files("cursor")
+        skills, agents = kit.load_library()
+        for name, agent in agents.items():
+            path = f".cursor/agents/{name}.md"
+            self.assertIn(path, cursor_files)
+            text = cursor_files[path].decode("utf-8")
+            if agent["skills"]:
+                first_skill = sorted(agent["skills"])[0]
+                if agent.get("mode") == "subagent":
+                    self.assertIn(f"`{first_skill}`", text)
+                    self.assertIn("## Instructions", text)
+                    self.assertLess(text.index(f"`{first_skill}`"), text.index("## Instructions"))
+                else:
+                    first_heading = skills[first_skill]["body"].strip().split("\n", 1)[0]
+                    self.assertIn(first_heading, text)
+                    self.assertIn("## Instructions", text)
+                    self.assertLess(text.index(first_heading), text.index("## Instructions"))
+
+    def test_byte_for_byte_reproducibility(self):
+        for target in kit.EXPORT_TARGETS:
+            run1 = kit.export_files(target)
+            run2 = kit.export_files(target)
+            self.assertEqual(run1.keys(), run2.keys())
+            for path in run1:
+                self.assertEqual(run1[path], run2[path], f"Mismatch in {target}:{path}")
+
+    def test_check_cache_friendliness_detects_unsorted_skills(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            copy_library(root)
+            path = root / "agents/mkl-bug-investigator.toml"
+            path.write_text(
+                'name = "mkl-bug-investigator"\ndescription = "desc"\nskills = ["mkl-triage-issue",'
+                ' "mkl-isolated-scratchpad"]\ninstructions = "inst"\n'
+            )
+            report = kit.check_cache_friendliness(root)
+            self.assertFalse(report["cache_friendly"])
+            self.assertTrue(any("not in lexical order" in issue for issue in report["issues"]))
+
+    def test_lazy_agent_mode_progressive_disclosure(self):
+        for target in ("claude", "cursor", "codex", "opencode", "gemini", "cline"):
+            full_files = kit.export_files(target, mode="full")
+            lazy_files = kit.export_files(target, mode="lazy")
+            self.assertEqual(full_files.keys(), lazy_files.keys())
+
+            if target == "cline":
+                lazy_roomodes = json.loads(lazy_files[kit.CLINE_ROOMODES].decode("utf-8"))
+                for l_mode in lazy_roomodes["customModes"]:
+                    self.assertIn(
+                        "## Available Skills (Progressive Disclosure)", l_mode["customInstructions"]
+                    )
+                    self.assertIn(
+                        "When your task requires one of the following", l_mode["customInstructions"]
+                    )
+                    self.assertIn("(Load: `skills/", l_mode["customInstructions"])
+            else:
+                _, agent_dir, ext = kit.TARGETS[target]
+                path = f"{agent_dir}/mkl-source-reviewer{ext}"
+                self.assertIn(path, lazy_files)
+                full_text = full_files[path].decode("utf-8")
+                lazy_text = lazy_files[path].decode("utf-8")
+
+                self.assertIn("## Available Skills (Progressive Disclosure)", lazy_text)
+                self.assertIn("When your task requires one of the following", lazy_text)
+                self.assertIn("mkl-review-source-change", lazy_text)
+                self.assertIn("(Load: `", lazy_text)
+
+                full_tokens = kit.count_tokens(full_text)
+                lazy_tokens = kit.count_tokens(lazy_text)
+                savings = (full_tokens - lazy_tokens) / full_tokens
+                self.assertGreater(savings, 0.45)
+
+    def test_cli_mode_flags(self):
+        self.assertEqual(kit.main(["check", "--mode", "lazy"]), 0)
+        self.assertEqual(kit.main(["check", "--mode", "full"]), 0)
+        self.assertEqual(kit.main(["tokens", "--mode", "lazy", "--target", "claude", "--json"]), 0)
+
+    def test_check_library_passes_on_root(self):
+        result = kit.check_library()
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["skills_checked"], 30)
+        self.assertEqual(result["agents_checked"], 9)
+        self.assertEqual(result["max_body_tokens"], 1000)
+        self.assertEqual(result["max_desc_tokens"], 60)
+
+    def test_check_library_enforces_skill_body_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            # Copy library structure
+            shutil.copytree(ROOT / "skills", temp_root / "skills")
+            shutil.copytree(ROOT / "agents", temp_root / "agents")
+
+            # Create oversized skill
+            oversized = temp_root / "skills" / "mkl-oversized"
+            oversized.mkdir(parents=True)
+            body_text = "Word " * 1300
+            (oversized / "SKILL.md").write_text(
+                f'---\nname: "mkl-oversized"\ndescription: "A skill with too many tokens in body."\n---\n\n# Oversized\n\n{body_text}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(kit.KitError) as ctx:
+                kit.check_library(temp_root)
+            self.assertIn(
+                "skills/mkl-oversized/SKILL.md exceeds body token budget", str(ctx.exception)
+            )
+            self.assertIn(
+                "Consider condensing instructions or splitting into focused workflows.",
+                str(ctx.exception),
+            )
+
+    def test_skill_metadata_enforces_description_token_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            skill_dir = Path(temp) / "mkl-verbose-desc"
+            skill_dir.mkdir()
+            verbose_desc = "Word " * 75
+            skill_file = skill_dir / "SKILL.md"
+            skill_file.write_text(
+                f'---\nname: "mkl-verbose-desc"\ndescription: "{verbose_desc.strip()}"\n---\n\n# Body\nContent\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(kit.KitError) as ctx:
+                kit.skill_metadata(skill_file)
+            self.assertIn("description exceeds token budget", str(ctx.exception))
+
+    def test_cli_check_token_budget_threshold_flags(self):
+        self.assertEqual(kit.main(["check", "--max-skill-tokens", "2000"]), 0)
+        self.assertEqual(kit.main(["check", "--max-skill-tokens", "100"]), 2)
+
+
+class PrefixNormalizationTests(unittest.TestCase):
+    def test_canonical_preamble_file_and_tokens(self):
+        preamble = kit.load_canonical_preamble()
+        self.assertTrue(len(preamble) > 0)
+        self.assertNotIn("\r\n", preamble)
+        tokens = kit.count_tokens(preamble)
+        self.assertGreaterEqual(
+            tokens,
+            kit.MIN_CANONICAL_PREAMBLE_TOKENS,
+            f"Canonical preamble has {tokens} tokens, expected >= {kit.MIN_CANONICAL_PREAMBLE_TOKENS}",
+        )
+        pattern = re.compile(r"\b20\d\d-[01]\d-[0-3]\dT[0-2]\d:[0-5]\d:[0-5]\d\b")
+        self.assertIsNone(pattern.search(preamble))
+
+    def test_check_prefix_normalization_passes_on_library(self):
+        report = kit.check_prefix_normalization()
+        self.assertTrue(
+            report["prefix_normalized"], f"Prefix normalization issues: {report['issues']}"
+        )
+        self.assertEqual(report["issues"], [])
+        self.assertGreaterEqual(report["preamble_tokens"], kit.MIN_CANONICAL_PREAMBLE_TOKENS)
+        self.assertEqual(report["checked_skills"], 30)
+        self.assertEqual(report["checked_agents"], 9)
+
+    def test_all_exported_skills_share_exact_canonical_preamble(self):
+        preamble = kit.load_canonical_preamble()
+        skills, _ = kit.load_library()
+        for target in ("codex", "claude", "cursor", "opencode"):
+            exported = kit.export_files(target)
+            skill_dir, _, _ = kit.TARGETS[target]
+            for name in skills:
+                path = f"{skill_dir}/{name}/SKILL.md"
+                self.assertIn(path, exported)
+                content = exported[path].decode("utf-8")
+                self.assertIn(
+                    preamble, content, f"{target} skill {name} missing canonical preamble"
+                )
+                end_fm = content.find("\n---\n")
+                self.assertNotEqual(
+                    end_fm, -1, f"{target} skill {name} missing frontmatter delimiter"
+                )
+                after_fm = content[end_fm + 5 :].lstrip("\n")
+                self.assertTrue(
+                    after_fm.startswith(preamble),
+                    f"{target} skill {name} does not start with preamble after frontmatter",
+                )
+
+    def test_all_exported_agents_share_exact_canonical_preamble(self):
+        preamble = kit.load_canonical_preamble()
+        _, agents = kit.load_library()
+        for target in ("codex", "claude", "cursor", "opencode"):
+            exported = kit.export_files(target)
+            _, agent_dir, ext = kit.TARGETS[target]
+            for name in agents:
+                path = f"{agent_dir}/{name}{ext}"
+                self.assertIn(path, exported)
+                content = exported[path].decode("utf-8")
+                if ext == ".toml":
+                    data = tomllib.loads(content)
+                    agent_text = data.get("developer_instructions", "")
+                else:
+                    agent_text = content
+                self.assertIn(
+                    preamble, agent_text, f"{target} agent {name} missing canonical preamble"
+                )
+
+    def test_deterministic_serialization_crlf_lf_invariance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            copy_library(temp_root)
+            preamble_file = temp_root / kit.CANONICAL_PREAMBLE_FILE
+            lf_content = preamble_file.read_text(encoding="utf-8")
+            crlf_content = lf_content.replace("\n", "\r\n")
+            preamble_file.write_text(crlf_content, encoding="utf-8")
+
+            loaded = kit.load_canonical_preamble(temp_root)
+            self.assertNotIn("\r\n", loaded)
+            self.assertEqual(loaded, lf_content.strip())
+
+    def test_check_prefix_normalization_fails_on_short_preamble(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            copy_library(temp_root)
+            preamble_file = temp_root / kit.CANONICAL_PREAMBLE_FILE
+            preamble_file.write_text("# Short preamble\nToo few tokens.\n", encoding="utf-8")
+
+            report = kit.check_prefix_normalization(temp_root)
+            self.assertFalse(report["prefix_normalized"])
+            self.assertTrue(
+                any("less than the required minimum" in issue for issue in report["issues"])
+            )
+
+
+class ModularSubagentTests(unittest.TestCase):
+    def test_subagent_profiles_startup_budget(self):
+        skills, agents = kit.load_library()
+        profile = kit.profile_tokens()
+        agent_tokens = {a["name"]: a["total_tokens"] for a in profile["agents"]}
+
+        # Acceptance Criteria:
+        # mkl-triage-agent < 500 tokens
+        # mkl-pr-auditor < 600 tokens
+        # mkl-doc-editor < 400 tokens
+        self.assertLess(agent_tokens["mkl-triage-agent"], 500)
+        self.assertLess(agent_tokens["mkl-pr-auditor"], 600)
+        self.assertLess(agent_tokens["mkl-doc-editor"], 400)
+
+        for name, agent in agents.items():
+            if agent.get("mode") == "subagent":
+                self.assertLessEqual(agent_tokens[name], kit.MAX_SUBAGENT_STARTUP_TOKENS)
+
+    def test_subagent_handoff_protocol_embedded_in_exports(self):
+        _, agents = kit.load_library()
+        for target in ("codex", "claude", "cursor", "opencode"):
+            exported = kit.export_files(target)
+            _, agent_dir, ext = kit.TARGETS[target]
+            for name, agent in agents.items():
+                content = exported[f"{agent_dir}/{name}{ext}"].decode("utf-8")
+                if agent.get("mode") == "subagent":
+                    self.assertIn("Subagent Handoff Protocol", content)
+                    self.assertIn("mkl-subagent-handoff/v1", content)
+                else:
+                    self.assertNotIn("Subagent Handoff Protocol", content)
+
+    def test_subagent_handoff_protocol_validation(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "subagent_handoff", ROOT / "tools/subagent_handoff.py"
+        )
+        handoff = importlib.util.module_from_spec(spec)
+        sys.modules["subagent_handoff"] = handoff
+        spec.loader.exec_module(handoff)
+
+        req = handoff.SubagentHandoffRequest(
+            task_id="task-1",
+            delegator="mkl-primary",
+            target_agent="mkl-triage-agent",
+            context={"goal": "reproduce bug", "scope_paths": ["src/app.py"]},
+        )
+        self.assertEqual(handoff.validate_handoff_request(req.to_dict()), [])
+
+        # Missing protocol fails validation
+        bad_req = req.to_dict()
+        bad_req["protocol"] = "unknown-v0"
+        self.assertTrue(len(handoff.validate_handoff_request(bad_req)) > 0)
+
+        resp = handoff.SubagentHandoffResponse(
+            task_id="task-1",
+            agent="mkl-triage-agent",
+            status="COMPLETED",
+            verdict="CONFIRMED_BUG",
+            summary="Defect confirmed via unit test reproduction script.",
+        )
+        self.assertEqual(handoff.validate_handoff_response(resp.to_dict()), [])
+
+        # Invalid status fails validation
+        bad_resp = resp.to_dict()
+        bad_resp["status"] = "INVALID_STATUS"
+        self.assertTrue(len(handoff.validate_handoff_response(bad_resp)) > 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
