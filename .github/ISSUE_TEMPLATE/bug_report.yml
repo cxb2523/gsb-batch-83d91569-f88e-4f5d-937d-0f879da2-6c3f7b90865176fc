@@ -1,0 +1,126 @@
+name: Bug report
+description: The scraper ran but the result was wrong, empty, or it crashed.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before anything else: never paste an API key, a proxy password or a
+        full `ws://user:pass@...` endpoint into a public issue.** The scrapers
+        mask credentials in their own logs, but raw HTML dumps and the Scraper
+        API's `x-debug` header do not. Replace them with `***`.
+
+        A few things answer most reports faster than we can:
+
+        - **Exit 3?** That has never been observed on this site: Craigslist
+          served a datacentre address with no proxy and no key during this
+          repo's development. Read the debug dump the run wrote first — if it
+          is Chromium's own error page, the problem is the network or the
+          proxy, not the site. See
+          [TROUBLESHOOTING.md](../blob/main/TROUBLESHOOTING.md).
+        - **Zero rows?** An area landing page (`/area/newyork`) has no
+          results of its own, so exit 4 there is a correct answer. A result
+          list looks like `/search/area/newyork?cat=sss`.
+        - **`rating`, `brand`, `in_stock` or `original_price` empty on every
+          row?** Expected: Craigslist publishes none of them. See the README.
+        - **`currency` null?** Jobs, services and community publish no
+          structured data, and the printed `$` is ambiguous across the USD,
+          CAD and MXN areas, so the scraper does not guess. The currency
+          follows the AREA in the URL, not your exit IP.
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Which engine
+      options:
+        - playwright_scraper.py
+        - puppeteer_scraper.py
+        - selenium_scraper.py
+        - scraper_api_client.py
+        - fingerprint_client.py
+        - other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: browser_route
+    attributes:
+      label: How was the browser reached
+      options:
+        - A browser the script launched itself
+        - A remote browser over --cdp-endpoint
+        - No browser (scraper_api_client.py over plain HTTP)
+        - Not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: exit_code
+    attributes:
+      label: Exit code
+      description: >-
+        `echo $?` straight after the run. These mean specific things — 3 is
+        "the response was not a Craigslist page", 4 is "ran fine, found
+        nothing", 6 is partial. See TROUBLESHOOTING.md.
+      placeholder: "4"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command
+      description: With credentials replaced by `***`.
+      render: shell
+      placeholder: |
+        python3 playwright_scraper.py \
+          --url "https://www.craigslist.org/search/area/newyork?cat=sss" \
+          --pages 3 --out bikes
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: >-
+        The whole run, not just the last line — the useful detail is usually
+        upstream of the error. Credentials replaced by `***`.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      placeholder: >-
+        About 350 rows from one served response, as the README measures for a
+        large area.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Please run and paste:
+        ```
+        python3 -c "import sys, platform; print(sys.version, platform.platform())"
+        pip list 2>/dev/null | grep -Ei "playwright|pyppeteer|selenium|beautifulsoup4|requests|webdriver"
+        python3 smoke_test.py | tail -3
+        ```
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: The offline suite passes on my machine (`python3 smoke_test.py`)
+          required: true
+        - label: I removed every API key, password and credentialled URL from this report
+          required: true
