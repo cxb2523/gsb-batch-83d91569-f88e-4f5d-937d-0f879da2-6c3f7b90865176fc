@@ -1051,7 +1051,7 @@ def record_helper_events(db, server_id: int, raw, now: datetime) -> None:
 
 
 DOCKER_STATUSES = {"ok", "unreachable", "not_configured"}
-DOCKER_REASON_CODES = {"timeout", "refused", "missing", "denied", "error"}
+DOCKER_REASON_CODES = {"timeout", "refused", "missing", "denied", "error", "forbidden", "upstream", "closed"}
 MAX_CONTAINERS_PER_CHECKIN = 500
 # Names end up inside incident keys (255 characters, with a prefix and suffix), so they are kept well under that.
 MAX_CONTAINER_NAME = 128
@@ -1321,6 +1321,14 @@ def _load_json(text_value: str | None) -> dict:
     return loaded if isinstance(loaded, dict) else {}
 
 
+def _load_json_list(text_value: str | None) -> list:
+    try:
+        loaded = json.loads(text_value) if text_value else []
+    except ValueError:
+        return []
+    return loaded if isinstance(loaded, list) else []
+
+
 ENROLL_RATE_WINDOW_SECONDS = 3600
 CREDENTIALS_REPLACED_KIND = "credentials_replaced"
 
@@ -1450,6 +1458,22 @@ def sync_firewall(db, server_id: int, firewall: dict, now: datetime) -> list[tup
     return events
 
 
+def _clean_container_errors(raw) -> str | None:
+    """Validate the per-container failure list (fixed stage and reason vocabulary, bounded size) and store it as
+    JSON text. Anything of the wrong shape is dropped rather than trusted, like every other reported field."""
+    if not isinstance(raw, list):
+        return None
+    cleaned = []
+    for item in raw[:MAX_CONTAINERS_PER_CHECKIN]:
+        if not isinstance(item, dict):
+            continue
+        container_id, stage, reason = item.get("container_id"), item.get("stage"), item.get("reason")
+        if not isinstance(container_id, str) or not _one_of(stage, {"inspect", "stats"}) or not _one_of(reason, DOCKER_REASON_CODES):
+            continue
+        cleaned.append({"container_id": _printable(container_id, 128), "stage": stage, "reason": reason})
+    return json.dumps(cleaned) if cleaned else None
+
+
 def _clean_system_fields(fields: dict) -> None:
     """Drop system-state values of the wrong type; a collector reports None when it can't tell."""
     for key, kind in (("oom_kill_total", int), ("kernel_tainted", int), ("ntp_synced", bool), ("reboot_required", bool)):
@@ -1466,6 +1490,13 @@ def _clean_system_fields(fields: dict) -> None:
         fields["docker_reason"] = None
     if "docker_latency_ms" in fields:
         fields["docker_latency_ms"] = _whole_number(fields["docker_latency_ms"], 0, 600_000)
+    if "docker_container_count" in fields:
+        # None means "not configured / no round ran"; zero is a real round that found nothing.
+        fields["docker_container_count"] = _whole_number(fields["docker_container_count"], 0, MAX_CONTAINERS_PER_CHECKIN)
+    if "docker_reason_text" in fields:
+        fields["docker_reason_text"] = (_printable(fields["docker_reason_text"], 255) or None) if isinstance(fields["docker_reason_text"], str) else None
+    if "docker_container_errors" in fields:
+        fields["docker_container_errors"] = _clean_container_errors(fields["docker_container_errors"])
     if "collect_duration_ms" in fields:
         fields["collect_duration_ms"] = _whole_number(fields["collect_duration_ms"], 0, 3_600_000)
     if "internet_status" in fields and not _one_of(fields["internet_status"], INTERNET_STATUSES):

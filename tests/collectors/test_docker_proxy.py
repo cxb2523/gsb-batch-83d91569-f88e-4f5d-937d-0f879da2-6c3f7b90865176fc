@@ -8,6 +8,11 @@ from http.server import BaseHTTPRequestHandler
 
 import pytest
 
+# The proxy module binds a Unix stream server at import time, so the whole module must be skipped before importing
+# it on platforms without Unix domain sockets (some Windows builds). CI and Linux run every test below.
+if not hasattr(socket, "AF_UNIX") or not hasattr(socketserver, "ThreadingUnixStreamServer"):
+    pytest.skip("Unix domain sockets are not available on this platform", allow_module_level=True)
+
 from src.collector import collector, docker_proxy as proxy
 
 CID = "a" * 64
@@ -225,6 +230,75 @@ def test_upstream_failures_become_a_generic_502(stack):
     daemon.shutdown()
     daemon.server_close()
     assert _raw(port, "GET", "/containers/json?all=1")[0] == 502
+
+
+class _ScriptableDocker(BaseHTTPRequestHandler):
+    """Answers one path with a chosen body and status, so each 502 trigger can be exercised in isolation."""
+
+    behavior = {}
+    seen: list[str] = []
+
+    def do_GET(self):
+        _ScriptableDocker.seen.append(self.path)
+        status, body, content_type = _ScriptableDocker.behavior.get(self.path, (404, b"nope", "text/plain"))
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def _scripted_proxy(tmp_path, behavior):
+    daemon_path = str(tmp_path / "docker.sock")
+    _ScriptableDocker.behavior = behavior
+    _ScriptableDocker.seen = []
+    daemon = socketserver.ThreadingUnixStreamServer(daemon_path, _ScriptableDocker)
+    daemon.daemon_threads = True
+    listen_path = str(tmp_path / "proxy" / "docker.sock")
+    server = proxy.make_server(listen_path, daemon_path)
+    for item in (daemon, server):
+        threading.Thread(target=item.serve_forever, daemon=True).start()
+    return listen_path, daemon, server
+
+
+def test_an_upstream_answer_that_is_not_json_is_a_502_not_a_crash(tmp_path):
+    listen_path, daemon, server = _scripted_proxy(tmp_path, {"/version": (200, b"this is not json " + SECRET.encode(), "text/plain")})
+    try:
+        status, body = _raw(listen_path, "GET", "/version")
+    finally:
+        server.shutdown(); server.server_close(); daemon.shutdown(); daemon.server_close()
+
+    assert (status, body) == (502, b"Upstream error")
+    assert SECRET not in body.decode()
+    assert _ScriptableDocker.seen == ["/version"]
+
+
+def test_an_upstream_non_200_hides_its_detail_behind_the_fixed_502_text(tmp_path):
+    listen_path, daemon, server = _scripted_proxy(
+        tmp_path, {"/system/df": (500, b'internal failure: "%s"' % SECRET.encode(), "text/plain")})
+    try:
+        status, body = _raw(listen_path, "GET", "/system/df")
+    finally:
+        server.shutdown(); server.server_close(); daemon.shutdown(); daemon.server_close()
+
+    assert (status, body) == (502, b"Upstream error")
+    assert SECRET not in body.decode()
+
+
+def test_an_oversized_answer_returns_502_and_the_upstream_detail_is_not_repeated(tmp_path):
+    big_body = b"[" + b"0," * (proxy.MAX_RESPONSE_BYTES // 2 + 16) + b"0]"
+    listen_path, daemon, server = _scripted_proxy(
+        tmp_path, {"/containers/json?all=1": (200, big_body, "application/json")})
+    try:
+        status, body = _raw(listen_path, "GET", "/containers/json?all=1")
+    finally:
+        server.shutdown(); server.server_close(); daemon.shutdown(); daemon.server_close()
+
+    assert (status, body) == (502, b"Upstream error")
+    assert len(body) < 100  # the oversized body never flows through to the client
 
 
 def test_oversized_upstream_answers_are_rejected(stack, monkeypatch):

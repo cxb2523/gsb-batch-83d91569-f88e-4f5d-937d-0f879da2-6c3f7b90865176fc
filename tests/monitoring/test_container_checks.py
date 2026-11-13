@@ -60,7 +60,8 @@ def _clear_docker_env(monkeypatch, tmp_path):
 def test_a_host_without_docker_is_not_configured_not_broken(monkeypatch, tmp_path):
     _clear_docker_env(monkeypatch, tmp_path)
 
-    assert collector.collect_docker() == ([], {"docker_status": "not_configured", "docker_reason": None, "docker_latency_ms": None})
+    assert collector.collect_docker() == ([], {"docker_status": "not_configured", "docker_reason": None, "docker_reason_text": None,
+                                               "docker_latency_ms": None, "docker_container_count": None, "docker_container_errors": []})
 
 
 def test_a_configured_but_missing_proxy_socket_is_unreachable(monkeypatch, tmp_path):
@@ -71,6 +72,7 @@ def test_a_configured_but_missing_proxy_socket_is_unreachable(monkeypatch, tmp_p
     assert (status["docker_status"], status["docker_reason"]) == ("unreachable", "missing")
 
 
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="Unix domain sockets are not available on this platform")
 def test_a_stale_socket_nobody_listens_on_is_reported_as_refused(monkeypatch, tmp_path):
     path = str(tmp_path / "stale.sock")
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -254,6 +256,55 @@ def test_malformed_docker_fields_are_dropped(db):
 
     rows = db.query(Host).order_by(Host.id).all()
     assert [(r.docker_status, r.docker_reason, r.docker_latency_ms) for r in rows] == [(None, None, None), ("ok", "timeout", None)]
+
+
+# --- backend: the explicit round verdict (#2960) ------------------------------------------------------
+
+def test_the_round_verdict_is_validated_stored_and_served(db):
+    import json as _json
+    from src.backend.models import HostMetric as Host
+    errors = [{"container_id": "a" * 64, "stage": "inspect", "reason": "upstream"},
+              {"container_id": "b" * 64, "stage": "stats", "reason": "closed"}]
+    _ingest(db, docker_status="ok", docker_container_count=2, docker_container_errors=errors,
+            docker_reason_text=None, docker_latency_ms=12)
+    _ingest(db, docker_status="unreachable", docker_reason="forbidden",
+            docker_reason_text="The read-only Docker proxy refused the request", docker_container_count=0)
+
+    rows = db.query(Host).order_by(Host.id).all()
+    assert (rows[0].docker_container_count, rows[0].docker_reason_text) == (2, None)
+    assert _json.loads(rows[0].docker_container_errors) == errors
+    assert (rows[1].docker_container_count, rows[1].docker_reason, rows[1].docker_reason_text) == (
+        0, "forbidden", "The read-only Docker proxy refused the request")
+    assert rows[1].docker_container_errors is None  # an empty list is stored as nothing
+
+
+def test_the_new_proxy_reason_codes_pass_validation(db):
+    from src.backend.models import HostMetric as Host
+    for reason in ("forbidden", "upstream", "closed"):
+        _ingest(db, docker_status="unreachable", docker_reason=reason)
+    assert [r.docker_reason for r in db.query(Host).all()] == ["forbidden", "upstream", "closed"]
+
+
+def test_hostile_verdict_fields_are_cleaned_not_stored(db):
+    from src.backend.models import HostMetric as Host
+    _ingest(db, docker_container_count=-3, docker_reason_text="x" * 400,
+            docker_container_errors=[{"container_id": "a" * 64, "stage": "rm", "reason": "upstream"}, "junk",
+                                     {"container_id": "b" * 64, "stage": "stats", "reason": "nope"}])
+    row = db.query(Host).one()
+    assert row.docker_container_count is None  # negative counts are not a verdict
+    assert row.docker_reason_text == "x" * 255  # printable and capped
+    assert row.docker_container_errors is None  # every entry had an unknown stage or reason
+
+
+def test_the_overview_serves_the_verdict_back(db, monkeypatch):
+    monkeypatch.setattr(main, "_current_user", lambda session_id, db: {"id": 1, "role": "admin"})
+    errors = [{"container_id": "a" * 64, "stage": "inspect", "reason": "upstream"}]
+    _ingest(db, [_c("web")], docker_status="ok", docker_container_count=1, docker_container_errors=errors)
+
+    server = monitoring_routes.monitoring_overview(session_id="s", db=db)["servers"][0]
+    host = server["host"]
+    assert host["docker_container_count"] == 1
+    assert host["docker_container_errors"] == errors and isinstance(host["docker_container_errors"], list)
 
 
 # --- backend: exit codes (#19) ----------------------------------------------------------------------

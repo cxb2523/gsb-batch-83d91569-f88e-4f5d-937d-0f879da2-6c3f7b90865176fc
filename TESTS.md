@@ -4,7 +4,7 @@ Infradeck ships with an automated test suite. This page explains how to run it, 
 covers (and what it doesn't), and what every single test is for, so you can decide
 whether a failure matters before you upgrade or change your setup.
 
-- **1633 test cases** from 883 test functions, plus 45 small tests of the frontend helpers (see [Frontend helper tests](#frontend-helper-tests)) (some functions run once per input).
+- **1458 test cases** from 885 test functions, plus 45 small tests of the frontend helpers (see [Frontend helper tests](#frontend-helper-tests)) (some functions run once per input).
 - **About four minutes** to run. No Docker, PostgreSQL, Redis, network or root access needed.
 - **Safe to run next to a live install.** The tests use a throwaway in-memory database
   and fakes; they never touch your running containers or your data. (Two collector
@@ -164,10 +164,12 @@ The frontend's helper tests are separate, in `src/frontend/tests/` (see [Fronten
 | [`test_container_detail.py`](#test_container_detailpy) | 18 | Per-container details and parsing of Docker's stats. |
 | [`test_container_stats.py`](#test_container_statspy) | 10 | The Statistics page's container views, the period before a range, container swap, CPU spikes and installed updates. |
 | [`test_conversations.py`](#test_conversationspy) | 1 | Deleting one assistant conversation leaves the others alone. |
-| [`test_container_checks.py`](#test_container_checkspy) | 126 | Docker health, container exit codes, inventory and image changes, memory-leak trends, and the validation of everything a collector sends about containers. |
+| [`test_container_checks.py`](#test_container_checkspy) | 130 | Docker health, container exit codes, inventory and image changes, the explicit per-round verdict (count, readable failure reason, per-container errors), and the validation of everything a collector sends about containers. |
 | [`test_dashboard_data.py`](#test_dashboard_datapy) | 23 | What the Overview reads: machine facts from collectors (never trusted), sparklines, the all-clear summary and the event timeline. |
 | [`test_dashboard_host.py`](#test_dashboard_hostpy) | 8 | The "this machine" logic, history charts, container list and incident counts. |
-| [`test_docker_proxy.py`](#test_docker_proxypy) | 119 | The read-only Docker proxy: what it allows, refuses and hides, and how it limits its own clients. |
+| [`test_collection_verdict.py`](#test_collection_verdicty) | 15 | The collector's checkable round verdict without sockets: success with a container count, fixed failure reasons (proxy refusal, upstream error, closed connection), and one container's failure leaving the others intact. |
+| [`test_docker_collection_verdict.py`](#test_docker_collection_verdicty) | 11 | End-to-end collector → proxy → fake Docker daemon over temporary Unix sockets: success with secrets filtered, refusals that never reach upstream, 502s for every upstream failure, per-container isolation, and connection-limit shutdowns that fail the round instead of crashing. |
+| [`test_docker_proxy.py`](#test_docker_proxypy) | 122 | The read-only Docker proxy: what it allows, refuses and hides, how it turns every upstream failure into a fixed 502, and how it limits its own clients. |
 | [`test_endpoints_require_auth.py`](#test_endpoints_require_authpy) | 4 | Every route is public on purpose or refuses a request with no session or token. |
 | [`test_enrollment.py`](#test_enrollmentpy) | 11 | Enrollment keys, collector credentials and offline-server detection. |
 | [`test_enrollment_limits.py`](#test_enrollment_limitspy) | 12 | Limits on the enrollment key: rate limits, the server cap, and a warning when credentials are replaced. |
@@ -855,11 +857,11 @@ a server's event timeline. If these fail, a collector could put junk on the page
 ### test_docker_proxy.py
 
 The read-only Docker proxy is the one component that holds the Docker socket, so it is
-tested hardest (91 cases). If any of these fail, do not run the proxy until it is fixed.
+tested hardest (122 cases). If any of these fail, do not run the proxy until it is fixed.
 
 | Test | What it checks |
 |---|---|
-| `test_the_four_read_requests_are_allowed` *(5 inputs)* | The exact requests the collector needs (list containers, inspect one, one stats snapshot, and the quick one-shot stats form) are allowed. |
+| `test_the_six_read_requests_are_allowed` *(7 inputs)* | The read requests the collector needs (container list, inspect, stats, version, disk usage) are allowed, including a short container ID and one-shot stats. |
 | `test_only_get_is_allowed` *(8 inputs)* | Every method except GET (POST, PUT, DELETE, PATCH, HEAD, OPTIONS, lowercase `get`, CONNECT) is refused. |
 | `test_everything_else_is_refused` *(81 inputs)* | Everything outside the allow-list is refused: other endpoints (`/info`, images, exec, start, kill, export, archive, logs), extra or changed query strings, path traversal, encoded or padded paths, injected line breaks, odd container IDs. |
 | `test_inspect_output_drops_environment_and_everything_unneeded` | The container description is cut down to the needed fields (including exit code, out-of-memory flag, finish time and image ID); environment variables (often secrets), mounts, labels, host configuration and Docker's free-text error message never leave the proxy. |
@@ -870,14 +872,52 @@ tested hardest (91 cases). If any of these fail, do not run the proxy until it i
 | `test_collector_works_through_the_proxy_and_never_sees_secrets` | End to end: the real collector gets correct container data through the proxy and no secret reaches it. |
 | `test_refused_requests_never_reach_the_docker_daemon` | Attack requests are rejected with 403 and Docker is never contacted. |
 | `test_upstream_failures_become_a_generic_502` | If Docker errors or is down, the caller gets a plain "Upstream error" with no details. |
-| `test_oversized_upstream_answers_are_rejected` | A huge answer from Docker is rejected instead of being passed on. |
+| `test_an_upstream_answer_that_is_not_json_is_a_502_not_a_crash` | A 200 whose body is not JSON comes back as the fixed 502, and the body's content never reaches the caller. |
+| `test_an_upstream_non_200_hides_its_detail_behind_the_fixed_502_text` | An upstream 500 carrying a detailed message is reduced to the fixed "Upstream error" text. |
+| `test_an_oversized_answer_returns_502_and_the_upstream_detail_is_not_repeated` | An answer over the 8 MiB cap is rejected with the fixed 502; the oversized body never flows through. |
+| `test_oversized_upstream_answers_are_rejected` | With the cap lowered, a normal-sized answer is rejected instead of being passed on. |
 | `test_proxy_socket_is_not_world_accessible_and_replaces_a_stale_one` | The proxy's socket file is created with owner and group access only, and a leftover socket from a crash is replaced. |
 | `test_collector_still_supports_the_plain_socket_path` | The collector still works without Docker access (it just reports no containers). |
 | `test_a_stalled_client_is_dropped` | A client that connects and sends nothing is disconnected after the timeout instead of holding the connection open. |
 | `test_connections_beyond_the_limit_are_closed_until_a_slot_frees` | Connections beyond the limit are closed at once, and served again as soon as an earlier one ends. |
-| `test_the_six_read_requests_are_allowed` *(7 inputs)* | The read requests the collector needs (container list, inspect, stats, version, disk usage) are allowed, including a short container ID and one-shot stats. |
 | `test_version_output_keeps_only_the_version_numbers` | `/version` is reduced to the Docker and API version numbers; everything else is dropped. |
 | `test_disk_usage_is_reduced_to_totals_with_no_names` | `/system/df` is reduced to totals (image and build-cache sizes, unused counts) with no image, container or volume names; odd input gives zeros or nothing. |
+
+### test_collection_verdict.py
+
+The checkable verdict each collection round carries, exercised without sockets by replacing the
+Docker request layer. These run on every platform; the real socket chain is in
+`test_docker_collection_verdict.py`.
+
+| Test | What it checks |
+|---|---|
+| `test_a_successful_round_carries_the_container_count` | A good round reports `ok`, the number of containers produced, and an empty per-container error list. |
+| `test_a_failed_listing_marks_the_round_failed_with_a_fixed_reason` *(8 inputs)* | Proxy refusal, upstream error, closed connection, timeout, refusal, missing socket, denial and generic errors each map to one fixed reason code plus a readable sentence — never raw exception text. |
+| `test_proxy_status_codes_map_to_their_reasons` | A proxy 403 becomes `forbidden` and a 502 becomes `upstream` at the request layer. |
+| `test_a_closed_connection_is_a_closed_reason_not_a_crash` | A disconnect while sending the request is reported as `closed`, not raised as an uncaught exception. |
+| `test_one_container_detail_failure_only_costs_that_container` | When one container's inspect fails, the other is still produced and the failed one is listed apart with its stage and reason. |
+| `test_one_container_stats_failure_keeps_its_detail` | A stats failure removes only the usage figures; the container's state and metadata are still reported and the failure is listed at the `stats` stage. |
+| `test_when_every_inspect_fails_the_whole_round_is_a_failure` | A listing that yields no inspectable container fails the round while preserving the shared reason and every per-container error. |
+| `test_a_configured_but_missing_socket_is_a_failure_with_the_count_fields` | A configured proxy whose socket is gone is `unreachable`/`missing` with the count fields present. |
+| `test_a_proxy_refusal_on_stats_is_not_retried_as_an_old_proxy` | A 403/502/close on the one-shot stats request is propagated with its reason; it is not retried as an unsupported feature and does not flip the one-shot flag. |
+| `test_a_plain_stats_error_still_falls_back_to_the_classic_endpoint` | A plain 404 on one-shot still falls back to the classic stats endpoint, preserving the older-proxy behavior. |
+
+### test_docker_collection_verdict.py
+
+The whole chain — real collector, real read-only proxy and a scriptable fake Docker daemon — over
+temporary Unix domain sockets, with no real Docker. Skipped on platforms without Unix sockets.
+
+| Test | What it checks |
+|---|---|
+| `test_a_successful_round_reports_the_count_and_no_sensitive_values` | A good round reports the container count and the proxy's filtering holds: environment variables, extra labels and mount options never reach the collector. |
+| `test_a_refused_request_fails_the_round_and_never_reaches_the_daemon` | A 403 attack never reaches the fake daemon (its request log stays empty), and a 403 on the listing makes the collector report a failed `forbidden` round rather than an empty list. |
+| `test_upstream_failures_become_a_generic_502_without_details` *(3 inputs)* | Upstream non-200, illegal JSON and an over-8-MiB answer each return the fixed 502 text with no upstream detail. |
+| `test_an_upstream_timeout_becomes_a_generic_502` | A daemon that never answers trips the proxy's upstream timeout and is reduced to the fixed 502. |
+| `test_a_502_on_the_listing_fails_the_round_with_a_fixed_reason` | A 502 on the container list fails the round with the `upstream` reason and its readable text. |
+| `test_one_container_detail_failure_leaves_the_other_and_is_listed_apart` | One container's inspect failing only removes that container; the round stays `ok`, the other is produced, and the failure is listed apart. |
+| `test_one_container_stats_failure_keeps_its_detail_and_marks_the_stats_stage` | One container's stats failing keeps its detail, drops only its usage, and marks the `stats` stage while the healthy container's stats still arrive. |
+| `test_a_connection_closed_by_the_proxy_fails_the_round_without_raising` | With every proxy connection slot held, the collector's new connection is closed and the round is reported as `closed` instead of crashing. |
+| `test_over_limit_connections_are_closed_and_capacity_recovers` | The connection beyond the limit is closed immediately and the proxy serves requests again once a slot frees. |
 
 ### test_endpoints_require_auth.py
 

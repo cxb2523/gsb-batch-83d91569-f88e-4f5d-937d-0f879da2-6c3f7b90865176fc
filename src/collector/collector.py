@@ -909,14 +909,36 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
         self.sock = connection
 
 
+class DockerProxyError(OSError):
+    """A failure of the read-only Docker proxy itself. The code is a fixed vocabulary entry (never raw text), so a
+    check-in can say what went wrong without repeating anything the proxy deliberately hides."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+# What the proxy says, mapped to the fixed reasons a check-in is allowed to carry.
+_PROXY_STATUS_REASONS = {403: "forbidden", 502: "upstream"}
+
+
 def _docker_request(socket_path: str, endpoint: str) -> Any:
     connection = _UnixHTTPConnection(socket_path)
-    connection.request("GET", endpoint, headers={"Host": "localhost", "Connection": "close"})
-    response = connection.getresponse()
-    body = response.read()
-    connection.close()
-    if response.status != 200:
-        raise OSError(f"Docker API returned HTTP {response.status}")
+    try:
+        connection.request("GET", endpoint, headers={"Host": "localhost", "Connection": "close"})
+        response = connection.getresponse()
+        body = response.read()
+        status = response.status
+    except (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError) as error:
+        # The proxy closes over-limit or stalled clients without answering; that is a round failure, not a crash.
+        raise DockerProxyError("closed") from error
+    finally:
+        connection.close()
+    if status in _PROXY_STATUS_REASONS:
+        # 403: the proxy refused the request; 502: the daemon failed, timed out, answered too large or not in JSON.
+        raise DockerProxyError(_PROXY_STATUS_REASONS[status])
+    if status != 200:
+        raise OSError(f"Docker API returned HTTP {status}")
     return json.loads(body or b"null")
 
 
@@ -932,8 +954,25 @@ def _docker_time(value: Any) -> str | None:
     return f"{match.group(0)}Z" if match and int(match.group(0)[:4]) >= 2000 else None
 
 
+# Readable, fixed wording for each reason code. No exception text or upstream detail is ever interpolated in,
+# so a check-in can explain the round without leaking anything the proxy cut out.
+DOCKER_REASON_TEXT = {
+    "forbidden": "The read-only Docker proxy refused the request",
+    "upstream": "The Docker proxy could not get a valid answer from the Docker daemon",
+    "closed": "The read-only Docker proxy closed the connection",
+    "timeout": "The Docker API did not answer in time",
+    "refused": "The connection to the Docker API was refused",
+    "missing": "The Docker API socket does not exist",
+    "denied": "Access to the Docker API was denied",
+    "error": "The Docker API returned an error",
+}
+
+
 def _docker_failure_reason(error: BaseException) -> str:
     """A coarse, fixed-vocabulary reason, never the raw error text."""
+    if isinstance(error, DockerProxyError):
+        # The proxy refused the request, the daemon behind it failed, or it closed the connection itself.
+        return error.code
     if isinstance(error, TimeoutError):
         return "timeout"
     if isinstance(error, ConnectionRefusedError):
@@ -945,12 +984,22 @@ def _docker_failure_reason(error: BaseException) -> str:
     return "error"
 
 
+def _container_error(container_id: str, stage: str, error: BaseException) -> dict[str, str]:
+    """One failed container, in the fixed shape the check-in lists apart from the containers that did come through."""
+    return {"container_id": container_id[:128], "stage": stage, "reason": _docker_failure_reason(error)}
+
+
 def collect_containers(socket_path: str | None = None, info: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """Every container with its state and usage. ``info`` receives how long listing them took."""
+    """Every container with its state and usage. ``info`` receives how long listing them took and, under
+    ``container_errors``, the containers whose detail or stats could not be read this round. A failure on one
+    container never removes the others."""
     # The read-only proxy is preferred: it keeps the Docker socket, which is root on the host, out of this container.
     socket_path = socket_path or os.getenv("INFRADECK_DOCKER_HOST") or os.getenv("DOCKER_SOCKET_PATH", "/var/run/docker.sock")
     if not Path(socket_path).exists():
         return []
+    container_errors: list[dict[str, str]] = []
+    if info is not None:
+        info.setdefault("container_errors", container_errors)
     listing_started = time.monotonic()
     containers = _docker_request(socket_path, "/containers/json?all=1")
     if info is not None:
@@ -964,13 +1013,18 @@ def collect_containers(socket_path: str | None = None, info: dict[str, Any] | No
             continue
         try:
             detail = _docker_request(socket_path, f"/containers/{container_id}/json")
-        except (OSError, ValueError, http.client.HTTPException):
+        except (OSError, ValueError, http.client.HTTPException) as error:
             # A container removed between listing and inspecting it must not fail the whole collection.
+            container_errors.append(_container_error(container_id, "inspect", error))
             continue
         state = detail.get("State") or {}
         status = state.get("Status") or item.get("State") or "unknown"
         health = (state.get("Health") or {}).get("Status")
-        usage_stats = _container_usage(socket_path, container_id) if status == "running" else {}
+        usage_stats: dict[str, Any] = {}
+        if status == "running":
+            usage_stats, stats_error = _container_usage(socket_path, container_id)
+            if stats_error is not None:
+                container_errors.append(_container_error(container_id, "stats", stats_error))
         stopped = str(status).lower() in _STOPPED
         exit_code = state.get("ExitCode")
         image_id = detail.get("Image")
@@ -993,8 +1047,16 @@ def collect_containers(socket_path: str | None = None, info: dict[str, Any] | No
             **({"swap_mb": swap} if status == "running" and (swap := container_swap_mb(container_id)) is not None else {}),
         })
     if containers and not result:
-        # Listing worked but nothing could be inspected: the daemon is failing, not empty.
+        # Listing worked but nothing could be inspected: the daemon is failing, not empty. Keep the reason the
+        # inspects gave when they all agreed (e.g. the proxy answered 502 for every container).
+        if info is not None:
+            info["container_errors"] = container_errors
+        reasons = {error.get("reason") for error in container_errors}
+        if len(reasons) == 1 and next(iter(reasons)) in {"forbidden", "upstream", "closed"}:
+            raise DockerProxyError(next(iter(reasons)))
         raise OSError("no container could be inspected")
+    if info is not None:
+        info["container_errors"] = container_errors
     return result
 
 
@@ -1043,25 +1105,35 @@ def _remember_docker_disk(socket_path: str, now: float | None = None) -> None:
 def collect_docker(socket_path: str | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Containers plus a verdict on the Docker API: ``ok``, ``unreachable`` or ``not_configured``.
 
-    "No Docker on this host" is not an error, and an empty list is not proof of a problem, so the
-    backend only alerts on ``unreachable`` for a host that had Docker working before.
+    Every round carries an explicit conclusion rather than an ambiguous empty list: a successful round says how
+    many containers it produced (``docker_container_count``) and lists apart any individual container whose detail
+    or stats failed (``docker_container_errors``); a failed round says why with a fixed reason code
+    (``docker_reason``) and a short readable sentence (``docker_reason_text``). "No Docker on this host" is not an
+    error, so the backend only alerts on ``unreachable`` for a host that had Docker working before.
     """
     explicit = socket_path or os.getenv("INFRADECK_DOCKER_HOST")
     target = explicit or os.getenv("DOCKER_SOCKET_PATH", "/var/run/docker.sock")
     if not Path(target).exists():
         # A proxy that is configured but missing is a failure; a host that simply has no Docker socket is not.
         if explicit:
-            return [], {"docker_status": "unreachable", "docker_reason": "missing", "docker_latency_ms": None}
-        return [], {"docker_status": "not_configured", "docker_reason": None, "docker_latency_ms": None}
+            return [], {"docker_status": "unreachable", "docker_reason": "missing", "docker_reason_text": DOCKER_REASON_TEXT["missing"],
+                        "docker_latency_ms": None, "docker_container_count": 0, "docker_container_errors": []}
+        return [], {"docker_status": "not_configured", "docker_reason": None, "docker_reason_text": None,
+                    "docker_latency_ms": None, "docker_container_count": None, "docker_container_errors": []}
     info: dict[str, Any] = {}
     try:
         containers = collect_containers(target, info)
         _remember_docker_version(target)
         _remember_docker_disk(target)
     except (OSError, ValueError, http.client.HTTPException) as error:
+        reason = _docker_failure_reason(error)
         print(f"Docker metrics unavailable ({type(error).__name__}); sending host metrics only", flush=True)
-        return [], {"docker_status": "unreachable", "docker_reason": _docker_failure_reason(error), "docker_latency_ms": info.get("latency_ms")}
-    return containers, {"docker_status": "ok", "docker_reason": None, "docker_latency_ms": info.get("latency_ms")}
+        return [], {"docker_status": "unreachable", "docker_reason": reason, "docker_reason_text": DOCKER_REASON_TEXT.get(reason, DOCKER_REASON_TEXT["error"]),
+                    "docker_latency_ms": info.get("latency_ms"), "docker_container_count": 0,
+                    "docker_container_errors": info.get("container_errors", [])}
+    return containers, {"docker_status": "ok", "docker_reason": None, "docker_reason_text": None,
+                        "docker_latency_ms": info.get("latency_ms"), "docker_container_count": len(containers),
+                        "docker_container_errors": info.get("container_errors", [])}
 
 
 COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
@@ -1126,6 +1198,10 @@ def _fetch_stats(socket_path: str, container_id: str) -> Any:
     if tried_one_shot:
         try:
             return _docker_request(socket_path, f"{base}&one-shot=true")
+        except DockerProxyError:
+            # A proxy refusal, an upstream failure or a closed connection is not an "old proxy" answer: pass it on
+            # with its reason intact instead of retrying and labelling the container with a generic error.
+            raise
         except (OSError, ValueError):
             pass
     stats = _docker_request(socket_path, base)
@@ -1161,11 +1237,15 @@ def _cpu_percent(container_id: str, stats: dict[str, Any]) -> float | None:
     return round(cpu_delta / system_delta * cores * 100, 2)
 
 
-def _container_usage(socket_path: str, container_id: str) -> dict[str, Any]:
+def _container_usage(socket_path: str, container_id: str) -> tuple[dict[str, Any], BaseException | None]:
+    """One container's usage figures and, when its stats could not be read, the failure that stopped them.
+
+    The container itself is still reported (with state and metadata); only the usage fields are missing.
+    """
     try:
         stats = _fetch_stats(socket_path, container_id)
-    except (OSError, ValueError):
-        return {}
+    except (OSError, ValueError) as error:
+        return {}, error
     usage: dict[str, Any] = {}
     try:
         cpu_pct = _cpu_percent(container_id, stats)
@@ -1192,7 +1272,7 @@ def _container_usage(socket_path: str, container_id: str) -> dict[str, Any]:
         usage["pids"] = (stats.get("pids_stats") or {}).get("current")
     except (ValueError, KeyError, TypeError, AttributeError):
         pass
-    return usage
+    return usage, None
 
 
 # ---------- availability checks ----------

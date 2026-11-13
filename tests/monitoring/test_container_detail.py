@@ -84,8 +84,9 @@ def test_container_usage_parses_docker_stats(monkeypatch):
     }
     monkeypatch.setattr(collector, "_docker_request", lambda socket_path, endpoint: stats)
 
-    usage = collector._container_usage("/sock", "abc")
+    usage, error = collector._container_usage("/sock", "abc")
 
+    assert error is None
     assert usage["cpu_pct"] == 200.0
     assert usage["memory_used_mb"] == 200.0
     assert usage["memory_pct"] == 20.0
@@ -107,9 +108,9 @@ def test_cpu_is_the_change_since_the_previous_check_in_and_the_first_has_none(mo
     readings = iter([_one_shot(100, 1000), _one_shot(300, 1400), _one_shot(300, 1800)])
     monkeypatch.setattr(collector, "_docker_request", lambda socket_path, endpoint: next(readings))
 
-    first = collector._container_usage("/sock", "abc")
-    second = collector._container_usage("/sock", "abc")
-    idle = collector._container_usage("/sock", "abc")
+    first = collector._container_usage("/sock", "abc")[0]
+    second = collector._container_usage("/sock", "abc")[0]
+    idle = collector._container_usage("/sock", "abc")[0]
 
     assert "cpu_pct" not in first            # unknown, not zero
     assert second["cpu_pct"] == 200.0        # 200 of 400 CPU time across 4 cores
@@ -123,8 +124,8 @@ def test_containers_do_not_share_cpu_history(monkeypatch):
     for name in ("a", "b"):
         collector._container_usage("/sock", name)
 
-    assert collector._container_usage("/sock", "a")["cpu_pct"] == 100.0
-    assert collector._container_usage("/sock", "b")["cpu_pct"] == 40.0
+    assert collector._container_usage("/sock", "a")[0]["cpu_pct"] == 100.0
+    assert collector._container_usage("/sock", "b")[0]["cpu_pct"] == 40.0
 
 
 def test_a_counter_that_goes_backwards_skips_that_sample_and_recovers(monkeypatch):
@@ -132,8 +133,8 @@ def test_a_counter_that_goes_backwards_skips_that_sample_and_recovers(monkeypatc
     monkeypatch.setattr(collector, "_docker_request", lambda socket_path, endpoint: next(readings))
 
     collector._container_usage("/sock", "abc")
-    restarted = collector._container_usage("/sock", "abc")
-    after = collector._container_usage("/sock", "abc")
+    restarted = collector._container_usage("/sock", "abc")[0]
+    after = collector._container_usage("/sock", "abc")[0]
 
     assert "cpu_pct" not in restarted        # the container restarted
     assert after["cpu_pct"] == 100.0         # measured from the new baseline
@@ -151,10 +152,10 @@ def test_the_normal_request_is_used_when_one_shot_is_refused_and_remembered(monk
 
     monkeypatch.setattr(collector, "_docker_request", fake)
 
-    assert collector._container_usage("/sock", "abc")["cpu_pct"] == 200.0
+    assert collector._container_usage("/sock", "abc")[0]["cpu_pct"] == 200.0
     assert collector._one_shot_unsupported
     asked.clear()
-    assert collector._container_usage("/sock", "abc")["cpu_pct"] == 200.0
+    assert collector._container_usage("/sock", "abc")[0]["cpu_pct"] == 200.0
     assert asked == ["/containers/abc/stats?stream=false"]   # no wasted one-shot attempt next time
 
 
@@ -164,7 +165,8 @@ def test_a_container_that_vanished_does_not_make_one_shot_look_unsupported(monke
 
     monkeypatch.setattr(collector, "_docker_request", gone)
 
-    assert collector._container_usage("/sock", "abc") == {}
+    usage, error = collector._container_usage("/sock", "abc")
+    assert usage == {} and error is not None
     assert not collector._one_shot_unsupported
 
 
@@ -173,7 +175,7 @@ def test_hostile_cpu_counters_give_no_figure_and_no_crash(monkeypatch, bad):
     readings = iter([_one_shot(100, 1000), _one_shot(bad, 1400), _one_shot(200, bad), _one_shot(300, 1800)])
     monkeypatch.setattr(collector, "_docker_request", lambda socket_path, endpoint: next(readings))
 
-    results = [collector._container_usage("/sock", "abc") for _ in range(3)]
+    results = [collector._container_usage("/sock", "abc")[0] for _ in range(3)]
 
     assert all("cpu_pct" not in usage for usage in results[:2])
 

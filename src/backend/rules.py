@@ -250,6 +250,9 @@ DOCKER_REASONS = {
     "refused": "the connection to the Docker API was refused",
     "missing": "the Docker API socket does not exist",
     "denied": "access to the Docker API was denied",
+    "forbidden": "the read-only Docker proxy refused the request",
+    "upstream": "the Docker proxy could not get a valid answer from the Docker daemon",
+    "closed": "the read-only Docker proxy closed the connection",
     "error": "the Docker API returned an error",
 }
 

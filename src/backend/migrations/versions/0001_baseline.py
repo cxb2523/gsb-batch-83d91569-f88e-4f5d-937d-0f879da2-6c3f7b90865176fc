@@ -371,6 +371,9 @@ def _create_tables() -> None:
     sa.Column('docker_status', sa.String(length=16), nullable=True),
     sa.Column('docker_reason', sa.String(length=16), nullable=True),
     sa.Column('docker_latency_ms', sa.Integer(), nullable=True),
+    sa.Column('docker_container_count', sa.Integer(), nullable=True),
+    sa.Column('docker_reason_text', sa.String(length=255), nullable=True),
+    sa.Column('docker_container_errors', sa.Text(), nullable=True),
     sa.Column('internet_status', sa.String(length=16), nullable=True),
     sa.Column('internet_latency_ms', sa.Integer(), nullable=True),
     sa.Column('collect_duration_ms', sa.Integer(), nullable=True),
@@ -561,6 +564,7 @@ def _bring_up_to_date(bind) -> None:
             ("boot_id", "VARCHAR(64)"), ("oom_kill_total", "INTEGER"), ("kernel_tainted", "INTEGER"),
             ("ntp_synced", "BOOLEAN"), ("reboot_required", "BOOLEAN"), ("last_shutdown", "VARCHAR(16)"),
             ("docker_status", "VARCHAR(16)"), ("docker_reason", "VARCHAR(16)"), ("docker_latency_ms", "INTEGER"),
+            ("docker_container_count", "INTEGER"), ("docker_reason_text", "VARCHAR(255)"), ("docker_container_errors", "TEXT"),
             ("internet_status", "VARCHAR(16)"), ("internet_latency_ms", "INTEGER"), ("collect_duration_ms", "INTEGER"),
         ):
             execute(f"ALTER TABLE host_metrics ADD COLUMN IF NOT EXISTS {column} {column_type}")

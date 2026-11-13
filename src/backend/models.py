@@ -219,6 +219,11 @@ class HostMetric(Base):
     docker_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     docker_reason: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     docker_latency_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # The explicit verdict of one collection round: how many containers came through, a short readable reason when
+    # the round failed, and the individual containers whose detail or stats failed while the rest succeeded.
+    docker_container_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    docker_reason_text: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    docker_container_errors: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Whether the host can reach the internet (ok | degraded | dns_failed | down); None when the check is off.
     internet_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     internet_latency_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
