@@ -1,0 +1,139 @@
+name: Bug report
+description: The scraper ran but the result was wrong, empty, or it crashed.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before anything else: never paste an API key, a proxy password or a
+        full `ws://user:pass@...` endpoint into a public issue.** The scrapers
+        mask credentials in their own logs, but raw HTML dumps do not.
+        Replace them with `***`.
+
+        A few things answer most reports faster than we can:
+
+        - **Exit 3 (blocked)?** Almost always the EXIT ADDRESS: this edge
+          answers a refused address with a ~195-byte 403 (`x-reference-error`
+          header), robots.txt included. A different exit fixes it; a captcha
+          key does not — no captcha has been observed on this host. See the
+          README's "The exit decides whether anything works".
+        - **Exit 4 (nothing found)?** Read the log line naming the grid. A
+          menu entry can be a "view all" parent that lists no products of its
+          own; `--list-categories` shows every grid and its trail.
+        - **Exit 5?** The content was never obtained — a request kept
+          failing, or a response was not the JSON the endpoint promises. The
+          log names each failed URL and why.
+        - **Exit 6?** Some grids or batches failed; the rows that were read
+          are written, and `<out>.meta.json` lists the failed URLs.
+        - **Many rows for one product?** By design: a row is one SKU, a
+          (product, colour, size) triple. `product_id` is the id the product
+          URL carries.
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Which engine
+      options:
+        - api_scraper.py (the primary engine — start here)
+        - playwright_scraper.py
+        - puppeteer_scraper.py
+        - selenium_scraper.py
+        - scraper_api_client.py
+        - fingerprint_client.py
+        - other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Which --mode
+      options:
+        - category
+        - product
+        - not applicable
+    validations:
+      required: true
+
+  - type: dropdown
+    id: browser_route
+    attributes:
+      label: How was the browser reached
+      options:
+        - No browser at all (api_scraper.py, plain HTTPS through a proxy)
+        - A browser the script launched itself
+        - A remote browser over --cdp-endpoint
+        - No browser (scraper_api_client.py, through the vendor's exits)
+        - Not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: exit_code
+    attributes:
+      label: Exit code
+      description: >-
+        `echo $?` straight after the run. These mean specific things — 3 is
+        refused, 4 is a true empty answer, 5 is "the content was never
+        obtained", 6 is a partial run. The table is in the README.
+      placeholder: "4"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command
+      description: With credentials replaced by `***`.
+      render: shell
+      placeholder: |
+        python3 api_scraper.py \
+          --category "WOMEN / SALE" --max-grids 1 --out bershka_products
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: >-
+        The whole run, not just the last line — the useful detail is usually
+        upstream of the error. Credentials replaced by `***`.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      placeholder: >-
+        131 rows, as the README says "WOMEN / SALE / Bershka / Dresses and
+        jumpsuits" yielded on 2026-09-20.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Please run and paste:
+        ```
+        python3 -c "import sys, platform; print(sys.version, platform.platform())"
+        pip list 2>/dev/null | grep -Ei "playwright|pyppeteer|selenium|beautifulsoup4|requests|webdriver"
+        python3 smoke_test.py | tail -3
+        ```
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: The offline suite passes on my machine (`python3 smoke_test.py`)
+          required: true
+        - label: I removed every API key, password and credentialled URL from this report
+          required: true
