@@ -29,6 +29,94 @@ from fantoma.session import SessionManager
 
 log = logging.getLogger("fantoma")
 
+# Field types accepted by Fantoma.collect_fields.
+_FIELD_TYPES = ("text", "value", "select")
+
+# JavaScript run on a resolved element handle to read one field. Kept as
+# module constants (instead of inline strings) so tests can recognise which
+# read a fake element was asked for.
+
+# Visible text. innerText only carries RENDERED text: a display:none /
+# aria-hidden element contributes nothing, which is what "visible text" means.
+_FIELD_TEXT_JS = """el => {
+    if (!el) return null;
+    const raw = typeof el.innerText === 'string' ? el.innerText : (el.textContent || '');
+    return raw.replace(/\\s+/g, ' ').trim();
+}"""
+
+# Current value of an input-like control. A type mismatch is reported, not
+# guessed: pointing "value" at a plain <div> must come back as a failure.
+_FIELD_VALUE_JS = """el => {
+    if (!el) return {ok: false, reason: 'element not found'};
+    const tag = el.tagName;
+    if (el.isContentEditable) {
+        return {ok: true, value: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()};
+    }
+    if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') {
+        return {ok: false, reason: 'not an input element (got <' + tag.toLowerCase() + '>)'};
+    }
+    return {ok: true, value: el.value == null ? '' : String(el.value)};
+}"""
+
+# Current selection of a dropdown, native or scripted.
+# Native <select>: the selected option's label.
+# role=combobox/listbox: explicit selection signals (aria-activedescendant,
+# aria-selected on an option the control owns or points at via
+# aria-controls/aria-owns) first, then the text the control itself displays.
+# A dropdown with no selection signal returns ok=false — never an empty label.
+_FIELD_SELECT_JS = """el => {
+    if (!el) return {ok: false, reason: 'element not found'};
+    const clean = s => (s || '').replace(/\\s+/g, ' ').trim();
+    const labelOf = node => clean(node.getAttribute('aria-label') || node.innerText
+        || node.textContent || '');
+    const tag = el.tagName;
+    const role = (el.getAttribute('role') || '').toLowerCase();
+
+    if (tag === 'SELECT') {
+        const opt = el.selectedIndex >= 0 ? el.options[el.selectedIndex] : null;
+        if (!opt) return {ok: false, reason: 'native <select> has no selected option'};
+        return {ok: true, value: clean(opt.label || opt.textContent || opt.value || '')};
+    }
+    if (role !== 'combobox' && role !== 'listbox') {
+        return {ok: false, reason: 'not a dropdown: expected <select> or role=combobox/listbox '
+            + '(got <' + tag.toLowerCase() + (role ? ' role=' + role : '') + '>)'};
+    }
+
+    // 1. aria-activedescendant names the option the control currently holds.
+    const activeId = (el.getAttribute('aria-activedescendant') || '').split(/\\s+/)[0];
+    if (activeId) {
+        const active = document.getElementById(activeId);
+        if (active) {
+            const label = labelOf(active);
+            if (label) return {ok: true, value: label};
+        }
+    }
+    // 2. An option marked aria-selected inside the control itself...
+    const ownPick = el.querySelector('[role="option"][aria-selected="true"]');
+    if (ownPick) {
+        const label = labelOf(ownPick);
+        if (label) return {ok: true, value: label};
+    }
+    // ...or inside the popup the control owns.
+    const popupId = (el.getAttribute('aria-controls') || el.getAttribute('aria-owns') || '')
+        .split(/\\s+/)[0];
+    const popup = popupId ? document.getElementById(popupId) : null;
+    if (popup) {
+        const pick = popup.querySelector('[role="option"][aria-selected="true"]');
+        if (pick) {
+            const label = labelOf(pick);
+            if (label) return {ok: true, value: label};
+        }
+    }
+    // 3. The control itself shows the choice. An input carries it in value;
+    //    a select-only combobox renders the label as its own text.
+    const shown = (tag === 'INPUT' || tag === 'TEXTAREA')
+        ? (el.value || '') : (el.innerText || el.textContent || '');
+    const label = clean(shown);
+    if (label) return {ok: true, value: label};
+    return {ok: false, reason: 'scripted dropdown (role=' + role + ') has no selected option'};
+}"""
+
 
 class Fantoma:
     """The Fantoma browser tool.
@@ -763,6 +851,155 @@ class Fantoma:
         if data is None:
             return []
         return data if isinstance(data, list) else [data]
+
+    # ── Field-level collection ───────────────────────────────
+
+    def collect_fields(self, fields: list[dict]) -> list[dict]:
+        """Read a batch of named fields straight from the page's live elements.
+
+        Unlike extract(), which hands page text to a model, this reads the DOM
+        itself: it can see an input's current value and the option a scripted
+        combobox currently holds — neither of which appears in page text.
+
+        Each field definition is a dict with:
+          name     — result key to report under
+          type     — "text" (visible text), "value" (an input's current value)
+                     or "select" (a dropdown's currently selected option label)
+          aria     — ARIA tree element number ([N] from get_state); or
+          selector — CSS selector for the element
+        Both locators may be given; aria wins.
+
+        One element failing never aborts the batch and its exception never
+        reaches another field's result: every field gets its own
+        {name, ok, value, reason}, with ok=False and a readable reason for
+        every failure (not found, type mismatch, no selection, empty value —
+        an empty string is never reported as success). If the page itself has
+        crashed or been closed, every field is marked failed with the same
+        readable explanation rather than the call hanging or raising.
+        """
+        reset_stuck()
+        if not isinstance(fields, (list, tuple)):
+            raise TypeError(f"fields must be a list of field definitions, got {type(fields).__name__}")
+        names = [str(f.get("name", "")) if isinstance(f, dict) else "" for f in fields]
+
+        # A crashed or closed tab never answers an evaluate; detect it the
+        # same way get_state does instead of waiting on a dead renderer.
+        try:
+            engine = self._engine
+            page = engine.get_page() if engine else None
+            if page is None:
+                return [self._field_failure(n, "page is not open — call start() first")
+                        for n in names]
+            crashed = getattr(engine, "page_crashed", None)
+            if callable(crashed) and crashed(page) is True:
+                return [self._field_failure(n, "page crashed or was closed — navigate again "
+                                               "or switch_tab before collecting fields")
+                        for n in names]
+        except Exception as e:
+            # Even the crash probe itself failing means the page is unusable.
+            reason = f"page is unavailable ({type(e).__name__}: {e})"
+            return [self._field_failure(n, reason) for n in names]
+
+        results = []
+        for field in fields:
+            # Per-field isolation: anything unexpected here is reported on
+            # this field alone, the rest of the batch keeps running.
+            try:
+                results.append(self._collect_one_field(page, field))
+            except Exception as e:
+                name = field.get("name", "") if isinstance(field, dict) else ""
+                log.warning("collect_fields(%r) failed unexpectedly: %s", name, e)
+                results.append(self._field_failure(
+                    name, f"unexpected error while collecting field: "
+                          f"{type(e).__name__}: {e}"))
+        return results
+
+    def _collect_one_field(self, page, field) -> dict:
+        if not isinstance(field, dict):
+            return self._field_failure("", f"field definition must be a dict, got {type(field).__name__}")
+        name = field.get("name", "")
+        ftype = field.get("type", "")
+        if ftype not in _FIELD_TYPES:
+            return self._field_failure(
+                name, f"unsupported field type {ftype!r}: expected one of "
+                      f"{', '.join(_FIELD_TYPES)}")
+
+        element, reason = self._resolve_field_element(page, field)
+        if element is None:
+            return self._field_failure(name, reason)
+
+        try:
+            if ftype == "text":
+                text = element.evaluate(_FIELD_TEXT_JS)
+                # The reader trims in real browsers; strip again so a
+                # whitespace-only answer can never masquerade as a value.
+                text = text.strip() if isinstance(text, str) else ""
+                if not text:
+                    return self._field_failure(name, "element has no visible text")
+                return {"name": name, "ok": True, "value": text, "reason": ""}
+
+            if ftype == "value":
+                answer = element.evaluate(_FIELD_VALUE_JS)
+                if not isinstance(answer, dict) or answer.get("ok") is not True:
+                    return self._field_failure(
+                        name, (answer or {}).get("reason", "could not read element value")
+                        if isinstance(answer, dict) else "could not read element value")
+                value = answer.get("value", "")
+                if not value:
+                    return self._field_failure(name, "input has no current value")
+                return {"name": name, "ok": True, "value": value, "reason": ""}
+
+            # select — native <select> and role=combobox/listbox alike
+            answer = element.evaluate(_FIELD_SELECT_JS)
+            if not isinstance(answer, dict) or answer.get("ok") is not True:
+                reason = answer.get("reason", "could not read dropdown selection") \
+                    if isinstance(answer, dict) else "could not read dropdown selection"
+                return self._field_failure(name, reason)
+            value = answer.get("value", "")
+            if not value:
+                return self._field_failure(name, "dropdown has no selected option")
+            return {"name": name, "ok": True, "value": value, "reason": ""}
+        except Exception as e:
+            return self._field_failure(
+                name, f"reading {ftype} failed: {type(e).__name__}: {e}")
+
+    def _resolve_field_element(self, page, field) -> tuple:
+        """Resolve a field's locator to a live element handle.
+
+        Returns (element, None) or (None, reason).
+        """
+        aria = field.get("aria")
+        selector = field.get("selector")
+        if aria is not None:
+            if not isinstance(aria, int) or isinstance(aria, bool):
+                return None, f"aria locator must be an element number (int), got {type(aria).__name__}"
+            try:
+                element = self._dom.get_element_by_index(page, aria)
+            except Exception as e:
+                return None, f"ARIA element [{aria}] could not be resolved: " \
+                             f"{type(e).__name__}: {e}"
+            if element is None:
+                return None, f"ARIA element [{aria}] not found on the page"
+            return element, None
+
+        if selector is not None:
+            if not isinstance(selector, str) or not selector.strip():
+                return None, "CSS selector must be a non-empty string"
+            try:
+                element = page.query_selector(selector)
+            except Exception as e:
+                return None, f"CSS selector {selector!r} failed: {type(e).__name__}: {e}"
+            if element is None:
+                return None, f"no element matches CSS selector {selector!r}"
+            return element, None
+
+        return None, "field has no locator: provide an aria element number or a CSS selector"
+
+    @staticmethod
+    def _field_failure(name, reason: str) -> dict:
+        # value is always "" on failure — a caller must never mistake a
+        # failure for an empty-but-successful field.
+        return {"name": name, "ok": False, "value": "", "reason": str(reason)}
 
     # ── Utilities ────────────────────────────────────────────
 
