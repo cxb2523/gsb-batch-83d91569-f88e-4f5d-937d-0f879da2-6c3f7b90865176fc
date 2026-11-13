@@ -1,0 +1,44 @@
+[build-system]
+requires = [
+  "setuptools<81",
+  "wheel<1",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sitemap-harvester"
+version = "1.0.5"
+authors = [
+    {name = "Meysam Azad", email = "meysam@developer-friendly.blog"},
+]
+description = "A tool to crawl website sitemaps and create a CSV report of URLs and their metadata"
+readme = "README.md"
+requires-python = ">=3.7,<4.0"
+classifiers = [
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "requests>=2,<3",
+    "beautifulsoup4<4.15",
+]
+
+[project.urls]
+Homepage = "https://github.com/meysam81/sitemap-harvester"
+
+[project.scripts]
+sitemap-harvester = "sitemap_harvester.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sitemap_harvester*"]
