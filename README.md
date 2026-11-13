@@ -359,6 +359,23 @@ survives a bad night. Every run that writes data writes
 failed by number, `dom_confirm`, `sponsored_rows` and
 `unauthorised_redirect`.
 
+**A `--concurrency` run also says what happened to every page.** The
+sidecar carries `page_outcomes`, one entry per page the run planned
+(`{"page": 4, "status": "fetched"}`, plus a `reason` on a failed page),
+with four statuses kept apart:
+
+| | |
+|---|---|
+| `fetched` | the page was fetched and read |
+| `failed` | the page was tried and did not yield data (exactly `pages_failed`) |
+| `skipped_exhausted` | never dispatched because the listing had ended — not a failure |
+| `skipped_workers_stopped` | never dispatched because a worker stopped (exactly `pages_unattempted`) |
+
+An exhausted skip is in neither `pages_failed` nor `pages_unattempted`: the
+catalogue had nothing left there, so nothing was missed. A run that stops
+for that reason says `pagination_exhausted`, not `completed`, even when
+it read every page it asked for.
+
 **`--allow-empty` is for a genuine empty result only.** With it, a run
 that finished and found nothing writes an empty JSON (`[]`), a CSV holding
 only its header, and a sidecar with `status: empty` and its `stop_reason`,

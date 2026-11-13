@@ -801,6 +801,96 @@ def _worker_pool(pool, worker_index: int):
     return ProxyPool(proxies[offset:] + proxies[:offset], rotate="per-run")
 
 
+# Every page of a concurrent run ends in exactly one of these states, and
+# they are recorded per page in the sidecar's `page_outcomes`. Four labels
+# rather than three because "never dispatched" has two causes worth telling
+# apart: the listing ended (nothing was missed — the run is complete) and
+# the workers stopped (pages WERE missed — the run is partial). Collapsing
+# them would make an exhausted listing's trailing pages look like a broken
+# run, which is the mistake the log used to be the only record of.
+PAGE_FETCHED = "fetched"
+PAGE_FAILED = "failed"
+PAGE_SKIPPED_EXHAUSTED = "skipped_exhausted"
+PAGE_SKIPPED_WORKERS_STOPPED = "skipped_workers_stopped"
+
+
+def _page_outcome_reason(outcome) -> str:
+    """Why a failed page failed, in the sidecar's own words.
+
+    `page_flow.stop_reason_for` is the shared naming for an EXPECTED failure.
+    A worker that raised has `state == "worker_error"`, which that helper
+    would report as `page_load_timeout` — wrong, and the one case where the
+    page's own name must win.
+    """
+    if outcome.state == "worker_error":
+        return "worker_error"
+    return page_flow.stop_reason_for(outcome)
+
+
+def _per_page_report(outcomes, planned, unattempted, exhausted):
+    """One conclusion per planned page, for the sidecar.
+
+    `planned` is every page number the run set out to fetch, page 1 included.
+    `outcomes` holds what workers returned (a page a worker raised on is in
+    there as a failure, never missing). `unattempted` is the numbers left in
+    the queue when all workers finished.
+
+    The three facts a reader needs are kept apart on purpose:
+
+      fetched                  a page that produced a usable outcome
+      failed                   a page that was ATTEMPTED and did not
+      skipped_exhausted        never dispatched because the listing ended
+      skipped_workers_stopped  never dispatched because a worker died
+
+    An exhausted skip is NOT a failure: the listing had already ended, so
+    there was nothing there to fetch. `pages_failed` and `pages_unattempted`
+    keep their existing meanings, and agree with this report: the failed
+    numbers here are exactly `pages_failed`, and the workers-stopped ones
+    are exactly `pages_unattempted` — see `_failed_pages_from` and
+    `_skipped_worker_pages_from` below.
+    """
+    by_page = {o.page_num: o for o in outcomes}
+    unattempted_set = set(unattempted)
+    report = []
+    for page_num in planned:
+        outcome = by_page.get(page_num)
+        if outcome is not None:
+            if outcome.ok:
+                report.append({"page": page_num, "status": PAGE_FETCHED})
+            else:
+                report.append({"page": page_num, "status": PAGE_FAILED,
+                               "reason": _page_outcome_reason(outcome)})
+            continue
+        # Not in results: it never left the queue. WHICH reason decides
+        # whether the run missed anything.
+        if page_num in unattempted_set:
+            report.append({
+                "page": page_num,
+                "status": (PAGE_SKIPPED_EXHAUSTED if exhausted
+                           else PAGE_SKIPPED_WORKERS_STOPPED)})
+        else:
+            # Defensive: every popped page lands in `results` even when its
+            # fetch raises, so this is a page neither fetched nor left in the
+            # queue. That cannot happen today; calling it a FAILURE if it
+            # ever did would invent damage the run cannot prove, so it is
+            # reported as never dispatched and the log/`pages_unattempted`
+            # carry the partial verdict.
+            report.append({"page": page_num,
+                           "status": PAGE_SKIPPED_WORKERS_STOPPED})
+    return report
+
+
+def _failed_pages_from(report) -> List[int]:
+    """The failed numbers in a per-page report, in page order."""
+    return [r["page"] for r in report if r["status"] == PAGE_FAILED]
+
+
+def _skipped_worker_pages_from(report) -> List[int]:
+    """The never-dispatched numbers whose cause is a stopped worker."""
+    return [r["page"] for r in report
+            if r["status"] == PAGE_SKIPPED_WORKERS_STOPPED]
+
+
 def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
     """Fetch `specs` [(page_num, url), ...] across `concurrency` workers.
 
@@ -811,6 +901,16 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
     Called for pages 2..N of a search or category listing. They are
     independent by construction: a page is an integer in the API request
     body, so page 5 can be asked for without reading page 4.
+
+    Returns `(results, unattempted, exhausted)`. `results` holds an outcome
+    for every page a worker actually STARTED (including the outcome made for
+    a page whose fetch raised); `unattempted` holds the numbers still in the
+    queue when all workers finished. `exhausted` says whether dispatch
+    stopped because the listing ended.
+
+    The caller turns those three facts into the sidecar's per-page report —
+    see `_per_page_report` — because only it knows the pages that were
+    planned and how the run is being reported.
     """
     work = queue.Queue()
     for spec in specs:
@@ -826,6 +926,12 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
 
     def worker(index: int):
         name = f"worker-{index + 1}"
+        # The spec this worker is HOLDING: popped from the queue, not yet
+        # answered. Tracked outside the inner `try` because a page leaves the
+        # queue before the fetch even starts (the delay sits between the two),
+        # and any exception from there on must record that page as FAILED
+        # rather than let it vanish. Only pages never popped are unattempted.
+        current = None
         try:
             with sync_playwright() as pw:
                 session = _BrowserSession(pw, args,
@@ -834,33 +940,21 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
                     first = True
                     while not exhausted.is_set():
                         try:
-                            page_num, url = work.get_nowait()
+                            current = work.get_nowait()
                         except queue.Empty:
                             break
+                        page_num, url = current
                         if not first:
                             time.sleep(args.delay)
                         first = False
-                        try:
-                            outcome = _fetch_one_page(session, args,
-                                                      session.pool,
-                                                      page_num, url)
-                        except Exception:  # noqa: BLE001 — recorded below
-                            # The page this worker was holding is a FAILED
-                            # page, not a lost one: it left the queue, so it
-                            # is in no other list, and dropping it reported
-                            # a run missing a page as complete. The session
-                            # may be unusable after this, so the worker
-                            # stops and leaves the rest to its siblings.
-                            logger.exception("[%s] page %d raised; it is "
-                                             "recorded as a failed page.",
-                                             name, page_num)
-                            with results_lock:
-                                results.append(PageOutcome(
-                                    page_num=page_num, url=url,
-                                    load_failed=True, state="worker_error"))
-                            break
+                        outcome = _fetch_one_page(session, args,
+                                                  session.pool,
+                                                  page_num, url)
                         with results_lock:
                             results.append(outcome)
+                        # Answered: a later failure belongs to the NEXT page,
+                        # not to this one.
+                        current = None
                         # ORGANIC rows, not rows. Past its last real page
                         # this API keeps answering 200 with nothing but the
                         # same promoted ads page 1 carried — page 18 of a
@@ -878,8 +972,22 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
                 finally:
                     session.close()
         except Exception:  # noqa: BLE001 — a dead worker must not hang the run
-            logger.exception("[%s] died; its pages will be reported as "
-                             "unattempted rather than failed.", name)
+            if current is None:
+                logger.exception("[%s] died; its pages will be reported as "
+                                 "unattempted rather than failed.", name)
+            else:
+                # The page this worker was holding is a FAILED page, not a
+                # lost one: it left the queue, so it is in no other list, and
+                # dropping it reported a run missing a page as complete. The
+                # session may be unusable after this, so the worker stops and
+                # leaves the rest to its siblings.
+                page_num, url = current
+                logger.exception("[%s] page %d raised; it is recorded as a "
+                                 "failed page.", name, page_num)
+                with results_lock:
+                    results.append(PageOutcome(
+                        page_num=page_num, url=url,
+                        load_failed=True, state="worker_error"))
 
     threads = [threading.Thread(target=worker, args=(i,),
                                 name=f"page-worker-{i + 1}")
@@ -1149,6 +1257,10 @@ def scrape(args) -> int:
     dedupe_key = "sku"
     stop_reason = "completed"
     pages_unattempted: List[int] = []
+    # The per-page conclusions of a concurrent run, or None on a sequential
+    # one. Built in the concurrent branch below from `outcomes`, the plan and
+    # the pages no worker reached — see `_per_page_report`.
+    page_report: Optional[List[dict]] = None
 
     pool = proxy_pool_from_args(args)
     if pool and args.cdp_endpoint:
@@ -1230,6 +1342,16 @@ def scrape(args) -> int:
                     logger.info("Page 1 carried no organic rows — not asking "
                                 "for more pages.")
                     stop_reason = "pagination_exhausted"
+                    if concurrency > 1:
+                        # A concurrent run that ended on page 1 still gets the
+                        # sidecar's per-page report, so a consumer reads one
+                        # shape of report whether or not workers were ever
+                        # started. Pages 2..N were planned and never
+                        # dispatched because the listing had ended — NOT
+                        # failures, and NOT `pages_unattempted`.
+                        plan = [1] + page_flow.planned_pages(args.pages)
+                        page_report = _per_page_report([first], plan,
+                                                       plan[1:], True)
                 elif args.pages > 1 and concurrency > 1:
                     session.close()
                     specs = [(n, args.url)
@@ -1240,28 +1362,54 @@ def scrape(args) -> int:
                     rest, unattempted, exhausted = _fetch_pages_concurrently(
                         args, pool, specs, concurrency)
                     outcomes.extend(rest)
-                    failed = [o for o in rest if not o.ok]
-                    if failed:
+                    # One conclusion per page this run set out to fetch,
+                    # page 1 included. It is built from the same three facts
+                    # `pages_failed` / `pages_unattempted` come from, so the
+                    # per-page report and the two aggregate fields cannot
+                    # disagree: the failed numbers in the report ARE
+                    # `pages_failed`, and its worker-stopped skips ARE
+                    # `pages_unattempted`.
+                    plan = [1] + [page_num for page_num, _url in specs]
+                    page_report = _per_page_report(outcomes, plan,
+                                                   unattempted, exhausted)
+                    # The aggregate fields are derived FROM that report rather
+                    # than alongside it, so the sidecar cannot contradict
+                    # itself: a page counted in `pages_failed` is a `failed`
+                    # row here, and a page in `pages_unattempted` is a
+                    # `skipped_workers_stopped` row. In particular an
+                    # exhausted skip is in NEITHER aggregate — it was not
+                    # tried, and the listing had nothing left to try for.
+                    failed_by_report = _failed_pages_from(page_report)
+                    if failed_by_report:
                         stop_reason = "page_failed"
-                        blocked = blocked or any(o.blocked_by for o in failed)
+                        blocked = blocked or any(o.blocked_by for o in rest
+                                                 if not o.ok)
                     elif exhausted:
+                        # Dispatch stopped because the listing ended — say
+                        # that, rather than leaving the default `completed`
+                        # in the sidecar. A reader must be able to tell a run
+                        # that walked every requested page from one that
+                        # found the catalogue's last page first.
                         stop_reason = "pagination_exhausted"
-                    if unattempted and not exhausted:
+                    pages_unattempted = _skipped_worker_pages_from(page_report)
+                    if pages_unattempted:
                         # Not the end of the listing: the workers stopped
                         # (a browser that never launched, a worker that
                         # died) with pages still queued. The run did not
                         # get what it was asked for, so it is not complete.
-                        pages_unattempted = unattempted
                         if stop_reason == "completed":
                             stop_reason = "pages_unattempted"
                         logger.warning("%d page(s) were never attempted "
                                        "because the workers stopped: %s. "
                                        "The run is reported as partial.",
-                                       len(unattempted),
-                                       ", ".join(str(n) for n in unattempted))
+                                       len(pages_unattempted),
+                                       ", ".join(str(n)
+                                                 for n in pages_unattempted))
                     elif unattempted:
                         logger.info("%d page(s) past the end of the listing "
-                                    "were not asked for: %s.",
+                                    "were not asked for: %s. They are NOT "
+                                    "failures and not `pages_unattempted`: "
+                                    "the catalogue had nothing left there.",
                                     len(unattempted),
                                     ", ".join(str(n) for n in unattempted))
                 elif args.pages > 1:
@@ -1362,7 +1510,19 @@ def scrape(args) -> int:
                              if o.dom_confirm), None),
         # Queued pages no worker reached, apart from pages_failed (tried and
         # failed). Empty unless a concurrent run's workers stopped early.
+        # Deliberately EMPTY when the QUEUE emptied because the listing
+        # ended: those pages were not missed, the catalogue had nothing left
+        # to give, and listing them here would make a correct short run
+        # report damage it did not suffer. Their per-page conclusion is
+        # `skipped_exhausted` in `page_outcomes` below.
         "pages_unattempted": pages_unattempted,
+        # One conclusion per page a concurrent run PLANNED, so which pages
+        # succeeded, which were tried and failed, and which were never
+        # dispatched can be read off the sidecar instead of reconstructed
+        # from the log. None on a sequential run, whose pages are fetched in
+        # order and whose `pages_completed`/`pages_failed` already say
+        # everything that happened.
+        "page_outcomes": page_report,
     }
 
     final_url = next((o.final_url for o in sorted(outcomes,

@@ -11,7 +11,36 @@ rather than leaving anyone to discover it from their own output.
 
 ## [Unreleased]
 
+### Added
+
+- **A `--concurrency` run now records a per-page conclusion for every page
+  it planned**, in a new `page_outcomes` array in `<out>.meta.json`: one
+  entry per page, with `fetched`, `failed` (plus a `reason`), or one of two
+  never-dispatched states — `skipped_exhausted` (the listing had ended) or
+  `skipped_workers_stopped` (a worker stopped). Until now those three
+  outcomes could only be reconstructed from the log.
+
+### Fixed
+
+- **An exhausted concurrent run reported `stop_reason: completed`, and its
+  trailing pages could read as failed or missed.** Dispatch stops when a
+  page carries no ORGANIC product, but the pages left in the queue were
+  handled as `pages_unattempted` — and left out of the sidecar entirely on
+  the exhausted branch. Now the stop reason is `pagination_exhausted`, and
+  those pages are `skipped_exhausted` in `page_outcomes` and in NEITHER
+  `pages_failed` nor `pages_unattempted`: the listing had nothing left, so
+  nothing was missed, and the run stays `complete` with exit 0.
+- **A worker that raised outside a page's fetch lost the page it held.**
+  The failure was recorded only around `_fetch_one_page`, so an exception
+  from the browser launch or teardown between two pages reported nothing.
+  The page a worker is holding is now tracked across the whole worker
+  body and recorded as `failed` wherever the exception comes from.
+
 ### Changed
+
+- `pages_failed` and `pages_unattempted` are now derived from
+  `page_outcomes` rather than gathered alongside it, so the sidecar cannot
+  carry a page in one aggregate and a different status in the report.
 
 - CI only: the canary now runs weekly (Mondays 19:17 UTC) and on a manual dispatch, with its optional secret `WOOLWORTHS_PROXY` passed on every run; the daily schedule is removed.
 - Docs: the README's canary paragraph now describes the workflow as it runs — weekly and on dispatch, ungated, headful under Xvfb, red on a refusal — instead of a daily run that skipped without a proxy secret.

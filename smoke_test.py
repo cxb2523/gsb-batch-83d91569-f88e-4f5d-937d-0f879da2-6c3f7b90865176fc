@@ -1313,6 +1313,125 @@ def test_workers_that_never_launch_leave_a_partial_run():
     assert meta["pages_unattempted"] == [2, 3, 4], meta["pages_unattempted"]
 
 
+# ---------------------------------------------------------------------------
+# The per-page conclusion (`page_outcomes`), the sidecar's answer to "which
+# pages succeeded, which were tried and failed, which were never dispatched?"
+# ---------------------------------------------------------------------------
+def _report_of(meta):
+    """{page: status} from a sidecar's per-page report."""
+    return {r["page"]: r["status"] for r in meta["page_outcomes"]}
+
+
+@check
+def test_a_normal_concurrent_run_reports_one_conclusion_per_page():
+    """No exhaustion: every planned page is `fetched`, and the report agrees
+    with `pages_completed` rather than being a second, driftable count."""
+    if PW is None:
+        return
+    rc, meta = _scrape_with_stub_workers(
+        lambda s, a, p, n, u: _outcome(n, _organic(3, n * 100),
+                                       state="content"),
+        pages=6, concurrency=3)
+    report = meta["page_outcomes"]
+    assert [r["page"] for r in report] == [1, 2, 3, 4, 5, 6], report
+    assert all(r["status"] == PW.PAGE_FETCHED for r in report), report
+    assert len([r for r in report if r["status"] == PW.PAGE_FETCHED]) == \
+        meta["pages_completed"], (report, meta["pages_completed"])
+    assert meta["pages_failed"] == [] and meta["pages_unattempted"] == [], meta
+
+
+@check
+def test_an_ads_only_page_reports_exhaustion_not_failure():
+    """The listing's real last page is followed by pages of nothing but ads.
+
+    Stop reason is `pagination_exhausted` — NOT the default `completed` —
+    and the pages that were never dispatched are `skipped_exhausted`: not
+    tried, nothing missed, and in NEITHER `pages_failed` NOR
+    `pages_unattempted`. The run is complete, exit 0.
+    """
+    if PW is None:
+        return
+    ads_only = [Product(sku="ad1", is_sponsored=True),
+                Product(sku="ad2", is_sponsored=True)]
+
+    def ads_from_4(session, args, pool, page_num, url):
+        if page_num >= 4:
+            return _outcome(page_num, list(ads_only), state="content")
+        return _outcome(page_num, _organic(3, page_num * 100), state="content")
+
+    rc, meta = _scrape_with_stub_workers(ads_from_4, pages=20, concurrency=2)
+    report = _report_of(meta)
+    assert meta["stop_reason"] == "pagination_exhausted", meta["stop_reason"]
+    assert meta["pages_failed"] == [], meta["pages_failed"]
+    assert meta["pages_unattempted"] == [], (
+        "an exhausted listing's unasked-for pages were recorded as missed — "
+        f"{meta['pages_unattempted']}")
+    last_fetched = max(p for p, s in report.items() if s == PW.PAGE_FETCHED)
+    assert last_fetched >= 4, f"the ads-only page never ran: {report}"
+    assert report[last_fetched + 1] == PW.PAGE_SKIPPED_EXHAUSTED, report
+    assert all(report[p] == PW.PAGE_SKIPPED_EXHAUSTED
+               for p in range(last_fetched + 1, 21)), report
+    assert not [p for p, s in report.items()
+                if s == PW.PAGE_SKIPPED_WORKERS_STOPPED], report
+    assert rc == 0 and meta["status"] == "complete", (rc, meta["status"])
+
+
+@check
+def test_a_worker_that_raises_is_failed_in_the_per_page_report():
+    """The page a worker held when it raised is `failed` with its own reason,
+    `pages_failed` agrees, and the run exits 6 — partial."""
+    if PW is None:
+        return
+
+    def raise_on_3(session, args, pool, page_num, url):
+        if page_num == 3:
+            raise RuntimeError("worker died on purpose")
+        return _outcome(page_num, _organic(3, page_num * 100), state="content")
+
+    rc, meta = _scrape_with_stub_workers(raise_on_3, pages=5, concurrency=2)
+    report = _report_of(meta)
+    assert report.get(3) == PW.PAGE_FAILED, report
+    assert next(r["reason"] for r in meta["page_outcomes"]
+                if r["page"] == 3) == "worker_error", meta["page_outcomes"]
+    assert meta["pages_failed"] == [3], meta["pages_failed"]
+    assert rc == output_writer.EXIT_PARTIAL, rc
+    assert meta["status"] == "partial", meta["status"]
+
+
+@check
+def test_pages_unattempted_agrees_with_the_per_page_report():
+    """The two aggregates and the report are one account of the run.
+
+    A page in `pages_unattempted` is a `skipped_workers_stopped` row, and a
+    page in `pages_failed` is a `failed` row — never both lists, never
+    neither. This is the invariant the whole change exists to make readable.
+    """
+    if PW is None:
+        return
+    opens = []
+
+    class _DeadWorkers(_FakeSession):
+        def open(self):
+            opens.append(1)
+            if len(opens) > 1:          # page 1's browser works
+                raise RuntimeError("browser failed to launch")
+            return self
+
+    rc, meta = _scrape_with_stub_workers(
+        lambda s, a, p, n, u: _outcome(n, _organic(3, n * 100),
+                                       state="content"),
+        pages=5, concurrency=2, session_cls=_DeadWorkers)
+    report = _report_of(meta)
+    workers_skipped = sorted(p for p, s in report.items()
+                             if s == PW.PAGE_SKIPPED_WORKERS_STOPPED)
+    assert workers_skipped == meta["pages_unattempted"], (
+        f"report says {workers_skipped}, sidecar says "
+        f"{meta['pages_unattempted']}")
+    assert set(meta["pages_unattempted"]).isdisjoint(meta["pages_failed"]), meta
+    assert set(report) == set(range(1, 6)), sorted(report)
+    assert rc == 6, rc
+
+
 @check
 def test_pyppeteer_proxy_auth_and_identity_survive_current_chromium():
     """page.authenticate needs a CDP method current Chromium removed, so the
