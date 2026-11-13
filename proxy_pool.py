@@ -231,6 +231,11 @@ class ProxyPool:
                 "spread a run across more of them.",
                 len(proxies), len(unique), len(proxies) - len(unique))
         self._proxies = unique
+        # Readable by the caller, not only by the log: how many entries the
+        # collapse above threw away. A run report can then say "the file
+        # listed 50 exits; 49 were the same address pasted twice" instead of
+        # that fact living only in a warning line nobody greps for.
+        self.duplicates_dropped = len(proxies) - len(unique)
         if shuffle:
             # Two runs started at the same minute otherwise hammer the same
             # first exit in the list.
@@ -239,6 +244,13 @@ class ProxyPool:
         self._index = 0
         # Counted so a run can report how many exits it actually burned.
         self.rotations = 0
+        # One record per actual switch, in order — the data behind the log
+        # lines, so a caller can answer "how many exits did this run use, and
+        # why did it leave each one" without parsing logs. Each record holds
+        # the rotation number, the reason given to advance(), and the exit
+        # switched TO, already masked: a record is something a run report may
+        # serialize, so it must never carry a password.
+        self._rotation_log: List[dict] = []
 
     def __len__(self) -> int:
         return len(self._proxies)
@@ -252,6 +264,16 @@ class ProxyPool:
         concurrency stop being worth it.
         """
         return list(self._proxies)
+
+    @property
+    def rotation_log(self) -> List[dict]:
+        """A copy of the switch records, oldest first.
+
+        Each record is {"rotation": n, "reason": str, "exit": masked_url}.
+        The exit is stored via mask() at switch time, so the password of an
+        authenticated exit can never reach a run report through here.
+        """
+        return [dict(record) for record in self._rotation_log]
 
     @property
     def current(self) -> str:
@@ -272,6 +294,11 @@ class ProxyPool:
             return self.current
         self._index = (self._index + 1) % len(self._proxies)
         self.rotations += 1
+        self._rotation_log.append({
+            "rotation": self.rotations,
+            "reason": reason,
+            "exit": mask(self.current),
+        })
         logger.info("Rotated proxy (%s) -> %s [exit %d/%d, rotation #%d]",
                     reason, mask(self.current), (self._index % len(self._proxies)) + 1,
                     len(self._proxies), self.rotations)
