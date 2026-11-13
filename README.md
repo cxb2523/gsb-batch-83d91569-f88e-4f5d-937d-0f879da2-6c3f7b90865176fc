@@ -16,7 +16,9 @@ flowchart LR
   Contract[Soroban Sentinel contract] -->|flagged events| RPC
 ```
 
-The browser uses the backend as its only application API. It renders account metrics and signal explanations, the current network/RPC status, and a paginated contract event feed. If loading an older event page fails, already-loaded events remain visible and the failed cursor can be retried. The dashboard keeps up to five successful account assessments in the current page session so analysts can revisit recent results without storing them across reloads. The event feed requires a deployed contract ID configured in the backend.
+The browser uses the backend as its only application API. It renders account metrics and signal explanations, the current network/RPC status, and a paginated contract event feed. If loading an older event page fails, already-loaded events remain visible and the failed cursor can be retried with the same cursor. The dashboard keeps up to five successful account assessments in the current page session so analysts can revisit recent results without storing them across reloads. The event feed requires a deployed contract ID configured in the backend.
+
+The **Export CSV** action always reflects the currently visible filtered rows and is disabled while no rows match the filter. The file keeps the original event columns, retains the formula-injection guard and UTF-8 BOM, and appends an `# export metadata` section recording the export time, active filter term, loaded versus matched event counts, whether older pages remain available (`has_older_pages`), and the most recent pagination/refresh error together with its failing cursor (both blank when no failure is recorded). Event feed state and CSV construction live in `app/lib/eventFeed.ts`; `scripts/verify-event-export.mjs` covers the success, empty, and failure-retry flows against mocked responses.
 
 ## Stellar Testnet deployment
 
@@ -49,6 +51,7 @@ Open [http://localhost:3000](http://localhost:3000). `npm run start` serves a pr
 | `npm run lint` | Run ESLint across the frontend. |
 | `npm run build` | Create a production build and check compilation/types. |
 | `npm run start` | Serve the production build. |
+| `npm run verify:events` | Run the local event feed/CSV export acceptance checks (mocked event pages and failure responses). |
 
 There is no separate frontend unit-test suite configured yet. CI runs lint and build on pushes to `main` and pull requests.
 

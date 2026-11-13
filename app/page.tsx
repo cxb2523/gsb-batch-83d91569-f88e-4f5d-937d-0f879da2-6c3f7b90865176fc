@@ -1,8 +1,16 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { API_BASE, ApiError, api } from "./lib/api";
+import {
+  buildEventCsvMetadata,
+  downloadEventsCsv,
+  eventFeedReducer,
+  fetchEventPage,
+  filterEvents,
+  initialEventFeedState,
+} from "./lib/eventFeed";
 
-const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
 const dashboardSections = [
   { id: "overview", label: "Overview", icon: "◫" },
   { id: "investigate", label: "Account screening", icon: "⌕" },
@@ -21,24 +29,7 @@ type RiskResult = {
   source: { horizon_url: string; network: string };
   as_of: string;
 };
-type SentinelEvent = { id: string; ledger: number; created_at: string; agent: string; subject: string; score: number; contract_id: string; transaction_hash?: string; tx_hash?: string };
-type EventPage = { events: SentinelEvent[]; next_cursor: string | null; source?: { rpc_url: string; network: string } };
-type EventRetry = { next?: string; append: boolean };
 type NetworkStatus = { network: string; rpc_url: string; status: string; latest_ledger: number | null; oldest_ledger: number | null; observed_at: string };
-
-class ApiError extends Error {
-  constructor(message: string, readonly status: number) { super(message); }
-}
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, { ...init, headers: { "Content-Type": "application/json", ...init?.headers } });
-  if (!response.ok) {
-    let detail = `Request failed (${response.status})`;
-    try { const body = await response.json(); detail = body.detail || body.message || detail; } catch { /* response was not JSON */ }
-    throw new ApiError(detail, response.status);
-  }
-  return response.json() as Promise<T>;
-}
 
 function Mark() {
   return <span className="mark" aria-hidden="true"><svg viewBox="0 0 36 36" fill="none"><path d="M18 2.8 21.8 14l11.4 4-11.4 4L18 33.2 14.2 22 2.8 18l11.4-4L18 2.8Z"/><circle cx="18" cy="18" r="3.2"/></svg></span>;
@@ -57,24 +48,6 @@ function networkName(passphrase?: string) {
   if (passphrase.includes("Test SDF Network")) return "Testnet";
   if (passphrase.includes("Public Global Stellar Network")) return "Public network";
   return passphrase;
-}
-
-function downloadEventsCsv(events: SentinelEvent[]) {
-  const rows = [
-    ["event_id", "ledger", "created_at", "agent", "account", "score", "contract_id"],
-    ...events.map((event) => [event.id, event.ledger, event.created_at, event.agent, event.subject, event.score, event.contract_id]),
-  ];
-  const csv = rows.map((row) => row.map((value) => {
-    const text = String(value ?? "");
-    const safeText = typeof value === "string" && /^[\t\r ]*[=+@-]/.test(text) ? `'${text}` : text;
-    return `"${safeText.replaceAll('"', '""')}"`;
-  }).join(",")).join("\r\n");
-  const url = URL.createObjectURL(new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" }));
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `stellar-sentinel-events-${new Date().toISOString().slice(0, 10)}.csv`;
-  link.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function explorerUrl(network: string | undefined, type: "account" | "contract" | "tx", value: string) {
@@ -103,13 +76,8 @@ export default function HomePage() {
   const [signalSort, setSignalSort] = useState("default");
   const [addressCopyStatus, setAddressCopyStatus] = useState("");
   const [eventAddressCopyStatus, setEventAddressCopyStatus] = useState("");
-  const [events, setEvents] = useState<SentinelEvent[]>([]);
+  const [eventFeed, dispatchEventFeed] = useReducer(eventFeedReducer, initialEventFeedState);
   const [eventSearch, setEventSearch] = useState("");
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [eventsLoading, setEventsLoading] = useState(true);
-  const [eventsError, setEventsError] = useState("");
-  const [eventsRetry, setEventsRetry] = useState<EventRetry | null>(null);
-  const [eventsNetwork, setEventsNetwork] = useState("");
   const [apiOnline, setApiOnline] = useState<boolean | null>(null);
   const [network, setNetwork] = useState<NetworkStatus | null>(null);
   const [networkLoading, setNetworkLoading] = useState(true);
@@ -151,22 +119,8 @@ export default function HomePage() {
   }, []);
 
   const loadEvents = useCallback(async (next?: string, append = false) => {
-    setEventsLoading(true);
-    setEventsError("");
-    setEventsRetry(null);
-    try {
-      const query = new URLSearchParams({ limit: "20" });
-      if (next) query.set("cursor", next);
-      const page = await api<EventPage>(`/events?${query.toString()}`);
-      setEvents((current) => append ? [...current, ...page.events] : page.events);
-      setCursor(page.next_cursor);
-      if (page.source?.network) setEventsNetwork(page.source.network);
-      setApiOnline(true);
-    } catch (error) {
-      setEventsError(error instanceof Error ? error.message : "Could not load event feed.");
-      setEventsRetry({ next, append });
-      setApiOnline(error instanceof ApiError ? true : false);
-    } finally { setEventsLoading(false); }
+    const outcome = await fetchEventPage(dispatchEventFeed, next, append);
+    setApiOnline(outcome.ok || outcome.httpStatus !== null);
   }, []);
 
   useEffect(() => {
@@ -297,10 +251,22 @@ export default function HomePage() {
   const rpcLabel = network?.status || "unknown";
   const currentNetwork = networkName(network?.network);
   const formatDashboardDate = (value: string) => formatDate(value, useUtcTimestamps);
-  const normalizedEventSearch = eventSearch.trim().toLowerCase();
-  const visibleEvents = events.filter((item) =>
-    `${item.subject} ${item.agent} ${item.contract_id} ${item.transaction_hash ?? item.tx_hash ?? ""}`.toLowerCase().includes(normalizedEventSearch),
-  );
+  const { events, cursor, loading: eventsLoading, error: eventsError, failedCursor, retryAppend, network: eventsNetwork } = eventFeed;
+  const visibleEvents = filterEvents(events, eventSearch);
+
+  function exportVisibleEvents() {
+    if (visibleEvents.length === 0) return;
+    const metadata = buildEventCsvMetadata({
+      exportedAt: new Date().toISOString(),
+      filterTerm: eventSearch,
+      loadedCount: events.length,
+      matchedCount: visibleEvents.length,
+      hasOlderPages: cursor !== null,
+      lastError: eventsError,
+      lastErrorCursor: failedCursor,
+    });
+    downloadEventsCsv(visibleEvents, metadata);
+  }
   const visibleSignals = (risk?.signals ?? []).filter((signal) =>
     signalSeverity === "all" || (signal.severity || "info").toLowerCase() === signalSeverity,
   );
@@ -359,15 +325,15 @@ export default function HomePage() {
           </section>}
 
           <section className="events-section" id="events">
-            <div className="panel-heading events-heading"><div><div className="eyebrow">SOROBAN CONTRACT ACTIVITY</div><h2>Flag events</h2><p>Threshold alerts recorded by the Stellar Sentinel contract.</p></div><div className="event-actions"><button className="secondary-button" type="button" onClick={() => downloadEventsCsv(visibleEvents)} disabled={visibleEvents.length === 0}>Export CSV</button><button className="icon-button" onClick={() => void loadEvents()} disabled={eventsLoading} aria-label="Refresh events">↻</button></div></div>
+            <div className="panel-heading events-heading"><div><div className="eyebrow">SOROBAN CONTRACT ACTIVITY</div><h2>Flag events</h2><p>Threshold alerts recorded by the Stellar Sentinel contract.</p></div><div className="event-actions"><button className="secondary-button" type="button" onClick={exportVisibleEvents} disabled={visibleEvents.length === 0}>Export CSV</button><button className="icon-button" onClick={() => void loadEvents()} disabled={eventsLoading} aria-label="Refresh events">↻</button></div></div>
             {eventsNetwork && <p className="events-network-label">Source network: {networkName(eventsNetwork)}</p>}
             <div className="events-panel panel">
-              {eventsLoading && events.length === 0 ? <div className="state-message"><span className="spinner dark"/><b>Loading contract events</b><span>Checking the connected Soroban event source…</span></div> : eventsError && events.length === 0 ? <div className="state-message"><span className="state-icon warning">!</span><b>Event feed unavailable</b><span>{eventsError}</span><small>Configure the contract and Soroban RPC in the backend to enable this feed.</small><button className="secondary-button" onClick={() => void loadEvents(eventsRetry?.next, eventsRetry?.append ?? false)}>Try again</button></div> : events.length === 0 ? <div className="state-message"><span className="state-icon">◷</span><b>No flag events yet</b><span>The connected contract has not returned any events.</span></div> : <>
+              {eventsLoading && events.length === 0 ? <div className="state-message"><span className="spinner dark"/><b>Loading contract events</b><span>Checking the connected Soroban event source…</span></div> : eventsError && events.length === 0 ? <div className="state-message"><span className="state-icon warning">!</span><b>Event feed unavailable</b><span>{eventsError}</span><small>Configure the contract and Soroban RPC in the backend to enable this feed.</small><button className="secondary-button" onClick={() => void loadEvents(failedCursor, retryAppend)}>Try again</button></div> : events.length === 0 ? <div className="state-message"><span className="state-icon">◷</span><b>No flag events yet</b><span>The connected contract has not returned any events.</span></div> : <>
                 <label className="event-search"><span className="sr-only">Search loaded events by account or agent</span><input value={eventSearch} onChange={(event) => setEventSearch(event.target.value)} placeholder="Filter loaded events by account or agent"/></label>
                 <span className="count-pill event-result-count" aria-live="polite">Showing {visibleEvents.length} matching of {events.length} loaded</span>
                 <span className="sr-only" role="status" aria-live="polite">{eventAddressCopyStatus}</span>
                 {visibleEvents.length > 0 ? <div className="table-scroll"><table><thead><tr><th>ACCOUNT</th><th>SCORE</th><th>AGENT</th><th>CONTRACT</th><th>LEDGER</th><th>RECORDED</th>{events.some((item) => item.transaction_hash || item.tx_hash) && <th>TRANSACTION</th>}</tr></thead><tbody>{visibleEvents.map((item) => { const transactionHash = item.transaction_hash || item.tx_hash; return <tr key={item.id}><td className="signal-name"><span className="severity-dot high"/><ExplorerLink network={network?.network} type="account" value={item.subject} label={shortAddress(item.subject)} accessibleLabel={`View subject account ${item.subject} on Stellar Expert`}/><button className="event-investigate" type="button" disabled={riskLoading} aria-label={`Analyze account ${item.subject}`} onClick={() => investigateEvent(item.subject)}>Analyze</button><button className="secondary-button event-copy-button" type="button" onClick={() => void copyEventAddress(item.subject)} aria-label={`Copy subject account ${item.subject}`}>Copy</button></td><td><span className="event-score">{item.score}</span></td><td><ExplorerLink network={network?.network} type="account" value={item.agent} label={shortAddress(item.agent)} accessibleLabel={`View agent account ${item.agent} on Stellar Expert`}/><button className="secondary-button event-copy-button" type="button" onClick={() => void copyEventAddress(item.agent)} aria-label={`Copy agent account ${item.agent}`}>Copy</button></td><td><ExplorerLink network={network?.network} type="contract" value={item.contract_id} label={shortAddress(item.contract_id)} accessibleLabel={`View contract ${item.contract_id} on Stellar Expert`}/></td><td className="mono">{item.ledger.toLocaleString()}</td><td>{formatDashboardDate(item.created_at)}</td>{events.some((event) => event.transaction_hash || event.tx_hash) && <td>{transactionHash ? <ExplorerLink network={network?.network} type="tx" value={transactionHash} label={shortAddress(transactionHash)} accessibleLabel={`View transaction ${transactionHash} on Stellar Expert`}/> : <span className="mono">—</span>}</td>}</tr>; })}</tbody></table></div> : <div className="empty-inline event-search-empty">No loaded events match this account or agent.</div>}
-                {eventsError ? <div className="load-more load-more-error" role="alert"><span>{eventsError}</span><button className="secondary-button" disabled={eventsLoading} onClick={() => void loadEvents(eventsRetry?.next, eventsRetry?.append ?? false)}>{eventsLoading ? "Retrying…" : eventsRetry?.append ? "Retry loading older events" : "Retry refresh"}</button></div> : cursor && <div className="load-more"><button className="secondary-button" disabled={eventsLoading} onClick={() => void loadEvents(cursor, true)}>{eventsLoading ? "Loading…" : "Load older events"}</button></div>}
+                {eventsError ? <div className="load-more load-more-error" role="alert"><span>{eventsError}</span><button className="secondary-button" disabled={eventsLoading} onClick={() => void loadEvents(failedCursor, retryAppend)}>{eventsLoading ? "Retrying…" : retryAppend ? "Retry loading older events" : "Retry refresh"}</button></div> : cursor && <div className="load-more"><button className="secondary-button" disabled={eventsLoading} onClick={() => void loadEvents(cursor, true)}>{eventsLoading ? "Loading…" : "Load older events"}</button></div>}
               </>}
             </div>
           </section>

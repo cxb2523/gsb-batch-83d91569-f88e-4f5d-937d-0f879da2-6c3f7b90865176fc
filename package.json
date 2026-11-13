@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "verify:events": "node scripts/verify-event-export.mjs"
   },
   "dependencies": {
     "next": "16.4.0",
