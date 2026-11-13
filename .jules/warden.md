@@ -1,0 +1,142 @@
+## 2026-11-07 — Lifecycle & Assurance Ledger
+- **QA & Veto Actions:** Fixed Biome linter error `lint/style/noParameterAssign` in WebFetcher.fetchBatch by assigning deduplicated URLs to a local variable. Verified test suite and build execution.
+- **Entropy Pruned:** 0 lines deleted.
+- **Deferred / Blocked:** None.
+
+## 2026-11-06 — Lifecycle & Assurance Ledger
+- **QA & Veto Actions:** Audited recent commits which added test coverage. Verified test suite execution. Added URL array deduplication to WebFetcher. Safely bumped minor and patch dependencies via npm update.
+- **Entropy Pruned:** 0 lines deleted. Codebase is clean.
+- **Deferred / Blocked:** None.
+
+## 2026-11-05 — Lifecycle & Assurance Ledger
+- **QA & Veto Actions:** Audited recent changes and verified test suite execution. No veto necessary. Fixed regex HTML truncation bug in DuckDuckGoSearcher and centralized cache eviction logic.
+- **Entropy Pruned:** 0 lines deleted.
+- **Deferred / Blocked:** None.
+
+## 2026-11-04 — Lifecycle & Assurance Ledger
+- **QA & Veto Actions:** Audited recent changes and verified test suite execution. No veto necessary.
+- **Entropy Pruned:** 0 lines deleted.
+- **Deferred / Blocked:** Safely bumped minor and patch dependencies via npm update.
+
+# .jules/warden.md
+
+## 2026-11-03 — Lifecycle & Assurance Ledger
+- **QA & Veto Actions:** Audited recent changes and verified test suite execution. No veto necessary. Safely bumped minor and patch dependencies via npm update.
+- **Entropy Pruned:** 0 lines deleted. `cliPromise` in `src/index.ts` is required by tests.
+- **Deferred / Blocked:** None.
+
+## 2026-11-02 — Lifecycle & Assurance Ledger
+- **QA & Veto Actions:** Audited recent changes and verified test suite execution. No veto necessary. Safely bumped minor and patch dependencies via npm update.
+- **Entropy Pruned:** 0 lines deleted. `cliPromise` in `src/index.ts` is required by tests.
+- **Deferred / Blocked:** None.
+
+## 2026-10-29 — Lifecycle & Assurance Ledger
+- **QA & Veto Actions:** Audited recent changes and verified test suite execution. No veto necessary.
+- **Entropy Pruned:** Removed unused re-exports (`generateMarkdownReport`, `generateHtmlReport`, `generateJsonReport`) in `src/exporters/index.ts`, the `export` keyword from `interface ReportMetadata` in `src/exporters/types.ts`, and `export type { SearchResult };` from `src/tools/GoogleSearcher.ts` as reported by `knip` and `ts-prune`.
+- **Deferred / Blocked:** Safely bumped minor and patch dependencies via npm update.
+
+## 2026-10-28 — Lifecycle & Assurance Ledger
+- **QA & Veto Actions:** Verified #176 error logging enhancements, all tests passing. No veto necessary.
+- **Entropy Pruned:** 0 lines deleted. cliPromise in src/index.ts is required by tests.
+- **Deferred / Blocked:** Safely bumped minor and patch dependencies via npm update.
+## 2026-10-27 — Assessment & Lifecycle
+
+**Observation / Pruned:**
+Observed unused `langsmith`, `openai`, and `uuid` dependencies in `package.json` according to `knip`. Removed them completely to fight codebase entropy.
+
+**Alignment / Deferred:**
+Aligned the test suite execution and linter. No regressions found.
+
+## 2026-10-25 — Lifecycle & Assurance Ledger
+- **QA & Veto Actions:** Ran tests, build, and lint checks. No regressions found. Fixed `package.json` missing `bin` field to prevent `knip` from flagging `bin/cli.js` as dead code.
+- **Entropy Pruned:** 0 lines deleted. Retained `bin/cli.js` as an essential entry point.
+- **Deferred / Blocked:** Safely bumped minor and patch dependencies via `npm update`. No breaking dependencies found.
+
+## 2026-06-08 — Assessment & Lifecycle
+
+**Observation / Pruned:**
+Logged routine lifecycle assurance and explicit verification of core modules to prevent future false positive dead code deletions. Verified potentially unused files and dependencies using `knip`. Confirmed no new dead code or orphaned dependencies were introduced, maintaining a clean codebase.
+
+**Alignment / Deferred:**
+Aligned the test suite execution. Ran `npm update` to bump patch/minor dependencies safely. All tests passing. Tagging release v1.0.36 to deploy these updates.
+
+## 2026-05-31 — Assessment & Lifecycle
+
+**Observation / Pruned:**
+Observed unused `console-table-printer` dependency and orphaned scripts (`fix_json.js`, `fix_package.js`, `fix_package_json.js`, `resolve_warden.js`). Removed them to fight codebase entropy.
+
+**Alignment / Deferred:**
+Aligned the test suite execution. Ran `npm update` to bump patch/minor dependencies safely. All tests passing. Tagging release v1.0.35 to deploy these updates.
+
+## 2026-05-12 — Assessment & Lifecycle
+
+**Observation / Pruned:**
+Checked for dead code using `knip` and `ts-prune`. Pruned `resolve_changelog.js` and `resolve_warden.js` which are unused files, but preserved `bin/cli.js` as it is an essential entry point despite `knip` flagging it.
+
+**Alignment / Deferred:**
+Aligned the test suite execution. Ran `npm update` to bump patch/minor dependencies safely. All tests passing. Tagging release v1.0.28 to deploy these updates.
+
+## 2026-05-28 — Assessment & Lifecycle
+
+**Observation / Pruned:**
+Observed that `console-table-printer` is an unused dependency in `package.json` according to `knip`. Removed it completely to fight codebase entropy.
+
+**Alignment / Deferred:**
+Aligned the test suite execution. Ran `npm update` to bump patch/minor dependencies safely. All tests passing. Tagging release v1.0.32 to deploy these updates.
+
+## 2026-05-27 — Assessment & Lifecycle
+
+**Observation / Pruned:**
+Observed that BOLT successfully enforced a strict `Content-Type` allowlist in `WebFetcher` to prevent downloading arbitrary large binaries. Checked for dead code using `knip` and verified that `bin/cli.js` is an essential entry point despite `knip` flagging it. No dead code found.
+
+**Alignment / Deferred:**
+Pinned `console-table-printer` to `2.15.0` to prevent a test failure during dependency updates. Aligned the test suite execution. Ran `npm update` to bump patch/minor dependencies safely. All tests passing. Tagging release v1.0.31 to deploy these updates.
+
+## 2026-05-26 — Assessment & Lifecycle
+
+**Observation / Pruned:**
+Observed that BOLT effectively optimized HTML stripping in `WebFetcher` to preemptively remove HTML comments to save context tokens. Checked for dead code using `knip` and verified that `bin/cli.js` is an essential entry point. Added an explicit unit test to `tests/WebFetcher.test.ts` to verify the HTML comment stripping functionality.
+
+**Alignment / Deferred:**
+Aligned the test suite execution. Ran `npm update` to bump patch/minor dependencies safely. All tests passing. Tagging release v1.0.30 to deploy these updates.
+
+## 2026-05-20 — Assessment & Lifecycle
+
+**Observation / Pruned:**
+Reviewed codebase for dead code and unused dependencies. Verified core modules to ensure no false positives in pruning. Maintained a clean and efficient codebase.
+
+**Alignment / Deferred:**
+Aligned the test suite execution. Ran `npm update` to bump patch/minor dependencies safely. All tests passing. Tagging release v1.0.27 to deploy these updates.
+
+## 2026-06-08 — WARDEN Run
+
+QA Status: verified
+Dead Code Removed: 0 lines
+Dependencies Bumped: 0
+Security: Critical=0, High=0
+Docs Updated: .jules/warden.md, CHANGELOG.md
+Release: none
+
+AI Summary: Analyzed repository state. Confirmed CI is stable with no vulnerabilities. Preserved core modules (bin/cli.js, src/*) from dead code deletion per prior Warden logs to prevent false positives. Executing targeted QA suite to verify recent merge integrity. Preparing patch release v1.0.41 for routine lifecycle maintenance.
+
+## 2026-06-19 — WARDEN Run
+
+QA Status: verified
+Dead Code Removed: 0 lines
+Dependencies Bumped: 0
+Security: Critical=0, High=0
+Docs Updated: none
+Release: none
+
+AI Summary: AI analysis failed, running basic checks only
+
+## 2026-10-24 — WARDEN Run
+
+QA Status: verified
+Dead Code Removed: 0 lines
+Dependencies Bumped: 0
+Security: Critical=0, High=0
+Docs Updated: .jules/warden.md
+Release: none
+
+AI Summary: Verified that tests pass after rebasing against master, where the signature of engine.run in src/index.ts was fixed to use the progress callback and cliPromise was properly exported. All 52 tests are passing.

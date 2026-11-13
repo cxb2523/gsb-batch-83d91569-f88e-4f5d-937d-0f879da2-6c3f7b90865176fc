@@ -1,0 +1,90 @@
+# CHANGELOG.md
+
+## [Unreleased]
+### Fixed
+- Standardize repository line endings to LF with `.gitattributes` to ensure cross-platform formatting consistency and resolve Biome linter check on Windows.
+
+- **[Fixed]:** Fixed Biome linter error `lint/style/noParameterAssign` in WebFetcher by assigning deduplicated urls to a new local variable instead of reassigning the function parameter.
+
+* **[Optimized]:** Added URL array deduplication to `WebFetcher.fetchBatch` to prevent redundant overhead from duplicate URLs before resolving normalized targets.
+* **[Optimized]:** Audited recent codebase additions. Confirmed CI is stable, tests pass without regressions, and there is no dead code. Safely bumped minor and patch dependencies via npm update.
+
+**[Optimized]:** Updated package dependencies and audited codebase.
+* **[Optimized]:** Safely bumped minor and patch dependencies via npm update.
+* **[Fixed]:** Added validation in `ResearchEngine` to reject empty or whitespace research topics and organized imports/formatting to conform with Biome standards.
+* **[Optimized]:** Safely bumped minor and patch dependencies via npm update.
+* **[Pruned]:** Removed unused re-exports in exporters and GoogleSearcher. Updated dependencies.
+* **[Added]:** Multi-vector query decomposition (`QueryDecomposer`) scaling orthogonal research vectors based on depth levels 1–5 via LLM reasoning with deterministic heuristic fallbacks.
+* **[Added]:** Zero-config DuckDuckGo search provider (`DuckDuckGoSearcher`) with redirect unwrapping, HTML entity decoding, and intelligent fallback orchestration (`SearchManager`) when Serper API keys are unconfigured.
+* **[Added]:** Multi-format publication exporters (`exportReport`) for structured Markdown with YAML frontmatter, standalone responsive HTML reports with dark/light mode and print-to-PDF styles, and structured JSON.
+* **[Added]:** Local research library management commands: `autoresearch list` and `autoresearch view <id|slug> [--open]` with browser launching and formatted terminal previews.
+* **[Added]:** Multi-provider LLM support for custom `OPENAI_BASE_URL` and custom `OPENAI_MODEL` in configuration and CLI auth wizard (Ollama, DeepSeek, Groq, LM Studio).
+* **[Added]:** 5 new comprehensive test suites covering DuckDuckGo search, multi-search orchestration, query decomposition, report exporters, and history management (expanding coverage to 82 tests).
+* **[Documentation]:** Complete overhaul of `README.md` with modern architecture flowchart, CLI manual, multi-provider setup guide, and verified test badges.
+* **[Fixed]:** Ensured contiguous, gapless citation numbering (`[Source 1]`, `[Source 2]`, etc.) in synthesized research context when earlier sources fail to fetch or contain empty content.
+* **[Fixed]:** Prevented literal `"undefined"` string coercion for missing search result titles and snippets, and filtered out entries missing valid URLs in `GoogleSearcher`.
+* **[Fixed]:** Added whitespace trimming to CLI input validation schema to reject empty or whitespace-only research topics.
+* **[Pruned]:** Removed orphaned `report.txt` artifact.
+* **[Dependencies]:** Safely updated direct dependency `@langchain/core` to 1.3.2.
+* **[Optimized]:** Routine WARDEN maintenance. Verified recent error logging and tests. Codebase is clean.
+* **[Chore]:** Routine WARDEN maintenance. Validated #176 error logging enhancements, verified all tests pass. Bumped patch/minor dependencies.
+* **[Pruned]:** Removed unused dependencies (`langsmith`, `openai`, `uuid`) to fight codebase entropy.
+* **[Chore]:** Routine WARDEN maintenance and structural verification. Fixed missing `bin` field in `package.json` to properly map `bin/cli.js`. Bumped patch/minor dependencies.
+
+## [1.0.41] - 2026-06-08
+* **[Chore]:** Routine maintenance and structural verification.
+
+## [1.0.40] - 2026-06-08
+
+- e51970e chore(sentinel): update monitoring log
+- d6f21df chore(warden): update ledger
+- c360c26 chore(release): v1.0.39
+- ef934fd chore(sentinel): update monitoring log
+- 3fb73af Merge pull request #168 from shenald-dev/jules-5177095139123476073-57fd5496
+- c0fb96f I have finished the task and the final result is ready for you.
+- 8dea139 Merge pull request #167 from shenald-dev/jules-13710994976568883044-42195d1a
+- ffebd18 I have completed the task and the final results are ready.
+- efa2362 Overhaul README with enterprise documentation
+- bb8d1a9 Update README with awesome new logo and formatting
+
+# Changelog
+
+## [1.0.39] - 2026-06-07
+* **[Fixed]:** Resolved recent merge conflicts to ensure codebase stability.
+* **[Documentation]:** Overhauled README with enterprise documentation, updated logo, and improved formatting.
+* **[Chore]:** Updated monitoring logs.
+* **[Optimized]:** Safely deduplicated URLs.
+
+All notable changes to autoresearch-agent will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [1.0.38] - 2026-06-03
+* **[Optimized]:** Replaced `setTimeout` with `await cliPromise` in `index.test.ts` to fix race conditions.
+* **[Optimized]:** Added targeted regex to preemptively strip self-closing boilerplate tags in `WebFetcher`.
+* **[Dependencies]:** Safely bumped minor/patch versions of dependencies via `npm update`.
+
+## [1.0.27] - 2026-05-06
+* **[Optimized]:** Reused `ConfigManager` instance across CLI and core services to optimize file reads.
+* **[Dependencies]:** Safely bumped minor/patch versions of dependencies via `npm update`.
+
+## [1.0.35] - 2026-05-31
+
+* **[Dead Code]:** Removed unused `console-table-printer` dependency and removed orphaned helper scripts.
+* **[Dependencies]:** Safely bumped minor and patch dependencies.
+
+## [1.0.33] - 2026-05-29
+* **[Fixed]:** Fixed unhandled Promise rejection in `cliPromise` when awaiting `ResearchEngine.run` by resolving async test concurrency issues and correctly awaiting the CLI execution in tests.
+## [1.0.39] - 2026-05-28
+* **[Fixed]:** Successfully resolved cascading merge conflicts with the `master` branch, protecting the strict `Content-Type` allowlist, the preemptive HTML comment stripping, and all previously consolidated optimizations for HTTP fetching and charset decoding.
+* **[Dependencies]:** Safely bumped minor/patch versions of dependencies via `npm update`.
+
+## [1.0.32] - 2026-05-28
+* **[Dead Code]:** Removed unused dependency `console-table-printer`.
+* **[Dependencies]:** Safely bumped minor/patch versions of dependencies via `npm update`.
+
+## [1.0.31] - 2026-05-27
+* **[Security]:** Enforced strict Content-Type allowlist in WebFetcher to prevent downloading arbitrary large binaries.
+* **[Dependencies]:** Safely bumped minor/patch versions of dependencies via `npm update`.
+
+## [1.0.30] - 2026-0
