@@ -1,7 +1,9 @@
 """Tests for web-mirror URL rewriting, download, and crawl logic."""
 
 import os
+import io
 import sys
+import requests
 import types
 import tempfile
 import shutil
@@ -288,21 +290,17 @@ class TestMain2GetSitemap:
 class TestMain2DownloadVideo:
     """Tests for main2.download_video."""
 
-    @patch("builtins.open", new_callable=mock_open)
-    @patch("shutil.copyfileobj")
     @patch("requests.get")
-    def test_download_video_streams(self, mock_get, mock_copy, mock_file):
-        mock_response = MagicMock()
-        mock_response.__enter__ = MagicMock(return_value=mock_response)
-        mock_response.__exit__ = MagicMock(return_value=False)
-        mock_response.raw = MagicMock()
+    def test_download_video_streams(self, mock_get, tmp_path):
+        mock_response = _FakeResponse(200, b"video-bytes")
         mock_get.return_value = mock_response
+        target = tmp_path / "vid.mp4"
 
         import main2
-        main2.download_video("https://cdn.example.com/vid.mp4", "/tmp/vid.mp4")
+        main2.download_video("https://cdn.example.com/vid.mp4", str(target))
 
         mock_get.assert_called_once_with("https://cdn.example.com/vid.mp4", stream=True)
-        mock_copy.assert_called_once()
+        assert target.read_bytes() == b"video-bytes"
 
 
 class TestMain2DownloadWebpage:
@@ -344,14 +342,11 @@ class TestMain2DownloadWebpage:
 
         mock_makedirs.assert_called_once()
 
-    @patch("builtins.open", new_callable=mock_open)
-    @patch("os.path.exists", return_value=True)
-    @patch("os.makedirs")
-    @patch("time.sleep")
-    @patch("main2.download_video")
-    def test_download_webpage_with_video(self, mock_dl_video, mock_sleep, mock_makedirs,
-                                          mock_exists, mock_file):
+    def test_download_webpage_with_video(self, tmp_path, monkeypatch):
         import main2
+
+        monkeypatch.setattr(main2, "fulldir", str(tmp_path))
+        monkeypatch.setattr(main2.time, "sleep", lambda _s: None)
 
         html = '<html><body><video src="https://cdn.example.com/v.mp4"></video></body></html>'
         mock_page = MagicMock()
@@ -359,12 +354,22 @@ class TestMain2DownloadWebpage:
         mock_context = MagicMock()
         mock_context.new_page.return_value = mock_page
 
+        written = []
+
+        def fake_download_video(url, filename):
+            written.append((url, filename))
+            with open(filename, "wb") as handle:
+                handle.write(b"video")
+
+        monkeypatch.setattr(main2, "download_video", fake_download_video)
+
         main2.download_webpage("https://www.place.holder/es/videos/v", mock_context)
 
-        mock_dl_video.assert_called_once()
-        written_path = mock_file.call_args[0][0]
-        assert written_path.endswith(".html")
-        assert not written_path.endswith("/index.html")
+        assert written == [("https://cdn.example.com/v.mp4",
+                            str(tmp_path) + "/es/videos/v/v.mp4")]
+        written_path = str(tmp_path / "es" / "videos" / "v.html")
+        assert os.path.isfile(written_path)
+        assert not os.path.exists(str(tmp_path / "es" / "videos" / "v" / "index.html"))
 
     @patch("builtins.open", new_callable=mock_open)
     @patch("os.path.exists", return_value=True)
@@ -392,14 +397,11 @@ class TestMain2DownloadWebpage:
         assert "https://www.place.holder/" not in written_html
         assert "https://other.com/" in written_html
 
-    @patch("builtins.open", new_callable=mock_open)
-    @patch("os.path.exists", return_value=True)
-    @patch("os.makedirs")
-    @patch("time.sleep")
-    @patch("main2.download_video")
-    def test_video_src_rewritten_to_local(self, mock_dl_video, mock_sleep, mock_makedirs,
-                                            mock_exists, mock_file):
+    def test_video_src_rewritten_to_local(self, tmp_path, monkeypatch):
         import main2
+
+        monkeypatch.setattr(main2, "fulldir", str(tmp_path))
+        monkeypatch.setattr(main2.time, "sleep", lambda _s: None)
 
         html = '<html><body><video src="https://cdn.example.com/clip.mp4"></video></body></html>'
         mock_page = MagicMock()
@@ -407,12 +409,18 @@ class TestMain2DownloadWebpage:
         mock_context = MagicMock()
         mock_context.new_page.return_value = mock_page
 
+        def fake_download_video(url, filename):
+            with open(filename, "wb") as handle:
+                handle.write(b"video")
+
+        monkeypatch.setattr(main2, "download_video", fake_download_video)
+
         main2.download_webpage("https://www.place.holder/es/videos/clip", mock_context)
 
-        written_html = mock_file().write.call_args[0][0]
+        written_html = (tmp_path / "es" / "videos" / "clip.html").read_text(encoding="utf-8")
         assert "clip.mp4" in written_html
         # The video src should now point to a local path starting with /
-        assert 'src="/' in written_html
+        assert 'src="/es/videos/clip/clip.mp4"' in written_html
 
 
 # ===================================================================
@@ -1150,3 +1158,319 @@ class TestOldMainEntryPointBlock:
             uc_mod.ChromeOptions = orig_opts
             if "old_main" in sys.modules:
                 del sys.modules["old_main"]
+
+
+# ===================================================================
+# 9. Video-page on-disk layout (main2.py)
+# ===================================================================
+
+class _FakeResponse:
+    """Minimal stand-in for a streamed ``requests`` response."""
+
+    def __init__(self, status_code=200, body=b"video-bytes"):
+        self.status_code = status_code
+        self.raw = io.BytesIO(body)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.raw.close()
+        return False
+
+
+def _page_context(html):
+    mock_page = MagicMock()
+    mock_page.content.return_value = html
+    mock_context = MagicMock()
+    mock_context.new_page.return_value = mock_page
+    return mock_context
+
+
+class TestMain2VideoPageLayout:
+    """On-disk layout for pages containing a ``<video>`` element."""
+
+    def _mirror(self, tmp_path, monkeypatch, url, html, body=b"video-bytes"):
+        import main2
+
+        monkeypatch.setattr(main2, "fulldir", str(tmp_path))
+        monkeypatch.setattr(main2.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(
+            main2.requests, "get",
+            lambda _url, stream=True: _FakeResponse(200, body),
+        )
+        main2.download_webpage(url, _page_context(html))
+        return main2
+
+    def test_video_page_writes_html_and_video(self, tmp_path, monkeypatch):
+        html = '<html><body><video src="https://cdn.example.com/clip.mp4"></video></body></html>'
+        self._mirror(tmp_path, monkeypatch, "https://www.place.holder/es/videos/clip", html)
+
+        html_file = tmp_path / "es" / "videos" / "clip.html"
+        video_file = tmp_path / "es" / "videos" / "clip" / "clip.mp4"
+
+        assert html_file.is_file()
+        assert video_file.is_file()
+        assert video_file.read_bytes() == b"video-bytes"
+        # The video lives in the sibling directory, not next to the HTML file.
+        assert html_file.parent == video_file.parent.parent
+
+        written = html_file.read_text(encoding="utf-8")
+        assert 'src="/es/videos/clip/clip.mp4"' in written
+
+    def test_video_src_points_at_real_file(self, tmp_path, monkeypatch):
+        from bs4 import BeautifulSoup
+
+        html = '<html><body><video src="https://cdn.example.com/clip.mp4"></video></body></html>'
+        self._mirror(tmp_path, monkeypatch, "https://www.place.holder/es/videos/clip", html)
+
+        written = (tmp_path / "es" / "videos" / "clip.html").read_text(encoding="utf-8")
+        src = BeautifulSoup(written, "html.parser").find("video")["src"]
+        # The rewritten URL maps onto a file that was actually downloaded.
+        assert src.startswith("/")
+        assert (tmp_path / src.lstrip("/")).is_file()
+
+    def test_trailing_slash_is_normalised(self, tmp_path, monkeypatch):
+        html = '<html><body><video src="https://cdn.example.com/clip.mp4"></video></body></html>'
+        self._mirror(tmp_path, monkeypatch,
+                     "https://www.place.holder/es/videos/clip/", html)
+
+        page_dir = tmp_path / "es" / "videos"
+        assert (page_dir / "clip.html").is_file()
+        assert (page_dir / "clip" / "clip.mp4").is_file()
+        # No hidden ".html" entry created by a path ending in a slash.
+        assert not (page_dir / "clip" / ".html").exists()
+        assert sorted(p.name for p in page_dir.iterdir()) == ["clip", "clip.html"]
+
+    def test_video_download_failure_writes_nothing(self, tmp_path, monkeypatch, caplog):
+        import logging
+        import main2
+
+        monkeypatch.setattr(main2, "fulldir", str(tmp_path))
+        monkeypatch.setattr(main2.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(
+            main2.requests, "get",
+            lambda _url, stream=True: _FakeResponse(404, b"not found"),
+        )
+        html = '<html><body><video src="https://cdn.example.com/missing.mp4"></video></body></html>'
+
+        with caplog.at_level(logging.ERROR, logger="mylogger"):
+            with pytest.raises(main2.VideoDownloadError):
+                main2.download_webpage(
+                    "https://www.place.holder/es/videos/missing",
+                    _page_context(html),
+                )
+
+        page_dir = tmp_path / "es" / "videos"
+        assert not (page_dir / "missing.html").exists()
+        assert not (page_dir / "missing" / "missing.mp4").exists()
+        assert not (page_dir / "missing" / "missing.mp4.part").exists()
+        assert any("missing" in record.getMessage() for record in caplog.records)
+
+    def test_video_download_network_error_writes_nothing(self, tmp_path, monkeypatch):
+        import main2
+
+        monkeypatch.setattr(main2, "fulldir", str(tmp_path))
+        monkeypatch.setattr(main2.time, "sleep", lambda _s: None)
+
+        def _boom(_url, stream=True):
+            raise requests.ConnectionError("connection reset")
+
+        monkeypatch.setattr(main2.requests, "get", _boom)
+        html = '<html><body><video src="https://cdn.example.com/x.mp4"></video></body></html>'
+
+        with pytest.raises(requests.ConnectionError):
+            main2.download_webpage(
+                "https://www.place.holder/es/videos/x", _page_context(html)
+            )
+
+        assert not (tmp_path / "es" / "videos" / "x.html").exists()
+        assert not (tmp_path / "es" / "videos" / "x" / "x.mp4").exists()
+
+    def test_repeat_crawl_removes_old_video(self, tmp_path, monkeypatch):
+        template = '<html><body><video src="https://cdn.example.com/{}.mp4"></video></body></html>'
+
+        self._mirror(tmp_path, monkeypatch, "https://www.place.holder/es/videos/clip",
+                     template.format("clip"))
+        assert (tmp_path / "es" / "videos" / "clip" / "clip.mp4").is_file()
+
+        # Second crawl: the page now points at a differently named file.
+        self._mirror(tmp_path, monkeypatch, "https://www.place.holder/es/videos/clip",
+                     template.format("clip_hd"))
+
+        video_dir = tmp_path / "es" / "videos" / "clip"
+        assert sorted(p.name for p in video_dir.iterdir()) == ["clip_hd.mp4"]
+        assert not (video_dir / "clip.mp4").exists()
+        written = (tmp_path / "es" / "videos" / "clip.html").read_text(encoding="utf-8")
+        assert "clip_hd.mp4" in written
+
+    def test_repeat_crawl_does_not_touch_other_pages(self, tmp_path, monkeypatch):
+        video_html = '<html><body><video src="https://cdn.example.com/a.mp4"></video></body></html>'
+        plain_html = "<html><body><p>Other page</p></body></html>"
+
+        self._mirror(tmp_path, monkeypatch, "https://www.place.holder/es/videos/a", video_html)
+        self._mirror(tmp_path, monkeypatch, "https://www.place.holder/es/videos/b", plain_html)
+
+        # Re-crawl page a only; page b's artifacts must survive.
+        self._mirror(tmp_path, monkeypatch, "https://www.place.holder/es/videos/a", video_html)
+
+        assert (tmp_path / "es" / "videos" / "b" / "index.html").is_file()
+        assert (tmp_path / "es" / "videos" / "a" / "a.mp4").is_file()
+        assert (tmp_path / "es" / "videos" / "a.html").is_file()
+
+    def test_video_source_child_element_is_used_and_rewritten(self, tmp_path, monkeypatch):
+        from bs4 import BeautifulSoup
+
+        html = ('<html><body><video>'
+                '<source src="https://cdn.example.com/from-source.webm" type="video/webm">'
+                '</video></body></html>')
+        self._mirror(tmp_path, monkeypatch, "https://www.place.holder/es/videos/src", html)
+
+        assert (tmp_path / "es" / "videos" / "src" / "from-source.webm").is_file()
+        written = (tmp_path / "es" / "videos" / "src.html").read_text(encoding="utf-8")
+        source = BeautifulSoup(written, "html.parser").find("video").find("source")
+        assert source["src"] == "/es/videos/src/from-source.webm"
+
+    def test_page_flipping_from_video_to_regular_cleans_video(self, tmp_path, monkeypatch):
+        video_html = '<html><body><video src="https://cdn.example.com/old.mp4"></video></body></html>'
+        self._mirror(tmp_path, monkeypatch, "https://www.place.holder/es/videos/flip", video_html)
+        assert (tmp_path / "es" / "videos" / "flip.html").is_file()
+        assert (tmp_path / "es" / "videos" / "flip" / "old.mp4").is_file()
+
+        self._mirror(tmp_path, monkeypatch, "https://www.place.holder/es/videos/flip",
+                     "<html><body><p>No video now</p></body></html>")
+
+        assert (tmp_path / "es" / "videos" / "flip" / "index.html").is_file()
+        assert not (tmp_path / "es" / "videos" / "flip.html").exists()
+        assert not (tmp_path / "es" / "videos" / "flip" / "old.mp4").exists()
+
+    def test_legacy_hidden_html_artifact_is_removed(self, tmp_path, monkeypatch):
+        """An old run could create a file literally named ``.html`` for a
+        trailing-slash URL; re-crawling the page must clean it up."""
+        import main2
+
+        monkeypatch.setattr(main2, "fulldir", str(tmp_path))
+        monkeypatch.setattr(main2.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(
+            main2.requests, "get",
+            lambda _url, stream=True: _FakeResponse(200, b"bytes"),
+        )
+
+        video_dir = tmp_path / "es" / "videos" / "legacy"
+        video_dir.mkdir(parents=True)
+        (video_dir / ".html").write_text("stale", encoding="utf-8")
+
+        html = '<html><body><video src="https://cdn.example.com/legacy.mp4"></video></body></html>'
+        main2.download_webpage("https://www.place.holder/es/videos/legacy/", _page_context(html))
+
+        assert not (video_dir / ".html").exists()
+        assert (video_dir / "legacy.mp4").is_file()
+        html_file = tmp_path / "es" / "videos" / "legacy.html"
+        assert html_file.is_file()
+        assert 'src="/es/videos/legacy/legacy.mp4"' in html_file.read_text(encoding="utf-8")
+
+
+class TestMain2RegularPageLayout:
+    """Regular pages keep writing ``<path>/index.html``."""
+
+    def test_regular_page_written_to_index_html(self, tmp_path, monkeypatch):
+        import main2
+
+        monkeypatch.setattr(main2, "fulldir", str(tmp_path))
+        monkeypatch.setattr(main2.time, "sleep", lambda _s: None)
+        html = '<html><body><a href="https://www.place.holder/es/other">Other</a></body></html>'
+
+        main2.download_webpage(
+            "https://www.place.holder/es/articles/test", _page_context(html)
+        )
+
+        index_file = tmp_path / "es" / "articles" / "test" / "index.html"
+        assert index_file.is_file()
+        assert not (tmp_path / "es" / "articles" / "test.html").exists()
+        written = index_file.read_text(encoding="utf-8")
+        assert 'href="/es/other"' in written
+
+    def test_regular_page_repeat_crawl_rewrites_index(self, tmp_path, monkeypatch):
+        import main2
+
+        monkeypatch.setattr(main2, "fulldir", str(tmp_path))
+        monkeypatch.setattr(main2.time, "sleep", lambda _s: None)
+        context = _page_context("<html><body>first</body></html>")
+        main2.download_webpage("https://www.place.holder/es/p", context)
+
+        context.new_page.return_value.content.return_value = "<html><body>second</body></html>"
+        main2.download_webpage("https://www.place.holder/es/p", context)
+
+        index_file = tmp_path / "es" / "p" / "index.html"
+        assert "second" in index_file.read_text(encoding="utf-8")
+
+
+class TestMain2PageIsolation:
+    """Failures on one page must not abort the rest of the crawl."""
+
+    def test_failed_video_page_does_not_stop_crawl(self, tmp_path, monkeypatch, caplog):
+        import logging
+        import main2
+
+        monkeypatch.setattr(main2, "fulldir", str(tmp_path))
+        monkeypatch.setattr(main2.time, "sleep", lambda _s: None)
+
+        def fake_get(url, stream=True):
+            if "broken" in url:
+                return _FakeResponse(500, b"")
+            return _FakeResponse(200, b"video-bytes")
+
+        monkeypatch.setattr(main2.requests, "get", fake_get)
+
+        good_html = '<html><body><video src="https://cdn.example.com/good.mp4"></video></body></html>'
+        broken_html = '<html><body><video src="https://cdn.example.com/broken.mp4"></video></body></html>'
+
+        context = MagicMock()
+        context.new_page.side_effect = [
+            MagicMock(**{"content.return_value": good_html}),
+            MagicMock(**{"content.return_value": broken_html}),
+        ]
+
+        with caplog.at_level(logging.ERROR, logger="mylogger"):
+            main2.mirror_pages(
+                ["https://www.place.holder/es/videos/good",
+                 "https://www.place.holder/es/videos/broken"],
+                context,
+            )
+
+        assert (tmp_path / "es" / "videos" / "good.html").is_file()
+        assert (tmp_path / "es" / "videos" / "good" / "good.mp4").is_file()
+        assert not (tmp_path / "es" / "videos" / "broken.html").exists()
+        assert any("broken" in record.getMessage() for record in caplog.records)
+
+
+class TestMain2DownloadVideoStatus:
+    """``download_video`` must check the HTTP status before writing."""
+
+    def test_non_2xx_status_does_not_write(self, tmp_path, monkeypatch):
+        import main2
+
+        monkeypatch.setattr(
+            main2.requests, "get",
+            lambda _url, stream=True: _FakeResponse(404, b"error body"),
+        )
+        target = tmp_path / "video.mp4"
+
+        with pytest.raises(main2.VideoDownloadError):
+            main2.download_video("https://cdn.example.com/v.mp4", str(target))
+
+        assert not target.exists()
+        assert list(tmp_path.iterdir()) == []
+
+    def test_2xx_status_writes_file(self, tmp_path, monkeypatch):
+        import main2
+
+        monkeypatch.setattr(
+            main2.requests, "get",
+            lambda _url, stream=True: _FakeResponse(200, b"payload"),
+        )
+        target = tmp_path / "video.mp4"
+
+        main2.download_video("https://cdn.example.com/v.mp4", str(target))
+
+        assert target.read_bytes() == b"payload"
