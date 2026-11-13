@@ -4,6 +4,9 @@
 
 ### Changed
 
+- Session pagination reports state explicitly without changing tool names or input keys: checkpoint tokens bind to the full operation/query/sort/username/filters set (`maxResults` stays a per-call page size), and a token used for a different operation or query returns `INVALID_CURSOR` before any upstream request.
+- Session pagination now stops a repeated upstream cursor with `paginationStopped=true` and `partial=true` (still draining already-buffered posts), returns already-fetched items when a per-call request/time budget is hit while keeping a usable `nextToken`, and preserves checkpoints across failed continuations so a retry neither loses nor duplicates items. User-timeline continuations replay the first resolved profile and sort each page by publication time.
+
 - Use the official MCP TypeScript SDK directly; remove FastMCP and the stale password scraper.
 - Default to credential-free public oEmbed reads; support ID and HTTPS status URLs.
 - Return structured post data plus JSON text compatibility, explicit tool schemas and read/write annotations.

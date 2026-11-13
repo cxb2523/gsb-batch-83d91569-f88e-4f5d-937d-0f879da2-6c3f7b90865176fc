@@ -99,7 +99,7 @@ npm run test:client -- --user golang
 
 `searchTweets` 默认返回 10 条，单次最多 100 条。`sortOrder: "relevancy"` 对应热门搜索，`"recency"` 对应最新。会话搜索支持可选 `filters`，按语言、日期、媒体、作者、回复/转推和最低互动量筛选。
 
-搜索和用户时间线在仍有缓存结果或上游游标时返回 `nextToken`。保持原输入不变，带上该标记继续调用，类似向下滚动；同时检查 `hasMore` 和 `partial`。会话标记只在当前服务进程中有效，15 分钟后或缓存被淘汰时失效。完整示例与限制见[工具参考](docs/tools.md#search-filters-and-loading-more)。热门搜索不是全站热度榜；当前不提供浏览器自动翻译或 For You 推荐流。
+搜索和用户时间线在仍有缓存结果或上游游标时返回 `nextToken`。保持原输入不变，带上该标记继续调用，类似向下滚动；同时检查 `hasMore`、`partial` 和 `paginationStopped`。会话标记是进程内随机令牌，15 分钟后或缓存被淘汰时失效；换查询或换工具再使用会返回 `INVALID_CURSOR`，且不会请求上游。完整示例与限制见[工具参考](docs/tools.md#search-filters-and-loading-more)。热门搜索不是全站热度榜；当前不提供浏览器自动翻译或 For You 推荐流。
 
 ## 工具概览
 
