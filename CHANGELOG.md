@@ -10,6 +10,40 @@ When it does, the release notes lead with it.
 
 ## [Unreleased]
 
+### Added
+
+- **A per-page verdict in the sidecar for the two listing modes.** A finished
+  `--mode search` or `--mode category` run now writes `pages` — one entry per
+  page that exists for the run, with `page`, `rows`, `status`
+  (`ok` / `empty` / `rejected` / `unreadable` / `not_attempted`), a `thin`
+  flag, the page state BBB actually answered with, and the URL — plus a
+  `coverage` block naming the run's stopping reason as one of
+  `completed` / `page_cap_reached` / `page_failed` / `pages_unattempted` /
+  `listing_exhausted`, with `rows`, `total_claimed` and `reachable_max`
+  beside it. A reader no longer has to infer from row counts or grep the log
+  to see how many rows each page gave, where the run stopped, or whether BBB's
+  15-page ceiling was what cut it off. A capped run remains `status:
+  complete` and exit 0 — it fetched everything the site will serve — and now
+  says so in `coverage.capped_by_page_cap` rather than only in the log.
+- **A short page is flagged in the result, not only in the log.** Only the
+  listing's LAST page may legitimately hold fewer rows; any other page
+  materially thinner than the run's fullest page is marked `thin: true` in
+  the sidecar, so a truncated response survives into the record a consumer
+  reads.
+- Offline coverage for both: normal multi-page, capped, failed middle page,
+  thin non-final page, and empty-result runs, all driven through the real
+  `scrape()` with the browser faked and payloads built from the inline
+  capture. `--mode profile` is unchanged and carries none of these fields.
+
+### Fixed
+
+- **`totalPages: 0` no longer plans phantom pages.** A confirmed-empty query
+  states `totalPages: 0`, which the page planner read as "the site said
+  nothing", fell back to the 15-page cap, and fetched a page that could not
+  exist — reporting the listing had "run out" when BBB had said from the
+  first response that there was nothing there. Such a run now fetches page 1
+  and stops.
+
 ### Changed
 
 - CI only: the scheduled canary now starts at 03:07 UTC (Mondays) instead of 05:40, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.

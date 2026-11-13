@@ -91,12 +91,13 @@ from captcha_solver import (detect_recaptcha_v3, detect_recaptcha_in_page,
                             reconcile_detections, solve_recaptcha,
                             CaptchaUnsolvable, INJECT_TOKEN_JS,
                             RECAPTCHA_DISCOVERY_JS)
-from product_parser import (API_PATH, DEFAULT_SORT, SORTS, api_url,
-                            api_url_from_listing_url, category_from_url,
-                            category_options, detect_bot_challenge,
-                            is_supported_url, listing_url, page_url,
-                            parse_listing, parse_profile, pick_category_option,
-                            profile_parts, references_own_assets)
+from product_parser import (API_PATH, DEFAULT_SORT, MAX_PAGES, PAGE_SIZE,
+                            SORTS, api_url, api_url_from_listing_url,
+                            category_from_url, category_options,
+                            detect_bot_challenge, is_supported_url,
+                            listing_url, page_url, parse_listing, parse_profile,
+                            pick_category_option, profile_parts,
+                            references_own_assets)
 from output_writer import (dedupe_by_key, finish_run, EXIT_API_ERROR,
                            SOURCE_DEFAULT)
 import page_flow
@@ -171,6 +172,11 @@ class PageOutcome:
     # Terminal and not a block; its own stop_reason so a reader checks the
     # URL rather than the proxy or the parser.
     not_found: bool = False
+    # BBB's own `pageSize` for the response, when it stated one. Carried on
+    # the outcome rather than assumed to be 15 so `reachable_max` is the
+    # site's own arithmetic (pages x page size) rather than this file's
+    # belief about the site.
+    page_size: Optional[int] = None
 
     @property
     def ok(self) -> bool:
@@ -208,11 +214,33 @@ ITEM_LINK_SELECTOR = page_flow.READY_SELECTOR_LISTING
 CORE_FIELD_FLOOR = 99
 CORE_FIELDS = ("title", "url", "sku", "category", "latitude")
 
-# A page holding less than this share of BBB's own `pageSize` is reported as
-# thin. The site's page size is FIXED at 15 and every captured page held
-# exactly 15, so the only legitimately short page is the last one of a
-# listing — which is why this can sit high without false alarms.
+# A page holding less than this share of the fullest page in the run is
+# reported as thin. The site's page size is FIXED at 15 and every captured
+# page held exactly 15, so the only legitimately short page is the LAST one
+# of a listing — which is why this can sit high without false alarms.
 THIN_PAGE_SHARE = 0.6
+
+# The per-page verdicts a listing run reports. Stated as constants because
+# these strings are a contract: a consumer reads `pages[].status` by name,
+# so an engine that spells "not_attempted" as "skipped" on one path would
+# be a silent hole in a file people branch on.
+PAGE_OK = "ok"                       # served and parsed, rows in hand
+PAGE_EMPTY = "empty"                 # served, and the result set is genuinely empty
+PAGE_REJECTED = "rejected"           # a refusal (hard block / unsolvable challenge)
+PAGE_UNREADABLE = "unreadable"       # nothing usable came back (timeout, unknown, 404)
+PAGE_NOT_ATTEMPTED = "not_attempted"  # planned, but the run stopped before asking
+
+# The four stopping reasons the task requires a reader to be able to tell
+# apart, plus "listing_exhausted" — the listing itself ran out before the
+# requested page count (a COMPLETE answer, not a failure). `stop_kind` is
+# derived from `stop_reason` rather than stored in parallel with it, so the
+# exit-code contract in output_writer does not have to learn a second
+# vocabulary.
+STOP_COMPLETED = "completed"
+STOP_PAGE_CAP_REACHED = "page_cap_reached"
+STOP_PAGE_FAILED = "page_failed"
+STOP_PAGES_UNATTEMPTED = "pages_unattempted"
+STOP_LISTING_EXHAUSTED = "listing_exhausted"
 
 
 # ---------------------------------------------------------------------------
@@ -354,12 +382,255 @@ def _plan_page_urls(args, page_one_url: str,
     sharing zero ids with page 1.
     """
     wanted = page_flow.pages_to_plan(args.pages, pages_available)
+    if pages_available is not None and pages_available <= 0:
+        # A CONFIRMED empty result states `totalPages: 0`. `pages_to_plan`
+        # reads a falsy ceiling as "the site did not say", falls back to
+        # MAX_PAGES and plans pages that cannot exist — which used to mean
+        # one wasted fetch and a run that reported the listing "ran out"
+        # when the site had said `totalPages: 0` from the first response.
+        # Zero is a number the site gave us, not a missing one.
+        logger.info("BBB reports 0 page(s) for this query — planning none.")
+        return []
     if wanted < args.pages:
         logger.info("BBB reports %s page(s) for this query; %d were asked "
                     "for. Planning %d — asking past the site's own last page "
                     "returns HTTP 500, not an empty page.",
                     pages_available, args.pages, wanted)
     return [page_url(page_one_url, n) for n in range(2, wanted + 1)]
+
+
+# ---------------------------------------------------------------------------
+# The per-page verdict and the run's stopping reason
+# ---------------------------------------------------------------------------
+# These two are the whole point of this block: a run that ends must leave
+# behind enough to answer "how many rows did each page give me, did the site
+# cut me off, and which page failed", WITHOUT the reader grepping the log or
+# inferring it from row counts. Everything here is a pure function of the
+# outcomes the loop collected, which is what makes it testable offline.
+def page_status(outcome: PageOutcome, tried: bool = True) -> str:
+    """One of PAGE_* for a single page.
+
+    `tried=False` is the "planned but never asked for" case — the loop
+    stopped before this page was fetched. Distinct from `unreadable` on
+    purpose: "we did not ask" and "we asked and the answer was unusable"
+    are different facts, and reporting the first as the second overstates
+    the damage while hiding where the run actually gave up.
+
+    An `empty` page is a SERVED page: the query matched nothing, or the
+    listing ended there. It is a legitimate outcome, not a failure. The
+    distinction between "this page is the end of the listing" and "this
+    page is broken" is made by `state`, and by whether it is the last page
+    of the run.
+    """
+    if not tried:
+        return PAGE_NOT_ATTEMPTED
+    if outcome.blocked_by is not None:
+        # Covers both Cloudflare shapes: the hard refusal and a challenge
+        # that was detected as a vendor block. Either way the site declined.
+        return PAGE_REJECTED
+    if outcome.state in ("blocked", "challenge"):
+        # A challenge that outlived every solve attempt marks the outcome
+        # `unreadable` (nothing parseable came back), but the REASON is a
+        # refusal by the site, not a response this parser could not follow.
+        # Grouping it under `rejected` is what makes "the site said no" a
+        # single answer rather than two that a reader has to reconcile.
+        return PAGE_REJECTED
+    if not outcome.ok:
+        # load failure, "unknown" payload, or BBB's own 404 — all the
+        # "asked, nothing usable came back" cases.
+        return PAGE_UNREADABLE
+    if not outcome.products:
+        return PAGE_EMPTY
+    return PAGE_OK
+
+
+def full_page_rows(outcomes: List[PageOutcome]) -> int:
+    """The row count of the fullest page in the run — the thin-page yardstick.
+
+    Compared against the run's own fullest page rather than against BBB's
+    fixed `pageSize`: the task is to catch a page that came back materially
+    thinner than its SIBLINGS, and a run whose site-side page size moved
+    should not flag every page in it.
+    """
+    return max((len(o.products) for o in outcomes if o.ok), default=0)
+
+
+def listing_last_page(outcomes: List[PageOutcome],
+                      requested_pages: int) -> int:
+    """The number of the listing's final page — the ONE page allowed to be short.
+
+    Taken from BBB's own `totalPages` where a response carried it, because
+    that is the site's arithmetic rather than this run's. A run that fetched
+    3 pages of a 15-page listing has NOT read the listing's last page: page 3
+    must still hold a full page, so a short page 3 there is a truncated
+    response and has to be flagged. Falling back to `min(requested, MAX_PAGES)`
+    only when the site said nothing — then the cap is the best available
+    statement of where the listing ends.
+    """
+    pages_available = next((o.pages_available for o in outcomes
+                            if o.pages_available is not None), None)
+    if pages_available is not None:
+        return min(pages_available, MAX_PAGES)
+    return min(requested_pages, MAX_PAGES)
+
+
+def page_report(outcomes: List[PageOutcome],
+                requested_pages: int) -> List[dict]:
+    """A row per page that EXISTS for this run: number, rows, status, thin.
+
+    The table covers pages 1..N where N is what the site will serve (its own
+    `totalPages`, or the request when the site said nothing) — not the raw
+    `--pages` value. A page 16 on a 15-page site is not "untried"; it is a
+    page BBB answers with HTTP 500, and listing it as `not_attempted` would
+    imply the run owed it a fetch. `coverage.pages_requested` still records
+    what was asked for.
+
+    A page inside that range with no outcome was never asked for: the run
+    stopped before it, whether because a failure ended the loop or the
+    listing ran out. "Absent from `outcomes`" is exactly that fact, so it
+    needs no parameter to say so.
+
+    Thin is only meaningful for a page that came back with rows on it: an
+    empty or failed page has its own status, and calling it "thin" as well
+    would bury the real verdict under a second, weaker one.
+    """
+    fullest = full_page_rows(outcomes)
+    last_page = listing_last_page(outcomes, requested_pages)
+    pages_available = next((o.pages_available for o in outcomes
+                            if o.pages_available is not None), None)
+    # Pages the site will actually serve — reporting a page 16 as
+    # "not_attempted" would imply it could have been fetched, when BBB
+    # answers it with HTTP 500. A confirmed-empty result states
+    # `totalPages: 0` while still having served page 1, so page 1 is the
+    # floor. The requested count is still recorded in
+    # `coverage.pages_requested`; the page table covers what existed.
+    if pages_available is None:
+        serveable = min(requested_pages, MAX_PAGES)
+    else:
+        serveable = min(requested_pages, pages_available)
+    serveable = max(1, serveable)
+    limit = max(serveable, max((o.page_num for o in outcomes), default=1))
+    by_number = {o.page_num: o for o in outcomes}
+    report = []
+    for number in range(1, limit + 1):
+        outcome = by_number.get(number)
+        status = page_status(outcome, tried=outcome is not None)
+        entries = len(outcome.products) if outcome is not None else 0
+        # Only a page that yielded rows can be "thin", and only when it is
+        # NOT the listing's last page: that one is legitimately short, and a
+        # threshold that fires on every healthy run teaches the reader to
+        # ignore it. The yardstick is this RUN's fullest page, so a site-side
+        # page-size change does not flag every page in the run.
+        thin = bool(status == PAGE_OK and number != last_page
+                    and fullest and entries < THIN_PAGE_SHARE * fullest)
+        report.append({
+            "page": number,
+            "rows": entries,
+            "status": status,
+            "thin": thin,
+            # The state is carried alongside the verdict because the two
+            # answer different questions: `status` says whether this page
+            # counts, `state` says what BBB actually sent.
+            "state": outcome.state if outcome is not None else None,
+            "url": (outcome.final_url or outcome.url)
+            if outcome is not None else None,
+        })
+    return report
+
+
+def stop_kind_for(stop_reason: str) -> str:
+    """The task's four-way classification of why the run ended.
+
+    Deliberately derived from the existing `stop_reason` rather than stored
+    in parallel: `stop_reason` is what output_writer's exit-code contract
+    already keys on, and a second stored field would be free to drift out
+    of agreement with the first. One vocabulary, one place it is decided.
+    """
+    if stop_reason == "page_cap_reached":
+        return STOP_PAGE_CAP_REACHED
+    if stop_reason in ("no_new_products", "pagination_exhausted"):
+        return STOP_LISTING_EXHAUSTED
+    if stop_reason == "pages_unattempted":
+        return STOP_PAGES_UNATTEMPTED
+    if stop_reason == "completed":
+        return STOP_COMPLETED
+    # Anything else is a page that did not come back usable: load timeout,
+    # unreadable response, a block, a 404. Its own name is the stop_reason.
+    return STOP_PAGE_FAILED
+
+
+def _page_table_sentence(report: List[dict]) -> str:
+    """A compact human summary of `page_report`, for the closing log line.
+
+    Runs of adjacent pages with the same verdict are collapsed ("pages 2-4
+    ok"), because a 15-page run otherwise prints fifteen near-identical
+    fragments and the ONE page that failed is lost in them. Built from the
+    same objects the sidecar holds, so the two cannot disagree.
+    """
+    if not report:
+        return "no pages"
+    runs = []
+    for entry in report:
+        label = entry["status"] + (" (thin)" if entry.get("thin") else "")
+        if runs and runs[-1][1] == label and entry["page"] == runs[-1][2] + 1:
+            runs[-1][2] = entry["page"]
+        else:
+            runs.append([entry["page"], label, entry["page"]])
+    parts = []
+    for first, label, last in runs:
+        span = str(first) if first == last else "%d-%d" % (first, last)
+        parts.append("page%s %s: %s" % ("s" if first != last else "", span,
+                                        label))
+    return ", ".join(parts)
+
+
+def coverage_report(outcomes: List[PageOutcome], stop_reason: str,
+                    requested_pages: int, planned_pages: int,
+                    rows: int) -> dict:
+    """The run-level verdict: why it stopped, and how much of the site it saw.
+
+    `rows` is the count this run HOLDS, after merge and dedupe — passed in
+    rather than filled in afterwards, because a placeholder a caller has to
+    remember to overwrite is a silent `null` in a file people branch on the
+    moment it is forgotten. `total_claimed` is what BBB said the query
+    matched; `reachable_max` is what the site will serve at `page_size` x
+    `pages_available`. Those together are what make a capped run legible:
+    225 rows of 19,016 is a COMPLETE request and a 1.2% sample, and the file
+    should say so rather than leave the reader to reconstruct it from row
+    counts.
+
+    `capped_by_page_cap` is set only when the site's own `totalPages` is what
+    limited the run — BBB offered fewer pages than were asked for. That is a
+    COMPLETE result (every page the site will serve was fetched), and it is
+    named differently from the pre-existing top-level `capped_by_site`,
+    which says the *result set* is larger than what 15 pages can reach.
+    Conflating the two would make a 3-page run of a 15-page listing look
+    capped when the user simply asked for three pages.
+    """
+    total_claimed = next((o.total_available for o in outcomes
+                          if o.total_available is not None), None)
+    pages_available = next((o.pages_available for o in outcomes
+                            if o.pages_available is not None), None)
+    page_size = next((o.page_size for o in outcomes if o.page_size), PAGE_SIZE)
+    reachable = (pages_available * page_size
+                 if pages_available is not None else None)
+    kind = stop_kind_for(stop_reason)
+    attempted = [o for o in outcomes if o.ok]
+    return {
+        "stop_kind": kind,
+        "stop_reason": stop_reason,
+        "pages_requested": requested_pages,
+        "pages_planned": planned_pages,
+        "pages_attempted": len(outcomes),
+        "pages_succeeded": len(attempted),
+        "capped_by_page_cap": kind == STOP_PAGE_CAP_REACHED,
+        "pages_available": pages_available,
+        "total_claimed": total_claimed,
+        "reachable_max": reachable,
+        "rows": rows,
+    }
+
+
 
 
 # Chromium's own names for "the proxy is the problem, not the site". Matched
@@ -1045,6 +1316,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         # asking for one more answers HTTP 500.
         outcome.total_available = listing.total_results
         outcome.pages_available = listing.pages_available
+        outcome.page_size = listing.page_size
         outcome.sort_applied = listing.sort
         if page_num == 1:
             logger.info("BBB reports %s result(s) across %s page(s) of %s, "
@@ -1221,6 +1493,11 @@ def scrape(args) -> int:
     outcomes: List[PageOutcome] = []
     seen_keys = set()
     blocked = False
+    # How many pages this run planned to fetch: 1 for page 1, then whatever
+    # `_plan_page_urls` decided from the site's own `totalPages`. Recorded
+    # because it is what tells a later reader whether a page with no outcome
+    # was cut off by a failure/stop or was never part of the plan at all.
+    planned_pages = 1
     # All three modes are one row per business-at-a-location, so `sku` is the
     # key for all of them.
     dedupe_key = "sku"
@@ -1310,10 +1587,16 @@ def scrape(args) -> int:
                 seen_keys.update(p.sku for p in first.products if p.sku is not None)
                 planned = _plan_page_urls(args, first.final_url,
                                           first.pages_available)
-                if len(planned) + 1 < args.pages:
+                planned_pages = len(planned) + 1
+                if (len(planned) + 1 < args.pages
+                        and not (first.pages_available == 0)):
                     # Capped by BBB's own `totalPages`, which is a complete
                     # answer rather than an early stop — see COMPLETE_STOP_REASONS.
-                    stop_reason = "page_cap_reached"
+                    # NOT set when the site said `totalPages: 0`: that is a
+                    # query which matched nothing, not a ceiling, and calling
+                    # an empty result "capped" would send a reader looking for
+                    # data the site never had.
+                    stop_reason = STOP_PAGE_CAP_REACHED
 
                 if args.pages > 1 and concurrency > 1 and not page_flow.pagination_is_addressable(first.final_url):
                     logger.warning("--concurrency %d requested, but this "
@@ -1343,9 +1626,10 @@ def scrape(args) -> int:
                     elif exhausted:
                         stop_reason = "no_new_products"
                     elif unattempted:
-                        # Should not happen without a failure or exhaustion,
-                        # but say so rather than reporting a complete run.
-                        stop_reason = "pages_unattempted"
+                        # Planned pages the workers never got to. Their own
+                        # reason, because a page nobody asked for is not a
+                        # page that failed.
+                        stop_reason = STOP_PAGES_UNATTEMPTED
                     session = None  # already closed
                 elif planned:
                     url = planned[0]
@@ -1422,24 +1706,28 @@ def scrape(args) -> int:
     # reader to ignore it. What is worth warning about is a page that came
     # back materially THIN against its siblings, which is what a truncated
     # response looks like.
+    #
+    # `page_report` is built ONCE and used for the log line, the closing
+    # summary and the sidecar: three copies of "which page was thin" would
+    # eventually disagree, and the disagreement is the bug this shape
+    # exists to prevent.
     total_available = next((o.total_available for o in outcomes
                             if o.total_available is not None), None)
     pages_available = next((o.pages_available for o in outcomes
                             if o.pages_available is not None), None)
+    report = (page_report(outcomes, args.pages)
+              if args.mode != "profile" else [])
     if args.mode != "profile" and all_rows:
-        counts = [(o.page_num, len(o.products)) for o in outcomes if o.ok]
-        fullest = max((n for _, n in counts), default=0)
-        thin = [(p, n) for p, n in counts
-                if fullest and n < THIN_PAGE_SHARE * fullest]
-        last_page = max((p for p, _ in counts), default=0)
-        thin = [(p, n) for p, n in thin if p != last_page]
+        thin = [(entry["page"], entry["rows"]) for entry in report
+                if entry["thin"]]
         if thin:
             logger.warning(
                 "Page(s) %s came back much thinner than the fullest page "
                 "(%d rows): %s. BBB serves a FIXED 15 per page, so a short "
-                "page that is not the last one is a truncated response rather "
-                "than a short listing — re-run with --dump-html.",
-                ", ".join(str(p) for p, _ in thin), fullest,
+                "page that is not the listing's last one is a truncated "
+                "response rather than a short listing — re-run with "
+                "--dump-html. Flagged in the sidecar's `pages[].thin`.",
+                ", ".join(str(p) for p, _ in thin), full_page_rows(outcomes),
                 ", ".join("page %d: %d" % (p, n) for p, n in thin))
         if total_available:
             # The honest sentence, and the reason `totalResults` is worth
@@ -1464,17 +1752,36 @@ def scrape(args) -> int:
     # (225 of 19,016, which is what a 15-page run of a broad query IS) from a
     # run that covered the whole result set, and no column can carry them
     # because they describe the QUERY rather than any business.
+    #
+    # `coverage` and `pages` are the per-page verdict the task asks for: the
+    # reason the run stopped, the four-way `stop_kind`, and one entry per
+    # page that exists for the run with its row count, status and thin flag.
+    # A reader no longer has to reconstruct any of that from the log or from
+    # row totals.
     extra = None
     if args.mode != "profile":
         sorts_applied = sorted({o.sort_applied for o in outcomes
                                 if o.sort_applied})
+        coverage = coverage_report(outcomes, stop_reason, args.pages,
+                                   planned_pages=planned_pages,
+                                   rows=len(all_rows))
+        # One line per run, so a reader does not have to open the sidecar to
+        # see WHERE it stopped: "pages 1-3 ok, page 4 unreadable, 5-8 never
+        # attempted" is the answer to "why did this stop here", and it is
+        # the same verdict the sidecar carries (the same `report` objects).
+        logger.info("Stopped (%s): %s.", coverage["stop_kind"],
+                    _page_table_sentence(report))
         extra = {"total_results": total_available,
                  "pages_available": pages_available,
                  "sort_requested": args.sort,
                  "sort_applied": sorts_applied[0] if len(sorts_applied) == 1
-                                 else sorts_applied}
+                                 else sorts_applied,
+                 "stop_kind": coverage["stop_kind"],
+                 "coverage": coverage,
+                 "pages": report,
+                 }
         if total_available and pages_available:
-            reachable = pages_available * 15
+            reachable = pages_available * PAGE_SIZE
             if total_available > reachable:
                 extra["capped_by_site"] = True
                 extra["reachable_max"] = reachable

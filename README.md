@@ -129,6 +129,22 @@ consumer can tell "complete" from "exhaustive":
 To go deeper, narrow the query: `--state NY` cut a 19,016-result search to
 6,693, and each slice gets its own 15 pages.
 
+**And the sidecar says what each page gave you.** Both listing modes write a
+`pages` table — page number, rows parsed, and a status of `ok`, `empty`,
+`rejected`, `unreadable` or `not_attempted` — beside a `coverage` block whose
+`stop_kind` is one of `completed`, `page_cap_reached`, `page_failed`,
+`pages_unattempted` or `listing_exhausted`. A non-final page that came back
+materially thinner than its siblings is flagged `thin: true` there, so a
+truncated response is in the record rather than only in the log:
+
+```json
+{"stop_kind": "page_cap_reached",
+ "coverage": {"pages_requested": 20, "pages_planned": 15, "rows": 225,
+              "total_claimed": 19016, "reachable_max": 225},
+ "pages": [{"page": 1, "rows": 15, "status": "ok", "thin": false},
+           {"page": 2, "rows": 3,  "status": "ok", "thin": true}]}
+```
+
 Asking for page 16 answers **HTTP 500**, not an empty page — so the scraper
 plans against `totalPages` and never asks for it.
 

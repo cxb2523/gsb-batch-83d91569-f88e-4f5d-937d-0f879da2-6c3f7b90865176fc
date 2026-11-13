@@ -1721,7 +1721,8 @@ def check_scraper_api_sends_waitfor_as_an_object_and_reads_http_code():
           status == 403 and isinstance(status, int), repr(status))
 
 
-def _drive_scrape(engine, body_for_page, pages=3):
+def _drive_scrape(engine, body_for_page, pages=3, extra_args=(),
+                  url=None, mode=None):
     """Run the real `scrape()` with the browser replaced by a fake.
 
     `body_for_page(n)` is what the site "answers" for page n. Returns
@@ -1729,6 +1730,15 @@ def _drive_scrape(engine, body_for_page, pages=3):
     the fake browser and the exit code is the repo's own code, which is the
     point: the first version of this audit finding was a state that only the
     WHOLE loop turned into a wrong exit code.
+
+    `extra_args` is appended to the argv the run is driven with, so a check
+    that needs `--allow-empty` (an empty result is the answer, and its
+    sidecar is what is under test) can say so rather than reimplementing
+    this driver.
+
+    `url` drives the run with `--url` instead of `--text/--location`, which
+    is what `--mode category` needs (it has no query flags to build from).
+    `mode` adds `--mode` when it is not the default `search`.
     """
     requested = []
 
@@ -1778,9 +1788,16 @@ def _drive_scrape(engine, body_for_page, pages=3):
     saved_argv, saved_sleep = sys.argv, engine.time.sleep
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "r")
-        sys.argv = ["x", "--text", "restaurants", "--location", "New York NY",
-                    "--pages", str(pages), "--out", out, "--delay", "0",
-                    "--retries", "1"]
+        argv = ["x", "--pages", str(pages), "--out", out, "--delay", "0",
+                "--retries", "1"]
+        if url is not None:
+            argv += ["--url", url]
+        else:
+            argv += ["--text", "restaurants", "--location", "New York NY"]
+        if mode is not None:
+            argv += ["--mode", mode]
+        argv += list(extra_args)
+        sys.argv = argv
         try:
             args = engine.parse_args()
             engine._snapshot = lambda page, url: page.body
@@ -1857,6 +1874,327 @@ def check_an_unreadable_page_is_not_the_end_of_the_listing():
               "outcome.unreadable = True" in src and "failure_reason" in src)
         check("%s: no stop_reason is built from load_failed alone" % module,
               '"page_load_timeout" if' not in src)
+
+
+def _listing_fixture(rows_per_page, page, total_pages, total_results,
+                     page_size=15):
+    """One `/api/search` answer for `page`, with `rows_per_page` unique rows.
+
+    Built from the real captured payload so the parser sees the same shape it
+    sees live — only the ids, names and the site's own arithmetic vary. Each
+    page's ids are distinct, so a page cannot be mistaken for a duplicate of
+    another and "no new products" cannot become the reason a run stops.
+    """
+    template = json.loads(LISTING_PAYLOAD_JSON)
+    base = template["results"][0]
+    results = []
+    for index in range(rows_per_page):
+        record = dict(base)
+        record["id"] = "0121_%d_%d" % (page, index)
+        record["businessName"] = "Page %d Business %d" % (page, index)
+        record["reportUrl"] = ("/us/ny/new-york/profile/restaurants/"
+                               "page-%d-business-%d-0121-%d" % (page, index, index))
+        # A BBB-hosted asset reference, which is what makes a truncated
+        # response classify as "served but unreadable" rather than as a
+        # block — the same discriminator the real captures carry.
+        record["logoUri"] = "https://m.bbb.org/prod/ProfileImages/p%d-%d.png" % (page, index)
+        results.append(record)
+    payload = {k: v for k, v in template.items() if k != "results"}
+    payload.update({"page": page, "pageSize": page_size,
+                    "totalPages": total_pages, "totalResults": total_results,
+                    "results": results})
+    return json.dumps(payload)
+
+
+def _page_rows_from_report(report):
+    return {entry["page"]: entry for entry in report or []}
+
+
+def check_a_multi_page_run_reports_every_page():
+    """The task's core ask: a finished run says, per page, what it got.
+
+    Driven through the real `scrape()` with the browser faked, so the page
+    table is the one the engine writes rather than a second implementation
+    in the test.
+    """
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    payloads = {n: _listing_fixture(15, n, 5, 75) for n in range(1, 6)}
+
+    rc, meta, requested = _drive_scrape(
+        engine, lambda n: payloads[n], pages=3)
+    equal("three normal pages: exit 0", rc, 0)
+    equal("...status complete", meta.get("status"), "complete")
+    equal("...stop_kind says all requested pages were fetched",
+          meta.get("stop_kind"), engine.STOP_COMPLETED)
+    equal("...the page table covers exactly what was requested",
+          [e["page"] for e in meta.get("pages", [])], [1, 2, 3])
+    equal("...each page's status", [e["status"] for e in meta.get("pages", [])],
+          [engine.PAGE_OK] * 3)
+    equal("...each page's row count", [e["rows"] for e in meta.get("pages", [])],
+          [15, 15, 15])
+    check("...no page is flagged thin",
+          not any(e["thin"] for e in meta.get("pages", [])))
+    equal("...page 4 and 5 were never asked for", requested, [1, 2, 3])
+    equal("the coverage block counts the run",
+          (meta.get("coverage", {}).get("rows"),
+           meta.get("coverage", {}).get("pages_attempted")), (45, 3))
+
+
+def check_a_run_stopped_by_the_sites_page_cap_is_complete_not_failed():
+    """BBB offers 15 pages; asking for 20 must not look like a failure.
+
+    The run fetched every page the site will serve, so it is COMPLETE — and
+    the sidecar has to say which ceiling stopped it and how much of the
+    catalogue that ceiling represents.
+    """
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    # 15 pages of 15, against 19,016 claimed — the real shape of a broad
+    # search.
+    payloads = {n: _listing_fixture(15, n, 15, 19016) for n in range(1, 16)}
+
+    rc, meta, requested = _drive_scrape(
+        engine, lambda n: payloads[n], pages=20)
+    equal("a request past the 15-page cap: exit 0", rc, 0)
+    equal("...status is complete, not partial", meta.get("status"), "complete")
+    equal("...stop_kind names the site's own cap",
+          meta.get("stop_kind"), engine.STOP_PAGE_CAP_REACHED)
+    check("...and the cap is not reported as a failure",
+          not meta.get("pages_failed") and meta.get("stop_reason")
+          == "page_cap_reached")
+    equal("...exactly the 15 pages the site serves were fetched",
+          requested, list(range(1, 16)))
+    report = _page_rows_from_report(meta.get("pages"))
+    equal("...the page table holds the site's 15 pages, not the requested 20",
+          sorted(report), list(range(1, 16)))
+    check("...every one of them is a normal page",
+          all(e["status"] == engine.PAGE_OK for e in report.values()))
+    coverage = meta.get("coverage") or {}
+    equal("the coverage block compares what was asked with what exists",
+          (coverage.get("pages_requested"), coverage.get("pages_planned")),
+          (20, 15))
+    equal("...says how many rows this run covers", coverage.get("rows"), 225)
+    equal("...against what BBB claims for the query",
+          coverage.get("total_claimed"), 19016)
+    equal("...and the site's reachable maximum",
+          coverage.get("reachable_max"), 225)
+    check("...flagging the cap as the stopping reason",
+          coverage.get("capped_by_page_cap") is True)
+
+
+def check_a_failed_page_is_named_and_the_rest_are_not_attempted():
+    """A middle page that cannot be read ends the run; the sidecar says which
+    page failed and that the pages after it were never asked for — three
+    different facts that a row total cannot express."""
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    good = _listing_fixture(15, 1, 15, 19016)
+    # A served page whose results container moved: not empty, not readable.
+    # Matched against the SERIALISED shape (`json.dumps` puts a space after
+    # the colon), not against the raw captured fixture.
+    moved = good.replace('"results": [', '"items_renamed": [', 1)
+    check("fixture: the moved container really is a different body",
+          moved != good)
+    payloads = {n: _listing_fixture(15, n, 15, 19016) for n in range(1, 6)}
+    payloads[3] = moved
+
+    rc, meta, requested = _drive_scrape(
+        engine, lambda n: payloads[n], pages=5)
+    equal("a failed middle page: exit 6, not 0", rc, 6)
+    equal("...status partial", meta.get("status"), "partial")
+    equal("...stop_kind says a page failed",
+          meta.get("stop_kind"), engine.STOP_PAGE_FAILED)
+    equal("...the failed page is listed", meta.get("pages_failed"), [3])
+    report = _page_rows_from_report(meta.get("pages"))
+    equal("...the failed page reads unreadable",
+          report[3]["status"], engine.PAGE_UNREADABLE)
+    equal("...pages before it are normal",
+          [report[n]["status"] for n in (1, 2)],
+          [engine.PAGE_OK, engine.PAGE_OK])
+    equal("...pages after it were never asked for",
+          [report[n]["status"] for n in (4, 5)],
+          [engine.PAGE_NOT_ATTEMPTED] * 2)
+    equal("...and the fetch log agrees (page 3 may be re-fetched once, which"
+          " is the existing block-retry policy)",
+          sorted(set(requested)), [1, 2, 3])
+    equal("...no page past the failure was ever navigated to",
+          [n for n in requested if n > 3], [])
+    equal("...no page is claimed as a row source after the failure",
+          meta.get("coverage", {}).get("pages_attempted"), 3)
+
+
+def check_a_short_page_is_flagged_only_when_it_is_not_the_last():
+    """A page materially thinner than its siblings is a truncated response;
+    the listing's last page is legitimately short and must not be flagged."""
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+
+    # Four pages of a 15-page listing; page 2 is thin. Page 4 is FULL: it
+    # is not the listing's last page, so there is no excuse for it to be
+    # short either.
+    payloads = {n: _listing_fixture(15, n, 15, 19016) for n in range(1, 6)}
+    payloads[2] = _listing_fixture(3, 2, 15, 19016)
+    rc, meta, requested = _drive_scrape(
+        engine, lambda n: payloads[n], pages=4)
+    report = _page_rows_from_report(meta.get("pages"))
+    equal("a thin non-final page is still a successful page",
+          report[2]["status"], engine.PAGE_OK)
+    check("...but it IS flagged thin", report[2]["thin"] is True,
+          "%r" % report[2])
+    check("...and only that page is",
+          [p for p, e in report.items() if e["thin"]] == [2],
+          "%r" % {p: e["thin"] for p, e in report.items()})
+    equal("...its row count is recorded verbatim", report[2]["rows"], 3)
+
+    # The other direction: a run whose FINAL fetched page is short because
+    # the site said there are no more pages. 2 pages, 15 then 7 rows.
+    payloads = {1: _listing_fixture(15, 1, 2, 22),
+                2: _listing_fixture(7, 2, 2, 22)}
+    rc, meta, requested = _drive_scrape(
+        engine, lambda n: payloads[n], pages=2)
+    report = _page_rows_from_report(meta.get("pages"))
+    equal("a short LAST page is not flagged thin", report[2]["thin"], False)
+    equal("...though its row count is still reported", report[2]["rows"], 7)
+
+
+def check_an_empty_result_is_a_complete_answer_not_a_capped_run():
+    """`totalPages: 0` is a query that matched nothing — not a ceiling and
+    not a failure. It must not be reported as `page_cap_reached`."""
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+
+    rc, meta, requested = _drive_scrape(
+        engine, lambda n: EMPTY_PAYLOAD_JSON, pages=3,
+        extra_args=["--allow-empty"])
+    equal("an empty result exits 4 (nothing found)", rc, 4)
+    equal("...and is not called a failure by its stop_kind",
+          meta.get("stop_kind"), engine.STOP_COMPLETED)
+    equal("...nor a capped run", meta.get("stop_reason"), "completed")
+    report = _page_rows_from_report(meta.get("pages"))
+    equal("...page 1 is a served EMPTY page",
+          report[1]["status"], engine.PAGE_EMPTY)
+    equal("...the empty query's own arithmetic is recorded",
+          (meta.get("coverage", {}).get("pages_available"),
+           meta.get("coverage", {}).get("total_claimed")), (0, 0))
+    equal("...and only page 1 is in the table", sorted(report), [1])
+    equal("...page 2 was never asked for", requested, [1])
+
+    # A page that goes empty mid-listing ends the listing: the pages after
+    # it are not attempted, and the table says so rather than counting them
+    # as failures.
+    good = {n: _listing_fixture(15, n, 5, 75) for n in range(1, 6)}
+    good[2] = EMPTY_PAYLOAD_JSON.replace('"page":1', '"page":2')
+    rc, meta, requested = _drive_scrape(engine, lambda n: good[n], pages=4)
+    report = _page_rows_from_report(meta.get("pages"))
+    equal("an empty page mid-listing stops the run cleanly", rc, 0)
+    equal("...stop_kind says the listing ran out",
+          meta.get("stop_kind"), engine.STOP_LISTING_EXHAUSTED)
+    equal("...the empty page reads empty", report[2]["status"],
+          engine.PAGE_EMPTY)
+    equal("...pages after it were not attempted",
+          [report[3]["status"], report[4]["status"]],
+          [engine.PAGE_NOT_ATTEMPTED] * 2)
+    equal("...and were not fetched", requested, [1, 2])
+
+
+def check_the_stop_kind_covers_all_four_required_reasons():
+    """The four reasons the task requires be distinguishable, plus the
+    listing-exhausted case. Checked against the engine's own constants, so a
+    renamed value cannot quietly become a fifth, unhandled one."""
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    equal("all requested pages fetched -> completed",
+          engine.stop_kind_for("completed"), engine.STOP_COMPLETED)
+    equal("site totalPages ceiling -> page_cap_reached",
+          engine.stop_kind_for("page_cap_reached"),
+          engine.STOP_PAGE_CAP_REACHED)
+    equal("a failed page -> page_failed",
+          engine.stop_kind_for("unreadable_response"),
+          engine.STOP_PAGE_FAILED)
+    equal("...a block is a failure too",
+          engine.stop_kind_for("blocked_cloudflare (hard block)"),
+          engine.STOP_PAGE_FAILED)
+    equal("a page nobody asked for -> pages_unattempted",
+          engine.stop_kind_for("pages_unattempted"),
+          engine.STOP_PAGES_UNATTEMPTED)
+    equal("the listing running out -> listing_exhausted",
+          engine.stop_kind_for("no_new_products"),
+          engine.STOP_LISTING_EXHAUSTED)
+    check("the four verdicts are distinct",
+          len({engine.STOP_COMPLETED, engine.STOP_PAGE_CAP_REACHED,
+               engine.STOP_PAGE_FAILED, engine.STOP_PAGES_UNATTEMPTED}) == 4)
+
+
+def check_the_pagination_report_is_offline_only():
+    """Pins that the tests above need no network: they drive `scrape()` with
+    the browser faked and payloads built from an inline capture."""
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    check("report helpers exist on the engine",
+          all(hasattr(engine, name) for name in
+              ("page_report", "coverage_report", "stop_kind_for",
+               "PAGE_OK", "PAGE_EMPTY", "PAGE_REJECTED", "PAGE_UNREADABLE",
+               "PAGE_NOT_ATTEMPTED")))
+    outcome = engine.PageOutcome(page_num=1, url="u")
+    outcome.blocked_by = "cloudflare"
+    equal("a blocked page is REJECTED, not merely unreadable",
+          engine.page_status(outcome), engine.PAGE_REJECTED)
+    outcome = engine.PageOutcome(page_num=2, url="u")
+    outcome.state = "challenge"
+    outcome.unreadable = True
+    equal("an unsolved challenge is REJECTED", engine.page_status(outcome),
+          engine.PAGE_REJECTED)
+    outcome = engine.PageOutcome(page_num=3, url="u")
+    outcome.load_failed = True
+    equal("a load timeout is UNREADABLE", engine.page_status(outcome),
+          engine.PAGE_UNREADABLE)
+    equal("an absent outcome is NOT ATTEMPTED", engine.page_status(None,
+          tried=False), engine.PAGE_NOT_ATTEMPTED)
+
+
+def check_category_mode_reports_pages_and_profile_mode_does_not():
+    """The change covers the two LISTING modes and deliberately leaves the
+    single-page profile mode alone: there is no page 2 to report on."""
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+
+    # --mode category costs one extra probe request to resolve the slug to
+    # BBB's tobId, then fetches the same listing pages as a search. The same
+    # page table must come out.
+    payloads = {n: _listing_fixture(15, n, 5, 75) for n in range(1, 6)}
+    rc, meta, requested = _drive_scrape(
+        engine, lambda n: payloads[n], pages=2,
+        url="https://www.bbb.org/us/category/restaurants", mode="category")
+    equal("category mode: exit 0", rc, 0)
+    equal("...mode is recorded as category", meta.get("mode"), "category")
+    equal("...the page table is written for category runs too",
+          [e["page"] for e in meta.get("pages", [])], [1, 2])
+    equal("...with the same verdicts", [e["status"] for e in meta.get("pages",
+          [])], [engine.PAGE_OK, engine.PAGE_OK])
+    equal("...and a coverage block", meta.get("coverage", {}).get("rows"), 30)
+
+    # --mode profile: ONE page, complete by construction, and none of the
+    # listing machinery should appear in its sidecar.
+    rc, meta, requested = _drive_scrape(
+        engine, lambda n: PROFILE_STATE_JSON, pages=1,
+        url=("https://www.bbb.org/us/ny/bronx/profile/cleaning-services/"
+             "proclean-maintenance-systems-inc-0121-134716"),
+        mode="profile")
+    equal("profile mode: one page, exit 0", rc, 0)
+    equal("...stop_reason is single_page_mode", meta.get("stop_reason"),
+          "single_page_mode")
+    check("...and the sidecar carries no per-page listing table",
+          "pages" not in meta and "coverage" not in meta,
+          "%r" % sorted(meta))
 
 
 def check_the_solve_budget_is_spent_at_the_purchase():
