@@ -1,0 +1,32 @@
+services:
+  twitter-scraper-mcp:
+    build: .
+    image: twitter-scraper-mcp:local
+    init: true
+    stdin_open: true
+    environment:
+      TWITTER_READ_BACKEND: ${TWITTER_READ_BACKEND:-oembed}
+      TWITTER_DISCOVERY_BACKEND: ${TWITTER_DISCOVERY_BACKEND:-twscrape}
+      TWSCRAPE_HTTP_BACKEND: ${TWSCRAPE_HTTP_BACKEND:-httpx}
+      TWITTER_ENABLE_WRITE: ${TWITTER_ENABLE_WRITE:-false}
+      TWITTER_WRITE_BACKEND: ${TWITTER_WRITE_BACKEND:-api}
+      TWITTER_WRITE_ACCOUNT: ${TWITTER_WRITE_ACCOUNT:-}
+      REQUEST_TIMEOUT_MS: ${REQUEST_TIMEOUT_MS:-20000}
+      PROXY_URL: ${PROXY_URL:-}
+      TWITTER_BEARER_TOKEN: ${TWITTER_BEARER_TOKEN:-}
+      TWITTER_API_KEY: ${TWITTER_API_KEY:-}
+      TWITTER_API_SECRET_KEY: ${TWITTER_API_SECRET_KEY:-}
+      TWITTER_ACCESS_TOKEN: ${TWITTER_ACCESS_TOKEN:-}
+      TWITTER_ACCESS_TOKEN_SECRET: ${TWITTER_ACCESS_TOKEN_SECRET:-}
+    volumes:
+      - twitter_sessions:/data
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  twitter_sessions:
