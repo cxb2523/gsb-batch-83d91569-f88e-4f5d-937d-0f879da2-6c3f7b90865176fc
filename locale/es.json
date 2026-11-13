@@ -1,0 +1,111 @@
+{
+	"events": {
+		"cooldown": "[🕓] - ¿Tienes prisa? Fuiste gravado en *{{time}} *, espera un poco allí",
+		"nodb": "[💡] Este comando requiere una base de datos configurada."
+	},
+	"langs": {
+		"pt": "portugués",
+		"en": "Inglés",
+		"es": "Español",
+		"fr": "Francés",
+		"de": "Alemán"
+	},
+	"usage": {
+		"title": "*[❗] - ¿Cómo usar?*",
+		"args": "*[💡] - Tipos de parámetros:*\n<ROBLECTORIO>\n[opcional]\n(Mensaje mencionado)",
+		"examples": "*[💯] - Ejemplos:*"
+	},
+	"help": {
+		"usage": "[Nombre de un comando]",
+		"desc": "Ver información sobre un comando",
+		"examples": ["Géminis", "etiqueta engomada"],
+		"title": "*[📖] - Menú de ayuda*",
+		"prefix": "[⚙️] Cambiar prefijo: *{{prefix}} *",
+		"lang": "[🌎] Cambiar lenguaje: *{{lang}} *"
+	},
+	"language": {
+		"usage": "<Código de idioma>",
+		"desc": "Cambiar lenguaje de bot",
+		"examples": [
+			"{pt}: portugués",
+			"{en}: inglés",
+			"{fr}: francés",
+			"{es}: español",
+			"{de}: alemán"
+		],
+		"changed": "[🌎] - El lenguaje cambió a *{{lng}} *",
+		"ask": "[🌎] - ¿Qué idioma prefieres? Actual: *{{current}}*\n{{list}}\nResponde con *{{prefix}}lang <número o código>*",
+		"invalid": "[❗] - \"{{input}}\" no es un idioma válido. Actual: *{{current}}*\n{{list}}\nResponde con *{{prefix}}lang <número o código>*"
+	},
+	"prefix": {
+		"usage": "<Prefijo con hasta 3 dígitos>",
+		"desc": "Cambiar el prefijo de comandos",
+		"examples": [".", "!"],
+		"changed": "[✔️] - Tu nuevo prefijo es: *{{prefix}} *"
+	},
+	"ping": { "desc": "Ver tiempo de respuesta de bot" },
+	"choose": {
+		"usage": "<Opción 1>, <Opción 2>, [Opción 3], [...]",
+		"desc": "En duda sobre qué hacer? Elige esto o aquello",
+		"examples": [
+			"Pizza, pastel, pudín, manzana",
+			"Debería hacer esto, no debería hacer eso",
+			"Ve al gimnasio, juega GTA 6"
+		],
+		"result": "* [🏆] - Opción elegida:* {{chosen}}"
+	},
+	"gemini": {
+		"usage": "[Limpiar: borra lo histórico] [RESET: borra los recuerdos y la historia] <Ad. Avent> [(Media)]]",
+		"desc": "Habla con Google AI",
+		"examples": [
+			"(imagen) Resume el texto de esta imagen",
+			"¿Cuál es la población de Nueva York?",
+			"Restablecer quién soy yo?",
+			"Limpio, ¿recuerdas lo que te pregunté ayer?"
+		]
+	},
+	"rank": { "desc": "Ver el rango de miembros que más hablaban en el grupo" },
+	"sticker": {
+		"usage": "<(Imagen/video)> [Número: calidad de imagen de 1 a 100 (estándar: 1)] [RMBG: eliminar el fondo de una imagen]",
+		"desc": "¡Crea pegatinas sin fondo!",
+		"examples": ["(Imagen) rmbg", "(Imagen) 50", "(video)", "(etiqueta engomada)"],
+		"nobuffer": "[⚠️] - Medios incompatibles o no encontrados"
+	},
+	"clean": {
+		"usage": "<Número de mensajes (Max 200)>",
+		"desc": "Ocultar sus delitos borrando los últimos mensajes grupales (requiere permiso del administrador)",
+		"examples": ["10", "200"],
+		"noAmount": "\"Clean 0\"? ¿Crees que aquí está tu habitación que no limpias nada?",
+		"deleted": "Borraré los últimos mensajes {{msgsSize}} y luego volveré a dormir aquí en mi red"
+	},
+	"download": {
+		"usage": "[A: audio] <Url>",
+		"desc": "Descargar videos o audios",
+		"examples": ["(mensaje con enlace)", "{link}", "A {link}"]
+	},
+	"everyone": {
+		"usage": "[mensaje]",
+		"desc": "Mencionar a todos los usuarios de un grupo en un solo mensaje",
+		"examples": ["", "El juego", "¡Noticias urgentes!"]
+	},
+	"remove": {
+		"usage": "<Imagen>",
+		"desc": "Eliminar el fondo de una imagen",
+		"examples": ["<Imagen>", "(imagen)"]
+	},
+	"reveal": {
+		"usage": "(Medios de visualización únicos)",
+		"desc": "Revelar un medio de visualización único",
+		"examples": [
+			"(Imagen de visualización única)",
+			"(Video de visualización único)",
+			"(Audio de visualización único)",
+			"(etiqueta engomada)"
+		]
+	},
+	"translate": {
+		"usage": "<Código de idioma: EN/PT/FR ...> <Ext>",
+		"desc": "Traductor de Google",
+		"examples": ["En botas gato", "Pt el gato en el sombrero", "Es je suis un chat"]
+	}
+}

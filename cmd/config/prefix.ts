@@ -1,0 +1,19 @@
+// Prefix setter - updates user prefix via User model setter with DB sync
+// Needed to let users customize cmd trigger per chat
+import { type CmdCtx } from '@conf/types/types.d.ts'
+import Cmd from '@class/cmd.ts'
+
+export default class extends Cmd {
+	constructor() {
+		super({})
+	}
+
+	// deno-lint-ignore require-await
+	async run({ t, user, send, args }: CmdCtx) {
+		if (!args[0] || args[0].length > 3) return send('usage.prefix', { user })
+
+		user.prefix = args[0] // setter prefix() will also change it on DB, if there is one
+
+		send(t('prefix.changed', { prefix: user.prefix.encode() }))
+	}
+}

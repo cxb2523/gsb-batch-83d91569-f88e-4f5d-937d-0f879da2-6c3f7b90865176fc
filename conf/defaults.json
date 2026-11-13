@@ -1,0 +1,114 @@
+{
+	"lang": "pt",
+	"prefix": ".",
+	"campus": {
+		"lat": -18.6758348,
+		"long": -39.8623881
+	},
+	"ai": {
+		"gemini_chain": [
+			"gemini-2.5-flash",
+			"gemini-3.7-flash"
+		],
+		"gemini_pro": "gemini-3-flash-preview"
+	},
+	"cache": {
+		"users": 200,
+		"groups": 200,
+		"dmMsgs": 60,
+		"groupMsgs": 200
+	},
+	"runner": {
+		"tempFolder": "conf/gen/temp",
+		"ytdlp": "conf/gen/python/bin/yt-dlp",
+		"py": {
+			"cmd": [
+				"conf/gen/python/bin/python3"
+			],
+			"ext": "py"
+		},
+		"lua": {
+			"cmd": [
+				"luajit"
+			],
+			"ext": "lua"
+		},
+		"node": {
+			"cmd": [
+				"node"
+			],
+			"ext": "js"
+		},
+		"deno": {
+			"cmd": [
+				"deno run -A"
+			],
+			"ext": "ts"
+		},
+		"bun": {
+			"cmd": [
+				"bun run"
+			],
+			"ext": "ts"
+		},
+		"bash": {
+			"cmd": [
+				"bash"
+			],
+			"ext": "sh"
+		},
+		"zsh": {
+			"cmd": [
+				"zsh"
+			],
+			"ext": "sh"
+		},
+		"cpp": {
+			"cmd": [
+				"g++ -o conf/gen/temp/main ",
+				"./conf/gen/temp/main #"
+			],
+			"ext": "cpp",
+			"triggers": [
+				{
+					"notIncludes": [
+						"int main"
+					],
+					"template": "int main() { {{code}} }"
+				},
+				{
+					"notIncludes": [
+						"#include <iostream>"
+					],
+					"template": "#include <iostream>\n#include <string>\n#include <vector>\n#include <map>\n#include <unordered_map>\n#include <set>\n#include <algorithm>\n#include <numeric>\n#include <memory>\n#include <utility>\n#include <fstream>\n#include <sstream>\n#include <iomanip>\n#include <limits>\n#include <stdexcept>\n#include <functional>\n#include <thread>\n#include <mutex>\n#include <chrono>\n#include <filesystem>\n#include <cmath>\n#include <cstdlib>\n{{code}}"
+				}
+			]
+		},
+		"rs": {
+			"cmd": [
+				"rustc -o conf/gen/temp/main",
+				"./conf/gen/temp/main"
+			],
+			"ext": "rs",
+			"triggers": [
+				{
+					"notIncludes": [
+						"fn main"
+					],
+					"template": "fn main() { {{code}} }"
+				}
+			]
+		},
+		"eval": {
+			"cmd": [],
+			"triggers": [
+				{
+					"includes": [
+						"await"
+					],
+					"template": "(async () => { {{code}} })()"
+				}
+			]
+		}
+	}
+}

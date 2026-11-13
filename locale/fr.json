@@ -1,0 +1,111 @@
+{
+	"events": {
+		"cooldown": "[🕓] - Êtes-vous pressé? Vous avez été taxé en * {{time}} *, attendez un peu là-bas",
+		"nodb": "[💡] Cette commande nécessite une base de données configurée."
+	},
+	"langs": {
+		"pt": "portugais",
+		"en": "Anglais",
+		"es": "Espagnol",
+		"fr": "Français",
+		"de": "Allemand"
+	},
+	"usage": {
+		"title": "* [❗] - comment utiliser? *",
+		"args": "* [💡] - Types de paramètres: *\n<obligatoire>\n[facultatif]\n(Message mentionné)",
+		"examples": "* [💯] - Exemples: *"
+	},
+	"help": {
+		"usage": "[Nom d'une commande]",
+		"desc": "Voir des informations sur une commande",
+		"examples": ["Gémeaux", "autocollant"],
+		"title": "* [📖] - Menu d'aide *",
+		"prefix": "[⚙️] Changer le préfixe: * {{prefix}} *",
+		"lang": "[🌎] Changer la langue: * {{lang}} *"
+	},
+	"language": {
+		"usage": "<Code de langue>",
+		"desc": "Changer la langue des bot",
+		"examples": [
+			"{pt}: Portugais",
+			"{en}: anglais",
+			"{fr}: français",
+			"{es}: espagnol",
+			"{de}: allemand"
+		],
+		"changed": "[🌎] - Langue changée en * {{lng}} *",
+		"ask": "[🌎] - Quelle langue préférez-vous ? Actuelle : *{{current}}*\n{{list}}\nRépondez avec *{{prefix}}lang <numéro ou code>*",
+		"invalid": "[❗] - \"{{input}}\" n'est pas une langue valide. Actuelle : *{{current}}*\n{{list}}\nRépondez avec *{{prefix}}lang <numéro ou code>*"
+	},
+	"prefix": {
+		"usage": "<Préfixe avec jusqu'à 3 chiffres>",
+		"desc": "Changer le préfixe des commandes",
+		"examples": [".", "!"],
+		"changed": "[✔️] - Votre nouveau préfixe est: * {{prefix}} *"
+	},
+	"ping": { "desc": "Voir le temps de réponse du bot" },
+	"choose": {
+		"usage": "<Option 1>, <option 2>, [Option 3], [...]",
+		"desc": "En doute sur ce qu'il faut faire? Choisissez ceci ou",
+		"examples": [
+			"Pizza, gâteau, pudding, pomme",
+			"Je devrais faire ça, je ne devrais pas faire ça",
+			"Allez au gymnase, jouez à GTA 6"
+		],
+		"result": "* [🏆] - Option choisie: * {{chosen}}"
+	},
+	"gemini": {
+		"usage": "[Clean: Efface l'historique] [Réinitialiser: efface les souvenirs et l'histoire] <MIVER> [(Media)]",
+		"desc": "Parlez à Google AI",
+		"examples": [
+			"(Image) Résumez le texte de cette image",
+			"Quelle est la population de New York?",
+			"Réinitialiser qui suis-je?",
+			"Clean tu te souviens de ce que je t'ai demandé hier?"
+		]
+	},
+	"rank": { "desc": "Voir le grade de membres qui ont le plus parlé du groupe" },
+	"sticker": {
+		"usage": "<(Image / vidéo)> [Numéro: qualité d'image de 1 à 100 (standard: 1)] [RMBG: supprimez l'arrière-plan d'une image]",
+		"desc": "Créez des autocollants sans fond !!!!",
+		"examples": ["(Image) rmbg", "(Image) 50", "(vidéo)", "(autocollant)"],
+		"nobuffer": "[⚠️] - Media incompatible ou non trouvé"
+	},
+	"clean": {
+		"usage": "<Nombre de messages (max 200)>",
+		"desc": "Cachez vos crimes effaçant les derniers messages de groupe (nécessite l'autorisation de l'administrateur)",
+		"examples": ["10", "200"],
+		"noAmount": "\"Clean 0\"? Pensez-vous que voici votre chambre que vous ne nettoyez rien?",
+		"deleted": "J'effacerai les derniers messages {{msgsSize}} et je vais ensuite me rendormir ici sur mon réseau"
+	},
+	"download": {
+		"usage": "[A: Audio] <URL>",
+		"desc": "Télécharger des vidéos ou des audios",
+		"examples": ["(Message avec lien)", "{link}", "A {link}"]
+	},
+	"everyone": {
+		"usage": "[message]",
+		"desc": "Mentionner tous les utilisateurs d'un groupe dans un seul message",
+		"examples": ["", "Le jeu", "Nouvelles urgentes!"]
+	},
+	"remove": {
+		"usage": "<image>",
+		"desc": "Supprimer l'arrière-plan d'une image",
+		"examples": ["<image>", "(image)"]
+	},
+	"reveal": {
+		"usage": "(Support de visualisation unique)",
+		"desc": "Révéler un support de visualisation unique",
+		"examples": [
+			"(Image de visualisation unique)",
+			"(Vidéo de visualisation unique)",
+			"(Audio de visualisation unique)",
+			"(autocollant)"
+		]
+	},
+	"translate": {
+		"usage": "<Code de langue: en / pt / fr ...> <Text>",
+		"desc": "Traducteur Google",
+		"examples": ["En bottes chat", "Pt le chat dans le chapeau", "ES JE SUIS UN CHAT"]
+	}
+}

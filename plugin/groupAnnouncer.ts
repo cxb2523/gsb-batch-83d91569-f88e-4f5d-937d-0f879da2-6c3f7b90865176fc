@@ -1,0 +1,117 @@
+// Group announcer - tag-triggered announcement queue
+// Forwards tagged msgs to linked groups in order
+// Simple queue avoids double sends while busy
+import { getMedia, reactToMsg, sendMsg } from '@util/msgAbstractions.ts'
+import { type Msg } from '@conf/types/types.d.ts'
+import { randomDelay } from '@util/functions.ts'
+import type { AnyMessageContent } from 'baileys'
+import Group from '@class/group.ts'
+import User from '@class/user.ts'
+
+type Announcement = { text?: str; caption?: str; groups?: str[]; tag?: str; msg?: Msg }
+// Announcement = simple text msg or media msg (replace text by caption)
+
+/** How does this shit work?
+ * every new msg will be pushed to the end of the queue.
+ * bot will send the FIRST msg to all chats
+ * then it shifts the array (removes the first element and goes to the next)
+ * until it's empty.
+ * when the bot start to send a msg, isSending will be true until
+ * it cleans the entire queue.
+ * It prevents calling sendAnnouncements() twice
+ * while bot is still sending the msgs.
+ * a risky way to live for sure cuz it would be really
+ * chaottic if sendAnnouncement() got called two times in a row
+ */
+
+let isSending = false
+const msgQueue: Announcement[] = []
+
+function getAllowedTags() {
+	const groups1 = Deno.env.get('GROUPS1')?.split('|') ?? []
+	const groups2 = Deno.env.get('GROUPS2')?.split('|') ?? []
+	return {
+		'#diurno': groups1,
+		'#noturno': groups2,
+		'#todos': [...groups1, ...groups2],
+	}
+}
+
+// Exported for external use (e.g. menuScraping.ts)
+export function getAllowedTagsList() {
+	return getAllowedTags()['#todos']
+}
+export { getAllowedTags as allowedTags }
+export default checkGroupAnnouncer
+async function checkGroupAnnouncer(msg: Msg, user: User, group?: Group) {
+	const allowedTags = getAllowedTags()
+	if (!group || !allowedTags['#todos'].includes(group.id) || msg.isBot) return
+	// ignore msgs from DMs, from other groups or that was sent by the bot
+
+	let announceMsg: Announcement = {}
+	const lowText = msg.text.toLowerCase()
+	for (const [key, value] of Object.entries(allowedTags)) {
+		if (lowText.includes(key)) {
+			announceMsg = {
+				tag: key, // tag trigger
+				groups: value.filter((g) => g !== group.id),
+				// all groups that wasn't the group the msg was sent
+			}
+		}
+	}
+
+	// ignore msgs that not contain any tag
+	if (!announceMsg.tag) return
+	// ignore msgs equals to just '#todos'
+	if (lowText === announceMsg.tag && !msg.media && !msg.quoted?.media) {
+		randomDelay(500, 1_500).then(() => reactToMsg.bind(msg)('question'))
+		// ignore no empty content msgs (only tag msgs)
+		return
+	}
+
+	announceMsg.text = `*${user.name}:* ${msg.text}`
+	if (msg.quoted) {
+		announceMsg.text = `> ${msg.quoted.text}\n${announceMsg.text}`
+	}
+
+	if (msg.media || msg.quoted?.media) {
+		const media = await getMedia(msg)
+		const type = msg.media ? msg.type : msg.quoted?.type!
+		announceMsg = {
+			caption: announceMsg.text,
+			[type]: media!.buffer,
+			groups: announceMsg.groups,
+		}
+	}
+
+	announceMsg.msg = msg
+	msgQueue.push(announceMsg)
+	// push the announcement to the end of the queue
+
+	if (!isSending) sendAnnouncements()
+	// only calls sendAnnouncements() if it's not doing anything
+}
+
+async function sendAnnouncements() {
+	if (!msgQueue[0]) return // there's no more msgs to send
+	isSending = true // now, sendAnnouncements() won't be called again
+	// until the queue is empty
+
+	const msg = msgQueue[0].msg!
+	// it is important bc msgQueue[0] will be deleted soon
+	randomDelay().then(() => reactToMsg.bind(msg)('ok'))
+
+	for (const g of msgQueue[0].groups!) {
+		await randomDelay(1_000, 2_500)
+		// a random delay is required to Meta not flag us as
+		// a spam bot. random delays and different msgs looks
+		//  like real users
+		await sendMsg.bind(g)(msgQueue[0] as AnyMessageContent)
+	}
+
+	msgQueue.shift() // removes the first element
+	// and goes to the next if it exists
+	if (msgQueue[0]) await sendAnnouncements()
+	else isSending = false
+	// if not, all the work has been done
+}

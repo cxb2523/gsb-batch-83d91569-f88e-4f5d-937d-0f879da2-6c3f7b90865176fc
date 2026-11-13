@@ -1,0 +1,95 @@
+// msgAbstractions - Baileys send, react and typing touchpoint
+// - wraps sendMsg with media cache lookup and locale templates
+import { type CmdCtx, type Msg } from '@conf/types/types.d.ts'
+import { downloadMedia } from '@util/msgTools.ts'
+import type { AnyMessageContent } from 'baileys'
+import { randomEmoji } from '@util/emojis.ts'
+import { getCtx } from '@util/msgTools.ts'
+import cache from '@plugin/cache.ts'
+import emojis from '@util/emojis.ts'
+import { getFixedT } from 'i18next'
+import User from '@class/user.ts'
+import bot from '@plugin/bot.ts'
+
+export { getMedia, reactToMsg, sendMsg, startTyping }
+
+async function getMedia(msg: Msg, startTyping?: Func) {
+	const target = msg.media ? msg : msg.quoted
+
+	if (!target || !target.media) return
+	if (startTyping) await startTyping()
+
+	let media = cache.media.get(target.media.url)
+	if (!media) {
+		// media not cached, download it
+		await downloadMedia(target, [target.type, 'media'])
+		media = cache.media.get(target.media.url)
+		if (!media) return // failed to download media
+	}
+
+	return {
+		target,
+		buffer: media.buffer,
+		url: target.media.url,
+		mime: media.mime,
+		length: media.length,
+		duration: media.duration,
+		type: target.type,
+		height: media.height,
+		width: media.width,
+	}
+}
+
+async function startTyping(this: str) {
+	return await bot.sock.sendPresenceUpdate('composing', this)
+}
+
+// simple abstraction to send a msg
+async function sendMsg(
+	this: str,
+	text: str | AnyMessageContent,
+	opts?: { user?: User; quoted?: Msg },
+) {
+	let content = text
+
+	if (typeof text === 'string') {
+		// it's a string, so it can be a text or a template string
+
+		if (opts?.user) {
+			// it's a template string, so we can use user's lang
+			const t = getFixedT(opts.user.lang)
+
+			if (text.startsWith('usage.')) {
+				// it's a cmd usage
+				text = text.replace('usage.', '')
+
+				cache.cmds.get('help')!.run({
+					args: [text],
+					send: sendMsg.bind(this),
+					user: opts?.user,
+					t,
+				} as CmdCtx)
+				// run help cmd to get cmd usage
+				return {} as CmdCtx
+			}
+			// it's not a cmd usage, but it's a template string
+			content = { text: t(text) } // get the localized text
+		} else content = { text } // default content type
+	}
+
+	const msg = await bot.sock.sendMessage(
+		!this.includes('@') ? this + '@s.whatsapp.net' : this,
+		content as AnyMessageContent,
+		{ quoted: opts?.quoted },
+	)
+
+	// convert raw msg on cmd context
+	return await getCtx(msg!)
+}
+
+// simple abstraction to react to a msg
+async function reactToMsg(this: Msg, emoji: str) {
+	const text = emoji === 'random' ? randomEmoji() : (emojis as any)[emoji] || emoji
+
+	await sendMsg.bind(this.chat)({ react: { text, key: this.key } })
+}

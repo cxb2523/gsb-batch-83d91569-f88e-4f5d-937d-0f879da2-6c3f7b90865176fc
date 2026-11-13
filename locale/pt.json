@@ -1,0 +1,146 @@
+{
+	"events": {
+		"cooldown": "[🕓] - Calma calabreso! Você foi taxado em *{{time}}*, espera um pouquinho aí",
+		"nodb": "[💡] Este comando requer um banco de dados configurado."
+	},
+	"langs": {
+		"pt": "Português",
+		"en": "Inglês",
+		"es": "Espanhol",
+		"fr": "Frances",
+		"de": "Alemão"
+	},
+	"usage": {
+		"title": "*[❗] - Como usar*",
+		"args": "*[💡] - Como ler:*\n`< >` obrigatório | `[ ]` opcional | `respondendo foto/vídeo` = responda a mensagem com o comando",
+		"examples": "*[💯] - Exemplos:*"
+	},
+	"help": {
+		"usage": "[comando]",
+		"desc": "Mostra a lista de comandos ou a ajuda detalhada de um comando.",
+		"examples": [
+			"",
+			"sticker",
+			"gemini"
+		],
+		"title": "*[📖] - Menu de ajuda*",
+		"prefix": "[⚙️] Alterar prefixo: *{{prefix}}*",
+		"lang": "[🌎] Alterar idioma: *{{lang}}*"
+	},
+	"language": {
+		"usage": "[número ou código ou nome do idioma]",
+		"desc": "Troca o idioma do bot. Pode usar sem nada para ver a lista.",
+		"examples": [
+			"",
+			"pt",
+			"2",
+			"português"
+		],
+		"changed": "[🌎] - Idioma alterado para {{lng}}",
+		"ask": "[🌎] - Qual idioma você prefere? Atual: *{{current}}*\n{{list}}\nResponda com *{{prefix}}lang <número ou código>*",
+		"invalid": "[❗] - \"{{input}}\" não é um idioma válido. Atual: *{{current}}*\n{{list}}\nResponda com *{{prefix}}lang <número ou código>*"
+	},
+	"prefix": {
+		"usage": "<letra ou símbolo, até 3 caracteres>",
+		"desc": "Troca o símbolo usado antes dos comandos.",
+		"examples": [
+			".",
+			"!",
+			"?"
+		],
+		"changed": "[✔️] - O seu novo prefixo é: *{{prefix}}*"
+	},
+	"ping": {
+		"usage": "(sem texto: só envie o comando)",
+		"desc": "Mostra se o bot está online e o tempo de resposta."
+	},
+	"choose": {
+		"usage": "<opção 1>, <opção 2>, [opção 3...]",
+		"desc": "Sorteia uma opção da sua lista. Separe cada opção com vírgula.",
+		"examples": [
+			"pizza, bolo, pudim",
+			"ir à academia, jogar GTA 6"
+		],
+		"result": "*[🏆] - Opção escolhida:* \"{{chosen}}\""
+	},
+	"gemini": {
+		"usage": "[clean | reset | pro] <sua pergunta> [respondendo foto/vídeo]",
+		"desc": "Pergunta para a IA do Google. Ela lembra do histórico. Use clean para esquecer a conversa, reset para esquecer tudo sobre você, pro para resposta mais forte.",
+		"examples": [
+			"qual a população de Nova Iorque?",
+			"respondendo foto: resuma o texto da imagem",
+			"clean",
+			"clean quanto custa um bolo?",
+			"reset quem sou eu?",
+			"pro explique buracos negros"
+		]
+	},
+	"rank": {
+		"usage": "(sem texto: só envie o comando)",
+		"desc": "Mostra quem mais conversou no grupo. Só funciona em grupos."
+	},
+	"sticker": {
+		"usage": "[número 1-100] [rmbg] [rounded] [circle] [respondendo foto/vídeo/figurinha]",
+		"desc": "Transforma foto ou vídeo curto em figurinha, sem precisar digitar texto. Se enviar várias fotos seguidas, cria todas de uma vez. Use rmbg só em foto para tirar o fundo.",
+		"examples": [
+			"respondendo foto: (sem texto)",
+			"respondendo foto: rmbg",
+			"respondendo foto: 50",
+			"respondendo foto: rounded circle",
+			"respondendo figurinha: (sem texto para virar foto)"
+		],
+		"nobuffer": "[⚠️] - Não encontrei foto, vídeo ou figurinha. Envie junto ou responda a mensagem com o comando"
+	},
+	"clean": {
+		"usage": "<quantidade> [reverse]",
+		"desc": "Apaga mensagens recentes do grupo para todos. Só em grupos, só admin e com bot admin.",
+		"examples": [
+			"10",
+			"50 reverse"
+		],
+		"noAmount": "[❗] - Digite uma quantidade maior que 0. Ex: clean 10",
+		"deleted": "Apagando as últimas {{msgsSize}} mensagens..."
+	},
+	"download": {
+		"usage": "[a] <link> - ou responda mensagem com link",
+		"desc": "Baixa vídeo (padrão) ou áudio de um link e manda aqui. Se passar de 256 MB manda como documento.",
+		"examples": [
+			"https://youtube.com/...",
+			"a https://youtube.com/...",
+			"respondendo mensagem com link: (sem texto)",
+			"respondendo mensagem com link: a"
+		]
+	},
+	"everyone": {
+		"usage": "[texto]",
+		"desc": "Marca todos do grupo de uma vez. Pode usar sem texto só para marcar.",
+		"examples": [
+			"",
+			"jogo hoje às 19h?",
+			"notícia urgente!"
+		]
+	},
+	"remove": {
+		"usage": "[respondendo foto ou enviando foto junto]",
+		"desc": "Tira o fundo de uma foto e devolve como imagem. Diferente do sticker rmbg, aqui não vira figurinha.",
+		"examples": [
+			"respondendo foto: (sem texto)"
+		]
+	},
+	"reveal": {
+		"usage": "[respondendo mídia de visualização única]",
+		"desc": "Mostra de novo uma foto, vídeo ou áudio de visualização única. Você precisa responder a mensagem.",
+		"examples": [
+			"respondendo foto de visualização única: (sem texto)"
+		]
+	},
+	"translate": {
+		"usage": "<idioma destino> <texto>",
+		"desc": "Traduz um texto para o idioma escolhido. Primeiro o código, depois o texto.",
+		"examples": [
+			"en gato de botas",
+			"pt the cat in the hat",
+			"es je suis un chat"
+		]
+	}
+}

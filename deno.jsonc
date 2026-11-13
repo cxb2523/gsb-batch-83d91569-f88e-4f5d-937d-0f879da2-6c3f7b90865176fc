@@ -1,0 +1,98 @@
+{
+	"fmt": {
+		"indentWidth": 4,
+		"singleQuote": true,
+		"useTabs": true,
+		"semiColons": false,
+		"lineWidth": 100,
+		"exclude": [
+			"conf/gen/python",
+			"conf/gen/auth",
+			"conf/gen/temp"
+		]
+	},
+	"lint": {
+		"rules": {
+			"exclude": [
+				"no-explicit-any",
+				"no-import-prefix",
+				"no-unversioned-import"
+			]
+		}
+	},
+	"imports": {
+		"@google/genai": "npm:@google/genai@^2.21.0",
+		"baileys": "npm:@whiskeysockets/baileys@^7.0.0-rc14",
+		"grammy": "npm:grammy@^1.46.0/web",
+		"i18next": "npm:i18next@^26.4.2",
+		"node-webpmux": "npm:node-webpmux@^3.2.1",
+		"sharp": "npm:sharp@^0.35.5",
+		"@types/node": "npm:@types/node@^26.6.4",
+		"drizzle-orm": "npm:drizzle-orm@^0.45.3",
+		"drizzle-orm/": "npm:/drizzle-orm@^0.45.3/",
+		"drizzle-kit": "npm:drizzle-kit@^0.31.11",
+		"postgres": "npm:postgres@^3.4.9",
+		"@libs/qrcode": "jsr:@libs/qrcode@^3.1.0",
+		"@class/": "./class/",
+		"@cmd/": "./cmd/",
+		"@conf/": "./conf/",
+		"@event/": "./event/",
+		"@plugin/": "./plugin/",
+		"@util/": "./util/",
+		"@db": "./plugin/db.ts",
+		"@wa": "./wa.ts"
+	},
+	"unstable": [
+		"cron"
+	],
+	"tasks": {
+		"presetup": "deno install -g npm:drizzle-kit && deno install -g -f -A --unsafe-proto npm:pm2",
+		"setup": "deno task presetup && deno install && echo light setup complete",
+		"setup:medium": "deno task presetup && deno install && deno task setup:py && echo medium setup complete",
+		"setup:strong": "deno task presetup && deno task db:push && deno install && deno task setup:py && echo strong setup complete",
+		"setup:py": "python3 -m venv conf/gen/python && conf/gen/python/bin/pip install rembg onnxruntime yt-dlp[default,curl-cffi]",
+		"wizard": "deno run -A setup.ts",
+		"update": "git pull origin master; deno upgrade; deno task presetup; deno install; deno task update:py; deno task postinstall",
+		"update:dev": "git pull origin dev; deno upgrade; deno task presetup; deno install; deno update --latest; deno task update:py; deno task postinstall",
+		"update:py": "conf/gen/python/bin/pip install -U rembg onnxruntime yt-dlp[default,curl-cffi]",
+		"postinstall": "deno task db:gen",
+		"start": "deno run -A --unsafe-proto npm:pm2 start conf/ecosystem.config.cjs --attach",
+		"start:dev": "NODE_EXTRA_CA_CERTS=conf/smufesrootca.pem deno run -A --env=conf/.env wa.ts",
+		"restart": "deno run -A --unsafe-proto npm:pm2 restart wa --attach",
+		"stop": "deno run -A --unsafe-proto npm:pm2 delete wa",
+		"db:gen": "deno run -A npm:drizzle-kit generate",
+		"db:push": "deno run -A npm:drizzle-kit push",
+		"db:pull": "deno run -A npm:drizzle-kit introspect",
+		"reset": "rm -r conf/gen/auth/* conf/gen/cache/* conf/gen/temp/*",
+		"check": "deno check",
+		"lint": "deno lint",
+		"fmt": "deno fmt",
+		"verify": "deno check && deno lint && deno fmt --check",
+		"dev": "DEV=1 NODE_EXTRA_CA_CERTS=conf/smufesrootca.pem deno run -A --watch-hmr --v8-flags=--expose-gc --env=conf/.env wa.ts",
+		"translate": "deno run -A npm:@parvineyvazov/json-translator locale/pt.json -m google -f pt -t en es fr de"
+	},
+	"compilerOptions": {
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"strict": true,
+		"skipLibCheck": false,
+		"types": [
+			"./conf/types/global.d.ts"
+		]
+	},
+	"nodeModulesDir": "auto",
+	"allowScripts": [
+		"npm:@google/genai@2.13.0",
+		"npm:@google/genai@2.15.0",
+		"npm:@google/genai@2.17.1",
+		"npm:@google/genai@2.21.0",
+		"npm:@whiskeysockets/baileys@7.0.0-rc13",
+		"npm:@whiskeysockets/baileys@7.0.0-rc14",
+		"npm:esbuild@0.18.20",
+		"npm:esbuild@0.25.12",
+		"npm:esbuild@0.28.1",
+		"npm:protobufjs@7.6.5",
+		"npm:sharp@0.30.7",
+		"npm:sharp@0.33.5"
+	]
+}

@@ -1,0 +1,68 @@
+// Handler loader: discovers command and event modules from disk and binds them to the
+// live Baileys socket. Event dispatch is guarded so one bad message or a mid-reconnect
+// clear() can never throw synchronously and kill the process.
+import { type BaileysEventMap } from 'baileys'
+import cache from '@plugin/cache.ts'
+import bot from '@plugin/bot.ts'
+import Cmd from '@class/cmd.ts'
+
+export { loadCmds, loadEvents }
+
+async function folderHandler(path: str, handler: Func) {
+	path = Deno.realPathSync(path)
+	let count = 0
+
+	for (const { name: category } of Deno.readDirSync(path)) {
+		// For each category folder
+		for (const { name: file } of Deno.readDirSync(`${path}/${category}`)) {
+			if (!file.endsWith('.ts')) continue
+			// for each file of each category
+			const imported = await import(`file://${path}/${category}/${file}`)
+
+			// call callback function to this file
+			handler(file, category, imported.default)
+			count++
+		}
+	}
+
+	print('HANDLER', `${count} ${path.includes('event') ? 'events' : 'cmds'} loaded`, 'yellow')
+	return
+}
+
+async function loadCmds() {
+	cache.cmds.clear()
+	await folderHandler(`./cmd`, (file: str, _category: str, imported: any) => {
+		const cmd: Cmd = new imported()
+
+		cmd.name = file.slice(0, -3) // remove .ts
+		// Set cmd
+		cache.cmds.set(cmd.name!, cmd)
+	})
+}
+
+async function loadEvents() {
+	cache.events.clear()
+
+	await folderHandler(`./event`, (file: str, category: str, event: any) => {
+		const name = `${category}.${file.slice(0, -3)}` as keyof BaileysEventMap
+		// folder+file names are the same of lib events
+		cache.events.set(name, event)
+
+		bot.sock.ev.removeAllListeners(name)
+		// Listen to the event here
+		bot.sock.ev.on(name, (...args) => {
+			// It allows to modify events in run time
+			try {
+				const fn = cache.events.get(name)
+				if (!fn) return
+				// it's the same as eventFunction(...args, name)
+				Promise.resolve(fn(...args, name)).catch((e: Error) =>
+					print(`EVENT/${name}:`, e, e.stack, 'red')
+				)
+			} catch (e) {
+				// Sync throw (e.g. handler cleared mid-reconnect) must not become uncaught.
+				print(`EVENT/${name}:`, e, (e as Error)?.stack, 'red')
+			}
+		})
+	})
+}

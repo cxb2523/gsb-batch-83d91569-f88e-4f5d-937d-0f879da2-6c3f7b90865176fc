@@ -1,0 +1,1 @@
+- Store group keys before sending msgs

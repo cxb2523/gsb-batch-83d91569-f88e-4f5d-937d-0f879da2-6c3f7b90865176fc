@@ -1,0 +1,29 @@
+// Dev-only bash exec - runs shell via runCode with timing and RAM report
+// Needed for host control and quick ops debugging
+import { type CmdCtx } from '@conf/types/types.d.ts'
+import runCode from '@plugin/runCode.ts'
+import Cmd from '@class/cmd.ts'
+
+export default class extends Cmd {
+	constructor() {
+		super({
+			alias: ['run'],
+			access: { restrict: true },
+			cooldown: 0,
+		})
+	}
+
+	async run({ args, send }: CmdCtx) {
+		const startTime = Date.now()
+		const output = await runCode('bash', args.join(' '))
+		// runCode: run on a child process
+
+		// execution duration
+		const duration = (Date.now() - startTime).duration(true)
+		const RAM = Deno.memoryUsage().rss.bytes() // current RAM usage
+
+		const text = `\`$ ${duration}/${RAM}\`\n` + output
+
+		send(text)
+	}
+}

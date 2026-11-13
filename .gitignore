@@ -1,0 +1,24 @@
+# Generated
+conf/gen/auth/*
+conf/gen/build
+conf/gen/cache/*
+conf/gen/deleted/*
+conf/gen/log
+conf/gen/prisma/*
+conf/gen/python/*
+conf/gen/temp/*
+conf/gen/bridge.db*
+cookies.txt
+out.log
+
+
+build
+
+
+# Settings
+*.env
+test
+
+# Modules
+rollback
+node_modules
