@@ -1,0 +1,23 @@
+# Puppeteer engine, via pyppeteer.
+#
+#   pip install -r requirements.txt -r requirements-puppeteer.txt
+#
+# pyppeteer downloads its OWN Chromium on first run — build 117, two years
+# old — and because the User-Agent is built from the browser's own version it
+# truthfully announces `Chrome/117`. Medium's Cloudflare refused that three
+# times out of three; pointed at an installed Chrome the same engine returned
+# 53 rows first try. So this engine needs to be pointed at an installed
+# browser:
+#
+#   python3 puppeteer_scraper.py --chromium-path "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ...
+#   python3 puppeteer_scraper.py --chromium-path /usr/bin/google-chrome ...
+#
+# It warns about this before the run rather than after a blocked page.
+#
+# Note: pyppeteer pins pyee<12 and urllib3<2.0, which conflict with playwright
+# and selenium respectively. Use a separate virtualenv for this engine.
+#
+# pyppeteer is also effectively unmaintained and its own README points at
+# Playwright. It exists here so the family has three drivers behind one row
+# schema, not because it is the better choice.
+pyppeteer>=1.0.2

@@ -1,0 +1,80 @@
+name: Site changed / selectors broke
+description: Medium changed something and the parser no longer matches.
+labels: ["site-change"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most common way a scraper stops working, and it is worth
+        its own report because the fix is different from a code bug:
+        something on medium.com moved.
+
+        Useful to know before filing, because it narrows the fix a lot — this
+        parser reads **two payloads and two fallbacks**, and they break
+        differently:
+
+        - **`window.__APOLLO_STATE__`** — the modern site: tag feeds, author
+          pages, story pages.
+        - **`window["obvInit"]({…})`** — the legacy renderer, and the only
+          one that answers a tag's day archive, with reading time, word count
+          and language on every story.
+        - **The page's JSON-LD and the rendered cards** (`article`,
+          `.streamItem`, and the author's `/@handle` link) — both fallbacks.
+
+        If a PAYLOAD moves, a run does not necessarily fail — it degrades to
+        a fallback and the counts empty out while the row count and the
+        titles stay healthy. The `data_source` column is what shows it: rows
+        that used to read `apollo` or `obvinit` now read `jsonld` or `dom`.
+
+        So please include the `data_source` breakdown of your run — it is the
+        single most useful line in the report.
+
+  - type: dropdown
+    id: what_broke
+    attributes:
+      label: What stopped matching
+      options:
+        - No rows at all on a page that visibly has stories
+        - Rows come out, but every data_source is "jsonld" or "dom" (a payload moved)
+        - title or author empty on rows that clearly have one
+        - claps look wrong (compare with the count the story page shows)
+        - The day-archive walk stopped, or stopped redirecting, where it should not
+        - A URL kind is no longer recognised (tag, archive, author, story)
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: URL
+      description: >-
+        The exact URL and how the browser was reached. Please say whether the
+        run was headless or headful, or over --cdp-endpoint.
+      placeholder: "https://medium.com/tag/python (mode: tag, headful bundled Chromium, exit: DE datacentre)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence from the page
+      description: |
+        Whichever of these you can get. A capture beats a description, and
+        `--dump-html` writes one on success as well as on failure.
+
+        - Which payload the page actually serves:
+          `grep -o '__APOLLO_STATE__\|obvInit' dump.html | sort | uniq -c`
+        - For a count problem: the story URL and the number the story page
+          shows.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it reproduces on a second engine, whether it reproduces in a
+        second locale, and when it last worked.
