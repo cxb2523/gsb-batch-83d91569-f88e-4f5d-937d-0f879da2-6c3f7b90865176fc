@@ -3,7 +3,10 @@
 Your data export only lists liked videos as links, so this fetches each post page
 and pulls out the JSON that TikTok embeds in it. Everything goes into
 scraper_data/scraper_output/post_data.json, with the deleted and private posts in
-unavailable.json next to it, and a second run skips the posts in either.
+unavailable.json next to it, and a second run skips the posts in either. Every run
+also leaves a per-post result list in scrape_results.json, so each liked video can be
+traced to what happened to it: saved, deleted or private, failed, or left behind when
+a bot challenge or an interrupt stopped the run.
 
     python tiktok_post_scraper.py --cookies cookies.txt
     python tiktok_post_scraper.py --cookies cookies.txt --limit 200
@@ -40,6 +43,14 @@ from tqdm import tqdm
 DEFAULT_INPUT = "user_data_tiktok.json"
 DEFAULT_OUTPUT_DIR = Path("scraper_data/scraper_output")
 UNAVAILABLE_NAME = "unavailable.json"
+# One result per video this run actually tried, so the likes still missing can be audited.
+RESULTS_NAME = "scrape_results.json"
+# The result categories written into scrape_results.json.
+SCRAPED = "scraped"
+UNAVAILABLE = "unavailable"
+FAILED = "failed"
+CHALLENGE_ABANDONED = "challenge_abandoned"
+INTERRUPTED = "interrupted"
 # TikTok finds a post by its ID alone and redirects to the real @username.
 POST_URL = "https://www.tiktok.com/@i/video/{video_id}"
 # Measured in November 2026 with cookies: one post a second in a row went through
@@ -324,6 +335,11 @@ def load_existing(output_file: Path) -> list[dict]:
     return existing if isinstance(existing, list) else []
 
 
+def make_result(video_id: str, category: str, detail: str) -> dict[str, str]:
+    """One row of scrape_results.json: the video, what happened, and a readable why."""
+    return {"videoId": video_id, "result": category, "detail": detail}
+
+
 async def scrape_posts(
     client: httpx.AsyncClient,
     urls: list[str],
@@ -339,21 +355,32 @@ async def scrape_posts(
 ) -> bool:
     """Scrape urls in batches and save them after base_data in output_file.
 
-    Deleted and private posts go after unavailable in unavailable.json next to it.
-    Returns False if it stopped early because TikTok kept challenging every request
-    through the longest cooldown.
+    Deleted and private posts go after unavailable in unavailable.json next to it,
+    and every video in urls gets one row in scrape_results.json saying how it ended
+    up. Returns False if it stopped early because TikTok kept challenging every
+    request through the longest cooldown.
     """
     posts = list(base_data or [])
     gone = list(unavailable or [])
     gone_file = output_file.with_name(UNAVAILABLE_NAME)
+    results_file = output_file.with_name(RESULTS_NAME)
     queue = deque(urls)
+    # One row per video this run tried; a video that's still queued when the run ends
+    # gets a row added on the way out so the list stays in step with the saved posts.
+    outcomes: list[dict[str, str]] = []
+    accounted_for: set[str] = set()
     stats: Counter[str] = Counter()
     cooldown = COOLDOWN
     finished = False
+    # Distinguishes the cooldown give-up from an exception on the way out
+    # (Ctrl+C, a cancelled request): both leave the queue non-empty but mean
+    # different things for the rows written below.
+    gave_up = False
 
     def save() -> None:
         write_output(output_file, posts)
         write_output(gone_file, gone)
+        write_output(results_file, outcomes)
 
     try:
         with tqdm(total=len(urls), desc="Scraping", unit="post") as bar:
@@ -365,19 +392,44 @@ async def scrape_posts(
                 challenged = [
                     url for url, result in zip(batch, results, strict=True) if result is None
                 ]
-                for result in results:
+                for url, result in zip(batch, results, strict=True):
+                    video_id = video_id_from_url(url)
                     if result is None:
                         continue
+                    accounted_for.add(video_id)
                     if result and liked_at is not None:
                         result["likedAt"] = liked_at.get(result["id"])
                     if "statusCode" in result:
                         gone.append(result)
                         stats["unavailable"] += 1
+                        outcomes.append(
+                            make_result(
+                                video_id,
+                                UNAVAILABLE,
+                                f"Deleted or private: the page has no post in it "
+                                f"(statusCode {result.get('statusCode')}); see {UNAVAILABLE_NAME}.",
+                            )
+                        )
                     elif result:
                         posts.append(result)
                         stats["scraped"] += 1
+                        outcomes.append(
+                            make_result(
+                                video_id,
+                                SCRAPED,
+                                f"Scraped and saved in {output_file.name}.",
+                            )
+                        )
                     else:
                         stats["failed"] += 1
+                        outcomes.append(
+                            make_result(
+                                video_id,
+                                FAILED,
+                                f"Couldn't be scraped after {retries} tries, usually a network "
+                                "error, throttling, or a page with no post in it; see the logs.",
+                            )
+                        )
                 bar.update(len(batch) - len(challenged))
                 # Challenged posts go back to the front, to try again after the break.
                 queue.extendleft(reversed(challenged))
@@ -385,6 +437,7 @@ async def scrape_posts(
 
                 if len(challenged) == len(batch):
                     if cooldown > MAX_COOLDOWN:
+                        gave_up = True
                         break
                     save()
                     log.warning(f"TikTok wants a break, so this waits {cooldown} seconds")
@@ -400,6 +453,35 @@ async def scrape_posts(
             else:
                 finished = True
     finally:
+        # A video still queued here never got a result row: the run gave up on the
+        # bot challenge, or was interrupted (Ctrl+C / cancelled while a request was
+        # in flight). Record why instead of silently dropping it, then save
+        # everything, so an interrupted run keeps both its posts and its list.
+        leftover = [
+            video_id_from_url(url)
+            for url in urls
+            if video_id_from_url(url) not in accounted_for
+        ]
+        for video_id in leftover:
+            if gave_up:
+                outcomes.append(
+                    make_result(
+                        video_id,
+                        CHALLENGE_ABANDONED,
+                        "Not scraped: TikTok kept answering with its bot challenge through the "
+                        "longest cooldown, so the run stopped early. Run it again with fresh "
+                        "cookies to retry.",
+                    )
+                )
+            else:
+                outcomes.append(
+                    make_result(
+                        video_id,
+                        INTERRUPTED,
+                        "Not reached before the run was interrupted (for example Ctrl+C); run it "
+                        "again and this video will be picked up.",
+                    )
+                )
         # This runs on Ctrl+C as well, so an interrupted run keeps what it got.
         save()
 
@@ -408,6 +490,7 @@ async def scrape_posts(
         f"deleted or private, {stats['failed']} failed, and TikTok challenged "
         f"{stats['challenged']} requests along the way"
     )
+    log.info(f"Wrote the per-post result list to {results_file}")
     if not finished:
         log.error(
             f"TikTok kept answering with its bot challenge for {MAX_COOLDOWN * 2 - COOLDOWN} "
@@ -442,6 +525,9 @@ async def run(args: argparse.Namespace) -> bool:
     if not likes:
         if base_data:
             write_output(output_file, base_data)
+        # The list only covers this run, and nothing was attempted: don't leave an
+        # old run's list behind to be mistaken for the current one.
+        write_output(output_file.with_name(RESULTS_NAME), [])
         log.info("Nothing new to scrape")
         return True
 

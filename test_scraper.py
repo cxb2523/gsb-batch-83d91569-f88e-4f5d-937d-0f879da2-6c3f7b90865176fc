@@ -17,6 +17,11 @@ from tenacity import wait_none
 
 import tiktok_post_scraper as scraper
 from tiktok_post_scraper import (
+    CHALLENGE_ABANDONED,
+    FAILED,
+    INTERRUPTED,
+    SCRAPED,
+    UNAVAILABLE,
     InputError,
     build_client,
     fetch_and_parse,
@@ -56,6 +61,12 @@ def _page(item_struct: dict) -> str:
 
 def _post_page(video_id: str) -> str:
     return _page({"id": video_id, "desc": f"post {video_id}", "author": {"uniqueId": "chef"}})
+
+
+def _gone_page(status: int = 10204) -> str:
+    return REHYDRATION.format(
+        data=json.dumps({"__DEFAULT_SCOPE__": {"webapp.video-detail": {"statusCode": status}}})
+    )
 
 
 class _FakeClient:
@@ -541,6 +552,198 @@ def test_parse_html_cli_output() -> None:
             assert exc.code == 1
         else:
             raise AssertionError("a page with no post in it should exit with 1")
+
+
+def _read_results(tmp: str | Path) -> list[dict]:
+    return json.loads((Path(tmp) / scraper.RESULTS_NAME).read_text(encoding="utf-8"))
+
+
+def _results_by_id(tmp: str | Path) -> dict[str, dict]:
+    rows = _read_results(tmp)
+    assert all(set(row) == {"videoId", "result", "detail"} for row in rows)
+    assert all(row["detail"] for row in rows)
+    return {row["videoId"]: row for row in rows}
+
+
+def test_manifest_covers_a_mixed_batch_and_matches_the_json_files() -> None:
+    # 1 scraped, 2 gone, 3 an HTTP error, 4 a dropped connection, 5 an unparseable page.
+    def handler(request: httpx.Request) -> httpx.Response:
+        video_id = video_id_from_url(str(request.url))
+        if video_id == "2":
+            return httpx.Response(200, text=_gone_page())
+        if video_id == "3":
+            return httpx.Response(500)
+        if video_id == "4":
+            raise httpx.ConnectError("network is down")
+        if video_id == "5":
+            return httpx.Response(200, text="<html>no post in here</html>")
+        return httpx.Response(200, text=_post_page(video_id))
+
+    async def scrape(out: Path) -> bool:
+        async with _mock_client(handler) as client:
+            urls = [scraper.POST_URL.format(video_id=n) for n in ("1", "2", "3", "4", "5")]
+            return await scrape_posts(
+                client, urls, None, out, batch_size=5, batch_delay=0, retries=2
+            )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "post_data.json"
+        assert asyncio.run(scrape(out)) is True
+        by_id = _results_by_id(tmp)
+        saved = json.loads(out.read_text(encoding="utf-8"))
+        unavailable = json.loads((Path(tmp) / scraper.UNAVAILABLE_NAME).read_text(encoding="utf-8"))
+        # Atomic writes never leave a half-written file behind.
+        assert not list(Path(tmp).glob("*.tmp"))
+
+    assert list(by_id) == ["1", "2", "3", "4", "5"]  # one row per video, in run order
+    assert by_id["1"]["result"] == SCRAPED
+    assert by_id["2"]["result"] == UNAVAILABLE
+    assert "10204" in by_id["2"]["detail"]
+    assert by_id["3"]["result"] == FAILED
+    assert by_id["4"]["result"] == FAILED
+    assert by_id["5"]["result"] == FAILED
+
+    # The success and unavailable rows line up with the two existing JSON files.
+    assert [post["id"] for post in saved] == [by_id["1"]["videoId"]]
+    assert [post["id"] for post in unavailable] == [by_id["2"]["videoId"]]
+    # Nothing that got saved or marked unavailable is ever labelled a failure.
+    assert all(
+        row["result"] != FAILED for row in by_id.values() if row["result"] in (SCRAPED, UNAVAILABLE)
+    )
+
+
+def test_manifest_records_every_video_when_the_challenge_never_lifts() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=CHALLENGE_HTML)
+
+    urls = [scraper.POST_URL.format(video_id=n) for n in range(1, 11)]
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "post_data.json"
+        assert _scrape_with_short_cooldowns(handler, urls, out, batch_size=3) is False
+        by_id = _results_by_id(tmp)
+        saved = json.loads(out.read_text(encoding="utf-8"))
+
+    assert list(by_id) == [str(n) for n in range(1, 11)]
+    assert all(row["result"] == CHALLENGE_ABANDONED for row in by_id.values())
+    assert saved == [{"id": "0"}]  # base_data untouched, and never called a failure
+
+
+def test_manifest_marks_a_recovered_challenge_as_scraped() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        video_id = video_id_from_url(str(request.url))
+        seen.append(video_id)
+        if video_id == "2" and seen.count("2") == 1:
+            return httpx.Response(200, text=CHALLENGE_HTML)
+        return httpx.Response(200, text=_post_page(video_id))
+
+    urls = [scraper.POST_URL.format(video_id=n) for n in ("1", "2")]
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "post_data.json"
+        assert _scrape_with_short_cooldowns(handler, urls, out, batch_size=2) is True
+        by_id = _results_by_id(tmp)
+    assert all(row["result"] == SCRAPED for row in by_id.values())
+    assert set(by_id) == {"1", "2"}
+
+
+def test_manifest_on_interrupt_matches_post_data_and_marks_the_rest_interrupted() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        video_id = video_id_from_url(str(request.url))
+        if video_id == "3":
+            await asyncio.sleep(30)
+        return httpx.Response(200, text=_post_page(video_id))
+
+    async def scrape(out: Path) -> None:
+        async with _mock_client(handler) as client:
+            urls = [scraper.POST_URL.format(video_id=n) for n in ("1", "2", "3")]
+            await asyncio.wait_for(
+                scrape_posts(client, urls, None, out, batch_size=1, batch_delay=0), timeout=1
+            )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "post_data.json"
+        _raises(TimeoutError, asyncio.run, scrape(out))
+        saved = json.loads(out.read_text(encoding="utf-8"))
+        by_id = _results_by_id(tmp)
+
+    saved_ids = [post["id"] for post in saved]
+    assert saved_ids == ["1", "2"]
+    # The two saved posts stay successful in the list; they can't turn into failures.
+    assert [by_id[video_id]["result"] for video_id in saved_ids] == [SCRAPED, SCRAPED]
+    assert by_id["3"]["result"] == INTERRUPTED
+    # The list and post_data.json describe exactly the same saved posts.
+    assert {row["videoId"] for row in by_id.values() if row["result"] == SCRAPED} == set(saved_ids)
+
+
+def test_manifest_only_covers_the_current_run_and_resume_skips_save_entries() -> None:
+    requested = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(video_id_from_url(str(request.url)))
+        return httpx.Response(200, text=_post_page(requested[-1]))
+
+    links = [{"date": f"2024-0{n}-01", "link": f"https://x/video/{n}/"} for n in ("3", "2", "1")]
+    real_build_client = scraper.build_client
+    scraper.build_client = lambda cookies=None: _mock_client(handler)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            export = _write_json(
+                tmp, "export.json", {"Activity": {"Like List": {"ItemFavoriteList": links}}}
+            )
+            # Post 2 was already saved, so the first run only fetches 3 and 1.
+            write_output(Path(tmp) / "post_data.json", [{"id": "2"}])
+            args = argparse.Namespace(
+                input=str(export), output_dir=tmp, limit=None, resume=True, cookies="a=b",
+                batch_size=5, batch_delay=0, retries=1,
+            )  # fmt: skip
+            assert asyncio.run(scraper.run(args)) is True
+            first = _read_results(tmp)
+            # The second run has nothing new: the skipped posts don't appear and any
+            # list from the first run is replaced by an empty one, not kept around.
+            assert asyncio.run(scraper.run(args)) is True
+            second = _read_results(tmp)
+    finally:
+        scraper.build_client = real_build_client
+
+    assert {row["videoId"] for row in first} == {"3", "1"}
+    assert all(row["result"] == SCRAPED for row in first)
+    assert "2" not in {row["videoId"] for row in first}
+    assert second == []
+
+
+def test_no_resume_replaces_the_old_manifest_with_this_run() -> None:
+    requested = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(video_id_from_url(str(request.url)))
+        return httpx.Response(200, text=_post_page(requested[-1]))
+
+    links = [{"date": "2024-01-01", "link": f"https://x/video/{n}/"} for n in ("1",)]
+    real_build_client = scraper.build_client
+    scraper.build_client = lambda cookies=None: _mock_client(handler)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            export = _write_json(
+                tmp, "export.json", {"Activity": {"Like List": {"ItemFavoriteList": links}}}
+            )
+            # A stale list from an earlier, different run.
+            write_output(
+                Path(tmp) / scraper.RESULTS_NAME,
+                [{"videoId": "999", "result": FAILED, "detail": "old run"}],
+            )
+            args = argparse.Namespace(
+                input=str(export), output_dir=tmp, limit=None, resume=False, cookies="a=b",
+                batch_size=5, batch_delay=0, retries=1,
+            )  # fmt: skip
+            assert asyncio.run(scraper.run(args)) is True
+            by_id = _results_by_id(tmp)
+    finally:
+        scraper.build_client = real_build_client
+
+    assert set(by_id) == {"1"}
+    assert "999" not in by_id  # the list reflects this run only
+    assert by_id["1"]["result"] == SCRAPED
 
 
 if __name__ == "__main__":
