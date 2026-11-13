@@ -1,0 +1,63 @@
+name: canary
+
+# A real three-page run against kohls.com, dispatched by hand.
+#
+# Why it needs a secret, and why it FAILS without one:
+#
+#   * Measured 2026-09-25, kohls.com (Akamai) refused this project's own
+#     Chromium, real Chrome and curl on US residential exits, and served
+#     the same URL through the 2Captcha Scraping Browser API. A GitHub runner
+#     is a datacentre address with a local browser — exactly what was refused
+#     — so the only path this canary can test is KOHLS_CDP_ENDPOINT.
+#   * Without that secret the job FAILS with an error naming it. It used to
+#     skip green, and a green canary that never reached the site says
+#     nothing about the site.
+#   * A refusal (exit 3), a page never obtained (exit 5) or zero rows is red.
+#     An expired profile answers 401 and shows up as exit 5: refresh the
+#     secret and dispatch again.
+#
+# Dispatch-only: each run spends Scraping Browser usage, so whether to run it
+# on a schedule is the owner's decision. Profiles can expire; how long one
+# lasts has not been measured for this repo, so a 401 is the signal to
+# refresh it, not a fixed lifetime. The endpoint reaches the engine through
+# the environment, never through a command line.
+on:
+  workflow_dispatch:
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    env:
+      KOHLS_CDP_ENDPOINT: ${{ secrets.KOHLS_CDP_ENDPOINT }}
+      # A filtered listing, SORTED: the Cuisinart brand page (337 products
+      # over 3 pages on 2026-09-25). The assertions read the size the page
+      # itself states, so the brand's assortment changing is not a failure.
+      # Sorted because the default "Featured" order moved mid-run in a live
+      # test (22 duplicates across pages, ~19 products never seen); Price
+      # Low-High returned all 337 with none.
+      URL: https://www.kohls.com/catalog/cuisinart.jsp?CN=Brand:Cuisinart&S=4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require the Scraping Browser endpoint
+        if: env.KOHLS_CDP_ENDPOINT == ''
+        run: |
+          echo "::error::Missing secret KOHLS_CDP_ENDPOINT — the canary cannot reach kohls.com without it (a datacentre runner's own browser is refused). Set the repo secret to a fresh Scraping Browser endpoint and dispatch again."
+          exit 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install core + Playwright (no local browser needed over CDP)
+        run: pip install -r requirements.txt -r requirements-playwright.txt
+      - name: Three-page run
+        run: |
+          set +e
+          mkdir -p live
+          python playwright_scraper.py --url "$URL" --pages 3 --out live/canary
+          echo "exit_code=$?" >> "$GITHUB_ENV"
+      - name: Assert the run
+        run: python .github/canary_assert.py live/canary "$exit_code"
+      - uses: actions/upload-artifact@v4
+        if: always() && env.KOHLS_CDP_ENDPOINT != ''
+        with:
+          name: canary
+          path: live/
