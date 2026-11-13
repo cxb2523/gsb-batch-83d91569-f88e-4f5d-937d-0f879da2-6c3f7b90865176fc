@@ -12,6 +12,7 @@ from tqdm import tqdm
 from .display import get_virtual_display, has_display, is_display_running
 from .exceptions import CategoriesError, ListingsError, ListingsInterruptError, NotFoundError
 from .mpscraper import MpScraper
+from .run_recorder import RunRecorder
 
 if TYPE_CHECKING:
     from .listing import Listing
@@ -44,6 +45,7 @@ DEFAULT_TIMEOUT_SECONDS = 10
 DEFAULT_WAIT_SECONDS = 10
 DEFAULT_DATA_DIR = "./"
 DEFAULT_LISTINGS_FILE = "listings.csv"
+DEFAULT_CRAWL_PAGES_FILE = "crawl_pages.json"
 DEFAULT_HEADLESS = False
 DEFAULT_CHROMIUM_PATH = "/usr/bin/chromium"
 DEFAULT_RECRAWL_HOURS = 24
@@ -214,18 +216,23 @@ def main():
         if args.chromedriver_path and not Path(args.chromedriver_path).is_file():
             raise NotFoundError(f"ChromeDriver not found at: {args.chromedriver_path} ")
 
+        crawl_pages_file_path = Path(args.data_dir) / DEFAULT_CRAWL_PAGES_FILE
+        run_recorder = RunRecorder(file_path=crawl_pages_file_path)
+
         mp_scraper = MpScraper(
             chromium_path=args.chromium_path,
             chromedriver_path=args.chromedriver_path,
             headless=args.headless,
             timeout_seconds=args.timeout_seconds,
             wait_seconds=args.wait_seconds,
+            run_recorder=run_recorder,
         )
 
         parent_categories = mp_scraper.get_parent_categories()
         if len(parent_categories) == 0:
             raise CategoriesError("No parent categories found")
 
+        interrupted = False
         try:
             remaining_limit = args.limit
             total = args.limit if args.limit > 0 else None
@@ -255,11 +262,13 @@ def main():
                         logger.info("Stopping gracefully...")
                         listings = exc.listings
                         stop = True
+                        interrupted = True
                     except ListingsError as exc:
                         listings = exc.listings
                         stop = True
                     except KeyboardInterrupt:
                         stop = True
+                        interrupted = True
 
                     if len(listings) > 0:
                         # concatenate the category's listings into the main dataframe
@@ -267,9 +276,20 @@ def main():
                         listings_df = pd.concat([listings_df, category_df], ignore_index=True)
 
             mp_scraper.close()
+        except KeyboardInterrupt:
+            interrupted = True
+            mp_scraper.close()
+            raise
         except Exception as exc:
+            interrupted = True
             mp_scraper.close()
             raise exc
+        finally:
+            # Persist every page attempt recorded so far, even when interrupted.
+            # No file is written when no page attempts were made.
+            run_recorder.finalize(interrupted=interrupted)
+            if run_recorder.has_records():
+                logger.info("\n%s", run_recorder.format_summary())
 
         if len(listings_df.index) > 0:
             logger.info("Saving listings to %s", listings_file_path)

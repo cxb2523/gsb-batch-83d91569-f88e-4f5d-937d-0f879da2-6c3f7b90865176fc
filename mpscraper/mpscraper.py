@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from logging import Logger
 from time import sleep
-from typing import NamedTuple
+from typing import NamedTuple, Protocol, cast
 
 from bs4 import BeautifulSoup, Tag
 from selenium.common.exceptions import TimeoutException, WebDriverException
@@ -24,6 +24,19 @@ from .exceptions import (
     UnexpectedCategoryIdError,
 )
 from .listing import Listing, ListingDetails
+from .run_recorder import (
+    RESULT_ELEMENT_MISSING,
+    RESULT_EMPTY,
+    RESULT_ERROR,
+    RESULT_RATE_LIMITED,
+    RESULT_SUCCESS,
+    RESULT_TIMEOUT,
+    STOP_EMPTY_PAGE,
+    STOP_ERROR,
+    STOP_LIMIT_REACHED,
+    STOP_RETRIES_EXHAUSTED,
+    RunRecorder,
+)
 from .utils import format_text, get_utc_iso_now
 
 logger: Logger = logging.getLogger(__name__)
@@ -67,6 +80,22 @@ class Category(NamedTuple):
     url: str
 
 
+class Driver(Protocol):
+    """Structural type for the browser operations MpScraper depends on.
+
+    MPDriver satisfies this; tests can substitute any object implementing the same
+    methods instead of launching a real browser.
+    """
+
+    def get(self, url: str) -> None: ...
+
+    def get_soup(self) -> BeautifulSoup: ...
+
+    def execute_script(self, script: str) -> object: ...
+
+    def quit(self) -> None: ...
+
+
 class MpScraper:
     def __init__(
         self,
@@ -76,17 +105,28 @@ class MpScraper:
         base_url: str = MARTKPLAATS_BASE_URL,
         chromium_path: str | None = None,
         chromedriver_path: str | None = None,
+        max_page_retries: int = 3,
+        run_recorder: RunRecorder | None = None,
+        driver: Driver | None = None,
     ) -> None:
-        self.__driver: MPDriver = MPDriver(
-            chromedriver_path=chromedriver_path,
-            chromium_path=chromium_path,
-            base_url=base_url,
-            headless=headless,
-        )
+        if driver is not None:
+            # Allows replacing the browser driver (e.g. with a fake driver in tests).
+            # The injected object only needs to satisfy the Driver protocol above; the
+            # cast keeps the internal MPDriver typing for the Selenium-based helpers.
+            self.__driver: MPDriver = cast("MPDriver", driver)
+        else:
+            self.__driver = MPDriver(
+                chromedriver_path=chromedriver_path,
+                chromium_path=chromium_path,
+                base_url=base_url,
+                headless=headless,
+            )
 
         self.__base_url = base_url
         self.__wait_seconds = wait_seconds
         self.__timeout_seconds = timeout_seconds
+        self.__max_page_attempts = max_page_retries + 1
+        self.__run_recorder = run_recorder if run_recorder is not None else RunRecorder()
 
     def close(self) -> None:
         """Gracefully close the scraper."""
@@ -295,7 +335,12 @@ class MpScraper:
     def get_listings(
         self, parent_category: Category, limit: int, existing_item_ids: set[str] | None = None
     ) -> list[Listing]:
-        """Return Marktplaats listings for the category up to limit, excluding existing_item_ids."""
+        """Return Marktplaats listings for the category up to limit, excluding existing_item_ids.
+
+        Every page attempt (including each rate-limit/timeout retry) is recorded on the
+        configured :class:`RunRecorder`, together with the reason each sub-category
+        stopped paging.
+        """
         listings: list[Listing] = []
         item_ids: set[str] = existing_item_ids.copy() if existing_item_ids is not None else set()
         parent_category_slug = parent_category.url.split("/")[-1]
@@ -307,6 +352,8 @@ class MpScraper:
         max_listings = limit
 
         categories: list[Category] = []
+
+        self.__run_recorder.start_parent_category(parent_category.id, parent_category.url)
 
         try:
             subcategories = self.__get_subcategories(parent_category=parent_category)
@@ -329,199 +376,298 @@ class MpScraper:
             smoothing=0,
         ) as pbar:
             for category_id, category_url in categories:
+                self.__run_recorder.start_subcategory(category_id, category_url)
                 current_page = 1
                 while len(listings) < max_listings:
-                    try:
-                        url_with_opts = self.__get_url_with_options(category_url, current_page)
-                        self.__driver.get(url_with_opts)
+                    attempt_number = 0
+                    page_result: str | None = None
+                    stop_reason: str | None = None
+                    stop_paging = False
 
-                        # Attempt to parse the page
-                        page = self.__driver.get_soup()
+                    while attempt_number < self.__max_page_attempts:
+                        attempt_number += 1
+                        try:
+                            url_with_opts = self.__get_url_with_options(category_url, current_page)
+                            self.__driver.get(url_with_opts)
 
-                        # Get the next.js props JSON object
-                        page_data_script = page.find("script", id=DATA_ELEM_ID)
-                        if not isinstance(page_data_script, Tag):
-                            raise ElementNotFoundError(
-                                tag_name="script",
-                                attrs={"id": DATA_ELEM_ID},
-                            )
+                            # Attempt to parse the page
+                            page = self.__driver.get_soup()
 
-                        page_data = json.loads(page_data_script.text or "{}")
-                        res_listings = page_data["props"]["pageProps"]["searchRequestAndResponse"][
-                            "listings"
-                        ]
+                            # Get the next.js props JSON object
+                            page_data_script = page.find("script", id=DATA_ELEM_ID)
+                            if not isinstance(page_data_script, Tag):
+                                raise ElementNotFoundError(
+                                    tag_name="script",
+                                    attrs={"id": DATA_ELEM_ID},
+                                )
 
-                        if len(res_listings) == 0:
-                            logger.info(
-                                "Ran out of listings for %s at page %i",
-                                category_url,
-                                current_page,
-                            )
-                            break
+                            page_data = json.loads(page_data_script.text or "{}")
+                            res_listings = page_data["props"]["pageProps"][
+                                "searchRequestAndResponse"
+                            ]["listings"]
 
-                        for res_listing in res_listings:
-                            if len(listings) == limit:
+                            if len(res_listings) == 0:
+                                # An empty page marks the end of this sub-category
+                                logger.info(
+                                    "Ran out of listings for %s at page %i",
+                                    category_url,
+                                    current_page,
+                                )
+                                self.__run_recorder.record_attempt(
+                                    page=current_page,
+                                    attempt=attempt_number,
+                                    result=RESULT_EMPTY,
+                                )
+                                page_result = RESULT_EMPTY
+                                stop_reason = STOP_EMPTY_PAGE
+                                stop_paging = True
                                 break
 
-                            item_id: str = res_listing["itemId"]
-                            if item_id[0] == MARKTPLAATS_ADVERTISEMENT_PREFIX:
-                                # skip sponsored advertisement listings
-                                continue
+                            listings_before_page = len(listings)
+                            for res_listing in res_listings:
+                                if len(listings) == limit:
+                                    break
 
-                            # skip if we already have this item_id
-                            if item_id in item_ids:
-                                # if limit is max listings, decrease max fetch-able count
-                                if limit == listings_count:
+                                item_id: str = res_listing["itemId"]
+                                if item_id[0] == MARKTPLAATS_ADVERTISEMENT_PREFIX:
+                                    # skip sponsored advertisement listings
+                                    continue
+
+                                # skip if we already have this item_id
+                                if item_id in item_ids:
+                                    # if limit is max listings, decrease max fetch-able count
+                                    if limit == listings_count:
+                                        max_listings -= 1
+                                        pbar.total = max_listings
+
+                                    continue
+
+                                # Get category ID
+                                child_category_id: int = int(res_listing["categoryId"])
+                                if child_category_id != category_id:
+                                    raise UnexpectedCategoryIdError(child_category_id, category_id)
+
+                                # Get basic info
+                                title: str = format_text(str(res_listing["title"]))
+                                vip_url = res_listing["vipUrl"]
+                                listing_url = f"{MARTKPLAATS_BASE_URL}{vip_url}"
+
+                                # Get image URLs
+                                image_urls: list[str] = []
+                                if "pictures" in res_listing:
+                                    for image_path in res_listing["pictures"]:
+                                        image_url_el = image_path["extraExtraLargeUrl"]
+                                        image_urls.append(image_url_el)
+
+                                # Get listing details from listing page
+                                listing_details: ListingDetails | None = None
+                                try:
+                                    got_details = False
+                                    while not got_details:
+                                        try:
+                                            listing_details = self.__get_listing_details(
+                                                listing_url
+                                            )
+
+                                            got_details = True
+                                        except ForbiddenError:
+                                            # wait
+                                            logger.warning(
+                                                "Got rate-limited. Retrying %s in %d seconds",
+                                                item_id,
+                                                self.__wait_seconds,
+                                            )
+                                            sleep(self.__wait_seconds)
+                                            continue
+                                except MPError as exc:
+                                    logger.error(
+                                        "Error fetching listing %s details Exception: %s",
+                                        listing_url,
+                                        str(exc),
+                                    )
+
+                                except ElementNotFoundError as exc:
+                                    logger.error(
+                                        "Unexpected element in listing %s Exception: %s",
+                                        listing_url,
+                                        str(exc),
+                                    )
+
+                                except KeyboardInterrupt as exc:
+                                    raise exc
+
+                                if listing_details is None:
+                                    # Failed to get listing details, so skip this listing
                                     max_listings -= 1
                                     pbar.total = max_listings
+                                    continue
 
-                                continue
+                                # Get location info
+                                country_code = ""
+                                city_name = ""
+                                if LOCATION_KEY in res_listing:
+                                    loc = res_listing[LOCATION_KEY]
+                                    country_code = loc[COUNTRYCODE_KEY]
 
-                            # Get category ID
-                            child_category_id: int = int(res_listing["categoryId"])
-                            if child_category_id != category_id:
-                                raise UnexpectedCategoryIdError(child_category_id, category_id)
+                                    if CITY_KEY in loc:
+                                        city_name = loc[CITY_KEY]
 
-                            # Get basic info
-                            title: str = format_text(str(res_listing["title"]))
-                            vip_url = res_listing["vipUrl"]
-                            listing_url = f"{MARTKPLAATS_BASE_URL}{vip_url}"
+                                # Get category name hierarchy ("verticals")
+                                verticals = []
+                                if VERTICALS_KEY in res_listing:
+                                    verticals = res_listing[VERTICALS_KEY]
 
-                            # Get image URLs
-                            image_urls: list[str] = []
-                            if "pictures" in res_listing:
-                                for image_path in res_listing["pictures"]:
-                                    image_url_el = image_path["extraExtraLargeUrl"]
-                                    image_urls.append(image_url_el)
+                                # get seller ID
+                                seller_id = ""
+                                if SELLER_INFO_KEY in res_listing:
+                                    seller_id = res_listing[SELLER_INFO_KEY][SELLER_ID_KEY]
 
-                            # Get listing details from listing page
-                            listing_details: ListingDetails | None = None
-                            try:
-                                got_details = False
-                                while not got_details:
-                                    try:
-                                        listing_details = self.__get_listing_details(listing_url)
+                                crawled_timestamp = get_utc_iso_now()
 
-                                        got_details = True
-                                    except ForbiddenError:
-                                        # wait
-                                        logger.warning(
-                                            "Got rate-limited. Retrying %s in %d seconds",
-                                            item_id,
-                                            self.__wait_seconds,
-                                        )
-                                        sleep(self.__wait_seconds)
-                                        continue
-                            except MPError as exc:
-                                logger.error(
-                                    "Error fetching listing %s details Exception: %s",
-                                    listing_url,
-                                    str(exc),
+                                listing = Listing(
+                                    item_id=item_id,
+                                    parent_category_id=parent_category.id,
+                                    child_category_id=child_category_id,
+                                    category_verticals=tuple(verticals),
+                                    ad_type=listing_details.ad_type,
+                                    title=title,
+                                    description=format_text(listing_details.description),
+                                    types=tuple(listing_details.types),
+                                    services=tuple(listing_details.services),
+                                    price_type=listing_details.price_type,
+                                    price_cents=listing_details.price_cents,
+                                    image_urls=tuple(image_urls),
+                                    listing_url=listing_url,
+                                    country_code=country_code,
+                                    city_name=city_name,
+                                    seller_id=seller_id,
+                                    listed_timestamp=listing_details.listed_timestamp,
+                                    crawled_timestamp=crawled_timestamp,
+                                    view_count=listing_details.view_count,
+                                    favorited_count=listing_details.favorited_count,
                                 )
 
-                            except ElementNotFoundError as exc:
-                                logger.error(
-                                    "Unexpected element in listing %s Exception: %s",
-                                    listing_url,
-                                    str(exc),
-                                )
+                                listings.append(listing)
+                                item_ids.add(listing.item_id)
+                                pbar.update()
 
-                            except KeyboardInterrupt as exc:
-                                raise exc
-
-                            if listing_details is None:
-                                # Failed to get listing details, so skip this listing
-                                max_listings -= 1
-                                pbar.total = max_listings
-                                continue
-
-                            # Get location info
-                            country_code = ""
-                            city_name = ""
-                            if LOCATION_KEY in res_listing:
-                                loc = res_listing[LOCATION_KEY]
-                                country_code = loc[COUNTRYCODE_KEY]
-
-                                if CITY_KEY in loc:
-                                    city_name = loc[CITY_KEY]
-
-                            # Get category name hierarchy ("verticals")
-                            verticals = []
-                            if VERTICALS_KEY in res_listing:
-                                verticals = res_listing[VERTICALS_KEY]
-
-                            # get seller ID
-                            seller_id = ""
-                            if SELLER_INFO_KEY in res_listing:
-                                seller_id = res_listing[SELLER_INFO_KEY][SELLER_ID_KEY]
-
-                            crawled_timestamp = get_utc_iso_now()
-
-                            listing = Listing(
-                                item_id=item_id,
-                                parent_category_id=parent_category.id,
-                                child_category_id=child_category_id,
-                                category_verticals=tuple(verticals),
-                                ad_type=listing_details.ad_type,
-                                title=title,
-                                description=format_text(listing_details.description),
-                                types=tuple(listing_details.types),
-                                services=tuple(listing_details.services),
-                                price_type=listing_details.price_type,
-                                price_cents=listing_details.price_cents,
-                                image_urls=tuple(image_urls),
-                                listing_url=listing_url,
-                                country_code=country_code,
-                                city_name=city_name,
-                                seller_id=seller_id,
-                                listed_timestamp=listing_details.listed_timestamp,
-                                crawled_timestamp=crawled_timestamp,
-                                view_count=listing_details.view_count,
-                                favorited_count=listing_details.favorited_count,
+                            new_listings_on_page = len(listings) - listings_before_page
+                            self.__run_recorder.record_attempt(
+                                page=current_page,
+                                attempt=attempt_number,
+                                result=RESULT_SUCCESS,
+                                new_listings=new_listings_on_page,
                             )
+                            page_result = RESULT_SUCCESS
 
-                            listings.append(listing)
-                            item_ids.add(listing.item_id)
-                            pbar.update()
+                            if len(listings) >= max_listings:
+                                stop_reason = STOP_LIMIT_REACHED
+                                stop_paging = True
+                                break
 
-                        current_page += 1
+                            current_page += 1
+                            break
 
-                    except ForbiddenError:
-                        logger.warning(
-                            "Probably rate-limited. waiting %d seconds...",
-                            self.__timeout_seconds,
-                        )
-                        sleep(self.__timeout_seconds)
-                        continue
-                    except MPError as exc:
-                        logger.error(
-                            "Error crawling URL: %s Exception: %s",
-                            category_url,
-                            str(exc),
-                        )
-                        continue
-                    except ElementNotFoundError as exc:
-                        logger.error(
-                            "Unexpected element for category URL: %s Exception: %s",
-                            category_url,
-                            str(exc),
-                        )
-                        continue
-                    except TimeoutException as exc:
-                        logger.warning("%s", str(exc))
-                        continue
-                    except WebDriverException as exc:
-                        logger.error("%s", str(exc))
-                        if exc.msg and "ERR_INTERNET_DISCONNECTED" in exc.msg:
+                        except ForbiddenError:
+                            logger.warning(
+                                "Probably rate-limited. waiting %d seconds...",
+                                self.__timeout_seconds,
+                            )
+                            self.__run_recorder.record_attempt(
+                                page=current_page,
+                                attempt=attempt_number,
+                                result=RESULT_RATE_LIMITED,
+                                error="ForbiddenError",
+                            )
+                            page_result = RESULT_RATE_LIMITED
                             sleep(self.__timeout_seconds)
                             continue
-                        raise exc
-                    except KeyboardInterrupt as exc:
-                        raise ListingsInterruptError(listings=listings) from exc
-                    except Exception as exc:
-                        logger.exception(exc)
-                        raise ListingsError(
-                            listings=listings, msg=f"Error getting listings: {exc}"
-                        ) from exc
+                        except TimeoutException as exc:
+                            logger.warning("%s", str(exc))
+                            self.__run_recorder.record_attempt(
+                                page=current_page,
+                                attempt=attempt_number,
+                                result=RESULT_TIMEOUT,
+                                error=str(exc),
+                            )
+                            page_result = RESULT_TIMEOUT
+                            sleep(self.__timeout_seconds)
+                            continue
+                        except ElementNotFoundError as exc:
+                            logger.error(
+                                "Unexpected element for category URL: %s Exception: %s",
+                                category_url,
+                                str(exc),
+                            )
+                            self.__run_recorder.record_attempt(
+                                page=current_page,
+                                attempt=attempt_number,
+                                result=RESULT_ELEMENT_MISSING,
+                                error=str(exc),
+                            )
+                            page_result = RESULT_ELEMENT_MISSING
+                            continue
+                        except MPError as exc:
+                            logger.error(
+                                "Error crawling URL: %s Exception: %s",
+                                category_url,
+                                str(exc),
+                            )
+                            self.__run_recorder.record_attempt(
+                                page=current_page,
+                                attempt=attempt_number,
+                                result=RESULT_ERROR,
+                                error=str(exc),
+                            )
+                            page_result = RESULT_ERROR
+                            continue
+                        except WebDriverException as exc:
+                            logger.error("%s", str(exc))
+                            self.__run_recorder.record_attempt(
+                                page=current_page,
+                                attempt=attempt_number,
+                                result=RESULT_ERROR,
+                                error=str(exc),
+                            )
+                            page_result = RESULT_ERROR
+                            if exc.msg and "ERR_INTERNET_DISCONNECTED" in exc.msg:
+                                sleep(self.__timeout_seconds)
+                                continue
+                            self.__run_recorder.set_stop_reason(STOP_ERROR)
+                            raise exc
+                        except KeyboardInterrupt as exc:
+                            self.__run_recorder.mark_interrupted()
+                            raise ListingsInterruptError(listings=listings) from exc
+                        except Exception as exc:
+                            logger.exception(exc)
+                            self.__run_recorder.record_attempt(
+                                page=current_page,
+                                attempt=attempt_number,
+                                result=RESULT_ERROR,
+                                error=str(exc),
+                            )
+                            self.__run_recorder.set_stop_reason(STOP_ERROR)
+                            raise ListingsError(
+                                listings=listings, msg=f"Error getting listings: {exc}"
+                            ) from exc
+
+                    if stop_paging and stop_reason is not None:
+                        self.__run_recorder.set_stop_reason(stop_reason)
+                        break
+
+                    if page_result is None:
+                        # No attempt was recorded (should not normally happen)
+                        break
+
+                    if attempt_number >= self.__max_page_attempts:
+                        logger.error(
+                            "Page %i of %s failed after %i attempt(s): %s",
+                            current_page,
+                            category_url,
+                            attempt_number,
+                            page_result,
+                        )
+                        self.__run_recorder.set_stop_reason(STOP_RETRIES_EXHAUSTED)
+                        break
 
         return listings
