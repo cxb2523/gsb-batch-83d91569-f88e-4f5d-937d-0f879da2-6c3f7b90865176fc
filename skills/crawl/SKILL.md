@@ -1,0 +1,172 @@
+---
+name: crawl
+description: "Collect the URLs behind one start page with Crawl (new): create a crawl, wait for it or get notified by webhook, read the kept URLs and optionally each page's HTML, stop it. Use when the user has a listing or section URL but not the item URLs."
+version: 0.1.0
+requires_backend_capabilities: [crawl]
+---
+
+# Crawl (new)
+
+Give Crawl one start URL; it follows the links on that page (and on the
+pages behind it, up to the depth you set) and returns the URLs it keeps. Use it
+when you know where the items live (a category page, a blog index, a docs
+section) but not the item URLs themselves. Once you have the URLs, read pages
+with `zenrows fetch` / `zenrows extract`, or ask Crawl for each page itself
+with `--output-format html` or `--output-format markdown`.
+
+Crawl stays on the start URL's registrable domain; subdomains count. An account without Crawl access gets
+403 `REQS008` → `CRAWL_NOT_ENABLED` ("Crawl is not enabled for this account");
+do not retry it.
+
+## Create, wait, read
+
+```
+zenrows crawl create https://example.com/products/ --depth 1 \
+  --max-items 20 --max-pages 25 --include-patterns /product/ --follow --json
+zenrows crawl results <id> --json            # every kept URL
+zenrows crawl results <id> --out urls.jsonl  # same, as JSONL
+```
+
+- `--depth N` (1 to 100000) is optional: link hops from the start URL. `1` =
+  the start page's links; `2` = also the links on each of those pages. Leave
+  it out for no depth limit: the crawl follows links until `--max-items` or
+  `--max-pages` stops it, or nothing is left to open. A crawl created without
+  a depth has no `depth` field in its output.
+- `--max-items` (kept URLs) and `--max-pages` (fetched pages) cap the crawl;
+  both default to 100. `--max-pages` bounds the cost: each page is one fetch.
+  The local policy `max_pages_per_run` caps `--max-pages` (default 10000);
+  above it the CLI refuses with `POLICY_LIMIT_EXCEEDED` before any request.
+- `--include-patterns` / `--exclude-patterns` are substring matches on the
+  normalized URL and repeat:
+  `--include-patterns /product/ --exclude-patterns ?add-to-cart`.
+- A crawl whose pages held nothing new to follow (no link, only links to other
+  sites, or only links the patterns reject) ends `completed` with no results
+  and exits 0. When patterns were set, it prints a note (under `--json`, in
+  `note`) to check them against the URLs the start page links to.
+- `create` returns at once. `--follow` (or `zenrows crawl wait <id>`) polls
+  until the crawl ends or `--timeout` seconds run out (default 600). When the
+  time runs out, the command exits 0 and prints the crawl with status
+  `running` and the hint `zenrows crawl wait <id>` (under `--json`, in
+  `note`). The crawl keeps running;
+  it is not stopped. Ctrl-C also stops the wait, not the crawl, and exits 130;
+  resume with `zenrows crawl wait <id>`.
+- `results` on a running crawl returns the URLs kept so far, with
+  `partial: true`. Read again once the crawl ends. `--limit` sets the page size
+  of each request.
+
+## Page content
+
+```
+zenrows crawl create <url> --depth 1 --output-format html --max-pages 20 --follow
+zenrows crawl create <url> --depth 1 --output-format markdown --max-pages 20 --follow
+zenrows crawl results <id> --json        # fetched results carry content_url
+zenrows crawl content <id> <content_id>  # one page (or pass the content_url)
+zenrows crawl download <id> --out pages.jsonl  # every URL + page, NDJSON
+```
+
+`--output-format html` stores each page as fetched; `--output-format markdown`
+stores it converted to Markdown. Either uses up the page budget: each kept page is one more
+fetch, and `--max-pages` counts it. Raise `--max-pages` to keep the same number
+of URLs. A result's `content_status` is `pending`, `fetched` or `failed`; only
+`fetched` results have content (else `CRAWL_CONTENT_NOT_FOUND`). `download`
+reports the crawl's `status`, and `partial: true` while it runs.
+
+## Webhooks
+
+Instead of polling, have Crawl post its events to a URL you run:
+
+```
+zenrows crawl create <url> --depth 1 --webhook https://example.com/hooks/zenrows \
+  --webhook-event crawl.completed --webhook-event crawl.failed \
+  --webhook-metadata site=books --json
+```
+
+- `--webhook <url>` takes an absolute `https` URL. It is fixed at create.
+- `--webhook-event` repeats; each of `crawl.started`, `crawl.completed`,
+  `crawl.stopped`, `crawl.failed` at most once. Leave it out for all four.
+  Exactly one of the last three is sent per crawl.
+- `--webhook-metadata key=value` repeats (up to 20 keys of 1 to 64
+  characters, each value at most 1,024 bytes as JSON); every event carries it
+  back, to match the crawl to your own records.
+- The crawl shows `webhook` as `{url, events, metadata}`, `events` being the
+  effective list; a crawl without one has none.
+- Events are signed JSON (`schema: zenrows.webhook/v1`, `event_id`,
+  `event_type`, `occurred_at`, `resource {type: crawl, id, url}`, `metadata`).
+  Verify the `X-Signature: t=…,v1=…,kid=…` header: `v1` is the hex
+  HMAC-SHA256 of `"<t>." + body` with the account's webhook signing key
+  (Settings → API Keys). Events can repeat (drop one whose `event_id` you
+  handled) and arrive out of order (sort by `occurred_at`).
+- The account needs a webhook signing key: without one the create gets 422
+  `webhook_signing_key_required` (create the key, then retry). A bad URL,
+  event or metadata gets 422 `invalid_webhook`. Both are
+  `CRAWL_INVALID_REQUEST`, and nothing was created.
+
+## While it runs, and after
+
+```
+zenrows crawl get <id>                       # status, coverage, stop_reason / error, one page of results
+zenrows crawl get <id> --cursor <c> --json   # the next page; keep polling with next_cursor
+zenrows crawl list                           # your crawls, newest first (--cursor, --limit)
+zenrows crawl stop <id>                      # stop it; kept URLs stay readable
+```
+
+A crawl ends `completed` (nothing left, or a cap hit: `stop_reason`
+`max_items` / `max_pages`), `stopped` or `failed` (`error.code` and
+`error.detail` say why). `stopped` with `stop_reason` `user` means you stopped
+it. `stopped` with no `stop_reason` and `error.code` `insufficient_credits` or
+`api_key_cap_reached` means the account ran out of credits or the API key hit a
+credit cap; the pages fetched before that stay readable. `failed`, and a
+`stopped` crawl with an `error`, exit non-zero: `CRAWL_INSUFFICIENT_CREDITS` or
+`CRAWL_KEY_CAP_REACHED` when credits ended it (the same codes a refused
+`create` gets, also when an older deployment reports it `failed`), else
+`CRAWL_FAILED`. `server_code` carries the API's `error.code`:
+`seed_unreachable` when the start URL could not be fetched or returned an empty
+page, `no_items_found` when the crawl read the start page but found no data it
+could use.
+`stop` on a crawl that already ended prints the status it ended with.
+
+With `--json`, `create`, `get`, `wait` and `stop` print
+`{ok, crawl_id, status, crawl}`; read `coverage`, `stop_reason` and `error`
+under `crawl`. `get` adds `results` and `next_cursor`. `download` prints
+`status: null` when the API sends no status.
+
+## Limits
+
+When the account has reached its limit of active jobs (3 by default), shared
+with its Batch jobs, a create gets 429 `too_many_crawls` →
+`CRAWL_TOO_MANY_CRAWLS`; nothing was created. Retry after `retry_after`
+seconds (about 30), or stop one of your crawls or Batch jobs first. Any other
+429 is `CRAWL_RATE_LIMITED`: requests are being throttled; retry after
+`retry_after` seconds.
+
+## Errors
+
+Every Crawl error carries the API's code as `server_code` (when the API sent
+one), and `crawl_id` on any call about one crawl.
+
+The CLI retries transient failures, as the Crawl SDKs do: up to 3 retries,
+waiting the `Retry-After` seconds (at most 30) or 250 ms x 2^n (+/-20% jitter,
+at most 10 s). Reads retry on 429, 502, 503, 504 and network errors (a timeout
+counts). `create` retries only with `--idempotency-key`, and only on 502, 503,
+504 and network errors, never on 429. `stop` retries on 429, 502, 503 (including
+`crawl_busy`) and 504, waiting the `Retry-After` seconds (at most 30) or 1 s.
+The "Retry?" column is for errors that remain after these retries.
+
+| Code | Meaning | Retry? |
+| --- | --- | --- |
+| `CRAWL_NOT_ENABLED` | 403 `REQS008`: Crawl is not enabled for this account | no |
+| `AUTH_INVALID` | 401: the API key was rejected | no, log in again |
+| `CRAWL_INSUFFICIENT_CREDITS` | 402 on `create`, or a crawl that ended on `insufficient_credits`: the account is out of credits (claim the account or add credits) | after credits renew or are added |
+| `CRAWL_KEY_CAP_REACHED` | 402 `AUTH014` or `api_key_cap_reached` on `create`, or a crawl that ended on `api_key_cap_reached`: this API key reached its credit cap | after the cap resets or is raised |
+| `CRAWL_INVALID_REQUEST` | 400 or 422: fix the request. For `idempotency_key_reused`, send a new key or no key | no, not as is |
+| `CRAWL_REQUEST_IN_FLIGHT` | 409: the same Idempotency-Key is still in flight | yes, once the first request ends |
+| `CRAWL_NOT_FOUND` / `CRAWL_CONTENT_NOT_FOUND` | 404: wrong id, or the page has no content | no |
+| `CRAWL_TOO_MANY_CRAWLS` | 429 `too_many_crawls` on `create`: the account's active-job limit | yes, after `retry_after` |
+| `CRAWL_RATE_LIMITED` | any other 429: requests are being throttled | yes, after `retry_after` |
+| `CRAWL_BUSY` | 503 `crawl_busy` on `stop`: the stop was not saved yet and the crawl still runs | yes, run the stop again after `retry_after` |
+| `CRAWL_FAILED` | the crawl ended `failed`, or `stopped` with an error other than credits, or another error | 5xx: yes, with backoff |
+| `BACKEND_UNAVAILABLE` | the API could not be reached | yes |
+
+Rules: start small (`--depth 1`, low caps) and check the results before a
+deep crawl. Mind the cost ([[cost-control]]). Read errors with
+[[trace-debug]].

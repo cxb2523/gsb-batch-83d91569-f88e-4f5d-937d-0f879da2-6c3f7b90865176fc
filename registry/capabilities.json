@@ -1,0 +1,59 @@
+{
+  "$comment": "Capability matrix for the Zenrows CLI. Every command consults this file before attempting a cloud call, so the CLI never fakes behavior for primitives the backend does not expose. Status values and classification rationale live in docs/capabilities.md; entries must stay in sync with the Capability type in src/types/index.ts.",
+  "capabilities": {
+    "protected_fetch": {
+      "key": "protected_fetch",
+      "label": "Protected Fetch",
+      "status": "available",
+      "command": "zenrows fetch",
+      "backend": "Fetch — GET https://api.zenrows.com/v1/",
+      "requiresAuth": true,
+      "notes": "Supported params: mode=auto (Adaptive Stealth), js_render, premium_proxy, proxy_country, wait, wait_for, js_instructions, custom_headers, session_id, original_status, allowed_status_codes, block_resources, response_type, screenshot."
+    },
+    "extract": {
+      "key": "extract",
+      "label": "Extract (extract=auto / CSS / Markdown)",
+      "status": "available",
+      "command": "zenrows extract",
+      "backend": "Extract — GET https://api.zenrows.com/v1/ (extract=auto, css_extractor, outputs, response_type; autoparse deprecated)",
+      "requiresAuth": true,
+      "notes": "Default is extract=auto, which works on any prepared domain with any key. A REQS007 (legacy AUTH010) is reported, never retried, with the next step for its reason: on a domain not prepared yet (EXTRACT_DOMAIN_NOT_PREPARED), prepare it with `zenrows extract prepare <domain> --url <page> [--wait]` (POST /v1/extract/prepared-domains: 1 to 5 example URLs; one works, we recommend 3 or more of the same page type because Extract compares pages of one type to check the fields it found and fill in fields one page is missing; a few minutes, no credits) and check it with `zenrows extract prepare status <domain>`; on a page Extract did not recognise on a prepared domain (EXTRACT_PAGE_NOT_RECOGNISED), try a product, article or listing page, retry it once in a few minutes, or use --css, because preparing again does not change it. CSS / outputs / markdown work on any domain; autoparse is deprecated and runs only with --autoparse."
+    },
+    "batch": {
+      "key": "batch",
+      "label": "Batch",
+      "status": "available",
+      "command": "zenrows batch",
+      "backend": "Batch — https://async.api.zenrows.com/v1 (X-API-Key header; separate host from the Fetch/Extract /v1/)",
+      "requiresAuth": true,
+      "notes": "Cloud subcommands (create/status/results/cancel/wait/retry-failed) call the Batch API with your API key; `zenrows batch estimate` works locally with no API key."
+    },
+    "crawl": {
+      "key": "crawl",
+      "label": "Crawl",
+      "status": "available",
+      "command": "zenrows crawl",
+      "backend": "Crawl — https://api.zenrows.com/v1/crawls (X-API-Key header; same host as Fetch/Extract)",
+      "requiresAuth": true,
+      "notes": "Crawl is still evolving: new features are coming, limits may be tuned, and the changelog announces each change. Follows the links on each page from one start URL, up to depth when set (optional; without it max_pages / max_items stop the crawl, both default 100), on the start URL's registrable domain (subdomains count), and returns the URLs it keeps, optionally with each page's HTML (create/get/list/results/content/download/stop/wait). An account without Crawl access gets 403 REQS008 (CRAWL_NOT_ENABLED). When the account has reached its limit of active jobs (3 by default), shared with its Batch jobs, a create gets 429 too_many_crawls (CRAWL_TOO_MANY_CRAWLS); retry after retry_after seconds. Any other 429 is CRAWL_RATE_LIMITED (requests are being throttled); retry after retry_after seconds."
+    },
+    "browser": {
+      "key": "browser",
+      "label": "Browser Sessions",
+      "status": "available",
+      "command": "zenrows browser",
+      "backend": "Browser Sessions REST API — https://mcp.zenrows.com/browser/sessions/* (Bearer auth; same backend as @zenrows/mcp browser_* tools)",
+      "requiresAuth": true,
+      "notes": "Browser Sessions is a GA Zenrows product (formerly Scraping Browser). Drives its managed REST API directly (create/verb/close over HTTP with Authorization: Bearer) — no CDP client or browser dependency needed. Escalation-only: prefer fetch/extract (they cost less) for the vast majority of cases. On by default; opt out with policy.allow_browser=false. Sessions bill by bandwidth + session time and auto-terminate after 15 minutes. For raw CDP control, `zenrows browser connect` prints the wss://browser.zenrows.com endpoint for your own Playwright/Puppeteer."
+    },
+    "mcp": {
+      "key": "mcp",
+      "label": "MCP",
+      "status": "available",
+      "command": "zenrows mcp",
+      "backend": "Remote https://mcp.zenrows.com/mcp + local `npx -y @zenrows/mcp`",
+      "requiresAuth": true,
+      "notes": "Hosted remote MCP server plus a local STDIO server (`npx -y @zenrows/mcp`, authenticated via the ZENROWS_API_KEY environment variable)."
+    }
+  }
+}

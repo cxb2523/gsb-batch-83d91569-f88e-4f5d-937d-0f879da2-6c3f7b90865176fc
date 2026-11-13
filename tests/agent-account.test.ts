@@ -1,0 +1,299 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { tempRoot } from "./helpers.ts";
+import { createWorkspace } from "../src/core/workspace.ts";
+import { discoverSignupUrl, siblingOfSignup, requestClaimLink, readAccount, writeAccount, clearAccount, signupAgent, resolveSignupUrl, SIGNUP_URL_ENV, DISCOVERY_URL_ENV, resolveAccountUrl, fetchAccountStatus, _resetDiscoveryCache } from "../src/core/agent-account.ts";
+import { saveConfig } from "../src/core/config.ts";
+import { AGENT_SIGNUP_API_URL } from "../src/core/open-url.ts";
+import { ToolkitError } from "../src/core/errors.ts";
+
+test("account.json round-trips", () => {
+  const { root, cleanup } = tempRoot();
+  try {
+    createWorkspace(root);
+    writeAccount({ accountId: "u1", unclaimed: true, claimUrl: "https://x/claim/t", createdAt: "2026-07-10T00:00:00Z" }, root);
+    const back = readAccount(root);
+    assert.equal(back?.accountId, "u1");
+    assert.equal(back?.unclaimed, true);
+  } finally {
+    cleanup();
+  }
+});
+
+test("clearAccount removes account.json", () => {
+  const { root, cleanup } = tempRoot();
+  try {
+    createWorkspace(root);
+    writeAccount({ accountId: "u1", unclaimed: true, claimUrl: "https://x/claim/t", createdAt: "2026-07-10T00:00:00Z" }, root);
+    assert.equal(clearAccount(root), true);
+    assert.equal(readAccount(root), null);
+    assert.equal(clearAccount(root), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("signupAgent parses a 201 response and sends provenance headers", async () => {
+  let sentHeaders: Record<string, string> = {};
+  const fakeFetch = (async (_url: string, init?: RequestInit) => {
+    sentHeaders = (init?.headers as Record<string, string>) ?? {};
+    return new Response(JSON.stringify({ apiKey: "zr-key", accountId: "u1", claimUrl: "https://x/claim/t" }),
+      { status: 201, headers: { "content-type": "application/json" } });
+  }) as unknown as typeof fetch;
+
+  const res = await signupAgent({ url: "https://x/api/agent/signup", fetchImpl: fakeFetch });
+  assert.equal(res.apiKey, "zr-key");
+  assert.equal(res.accountId, "u1");
+  assert.equal(res.claimUrl, "https://x/claim/t");
+  // Anonymous provenance headers (shared contract with the Zenrows signup API).
+  assert.ok(sentHeaders["X-ZR-Agent-Id"] && sentHeaders["X-ZR-Agent-Id"].length > 0);
+  assert.equal(sentHeaders["X-ZR-Source"], "cli");
+  assert.ok(typeof sentHeaders["X-ZR-Client"] === "string");
+  assert.ok(typeof sentHeaders["X-ZR-CLI-Version"] === "string");
+  assert.ok(typeof sentHeaders["X-ZR-OS"] === "string");
+  assert.ok(sentHeaders["X-ZR-CI"] === "0" || sentHeaders["X-ZR-CI"] === "1");
+});
+
+test("signupAgent falls back to the built-in default when a discovered endpoint fails (safety net)", async () => {
+  // This is the exact regression that caused the original outage: discovery
+  // advertised a host behind a bot-challenge. The safety net must recover by
+  // trying the built-in default, so signup can never fail closed on a bad doc.
+  const prevSignup = process.env[SIGNUP_URL_ENV];
+  const prevDisco = process.env[DISCOVERY_URL_ENV];
+  const prevTelemetry = process.env.ZENROWS_TELEMETRY;
+  delete process.env[SIGNUP_URL_ENV];
+  delete process.env[DISCOVERY_URL_ENV];
+  process.env.ZENROWS_TELEMETRY = "off"; // skip provenance/telemetry-id side effects
+  _resetDiscoveryCache();
+
+  const BLOCKED = "https://blocked.zenrows.com/api/agent/signup";
+  const calls: Array<{ method: string; url: string }> = [];
+  const fakeFetch = (async (url: string, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    calls.push({ method, url: String(url) });
+    if (method === "GET") {
+      // discovery doc points the CLI at a blocked host
+      return new Response(JSON.stringify({ agent_auth: { signup_endpoint: BLOCKED } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (String(url) === BLOCKED) return new Response("<title>Just a moment...</title>", { status: 403 });
+    if (String(url) === AGENT_SIGNUP_API_URL)
+      return new Response(JSON.stringify({ apiKey: "zr-key", accountId: "u1", claimUrl: "https://x/claim/t" }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      });
+    return new Response("unexpected", { status: 500 });
+  }) as unknown as typeof fetch;
+
+  try {
+    const res = await signupAgent({ fetchImpl: fakeFetch });
+    assert.equal(res.apiKey, "zr-key"); // recovered via the fallback
+    const posts = calls.filter((c) => c.method === "POST").map((c) => c.url);
+    assert.deepEqual(posts, [BLOCKED, AGENT_SIGNUP_API_URL]); // blocked first, then fell back to default
+  } finally {
+    _resetDiscoveryCache();
+    if (prevSignup !== undefined) process.env[SIGNUP_URL_ENV] = prevSignup;
+    if (prevDisco !== undefined) process.env[DISCOVERY_URL_ENV] = prevDisco;
+    if (prevTelemetry !== undefined) process.env.ZENROWS_TELEMETRY = prevTelemetry;
+    else delete process.env.ZENROWS_TELEMETRY;
+  }
+});
+
+test("signupAgent omits all provenance headers when opted out via env", async () => {
+  const prev = process.env.ZENROWS_TELEMETRY;
+  process.env.ZENROWS_TELEMETRY = "off";
+  let sentHeaders: Record<string, string> = {};
+  const fakeFetch = (async (_url: string, init?: RequestInit) => {
+    sentHeaders = (init?.headers as Record<string, string>) ?? {};
+    return new Response(JSON.stringify({ apiKey: "k", accountId: "u1", claimUrl: "https://x/claim/t" }),
+      { status: 201, headers: { "content-type": "application/json" } });
+  }) as unknown as typeof fetch;
+  try {
+    await signupAgent({ url: "https://x/api/agent/signup", fetchImpl: fakeFetch });
+    for (const h of ["X-ZR-Agent-Id", "X-ZR-Client", "X-ZR-Source", "X-ZR-CLI-Version", "X-ZR-OS", "X-ZR-Node", "X-ZR-CI"]) {
+      assert.equal(sentHeaders[h], undefined, `${h} must not be sent when opted out`);
+    }
+  } finally {
+    if (prev !== undefined) process.env.ZENROWS_TELEMETRY = prev;
+    else delete process.env.ZENROWS_TELEMETRY;
+  }
+});
+
+test("resolveSignupUrl: default, config override, env override precedence", async () => {
+  const { root, cleanup } = tempRoot();
+  const prevSignup = process.env[SIGNUP_URL_ENV];
+  const prevDisco = process.env[DISCOVERY_URL_ENV];
+  delete process.env[SIGNUP_URL_ENV];
+  delete process.env[DISCOVERY_URL_ENV];
+  _resetDiscoveryCache();
+  // A discovery fetch that returns nothing usable, so we exercise the default.
+  const noDisco = (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch;
+  try {
+    createWorkspace(root);
+    // 1. default (no config, no env, discovery yields null)
+    assert.equal(await resolveSignupUrl(root, { fetchImpl: noDisco }), AGENT_SIGNUP_API_URL);
+    // 2. config override (beats discovery/default)
+    saveConfig({ apiBase: "https://api.zenrows.com/v1/", defaultMode: "auto", telemetry: "off", version: "0.1.0", signupUrl: "http://localhost.com:8000/api/agent/signup" }, root);
+    assert.equal(await resolveSignupUrl(root), "http://localhost.com:8000/api/agent/signup");
+    // 3. env beats config
+    process.env[SIGNUP_URL_ENV] = "http://127.0.0.1:9/api/agent/signup";
+    assert.equal(await resolveSignupUrl(root), "http://127.0.0.1:9/api/agent/signup");
+  } finally {
+    if (prevSignup !== undefined) process.env[SIGNUP_URL_ENV] = prevSignup;
+    else delete process.env[SIGNUP_URL_ENV];
+    if (prevDisco !== undefined) process.env[DISCOVERY_URL_ENV] = prevDisco;
+    else delete process.env[DISCOVERY_URL_ENV];
+    _resetDiscoveryCache();
+    cleanup();
+  }
+});
+
+test("resolveSignupUrl: discovers via .well-known when no env/config", async () => {
+  const { root, cleanup } = tempRoot();
+  const prevSignup = process.env[SIGNUP_URL_ENV];
+  const prevDisco = process.env[DISCOVERY_URL_ENV];
+  delete process.env[SIGNUP_URL_ENV];
+  delete process.env[DISCOVERY_URL_ENV];
+  _resetDiscoveryCache();
+  let calledUrl: string | undefined;
+  const fakeFetch = (async (url: string) => {
+    calledUrl = url;
+    return new Response(
+      JSON.stringify({ agent_auth: { signup_endpoint: "https://disco.zenrows.com/api/agent/signup" } }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as unknown as typeof fetch;
+  try {
+    createWorkspace(root);
+    assert.equal(await resolveSignupUrl(root, { fetchImpl: fakeFetch }), "https://disco.zenrows.com/api/agent/signup");
+    assert.ok(calledUrl?.endsWith("/.well-known/oauth-protected-resource"));
+    // resolveAccountUrl derives /account from the discovered (cached) signup URL.
+    assert.equal(await resolveAccountUrl(root), "https://disco.zenrows.com/api/agent/account");
+  } finally {
+    if (prevSignup !== undefined) process.env[SIGNUP_URL_ENV] = prevSignup;
+    else delete process.env[SIGNUP_URL_ENV];
+    if (prevDisco !== undefined) process.env[DISCOVERY_URL_ENV] = prevDisco;
+    else delete process.env[DISCOVERY_URL_ENV];
+    _resetDiscoveryCache();
+    cleanup();
+  }
+});
+
+test("resolveAccountUrl derives /account from the signup URL", async () => {
+  const { root, cleanup } = tempRoot();
+  const prev = process.env[SIGNUP_URL_ENV];
+  process.env[SIGNUP_URL_ENV] = "http://localhost:8000/api/agent/signup";
+  try {
+    createWorkspace(root);
+    assert.equal(await resolveAccountUrl(root), "http://localhost:8000/api/agent/account");
+  } finally {
+    if (prev !== undefined) process.env[SIGNUP_URL_ENV] = prev;
+    else delete process.env[SIGNUP_URL_ENV];
+    cleanup();
+  }
+});
+
+test("fetchAccountStatus parses claim state and sends X-API-Key", async () => {
+  let sentKey: unknown;
+  const fakeFetch = (async (_url: string, init?: RequestInit) => {
+    sentKey = (init?.headers as Record<string, string>)["X-API-Key"];
+    return new Response(JSON.stringify({ accountId: "u1", claimed: true, isAgent: false }),
+      { status: 200, headers: { "content-type": "application/json" } });
+  }) as unknown as typeof fetch;
+
+  const s = await fetchAccountStatus("zr-key", { url: "https://x/api/agent/account", fetchImpl: fakeFetch });
+  assert.equal(sentKey, "zr-key");
+  assert.equal(s.claimed, true);
+  assert.equal(s.accountId, "u1");
+});
+
+test("signupAgent throws SIGNUP_RATE_LIMITED on 429", async () => {
+  const fakeFetch = (async () =>
+    new Response(JSON.stringify({ error: "rate_limited" }), { status: 429 })) as unknown as typeof fetch;
+  await assert.rejects(
+    () => signupAgent({ fetchImpl: fakeFetch }),
+    (e: unknown) => e instanceof ToolkitError && e.code === "SIGNUP_RATE_LIMITED",
+  );
+});
+
+test("discoverSignupUrl: a non-Zenrows or non-https endpoint is ignored, so the key never goes there", async () => {
+  for (const endpoint of [
+    "https://evil.example/api/agent/signup",
+    "http://app.zenrows.com/api/agent/signup",
+    "https://zenrows.com.evil.example/api/agent/signup",
+    "https://user:pw@app.zenrows.com/api/agent/signup",
+  ]) {
+    const fakeFetch = (async () =>
+      new Response(JSON.stringify({ agent_auth: { signup_endpoint: endpoint } }), { status: 200 })) as unknown as typeof fetch;
+    assert.equal(await discoverSignupUrl(undefined, { fetchImpl: fakeFetch }), null, endpoint);
+  }
+  const ok = (async () =>
+    new Response(JSON.stringify({ agent_auth: { signup_endpoint: "https://api.zenrows.com/api/agent/signup" } }), { status: 200 })) as unknown as typeof fetch;
+  assert.equal(await discoverSignupUrl(undefined, { fetchImpl: ok }), "https://api.zenrows.com/api/agent/signup");
+});
+
+test("siblingOfSignup: derives /account and /claim, else falls back to the built-in endpoint", () => {
+  assert.equal(siblingOfSignup("http://127.0.0.1:9/api/agent/signup", "claim"), "http://127.0.0.1:9/api/agent/claim");
+  assert.equal(siblingOfSignup("https://x.zenrows.com/api/agent/signup/", "account"), "https://x.zenrows.com/api/agent/account");
+  assert.equal(siblingOfSignup("https://x.zenrows.com/api/agent/register", "claim"), AGENT_SIGNUP_API_URL.replace(/\/signup$/, "/claim"));
+});
+
+test("requestClaimLink: a non-JSON 200 is reported as an unexpected response, not a network failure", async () => {
+  const fakeFetch = (async () => new Response("<html>oops</html>", { status: 200 })) as unknown as typeof fetch;
+  await assert.rejects(requestClaimLink("k", { url: "https://x.zenrows.com/api/agent/claim", fetchImpl: fakeFetch }), (e: unknown) =>
+    e instanceof ToolkitError && e.code === "FETCH_FAILED" && /without a claim link/.test(e.message));
+});
+
+test("requestClaimLink: 409 not_agent_account is final", async () => {
+  const fakeFetch = (async () => new Response(JSON.stringify({ error: "not_agent_account" }), { status: 409 })) as unknown as typeof fetch;
+  assert.deepEqual(await requestClaimLink("k", { url: "https://x.zenrows.com/api/agent/claim", fetchImpl: fakeFetch }), { status: "not_agent" });
+});
+
+test("siblingOfSignup: an override that is not Zenrows or loopback never receives the key", () => {
+  const builtIn = AGENT_SIGNUP_API_URL.replace(/\/signup$/, "/account");
+  for (const override of [
+    "https://evil.example/api/agent/signup",
+    "http://app.zenrows.com/api/agent/signup",
+    "https://u:p@app.zenrows.com/api/agent/signup",
+    "http://u@127.0.0.1:9/api/agent/signup",
+    "http://10.0.0.5/api/agent/signup",
+  ]) {
+    assert.equal(siblingOfSignup(override, "account"), builtIn, override);
+  }
+  for (const ok of ["http://localhost:8000/api/agent/signup", "https://[::1]:8443/api/agent/signup", "https://staging.zenrows.com/api/agent/signup"]) {
+    assert.equal(siblingOfSignup(ok, "account"), ok.replace(/\/signup$/, "/account"), ok);
+  }
+});
+
+test("fetchAccountStatus: a project config's untrusted signupUrl is not where the key goes; the project root is honoured", async () => {
+  const { root, cleanup } = tempRoot();
+  const prevSignup = process.env[SIGNUP_URL_ENV];
+  delete process.env[SIGNUP_URL_ENV];
+  const calls: string[] = [];
+  const fakeFetch = (async (url: string) => {
+    calls.push(String(url));
+    return new Response(JSON.stringify({ accountId: "u1", claimed: false, isAgent: true }), { status: 200 });
+  }) as unknown as typeof fetch;
+  try {
+    createWorkspace(root);
+    const cfg = { apiBase: "https://api.zenrows.com/v1/", defaultMode: "auto" as const, telemetry: "off" as const, version: "0.1.0" };
+    saveConfig({ ...cfg, signupUrl: "https://attacker.example/api/agent/signup" }, root);
+    await fetchAccountStatus("k", { projectRoot: root, fetchImpl: fakeFetch });
+    assert.deepEqual(calls, [AGENT_SIGNUP_API_URL.replace(/\/signup$/, "/account")]);
+    calls.length = 0;
+    saveConfig({ ...cfg, signupUrl: "http://127.0.0.1:9/api/agent/signup" }, root);
+    await requestClaimLink("k", { projectRoot: root, fetchImpl: (async (url: string) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({ claimUrl: "https://app.zenrows.com/claim/t" }), { status: 200 });
+    }) as unknown as typeof fetch });
+    assert.deepEqual(calls, ["http://127.0.0.1:9/api/agent/claim"]);
+    calls.length = 0;
+    await fetchAccountStatus("k", { projectRoot: root, fetchImpl: fakeFetch });
+    assert.deepEqual(calls, ["http://127.0.0.1:9/api/agent/account"]);
+  } finally {
+    if (prevSignup !== undefined) process.env[SIGNUP_URL_ENV] = prevSignup;
+    cleanup();
+  }
+});

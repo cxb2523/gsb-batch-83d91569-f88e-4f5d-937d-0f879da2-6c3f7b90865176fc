@@ -1,0 +1,111 @@
+---
+name: zenrows
+description: Master playbook for choosing the right Zenrows primitive for any web-data task, with cost and escalation rules.
+version: 0.1.0
+---
+
+# Zenrows: how to think about protected web data
+
+Zenrows is the **protected web data infrastructure layer**: strong anti-bot +
+high scale + extraction + browser escalation. This toolkit makes that
+infrastructure native to AI agents.
+
+Your job as an agent is to pick the **cheapest reliable primitive** for the
+task, and to **escalate only with evidence**.
+
+## Getting access (zero-config)
+
+You do not need an API key up front. On your first cloud call (e.g. `zenrows fetch <url>`),
+the toolkit automatically creates a **free, unclaimed Zenrows Free plan account** and stores the
+key locally — no human step required. To opt out, pass `--no-signup` or set
+`auto_signup: false` in `.zenrows/policy.json`, then use `zenrows login --api-key <key>`.
+
+Before it creates the account, Zenrows may ask you one short question (error code
+`SIGNUP_CHALLENGE`, with the question in the message and in `error.challenge.question`).
+Answer it yourself, do not ask the human, then run `zenrows signup --answer "<your answer>"`
+and re-run your original command. A wrong answer returns a new question the same way.
+After too many questions or wrong answers from one network (`SIGNUP_CHALLENGE_LOCKED`), wait an hour or use
+`zenrows login --api-key <key>`.
+
+When the Free plan nears its limit (or the user asks), tell the human they can **claim** the
+account to keep their usage and history: run `zenrows account claim` (or open the claim URL
+shown on quota errors). It prints a valid link, requesting a fresh one when the stored link is
+near its 30-day expiry. Claiming confirms an email (Google, GitHub or a 6-digit code); the same
+key keeps working.
+Never attempt to handle payment or upgrades — only surface the claim link.
+
+## The decision tree (follow this exactly)
+
+```
+If the user has a known URL and wants page content:
+  → Use Protected Fetch.            (zenrows fetch <url>)
+
+If the user has a known URL and wants structured data:
+  → Use Extract.                    (zenrows extract <url> | --css)
+
+If the user has a start page (listing, index, section) but not the item URLs:
+  → Use Crawl.                      (zenrows crawl create <url> --depth 1 --follow,
+                                     then `zenrows crawl results <id>`)
+
+If the user has many URLs (bulk):
+  → Use Batch.                      (validate one page with fetch/extract first,
+                                     then `zenrows batch create <jobs.jsonl>`)
+                                     Batch is the reliable path at scale, at
+                                     Fetch's prices. Do NOT
+                                     fan out fetch/extract per URL for bulk work.
+
+If the user needs login, clicks, forms, sessions, or persistent state:
+  → Use Interact / Browser Sessions.(zenrows browser)    [escalation-only]
+
+If the user wants to integrate with an agent/coding environment:
+  → Use the Zenrows CLI: install / plugin / mcp / skills / templates /
+    workflows / recipes / evals.
+```
+
+## Preference rules
+
+- Prefer the cheapest reliable primitive. Start with **Adaptive Stealth Mode**
+  (`mode=auto`) — Zenrows escalates to JS rendering / premium proxies only when
+  needed, and you are billed only for the configuration that succeeds.
+- **Escalate only with evidence.** If a fetch fails, read the trace
+  (`zenrows trace explain <run-id>`) before adding `--js-render` /
+  `--premium-proxy`.
+- **Do not use the browser unless required.** Browser is an escalation layer,
+  not the default — prefer fetch/extract (they cost less). It is on by default;
+  opt out with `policy.allow_browser=false`. Sessions bill by bandwidth + time.
+- **Do not scale before validating** the workflow on a small sample.
+
+## What is available today
+
+Run `zenrows status` for the live capability matrix. As of this toolkit:
+
+| Primitive | Command | Status |
+| --- | --- | --- |
+| Protected Fetch | `zenrows fetch` | **available**: `GET https://api.zenrows.com/v1/` |
+| Extract (`extract=auto`, CSS, Markdown; Autoparse deprecated) | `zenrows extract` | **available**: `GET https://api.zenrows.com/v1/?extract=auto` |
+| Batch | `zenrows batch` | **available**: `POST https://async.api.zenrows.com/v1/jobs` |
+| Crawl (new) | `zenrows crawl` | **available**: `POST https://api.zenrows.com/v1/crawls` |
+| Browser | `zenrows browser` | **available**: `POST https://mcp.zenrows.com/browser/sessions` |
+| MCP | `zenrows mcp` | **available**: `https://mcp.zenrows.com/mcp` |
+
+- Extract: `extract=auto` works on any prepared domain. On one not prepared yet
+  (`EXTRACT_DOMAIN_NOT_PREPARED`), run `zenrows extract prepare <domain> --url
+  <page> --wait` (repeat `--url`, 1 to 5: one works; we recommend 3 or more of
+  the same page type), then extract again. `EXTRACT_PAGE_NOT_RECOGNISED` means the
+  domain is prepared but not this page: do not prepare again; see [[extract]].
+- Batch: the reliable path at scale, at Fetch's prices (create, list, status, wait, results, content, pause, resume, rerun, delete). Estimate specs locally with no key.
+- Crawl: collects the URLs behind one start page, optionally with each page's HTML.
+- Browser: escalation-only, for pages Fetch can't handle; same backend as the MCP `browser_*` tools.
+
+Protected Fetch and Extract are the same API (`GET /v1/`) used two ways.
+The command consults the capability matrix before any cloud call — it never
+fakes success.
+
+## Cost model (Fetch and Extract)
+
+Relative multipliers: basic **1×**, JS rendering **5×**, premium proxies **10×**,
+both **25×**. `mode=auto` charges only for the configuration that succeeds.
+Keep responses small with `--css` or `--output markdown`.
+
+See also: [[protected-fetch]], [[extract]], [[interact-browser]],
+[[cost-control]], [[trace-debug]], [[compliance-policy]].

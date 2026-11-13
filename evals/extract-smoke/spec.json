@@ -1,0 +1,11 @@
+{
+  "description": "Smoke test: Extract (extract=auto) returns structured output for an enabled company page.",
+  "steps": [
+    {
+      "kind": "extract",
+      "url": "https://www.owler.com/company/meltwater",
+      "options": { "method": "extract", "jsRender": false },
+      "expect": { "minLength": 2 }
+    }
+  ]
+}

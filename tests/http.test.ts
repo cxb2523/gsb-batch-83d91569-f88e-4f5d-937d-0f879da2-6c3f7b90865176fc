@@ -1,0 +1,315 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { scrape, formatRequestCost } from "../src/core/http.ts";
+import { CLI_VERSION } from "../src/core/config.ts";
+
+// The exact shape Zenrows returns when an account is out of credits / over its
+// usage limit: HTTP 402 with a non-empty JSON error envelope.
+const AUTH004 = JSON.stringify({
+  code: "AUTH004",
+  detail:
+    "This account has reached its usage limit. Purchase a new subscription to continue using the service.",
+  instance: "/v1",
+  status: 402,
+  title: "Usage exceeded (AUTH004)",
+  type: "https://docs.zenrows.com/api-error-codes#AUTH004",
+});
+
+function withFetch(res: () => Response, fn: () => Promise<void>): Promise<void> {
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async () => res()) as typeof fetch;
+  return fn().finally(() => {
+    globalThis.fetch = orig;
+  });
+}
+
+// A binary response body: the PNG magic signature starts with 0x89 (>0x7F).
+// Reading it as UTF-8 text mangles every high byte into U+FFFD (ef bf bd),
+// which is exactly the screenshot/PDF corruption we are guarding against.
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xde, 0xad, 0xbe, 0xef]);
+
+test("scrape preserves raw bytes for a screenshot (no UTF-8 corruption)", async () => {
+  await withFetch(
+    () => new Response(PNG_BYTES, { status: 200, headers: { "content-type": "image/png" } }),
+    async () => {
+      const r = await scrape("https://api.zenrows.com/v1/", "k", {
+        url: "https://x",
+        screenshot: true,
+      });
+      assert.equal(r.isBinary, true);
+      assert.ok(Buffer.isBuffer(r.raw), "raw should be a Buffer");
+      assert.deepEqual([...r.raw], [...PNG_BYTES], "raw bytes must survive byte-for-byte");
+      assert.equal(r.raw[0], 0x89, "PNG signature byte must not be mangled");
+    },
+  );
+});
+
+test("scrape preserves raw bytes for a PDF response_type", async () => {
+  const PDF_BYTES = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37, 0xff, 0xfe]);
+  await withFetch(
+    () => new Response(PDF_BYTES, { status: 200, headers: { "content-type": "application/pdf" } }),
+    async () => {
+      const r = await scrape("https://api.zenrows.com/v1/", "k", {
+        url: "https://x",
+        response_type: "pdf",
+      });
+      assert.equal(r.isBinary, true);
+      assert.deepEqual([...r.raw], [...PDF_BYTES]);
+    },
+  );
+});
+
+test("scrape marks ordinary text responses as non-binary", async () => {
+  await withFetch(
+    () => new Response("<html>hi</html>", { status: 200, headers: { "content-type": "text/html" } }),
+    async () => {
+      const r = await scrape("https://api.zenrows.com/v1/", "k", { url: "https://x" });
+      assert.equal(r.isBinary, false);
+      assert.equal(r.body, "<html>hi</html>");
+    },
+  );
+});
+
+test("scrape parses X-Request-Cost and X-Request-Credits headers", async () => {
+  await withFetch(
+    () =>
+      new Response("<html>ok</html>", {
+        status: 200,
+        headers: {
+          "content-type": "text/html",
+          "x-request-cost": "0.0018125",
+          "x-request-credits": "5",
+        },
+      }),
+    async () => {
+      const r = await scrape("https://api.zenrows.com/v1/", "k", { url: "https://x" });
+      assert.equal(r.costUsd, 0.0018125);
+      assert.equal(r.costCredits, 5);
+    },
+  );
+});
+
+test("formatRequestCost includes credits when present", () => {
+  assert.equal(formatRequestCost(0.0004, 1), "cost $0.0004 · 1 credit");
+  assert.equal(formatRequestCost(0.0091, 25), "cost $0.0091 · 25 credits");
+  assert.equal(formatRequestCost(0.0004, null), "cost $0.0004");
+});
+
+test("scrape sends a User-Agent carrying the current CLI version", async () => {
+  let seenUA: string | undefined;
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async (_url: string, init: RequestInit) => {
+    seenUA = new Headers(init.headers).get("user-agent") ?? undefined;
+    return new Response("ok", { status: 200, headers: { "content-type": "text/html" } });
+  }) as typeof fetch;
+  try {
+    await scrape("https://api.zenrows.com/v1/", "k", { url: "https://x" });
+  } finally {
+    globalThis.fetch = orig;
+  }
+  assert.equal(seenUA, `zenrows-cli/${CLI_VERSION}`);
+});
+
+test("scrape does NOT advise a (billed) retry when the target cannot be resolved (RESP007)", async () => {
+  const RESP007 = JSON.stringify({
+    code: "RESP007",
+    detail: "The requested target domain could not be resolved, or there is no DNS record associated with it.",
+    status: 422,
+    title: "Could not resolve domain (RESP007)",
+  });
+  await withFetch(
+    () => new Response(RESP007, { status: 422, headers: { "content-type": "application/json" } }),
+    async () => {
+      await assert.rejects(
+        () => scrape("https://api.zenrows.com/v1/", "test-key", { url: "https://no-such-host.invalid" }),
+        (err: unknown) => {
+          const e = err as { code: string; next_action: string; suggested_commands: string[] };
+          assert.equal(e.code, "FETCH_FAILED");
+          // The whole point: it discourages a retry and offers no billed retry
+          // command. (Naming the flags to say they *won't* help is fine; telling
+          // the agent to "retry with" them is not.)
+          assert.match(e.next_action, /do not retry/i);
+          assert.doesNotMatch(e.next_action, /retry with/i);
+          assert.equal(e.suggested_commands.length, 0);
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("scrape maps AUTH010 on extract=auto to EXTRACT_DOMAIN_NOT_PREPARED", async () => {
+  const AUTH010 = JSON.stringify({
+    code: "AUTH010",
+    detail: "This domain is not enabled for Extract.",
+    status: 402,
+    title: "Feature is not included in plan (AUTH010)",
+    type: "https://docs.zenrows.com/api-error-codes#AUTH010",
+  });
+  await withFetch(
+    () => new Response(AUTH010, { status: 402, headers: { "content-type": "application/json" } }),
+    async () => {
+      await assert.rejects(
+        () =>
+          scrape("https://api.zenrows.com/v1/", "test-key", {
+            url: "https://example.net",
+            extract: "auto",
+          }),
+        (err: unknown) => {
+          assert.ok(err && typeof err === "object" && "code" in err);
+          assert.equal((err as { code: string }).code, "EXTRACT_DOMAIN_NOT_PREPARED");
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("scrape maps REQS007 on extract=auto to EXTRACT_DOMAIN_NOT_PREPARED", async () => {
+  const REQS007 = JSON.stringify({
+    code: "REQS007",
+    detail: "Extract has not been prepared for example.net yet.",
+    status: 403,
+    title: "Extract not prepared (REQS007)",
+  });
+  await withFetch(
+    () => new Response(REQS007, { status: 403, headers: { "content-type": "application/json" } }),
+    async () => {
+      await assert.rejects(
+        () => scrape("https://api.zenrows.com/v1/", "test-key", { url: "https://example.net", extract: "auto" }),
+        (err: unknown) => {
+          assert.equal((err as { code: string }).code, "EXTRACT_DOMAIN_NOT_PREPARED");
+          assert.equal(
+            (err as { message: string }).message,
+            "Extract hasn't prepared example.net yet. Prepare it with `zenrows extract prepare example.net --url https://example.net` (a few example URLs, a few minutes, no credits), then retry; meanwhile use --css.",
+          );
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("scrape does not map REQS007 to EXTRACT_DOMAIN_NOT_PREPARED without extract=auto", async () => {
+  const REQS007 = JSON.stringify({ code: "REQS007", detail: "Extract has not been prepared for example.net yet.", status: 403 });
+  await withFetch(
+    () => new Response(REQS007, { status: 403, headers: { "content-type": "application/json" } }),
+    async () => {
+      await assert.rejects(
+        () => scrape("https://api.zenrows.com/v1/", "test-key", { url: "https://example.net", autoparse: true }),
+        (err: unknown) => {
+          assert.notEqual((err as { code: string }).code, "EXTRACT_DOMAIN_NOT_PREPARED");
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("scrape treats AUTH010 without extract as a credits/plan error, not EXTRACT_DOMAIN", async () => {
+  // AUTH010 is also used for other plan-gated features; only map it to
+  // EXTRACT_DOMAIN_NOT_PREPARED when the request asked for extract=auto.
+  const AUTH010 = JSON.stringify({
+    code: "AUTH010",
+    detail: "Feature is not included in plan.",
+    status: 402,
+    title: "Feature is not included in plan (AUTH010)",
+    type: "https://docs.zenrows.com/api-error-codes#AUTH010",
+  });
+  await withFetch(
+    () => new Response(AUTH010, { status: 402, headers: { "content-type": "application/json" } }),
+    async () => {
+      await assert.rejects(
+        () => scrape("https://api.zenrows.com/v1/", "test-key", { url: "https://example.net" }),
+        (err: unknown) => {
+          assert.ok(err && typeof err === "object" && "code" in err);
+          assert.equal((err as { code: string }).code, "POLICY_MAX_CREDITS_EXCEEDED");
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("scrape treats a 402 credit/quota response as an error, not success", async () => {
+  await withFetch(
+    () => new Response(AUTH004, { status: 402, headers: { "content-type": "application/json" } }),
+    async () => {
+      await assert.rejects(
+        () => scrape("https://api.zenrows.com/v1/", "test-key", { url: "https://example.net" }),
+        (err: unknown) => {
+          assert.ok(err && typeof err === "object" && "code" in err);
+          assert.equal((err as { code: string }).code, "POLICY_MAX_CREDITS_EXCEEDED");
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("scrape maps REQS001 (forbidden domain) to a non-retryable DOMAIN_FORBIDDEN error", async () => {
+  const REQS001 = JSON.stringify({
+    code: "REQS001",
+    detail: "Requests to this domain are forbidden.",
+    status: 400,
+    title: "Requests to this domain are forbidden (REQS001)",
+    type: "https://docs.zenrows.com/api-error-codes#REQS001",
+  });
+  await withFetch(
+    () => new Response(REQS001, { status: 400, headers: { "content-type": "application/json" } }),
+    async () => {
+      await assert.rejects(
+        () => scrape("https://api.zenrows.com/v1/", "k", { url: "https://books.toscrape.com/" }),
+        (err: unknown) => {
+          const e = err as { code?: string; next_action?: string };
+          assert.equal(e.code, "DOMAIN_FORBIDDEN");
+          // Must NOT advise a retry — the block is permanent.
+          assert.doesNotMatch(e.next_action ?? "", /retry/i);
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("scrape still returns non-Zenrows 4xx bodies (allowed_status_codes / original_status)", async () => {
+  // A target site's own 404 (real page content) must NOT be swallowed as an
+  // error — original_status / allowed_status_codes legitimately return it.
+  await withFetch(
+    () => new Response("<html>Not Found</html>", { status: 404, headers: { "content-type": "text/html" } }),
+    async () => {
+      const r = await scrape("https://api.zenrows.com/v1/", "k", {
+        url: "https://x",
+        original_status: true,
+      });
+      assert.equal(r.status, 404);
+      assert.match(r.body, /Not Found/);
+    },
+  );
+});
+
+test("scrape maps AUTH014 (this key hit its credit cap) to KEY_CREDIT_CAP_REACHED, not out of credits", async () => {
+  const AUTH014 = JSON.stringify({
+    code: "AUTH014",
+    detail: "This API key has reached its daily cap of 200 credits. The cap resets on 2026-10-03 at 00:00 UTC.",
+    status: 402,
+    title: "API key credit cap reached (AUTH014)",
+    type: "https://docs.zenrows.com/api-error-codes#AUTH014",
+  });
+  await withFetch(
+    () => new Response(AUTH014, { status: 402, headers: { "content-type": "application/problem+json" } }),
+    async () => {
+      await assert.rejects(
+        () => scrape("https://api.zenrows.com/v1/", "test-key", { url: "https://example.net" }),
+        (err: unknown) => {
+          const e = err as { code: string; likely_cause: string; next_action: string };
+          assert.equal(e.code, "KEY_CREDIT_CAP_REACHED");
+          assert.match(e.likely_cause, /resets on 2026-10-03/);
+          assert.match(e.next_action, /settings\/api-keys/);
+          assert.doesNotMatch(e.next_action, /credit pack|out of Zenrows credits/);
+          return true;
+        },
+      );
+    },
+  );
+});

@@ -1,0 +1,139 @@
+/**
+ * Shared types for the Zenrows CLI.
+ *
+ * The toolkit is the open-source adoption / distribution layer for the Zenrows
+ * protected web data platform. These types model the local workspace, the
+ * capability matrix, and the installable asset registry — not the cloud
+ * infrastructure itself.
+ */
+
+export type CapabilityStatus =
+  | "available"
+  | "available-but-needs-confirmation"
+  | "experimental"
+  | "beta"
+  | "planned"
+  | "not-implemented"
+  | "deprecated";
+
+export interface Capability {
+  /** Stable capability key, e.g. "protected_fetch". */
+  key: string;
+  /** Human label. */
+  label: string;
+  status: CapabilityStatus;
+  /** CLI command that exposes this capability, e.g. "zenrows fetch". */
+  command: string;
+  /** Backend endpoint or surface, e.g. "GET https://api.zenrows.com/v1/". */
+  backend: string;
+  /** Whether a valid API key is required before the command can do real work. */
+  requiresAuth: boolean;
+  /** Notes explaining the classification (shown in `status`). */
+  notes?: string;
+}
+
+export type AssetType =
+  | "plugin"
+  | "skill"
+  | "template"
+  | "workflow"
+  | "recipe"
+  | "eval";
+
+export interface RegistryAsset {
+  name: string;
+  type: AssetType;
+  description: string;
+  status: Exclude<CapabilityStatus, "available-but-needs-confirmation" | "not-implemented">;
+  /** Capability keys this asset depends on; checked before run. */
+  requires_backend_capabilities: string[];
+  requires_auth: boolean;
+  version: string;
+  /** Path relative to the package root. */
+  path: string;
+  tags: string[];
+}
+
+export interface ToolkitConfig {
+  /** Zenrows REST API base, confirmed: https://api.zenrows.com/v1/ */
+  apiBase: string;
+  /** Default fetch mode. "auto" = Adaptive Stealth Mode. */
+  defaultMode: "auto" | "manual";
+  /**
+   * Anonymous attribution toggle. The toolkit never POSTs to a telemetry
+   * endpoint; "anonymous" only attaches provenance headers to the signup
+   * request, the `X-ZenRows-Client` agent name to API requests, and `utm_*`
+   * params to the browser URLs a human opens. "off" (or
+   * `ZENROWS_TELEMETRY=off`) suppresses all three.
+   */
+  telemetry: "anonymous" | "off";
+  /**
+   * Override the agent-signup endpoint. Defaults to the production endpoint
+   * when unset; set this (or the ZENROWS_AGENT_SIGNUP_URL env var) to point at a
+   * local/staging server for testing.
+   */
+  signupUrl?: string;
+  /**
+   * Base origin used to discover the agent-signup endpoint via
+   * `/.well-known/oauth-protected-resource`. Defaults to the production origin
+   * when unset; set this (or the ZENROWS_DISCOVERY_URL env var) to point
+   * discovery at a local/staging server for testing.
+   */
+  discoveryUrl?: string;
+  /**
+   * Legacy per-workspace agent id (uuid), adopted into the per-machine id on
+   * first run (see `getOrCreateTelemetryId`). Sent
+   * as the `X-ZR-Agent-Id` signup header so the backend can correlate the
+   * anonymous device with the account it merges on claim. No PII — random only.
+   */
+  telemetryId?: string;
+  /** Schema/version marker for forward-compatible migrations. */
+  version: string;
+}
+
+export interface Policy {
+  max_credits_per_run: number;
+  max_pages_per_run: number;
+  max_concurrency: number;
+  allow_browser: boolean;
+  allow_experimental: boolean;
+  allowed_domains: string[];
+  blocked_domains: string[];
+  redact_secrets: boolean;
+  telemetry: "anonymous" | "off";
+  /** Auto-create an unclaimed Zenrows account on first cloud call when no key exists. */
+  auto_signup: boolean;
+}
+
+export interface AgentAccount {
+  accountId: string;
+  /** True until a human claims the account. */
+  unclaimed: boolean;
+  /** URL a human opens to claim (set email + password). */
+  claimUrl: string;
+  /** ISO-8601 creation time (local). */
+  createdAt: string;
+  /** ISO-8601 timestamp of the last usage check (throttles the claim nudge). */
+  lastUsageCheckAt?: string;
+  /**
+   * ISO-8601 time `claimUrl` was issued. Claim links expire 30 days after
+   * issue; absent on accounts written before this field existed, where
+   * `createdAt` (the signup that issued the first link) stands in.
+   */
+  claimUrlIssuedAt?: string;
+  /** ISO-8601 timestamp of the last claim-status check (throttles it on errors). */
+  lastClaimCheckAt?: string;
+}
+
+export interface Secrets {
+  /** Zenrows API key. Never written to run artifacts or printed. */
+  apiKey?: string;
+}
+
+export interface AuthState {
+  hasKey: boolean;
+  /** Where the key was resolved from. */
+  source: "secrets-file" | "env" | "none";
+  /** Masked preview for display, e.g. "ab12…wxyz". Never the full key. */
+  masked?: string;
+}

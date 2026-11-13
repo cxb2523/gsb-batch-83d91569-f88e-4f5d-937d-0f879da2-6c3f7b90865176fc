@@ -1,0 +1,37 @@
+{
+  "assets": [
+    {
+      "name": "protected-fetch-node",
+      "type": "template",
+      "description": "Minimal Node.js project calling Zenrows Fetch.",
+      "status": "available",
+      "requires_backend_capabilities": ["protected_fetch"],
+      "requires_auth": true,
+      "version": "0.1.0",
+      "path": "templates/protected-fetch-node",
+      "tags": ["node", "fetch", "starter"]
+    },
+    {
+      "name": "extract-pricing-pages",
+      "type": "template",
+      "description": "Extract structured pricing fields from product pages (extract=auto / CSS).",
+      "status": "available",
+      "requires_backend_capabilities": ["extract"],
+      "requires_auth": true,
+      "version": "0.1.0",
+      "path": "templates/extract-pricing-pages",
+      "tags": ["extract", "pricing", "starter"]
+    },
+    {
+      "name": "batch-jsonl-pipeline",
+      "type": "template",
+      "description": "JSONL job-spec scaffold for high-scale workloads on Batch: submit/track/collect with an API key, validate + estimate locally with no key.",
+      "status": "available",
+      "requires_backend_capabilities": [],
+      "requires_auth": false,
+      "version": "0.1.0",
+      "path": "templates/batch-jsonl-pipeline",
+      "tags": ["batch", "jsonl", "pipeline"]
+    }
+  ]
+}
