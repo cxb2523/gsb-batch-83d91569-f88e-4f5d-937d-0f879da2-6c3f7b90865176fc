@@ -1,0 +1,68 @@
+name: Site changed / selectors broke
+description: foodpanda changed something and the parser no longer matches.
+labels: ["site-change"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most common way a scraper stops working, and it is worth
+        its own report because the fix is different from a code bug:
+        something on foodpanda.pk moved.
+
+        Useful to know before filing, because it narrows the fix a lot: this
+        parser reads the rendered **vendor tile**
+        (`li[class*="bds-c-vendor-tile"]`, whose `data-testid` is the vendor
+        code), with `a[href^="/restaurant/"]` as the fallback anchor. The one
+        JSON-LD block on a listing names only a handful of vendors and is a
+        cross-check, not a path. CONTRIBUTING.md lists every anchor.
+
+  - type: dropdown
+    id: what_broke
+    attributes:
+      label: What stopped matching
+      options:
+        - No rows at all on a page that visibly has vendors (the tile moved)
+        - A specific field is null or wrong (rating, review_count, cuisines, sku, URL)
+        - Cuisines full of delivery times or other info rows (the labels moved)
+        - The JSON-LD cross-check warns on every page
+        - Pagination stops early or repeats a page
+        - (page, position) not unique across a run
+        - A refusal is misclassified (exit 3 on a good page, or rows from a denial page)
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: URL
+      description: >-
+        The exact URL (which country site), and how the browser was reached.
+        Please say whether the run was headful or over --cdp-endpoint: a
+        headless run is refused by the site and is not a parser problem.
+      placeholder: "https://www.foodpanda.pk/city/lahore/area/gulberg (headful local Chrome, residential exit)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence from the page
+      description: |
+        Whichever of these you can get. A capture beats a description, and
+        `--dump-html` writes one on success as well as on failure.
+
+        - The `--dump-html` snapshot of the page.
+        - Or one whole `li[class*="bds-c-vendor-tile"]` element from devtools.
+        - For a field problem: the value you got, and the value the tile shows.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it reproduces on a second engine, whether it reproduces on a
+        second country site, and when it last worked.
