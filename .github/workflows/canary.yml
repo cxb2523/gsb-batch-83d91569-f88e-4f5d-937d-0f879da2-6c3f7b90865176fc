@@ -1,0 +1,107 @@
+name: canary
+
+on:
+  schedule:
+    - cron: "41 6 * * 1"   # weekly, Mondays; avoid :00 so it doesn't pile up with everyone else's
+  workflow_dispatch: {}     # dispatch manually at least once before trusting the badge
+
+jobs:
+  # A real run: one keyword search for 100 ads — the 30 the page embeds and
+  # at least 7 scroll batches, so scrolling is exercised on every run — with a
+  # local Playwright Chromium. It ALWAYS runs: the README's claim is that the
+  # library is readable logged out with no key and no proxy, and a canary that
+  # skips tests nothing. With the FACEBOOK_PROXY secret set the search goes
+  # through that proxy (env only, never argv); without it, straight from the
+  # GitHub runner. A blocked, empty, stalled, partial or remote-error run is
+  # red either way, and when no proxy was configured the error names the
+  # secret that would let it route around a datacentre refusal.
+  #
+  # `vars.FACEBOOK_CANARY_QUERY` / `vars.FACEBOOK_CANARY_REGION` override
+  # the search (default nike / US: ~24,000 results on 2026-10-06).
+  canary:
+    runs-on: ubuntu-latest
+    env:
+      HAS_PROXY: ${{ secrets.FACEBOOK_PROXY != '' }}
+      CANARY_QUERY: ${{ vars.FACEBOOK_CANARY_QUERY || 'nike' }}
+      CANARY_REGION: ${{ vars.FACEBOOK_CANARY_REGION || 'US' }}
+      FACEBOOK_PROXY: ${{ secrets.FACEBOOK_PROXY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Playwright and Chromium
+        run: |
+          pip install -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: One search, 100 ads
+        run: |
+          set +e
+          if [ "$HAS_PROXY" = "true" ]; then echo "Route: FACEBOOK_PROXY secret"; \
+          else echo "Route: the GitHub runner's own address (no FACEBOOK_PROXY secret)"; fi
+          python3 playwright_scraper.py --query "$CANARY_QUERY" --region "$CANARY_REGION" \
+            --max-results 100 --format json --out canary.json --dump-html --proxy-budget-mb 25
+          echo "canary_exit=$?" >> "$GITHUB_ENV"
+
+      # What the run sent through FACEBOOK_PROXY and the budget it ran under,
+      # both read from its sidecar; red when it stopped at that budget
+      # (stop_reason proxy_budget_exceeded). The canary passes 25 MB, above
+      # the scraper's 10 MB default: measured 2026-10-21, the 100-ad search
+      # used 13.5 MB, over a 10 MB cap.
+      - name: Proxy traffic
+        if: always()
+        run: python3 .github/proxy_traffic_summary.py canary.json canary
+
+      - name: Require a complete run with full rows
+        run: |
+          python3 -c "
+          import json, os, sys, traceback
+          def annotate(kind, exc, tb):
+              traceback.print_exception(kind, exc, tb)
+              print('::error::canary row check failed: %s: %s' % (kind.__name__, str(exc)[:400].replace(chr(10), ' ')))
+          sys.excepthook = annotate
+          code = int(os.environ['canary_exit'])
+          print(f'exit {code}')
+          if code != 0:
+              if os.environ.get('HAS_PROXY') != 'true' and code in (3, 4, 5):
+                  print('::error::canary got exit %d from the GitHub runner with no proxy. If this is a '
+                        'datacentre refusal, set the FACEBOOK_PROXY repo secret (a residential '
+                        'http://login:password@host:port proxy).' % code)
+              elif os.environ.get('HAS_PROXY') != 'true':
+                  print('::error::canary exit %d from the GitHub runner with no proxy (1 crash, 6 partial).' % code)
+              else:
+                  print('::error::canary exit %d through the FACEBOOK_PROXY secret (1 crash, 3 blocked, 4 zero rows, 5 content never obtained, 6 partial). A proxy that rejects its credential (HTTP 407) reaches Chromium as a navigation timeout, so on exit 5 check the FACEBOOK_PROXY secret first.' % code)
+              raise SystemExit(f'canary requires EXIT_OK=0, got {code}')
+          meta = json.load(open('canary.json.meta.json'))
+          print(json.dumps(meta, indent=2))
+          s = meta['searches'][0]
+          # scrolls counts scroll ACTIONS, and one can bring two batches (8 batches over 5 scrolls on
+          # 2026-10-20); the batch count is the row 'page' asserted below.
+          assert meta['status'] == 'complete' and s['stop'] == 'limit' and s['scrolls'] >= 1, meta
+          assert meta['total_results'] and meta['total_results'] > 1000, meta
+          rows = json.load(open('canary.json'))
+          assert len(rows) == 100 and len({r['sku'] for r in rows}) == 100, len(rows)
+          # Scroll batches are what a regression to the first page alone loses.
+          assert max(r['page'] for r in rows) >= 7, sorted({r['page'] for r in rows})
+          assert [r['position'] for r in rows] == list(range(1, 101))
+          for r in rows:
+              assert r['sku'] == 'facebook-ad-' + r['ad_id'] and r['ad_id'].isdigit(), r
+              assert r['advertiser_name'] and r['advertiser_page_id'] and r['first_shown_at'], r
+              assert r['display_format'] and r['platforms_json'] and r['region'] == os.environ['CANARY_REGION'], r
+              for k, v in r.items():
+                  assert k == 'link_url' or not (isinstance(v, str) and '{{' in v), (k, v)
+          share = sum(1 for r in rows if r['advertiser_likes']) / len(rows)
+          assert share >= 0.9, f'advertiser_likes on only {share:.0%} of rows'
+          print('canary: OK')
+          "
+
+      - name: Upload artifacts on every run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-${{ github.run_id }}
+          path: |
+            canary*.json
+            canary_debug_*.html
+          retention-days: 14
