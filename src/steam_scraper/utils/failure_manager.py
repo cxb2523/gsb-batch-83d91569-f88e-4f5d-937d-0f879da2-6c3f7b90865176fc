@@ -1,0 +1,222 @@
+"""失败记录管理模块。
+
+提供爬取失败记录的持久化、读取和清理功能。
+与 Checkpoint 中的 failed_appids 不同，此模块存储更详细的失败信息，
+包括失败原因、时间戳和上下文，便于问题诊断和分析。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import time
+from pathlib import Path
+
+from typing_extensions import NotRequired, TypedDict
+
+from steam_scraper.config import Config, get_config
+from steam_scraper.utils.ui import terminal_text
+
+
+class FailureRecord(TypedDict):
+    """可持久化的单条失败任务记录。"""
+
+    type: str
+    id: int
+    reason: str
+    timestamp: NotRequired[int]
+    context: NotRequired[dict[str, object]]
+
+
+def _parse_app_id(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    try:
+        app_id = int(value)
+    except ValueError:
+        return None
+    return app_id if app_id > 0 else None
+
+
+def _parse_failure_record(value: object) -> FailureRecord | None:
+    if not isinstance(value, dict):
+        return None
+
+    item_type = value.get("type")
+    app_id = _parse_app_id(value.get("id"))
+    reason = value.get("reason")
+    timestamp = value.get("timestamp")
+    context = value.get("context")
+    if (
+        not isinstance(item_type, str)
+        or item_type not in ("game", "review")
+        or app_id is None
+        or not isinstance(reason, str)
+        or (timestamp is not None and not isinstance(timestamp, int))
+        or (context is not None and not isinstance(context, dict))
+    ):
+        return None
+    record: FailureRecord = {"type": item_type, "id": app_id, "reason": reason}
+    if isinstance(timestamp, int):
+        record["timestamp"] = timestamp
+    if isinstance(context, dict):
+        record["context"] = context
+    return record
+
+
+class FailureManager:
+    """失败记录管理器。
+
+    用于记录爬取过程中失败的项目，并支持重试机制。
+    数据以 JSON 格式存储。
+
+    Attributes:
+        config: 配置对象。
+        path: 失败日志文件路径。
+    """
+
+    def __init__(self, config: Config | None = None) -> None:
+        """初始化失败管理器。
+
+        Args:
+            config: 可选的配置对象。
+        """
+        self.config = config or get_config()
+        self.path = self.config.output.failure_log_path
+
+    def _load_failures(self) -> list[FailureRecord]:
+        """从文件加载失败记录。
+
+        Returns:
+            结构有效的失败记录列表；损坏记录会被忽略。
+        """
+        if not self.path.exists():
+            return []
+
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                loaded: object = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return []
+
+        if not isinstance(loaded, list):
+            return []
+        # 兼容旧日志中的字符串 ID，避免重试成功后无法按整数 ID 删除记录。
+        failures: dict[tuple[str, int], FailureRecord] = {}
+        for item in loaded:
+            record = _parse_failure_record(item)
+            if record is not None:
+                failures[(record["type"], record["id"])] = record
+        return list(failures.values())
+
+    def _save_failures(self, failures: list[FailureRecord]) -> None:
+        """原子保存失败记录，写入失败时保留原有日志。
+
+        Args:
+            failures: 失败记录列表。
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.path.parent,
+                prefix=f".{self.path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as file:
+                temporary_path = Path(file.name)
+                json.dump(failures, file, indent=2, ensure_ascii=False)
+            os.replace(temporary_path, self.path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
+    def log_failure(
+        self,
+        item_type: str,
+        item_id: int | str,
+        reason: str,
+        context: dict[str, object] | None = None,
+    ) -> None:
+        """记录一条失败信息。
+
+        Args:
+            item_type: 项目类型 ('game' 或 'review')。
+            item_id: 项目 ID (如 app_id)。
+            reason: 失败原因描述。
+            context: 可选的上下文信息。
+
+        Raises:
+            ValueError: 任务类型不是 game/review，或 ID 不是正整数时抛出。
+        """
+        app_id = _parse_app_id(item_id)
+        if item_type not in ("game", "review") or app_id is None:
+            raise ValueError("失败任务必须使用 game/review 类型和正整数 AppID")
+        failures = self._load_failures()
+
+        # 检查是否已存在相同的失败记录（避免重复）
+        # 如果同一个项目多次失败，只保留最新的一条，避免日志膨胀
+        for failure in failures:
+            if failure["type"] == item_type and failure["id"] == app_id:
+                # 更新已存在记录的原因和时间，保留最新的失败信息
+                failure["reason"] = reason
+                failure["timestamp"] = int(time.time())
+                if context:
+                    failure["context"] = context
+                self._save_failures(failures)
+                return
+
+        # 添加新记录
+        new_failure: FailureRecord = {
+            "type": item_type,
+            "id": app_id,
+            "reason": reason,
+            "timestamp": int(time.time()),
+            "context": context or {},
+        }
+        failures.append(new_failure)
+        self._save_failures(failures)
+        print(terminal_text(f"已记录失败: [{item_type}] ID={app_id} - {reason}").plain)
+
+    def get_failures(self, item_type: str | None = None) -> list[FailureRecord]:
+        """获取失败记录。
+
+        Args:
+            item_type: 可选的类型过滤 ('game' 或 'review')。
+
+        Returns:
+            全部失败记录，或指定类型的失败记录。
+        """
+        failures = self._load_failures()
+        if item_type:
+            return [f for f in failures if f["type"] == item_type]
+        return failures
+
+    def remove_failure(self, item_type: str, item_id: int | str) -> None:
+        """移除一条失败记录。
+
+        通常在重试成功后调用。
+
+        Args:
+            item_type: 项目类型。
+            item_id: 项目 ID。
+        """
+        failures = self._load_failures()
+        initial_len = len(failures)
+        app_id = _parse_app_id(item_id)
+
+        failures = [
+            f for f in failures if not (f["type"] == item_type and f["id"] == app_id)
+        ]
+
+        if len(failures) < initial_len:
+            self._save_failures(failures)
+
+    def clear(self) -> None:
+        """清除所有失败记录。"""
+        if self.path.exists():
+            self.path.unlink()
+            print("失败记录已清空。")
