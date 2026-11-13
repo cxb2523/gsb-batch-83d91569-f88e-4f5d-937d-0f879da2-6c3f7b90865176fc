@@ -1,0 +1,415 @@
+# Real runs against mercor.com. tests.yml (deliberately) never touches the
+# site — see its own header.
+#
+# THIS CANARY IS NOT GATED, AND THAT IS THE POINT.
+#
+# Most canaries in this family skip when a proxy secret is absent, because
+# their site refuses a datacenter address and a GitHub runner is one — and a
+# check that is always red teaches everyone to ignore checks.
+#
+# Mercor is the other case, and the rule for it is the opposite: a
+# canary that CAN pass without a credential should never be gated on one.
+# Measured 2026-09-18 from a bare Hetzner datacentre address, with no key and
+# no proxy: `/explore` 200 with 390 listings, `/careers` 200 with 108 roles,
+# `/sitemap.xml` 200 with 447 job URLs, twelve rapid detail fetches all 200,
+# and eighteen candidate bot-challenge markers counted at zero across seven
+# captures.
+#
+# So these jobs run a real scrape every Monday from a runner with no
+# secrets, and they are expected to be GREEN. That is not a convenience — it
+# is what keeps the central claim of this repo's README honest. If Mercor
+# ever puts these routes behind a challenge, a key or a rate limit, the badge
+# goes red the next morning and the claim is retested without anyone having
+# to remember to.
+#
+# There is no secret anywhere in this file, which also means there is nothing
+# here that can rot: a Scraping Browser profile's credentials live about a
+# day, so a scheduled job holding one is stale between runs.
+
+name: canary
+
+on:
+  schedule:
+    # 05:40 UTC. Not on the hour: every scheduled workflow on GitHub fires at
+    # :00 and the queue there is long.
+    - cron: "40 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  index:
+    name: the marketplace index and Mercor's own openings
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      # --pages is deliberately absent. `/explore` holds its whole result set
+      # in ONE response and honours no pagination parameter — `?page=2`,
+      # `?limit=`, `?offset=` and `?domain=` each returned a byte-identical
+      # payload on 2026-09-18 — so asking for three pages here would prove
+      # nothing. The `detail` job below is where pagination is exercised.
+      - name: Run --mode listings
+        id: listings
+        run: |
+          set +e   # GitHub runs `run:` under `bash -e`, and a non-zero exit
+                   # would abort the step BEFORE the echo below.
+          python playwright_scraper.py --mode listings --format both --out canary_index
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Run --mode careers
+        id: careers
+        run: |
+          set +e
+          python playwright_scraper.py --mode careers --format both --out canary_careers
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Check what came back
+        env:
+          LISTINGS_EXIT: ${{ steps.listings.outputs.exit_code }}
+          CAREERS_EXIT: ${{ steps.careers.outputs.exit_code }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+
+          failures = []
+          def want(label, ok, detail=""):
+              if not ok:
+                  failures.append(f"{label}: {detail}")
+
+          def interpret(code, what):
+              # Interpret rather than just failing: the codes mean different
+              # things and only some of them are this repo's fault.
+              return {
+                  3: f"Blocked (exit 3) on {what}. This is NEW — on 2026-09-18 "
+                     f"Mercor served every route to a bare datacentre address "
+                     f"with no challenge on any of seven captures. If this is "
+                     f"real, the README's central claim needs retesting and "
+                     f"the uploaded debug HTML is the evidence.",
+                  4: f"Zero rows (exit 4) on {what}. Either the route is "
+                     f"genuinely empty, or the React Query payload shape moved.",
+                  5: f"Remote API error (exit 5) on {what} — nothing was tested.",
+                  6: f"Partial (exit 6) on {what}.",
+              }.get(code, f"Exit {code} on {what}. See the log.")
+
+          # ---------------- the marketplace index -------------------------
+          code = int(os.environ["LISTINGS_EXIT"])
+          if code != 0:
+              print(f"::error::{interpret(code, '--mode listings')}")
+              sys.exit(1)
+
+          meta = json.load(open("canary_index.meta.json"))
+          rows = json.load(open("canary_index.json"))
+          print(json.dumps(meta, indent=1))
+
+          want("status", meta["status"] == "complete", meta["status"])
+          want("no failed pages", not meta["pages_failed"], str(meta["pages_failed"]))
+          want("the route is still single-page",
+               meta["stop_reason"] == "single_page_route", meta["stop_reason"])
+          # A page the site served and the parser could not read used to end
+          # as `empty` (exit 4) — "the index is empty" — and now ends as
+          # `parser_found_nothing`. Either way the run would not be
+          # `complete`; this names it, so the failure says what moved.
+          want("no page was served and left unread",
+               not meta.get("pages_unreadable"),
+               str(meta.get("pages_unreadable")))
+
+          # 390 listings on 2026-09-18. The floor sits well under that on
+          # purpose: a marketplace's size moves, and a threshold that fires
+          # on a healthy run teaches the reader to ignore it.
+          want("row floor", len(rows) >= 150, f"{len(rows)} rows")
+
+          # The two views the response has of ITSELF. If `urls_in_itemlist`
+          # ever exceeds `records_in_payload`, the React Query path has
+          # started dropping rows and the primary source needs revisiting —
+          # it was 326 against 390 when this was written.
+          payload = meta.get("records_in_payload")
+          indexed = meta.get("urls_in_itemlist")
+          print(f"payload {payload} records, ItemList indexes {indexed}")
+          want("the payload count is still readable",
+               isinstance(payload, int) and payload > 0, str(payload))
+          want("the ItemList has not overtaken the payload",
+               not (isinstance(indexed, int) and isinstance(payload, int)
+                    and indexed > payload),
+               f"ItemList {indexed} > payload {payload}")
+
+          # The four columns Mercor filled on 390 of 390 records. NOT
+          # `company_name` — 291 of 390 withhold the client's name on
+          # purpose, so a floor there would fire every single run.
+          for column in ("title", "url", "sku", "rate_min"):
+              filled = sum(1 for r in rows if r.get(column) not in (None, "", []))
+              share = 100.0 * filled / len(rows)
+              print(f"{column}: {filled}/{len(rows)} ({share:.0f}%)")
+              want(f"{column} coverage", share >= 99, f"{share:.0f}%")
+
+          # `company_brand_visible` is the site's own "may I show this" flag.
+          # A null name beside False is withheld; beside True it would be
+          # genuinely unset and worth looking at.
+          bad = [r["sku"] for r in rows
+                 if not r.get("company_name") and r.get("company_brand_visible")]
+          want("no row claims a visible brand while naming nobody",
+               not bad, str(bad[:5]))
+
+          # The traps most likely to come back silently.
+          want("no rate_max below its rate_min",
+               not any(r.get("rate_min") is not None and r.get("rate_max") is not None
+                       and r["rate_max"] < r["rate_min"] for r in rows),
+               "a range came out inverted")
+          want("no listing row invents a currency",
+               all(r.get("rate_currency") is None for r in rows),
+               "the index publishes none, so a value here is invented")
+          want("every row's data_source is explore",
+               {r.get("data_source") for r in rows} == {"explore"},
+               str({r.get("data_source") for r in rows}))
+          want("sku unique", len({r["sku"] for r in rows}) == len(rows),
+               "duplicate skus")
+          want("page+position unique",
+               len({(r["page"], r["position"]) for r in rows}) == len(rows),
+               "collisions")
+          # The site's own category, which is what makes --domain useful.
+          domains = {r.get("domain") for r in rows if r.get("domain")}
+          print(f"{len(domains)} distinct domains: {sorted(domains)[:5]}...")
+          want("the site still states a domain per listing", len(domains) >= 3,
+               str(sorted(domains)))
+          # Pay periods are not all hourly, and reading rate_min without
+          # rate_period is how a consumer gets that wrong.
+          periods = {r.get("rate_period") for r in rows}
+          print(f"pay periods seen: {sorted(p for p in periods if p)}")
+          want("every row states a pay period", None not in periods,
+               "a row carried a rate with no period")
+
+          # ---------------- Mercor's own openings -------------------------
+          code = int(os.environ["CAREERS_EXIT"])
+          if code != 0:
+              print(f"::error::{interpret(code, '--mode careers')}")
+              sys.exit(1)
+
+          crows = json.load(open("canary_careers.json"))
+          cmeta = json.load(open("canary_careers.meta.json"))
+          want("careers: no page was served and left unread",
+               not cmeta.get("pages_unreadable"),
+               str(cmeta.get("pages_unreadable")))
+          print(f"careers: {len(crows)} role(s), status {cmeta['status']}")
+          want("careers status", cmeta["status"] == "complete", cmeta["status"])
+          want("careers row floor", len(crows) >= 20, f"{len(crows)} rows")
+          want("every careers row names a department",
+               all(r.get("department") for r in crows))
+          want("careers ids are NOT marketplace ids",
+               not any((r.get("sku") or "").startswith("list_") for r in crows),
+               "the two populations must not share an id space")
+          # Currency is read here, never defaulted: the route publishes USD
+          # and GBP, so a single-currency result would mean it stopped being
+          # read.
+          paid = [r for r in crows if r.get("rate_min") is not None]
+          print(f"{len(paid)}/{len(crows)} careers roles state a salary")
+          # A PARSER check, not a share of what Mercor chooses to publish:
+          # every role whose own compensation string carries a figure must
+          # come out with a rate. How many roles publish pay at all is the
+          # employer's decision and says nothing about this code.
+          # A bonus-only figure ("Offers Equity • $36K Bonus") is not a
+          # salary, so segments naming a bonus are set aside first.
+          def salary_text(comp):
+              return " ".join(seg for seg in (comp or "").split("•")
+                              if "bonus" not in seg.lower())
+          missed = [r.get("sku") for r in crows
+                    if any(ch.isdigit() for ch in salary_text(r.get("compensation")))
+                    and r.get("rate_min") is None]
+          want("every published salary figure was parsed into a rate",
+               not missed, str(missed[:5]))
+          want("...and every one that does names a currency",
+               all(r.get("rate_currency") for r in paid),
+               "a salary came through with no currency")
+          # A WITHHELD salary must be null, never zero — a zero written
+          # through drags every average a consumer computes.
+          #
+          # But a STATED zero is real and must survive. Mercor publishes
+          # "Mercor AI Safety Fund Grants" with a compensationTierSummary of
+          # "$0" and a genuine (0, 0, USD) component: a grant programme, not
+          # a missing figure. The first version of this check banned zero
+          # outright and failed on exactly that row — a correct parse
+          # reported as a defect.
+          #
+          # The two are told apart by the site's own string, which is what
+          # `compensation` keeps verbatim: a zero is legitimate only if the
+          # site printed one.
+          bad_zero = [r for r in crows
+                      if r.get("rate_min") == 0 and not (r.get("compensation") or "")]
+          want("no zero-salary sentinel without the site stating it",
+               not bad_zero,
+               "a withheld salary was written as 0: %s"
+               % [r.get("sku") for r in bad_zero])
+          stated_zero = [r for r in crows if r.get("rate_min") == 0]
+          if stated_zero:
+              print(f"{len(stated_zero)} role(s) state a zero the site printed: "
+                    + ", ".join(f'{r["title"]!r}={r["compensation"]!r}'
+                                for r in stated_zero))
+          # And the other half: a role the site refuses to show pay for must
+          # come back null on every pay column, not partially filled.
+          half = [r for r in crows
+                  if (r.get("rate_min") is None) != (r.get("rate_currency") is None)]
+          want("a withheld salary is null on every pay column", not half,
+               str([r.get("sku") for r in half]))
+
+          if failures:
+              for line in failures:
+                  print(f"::error::{line}")
+              sys.exit(1)
+          print("All index-canary assertions passed.")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-index
+          path: |
+            canary_index.*
+            canary_careers.*
+            canary_*_debug.html
+          if-no-files-found: ignore
+
+  detail:
+    name: the enumeration and the paginated mode
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      # >= 3 pages, because with one page pagination is never exercised —
+      # exactly how a silent single-page bug survived in a sibling repo.
+      # On this site `--mode job` is the paginated mode: a
+      # page is one job detail page, and the addresses come from the
+      # sitemap ∪ index enumeration rather than from a guessed convention.
+      #
+      # Four pages, not four hundred. This runs weekly against a site that
+      # imposes no rate limit, and that is a reason to be careful rather
+      # than a licence: the check is that enumeration and multi-page fetch
+      # still work, which four pages proves as well as four hundred would.
+      - name: Run --mode job over 4 enumerated jobs
+        id: run
+        run: |
+          set +e
+          python playwright_scraper.py --mode job --pages 4 --delay 1 \
+            --format both --out canary_jobs
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Check what came back
+        env:
+          EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+
+          code = int(os.environ["EXIT_CODE"])
+          if code != 0:
+              print(f"::error::The run exited {code}.")
+              print({
+                  3: "Blocked (exit 3). NEW on this site — see the index job.",
+                  4: "Zero rows (exit 4): the detail payload shape may have moved.",
+                  5: "Remote API error (exit 5) — nothing was tested.",
+                  6: "Partial (exit 6): some jobs came back and some did not. "
+                     "A listing taken down between the sitemap being read and "
+                     "its page being fetched is an ordinary event here and "
+                     "classifies as not_found, not as a failure — so a 6 "
+                     "means something else.",
+              }.get(code, "See the log."))
+              sys.exit(1)
+
+          meta = json.load(open("canary_jobs.meta.json"))
+          rows = json.load(open("canary_jobs.json"))
+          print(json.dumps(meta, indent=1))
+
+          failures = []
+          def want(label, ok, detail=""):
+              if not ok:
+                  failures.append(f"{label}: {detail}")
+
+          want("status", meta["status"] == "complete", meta["status"])
+          want("four pages completed", meta["pages_completed"] == 4,
+               f'{meta["pages_completed"]} of 4')
+          want("no failed pages", not meta["pages_failed"], str(meta["pages_failed"]))
+          want("this mode is reported as paginated",
+               meta.get("route_is_paginated") is True,
+               str(meta.get("route_is_paginated")))
+
+          # The enumeration is the thing this job exists to test. 462 on
+          # 2026-09-18, from 447 sitemap URLs and 390 index records with 375
+          # shared. A collapse here means one of the two sources stopped
+          # answering — and either alone silently misses live jobs.
+          enumerated = meta.get("jobs_enumerated")
+          print(f"enumerated {enumerated} job(s), fetched {meta.get('jobs_fetched')}")
+          want("the enumeration still finds a catalogue",
+               isinstance(enumerated, int) and enumerated >= 100,
+               f"jobs_enumerated was {enumerated}")
+          # BOTH sources answered. This is the scheduled check that makes a lost
+          # sitemap loud: without it a run could enumerate from the index
+          # alone, fetch every address it was given, and be green. Since
+          # v0.1.1 such a run is `partial`, which the status check above
+          # already fails on — this names WHICH source and why.
+          want("the enumeration was whole (sitemap AND index answered)",
+               meta.get("enumeration_complete") is True,
+               str(meta.get("enumeration_failures")))
+          sources = meta.get("enumeration_sources") or {}
+          print(f"enumeration sources: {sources}")
+          want("both sources contributed",
+               sources.get("sitemap_urls", 0) > 0
+               and sources.get("explore_records", 0) > 0, str(sources))
+          want("no page was served and left unread",
+               not meta.get("pages_unreadable"),
+               str(meta.get("pages_unreadable")))
+
+          want("four rows", len(rows) == 4, f"{len(rows)} rows")
+          want("sku unique", len({r["sku"] for r in rows}) == 4, "duplicate skus")
+          want("every row came from a detail page",
+               {r.get("data_source") for r in rows} == {"detail"},
+               str({r.get("data_source") for r in rows}))
+
+          # A detail page is the ONLY source that states a currency, which is
+          # the main reason this mode exists.
+          priced = [r for r in rows if r.get("rate_min") is not None]
+          want("detail rows state a currency",
+               all(r.get("rate_currency") for r in priced),
+               "a detail row came back with a rate and no currency")
+          # And the schema.org employment type, which the index does not
+          # publish in any form.
+          want("detail rows state an employment type",
+               all(r.get("employment_type") for r in rows),
+               str([(r["sku"], r.get("employment_type")) for r in rows]))
+          want("no rate_max below its rate_min",
+               not any(r.get("rate_min") is not None and r.get("rate_max") is not None
+                       and r["rate_max"] < r["rate_min"] for r in rows))
+
+          if failures:
+              for line in failures:
+                  print(f"::error::{line}")
+              sys.exit(1)
+          print("All detail-canary assertions passed.")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-detail
+          path: |
+            canary_jobs.*
+            canary_jobs_*_debug.html
+          if-no-files-found: ignore
