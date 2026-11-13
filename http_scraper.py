@@ -58,6 +58,18 @@ decisions it does need — how to classify a page, how to plan pages, when a
 run is complete — come from `page_flow` and `output_writer`, the same way
 they do for the browser engines.
 
+AN INTERRUPTED RUN CAN CONTINUE, NOT JUST RESTART
+-------------------------------------------------
+A paginated run keeps a progress manifest at `<out>.progress.json`, rewritten
+atomically after every completed page: which pages are done, which skus were
+seen, which page URLs remain (planned once from page 1's own HTML), and why
+the run stopped. `--resume` reads it, carries the already-gathered rows over
+from `<out>.json`, and fetches only the pending pages — page 1 is not
+re-fetched, so the proxy traffic an interrupted run already paid for is not
+paid for twice. A manifest whose start URL or `--mode` does not match this
+run belongs to another run and is reported, never silently reused. The
+manifest holds page URLs and skus only — never a proxy credential.
+
 YOU WILL STILL NEED AN EXIT THE SITE SERVES
 --------------------------------------------
 No browser setting ever changed that, and neither does removing the
@@ -75,16 +87,20 @@ Requires: pip install -r requirements.txt   (no browser, no driver)
 """
 
 import argparse
+import json
 import logging
+import os
 import re
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
+from datetime import datetime, timezone
 from typing import List, Optional
 
 import requests
 
 from output_writer import (dedupe_by_key, finish_run, finish_without_fetch,
+                           write_progress, Product, COMPLETE_STOP_REASONS,
                            SOURCE_DEFAULT)
 import page_flow
 from product_parser import (parse_products, detect_bot_challenge,
@@ -163,6 +179,174 @@ class PageOutcome:
 _PROXY_ERRORS = (requests.exceptions.ProxyError,
                  requests.exceptions.SSLError,
                  requests.exceptions.ConnectionError)
+
+
+# ---------------------------------------------------------------------------
+# The resumable-run progress manifest (`<out>.progress.json`)
+# ---------------------------------------------------------------------------
+#
+# A paginated run that gets refused on page 4 of 6 has already PAID for pages
+# 1-3 — proxy traffic is billed by the byte. Without a record of what was
+# gathered, the next run starts at page 1 and pays for them again. The
+# manifest is that record: after every completed page the run writes which
+# pages are done, which skus were seen, which page URLs are still pending
+# (planned once from page 1's own HTML, so a resume never re-fetches page 1
+# just to learn the plan), and why the run stopped. `--resume` reads it and
+# fetches only what is missing.
+#
+# The manifest holds page URLs, row counts and skus — never a proxy URL or
+# any other credential. A credential on disk outlives the run it served.
+
+# stop_reason while the page loop is still going. Distinct from every
+# terminal reason on purpose: a manifest that says "completed" must mean the
+# loop CONCLUDED, not that the process died between two pages. Without the
+# distinction a killed run's manifest would read as a finished one and
+# --resume would finalize a catalogue it never fetched.
+PROGRESS_IN_PROGRESS = "in_progress"
+
+PROGRESS_VERSION = 1
+
+
+def _progress_path(out_prefix: str) -> str:
+    return f"{out_prefix}.progress.json"
+
+
+def _new_progress(args, planned: List[dict]) -> dict:
+    """A fresh manifest, just after page 1 planned the remaining pages."""
+    return {
+        "version": PROGRESS_VERSION,
+        "start_url": args.url,
+        "mode": args.mode,
+        "pages_requested": args.pages,
+        # The pages still to fetch, as planned by page_flow.plan_pages from
+        # page 1's own HTML: [{"page": 2, "url": ...}, ...]. Written once,
+        # here, so --resume can request them directly without re-fetching
+        # page 1 to re-derive them.
+        "planned_pages": planned,
+        # One record per completed page: {"page", "url", "rows", "new_skus"}.
+        "pages": [],
+        "pages_completed": [],
+        "seen_skus": [],
+        "stop_reason": PROGRESS_IN_PROGRESS,
+        "updated_at": None,
+    }
+
+
+def _record_page(progress: dict, outcome: "PageOutcome", fresh_skus: int,
+                 seen_keys: set) -> None:
+    """Enter one completed page into the manifest."""
+    progress["pages"].append({
+        "page": outcome.page_num,
+        "url": outcome.url,
+        "rows": len(outcome.rows),
+        "new_skus": fresh_skus,
+    })
+    completed = progress.setdefault("pages_completed", [])
+    if outcome.page_num not in completed:
+        completed.append(outcome.page_num)
+        completed.sort()
+    progress["seen_skus"] = sorted(seen_keys)
+
+
+def _save_progress(args, progress: dict, stop_reason: str) -> None:
+    """Persist the manifest atomically, stamping the current stop reason."""
+    progress["stop_reason"] = stop_reason
+    progress["updated_at"] = datetime.now(timezone.utc).isoformat()
+    path = write_progress(args.out, progress)
+    logger.info("Progress -> %s (%d page(s) done, stop_reason=%s)",
+                path, len(progress.get("pages_completed") or []), stop_reason)
+
+
+def _read_progress(args) -> Optional[dict]:
+    """The manifest for --resume, or None when this run must start fresh.
+
+    Every rejection says WHY out loud. A manifest whose start URL or mode
+    does not match THIS run belongs to another run, and silently reusing it
+    would skip pages that were never fetched and call the result complete —
+    the exact failure the manifest exists to prevent.
+    """
+    path = _progress_path(args.out)
+    if not os.path.exists(path):
+        logger.info("--resume: no progress manifest at %s — starting a "
+                    "fresh run.", path)
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError) as exc:
+        logger.warning("--resume: cannot read %s (%s) — ignoring it and "
+                       "starting a fresh run.", path, exc)
+        return None
+    if not isinstance(manifest, dict):
+        logger.warning("--resume: %s is not a manifest object — ignoring it "
+                       "and starting a fresh run.", path)
+        return None
+    start_url, mode = manifest.get("start_url"), manifest.get("mode")
+    if start_url != args.url or mode != args.mode:
+        logger.warning(
+            "--resume: %s belongs to a different run (its start_url=%r, "
+            "mode=%r; this run is start_url=%r, mode=%r) — NOT reusing it. "
+            "Starting a fresh run, which will overwrite it.",
+            path, start_url, mode, args.url, args.mode)
+        return None
+    return manifest
+
+
+def _load_prior_rows(out_prefix: str) -> Optional[List]:
+    """Rows from the previous run's `<out>.json`, or None if unusable.
+
+    --resume continues a run rather than re-fetching it, so the rows it
+    already gathered must come from somewhere: the output the interrupted
+    run wrote before it stopped (a partial run still writes its rows — see
+    finish_run). The manifest alone is not enough; it records WHICH skus
+    were seen, not their rows.
+    """
+    path = f"{out_prefix}.json"
+    if not os.path.exists(path):
+        logger.warning("--resume: the manifest at %s has no sibling %s to "
+                       "take the already-gathered rows from — starting a "
+                       "fresh run.", _progress_path(out_prefix),
+                       os.path.basename(path))
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        names = {f.name for f in fields(Product)}
+        rows = [Product(**{k: v for k, v in row.items() if k in names})
+                for row in data]
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("--resume: %s is unreadable (%s) — starting a fresh "
+                       "run.", path, exc)
+        return None
+    logger.info("--resume: carried over %d row(s) from %s.", len(rows), path)
+    return rows
+
+
+def _finalize_resumed(args, progress: dict, rows: List) -> int:
+    """Every planned page is already done: finish from the existing rows.
+
+    No page is re-fetched — that is the point of the manifest. The stop
+    reason is the one the manifest recorded when the last page completed.
+    """
+    stop_reason = progress.get("stop_reason") or "completed"
+    if stop_reason == PROGRESS_IN_PROGRESS:
+        # The process died between the last page and the final manifest
+        # write. The DATA says every planned page completed, which is what
+        # "completed" means.
+        stop_reason = "completed"
+    completed = progress.get("pages_completed") or []
+    logger.info("--resume: %s shows all %d planned page(s) already fetched "
+                "(stop_reason=%s) — finishing from the existing output; no "
+                "page is re-fetched.", _progress_path(args.out),
+                len(completed), stop_reason)
+    return finish_run(rows, args.out, args.format, args.allow_empty,
+                      extra={"transport": "http"},
+                      blocked=False, stop_reason=stop_reason,
+                      pages_requested=progress.get("pages_requested") or args.pages,
+                      pages_completed=len(completed),
+                      pages_failed=[], mode=args.mode,
+                      source=SOURCE_DEFAULT,
+                      start_url=args.url, final_url=args.url)
 
 
 def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome:
@@ -304,6 +488,46 @@ def scrape(args) -> int:
     blocked = False
     stop_reason = "single_page_mode" if args.mode not in page_flow.PAGINATED_MODES else "completed"
 
+    # --resume state. `pending` is None until the run knows which pages
+    # remain: either planned from page 1 (fresh run) or read back out of the
+    # manifest (resumed run).
+    prior_rows: List = []
+    prior_completed: List[int] = []
+    progress: Optional[dict] = None
+    pending: Optional[List[dict]] = None
+
+    if getattr(args, "resume", False):
+        progress = _read_progress(args)
+        if progress is not None:
+            done = progress.get("pages_completed") or []
+            if 1 not in done:
+                # No completed first page means no plan and no rows: nothing
+                # was ever gathered, so there is nothing to resume.
+                logger.info("--resume: %s has no completed first page, so "
+                            "there is no plan to resume from — starting "
+                            "fresh.", _progress_path(args.out))
+                progress = None
+            else:
+                prior_rows = _load_prior_rows(args.out)
+                if prior_rows is None:
+                    progress = None      # the warning was already logged
+                else:
+                    prior_completed = list(done)
+                    seen_keys = set(progress.get("seen_skus") or [])
+                    pending = [p for p in progress.get("planned_pages") or []
+                               if isinstance(p, dict) and p.get("page") not in done]
+                    if not pending or progress.get("stop_reason") in COMPLETE_STOP_REASONS:
+                        # Nothing left to fetch, or the interrupted run had
+                        # already reached a DATA-side end (no_new_products):
+                        # re-fetching the pending pages would re-read a
+                        # listing the site itself said was finished.
+                        return _finalize_resumed(args, progress, prior_rows)
+                    logger.info("--resume: %d page(s) already done %s; "
+                                "fetching the remaining %d %s from the "
+                                "manifest's plan — page 1 is NOT re-fetched.",
+                                len(prior_completed), sorted(prior_completed),
+                                len(pending), [p["page"] for p in pending])
+
     pool = proxy_pool_from_args(args)
     if args.concurrency > 1:
         assert not page_flow.CONCURRENCY_CAPABLE_MODES
@@ -322,21 +546,33 @@ def scrape(args) -> int:
 
     try:
         with requests.Session() as session:
-            first = _fetch_one_page(session, args, pool, 1, args.url)
-            outcomes.append(first)
+            if pending is None:
+                first = _fetch_one_page(session, args, pool, 1, args.url)
+                outcomes.append(first)
 
-            if not first.ok:
-                stop_reason = ("page_load_timeout" if first.load_failed
-                               else page_flow.blocked_stop_reason(first.blocked_by))
-                blocked = first.blocked_by is not None
-            elif args.mode in page_flow.PAGINATED_MODES and args.pages > 1:
-                seen_keys.update(r.sku for r in first.rows if r.sku is not None)
-                planned = page_flow.plan_pages(first.html or "", first.final_url or args.url,
-                                               args.pages)
-                if not planned:
-                    logger.info("The site says there is no page 2 — stopping here.")
-                    stop_reason = "pagination_exhausted"
-                for page_num, url in enumerate(planned, start=2):
+                if not first.ok:
+                    stop_reason = ("page_load_timeout" if first.load_failed
+                                   else page_flow.blocked_stop_reason(first.blocked_by))
+                    blocked = first.blocked_by is not None
+                elif args.mode in page_flow.PAGINATED_MODES and args.pages > 1:
+                    seen_keys.update(r.sku for r in first.rows if r.sku is not None)
+                    planned = [{"page": n, "url": u} for n, u in enumerate(
+                        page_flow.plan_pages(first.html or "",
+                                             first.final_url or args.url,
+                                             args.pages), start=2)]
+                    progress = _new_progress(args, planned)
+                    _record_page(progress, first, len(seen_keys), seen_keys)
+                    _save_progress(args, progress,
+                                   PROGRESS_IN_PROGRESS if planned
+                                   else "pagination_exhausted")
+                    if not planned:
+                        logger.info("The site says there is no page 2 — stopping here.")
+                        stop_reason = "pagination_exhausted"
+                    pending = planned
+
+            if pending:
+                for item in pending:
+                    page_num, url = item["page"], item["url"]
                     time.sleep(args.delay)
                     outcome = _fetch_one_page(session, args, pool, page_num, url)
                     outcomes.append(outcome)
@@ -344,16 +580,23 @@ def scrape(args) -> int:
                         stop_reason = ("page_load_timeout" if outcome.load_failed
                                        else page_flow.blocked_stop_reason(outcome.blocked_by))
                         blocked = outcome.blocked_by is not None
+                        if progress is not None:
+                            _save_progress(args, progress, stop_reason)
                         break
                     fresh = sum(1 for r in outcome.rows
                                 if r.sku is None or r.sku not in seen_keys)
                     seen_keys.update(r.sku for r in outcome.rows if r.sku is not None)
+                    if progress is not None:
+                        _record_page(progress, outcome, fresh, seen_keys)
+                        _save_progress(args, progress, PROGRESS_IN_PROGRESS)
                     if not fresh:
                         # The terminating condition is DATA, never a selector and
                         # never the ?page= parameter, which this site ignores.
                         logger.info("Page %d added no sku not already seen — "
                                     "treating that as the end of the listing.", page_num)
                         stop_reason = "no_new_products"
+                        if progress is not None:
+                            _save_progress(args, progress, stop_reason)
                         break
 
     except proxy_meter.ProxyBudgetExceeded as e:
@@ -364,9 +607,15 @@ def scrape(args) -> int:
     if meter is not None and meter.exceeded:
         stop_reason, blocked = proxy_meter.STOP_BUDGET_EXCEEDED, False
 
-    # Merge in PAGE order, not arrival order.
-    all_rows: List = []
-    seen: set = set()
+    # The manifest's final state mirrors the run's, so --resume can tell
+    # "died mid-loop" (in_progress) from "concluded" (a terminal reason).
+    if progress is not None:
+        _save_progress(args, progress, stop_reason)
+
+    # Merge in PAGE order, not arrival order. Rows carried over from the
+    # interrupted run come first — their pages were fetched first.
+    all_rows: List = list(prior_rows)
+    seen: set = {r.sku for r in prior_rows if r.sku is not None}
     for outcome in sorted(outcomes, key=lambda o: o.page_num):
         all_rows.extend(dedupe_by_key(outcome.rows, seen, "sku"))
 
@@ -407,7 +656,8 @@ def scrape(args) -> int:
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       extra=arithmetic,
                       blocked=blocked, stop_reason=stop_reason,
-                      pages_requested=args.pages, pages_completed=len(ok_pages),
+                      pages_requested=args.pages,
+                      pages_completed=len(ok_pages) + len(prior_completed),
                       pages_failed=failed_pages, mode=args.mode,
                       source=SOURCE_DEFAULT,
                       start_url=args.url, final_url=final_url)
@@ -464,6 +714,15 @@ def parse_args():
     proxy_meter.add_budget_flag(p)
     p.add_argument("--allow-empty", action="store_true",
                    help="Write output files even when 0 rows were found.")
+    p.add_argument("--resume", action="store_true",
+                   help="Continue an interrupted paginated run instead of "
+                        "starting over: read <out>.progress.json, keep the "
+                        "rows already gathered from <out>.json, and fetch "
+                        "only the pages the manifest still lists as pending. "
+                        "A missing manifest, or one whose start URL or "
+                        "--mode differs from this run, is reported and the "
+                        "run starts fresh — another run's manifest is never "
+                        "silently reused.")
     p.add_argument("--dump-html", default=None, metavar="PATH",
                    help="Save the exact HTML the parser is given, on success "
                         "as well as failure.")

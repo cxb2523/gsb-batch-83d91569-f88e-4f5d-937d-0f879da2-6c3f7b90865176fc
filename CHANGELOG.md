@@ -11,6 +11,28 @@ nobody discovers it from a bill or a broken cron job.
 
 ## [Unreleased]
 
+### Added
+
+- `http_scraper.py`: resumable pagination. A paginated run now keeps a
+  progress manifest at `<out>.progress.json`, rewritten atomically (same
+  temp-file-and-rename as the data files) after every completed page:
+  completed page numbers, per-page URL/row count/new-sku count, the seen-sku
+  set, the pending page URLs as planned by `page_flow.plan_pages` from page
+  1's own HTML, and the current stop reason. The manifest never contains a
+  proxy credential. New `--resume` switch: reads the manifest, carries the
+  already-gathered rows over from `<out>.json`, and fetches only the pending
+  pages — page 1 is not re-fetched, so the proxy traffic an interrupted run
+  already paid for is not paid for twice. A missing manifest, or one whose
+  start URL or `--mode` differs from this run, is reported and the run
+  starts fresh; another run's manifest is never silently reused. A manifest
+  showing every planned page complete (or a data-side end such as
+  `no_new_products`) finalizes from the existing output without any fetch.
+  Exit codes, the merge/dedupe order and the `no_new_products` terminating
+  condition are unchanged — `finish_run` decides them as before.
+  Verified against a local two-page listing in
+  `tests/test_resume_progress.py` (normal resume, manifest mismatch,
+  mid-run refusal).
+
 ## [0.3.1] — 2026-11-11
 
 > **Behaviour changes.** (1) A run through a proxy now makes one pre-check

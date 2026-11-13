@@ -458,6 +458,27 @@ def write_run_meta(out_prefix: str, meta: dict) -> str:
 
 ATTEMPT_META_SUFFIX = ".latest_attempt.meta.json"
 
+PROGRESS_SUFFIX = ".progress.json"
+
+
+def write_progress(out_prefix: str, manifest: dict) -> str:
+    """Write `<out>.progress.json`: the resumable pagination manifest.
+
+    Through the same `_atomic` replace as the data files, and for the same
+    reason: a crash or kill halfway through `json.dump` must leave the
+    PREVIOUS complete manifest in place, never a truncated one. `--resume`
+    trusts this file to decide which pages not to re-fetch, so a
+    half-written manifest is worse than a stale one — it could skip pages
+    that were never fetched and let the run call itself complete.
+
+    The manifest holds page URLs, row counts and skus only. No proxy URL
+    ever reaches it: a credential on disk outlives the run it served.
+    """
+    path = f"{out_prefix}{PROGRESS_SUFFIX}"
+    with _atomic(path) as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    return path
+
 
 def write_attempt_meta(out_prefix: str, meta: dict) -> str:
     """Write `<out>.latest_attempt.meta.json`: this attempt, whatever it got."""
