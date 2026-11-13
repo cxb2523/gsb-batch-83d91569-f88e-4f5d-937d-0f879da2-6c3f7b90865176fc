@@ -1,0 +1,18 @@
+{
+  "name": "retroachievements-downloader",
+  "private": true,
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "dev:api": "python api/index.py",
+    "dev:web": "npm run dev --prefix web",
+    "dev": "concurrently -n api,web -c blue,green \"npm run dev:api\" \"npm run dev:web\""
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4",
+    "concurrently": "^10.0.6",
+    "lefthook": "^2.2.2"
+  }
+}

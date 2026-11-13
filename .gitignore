@@ -1,0 +1,63 @@
+# Deployment
+.vercel
+
+# Claude Code skills (personal tooling, no es parte del proyecto)
+.claude/
+.agents/
+skills-lock.json
+.taste-skill/
+
+# Node / Next.js (web/)
+node_modules/
+.next/
+next-env.d.ts
+
+# Logs
+*.log
+*.out
+
+# Python
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg-info/
+.coverage
+.pytest_cache/
+.ruff_cache/
+
+# Environments 
+.env 
+.venv 
+env/ 
+venv/ 
+ENV/ 
+env.bak/ 
+venv.bak/ 
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+missing_games.txt
+*.tmp
+*.bak
+
+# Data files (keep structure but ignore if needed)
+game_hashes.json
+.env*
+
+# scripts/sync_source.py: cache de resumen (progreso intermedio, no el resultado final)
+Data/.*_hash_cache.json
+
+# scripts/check_sources_health.py: reporte de la corrida, se regenera cada vez (CI lo lee antes de que termine el job)
+sources_health_report.md

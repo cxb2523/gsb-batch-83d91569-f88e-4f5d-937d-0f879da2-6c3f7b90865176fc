@@ -1,0 +1,16 @@
+{
+  "services": {
+    "web": { "root": "web/" },
+    "api": {
+      "root": ".",
+      "entrypoint": "api.index:app"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/:path*", "destination": { "service": "api" } },
+    { "source": "/dl", "destination": { "service": "api" } },
+    { "source": "/get_game_versions", "destination": { "service": "api" } },
+    { "source": "/search", "destination": { "service": "api" } },
+    { "source": "/(.*)", "destination": { "service": "web" } }
+  ]
+}
