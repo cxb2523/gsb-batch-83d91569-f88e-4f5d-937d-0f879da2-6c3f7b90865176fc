@@ -1,0 +1,121 @@
+[project]
+name = "mpscraper"
+dynamic = ["version"]
+description = "Marktplaats.nl (Dutch Classifieds) Listing Scraper"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "Ross Chadwick", email = "git@ross.ch" }]
+keywords = [
+    "web-scraping",
+    "selenium",
+    "marktplaats",
+    "machine-learning",
+    "dataset-generation",
+]
+classifiers = [
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "beautifulsoup4>=4.14.3",
+    "lxml>=6.1.1",
+    "selenium>=4.46.0",
+    "tqdm>=4.67.1",
+    "xvfbwrapper>=0.2.29",
+    "pandas>=3.0.5",
+]
+
+[dependency-groups]
+dev = [
+    "bandit>=1.8.6",
+    "basedpyright>=1.39.9",
+    "pytest-cov>=7.0.0",
+    "pytest>=9.1.1",
+    "ruff>=0.16.1",
+    "pandas-stubs>=3.0.3.260530",
+    "prek>=0.4.11",
+]
+
+[project.scripts]
+mpscraper = "mpscraper.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/chadsr/marktplaats-scraper"
+Repository = "https://github.com/chadsr/marktplaats-scraper"
+Issues = "https://github.com/chadsr/marktplaats-scraper/issues"
+
+[build-system]
+requires = ["hatchling", "versioningit"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["mpscraper"]
+
+[tool.hatch.version]
+source = "versioningit"
+default-version = "0.0.0+unknown"
+
+[tool.hatch.version.format]
+distance = "{next_version}.dev{distance}+{vcs}{rev}"
+dirty = "{version}+dirty"
+distance-dirty = "{next_version}.dev{distance}+{vcs}{rev}.dirty"
+
+[tool.hatch.build.hooks.versioningit-onbuild]
+source-file = "mpscraper/_version.py"
+build-file = "mpscraper/_version.py"
+replacement = '"{next_version}"'
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = ["--cov", "--cov-report=xml", "--cov-report=term-missing"]
+markers = []
+log_cli_level = "INFO"
+
+
+# Coverage.py configuration to ensure .coverage* data files are written (especially with xdist)
+[tool.coverage.run]
+branch = true
+parallel = true
+source = ["mpscraper"]
+
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+
+[tool.ruff]
+line-length = 100
+include = ["mpscraper/**/*.py", "tests/**/*.py", "examples/**/*.ipynb"]
+exclude = ["typings"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # Pyflakes
+    "I",   # isort (import sorting)
+    "ISC", # flake8-implicit-str-concat]
+    "RET", # flake8-return
+    "SIM", # flake8-simplify
+    "TC",  # type-checking rules
+    "UP",  # pyupgrade (syntax upgrades)
+    "W",   # pycodestyle warnings
+    "RUF", # Ruff rules
+]
+
+[tool.basedpyright]
+include = ["mpscraper", "tests"]
+exclude = ["examples", "typings"]
+stubPath = "typings"
+reportMissingImports = "error"
+reportMissingTypeStubs = true
+reportAttributeAccessIssue = true
+failOnWarnings = false
+ignore = []
+defineConstant = {}
+
+[tool.bandit]
+exclude_dirs = ["typings", "tests"]

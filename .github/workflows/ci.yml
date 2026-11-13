@@ -1,0 +1,55 @@
+name: CI
+permissions:
+  contents: read
+on:
+  pull_request:
+    paths:
+      - "mpscraper/**"
+      - "tests/**"
+      - "uv.lock"
+      - "pyproject.toml"
+      - ".github/workflows/ci.yml"
+  push:
+    branches:
+      - "main"
+    paths:
+      - "mpscraper/**"
+      - "tests/**"
+      - "uv.lock"
+      - "pyproject.toml"
+      - ".github/workflows/ci.yml"
+jobs:
+  lint:
+    runs-on: "ubuntu-latest"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          activate-environment: true
+      - name: Lint
+        run: uv run prek --all-files
+  test:
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 10
+    steps:
+      - name: Install Xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - id: setup-chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          install-dependencies: true
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          activate-environment: true
+      - name: Install dependencies
+        run: uv sync --all-groups
+      - name: Run Pytest
+        env:
+          CHROMIUM_PATH: ${{ steps.setup-chrome.outputs.chromium-path }}
+        run: |
+          pytest ./tests
+      - name: Upload Coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
