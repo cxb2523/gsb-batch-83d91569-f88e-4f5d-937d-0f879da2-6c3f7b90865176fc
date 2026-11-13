@@ -1,0 +1,18 @@
+{
+  "count": 2,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "id": 101,
+      "command": "python3 /home/alpha/sync_logs.py",
+      "expiry": "2026-11-10",
+      "extend_url": "/api/v0/user/alpha/schedule/101/extend/"
+    },
+    {
+      "id": 102,
+      "command": "python3 /home/alpha/cleanup.py",
+      "expiry": "2026-11-11"
+    }
+  ]
+}

@@ -25,7 +25,10 @@ jobs:
         run: python -m pip install -r requirements.txt
 
       - name: Check Python syntax
-        run: python -m py_compile renew_python_anywhere.py
+        run: python -m py_compile renew_python_anywhere.py tests/test_renewal.py
 
       - name: Check dependency imports
         run: python -c "import requests, bs4, dotenv"
+
+      - name: Run offline renewal tests
+        run: python -m unittest discover -s tests -v

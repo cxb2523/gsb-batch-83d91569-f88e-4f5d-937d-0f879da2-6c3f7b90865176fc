@@ -15,6 +15,27 @@ BASE_URL = "https://www.pythonanywhere.com"
 LOG_FILE = ".github/logs/workflow_runs.log"
 ACCOUNT_PATTERN = re.compile(r"^ACCOUNT_(\d+)_(USERNAME|PASSWORD)$")
 
+STATUS_SUCCESS = "SUCCESS"
+STATUS_SKIPPED = "SKIPPED"
+STATUS_FAILED = "FAILED"
+
+
+def log(message):
+    """Encoding-safe console output.
+
+    Emoji and other non-ASCII markers must not crash a run on a console
+    whose encoding cannot represent them (e.g. Windows GBK); unencodable
+    characters are replaced instead.
+    """
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        safe = message.encode(encoding, errors="replace").decode(
+            encoding, errors="replace"
+        )
+        print(safe)
+
 
 def get_accounts_from_env():
     """Return configured accounts, incomplete pairs, and duplicate warnings."""
@@ -95,13 +116,13 @@ def get_accounts_from_env():
 
 def login(session, username, password):
     login_url = f"{BASE_URL}/login/"
-    print(f"🔐 Logging in as {username}...")
+    log(f"🔐 Logging in as {username}...")
     login_page = session.get(login_url, timeout=10)
     login_page.raise_for_status()
     soup = BeautifulSoup(login_page.content, "html.parser")
     csrf_token = soup.find("input", {"name": "csrfmiddlewaretoken"})
     if not csrf_token:
-        print("❌ Could not find CSRF token on login page")
+        log("❌ Could not find CSRF token on login page")
         return False
 
     response = session.post(
@@ -118,10 +139,10 @@ def login(session, username, password):
     )
     response.raise_for_status()
     if "log out" not in response.text.lower() or "login" in response.url.lower():
-        print("❌ Login failed")
+        log("❌ Login failed")
         return False
 
-    print("✅ Login successful")
+    log("✅ Login successful")
     return True
 
 
@@ -134,147 +155,413 @@ def get_webapp_expiry(soup, domain):
     return "Unknown Date"
 
 
+def _item(kind, name, ok, status, detail):
+    """Build one checkable per-item outcome.
+
+    kind:   "Web App" or "Task"
+    name:   domain (web apps) or command / task list label (tasks)
+    ok:     whether the item counts toward account success
+    status: STATUS_SUCCESS / STATUS_SKIPPED / STATUS_FAILED
+    detail: human-readable reason or old -> new expiry
+    """
+    return {
+        "kind": kind,
+        "name": name,
+        "ok": ok,
+        "status": status,
+        "detail": detail,
+    }
+
+
+def render_item(item):
+    return f"{item['kind']}: {item['name']} — {item['status']}: {item['detail']}"
+
+
 def renew_webapps(session, username):
+    """Renew every web app form, recording one outcome per domain.
+
+    A failure on one form (missing CSRF, bad POST status, unexpected
+    redirect, refresh error) never stops the remaining forms from being
+    attempted. Returns (all_ok, per_item_results).
+    """
     dashboard_url = f"{BASE_URL}/user/{username}/webapps/"
-    print("📊 Checking web apps...")
+    log("📊 Checking web apps...")
     time.sleep(1)
-    dashboard = session.get(dashboard_url, timeout=10)
-    dashboard.raise_for_status()
+    try:
+        dashboard = session.get(dashboard_url, timeout=10)
+    except requests.RequestException as error:
+        return False, [
+            _item(
+                "Web App",
+                "(dashboard)",
+                False,
+                STATUS_FAILED,
+                f"dashboard request failed: {error}",
+            )
+        ]
+    if dashboard.status_code != 200:
+        return False, [
+            _item(
+                "Web App",
+                "(dashboard)",
+                False,
+                STATUS_FAILED,
+                f"dashboard request failed, HTTP {dashboard.status_code}",
+            )
+        ]
+
     soup = BeautifulSoup(dashboard.content, "html.parser")
     forms = [
         form
         for form in soup.find_all("form", action=True)
         if "/extend" in form["action"].lower()
     ]
-    details = []
-    ok = True
-
     if not forms:
-        print("ℹ️ No web apps found on this account.")
-        return True, details
+        log("ℹ️ No web apps found on this account.")
+        return True, []
 
+    results = []
     for form in forms:
         action = urljoin(BASE_URL, form["action"])
         domain = action.rstrip("/").split("/webapps/")[-1].replace("/extend", "")
         csrf = form.find("input", {"name": "csrfmiddlewaretoken"})
         if not csrf:
-            details.append(f"Web App: {domain} (missing CSRF token)")
-            ok = False
+            log(f"❌ Missing CSRF token for web app: {domain}")
+            results.append(
+                _item(
+                    "Web App",
+                    domain,
+                    False,
+                    STATUS_FAILED,
+                    "missing CSRF token in extend form",
+                )
+            )
             continue
 
         old_expiry = get_webapp_expiry(soup, domain)
-        response = session.post(
-            action,
-            data={"csrfmiddlewaretoken": csrf["value"]},
-            headers={"Referer": dashboard_url},
-            timeout=10,
-        )
-        if response.status_code != 200 or "webapps" not in response.url.lower():
-            details.append(f"Web App: {domain} (failed, status {response.status_code})")
-            ok = False
+        try:
+            response = session.post(
+                action,
+                data={"csrfmiddlewaretoken": csrf["value"]},
+                headers={"Referer": dashboard_url},
+                timeout=10,
+            )
+        except requests.RequestException as error:
+            results.append(
+                _item(
+                    "Web App",
+                    domain,
+                    False,
+                    STATUS_FAILED,
+                    f"extend request failed: {error}",
+                )
+            )
+            continue
+
+        if response.status_code != 200:
+            results.append(
+                _item(
+                    "Web App",
+                    domain,
+                    False,
+                    STATUS_FAILED,
+                    f"extend POST returned HTTP {response.status_code}",
+                )
+            )
+            continue
+        if "webapps" not in response.url.lower():
+            results.append(
+                _item(
+                    "Web App",
+                    domain,
+                    False,
+                    STATUS_FAILED,
+                    f"unexpected redirect after extend: {response.url}",
+                )
+            )
             continue
 
         time.sleep(1)
-        refreshed = session.get(dashboard_url, timeout=10)
-        refreshed.raise_for_status()
+        try:
+            refreshed = session.get(dashboard_url, timeout=10)
+        except requests.RequestException as error:
+            results.append(
+                _item(
+                    "Web App",
+                    domain,
+                    False,
+                    STATUS_FAILED,
+                    f"renewed but dashboard refresh failed: {error}",
+                )
+            )
+            continue
+        if refreshed.status_code != 200:
+            results.append(
+                _item(
+                    "Web App",
+                    domain,
+                    False,
+                    STATUS_FAILED,
+                    "renewed but dashboard refresh failed, "
+                    f"HTTP {refreshed.status_code}",
+                )
+            )
+            continue
+
         new_expiry = get_webapp_expiry(
             BeautifulSoup(refreshed.content, "html.parser"), domain
         )
-        details.append(f"Web App: {domain} ({old_expiry} → {new_expiry})")
-        print(f"✅ Renewed web app: {domain} ({old_expiry} → {new_expiry})")
+        results.append(
+            _item(
+                "Web App",
+                domain,
+                True,
+                STATUS_SUCCESS,
+                f"{old_expiry} → {new_expiry}",
+            )
+        )
+        log(f"✅ Renewed web app: {domain} ({old_expiry} → {new_expiry})")
 
-    return ok, details
+    return not any(not item["ok"] for item in results), results
 
 
 def renew_scheduled_tasks(session, username):
+    """Renew every scheduled task, recording one outcome per task.
+
+    List-level problems (request failure, non-JSON payload, missing/
+    non-list ``results``) become a single task-level FAILED record instead
+    of aborting the account. Per-task problems (missing extend URL, extend
+    POST failure, refresh failure/invalid payload) only affect that task.
+    Returns (all_ok, per_item_results).
+    """
     tasks_page_url = f"{BASE_URL}/user/{username}/tasks_tab/"
     tasks_api_url = f"{BASE_URL}/api/v0/user/{username}/schedule/"
-    print("🗓️ Checking scheduled tasks...")
+    log("🗓️ Checking scheduled tasks...")
     time.sleep(1)
-    response = session.get(
-        tasks_api_url, headers={"Referer": tasks_page_url}, timeout=10
-    )
-    details = []
+
+    try:
+        response = session.get(
+            tasks_api_url, headers={"Referer": tasks_page_url}, timeout=10
+        )
+    except requests.RequestException as error:
+        return False, [
+            _item(
+                "Task",
+                "task list",
+                False,
+                STATUS_FAILED,
+                f"list request failed: {error}",
+            )
+        ]
+
     if response.status_code != 200:
-        return False, [f"Scheduled tasks: fetch failed, status {response.status_code}"]
+        return False, [
+            _item(
+                "Task",
+                "task list",
+                False,
+                STATUS_FAILED,
+                f"list request failed, HTTP {response.status_code}",
+            )
+        ]
 
     try:
         payload = response.json()
-    except ValueError:
-        return False, ["Scheduled tasks: response was not valid JSON"]
+    except ValueError as error:
+        reason = str(error) or "response was not valid JSON"
+        return False, [
+            _item(
+                "Task",
+                "task list",
+                False,
+                STATUS_FAILED,
+                f"list response was not valid JSON ({reason})",
+            )
+        ]
 
     tasks = payload.get("results") if isinstance(payload, dict) else payload
     if not isinstance(tasks, list):
-        return False, ["Scheduled tasks: response did not contain a task list"]
+        return False, [
+            _item(
+                "Task",
+                "task list",
+                False,
+                STATUS_FAILED,
+                "list response did not contain a results list",
+            )
+        ]
 
     if not tasks:
-        print("ℹ️ No scheduled tasks found on this account.")
-        return True, details
+        log("ℹ️ No scheduled tasks found on this account.")
+        return True, []
 
     csrf_token = session.cookies.get("csrftoken")
     if not csrf_token:
-        return False, ["Scheduled tasks: missing CSRF token"]
+        return False, [
+            _item(
+                "Task",
+                "task list",
+                False,
+                STATUS_FAILED,
+                "missing CSRF token for task extension",
+            )
+        ]
 
-    ok = True
-    for task in tasks:
-        extend_url = task.get("extend_url")
-        description = task.get("command") or f"task {task.get('id')}"
-        old_expiry = task.get("expiry")
-        if not extend_url:
-            details.append(f"Task: {description} (no extend URL)")
+    results = []
+    for index, task in enumerate(tasks, 1):
+        if not isinstance(task, dict):
+            results.append(
+                _item(
+                    "Task",
+                    f"task entry {index}",
+                    False,
+                    STATUS_FAILED,
+                    "task entry was not a JSON object",
+                )
+            )
             continue
 
-        result = session.post(
-            urljoin(BASE_URL, extend_url),
-            headers={"X-CSRFToken": csrf_token, "Referer": tasks_page_url},
-            timeout=10,
+        description = (
+            task.get("command")
+            or (f"task {task.get('id')}" if task.get("id") is not None else None)
+            or f"task entry {index}"
         )
+        old_expiry = task.get("expiry")
+        extend_url = task.get("extend_url")
+        if not extend_url:
+            log(f"⏭️ Skipping task without extend URL: {description}")
+            results.append(
+                _item(
+                    "Task",
+                    description,
+                    True,
+                    STATUS_SKIPPED,
+                    "no extend URL available",
+                )
+            )
+            continue
+
+        try:
+            result = session.post(
+                urljoin(BASE_URL, extend_url),
+                headers={"X-CSRFToken": csrf_token, "Referer": tasks_page_url},
+                timeout=10,
+            )
+        except requests.RequestException as error:
+            results.append(
+                _item(
+                    "Task",
+                    description,
+                    False,
+                    STATUS_FAILED,
+                    f"extend request failed: {error}",
+                )
+            )
+            continue
         if result.status_code != 200:
-            details.append(f"Task: {description} (failed, status {result.status_code})")
-            ok = False
+            results.append(
+                _item(
+                    "Task",
+                    description,
+                    False,
+                    STATUS_FAILED,
+                    f"extend POST returned HTTP {result.status_code}",
+                )
+            )
             continue
 
         time.sleep(1)
-        refreshed = session.get(
-            tasks_api_url, headers={"Referer": tasks_page_url}, timeout=10
-        )
-        if refreshed.status_code != 200:
-            details.append(
-                f"Task: {description} (renewed but refresh failed, status {refreshed.status_code})"
+        try:
+            refreshed = session.get(
+                tasks_api_url, headers={"Referer": tasks_page_url}, timeout=10
             )
-            ok = False
+        except requests.RequestException as error:
+            results.append(
+                _item(
+                    "Task",
+                    description,
+                    False,
+                    STATUS_FAILED,
+                    f"renewed but list refresh failed: {error}",
+                )
+            )
             continue
-        new_expiry = old_expiry
+        if refreshed.status_code != 200:
+            results.append(
+                _item(
+                    "Task",
+                    description,
+                    False,
+                    STATUS_FAILED,
+                    f"renewed but list refresh failed, HTTP {refreshed.status_code}",
+                )
+            )
+            continue
+
         try:
             refreshed_payload = refreshed.json()
-            tasks_after = (
-                refreshed_payload.get("results")
-                if isinstance(refreshed_payload, dict)
-                else refreshed_payload
-            )
-            if not isinstance(tasks_after, list):
-                raise ValueError("response did not contain a task list")
-            new_expiry = next(
-                (
-                    task_after.get("expiry")
-                    for task_after in tasks_after
-                    if task_after.get("id") == task.get("id")
-                ),
-                old_expiry,
-            )
         except ValueError:
-            details.append(
-                f"Task: {description} (renewed but refresh response was invalid)"
+            results.append(
+                _item(
+                    "Task",
+                    description,
+                    False,
+                    STATUS_FAILED,
+                    "renewed but refresh response was not valid JSON",
+                )
             )
-            ok = False
+            continue
+        tasks_after = (
+            refreshed_payload.get("results")
+            if isinstance(refreshed_payload, dict)
+            else refreshed_payload
+        )
+        if not isinstance(tasks_after, list):
+            results.append(
+                _item(
+                    "Task",
+                    description,
+                    False,
+                    STATUS_FAILED,
+                    "renewed but refresh response did not contain a results list",
+                )
+            )
             continue
 
-        if new_expiry == old_expiry:
-            details.append(f"Task: {description} (Already maxed out at: {old_expiry})")
-        else:
-            details.append(f"Task: {description} ({old_expiry} → {new_expiry})")
+        new_expiry = next(
+            (
+                task_after.get("expiry")
+                for task_after in tasks_after
+                if isinstance(task_after, dict)
+                and task_after.get("id") == task.get("id")
+            ),
+            old_expiry,
+        )
 
-    return ok, details
+        if new_expiry == old_expiry:
+            results.append(
+                _item(
+                    "Task",
+                    description,
+                    True,
+                    STATUS_SUCCESS,
+                    f"Already maxed out at: {old_expiry}",
+                )
+            )
+            log(f"✅ Task already maxed out: {description} ({old_expiry})")
+        else:
+            results.append(
+                _item(
+                    "Task",
+                    description,
+                    True,
+                    STATUS_SUCCESS,
+                    f"{old_expiry} → {new_expiry}",
+                )
+            )
+            log(f"✅ Renewed task: {description} ({old_expiry} → {new_expiry})")
+
+    return not any(not item["ok"] for item in results), results
 
 
 def renew_account(label, username, password):
@@ -282,18 +569,50 @@ def renew_account(label, username, password):
     session.headers.update(
         {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     )
+
     try:
-        if not login(session, username, password):
-            return False, ["Login failed"]
-        webapps_ok, webapp_details = renew_webapps(session, username)
-        tasks_ok, task_details = renew_scheduled_tasks(session, username)
-        return webapps_ok and tasks_ok, webapp_details + task_details
+        logged_in = login(session, username, password)
     except requests.Timeout:
-        return False, ["Request timed out"]
+        return False, ["Login failed: request timed out"]
     except requests.RequestException as error:
-        return False, [f"Network error: {error}"]
+        return False, [f"Login failed: network error: {error}"]
     except Exception as error:
-        return False, [f"Unexpected error: {error}"]
+        return False, [f"Login failed: unexpected error: {error}"]
+    if not logged_in:
+        return False, ["Login failed"]
+
+    # Web apps and scheduled tasks are independent: a failure in one stage
+    # must not prevent the other stage from being attempted.
+    try:
+        webapps_ok, webapp_results = renew_webapps(session, username)
+    except Exception as error:
+        webapps_ok = False
+        webapp_results = [
+            _item(
+                "Web App",
+                "(all web apps)",
+                False,
+                STATUS_FAILED,
+                f"unexpected error: {error}",
+            )
+        ]
+
+    try:
+        tasks_ok, task_results = renew_scheduled_tasks(session, username)
+    except Exception as error:
+        tasks_ok = False
+        task_results = [
+            _item(
+                "Task",
+                "task list",
+                False,
+                STATUS_FAILED,
+                f"unexpected error: {error}",
+            )
+        ]
+
+    details = [render_item(item) for item in webapp_results + task_results]
+    return webapps_ok and tasks_ok, details
 
 
 def write_log(status, accounts, incomplete, warnings, results):
@@ -319,13 +638,15 @@ def write_log(status, accounts, incomplete, warnings, results):
     if warnings:
         lines.append("Warnings:")
         lines.extend(f"- {item}" for item in warnings)
+    lines.append("Renewal details:")
     if results:
-        lines.append("Renewal details:")
         for label, success, details in results:
             lines.append(f"- {label}: {'SUCCESS' if success else 'FAILED'}")
-            lines.extend(f"  - {detail}" for detail in details)
+            if details:
+                lines.extend(f"  - {detail}" for detail in details)
+            else:
+                lines.append("  - No web apps or scheduled tasks found.")
     else:
-        lines.append("Renewal details:")
         lines.append("- No complete accounts were configured.")
     lines.extend(["========================================", ""])
     with open(LOG_FILE, "a", encoding="utf-8") as log:
@@ -336,7 +657,7 @@ def run():
     accounts, incomplete, warnings = get_accounts_from_env()
     results = []
     for label, username, password in accounts:
-        print(f"\n{'=' * 50}\nProcessing {label}: {username}\n{'=' * 50}")
+        log(f"\n{'=' * 50}\nProcessing {label}: {username}\n{'=' * 50}")
         success, details = renew_account(label, username, password)
         results.append((label, success, details))
 

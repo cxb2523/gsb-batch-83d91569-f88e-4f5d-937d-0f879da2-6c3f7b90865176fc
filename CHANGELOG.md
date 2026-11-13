@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Checkable per-item outcomes for every web app and scheduled task. Each
+  log line is marked `SUCCESS`, `SKIPPED`, or `FAILED` and names the domain
+  or task command together with a reason (HTTP status, invalid JSON,
+  missing CSRF token, unexpected redirect, refresh error).
+- Offline unit test suite under `tests/` using self-made HTML/JSON fixtures
+  and a fake session; it never contacts the real PythonAnywhere site. The
+  CI workflow now runs it on every push and pull request.
+
+### Changed
+
+- A scheduled-task list request that fails, returns non-JSON, or returns a
+  non-list `results` value is recorded as a single task-level failure
+  instead of replacing the whole account's results; web apps are still
+  renewed for that account.
+- Per-task and per-web-app failures (extend POST error, refresh failure or
+  invalid refresh payload, missing CSRF token, unexpected redirect) now
+  affect only that item; all remaining forms and tasks are still attempted.
+- A scheduled task without an `extend_url` is logged as `SKIPPED` rather
+  than a failure, while an unchanged expiry after renewal remains a
+  successful "already maxed out" outcome.
+- Console output is encoding-safe so non-ASCII status markers no longer
+  crash runs on consoles that cannot encode them.
+
 ## [1.4.0] - 2026-09-06
 
 ### Added

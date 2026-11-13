@@ -67,8 +67,12 @@ Day 30:  Bot auto-renews ✅
 - Complete audit trail in `.github/logs/workflow_runs.log`
 - Clear SUCCESS, PARTIAL, or FAILED status indicators
 - Timestamps, run IDs, and trigger source for debugging
-- Detailed per-account results showing exactly which items were renewed and
-  their old vs. new expiry dates
+- One checkable outcome line per web app and per scheduled task, each
+  marked `SUCCESS`, `SKIPPED`, or `FAILED` with the domain or task command
+  and a reason (HTTP status, invalid JSON, missing CSRF token, etc.)
+- A failure for one item never abandons the remaining items: task-list
+  errors become a task-level failure while web apps are still renewed, and
+  per-form/per-task failures only affect that form or task
 - Explicit reporting for incomplete credentials, duplicate accounts, skipped
   items, and request failures
 
@@ -113,8 +117,11 @@ flowchart LR
 2. The credential resolver discovers complete `PA_*`, numbered, and JSON
    account configurations, then reports incomplete or duplicate entries.
 3. The orchestrator creates an isolated authenticated session for each account.
-4. The web app and scheduled task adapters renew the resources exposed by
-   PythonAnywhere.
+4. The web app and scheduled task adapters renew each resource independently.
+   Every web app form and every scheduled task produces its own `SUCCESS`,
+   `SKIPPED`, or `FAILED` outcome; a failure in one item, or a broken
+   scheduled-task list response, does not stop the remaining items or the
+   other renewal stage.
 5. Results are written to `.github/logs/workflow_runs.log` with an explicit
    `SUCCESS`, `PARTIAL`, or `FAILED` status.
 6. The workflow commits the log so the repository retains an auditable run
@@ -227,6 +234,31 @@ The terminal output includes one processing section per complete account:
 🗓️ Checking scheduled tasks...
 ```
 
+### Running the offline tests
+
+The test suite is fully offline: it drives the renewal logic through a fake
+session backed by self-made HTML/JSON fixtures under `tests/fixtures`, so it
+never contacts the real PythonAnywhere site (any unregistered fake route
+raises instead of opening a socket). No extra dependencies are required.
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The same command runs in CI on every push and pull request. It covers, among
+other cases:
+
+- A scheduled-task list that fails, returns non-JSON, or returns a
+  non-list `results` value — recorded as a task-level failure while the
+  account's web apps are still processed.
+- A single task without an `extend_url` — recorded as `SKIPPED`, not failed.
+- A task whose expiry does not change after renewal — recorded as already
+  maxed out and treated as success.
+- A web app form missing its CSRF token — that form fails while the next
+  form is still processed.
+- Two configured accounts where one fails — the other account's results are
+  unaffected.
+
 ---
 
 ## Project Structure
@@ -238,6 +270,9 @@ PythonAnywhere-Auto-Renew/
 │   │   └── renew.yml              # GitHub Actions workflow
 │   └── logs/
 │       └── workflow_runs.log      # Auto-generated run history
+├── tests/
+│   ├── fixtures/                  # Self-made offline HTML/JSON samples
+│   └── test_renewal.py            # Offline unit tests (no real network)
 ├── renew_python_anywhere.py       # Main renewal script
 ├── requirements.txt               # Python dependencies
 ├── .env                           # Local credentials (not in git)
@@ -355,11 +390,21 @@ Configured accounts:
 - ACCOUNT_1: accountone
 Renewal details:
 - PA: SUCCESS
-  - Web App: mainuser.pythonanywhere.com (old date → new date)
+  - Web App: mainuser.pythonanywhere.com — SUCCESS: old date → new date
 - ACCOUNT_1: SUCCESS
-  - Task: python3 sync.py (Already maxed out at: 2026-08-11)
+  - Task: python3 sync.py — SUCCESS: Already maxed out at: 2026-08-11
 ========================================
 ```
+
+Each indented line is one checkable item. The marker is one of:
+
+- `SUCCESS` — the web app or task was renewed, or the task was already at
+  its maximum expiry (an unchanged expiry after renewal counts as success).
+- `SKIPPED` — the item could not be renewed by design (for example, a task
+  without an `extend_url`); it does not fail the account.
+- `FAILED` — the item could not be renewed; the line names the domain or
+  task command together with the reason (HTTP status, invalid JSON, missing
+  CSRF token, unexpected redirect, refresh error).
 
 ### Partial Entry
 
@@ -377,7 +422,7 @@ Incomplete or skipped credentials:
 - ACCOUNT_2_USERNAME/ACCOUNT_2_PASSWORD
 Renewal details:
 - PA: SUCCESS
-  - Web App: mainuser.pythonanywhere.com (old date → new date)
+  - Web App: mainuser.pythonanywhere.com — SUCCESS: old date → new date
 ========================================
 ```
 
@@ -395,12 +440,19 @@ Configured accounts:
 - PA: mainuser
 - ACCOUNT_1: accountone
 Renewal details:
-- PA: SUCCESS
-  - Web App: mainuser.pythonanywhere.com (old date → new date)
-- ACCOUNT_1: FAILED
-  - Login failed
+- PA: FAILED
+  - Web App: mainuser.pythonanywhere.com — FAILED: extend POST returned HTTP 500
+  - Task: task list — FAILED: list response was not valid JSON (...)
+- ACCOUNT_1: SUCCESS
+  - Web App: accountone.pythonanywhere.com — SUCCESS: old date → new date
 ========================================
 ```
+
+Even when a task-list request fails or returns an unusable payload, the
+account's web apps are still attempted and reported; the task problem is
+captured as a single `task list` failure line rather than replacing every
+task outcome. A failure in one account never prevents the other configured
+accounts from running.
 
 ---
 
@@ -430,7 +482,7 @@ Renewal details:
 
 - PythonAnywhere caps scheduled task extensions (usually a maximum of 30 days into the future).
 - If you run the bot frequently or trigger it manually, a task might already be at its maximum expiry limit.
-- The bot recognizes this and safely logs it as a SUCCESS ✅ without failing your workflow.
+- The bot recognizes this and safely logs the task as a `SUCCESS` ("Already maxed out") without failing your workflow.
 
 ### "Workflow disabled"
 
