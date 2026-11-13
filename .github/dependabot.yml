@@ -1,0 +1,28 @@
+version: 2
+updates:
+  # Root workspace + all packages
+  - package-ecosystem: npm
+    directory: "/"
+    target-branch: dev          # all updates land on dev, ship to main with a release
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    labels: ["dependencies"]
+    ignore:
+      # @types/vscode must track engines.vscode (vsce refuses to package if the
+      # types are newer). Bump both together, deliberately, not via Dependabot.
+      - dependency-name: "@types/vscode"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  # GitHub Actions themselves (e.g. checkout, setup-node)
+  - package-ecosystem: github-actions
+    directory: "/"
+    target-branch: dev
+    schedule:
+      interval: weekly
+      day: monday
+    labels: ["ci", "dependencies"]
