@@ -37,6 +37,26 @@ with it, so nobody discovers it from a bill or from a diff.
 
 ### Added
 
+- **Per-page exit-handling audit (Playwright engine).** A run's sidecar used
+  to carry only one `stop_reason` and a list of failed page numbers, which
+  could not say which exit refused a given page, how many exits were tried or
+  which one finally delivered. `<out>.meta.json` (and
+  `<out>.latest_attempt.meta.json`) now carries a `page_outcomes` list with
+  one record per page **attempted**, ordered by page number regardless of
+  concurrent completion order. Each record holds the page number, request URL,
+  final URL, the outcome (`content` / `empty` / `blocked` / `captcha` /
+  `load_failed`), every exit tried as a `proxy_pool.mask` string (never a
+  credential), one entry per rotation with the abandoned masked exit and its
+  reason, and whether `--proxy-budget-mb` was spent on that page. With no
+  proxy pool the exit lists are empty while the outcome is still recorded.
+  The existing `status`, `stop_reason` and `pages_failed` fields are
+  unchanged.
+- `pages_unattempted` in the Playwright sidecar now lists **every** page that
+  was never attempted — a budget stop, dispatch ending at the end of the
+  listing, or a dead worker — not only the pages a budget stop left behind.
+  Unattempted pages never appear in `page_outcomes`, so the two lists cannot
+  double-count. (The other two engines keep their budget-only behaviour for
+  now; the key name is unchanged.)
 - `--load-media` in all three engines.
 - A proxy traffic meter (`proxy_meter.py`) in all three engines, active only
   behind a local proxy: Playwright sums `request.sizes()`, pyppeteer and

@@ -392,7 +392,10 @@ block on the last page included). It never goes on silently. A proxied run
 prints one line at the end, e.g. `Proxy traffic: 3.2 MB of 10 MB budget`, and
 the sidecar records `proxy_bytes`, `proxy_budget_bytes` and
 `proxy_budget_exceeded` (`null` / `null` / `false` with no local proxy), plus
-`pages_unattempted` after a stop. A proxied run that writes no rows records
+`pages_unattempted` after a stop. In the Playwright engine `pages_unattempted`
+covers every page never fetched — not only a budget stop — and each attempted
+page's record carries its own `budget_exhausted` flag (see *Per-page exit
+audit* below). A proxied run that writes no rows records
 them in `<out>.latest_attempt.meta.json`, leaving the data and
 `<out>.meta.json` as they were.
 
@@ -443,6 +446,43 @@ leaves `<out>.meta.json` alone.
 `<out>.meta.json` records `status`, `stop_reason`, `mode`, `source` and
 **which** pages failed by number — a count stops being a description once a
 page can fail while later ones succeed.
+
+**Per-page exit audit (Playwright).** Because one `stop_reason` cannot say
+which exit refused which page, the Playwright sidecar also carries
+`page_outcomes`: one record for every page **attempted**, sorted by page
+number even when `--concurrency` finished them out of order. Each record is
+self-contained:
+
+```json
+{
+  "page": 3,
+  "request_url": "https://www.mediamarkt.de/de/category/x-1.html?page=3",
+  "final_url": "https://www.mediamarkt.de/de/category/x-1.html?page=3",
+  "outcome": "content",
+  "exits_tried": ["http://***:***@10.0.0.1:8000", "http://***:***@10.0.0.2:8000"],
+  "rotations": [
+    {"exit": "http://***:***@10.0.0.1:8000", "reason": "blocked on page 3"}
+  ],
+  "budget_exhausted": false
+}
+```
+
+`outcome` is one of `content`, `empty`, `blocked`, `captcha` or
+`load_failed`. `exits_tried` lists every exit the page left from, in order,
+masked through the same `proxy_pool.mask` used in the logs — host and port
+kept, credentials never written. `rotations` names each abandoned exit and
+the reason for leaving it (a `blocked`/`captcha` response, an unusable exit,
+or a sequential `--proxy-rotate per-page` change). With no proxy pool both
+lists are empty while `outcome` still records what happened.
+`budget_exhausted` marks the pages in whose fetch `--proxy-budget-mb` was
+spent.
+
+`pages_unattempted` lists the page numbers that were never fetched — a budget
+stop, dispatch ending at the end of the listing, or a worker that died. An
+unattempted page has no entry in `page_outcomes` by construction, so the two
+lists never double-count; a page that was tried and failed stays in
+`page_outcomes` and `pages_failed` instead. The same keys are written to
+`<out>.latest_attempt.meta.json` when no row file is produced.
 
 ---
 

@@ -2093,6 +2093,273 @@ def test_concurrent_dispatch(skips):
     return ok
 
 
+def test_page_outcome_records(skips):
+    """Per-page exit-handling audit: every attempted page leaves one
+    structured record naming its exits, rotations and final outcome, and
+    unattempted pages are accounted for separately and never twice."""
+    group("page_outcomes: per-page exit handling in the Playwright engine")
+    ok = True
+    try:
+        import playwright_scraper as eng
+    except ImportError as e:
+        skips.append("page outcome records (%s)" % e)
+        return ok
+    import proxy_meter
+    import proxy_pool
+    from unittest import mock
+
+    URL = "https://www.mediamarkt.de/de/category/x-1.html"
+    # Real-looking exit URLs, including one with credentials: the records must
+    # carry the masked form only.
+    EXITS = ["http://user:secret@10.0.0.1:8000",
+             "http://user:secret@10.0.0.2:8000",
+             "http://10.0.0.3:8000"]
+    MASKS = [proxy_pool.mask(e) for e in EXITS]
+
+    def make_args(tmp):
+        return type("A", (), dict(proxy_block_retries=2, pages=1, retries=3,
+                                  retry_delay=0, mode="listing",
+                                  out=os.path.join(tmp, "o"), dump_html=None,
+                                  category=None, locale="de-DE"))()
+
+    class FakePool:
+        def __init__(self, exits):
+            self._exits = list(exits)
+            self.index = 0
+            self.advanced = []
+            self.rotate = "per-run"
+
+        def __len__(self):
+            return len(self._exits)
+
+        @property
+        def current(self):
+            return self._exits[self.index]
+
+        def advance(self, reason):
+            self.advanced.append(reason)
+            self.index = (self.index + 1) % len(self._exits)
+            return self.current
+
+        def rotates_per_page(self):
+            return self.rotate == "per-page"
+
+    class FakePage:
+        url = URL
+
+        def __init__(self, html, status=200):
+            self._html, self._status = html, status
+
+        def goto(self, *a, **k):
+            return types.SimpleNamespace(status=self._status)
+
+        def content(self):
+            return self._html
+
+        def wait_for_timeout(self, *a, **k):
+            pass
+
+        def wait_for_function(self, *a, **k):
+            pass
+
+        def query_selector_all(self, selector):
+            # The readiness wait asks for product cards; the listing fixture
+            # has them, the hub/block fixtures do not.
+            return [object() for _ in range(12)] if "mms-product-card" in self._html else []
+
+    class FakeSession:
+        def __init__(self, page, pool):
+            self.page, self.pool = page, pool
+            self.relaunches = 0
+
+        def relaunch(self):
+            self.relaunches += 1
+
+    # --- 1. the record builder: plain types, full vocabulary, no secrets ---
+    o = eng.PageOutcome(page_num=2, url=URL, final_url=URL, state="content")
+    o.exits_tried = [MASKS[0], MASKS[1]]
+    o.add_rotation(MASKS[0], "blocked on page 2")
+    rec = o.to_page_record()
+    ok &= check("a page record carries exactly the audited fields",
+                sorted(rec) == ["budget_exhausted", "exits_tried", "final_url",
+                                "outcome", "page", "request_url", "rotations"]
+                and rec["page"] == 2 and rec["request_url"] == URL
+                and rec["final_url"] == URL and rec["outcome"] == "content"
+                and rec["budget_exhausted"] is False)
+    ok &= check("the rotation record names the abandoned exit and the reason",
+                rec["rotations"] == [{"exit": MASKS[0], "reason": "blocked on page 2"}]
+                and rec["exits_tried"] == [MASKS[0], MASKS[1]])
+    ok &= check("the outcome label covers the whole vocabulary",
+                [eng.PageOutcome(page_num=n, url=URL, state=s).outcome_label
+                 for n, s in ((1, "content"), (2, "empty"), (3, "blocked"), (4, "captcha"))]
+                == ["content", "empty", "blocked", "captcha"]
+                and eng.PageOutcome(page_num=5, url=URL, load_failed=True).outcome_label
+                == "load_failed")
+    bare = eng.PageOutcome(page_num=1, url=URL).to_page_record()
+    ok &= check("a page with no proxy pool records empty exits but a real outcome",
+                bare["exits_tried"] == [] and bare["rotations"] == []
+                and bare["budget_exhausted"] is False)
+    o.prepend_rotation(MASKS[2], "per-page rotation, page 2")
+    ok &= check("a leading rotation is recorded first and its exit tried first",
+                o.rotations[0] == {"exit": MASKS[2], "reason": "per-page rotation, page 2"}
+                and o.exits_tried[0] == MASKS[2])
+
+    with tempfile.TemporaryDirectory() as d:
+        # --- 2. content on the first exit: one exit, no rotation ------------
+        proxy_meter.start(None, active=False)
+        try:
+            pool = FakePool(EXITS)
+            session = FakeSession(FakePage(FIX_LISTING_DE), pool)
+            with mock.patch.object(eng, "handle_captcha_if_present", lambda *a, **k: False):
+                outcome = eng._fetch_one_page(session, make_args(d), pool, 1, URL)
+        finally:
+            proxy_meter.start(None, active=False)
+        rec = outcome.to_page_record()
+        ok &= check("a content page records its one exit and no rotation",
+                    outcome.state == "content" and rec["outcome"] == "content"
+                    and rec["exits_tried"] == [MASKS[0]] and rec["rotations"] == []
+                    and session.relaunches == 0 and "secret" not in json.dumps(rec))
+
+        # --- 3. refused by exit 1, delivered by exit 2 ----------------------
+        class RotatingPage(FakePage):
+            def __init__(self, responses):
+                self.responses = list(responses)
+                self.calls = 0
+
+            def goto(self, *a, **k):
+                html, status = self.responses[min(self.calls, len(self.responses) - 1)]
+                self.calls += 1
+                self._html, self._status = html, status
+                return types.SimpleNamespace(status=status)
+
+            def content(self):
+                return self._html
+
+            def query_selector_all(self, selector):
+                return [object() for _ in range(12)] if "mms-product-card" in self._html else []
+
+        pool = FakePool(EXITS)
+        page = RotatingPage([(FIX_BLOCKED_DE, 403), (FIX_LISTING_DE, 200)])
+        session = FakeSession(page, pool)
+        with mock.patch.object(eng, "handle_captcha_if_present", lambda *a, **k: False):
+            outcome = eng._fetch_one_page(session, make_args(d), pool, 1, URL)
+        rec = outcome.to_page_record()
+        ok &= check("a blocked-then-delivered page records both exits in order",
+                    rec["outcome"] == "content"
+                    and rec["exits_tried"] == [MASKS[0], MASKS[1]])
+        ok &= check("...and the rotation reason names the block, on the abandoned exit",
+                    rec["rotations"] == [{"exit": MASKS[0],
+                                          "reason": "blocked on page 1"}]
+                    and pool.advanced == ["blocked on page 1"]
+                    and session.relaunches == 1)
+        ok &= check("...and no credential survives into the record",
+                    "secret" not in json.dumps(rec) and "10.0.0.1" in json.dumps(rec))
+
+        # --- 4. refused by every exit: blocked, full rotation trail ---------
+        # Three exits for block_retries=2 (three attempts): one rotation per
+        # abandoned exit, no pool wrap so the trail reads exactly once.
+        pool = FakePool(EXITS)
+        page = RotatingPage([(FIX_BLOCKED_DE, 403)])
+        session = FakeSession(page, pool)
+        # open_private writes the debug dump; point it at the temp dir.
+        with mock.patch.object(eng, "handle_captcha_if_present", lambda *a, **k: False):
+            outcome = eng._fetch_one_page(session, make_args(d), pool, 1, URL)
+        rec = outcome.to_page_record()
+        ok &= check("a page refused on every exit ends blocked with every exit recorded",
+                    rec["outcome"] == "blocked" and outcome.blocked_by == "mediamarkt-403"
+                    and rec["exits_tried"] == MASKS
+                    and [r["exit"] for r in rec["rotations"]] == MASKS[:-1]
+                    and all(r["reason"] == "blocked on page 1" for r in rec["rotations"]))
+
+        # --- 5. the budget: a page already over budget never navigates ------
+        class TimingOutBudgetPage(FakePage):
+            def goto(self, *a, **k):
+                raise eng.PWTimeout("Timeout 60000ms exceeded")
+
+        proxy_meter.start(0.001, active=True)
+        proxy_meter.current().add(5000)  # budget already spent before goto
+        try:
+            pool = FakePool(EXITS)
+            session = FakeSession(TimingOutBudgetPage(FIX_LISTING_DE), pool)
+            with mock.patch.object(eng, "handle_captcha_if_present", lambda *a, **k: False):
+                outcome = eng._fetch_one_page(session, make_args(d), pool, 1, URL)
+        finally:
+            proxy_meter.start(None, active=False)
+        rec = outcome.to_page_record()
+        ok &= check("a page whose budget is already spent ends load_failed and says so",
+                    rec["outcome"] == "load_failed" and outcome.load_failed is True
+                    and rec["budget_exhausted"] is True
+                    and rec["exits_tried"] == [MASKS[0]] and rec["rotations"] == [])
+
+        # The other budget shape: the navigation SUCCEEDS but its own bytes
+        # trip the meter. The page's data is still read (content), and the
+        # record says the budget was spent on this page rather than a later
+        # one inheriting the flag.
+        class SpentOnResponsePage(FakePage):
+            def goto(self, *a, **k):
+                proxy_meter.current().add(5000)
+                return types.SimpleNamespace(status=200)
+
+        proxy_meter.start(0.001, active=True)
+        try:
+            pool = FakePool(EXITS)
+            session = FakeSession(SpentOnResponsePage(FIX_LISTING_DE), pool)
+            with mock.patch.object(eng, "handle_captcha_if_present", lambda *a, **k: False):
+                outcome = eng._fetch_one_page(session, make_args(d), pool, 1, URL)
+        finally:
+            proxy_meter.start(None, active=False)
+        rec = outcome.to_page_record()
+        ok &= check("a page that spends the budget on its own response keeps its content and flags it",
+                    rec["outcome"] == "content" and rec["budget_exhausted"] is True)
+
+        # --- 6. a dead exit is rotated away for its transport reason --------
+        class DeadThenGoodPage(FakePage):
+            def __init__(self, pool):
+                super().__init__(FIX_LISTING_DE)
+                self._pool = pool
+
+            def goto(self, *a, **k):
+                if self._pool.index == 0:
+                    raise eng.PWError("net::ERR_PROXY_CONNECTION_FAILED at " + URL)
+                return types.SimpleNamespace(status=200)
+
+            def content(self):
+                return "" if self._pool.index == 0 else FIX_LISTING_DE
+
+        proxy_meter.start(None, active=False)
+        try:
+            pool = FakePool(EXITS)
+            session = FakeSession(DeadThenGoodPage(pool), pool)
+            with mock.patch.object(eng, "handle_captcha_if_present", lambda *a, **k: False):
+                outcome = eng._fetch_one_page(session, make_args(d), pool, 1, URL)
+        finally:
+            proxy_meter.start(None, active=False)
+        rec = outcome.to_page_record()
+        ok &= check("a dead exit is recorded with its unusable-exit reason",
+                    rec["outcome"] == "content"
+                    and rec["exits_tried"] == [MASKS[0], MASKS[1]]
+                    and rec["rotations"] == [
+                        {"exit": MASKS[0],
+                         "reason": "unusable exit: ERR_PROXY_CONNECTION_FAILED"}])
+
+        # --- 7. no pool: empty exit lists, outcome still truthful -----------
+        session = FakeSession(FakePage(FIX_LISTING_DE), None)
+        with mock.patch.object(eng, "handle_captcha_if_present", lambda *a, **k: False):
+            outcome = eng._fetch_one_page(session, make_args(d), None, 1, URL)
+        rec = outcome.to_page_record()
+        ok &= check("without a pool the exit lists are empty but the outcome stands",
+                    rec["outcome"] == "content" and rec["exits_tried"] == []
+                    and rec["rotations"] == [])
+
+    # --- 8. source-level guarantee that only mask() output reaches records --
+    src = inspect.getsource(eng)
+    ok &= check("exits_tried/rotations are populated only with mask(pool.current)",
+                src.count("mask(pool.current)") >= 4
+                and "exits_tried.append(current_mask)" in src
+                and "add_rotation(abandoned" in src)
+    return ok
+
+
 def test_no_undefined_names():
     group("no engine references a name that does not exist")
     ok = True
@@ -3408,6 +3675,23 @@ def test_proxy_budget(skips):
                     == (1200, 1000, True))
         ok &= check("%s: ...pages 3-5 unattempted, not failed" % name,
                     meta is not None and meta.get("pages_unattempted") == [3, 4, 5] and meta["pages_failed"] == [])
+        if name == "playwright_scraper" and meta is not None:
+            # The per-page audit: attempted pages only, in page order, each
+            # carrying the full record shape; unattempted pages are absent so
+            # the two lists can never double-count.
+            records = meta.get("page_outcomes")
+            pages_in_records = [r["page"] for r in (records or [])]
+            ok &= check("playwright: page_outcomes holds one record per attempted page, in order",
+                        pages_in_records == [1, 2]
+                        and all(set(r) == {"page", "request_url", "final_url", "outcome",
+                                           "exits_tried", "rotations", "budget_exhausted"}
+                                for r in records))
+            ok &= check("playwright: unattempted pages never appear in page_outcomes (no double count)",
+                        set(pages_in_records).isdisjoint(meta["pages_unattempted"])
+                        and all("exits_tried" in r and "rotations" in r for r in records))
+            ok &= check("playwright: every page_outcomes outcome is from the fixed vocabulary",
+                        all(r["outcome"] in ("content", "empty", "blocked", "captcha", "load_failed")
+                            for r in records))
         ok &= check("%s: ...one 'Proxy traffic' line" % name,
                     text.count("Proxy traffic: 0.0 MB of 0.001 MB budget") == 1)
         rc, meta, attempt, fetched, text = _scrape_on_budget(mod, 0.001, 5000, blocked_on=(1,))
@@ -3609,6 +3893,7 @@ def main() -> int:
     ok &= test_fingerprint_application()
     ok &= test_credentials_never_reach_a_log()
     ok &= test_concurrent_dispatch(skips)
+    ok &= test_page_outcome_records(skips)
     ok &= test_no_undefined_names()
     ok &= test_dockerfile_copies_what_it_runs()
     ok &= test_shared_calls_bind_against_the_real_signature()

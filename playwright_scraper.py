@@ -124,10 +124,80 @@ class PageOutcome:
     # Recorded in the run metadata so a consumer can see what fraction of a
     # category a run actually took.
     total_available: Optional[int] = None
+    # Per-page audit of what happened to the page at the PROXY level. The run
+    # sidecar used to carry only one stop_reason and a list of failed page
+    # numbers, which cannot say which exit refused a given page, how many
+    # exits were tried or which one finally delivered. These fields record
+    # exactly that, per page. Every exit address goes through proxy_pool.mask
+    # before it lands here: a structured record is still a log, so it must
+    # never carry a credential.
+    #
+    # Every exit this page was attempted from, in the order it was used.
+    # Empty when the run had no pool — the outcome fields below still say
+    # truthfully what happened to the page without an exit behind it.
+    exits_tried: List[str] = field(default_factory=list)
+    # One entry per rotation AWAY from an exit, in order: the masked exit
+    # that was abandoned and the reason recorded for the rotation. A
+    # per-page rotation decided outside this page (the sequential loop's
+    # --proxy-rotate per-page) is prepended by the caller so this page's
+    # record still starts from the exit it first left on.
+    rotations: List[dict] = field(default_factory=list)
+    # Whether --proxy-budget-mb was already (or became) spent while this page
+    # was being fetched. The budget is shared, so this flag answers the
+    # operator question "did THIS page stop because of the budget?" without
+    # having to infer it from the run-level stop_reason.
+    budget_exhausted: bool = False
 
     @property
     def ok(self) -> bool:
         return not self.load_failed and self.blocked_by is None
+
+    @property
+    def outcome_label(self) -> str:
+        """The sidecar vocabulary for how this page ended.
+
+        Mirrors page_flow's states one to one, with load_failed as the extra
+        transport-level outcome: content / empty / blocked / captcha /
+        load_failed. Kept as a property so the label and the fields that
+        decide it cannot drift apart in a hand-written dict.
+        """
+        if self.load_failed:
+            return "load_failed"
+        return self.state or "empty"
+
+    def add_rotation(self, exit_mask: str, reason: str) -> None:
+        """Record leaving `exit_mask` for `reason`.
+
+        `exit_mask` must already have passed through proxy_pool.mask: this
+        record is written to the sidecar and must never hold a credential.
+        """
+        self.rotations.append({"exit": exit_mask, "reason": reason})
+
+    def prepend_rotation(self, exit_mask: str, reason: str) -> None:
+        """Record a rotation decided BEFORE this page's own fetch loop.
+
+        Only the sequential path's per-page rotation uses this. The exit it
+        leaves for is recorded as tried first, so the page's rotation history
+        reads in chronological order. Same masking rule as add_rotation.
+        """
+        self.rotations.insert(0, {"exit": exit_mask, "reason": reason})
+        self.exits_tried.insert(0, exit_mask)
+
+    def to_page_record(self) -> dict:
+        """The JSON-safe record written under sidecar key `page_outcomes`.
+
+        Holds only plain types so json.dump cannot meet an unexpected object,
+        and only masked exit strings so a credential has nowhere to enter.
+        """
+        return {
+            "page": self.page_num,
+            "request_url": self.url,
+            "final_url": self.final_url,
+            "outcome": self.outcome_label,
+            "exits_tried": list(self.exits_tried),
+            "rotations": [dict(r) for r in self.rotations],
+            "budget_exhausted": self.budget_exhausted,
+        }
 
 
 ITEM_LINK_SELECTOR = SELECTORS["item_link"]
@@ -617,6 +687,14 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
 
     for block_attempt in range(block_retries + 1):
         logger.info("Fetching page %d/%d: %s", page_num, args.pages, url)
+        # Record the exit this attempt actually leaves from. With no pool
+        # there is nothing to record and the list stays empty, as the
+        # sidecar contract requires. Read per attempt: a rotation replaces
+        # pool.current between iterations.
+        if pool:
+            current_mask = mask(pool.current)
+            if current_mask not in outcome.exits_tried:
+                outcome.exits_tried.append(current_mask)
         # Retry a navigation timeout rather than ending the run on it. One
         # network flap on page 12 of 50 should not break the loop.
         load_failed, exit_failed = False, None
@@ -624,6 +702,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         for attempt in range(1, args.retries + 1):
             if proxy_meter.exceeded():
                 load_failed = True  # --proxy-budget-mb: no further navigation
+                outcome.budget_exhausted = True
                 break
             try:
                 response = session.page.goto(url, wait_until="domcontentloaded",
@@ -654,10 +733,13 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
                     time.sleep(pause)
 
         if exit_failed and block_attempt < block_retries and not proxy_meter.exceeded():
+            abandoned = mask(pool.current)
+            rotate_reason = f"unusable exit: {exit_failed}"
             logger.warning("Exit %s is unusable (%s) — rotating to another "
-                           "one (%d/%d).", mask(pool.current), exit_failed,
+                           "one (%d/%d).", abandoned, exit_failed,
                            block_attempt + 1, block_retries)
-            pool.advance(f"unusable exit: {exit_failed}")
+            outcome.add_rotation(abandoned, rotate_reason)
+            pool.advance(rotate_reason)
             session.relaunch()
             continue
         if load_failed:
@@ -669,6 +751,11 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
             # page the solve replaced: it describes the challenge, not this.
             session.page.wait_for_timeout(1000)
             status = None
+        elif proxy_meter.exceeded():
+            # The meter tripped during the solve/navigation: the rest of this
+            # page is still read, but the record must say the budget was spent
+            # on it rather than letting a later page's flag take the blame.
+            outcome.budget_exhausted = True
 
         html = _content_when_settled(session.page) or ""
         state = _classify(session.page, html, status=status)
@@ -688,11 +775,25 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         # 2026-09-09 — the same URL that answers 403 from a datacentre exit
         # answers 200 from a residential one.
         if block_attempt < block_retries and not proxy_meter.exceeded():
+            abandoned = mask(pool.current)
+            rotate_reason = f"{state} on page {page_num}"
             logger.warning("Page %d came back as %s from %s — retrying from "
                            "another exit (%d/%d).", page_num, state,
-                           mask(pool.current), block_attempt + 1, block_retries)
-            pool.advance(f"{state} on page {page_num}")
+                           abandoned, block_attempt + 1, block_retries)
+            outcome.add_rotation(abandoned, rotate_reason)
+            pool.advance(rotate_reason)
             session.relaunch()
+        elif proxy_meter.exceeded():
+            # A retryable state the budget will not let us act on: the page
+            # keeps its blocked/captcha answer, and its record says why no
+            # further exit was tried.
+            outcome.budget_exhausted = True
+
+    # A budget can also trip between the last meter check and here (a request
+    # the meter counts while the final response is being read). Capture it so
+    # the per-page flag reflects the shared meter's actual final state.
+    if proxy_meter.exceeded():
+        outcome.budget_exhausted = True
 
     if load_failed:
         logger.error("Gave up loading %s after %d attempt(s).", url, args.retries)
@@ -1074,11 +1175,21 @@ def scrape(args) -> int:
                         # A new exit per page is what actually spreads a run's
                         # volume, and it costs a browser relaunch: carrying the
                         # session across exits would defeat the point.
+                        # The rotation is decided between pages, so it is
+                        # handed to the NEXT page's audit record rather than
+                        # the previous page's: this page is the one that
+                        # leaves from the new exit.
+                        leading_rotation = None
                         if pool and pool.rotates_per_page():
-                            pool.advance(f"per-page rotation, page {page_num}")
+                            abandoned = mask(pool.current)
+                            rotate_reason = f"per-page rotation, page {page_num}"
+                            pool.advance(rotate_reason)
                             session.relaunch()
+                            leading_rotation = (mask(pool.current), rotate_reason)
 
                         outcome = _fetch_one_page(session, args, pool, page_num, url)
+                        if leading_rotation is not None:
+                            outcome.prepend_rotation(abandoned, rotate_reason)
                         outcomes.append(outcome)
                         if not outcome.ok:
                             stop_reason = ("page_load_timeout" if outcome.load_failed
@@ -1161,6 +1272,19 @@ def scrape(args) -> int:
     final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
                  if ok_pages else args.url)
 
+    # One structured record per page actually attempted, in page order — not
+    # completion order, which under --concurrency is nondeterministic. A page
+    # that was never attempted (the budget tripped, dispatch stopped at the
+    # end of the listing, a worker died) has NO record here by construction:
+    # it is reported separately in pages_unattempted so the two can never
+    # double-count.
+    page_outcomes = [o.to_page_record()
+                     for o in sorted(outcomes, key=lambda o: o.page_num)]
+    attempted_pages = {o.page_num for o in outcomes}
+    pages_requested = args.pages if args.mode == "listing" else 1
+    pages_unattempted = [n for n in range(1, pages_requested + 1)
+                         if n not in attempted_pages]
+
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       blocked=blocked, stop_reason=stop_reason,
                       pages_requested=args.pages, pages_completed=len(ok_pages),
@@ -1168,7 +1292,11 @@ def scrape(args) -> int:
                       source=site_host(final_url),
                       start_url=args.url, final_url=final_url,
                       extra={"media_blocked": media_blocked,
-                             **page_flow.budget_extra(outcomes, args)})
+                             "page_outcomes": page_outcomes,
+                             # Supersedes page_flow.budget_extra on this engine:
+                             # every unattempted page is reported, not only the
+                             # ones a budget stop leaves behind.
+                             "pages_unattempted": pages_unattempted})
 
 
 def parse_args():
