@@ -1,0 +1,454 @@
+# One real run against maison.kose.co.jp. tests.yml (deliberately) never
+# touches the site — see its own header.
+#
+# THIS CANARY NEEDS NO CREDENTIALS, and that is the whole point of it.
+#
+# The README's central claim is that you need no 2Captcha account, no proxy
+# and no browser trickery to read this site: measured 2026-09-18 from a
+# datacentre address, listings and product pages answered HTTP 200 to a plain
+# `curl`, to `python-requests` and to a request with no User-Agent header at
+# all, with no challenge of any kind. A GitHub runner is a datacentre address
+# too, so this workflow re-measures that claim every Monday.
+#
+# **A canary that CAN pass without a credential must never be gated on one.**
+# If Kosé ever puts its catalogue behind a key or a bot manager, this badge
+# goes red the next morning and the README's claim is retested without anyone
+# remembering to.
+#
+# The last job exercises the PAID path (the Scraping Browser API over CDP),
+# which cannot run without a secret. It does not pass by skipping: with no
+# secret it FAILS with an ::error:: naming the secret, because a green check
+# that tested nothing reads exactly like one that tested something.
+#
+#     gh secret set KOSE_CDP_ENDPOINT --repo 2scraper/kose-scraper
+#
+# `secrets` is not available in a job-level `if`, so presence is tested
+# through job `env` and read in each step's `if`.
+
+name: canary
+
+on:
+  schedule:
+    # 03:47 UTC. Not on the hour: every scheduled workflow on GitHub fires at
+    # :00 and the queue there is long.
+    - cron: "47 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Cosme Decorté's catalogue: 13 pages of 24 on 2026-09-18, so three pages
+  # really is three pages. With one page pagination is never exercised, which
+  # is exactly how a silent single-page bug survived in a sibling repo.
+  CANARY_URL: "https://maison.kose.co.jp/site/cosmedecorte/c/c15/"
+  CANARY_PRODUCT: "https://maison.kose.co.jp/site/onebykose/g/gMUSC/"
+
+jobs:
+  listing:
+    name: listing (no credentials needed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Run
+        id: run
+        run: |
+          set +e   # GitHub runs `run:` under `bash -e`, and a non-zero exit
+                   # would abort the step BEFORE the echo below.
+          python playwright_scraper.py \
+            --url "$CANARY_URL" --pages 3 --format both --out canary
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Check what came back
+        env:
+          EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+
+          code = int(os.environ["EXIT_CODE"])
+          if code != 0:
+              print(f"::error::The run exited {code}.")
+              print({
+                  3: "Blocked (exit 3). Kose refused a GitHub runner's "
+                     "address, which has never happened in testing — a "
+                     "request with NO User-Agent header at all was served "
+                     "the same bytes as a browser on 2026-09-18. If this is "
+                     "real, the site started gating its catalogue and the "
+                     "README's central claim needs re-measuring TODAY.",
+                  4: "Zero products (exit 4). Either the category is empty "
+                     "now, or the tile markup moved and the parser reads "
+                     "nothing. Check the uploaded HTML dump.",
+                  5: "Remote API error (exit 5) — nothing was tested.",
+                  6: "Partial (exit 6): some pages came back and some did not.",
+              }.get(code, "See the log."))
+              sys.exit(1)
+
+          meta = json.load(open("canary.meta.json"))
+          rows = json.load(open("canary.json"))
+          print(json.dumps(meta, indent=1, ensure_ascii=False))
+
+          failures = []
+          def want(label, ok, detail):
+              if not ok:
+                  failures.append(f"{label}: {detail}")
+
+          # Fail on a parser failure BY NAME. "0 products" would send
+          # whoever reads this red badge to check the URL, when the thing that
+          # moved is the parser. This stop_reason means the site served a page
+          # that links to products and we turned it into nothing.
+          want("not a parser failure",
+               meta.get("stop_reason") != "parser_found_nothing",
+               "the site served a page linking to products and the parser "
+               "produced ZERO rows — check `li.c-product__item` before you "
+               "check the URL")
+
+          want("status", meta["status"] == "complete", meta["status"])
+          want("pages_completed", meta["pages_completed"] == 3,
+               f'{meta["pages_completed"]} of 3')
+          want("no failed pages", not meta["pages_failed"],
+               str(meta["pages_failed"]))
+
+          # 24 per page x 3 pages = 72. The floor sits below that so a
+          # legitimately reshuffled page cannot trip it, and above two pages'
+          # worth so a silent single-page run cannot pass.
+          want("row floor", len(rows) >= 60, f"{len(rows)} rows")
+
+          # The site's own arithmetic, which pages are planned from. If this
+          # stops being read, pagination falls back to walking off the end —
+          # and on THIS site walking off the end returns the last page again,
+          # byte-identical, forever.
+          want("the site stated a page count",
+               isinstance(meta.get("pages_available"), int)
+               and meta["pages_available"] >= 3,
+               f'pages_available was {meta.get("pages_available")!r}')
+          want("the route was recorded", meta.get("route") == "category",
+               f'route was {meta.get("route")!r}')
+
+          # Column coverage, measured 216/216 on four live runs. A floor of
+          # 95% leaves room for the site to publish one odd tile without a
+          # red badge, and catches a column that stopped being read.
+          for column in ("title", "url", "sku", "brand", "price", "currency",
+                         "in_stock", "image_url", "tax_rate"):
+              filled = sum(1 for r in rows if r.get(column) is not None)
+              share = 100.0 * filled / max(len(rows), 1)
+              want(f"{column} coverage", share >= 95.0,
+                   f"{share:.0f}% ({filled}/{len(rows)})")
+
+          # Values, not just coverage. A column can be 100% populated
+          # and entirely wrong.
+          want("every currency is JPY",
+               {r.get("currency") for r in rows if r.get("price") is not None} == {"JPY"},
+               str(sorted({r.get("currency") for r in rows})))
+          want("every tax rate is one Japan actually charges",
+               set(r.get("tax_rate") for r in rows) <= {8, 10},
+               str(sorted(set(r.get("tax_rate") for r in rows), key=str)))
+          want("prices are plausible for a cosmetics catalogue",
+               all(100 <= r["price"] <= 1_000_000
+                   for r in rows if r.get("price") is not None),
+               "a price outside 100..1,000,000 yen usually means the comma "
+               "was mishandled: 264,000 read as 264")
+          want("every row's URL names its own sku",
+               all(r["sku"] and f"/g/g{r['sku']}/" in r["url"] for r in rows),
+               "a row points at a product other than the one it describes")
+
+          # page + position must be unique across a multi-page run, or
+          # `position` is worthless — it restarts at 1 on every page.
+          pairs = [(r.get("page"), r.get("position")) for r in rows]
+          want("page+position unique", len(set(pairs)) == len(pairs),
+               f"{len(pairs) - len(set(pairs))} collision(s)")
+          want("more than one page is represented",
+               len({p for p, _ in pairs}) == 3,
+               str(sorted({p for p, _ in pairs})))
+          want("skus are distinct across the run",
+               len({r["sku"] for r in rows}) == len(rows),
+               "pages repeated — on this site that is what walking past the "
+               "last page looks like")
+
+          if failures:
+              for f in failures:
+                  print(f"::error::{f}")
+              sys.exit(1)
+          brands = len({r.get("brand") for r in rows})
+          print(f"::notice::{len(rows)} products, {brands} brand(s), "
+                f"{meta['pages_available']} pages available, status "
+                f"{meta['status']}.")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-listing
+          path: |
+            canary.json
+            canary.csv
+            canary.meta.json
+            *_debug.html
+          if-no-files-found: ignore
+
+  http_vs_browser:
+    name: HTTP engine, and the two must agree
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Run both engines over the same three pages
+        id: run
+        run: |
+          set +e
+          python http_scraper.py --url "$CANARY_URL" --pages 3 \
+            --format json --out canary_http
+          echo "http_exit=$?" >> "$GITHUB_OUTPUT"
+          python playwright_scraper.py --url "$CANARY_URL" --pages 3 \
+            --format json --out canary_browser
+          echo "browser_exit=$?" >> "$GITHUB_OUTPUT"
+
+      - name: They must return the same rows
+        env:
+          HTTP_EXIT: ${{ steps.run.outputs.http_exit }}
+          BROWSER_EXIT: ${{ steps.run.outputs.browser_exit }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+
+          failures = []
+          def want(label, ok, detail=""):
+              if not ok:
+                  failures.append(f"{label}: {detail}")
+
+          http_exit = int(os.environ["HTTP_EXIT"])
+          browser_exit = int(os.environ["BROWSER_EXIT"])
+          want("the HTTP engine exits 0", http_exit == 0, str(http_exit))
+          want("the browser engine exits 0", browser_exit == 0,
+               str(browser_exit))
+          if failures:
+              for f in failures:
+                  print(f"::error::{f}")
+              # A browserless path that stops working is the README's
+              # central claim failing, and it is the more important of the
+              # two: it says the site started gating what it used to serve.
+              sys.exit(1)
+
+          a = {r["sku"]: r for r in json.load(open("canary_http.json"))}
+          b = {r["sku"]: r for r in json.load(open("canary_browser.json"))}
+          want("both engines returned rows", a and b,
+               f"{len(a)} / {len(b)}")
+          want("the same products", set(a) == set(b),
+               f"{len(set(a) ^ set(b))} sku(s) in one and not the other")
+
+          # Field by field, ignoring the per-row timestamp, which is the
+          # only column that legitimately differs between two runs.
+          differing = []
+          for sku in set(a) & set(b):
+              for field in a[sku]:
+                  if field in ("scraped_at", "mode"):
+                      continue
+                  if a[sku][field] != b[sku][field]:
+                      differing.append((sku, field))
+          # This is the check that found the site's own in-browser title
+          # truncation: for months the browser engines returned a SHORTER
+          # title than the server renders, on 10 of 72 rows, and nothing
+          # could see it because there was no browserless engine to
+          # disagree with.
+          want("no field differs between the two engines", not differing,
+               str(differing[:6]))
+
+          meta_a = json.load(open("canary_http.meta.json"))
+          meta_b = json.load(open("canary_browser.meta.json"))
+          want("both runs are complete",
+               meta_a["status"] == meta_b["status"] == "complete",
+               f'{meta_a["status"]} / {meta_b["status"]}')
+          want("each sidecar names its engine",
+               meta_a.get("engine") == "http"
+               and meta_b.get("engine") == "playwright",
+               f'{meta_a.get("engine")} / {meta_b.get("engine")}')
+
+          if failures:
+              for f in failures:
+                  print(f"::error::{f}")
+              sys.exit(1)
+          print(f"::notice::{len(a)} rows from each engine, identical, in "
+                f"{meta_a.get('duration_seconds')}s (http) against "
+                f"{meta_b.get('duration_seconds')}s (browser).")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-http-vs-browser
+          path: |
+            canary_http.json
+            canary_http.meta.json
+            canary_browser.json
+            canary_browser.meta.json
+          if-no-files-found: ignore
+
+  product:
+    name: product page (no credentials needed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Run
+        id: run
+        run: |
+          set +e
+          python playwright_scraper.py --mode product \
+            --url "$CANARY_PRODUCT" --format json --out canary_product
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Check what came back
+        env:
+          EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          code = int(os.environ["EXIT_CODE"])
+          if code != 0:
+              print(f"::error::The product run exited {code}.")
+              sys.exit(1)
+          rows = json.load(open("canary_product.json"))
+          failures = []
+          def want(label, ok, detail=""):
+              if not ok:
+                  failures.append(f"{label}: {detail}")
+
+          want("exactly one row", len(rows) == 1, str(len(rows)))
+          r = rows[0]
+          want("the sku is the one asked for", r.get("sku") == "MUSC", str(r.get("sku")))
+          want("a price", isinstance(r.get("price"), (int, float)), str(r.get("price")))
+          want("JPY", r.get("currency") == "JPY", str(r.get("currency")))
+          want("read from the page's own JSON-LD",
+               r.get("price_source") == "jsonld", str(r.get("price_source")))
+          # The four columns that are the REASON to open a detail page. If
+          # they stop being populated the mode still "works" and returns
+          # nothing extra, which is the quiet failure this catches.
+          for column in ("subcategory", "volume", "colour_count", "release_date"):
+              want(f"{column} populated", r.get(column) is not None)
+          # The trap: 5 of 20 product pages canonicalise to a DIFFERENT sku.
+          want("the row's URL names its own sku",
+               f"/g/g{r['sku']}/" in r["url"], r["url"])
+          if failures:
+              for f in failures:
+                  print(f"::error::{f}")
+              sys.exit(1)
+          print(f"::notice::{r['title']} — {r['price']} {r['currency']}, "
+                f"{r['volume']}, {r['colour_count']} colour(s).")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-product
+          path: |
+            canary_product.json
+            canary_product.meta.json
+          if-no-files-found: ignore
+
+  scraping_browser:
+    name: Scraping Browser API (needs the KOSE_CDP_ENDPOINT secret)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # `secrets` is not available in a job-level `if`, so presence is tested
+      # here and read in each step's `if`.
+      HAVE_CDP: ${{ secrets.KOSE_CDP_ENDPOINT != '' }}
+    steps:
+      - name: Require the secret
+        if: env.HAVE_CDP != 'true'
+        run: |
+          echo "::error::The KOSE_CDP_ENDPOINT secret is not set, so the Scraping Browser path was NOT tested."
+          echo "The listing jobs above test the site itself with no credentials."
+          echo "This job tests the paid path and fails rather than passing on a"
+          echo "skip. To make it run:"
+          echo "    gh secret set KOSE_CDP_ENDPOINT --repo 2scraper/kose-scraper"
+          exit 1
+
+      - uses: actions/checkout@v4
+        if: env.HAVE_CDP == 'true'
+      - uses: actions/setup-python@v5
+        if: env.HAVE_CDP == 'true'
+        with:
+          python-version: "3.12"
+      - name: Install
+        if: env.HAVE_CDP == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+
+      - name: Run over CDP
+        if: env.HAVE_CDP == 'true'
+        id: run
+        env:
+          # Through the ENVIRONMENT, never a command line: env_config.py reads
+          # exactly this variable, and a credential in argv is readable by
+          # anything that can run `ps`.
+          KOSE_CDP_ENDPOINT: ${{ secrets.KOSE_CDP_ENDPOINT }}
+        run: |
+          set +e
+          python playwright_scraper.py \
+            --url "$CANARY_URL" --pages 2 --format json --out canary_cdp
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Check what came back
+        if: env.HAVE_CDP == 'true'
+        env:
+          EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          code = int(os.environ["EXIT_CODE"])
+          if code == 5:
+              print("::error::Exit 5: the content was never obtained over CDP. "
+                    "A Scraping Browser profile allows ONE live connection, so "
+                    "a busy pid looks like this; an expired profile answers "
+                    "401. Either way nothing was tested.")
+              sys.exit(1)
+          if code != 0:
+              print(f"::error::The CDP run exited {code}.")
+              sys.exit(1)
+          rows = json.load(open("canary_cdp.json"))
+          if len(rows) < 40:
+              print(f"::error::only {len(rows)} rows over CDP")
+              sys.exit(1)
+          print(f"::notice::{len(rows)} products over the Scraping Browser API.")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always() && env.HAVE_CDP == 'true'
+        with:
+          name: canary-cdp
+          path: |
+            canary_cdp.json
+            canary_cdp.meta.json
+          if-no-files-found: ignore
