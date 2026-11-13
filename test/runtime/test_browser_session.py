@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import redirect_stderr, redirect_stdout, suppress
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,7 @@ from reverse.browser_session import (
     PROTOCOL_VERSION,
     RPC_CANCELLATION_GRACE,
     RPC_TRANSPORT_MARGIN,
+    RpcOutcome,
     _control_timeout,
     _control_token,
     _extension_id,
@@ -726,12 +728,20 @@ class BrowserSessionContractTest(unittest.TestCase):
 
 
 class FakeExtension:
-    def __init__(self, instance_id: str = INSTANCE_ID) -> None:
+    def __init__(
+        self,
+        instance_id: str = INSTANCE_ID,
+        *,
+        cancel_error: Exception | None = None,
+    ) -> None:
         self.instance_id = instance_id
         self.messages: list[dict[str, object]] = []
         self.sent = asyncio.Event()
+        self.cancel_error = cancel_error
 
     async def send(self, value: dict[str, object]) -> None:
+        if value.get("type") == "cancel" and self.cancel_error is not None:
+            raise self.cancel_error
         self.messages.append(value)
         self.sent.set()
 
@@ -745,6 +755,163 @@ class BrowserSessionRpcTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         self.temporary.cleanup()
+
+    async def test_timeout_reports_cancel_was_delivered(self) -> None:
+        progress: list[dict[str, object]] = []
+
+        async def progress_sink(event: dict[str, object]) -> None:
+            progress.append(event)
+
+        async def instant_timeout(
+            awaitable: object,
+            timeout: float,
+        ) -> object:
+            del timeout
+            # 让出一次，确保扩展已收到 request 消息。
+            await asyncio.sleep(0)
+            raise TimeoutError
+
+        with (
+            patch.object(
+                self.daemon, "_select", return_value=self.extension
+            ),
+            patch.object(
+                browser_session.asyncio, "wait_for", instant_timeout
+            ),
+        ):
+            with self.assertRaises(BrowserSessionError) as raised:
+                await self.daemon._dispatch_control(
+                    {
+                        "op": "request",
+                        "platform": "reddit",
+                        "path": "/bridge/v1/reddit/home-feed",
+                        "entries": [],
+                        "referer": "https://www.reddit.com/",
+                    },
+                    progress_sink,  # type: ignore[arg-type]
+                )
+
+        self.assertEqual(raised.exception.code, "timeout")
+        outcome = raised.exception.outcome
+        assert outcome is not None
+        self.assertEqual(outcome.status, "timeout_cancelled")
+        self.assertTrue(outcome.cancel_delivered)
+        self.assertIsNone(outcome.cancel_error)
+        self.assertEqual(
+            [message["type"] for message in self.extension.messages],
+            ["request", "cancel"],
+        )
+        self.assertEqual(
+            [event["outcome"] for event in progress if event["stage"] == "cancel"],
+            ["timeout_cancelled"],
+        )
+        self.assertEqual(
+            [
+                event["message"]
+                for event in progress
+                if event["stage"] == "cancel"
+            ],
+            ["请求超时，已取消扩展侧等待"],
+        )
+
+    async def test_timeout_reports_when_cancel_could_not_be_delivered(self) -> None:
+        progress: list[dict[str, object]] = []
+        failing = FakeExtension(cancel_error=OSError("connection lost"))
+        self.daemon.connections[INSTANCE_ID] = failing  # type: ignore[assignment]
+
+        async def progress_sink(event: dict[str, object]) -> None:
+            progress.append(event)
+
+        async def instant_timeout(
+            awaitable: object,
+            timeout: float,
+        ) -> object:
+            del timeout
+            await asyncio.sleep(0)
+            raise TimeoutError
+
+        with (
+            patch.object(self.daemon, "_select", return_value=failing),
+            patch.object(
+                browser_session.asyncio, "wait_for", instant_timeout
+            ),
+        ):
+            with self.assertRaises(BrowserSessionError) as raised:
+                await self.daemon._dispatch_control(
+                    {
+                        "op": "request",
+                        "platform": "reddit",
+                        "path": "/bridge/v1/reddit/home-feed",
+                        "entries": [],
+                        "referer": "https://www.reddit.com/",
+                    },
+                    progress_sink,  # type: ignore[arg-type]
+                )
+
+        # 取消发送失败不得吞掉超时结论：错误码仍是 timeout。
+        self.assertEqual(raised.exception.code, "timeout")
+        outcome = raised.exception.outcome
+        assert outcome is not None
+        self.assertEqual(outcome.status, "timeout_cancel_failed")
+        self.assertFalse(outcome.cancel_delivered)
+        self.assertIn("OSError", str(outcome.cancel_error))
+        self.assertEqual(
+            [message["type"] for message in failing.messages], ["request"]
+        )
+        self.assertEqual(
+            [event["outcome"] for event in progress if event["stage"] == "cancel"],
+            ["timeout_cancel_failed"],
+        )
+        self.assertEqual(
+            [
+                event["message"]
+                for event in progress
+                if event["stage"] == "cancel"
+            ],
+            ["请求超时，取消未送达扩展"],
+        )
+
+    async def test_caller_cancellation_reports_outcome_after_cancel(self) -> None:
+        progress: list[dict[str, object]] = []
+
+        async def progress_sink(event: dict[str, object]) -> None:
+            progress.append(event)
+
+        with patch.object(self.daemon, "_select", return_value=self.extension):
+            task = asyncio.create_task(
+                self.daemon._dispatch_control(
+                    {
+                        "op": "request",
+                        "platform": "reddit",
+                        "path": "/bridge/v1/reddit/home-feed",
+                        "entries": [],
+                        "referer": "https://www.reddit.com/",
+                    },
+                    progress_sink,  # type: ignore[arg-type]
+                )
+            )
+            await self._await_types("request")
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual(
+            [message["type"] for message in self.extension.messages],
+            ["request", "cancel"],
+        )
+        cancel_events = [
+            (event["outcome"], event["cancel_delivered"])
+            for event in progress
+            if event["stage"] == "cancel"
+        ]
+        self.assertEqual(cancel_events, [("caller_cancelled", True)])
+
+    async def _await_types(self, *wanted: str) -> None:
+        for _ in range(200):
+            seen = [message["type"] for message in self.extension.messages]
+            if all(kind in seen for kind in wanted):
+                return
+            await asyncio.sleep(0.005)
+        self.fail(f"extension never received {wanted!r}")
 
     async def test_task_cancellation_sends_cancel_and_clears_pending(self) -> None:
         task = asyncio.create_task(
@@ -1470,6 +1637,155 @@ class BrowserSessionWireTest(unittest.IsolatedAsyncioTestCase):
             worker.cancel()
             with suppress(asyncio.CancelledError):
                 await worker
+
+    async def test_timeout_outcome_and_cancel_reach_the_control_client(self) -> None:
+        """真实回环连接：请求超时后取消送达，调用方同时拿到错误码与结局。"""
+
+        received: list[dict[str, object]] = []
+        request_seen = asyncio.Event()
+        cancel_seen = asyncio.Event()
+
+        async def extension_worker() -> None:
+            async for raw in self.extension:
+                message = json.loads(raw)
+                received.append(message)
+                if message["type"] == "session":
+                    await self.extension.send(
+                        json.dumps(
+                            {
+                                "type": "response",
+                                "id": message["id"],
+                                "platform": message["platform"],
+                                "payload": {
+                                    "logged_in": True,
+                                    "request_ready": True,
+                                },
+                            }
+                        )
+                    )
+                elif message["type"] == "request":
+                    request_seen.set()
+                elif message["type"] == "cancel":
+                    cancel_seen.set()
+
+        worker = asyncio.create_task(extension_worker())
+        progress: list[dict[str, object]] = []
+        original_timeout = browser_session._rpc_timeout
+
+        def short_request_timeout(platform: str, kind: str) -> float:
+            if kind == "request":
+                return 0.05
+            return original_timeout(platform, kind)
+
+        try:
+            with (
+                patch.object(browser_session, "BRIDGE_PORT", self.port),
+                patch.object(
+                    browser_session,
+                    "session_home",
+                    return_value=Path(self.temporary.name),
+                ),
+                patch.object(
+                    browser_session, "_rpc_timeout", short_request_timeout
+                ),
+            ):
+                with self.assertRaises(BrowserSessionError) as raised:
+                    await asyncio.wait_for(
+                        browser_session.call_daemon(
+                            {
+                                "op": "request",
+                                "platform": "reddit",
+                                "path": "/bridge/v1/reddit/home-feed",
+                                "entries": [],
+                                "referer": "https://www.reddit.com/",
+                            },
+                            progress=progress.append,
+                        ),
+                        timeout=5,
+                    )
+        finally:
+            worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker
+
+        self.assertEqual(raised.exception.code, "timeout")
+        outcome = raised.exception.outcome
+        self.assertIsNotNone(outcome)
+        assert outcome is not None
+        self.assertEqual(outcome.status, "timeout_cancelled")
+        self.assertTrue(outcome.cancel_delivered)
+        await asyncio.wait_for(request_seen.wait(), 1)
+        await asyncio.wait_for(cancel_seen.wait(), 1)
+        cancel_events = [
+            event for event in progress if event.get("stage") == "cancel"
+        ]
+        self.assertEqual(len(cancel_events), 1)
+        self.assertEqual(cancel_events[0]["outcome"], "timeout_cancelled")
+        self.assertTrue(cancel_events[0]["cancel_delivered"])
+        self.assertIn("已取消", str(cancel_events[0]["message"]))
+
+
+class SessionCommandOutputTest(unittest.TestCase):
+    """`session request` 的诊断文本只能进 stderr，stdout 仍是纯 JSON。"""
+
+    def _run(self, error: BrowserSessionError) -> tuple[int, str, str]:
+        stdout, stderr = StringIO(), StringIO()
+        with (
+            patch.object(browser_session, "start_daemon"),
+            patch.object(
+                browser_session,
+                "call_daemon",
+                new_callable=AsyncMock,
+                side_effect=error,
+            ),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            code = browser_session.main(
+                [
+                    "request",
+                    "reddit",
+                    "/bridge/v1/reddit/home-feed",
+                    "--referer",
+                    "https://www.reddit.com/",
+                ]
+            )
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_timeout_with_delivered_cancel_is_reported_on_stderr(self) -> None:
+        error = BrowserSessionError(
+            "timeout",
+            outcome=RpcOutcome(
+                status="timeout_cancelled",
+                request_id="a" * 32,
+                kind="request",
+                platform="reddit",
+                cancel_delivered=True,
+            ),
+        )
+        code, stdout, stderr = self._run(error)
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("已取消", stderr)
+        self.assertIn("browser-session: timeout", stderr)
+
+    def test_timeout_with_undelivered_cancel_is_reported_on_stderr(self) -> None:
+        error = BrowserSessionError(
+            "timeout",
+            outcome=RpcOutcome(
+                status="timeout_cancel_failed",
+                request_id="b" * 32,
+                kind="request",
+                platform="reddit",
+                cancel_delivered=False,
+                cancel_error="OSError: connection lost",
+            ),
+        )
+        code, stdout, stderr = self._run(error)
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("取消未送达扩展", stderr)
+        self.assertIn("browser-session: timeout", stderr)
 
 
 if __name__ == "__main__":

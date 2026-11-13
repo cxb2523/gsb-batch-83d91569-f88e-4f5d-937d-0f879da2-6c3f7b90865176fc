@@ -220,12 +220,126 @@ _LOCAL_LOCKS_GUARD = threading.Lock()
 ProgressSink = Callable[[dict[str, Any]], Awaitable[None]]
 ProgressCallback = Callable[[dict[str, Any]], None]
 
+# RPC 等待被取消时的结构化结局。与错误码 "timeout" 并存：错误码保持原语义，
+# 结局说明取消消息是否真的送达扩展，供调用方判断能否安全重试。
+RPC_OUTCOME_TIMEOUT_CANCELLED = "timeout_cancelled"
+RPC_OUTCOME_TIMEOUT_CANCEL_FAILED = "timeout_cancel_failed"
+RPC_OUTCOME_CALLER_CANCELLED = "caller_cancelled"
+
+
+@dataclass(frozen=True)
+class RpcOutcome:
+    """一次 RPC 等待以超时或取消收尾时的结局。
+
+    status 区分三种情况：
+    - ``timeout_cancelled``：等待超时，取消消息已送达扩展；
+    - ``timeout_cancel_failed``：等待超时，取消消息发送失败（扩展可能仍在处理）；
+    - ``caller_cancelled``：等待期间调用方主动取消。
+
+    ``cancel_delivered`` 单独记录取消消息是否送达，避免发送失败吞掉超时结论。
+    """
+
+    status: str
+    request_id: str
+    kind: str
+    platform: str
+    cancel_delivered: bool
+    cancel_error: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "request_id": self.request_id,
+            "kind": self.kind,
+            "platform": self.platform,
+            "cancel_delivered": self.cancel_delivered,
+            "cancel_error": self.cancel_error,
+        }
+
+
+OUTCOME_MESSAGES = {
+    RPC_OUTCOME_TIMEOUT_CANCELLED: "请求超时，已取消扩展侧等待",
+    RPC_OUTCOME_TIMEOUT_CANCEL_FAILED: "请求超时，取消未送达扩展",
+}
+OUTCOME_CANCELLED_DELIVERED = "等待已取消，取消已送达扩展"
+OUTCOME_CANCELLED_UNDELIVERED = "等待已取消，取消未送达扩展"
+
+
+def get_rpc_outcome(error: BaseException) -> RpcOutcome | None:
+    """读取挂在 CancelledError 上的取消结局；没有则返回 None。"""
+
+    outcome = getattr(error, "outcome", None)
+    return outcome if isinstance(outcome, RpcOutcome) else None
+
+
+def rpc_outcome_event(outcome: RpcOutcome) -> dict[str, Any]:
+    """把 RPC 结局转换为终端进度事件，供守护进程和 CLI 共用同一套文案。"""
+
+    if outcome.status in OUTCOME_MESSAGES:
+        message = OUTCOME_MESSAGES[outcome.status]
+    elif outcome.cancel_delivered:
+        message = OUTCOME_CANCELLED_DELIVERED
+    else:
+        message = OUTCOME_CANCELLED_UNDELIVERED
+    return {
+        "event": "progress",
+        "stage": "cancel",
+        "label": "等待",
+        "message": message,
+        "platform": outcome.platform,
+        "outcome": outcome.status,
+        "cancel_delivered": outcome.cancel_delivered,
+    }
+
+
+def _rpc_outcome_from_wire(value: Any) -> RpcOutcome | None:
+    """从控制通道响应还原结局；字段不完整时返回 None，不影响原有错误处理。"""
+
+    if not isinstance(value, dict):
+        return None
+    status = value.get("status")
+    request_id = value.get("request_id")
+    kind = value.get("kind")
+    platform = value.get("platform")
+    cancel_delivered = value.get("cancel_delivered")
+    cancel_error = value.get("cancel_error")
+    if (
+        status
+        not in {
+            RPC_OUTCOME_TIMEOUT_CANCELLED,
+            RPC_OUTCOME_TIMEOUT_CANCEL_FAILED,
+            RPC_OUTCOME_CALLER_CANCELLED,
+        }
+        or not isinstance(request_id, str)
+        or not isinstance(kind, str)
+        or not isinstance(platform, str)
+        or not isinstance(cancel_delivered, bool)
+        or (cancel_error is not None and not isinstance(cancel_error, str))
+    ):
+        return None
+    return RpcOutcome(
+        status=status,
+        request_id=request_id,
+        kind=kind,
+        platform=platform,
+        cancel_delivered=cancel_delivered,
+        cancel_error=cancel_error,
+    )
+
 
 class BrowserSessionError(RuntimeError):
     """边界明确的桥接或扩展错误。"""
 
-    def __init__(self, code: str, message: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str | None = None,
+        *,
+        outcome: RpcOutcome | None = None,
+    ) -> None:
         self.code = code
+        # 仅超时路径携带；其他错误保持为 None，现有调用方无需感知。
+        self.outcome = outcome
         super().__init__(message or code)
 
 
@@ -314,13 +428,16 @@ def _write_private(path: Path, value: str) -> None:
             target.flush()
             os.fsync(target.fileno())
         os.replace(temporary, path)
-        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        directory = os.open(path.parent, directory_flags)
-        try:
-            with suppress(OSError):
-                os.fsync(directory)
-        finally:
-            os.close(directory)
+        if os.name != "nt":
+            # Windows 不允许以 O_RDONLY 打开目录，NTFS 也不支持目录 fsync；
+            # 仅 POSIX 需要补齐目录项落盘。
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory = os.open(path.parent, directory_flags)
+            try:
+                with suppress(OSError):
+                    os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -795,12 +912,32 @@ class BridgeDaemon:
         extension: _Extension,
         request_id: str,
         platform: str,
-    ) -> None:
+    ) -> str | None:
+        """尽力发出取消消息，返回失败原因；成功返回 None。
+
+        取消只在尽力而为：失败不能改变已发生的超时结论，也不能向上抛出，
+        否则调用方会误以为获得了新的错误码。
+        """
+
         try:
             await extension.send(
                 {"type": "cancel", "id": request_id, "platform": platform}
             )
-        except (ConnectionClosed, OSError, RuntimeError):
+        except (ConnectionClosed, WebSocketException, OSError, RuntimeError) as exc:
+            return f"{type(exc).__name__}: {exc}"
+        return None
+
+    @staticmethod
+    async def _emit_rpc_outcome(
+        sink: ProgressSink | None,
+        outcome: RpcOutcome | None,
+    ) -> None:
+        if sink is None or outcome is None:
+            return
+        try:
+            await sink(rpc_outcome_event(outcome))
+        except (ConnectionClosed, WebSocketException, OSError, RuntimeError):
+            # 诊断通道已断时不能掩盖原始的取消或超时结论。
             pass
 
     async def _rpc(
@@ -827,12 +964,49 @@ class BridgeDaemon:
             if not self._take_pending(request_id, future):
                 return await future
             future.cancel()
-            await self._send_cancel(extension, request_id, platform)
-            raise BrowserSessionError("timeout") from exc
-        except asyncio.CancelledError:
+            cancel_error = await self._send_cancel(extension, request_id, platform)
+            outcome = RpcOutcome(
+                status=(
+                    RPC_OUTCOME_TIMEOUT_CANCELLED
+                    if cancel_error is None
+                    else RPC_OUTCOME_TIMEOUT_CANCEL_FAILED
+                ),
+                request_id=request_id,
+                kind=kind,
+                platform=platform,
+                cancel_delivered=cancel_error is None,
+                cancel_error=cancel_error,
+            )
+            # 错误码保持 "timeout"；结局挂在异常上，发送失败不得吞掉超时结论。
+            raise BrowserSessionError("timeout", outcome=outcome) from exc
+        except asyncio.CancelledError as exc:
             if self._take_pending(request_id, future):
                 future.cancel()
-                await self._send_cancel(extension, request_id, platform)
+                try:
+                    cancel_error = await self._send_cancel(
+                        extension, request_id, platform
+                    )
+                except asyncio.CancelledError:
+                    # 取消期间再次收到取消：记录未送达后继续传播取消。
+                    exc.outcome = RpcOutcome(
+                        status=RPC_OUTCOME_CALLER_CANCELLED,
+                        request_id=request_id,
+                        kind=kind,
+                        platform=platform,
+                        cancel_delivered=False,
+                        cancel_error="CancelledError",
+                    )
+                    raise
+                # 取消语义必须原样传播（不能改成返回值或新异常），因此把
+                # 结局附在 CancelledError 上，由调用方按需读取。
+                exc.outcome = RpcOutcome(
+                    status=RPC_OUTCOME_CALLER_CANCELLED,
+                    request_id=request_id,
+                    kind=kind,
+                    platform=platform,
+                    cancel_delivered=cancel_error is None,
+                    cancel_error=cancel_error,
+                )
             raise
         finally:
             if self._take_pending(request_id, future) and not future.done():
@@ -1069,11 +1243,17 @@ class BridgeDaemon:
                 if normalized["referer"]
                 else None
             )
-            extension = await self._select(
-                platform,
-                True,
-                session_values,
-            )
+            # 探测阶段的 RPC 也可能在等待中被调用方取消；把结局从 CancelledError
+            # 取出并输出，保证取消结论不会因发生在 _select 内部而丢失。
+            try:
+                extension = await self._select(
+                    platform,
+                    True,
+                    session_values,
+                )
+            except asyncio.CancelledError as exc:
+                await self._emit_rpc_outcome(progress, get_rpc_outcome(exc))
+                raise
             await self._progress(
                 progress,
                 "session",
@@ -1094,12 +1274,18 @@ class BridgeDaemon:
             try:
                 result = await self._rpc(extension, "request", platform, values)
             except BrowserSessionError as exc:
+                if exc.outcome is not None:
+                    await self._emit_rpc_outcome(progress, exc.outcome)
                 if exc.code in INTERACTIVE_LOGIN_ERRORS or exc.code in {
                     "advertiser_account_required",
                     "csrf_or_signature_expired",
                     "transport_modules_changed",
                 }:
                     self._forget_ready_route(platform)
+                raise
+            except asyncio.CancelledError as exc:
+                # 调用方取消：结局挂在 CancelledError 上，取出后继续传播取消。
+                await self._emit_rpc_outcome(progress, get_rpc_outcome(exc))
                 raise
             self._remember_ready_route(platform, extension)
             await self._progress(
@@ -1149,6 +1335,9 @@ class BridgeDaemon:
             return
         except BrowserSessionError as exc:
             response = {"ok": False, "error": exc.code, "message": str(exc)}
+            if exc.outcome is not None:
+                # 调用方据此判断取消是否送达、能否安全重试；错误码保持不变。
+                response["outcome"] = exc.outcome.as_dict()
         finally:
             for task in (closed_task, dispatch_task):
                 if task is not None and not task.done():
@@ -1222,7 +1411,12 @@ async def call_daemon(
             else "invalid_response"
         )
         message = response.get("message") if isinstance(response, dict) else None
-        raise BrowserSessionError(str(code), message)
+        outcome = (
+            _rpc_outcome_from_wire(response.get("outcome"))
+            if isinstance(response, dict)
+            else None
+        )
+        raise BrowserSessionError(str(code), message, outcome=outcome)
     return response.get("result")
 
 
@@ -1665,6 +1859,7 @@ def main(argv: list[str] | None = None) -> int:
             start_daemon()
             if args.command == "start":
                 request = {"op": "ping"}
+                result = asyncio.run(call_daemon(request))
             else:
                 request = {
                     "op": "request",
@@ -1675,7 +1870,16 @@ def main(argv: list[str] | None = None) -> int:
                     "method": args.method,
                     "request_interval_ms": args.request_interval_ms,
                 }
-            result = asyncio.run(call_daemon(request))
+                report_progress = stderr_progress()
+                try:
+                    result = asyncio.run(
+                        call_daemon(request, progress=report_progress)
+                    )
+                except BrowserSessionError as exc:
+                    if exc.outcome is not None:
+                        # 进度通道可能已断开，这里再兜底输出一次；去重保证不重复。
+                        report_progress(rpc_outcome_event(exc.outcome))
+                    raise
     except BrowserSessionError as exc:
         print(f"browser-session: {exc}", file=sys.stderr)
         return 1

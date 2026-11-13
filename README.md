@@ -438,6 +438,11 @@ reverse session stop
 本机会话目录可以通过 `BROWSER_SESSION_HOME` 覆盖。目录只保存本机控制令牌、扩展实例
 摘要、平台绑定、运行锁和诊断日志，不保存平台 Cookie。
 
+扩展回包超时后，桥接端会尽力向扩展发送取消消息，并把结局随 `timeout` 一起交给调用方：
+`timeout_cancelled` 表示取消已送达扩展，`timeout_cancel_failed` 表示取消未送达（扩展可能
+仍在处理），等待期间被调用方取消则为 `caller_cancelled`。`session request` 把这些结局以
+`[等待] ...` 进度行写入 stderr；stdout 仍然只有 JSON 结果，不混入诊断文本。
+
 ## Reddit 请求策略
 
 Reddit HTTP 使用 `curl_cffi.requests.Session`，统一复用会话和 Cookie jar，并先访问
