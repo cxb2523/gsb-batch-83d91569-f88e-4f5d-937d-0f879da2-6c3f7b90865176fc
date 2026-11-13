@@ -1054,6 +1054,8 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     # them called it.
     products = (_parse_for_mode(html, page.url, args, page_num)
                 if page_flow.should_parse(state) else [])
+    first_batch_rows = len(products)
+    walk_new_rows = 0
     if walked_rows:
         # Batch 1 came from the served list, complete and enriched; the walk's
         # rows come from the rendered grid and carry less, which is what
@@ -1062,12 +1064,20 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         # places is how the two disagree.
         first_skus = {r.sku for r in products if r.sku}
         fresh = [r for r in walked_rows if r.sku not in first_skus]
+        walk_new_rows = len(fresh)
         logger.info("The walk added %d row(s) beyond the served list's %d.",
                     len(fresh), len(products))
         for i, row in enumerate(fresh, start=1):
             row.page = 2 + (i - 1) // max(len(products), 1)
             row.position = 1 + (i - 1) % max(len(products), 1)
         products = products + fresh
+    if outcome.walk is not None:
+        # Recorded on the walk itself so the sidecar's walk_coverage is built
+        # from the same numbers the log lines above printed -- the two cannot
+        # drift apart, and a reader of .meta.json can check one against the
+        # other.
+        outcome.walk["first_batch_rows"] = first_batch_rows
+        outcome.walk["walk_new_rows"] = walk_new_rows
     logger.info("Parsed %d row(s) from batch %d.", len(products), page_num)
 
     if args.mode == "listing" and page_num == 1:
@@ -1198,13 +1208,12 @@ def scrape(args) -> int:
             # for byte -- so `_fetch_one_page` does the walk internally and
             # what comes back already spans the run.
             seen_keys.update(p.sku for p in first.products if p.sku is not None)
-            walk = first.walk or {}
-            if args.pages > 1 and not walk:
-                stop_reason = "walk_did_not_start"
-            elif walk.get("gaps"):
-                stop_reason = "walk_gaps"
-            elif walk.get("hit_cap"):
-                stop_reason = "result_cap_reached"
+            # The walk's say over the stop reason is page_flow's, so all
+            # three engines rank the three early stops identically and none
+            # of them can collapse one into "completed".
+            reason = page_flow.walk_stop_reason(args.pages, first.walk)
+            if reason:
+                stop_reason = reason
 
     finally:
         if session is not None:
@@ -1275,6 +1284,12 @@ def scrape(args) -> int:
     headers = {o.page_num: o.header for o in outcomes if o.header}
     if walks or headers:
         extra = {"walk": walks, "result_header": headers}
+    if walks:
+        # Flat and beside stop_reason, so a reader of the state file sees how
+        # far the walk got, what it skipped and how many rows it added without
+        # replaying the log. One walk happens per run, on the one fetch.
+        extra["walk_coverage"] = page_flow.walk_coverage(
+            next(iter(walks.values())))
     capped = [n for n, w in walks.items() if w and w.get("hit_cap")]
     if capped:
         logger.warning(

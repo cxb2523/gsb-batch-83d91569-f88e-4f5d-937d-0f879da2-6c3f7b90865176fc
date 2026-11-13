@@ -333,6 +333,66 @@ def walk_virtualised(count: Callable[[str], int],
             "hit_cap": highest >= RESULT_CAP, "final_step_px": step}
 
 
+def walk_stop_reason(pages: int, walk: Optional[dict]) -> Optional[str]:
+    """The stop_reason a listing run's walk implies, shared by all engines.
+
+    None when the walk has no say -- a single-batch run never walks, so its
+    reason is decided elsewhere. The three early stops are NOT complete
+    states and must never be collapsed into "completed":
+
+        walk_did_not_start   more than one batch was asked for and the walk
+                             never ran -- the page never hydrated, so the run
+                             holds batch 1 and nothing past it
+        walk_gaps            the walk outran its harvest; stretches of the
+                             list went by unread and the row count is a floor
+        result_cap_reached   the site's own 10,000-per-address ceiling ended
+                             the walk; the catalogue continues past it
+
+    Gaps outrank the cap: a walk can hit the ceiling AND have skipped rows
+    on the way, and the skipped rows are the worse news.
+    """
+    if pages <= 1:
+        return None
+    if not walk:
+        return "walk_did_not_start"
+    if walk.get("gaps"):
+        return "walk_gaps"
+    if walk.get("hit_cap"):
+        return "result_cap_reached"
+    return "completed"
+
+
+def walk_coverage(walk: dict) -> dict:
+    """The checkable summary of one walk, for the run's `.meta.json` sidecar.
+
+    Flat and beside `stop_reason`, so a reader of the state file can see how
+    far the walk got, what it cost, and what it yielded without replaying the
+    log. Every number is copied from the walk dict the engine's log lines
+    were printed from, so the sidecar and the log cannot disagree:
+
+        counter_reached   where the site's own "1 - N of 10,000+" counter
+                          stopped -- how far down the list the walk got
+        steps             scroll steps spent getting there
+        gaps              times the window jumped a stretch nobody read
+        hit_cap           whether the site's 10,000-per-address ceiling
+                          ended the walk
+        harvested         distinct rows the walk's harvests collected,
+                          INCLUDING the ones batch 1 already had
+        walk_new_rows     rows the walk added beyond the served first batch
+        first_batch_rows  rows the served first batch held, so the walk's
+                          contribution is readable as a share of the run
+    """
+    return {
+        "counter_reached": walk.get("counter_reached", 0),
+        "steps": walk.get("steps", 0),
+        "gaps": walk.get("gaps", 0),
+        "hit_cap": bool(walk.get("hit_cap")),
+        "harvested": walk.get("harvested", 0),
+        "walk_new_rows": walk.get("walk_new_rows", 0),
+        "first_batch_rows": walk.get("first_batch_rows", 0),
+    }
+
+
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------

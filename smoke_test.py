@@ -62,7 +62,7 @@ from output_writer import (_atomic, write_json, write_run_meta, Product, save, f
                            dedupe_by_key, ROW_CLASS_BY_MODE,
                            UNIQUE_BY_SKU_MODES, SOURCE_DEFAULT,
                            EXIT_BLOCKED, EXIT_NO_PRODUCTS, EXIT_PARTIAL,
-                           EXIT_API_ERROR)
+                           EXIT_API_ERROR, EXIT_FETCH_FAILED)
 from product_parser import (is_empty_document, parse_products, parse_posting, parse_rendered_cards,
                             page_currency, page_url, paginates_by_url,
                             pagination_refusal, category_from_url,
@@ -1730,6 +1730,134 @@ def test_walk_machinery():
                  page_flow.window_high(None),
                  page_flow.window_high("retrieving more"))
                 == (6, 10000, None, None))
+    return ok
+
+
+def test_walk_coverage():
+    section("Walk coverage in the run sidecar")
+    ok = True
+    # Batch 1, as a served-list run parses it. The walk's own record is
+    # fabricated: walk_virtualised's return plus the two row counts the
+    # engine records where it logs them. No network, no browser.
+    rows = parse_products(LISTING_NEWYORK, LISTING_URL, page=1)
+    first_batch = len(rows)
+
+    def walk(**kw):
+        w = {"counter_reached": 0, "steps": 0, "gaps": 0, "hit_cap": False,
+             "final_step_px": page_flow.SCROLL_STEP_PX, "harvested": 0,
+             "first_batch_rows": first_batch, "walk_new_rows": 0}
+        w.update(kw)
+        return w
+
+    with tempfile.TemporaryDirectory() as d:
+        def run(name, pages, walk_result, run_rows=rows, mode="listing"):
+            # The same plumbing the engines' scrape() runs: the stop reason
+            # is page_flow's call, and the coverage is built from the walk
+            # dict the log lines were printed from.
+            extra = None
+            if walk_result:
+                extra = {"walk": {"1": walk_result},
+                         "walk_coverage": page_flow.walk_coverage(walk_result)}
+            reason = ("single_page_mode" if mode == "posting"
+                      else page_flow.walk_stop_reason(pages, walk_result)
+                      or "completed")
+            with redirect_stdout(io.StringIO()):
+                rc = finish_run(run_rows, os.path.join(d, name), "json", False,
+                                blocked=False, stop_reason=reason,
+                                pages_requested=pages, pages_completed=1,
+                                start_url=LISTING_URL, final_url=LISTING_URL,
+                                mode=mode, extra=extra)
+            meta = json.load(open(os.path.join(d, name + ".meta.json")))
+            written = json.load(open(os.path.join(d, name + ".json")))
+            return rc, meta, written
+
+        # 1. A walk that ran clean: the run is complete, and the sidecar
+        # carries where the counter stopped, what it cost and what it added.
+        rc, meta, written = run("clean", 3, walk(
+            counter_reached=900, steps=50, harvested=first_batch + 40,
+            walk_new_rows=40))
+        ok &= check("a clean walk is a complete run", rc == 0
+                    and meta["status"] == "complete"
+                    and meta["stop_reason"] == "completed")
+        cov = meta.get("walk_coverage") or {}
+        ok &= check("the sidecar carries the walk's own numbers",
+                    (cov.get("counter_reached"), cov.get("steps"),
+                     cov.get("gaps"), cov.get("hit_cap"),
+                     cov.get("harvested"), cov.get("walk_new_rows"),
+                     cov.get("first_batch_rows"))
+                    == (900, 50, 0, False, first_batch + 40, 40, first_batch))
+        ok &= check("a complete walk wrote every gathered row",
+                    [r["sku"] for r in written] == [r.sku for r in rows])
+
+        # 2. Gaps: PARTIAL, the gap count is in the sidecar, and the rows
+        # gathered before and after the gap are all still written.
+        rc, meta, written = run("gapped", 3, walk(
+            counter_reached=700, steps=60, gaps=2, harvested=first_batch + 25,
+            walk_new_rows=25))
+        ok &= check("a gapped walk keeps stop_reason walk_gaps and exits 6",
+                    rc == EXIT_PARTIAL and meta["status"] == "partial"
+                    and meta["stop_reason"] == "walk_gaps")
+        ok &= check("the sidecar counts the gaps",
+                    (meta.get("walk_coverage") or {}).get("gaps") == 2)
+        ok &= check("a gapped run still wrote every gathered row",
+                    len(written) == len(rows))
+
+        # 3. The site's ceiling: PARTIAL, hit_cap is in the sidecar.
+        rc, meta, written = run("capped", 34, walk(
+            counter_reached=RESULT_CAP, steps=550, hit_cap=True,
+            harvested=first_batch + 9000, walk_new_rows=9000))
+        ok &= check("a capped walk keeps stop_reason result_cap_reached",
+                    rc == EXIT_PARTIAL
+                    and meta["stop_reason"] == "result_cap_reached")
+        ok &= check("the sidecar says the ceiling was hit, and where",
+                    ((meta.get("walk_coverage") or {}).get("hit_cap"),
+                     (meta.get("walk_coverage") or {}).get("counter_reached"))
+                    == (True, RESULT_CAP))
+        ok &= check("a capped run still wrote every gathered row",
+                    len(written) == len(rows))
+
+        # 4. The walk never started: no coverage fields at all, the reason
+        # says why, and batch 1's rows are not thrown away.
+        rc, meta, written = run("nowalk", 3, None)
+        ok &= check("a walk that never started keeps walk_did_not_start",
+                    rc == EXIT_PARTIAL
+                    and meta["stop_reason"] == "walk_did_not_start")
+        ok &= check("and carries no walk coverage it cannot back",
+                    "walk_coverage" not in meta and "walk" not in meta)
+        ok &= check("batch 1 is still written when the walk never ran",
+                    len(written) == len(rows))
+
+        # Gaps outrank the cap: a walk can do both, and the skipped rows are
+        # the worse news.
+        ok &= check("gaps outrank the ceiling in the stop reason",
+                    page_flow.walk_stop_reason(
+                        3, walk(gaps=1, hit_cap=True,
+                                counter_reached=RESULT_CAP)) == "walk_gaps")
+
+        # Negative: a single-batch run and a posting run get no walk fields,
+        # and their stop reasons are untouched.
+        rc, meta, _ = run("single", 1, None)
+        ok &= check("a single-batch run has no walk fields and exits 0",
+                    rc == 0 and meta["stop_reason"] == "completed"
+                    and "walk_coverage" not in meta)
+        rc, meta, _ = run("posting", 1, None, mode="posting")
+        ok &= check("a posting run has no walk fields either",
+                    rc == 0 and meta["stop_reason"] == "single_page_mode"
+                    and "walk_coverage" not in meta)
+
+        # The existing endings are not rewritten by the new fields: a run
+        # holding nothing is exit 5 when it did not finish, and no sidecar
+        # contradicts the previous good output it refused to overwrite.
+        with redirect_stdout(io.StringIO()):
+            rc = finish_run([], os.path.join(d, "empty"), "json", False,
+                            blocked=False, stop_reason="walk_did_not_start",
+                            pages_requested=3, pages_completed=1,
+                            start_url=LISTING_URL, final_url=LISTING_URL,
+                            mode="listing")
+        ok &= check("nothing gathered + walk never started is exit 5, "
+                    "not an empty result", rc == EXIT_FETCH_FAILED)
+        ok &= check("and no sidecar is written for a run that gathered "
+                    "nothing", not os.path.exists(os.path.join(d, "empty.meta.json")))
     return ok
 
 
@@ -3627,6 +3755,7 @@ def main():
     ok &= test_markers_match_no_good_page()
     ok &= test_rendered_grid()
     ok &= test_walk_machinery()
+    ok &= test_walk_coverage()
     ok &= test_page_flow_policy()
     ok &= test_output_contract()
     ok &= test_writers()
