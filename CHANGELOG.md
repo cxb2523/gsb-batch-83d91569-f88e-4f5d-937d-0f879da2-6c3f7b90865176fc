@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add a per-file manifest to each scan result: every discovered `.jsonl` and `.jsonl.zst` log is listed with its path, a status (`parsed`, `cached`, `superseded`, `failed`) and, for read failures, the error message. When a session exists in both the active and archived folders, both copies appear and the replaced one points to the kept file. Manifest order is stable across scans.
+- Treat a plain session log whose lines are all unreadable as a per-file read failure instead of failing the whole scan or inventing an empty session; the failed file is excluded from session totals and never served from a stale cache. Corrupted `.jsonl.zst` archives still fail the whole scan so missing archives cannot trigger session deletions downstream.
+
 ## 1.7.3 — 2026-11-11
 
 - Show the reported Codex credit balance and its observation time next to the weekly quota. Plot credit balances and their net change on a separate scale within the weekly consumption panel.

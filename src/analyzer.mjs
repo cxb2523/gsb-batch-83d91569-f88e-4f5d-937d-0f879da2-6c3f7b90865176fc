@@ -100,6 +100,11 @@ function number(value) {
   return Number.isFinite(Number(value)) ? Number(value) : 0;
 }
 
+// Code-point comparison keeps manifest ordering identical across locales.
+function comparePaths(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 export function normalizeUsage(raw = {}) {
   return {
     inputTokens: number(raw.input_tokens),
@@ -263,6 +268,7 @@ export async function parseSessionFile(filePath, threadNames = new Map()) {
   input.setEncoding("utf8");
   const lines = readline.createInterface({ input, crlfDelay: Infinity });
   let lineNumber = 0;
+  let validRows = 0;
 
   try {
     for await (const line of lines) {
@@ -275,6 +281,7 @@ export async function parseSessionFile(filePath, threadNames = new Map()) {
         parseErrors.push(lineNumber);
         continue;
       }
+      validRows += 1;
 
       const timestamp = row.timestamp || null;
       if (timestamp) {
@@ -372,6 +379,12 @@ export async function parseSessionFile(filePath, threadNames = new Map()) {
     source.destroy();
   }
 
+  // A file whose every line is unreadable is corrupt, not an empty session:
+  // report it as a read failure instead of inventing a token-less session.
+  if (validRows === 0 && lineNumber > 0) {
+    throw new Error("Aucune ligne JSON valide dans le fichier de session.");
+  }
+
   const sessionId = meta?.id || meta?.session_id || path.basename(filePath).replace(/\.jsonl(?:\.zst)?$/, "");
   const turnList = [...turns.values()];
   const models = [...new Set(calls.map((call) => call.model).filter(Boolean))];
@@ -414,8 +427,10 @@ export async function analyzeCodexUsage(options = {}) {
   const names = await loadThreadNames(path.dirname(source.sessionIndexPath), source.sessionIndexPath);
   const roots = [source.sessionsPath, source.archivedSessionsPath];
   const fileLists = await Promise.all(roots.map(walkJsonl));
-  const files = fileLists.flat();
+  const filePaths = fileLists.flat();
   const sessions = [];
+  const failures = [];
+  const outcomes = [];
   const previousSessions = options.previousData?.analyzerVersion === ANALYZER_VERSION
     ? options.previousData.sessions || []
     : [];
@@ -425,38 +440,60 @@ export async function analyzeCodexUsage(options = {}) {
   const concurrency = Math.max(1, Math.min(32, Number(options.concurrency) || 16));
   let cursor = 0;
   await Promise.all(Array.from({ length: concurrency }, async () => {
-    while (cursor < files.length) {
-      const file = files[cursor++];
+    while (cursor < filePaths.length) {
+      const file = filePaths[cursor++];
       try {
         const info = await stat(file);
         const previous = previousByFile.get(file);
         if (previous && previous.fileSize === info.size && previous.fileModifiedAtMs === info.mtimeMs) {
           const title = names.get(previous.id) || previous.title || "Conversation sans titre";
-          sessions.push(title === previous.title ? previous : { ...previous, title });
+          const session = title === previous.title ? previous : { ...previous, title };
+          sessions.push(session);
+          outcomes.push({ filePath: file, status: "cached", session });
         } else {
-          sessions.push({
+          const session = {
             ...await parseSessionFile(file, names),
             fileSize: info.size,
             fileModifiedAtMs: info.mtimeMs,
-          });
+          };
+          sessions.push(session);
+          outcomes.push({ filePath: file, status: "parsed", session });
         }
       } catch (error) {
-        sessions.push({ filePath: file, error: error.message });
+        // A failed file is reported, never replaced by a stale cached copy:
+        // previousByFile only holds successfully parsed sessions, and a changed
+        // file that no longer parses lands here instead of reusing its entry.
+        failures.push({ filePath: file, error: error.message });
+        outcomes.push({ filePath: file, status: "failed", error: error.message });
       }
     }
   }));
 
   // A failed archive read must not become a successful partial snapshot whose
   // missing sessions would then be deleted from both SQLite and the Mesh hub.
-  const archiveError = sessions.find((session) => session.error && session.filePath.endsWith(".jsonl.zst"));
+  const archiveError = failures.find((failure) => failure.filePath.endsWith(".jsonl.zst"));
   if (archiveError) throw new Error(`Lecture de l'archive Codex impossible : ${archiveError.filePath}: ${archiveError.error}`);
 
-  // A session may briefly exist in both active and archived folders. Keep the newest copy.
+  // A session may briefly exist in both active and archived folders. Keep the
+  // newest copy. Iterate in path order so ties resolve deterministically and
+  // the file manifest stays comparable between scans.
   const unique = new Map();
-  for (const session of sessions.filter((item) => item.id)) {
+  const orderedSessions = [...sessions].sort((left, right) => comparePaths(left.filePath, right.filePath));
+  for (const session of orderedSessions) {
     const existing = unique.get(session.id);
     if (!existing || String(session.updatedAt) > String(existing.updatedAt)) unique.set(session.id, session);
   }
+
+  const files = outcomes.map((outcome) => {
+    if (outcome.status === "failed") {
+      return { filePath: outcome.filePath, status: "failed", sessionId: null, error: outcome.error, supersededBy: null };
+    }
+    const kept = unique.get(outcome.session.id);
+    if (kept && kept !== outcome.session) {
+      return { filePath: outcome.filePath, status: "superseded", sessionId: outcome.session.id, error: null, supersededBy: kept.filePath };
+    }
+    return { filePath: outcome.filePath, status: outcome.status, sessionId: outcome.session.id, error: null, supersededBy: null };
+  }).sort((left, right) => comparePaths(left.filePath, right.filePath));
 
   const weeklyQuotaHistory = mergeWeeklyQuotaObservations([...unique.values()]
     .flatMap((session) => session.weeklyQuotaHistory || (session.weeklyQuota ? [session.weeklyQuota] : [])));
@@ -473,7 +510,8 @@ export async function analyzeCodexUsage(options = {}) {
     weeklyQuota: weeklyQuotaHistory[0] || null,
     weeklyQuotaHistory,
     sessions: [...unique.values()].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))),
-    errors: sessions.filter((item) => item.error),
+    files,
+    errors: failures,
   };
 }
 
