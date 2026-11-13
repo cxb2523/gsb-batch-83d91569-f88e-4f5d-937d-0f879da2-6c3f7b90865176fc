@@ -165,6 +165,8 @@ Returns:
 { "cancelled": true }
 ```
 
+`agentFetchCancel` answers `cancelled: false` when no running or queued fetch has that id; the browser treats a second cancel of the same id the same way. A caller that needs idempotent cancellation, an explicit error for an unknown id, and a timeout that provably releases the hidden page gets them from the reference client in [`tools/agent_fetch_client.py`](tools/agent_fetch_client.py): it assigns every fetch a stable id, ends each fetch in exactly one result carrying a termination reason (`completed`, `cancelled` or `timeout`) and the elapsed time, discards any body that arrives after cancellation, and on timeout sends `Browser.agentFetchCancel` itself so the hidden page is torn down rather than left running. Its protocol-layer behaviour is covered by [`tests/test_agent_fetch_client.py`](tests/test_agent_fetch_client.py), which runs against a fake CDP transport with no browser involved.
+
 ### `Browser.getFingerprint`: what this browser shows pages
 
 **Release binary only.** Returns everything this browser settled on for pages to see: the brand, user agent and client hints, the GPU and WebGPU, the hardware, the screen and refresh rate, the device type, battery, media devices and media features, history length, connection, WebRTC address, time zone and place, languages, font bundles, voices, audio, text rendering, the canvas and WebGL noise, the seeds, and every fingerprint switch as the browser holds it. It is read in the browser process alone, so it answers while every tab is frozen, and no page sees the call. Use it to record or verify the identity a browser instance presents without running script in any page.
