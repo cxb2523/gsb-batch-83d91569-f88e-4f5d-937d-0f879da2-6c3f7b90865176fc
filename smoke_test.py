@@ -1,0 +1,4014 @@
+#!/usr/bin/env python3
+"""quora-scraper — offline smoke tests.
+
+One file of plain functions with fixtures loaded from `fixtures_generated.json`,
+no pytest required. `tests/test_smoke.py` wraps it as a single pytest test so
+`pytest` works as an entry point without a second copy of the checks.
+
+    python3 smoke_test.py
+
+It MUST pass with no engine library installed at all: every
+`import playwright_scraper` / `selenium_scraper` / `puppeteer_scraper` is
+guarded and the skip is REPORTED, because "skipped, engine absent" reads
+exactly like a passing run. CI's engine-smoke job installs each engine in its
+own venv and fails if that skip list is non-empty.
+
+The fixtures are cut from real captures by `make_fixtures.py`, which proves
+each one parses IDENTICALLY to its untrimmed original, column for column,
+and scrubs the challenge page's site keys. Do not hand-edit them.
+
+WHAT THIS SUITE IS FOR, beyond the obvious
+------------------------------------------
+Most of these checks exist because of a specific failure, in this repo or in
+a sibling. The ones worth knowing about before you change anything:
+
+  * `test_values_on_real_fixtures` asserts VALUES, not coverage. A column can
+    be 100% populated and entirely wrong — a sibling repo shipped a
+    `review_count` of 445279961 on every row of every mode while its coverage
+    check said 100%. The German fixture is the one that matters here:
+    `1.614 Bewertungen` is 1614, and `re.search(r"\\d+", ...)` returns 1.
+
+  * `test_engine_parity` binds every shared-module call in every engine
+    against the callee's REAL signature. Two engines in a sibling repo called
+    `classify(html, url=...)` where the parameter is positional, both crashed
+    on their first fetch, and nothing short of a live run saw it.
+
+  * `test_throttle_is_not_completion` pins the bug this repo's own first live
+    run found: a page turn refused by the site's rate limiter must NOT be
+    reported as the end of the listing, because `pagination_exhausted` is a
+    COMPLETE stop reason and a throttled run would say "complete" while
+    holding one page of six.
+"""
+
+import ast
+import contextlib
+import csv as csv_module
+import inspect
+import io
+import json
+import os
+import pathlib
+import re
+import sys
+import tempfile
+from dataclasses import asdict, fields
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import captcha_solver
+import env_config
+from fingerprint_client import (fingerprint_user_agent,
+                                playwright_context_kwargs)
+import page_flow
+import product_parser
+from diff_runs import diff_products
+from output_writer import (EXIT_FETCH_FAILED, Answer, Product, save, finish_run, write_csv,
+                           run_meta, dedupe_by_key, dedupe_by_sku,
+                           ROW_CLASS_BY_MODE, UNIQUE_BY_SKU_MODES,
+                           COMPLETE_STOP_REASONS, EXIT_BLOCKED,
+                           EXIT_NO_PRODUCTS, EXIT_PARTIAL, EXIT_API_ERROR,
+                           LIST_CSV_SEPARATOR, SOURCE_DEFAULT)
+import product_parser  # noqa: F401 — for the private helpers below
+from product_parser import (parse_answers, SELECTORS, HOSTS, LANGUAGE_HOSTS,
+                            NON_CONTENT_HOSTS, PAGE_CAP, NEXT_PAGE_SELECTOR,
+                            PAGINATES_BY_URL, PAGE_URL_REASON,
+                            RESERVED_FIRST_SEGMENTS, NO_RESULTS_MARKERS,
+                            CHALLENGE_MARKERS, BOT_CHALLENGE_MARKERS,
+                            SOLVABLE_CHALLENGES, category_from_url,
+                            detect_block_marker, detect_bot_challenge,
+                            detect_page_state, inline_payloads,
+                            answers_from_payloads, is_no_results,
+                            is_supported_host, is_space_host, language_of,
+                            listing_kind, normalize_url, page_url,
+                            paginates_by_url, permalink_key, render_rich_text,
+                            served_by_quora, site_host, source_of,
+                            strip_tracking, unsupported_reason,
+                            _display_name, _epoch_us_to_iso)
+from proxy_pool import ProxyPool, mask, to_playwright, split_credentials
+
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+ENGINES = ("playwright_scraper", "selenium_scraper", "puppeteer_scraper")
+SHARED_MODULES = {"page_flow": page_flow, "product_parser": product_parser}
+
+_failures = []
+_total_checks = 0
+
+
+def check(label, condition):
+    """Print and record one check. Returns the condition so callers can
+    accumulate with `ok &= check(...)`."""
+    global _total_checks
+    _total_checks += 1
+    if condition:
+        print("  PASS  %s" % label)
+    else:
+        print("  FAIL  %s" % label)
+        _failures.append(label)
+    return bool(condition)
+
+
+def group(title):
+    print("\n== %s" % title)
+
+
+def _raises(fn):
+    """True if `fn()` raises. Used where refusing is the correct behaviour."""
+    try:
+        fn()
+    except Exception:
+        return True
+    return False
+
+
+_FIXTURE_PATH = os.path.join(REPO_ROOT, "fixtures_generated.json")
+if not os.path.exists(_FIXTURE_PATH):
+    # Said in words rather than as a bare FileNotFoundError, because the
+    # first time this happened it was not missing from the disk — it was
+    # missing from the COMMIT. `.gitignore` carries a blanket `*.json` (a
+    # scraper's own output is large and stale by the time anyone reads it),
+    # which swallowed it silently: the whole suite was green locally and
+    # every CI job died at import. `test_required_files_are_committed` now
+    # catches that case directly.
+    raise SystemExit(
+        f"fixtures_generated.json is missing from {REPO_ROOT}.\n"
+        f"If you are in a clean checkout, it should have been committed — "
+        f"check that .gitignore's `*.json` rule still carries the "
+        f"`!fixtures_generated.json` exception.\n"
+        f"If you are regenerating fixtures, run: python3 make_fixtures.py")
+with open(_FIXTURE_PATH, encoding="utf-8") as _f:
+    FIXTURES = json.load(_f)
+URLS = FIXTURES["_URLS"]
+
+
+def fixture(name):
+    return FIXTURES[name]
+
+
+def rows_of(name, page=1):
+    return parse_answers(FIXTURES[name], URLS[name], page=page)
+
+
+def by_sku(name, page=1):
+    return {r.sku: r for r in rows_of(name, page)}
+
+
+# ---------------------------------------------------------------------------
+def _engine_source(module_name):
+    """The engine's source, or None when its driver is not installed.
+
+    Read off disk rather than through `inspect.getsource`, so a check about
+    an engine's TEXT does not itself need the engine's library.
+    """
+    path = os.path.join(REPO_ROOT, module_name + ".py")
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def test_numbers_and_prices():
+    group("Quora's own encodings")
+    ok = True
+
+    # RICH TEXT. Every string this site publishes — a question title, an
+    # answer, a credential — is itself a JSON document. Reading `.get("title")`
+    # and writing it to a column puts the whole blob in the row, which is the
+    # 100%-populated-and-entirely-wrong column the family rule exists to catch.
+    doc = ('{"sections": [{"spans": [{"text": "Hello ", "modifiers": {}}, '
+           '{"text": "world", "modifiers": {"bold": true}}], "type": "plain"}]}')
+    ok &= check("rich text renders spans in order",
+                render_rich_text(doc) == "Hello world")
+    listed = ('{"sections": [{"spans": [{"text": "one"}], '
+              '"type": "unordered-list"}, {"spans": [{"text": "two"}], '
+              '"type": "unordered-list"}]}')
+    ok &= check("list sections get a bullet",
+                render_rich_text(listed) == "- one\n- two")
+    image = ('{"sections": [{"spans": [{"text": "", "modifiers": '
+             '{"image": "https://example.invalid/x"}}], "type": "image"}]}')
+    ok &= check("an image section with no text is dropped, not blank-lined",
+                render_rich_text(image) is None)
+    ok &= check("a plain string passes through unchanged",
+                render_rich_text("Software Engineer") == "Software Engineer")
+    ok &= check("unparsable JSON is returned as text, not lost",
+                render_rich_text('{"sections": [') == '{"sections": [')
+    ok &= check("None stays None", render_rich_text(None) is None)
+    ok &= check("empty renders to None, never an empty string",
+                render_rich_text('{"sections": []}') is None)
+
+    # EPOCH MICROSECONDS. Read as seconds this lands in the year 57 million
+    # and as milliseconds in 57705 — both parse without error, which is why
+    # this is a named function with a test rather than an inline division.
+    ok &= check("creationTime is microseconds, not seconds",
+                _epoch_us_to_iso(1757155453070805).startswith("2025-09-06"))
+    ok &= check("a second-scale number would land outside Quora's lifetime",
+                not (_epoch_us_to_iso(1757155453) or "").startswith("20"))
+    ok &= check("0 is not a timestamp", _epoch_us_to_iso(0) is None)
+    ok &= check("a non-number is not a timestamp",
+                _epoch_us_to_iso("yesterday") is None)
+
+    # THE AUTHOR'S NAME, which Quora stores as two fields plus a flag. A
+    # fixed join order misnames every author on a site that writes the family
+    # name first.
+    western = {"names": [{"givenName": "Ada", "familyName": "Lovelace",
+                          "reverseOrder": False}]}
+    eastern = {"names": [{"givenName": "Taro", "familyName": "Yamada",
+                          "reverseOrder": True}]}
+    ok &= check("given-then-family by default",
+                _display_name(western) == "Ada Lovelace")
+    ok &= check("reverseOrder is honoured, not ignored",
+                _display_name(eastern) == "Yamada Taro")
+    ok &= check("no names object -> None", _display_name({}) is None)
+    return ok
+
+
+def test_values_on_real_fixtures():
+    group("VALUES on real fixtures, not coverage")
+    ok = True
+
+    topic = rows_of("TOPIC_EN")
+    ok &= check("TOPIC_EN parses 4 answers", len(topic) == 4)
+    first = topic[0]
+    ok &= check("sku is the permalink with the scheme removed",
+                first.sku.startswith("www.quora.com/")
+                and "://" not in first.sku)
+    ok &= check("url is the sku with a scheme on it",
+                first.url == "https://" + first.sku)
+    ok &= check("the question is the row's title",
+                first.title is not None and first.title.endswith("?"))
+    ok &= check("question_url drops the /answer/ segment",
+                first.question_url is not None
+                and "/answer/" not in first.question_url)
+    ok &= check("author read from the NAMED profile link, not the avatar",
+                all(r.author for r in topic))
+    ok &= check("author_url points at a profile",
+                all("/profile/" in (r.author_url or "") for r in topic))
+    ok &= check("the card's body is read",
+                all(r.text and r.text_chars == len(r.text) for r in topic))
+    ok &= check("date_text is kept verbatim and never parsed",
+                all(r.date_text and r.created_at is None for r in topic))
+
+    group("A topic feed carries NO inline payload — the measured asymmetry")
+    ok &= check("every topic row is DOM-built",
+                all(r.data_source == "dom" for r in topic))
+    ok &= check("and therefore has no counts at all",
+                all(r.upvotes is None and r.views is None and r.shares is None
+                    and r.answer_id is None for r in topic))
+
+    group("A question page DOES — and that is the other read path")
+    question = rows_of("QUESTION_EN")
+    backed = [r for r in question if r.data_source != "dom"]
+    ok &= check("QUESTION_EN has payload-backed rows", len(backed) >= 3)
+    ok &= check("the payload fills the counts the DOM never shows",
+                all(r.upvotes is not None and r.views is not None
+                    and r.created_at is not None for r in backed))
+    ok &= check("and the numeric ids",
+                all(r.answer_id and r.question_id for r in backed))
+    ok &= check("answer_count is the QUESTION's total, the same on every row",
+                len({r.answer_count for r in backed}) == 1
+                and next(iter({r.answer_count for r in backed})) > len(question))
+    ok &= check("a question page's cards do not repeat the question, so the "
+                "title comes from the page heading",
+                all(r.title == "What is machine learning?" for r in question))
+    ok &= check("Quora's own AI-answer flag is carried, not inferred",
+                any(r.is_machine_answer for r in question))
+    machine = next(r for r in question if r.is_machine_answer)
+    ok &= check("a machine answer is rendered in a block no card matches, "
+                "so it arrives from the payload alone",
+                machine.data_source == "inline")
+    ok &= check("its permalink is the /answers/{aid} shape",
+                "/answers/" in machine.sku)
+
+    group("Provenance never lies")
+    ok &= check("a dom row carries no payload-only column",
+                all(r.upvotes is None and r.views is None and r.created_at is None
+                    and r.answer_id is None
+                    for r in question if r.data_source == "dom"))
+    ok &= check("data_source is one of the three known values",
+                {r.data_source for r in question + topic}
+                <= {"dom", "dom+inline", "inline"})
+
+    group("The Spanish site — the second-locale checks")
+    spanish = rows_of("TOPIC_ES")
+    ok &= check("TOPIC_ES parses 4 answers", len(spanish) == 4)
+    ok &= check("source is the language host, not www",
+                all(r.source == "es.quora.com" for r in spanish))
+    ok &= check("language comes from the host", all(r.language == "es" for r in spanish))
+    ok &= check("a non-ASCII question title survives",
+                any("¿" in (r.title or "") for r in spanish))
+    ok &= check("a percent-encoded slug is kept as the site writes it",
+                any("%C3%A1" in r.sku for r in spanish))
+    ok &= check("a localised relative date is NOT parsed into a date",
+                all(r.created_at is None for r in spanish)
+                and any("año" in (r.date_text or "") for r in spanish))
+
+    group("A profile — where the Session subdomain lives")
+    profile = rows_of("PROFILE_EN")
+    ok &= check("PROFILE_EN parses 4 answers", len(profile) == 4)
+    session = [r for r in profile if not r.sku.startswith("www.quora.com/")]
+    ok &= check("a Session-subdomain permalink is recognised", session)
+    ok &= check("it has no /answer/ segment at all — no URL pattern could "
+                "tell it from a question page",
+                all("/answer/" not in r.sku for r in session))
+    # THREE different values for one answer, measured on a real profile:
+    # the permalink carries a per-answer suffix the question URL does not,
+    # and `slug` is a third thing again. The payload is the only thing that
+    # can tell them apart, which is why it overwrites the URL-derived guess.
+    ok &= check("the payload's own question URL wins over the permalink",
+                all(r.question_url != r.url for r in session
+                    if r.data_source != "dom"))
+    ok &= check("and it is a prefix of the permalink, not something else",
+                all(r.url.startswith(r.question_url) for r in session
+                    if r.data_source != "dom"))
+    ok &= check("with no payload there is nothing to strip, so the permalink "
+                "stands rather than a guess",
+                all(r.question_url == r.url for r in session
+                    if r.data_source == "dom"))
+    ok &= check("language is null on a Space or Session host, never guessed",
+                all(r.language is None for r in session))
+
+    group("Page and position — the pair, not either alone")
+    p1 = rows_of("TOPIC_EN", page=1)
+    p2 = rows_of("TOPIC_ES", page=2)
+    ok &= check("page is threaded in, not defaulted to 1",
+                all(r.page == 1 for r in p1) and all(r.page == 2 for r in p2))
+    pairs = [(r.page, r.position) for r in p1 + p2]
+    ok &= check("page+position unique across a multi-page run",
+                len(set(pairs)) == len(pairs))
+    ok &= check("position is 1..N within a page",
+                [r.position for r in p1] == list(range(1, len(p1) + 1)))
+
+    group("Columns that do not exist here, and the measurement behind it")
+    columns = {f.name for f in fields(Answer)}
+    for absent in ("price", "currency", "original_price", "discount_pct",
+                   "brand", "in_stock", "rating", "review_count"):
+        ok &= check(f"no `{absent}` column — this site has none of it",
+                    absent not in columns)
+    ok &= check("the family prefix is byte-identical and in order",
+                [f.name for f in fields(Answer)][:5]
+                == ["source", "scraped_at", "url", "sku", "title"])
+    return ok
+
+
+def test_a_question_page_holds_other_questions_answers():
+    group("A question page carries OTHER questions' answers (live)")
+    ok = True
+    # None of this is visible in an unscrolled capture, and all of it was
+    # wrong until a live run of 260 rows showed it. A scrolled question page
+    # carries, besides its own answers:
+    #
+    #   * RELATED questions, behind a badge rendered INSIDE the title node;
+    #   * MERGED duplicates, with no title node and an "Originally Answered:"
+    #     banner instead;
+    #   * promoted answers, which carry their own title node.
+    #
+    # Measured on that run: 29 rows titled "Related What is machine learning
+    # for?" and 27 rows wearing the page's own question while belonging to a
+    # different one. Both are the 100%-populated-and-wrong column the family rule is
+    # about.
+    rows = rows_of("QUESTION_MERGED")
+    url = URLS["QUESTION_MERGED"]
+    page_question = product_parser._question_path(url)
+    own = [r for r in rows if product_parser._question_path(r.url) == page_question]
+    foreign = [r for r in rows if product_parser._question_path(r.url) != page_question]
+    ok &= check("the fixture holds this question's answers", own)
+    ok &= check("and answers belonging to other questions", foreign)
+
+    ok &= check("no title carries the 'Related' badge",
+                not any((r.title or "").startswith("Related") for r in rows))
+    heading = product_parser.page_question_title(fixture("QUESTION_MERGED"))
+    ok &= check("the page's own heading was found", bool(heading))
+    ok &= check("this question's own answers get that heading",
+                all(r.title == heading for r in own))
+    ok &= check("and a FOREIGN answer never wears it",
+                not any(r.title == heading for r in foreign))
+    ok &= check("a merged duplicate takes its title from the banner's link, "
+                "not from the localised 'Originally Answered:' prefix",
+                any(r.title and "Originally Answered" not in r.title
+                    and product_parser._question_path(r.url) != page_question
+                    for r in foreign))
+    ok &= check("every foreign row still has the right question_url",
+                all(r.question_url and product_parser._question_path(r.question_url)
+                    == product_parser._question_path(r.url) or r.data_source != "dom"
+                    for r in foreign))
+
+    group("An unknown title is null, never the nearest available one")
+    # Some cards name no question at all — no title node, no banner. Their
+    # `question_url` is still right, so a consumer can fetch it; inventing a
+    # title from the slug would be a guess wearing the look of a reading.
+    for row in rows:
+        if row.title is None:
+            ok &= check("a titleless row still carries its question_url",
+                        bool(row.question_url))
+            break
+    else:
+        ok &= check("(this fixture happens to title every row)", True)
+
+    group("The sku is always a URL")
+    for name in ("TOPIC_EN", "TOPIC_ES", "QUESTION_EN", "QUESTION_MERGED",
+                 "PROFILE_EN"):
+        bad = [r.sku for r in rows_of(name)
+               if not re.match(r"^[a-z0-9.-]+\.quora\.com/\S+$", r.sku or "")]
+        ok &= check(f"{name}: every sku is a host and a path, no spaces "
+                    f"{'' if not bad else bad[:1]}", not bad)
+    return ok
+
+
+def test_urls():
+    group("URL shapes")
+    ok = True
+    kinds = {
+        "https://www.quora.com/topic/Machine-Learning": "topic",
+        "https://es.quora.com/topic/Aprendizaje-autom%C3%A1tico": "topic",
+        "https://www.quora.com/profile/Someone-1": "profile",
+        "https://www.quora.com/What-is-machine-learning-4": "question",
+        "https://www.quora.com/What-is-x/answer/Someone-1": "question",
+        "https://www.quora.com/What-is-x/answers/123456": "question",
+        "https://www.quora.com/search?q=machine+learning": "search",
+        "https://www.quora.com/about": "unknown",
+        "https://www.quora.com/careers": "unknown",
+    }
+    for url, kind in kinds.items():
+        ok &= check(f"{url.split('quora.com')[1][:36]!r} -> {kind}",
+                    listing_kind(url) == kind)
+
+    # A reserved first segment is the one thing that stops `/about` parsing
+    # as a question titled "about".
+    ok &= check("every reserved segment is refused as a question",
+                all(listing_kind(f"https://www.quora.com/{seg}") != "question"
+                    for seg in RESERVED_FIRST_SEGMENTS))
+
+    group("Normalisation")
+    ok &= check("a bare quora.com is normalised to www",
+                normalize_url("https://quora.com/topic/X")
+                == "https://www.quora.com/topic/X")
+    ok &= check("an answer permalink is read as its question",
+                normalize_url("https://www.quora.com/What-is-x/answer/Someone-1")
+                == "https://www.quora.com/What-is-x")
+    ok &= check("tracking parameters are stripped before a URL is written down",
+                strip_tracking("https://www.quora.com/X?ch=10&oid=1&keep=1")
+                == "https://www.quora.com/X?keep=1")
+
+    group("Hosts — from the site's own language list")
+    ok &= check("twenty-four hosts", len(HOSTS) == 24)
+    ok &= check("Japanese is on jp., not ja. — the one host that is a "
+                "country code", "jp.quora.com" in HOSTS and "ja.quora.com" not in HOSTS)
+    ok &= check("every host maps to a language", all(LANGUAGE_HOSTS.values()))
+    ok &= check("www is supported",
+                is_supported_host("https://www.quora.com/topic/X"))
+    ok &= check("a language host is supported",
+                is_supported_host("https://pl.quora.com/topic/X"))
+    ok &= check("a Space subdomain is supported",
+                is_supported_host("https://someboard.quora.com/"))
+
+    group("Refusals name their reason")
+    ok &= check("another site is refused",
+                "not a Quora host" in (unsupported_reason("https://www.reddit.com/r/x") or ""))
+    ok &= check("help.quora.com is refused as a HELP CENTRE, not as 'not Quora'",
+                "help centre" in (unsupported_reason("https://help.quora.com/hc/en-us") or ""))
+    ok &= check("search is refused with the sign-in-wall reason",
+                "sign-in wall" in (unsupported_reason("https://www.quora.com/search?q=x") or ""))
+    ok &= check("a non-http URL is refused",
+                unsupported_reason("ftp://www.quora.com/topic/X") is not None)
+
+    group("The sku")
+    ok &= check("permalink_key drops the scheme and the trailing slash",
+                permalink_key("https://www.quora.com/A/answer/B/")
+                == "www.quora.com/A/answer/B")
+    ok &= check("it keeps the host, so two hosts cannot collide",
+                permalink_key("https://es.quora.com/A") == "es.quora.com/A")
+    ok &= check("a relative href with no host has no key",
+                permalink_key("/A/answer/B") is None)
+
+    group("category_from_url")
+    ok &= check("a topic's slug", category_from_url(
+        "https://www.quora.com/topic/Machine-Learning") == "Machine-Learning")
+    ok &= check("a profile's slug", category_from_url(
+        "https://www.quora.com/profile/Someone-1") == "Someone-1")
+    ok &= check("a question's slug", category_from_url(
+        "https://www.quora.com/What-is-x") == "What-is-x")
+    ok &= check("a reserved path has no category",
+                category_from_url("https://www.quora.com/about") is None)
+    return ok
+
+
+def test_pagination():
+    group("Pagination — a scroll, and nothing else")
+    ok = True
+    ok &= check("this site does not paginate by URL", PAGINATES_BY_URL is False)
+    ok &= check("page_url returns None for every mode and every page",
+                all(page_url(u, n) is None
+                    for u in URLS.values() for n in (2, 3, 40)))
+    ok &= check("paginates_by_url agrees with the constant",
+                not any(paginates_by_url(u) for u in URLS.values()))
+    ok &= check("there is no next-page selector to be tempted by",
+                NEXT_PAGE_SELECTOR == "")
+    ok &= check("the reason is stated, not implied",
+                "ignored" in PAGE_URL_REASON)
+
+    group("Concurrency is REFUSED with its reason, not clamped")
+    ok &= check("the limit is 1 for every URL",
+                all(page_flow.concurrency_limit(u) == 1 for u in URLS.values()))
+    for url in list(URLS.values())[:3]:
+        reason = page_flow.concurrency_refusal(url)
+        ok &= check(f"refusal explains itself for {url[:44]}",
+                    reason and "second worker" in reason)
+
+    group("The cap")
+    ok &= check("PAGE_CAP is a real bound", isinstance(PAGE_CAP, int) and PAGE_CAP > 1)
+    ok &= check("page_cap_reached fires at the cap",
+                page_flow.page_cap_reached(PAGE_CAP)
+                and not page_flow.page_cap_reached(PAGE_CAP - 1))
+
+    group("There is no per-page counter, and page_gap says so honestly")
+    ok &= check("page_gap is None, never 0 — an unknown gap is not no gap",
+                page_flow.page_gap(fixture("QUESTION_EN"), 3) is None)
+    ok &= check("answers_expected reads the QUESTION's own total instead",
+                page_flow.answers_expected(fixture("QUESTION_EN")) > 100)
+    ok &= check("and is None where the site states none",
+                page_flow.answers_expected(fixture("TOPIC_EN")) is None)
+    return ok
+
+
+def test_page_state():
+    group("Page state — ordered by what each signal PROVES")
+    ok = True
+    for name in ("TOPIC_EN", "TOPIC_ES", "QUESTION_EN", "PROFILE_EN"):
+        ok &= check(f"{name} is content",
+                    detect_page_state(fixture(name), 200, URLS[name]) == "content")
+    ok &= check("the challenge page is a challenge, not a block",
+                detect_page_state(fixture("BLOCK_CF"), 403, URLS["BLOCK_CF"])
+                == "challenge")
+    ok &= check("and names its vendor",
+                detect_bot_challenge(fixture("BLOCK_CF")) == "cloudflare")
+
+    group("The inverted case: a browser error page")
+    ok &= check("an empty document is blocked, not empty",
+                detect_page_state(fixture("BROWSER_ERROR"), None,
+                                  URLS["BROWSER_ERROR"]) == "blocked")
+    ok &= check("None html is blocked", detect_page_state(None, 200, "") == "blocked")
+    # Chromium's own network-error page carries the SITE'S hostname in its
+    # <title>, so every text marker reads it as a real page. Only the
+    # positive-asset check answers correctly.
+    chrome_error = ("<html><head><title>www.quora.com</title></head><body>"
+                    "<div>ERR_PROXY_CONNECTION_FAILED</div></body></html>")
+    ok &= check("Chromium's error page is blocked despite carrying the "
+                "site's own hostname",
+                detect_page_state(chrome_error, None,
+                                  "https://www.quora.com/topic/X") == "blocked")
+    ok &= check("served_by_quora is False for it",
+                not served_by_quora(chrome_error))
+    ok &= check("and True for every good fixture",
+                all(served_by_quora(fixture(n))
+                    for n in ("TOPIC_EN", "QUESTION_EN", "PROFILE_EN")))
+
+    group("A shell is served, ours, and unpainted — the NORMAL first state")
+    shell = ('<html><head><link href="https://qsbr.cf2.quoracdn.net/x.css">'
+             '<script>window.ansFrontendGlobals={};</script>'
+             '<link href="https://qph.cf2.quoracdn.net/y.png"></head>'
+             '<body><div class="q-box"></div></body></html>')
+    ok &= check("a served page with nothing painted is `shell`",
+                detect_page_state(shell, 200, "https://www.quora.com/topic/X")
+                == "shell")
+    ok &= check("and page_flow calls it unpainted",
+                page_flow.is_unpainted("shell", shell))
+    ok &= check("a 403 with no page to read is blocked",
+                detect_page_state(shell.replace("q-box", "nothing"), 403,
+                                  "https://www.quora.com/topic/X") in
+                ("blocked", "shell"))
+
+    group("Empty is a POSITIVE signal only")
+    empty = shell.replace("<div class=\"q-box\"></div>",
+                          "<div>There are no answers yet.</div>")
+    ok &= check("the site's own copy classifies as empty",
+                detect_page_state(empty, 200, "https://www.quora.com/topic/X")
+                == "empty")
+    ok &= check("is_no_results does not fire on a good page",
+                not any(is_no_results(fixture(n))
+                        for n in ("TOPIC_EN", "QUESTION_EN")))
+
+    group("Markers that match every good page are NOT markers")
+    good = fixture("QUESTION_EN") + fixture("TOPIC_EN")
+    for banned in ("cf-turnstile", "challenges.cloudflare.com", "recaptcha",
+                   "api.js?render"):
+        ok &= check(f"{banned!r} is not in the challenge marker set",
+                    not any(banned in m for m in CHALLENGE_MARKERS))
+    ok &= check("no challenge marker appears on a good page",
+                not any(m in good.lower() for m in CHALLENGE_MARKERS))
+    ok &= check("no bot-challenge marker appears on a good page either",
+                not any(m.lower() in good.lower() for m in BOT_CHALLENGE_MARKERS))
+    return ok
+
+
+def test_challenge_is_not_always_solvable():
+    group("detected != blocking != paying")
+    ok = True
+    block = fixture("BLOCK_CF")
+    ok &= check("the interstitial is recognised and its vendor named",
+                detect_bot_challenge(block) == "cloudflare")
+    ok &= check("detect_block_marker names it too",
+                detect_block_marker(block) == "cloudflare")
+    ok &= check("the state is `challenge`, not `blocked` — it is worth a retry",
+                detect_page_state(block, 403, URLS["BLOCK_CF"]) == "challenge")
+
+    # THE MEASURED POINT OF THIS WHOLE FILE'S CAPTCHA STANCE. Cloudflare's
+    # MANAGED challenge carries no sitekey: 0 `data-sitekey` attributes and 0
+    # Turnstile iframes on the page this site actually served. There is
+    # nothing for a solver to answer, so `challenge` here must NOT buy one.
+    ok &= check("a challenge does NOT buy a solve on this site",
+                page_flow.should_solve("challenge") is False)
+    ok &= check("nor does a block", page_flow.should_solve("blocked") is False)
+    ok &= check("no state in the policy buys a solve",
+                not any(row["solve"] for row in page_flow.STATE_POLICY.values()))
+    ok &= check("the fixture carries no sitekey to solve against",
+                "data-sitekey" not in block and "turnstile/v0/api.js?render" not in block)
+    ok &= check("SOLVABLE_CHALLENGES still names what the SOLVER implements, "
+                "which is a different question from what this site serves",
+                set(SOLVABLE_CHALLENGES) == {"recaptcha", "hcaptcha"})
+
+    # Detection stays BROAD even though spending is zero: which challenge a
+    # visitor meets depends on the exit and on what the address has been
+    # doing, and a narrow detector is how a rendered challenge gets reported
+    # as an empty topic months later.
+    rendered = ('<html><head></head><body><div class="g-recaptcha" '
+                'data-sitekey="6Lexample"></div></body></html>')
+    ok &= check("a rendered reCAPTCHA is still detected",
+                detect_bot_challenge(rendered) == "recaptcha")
+    ok &= check("and classifies as a challenge",
+                detect_page_state(rendered, 200,
+                                  "https://www.quora.com/topic/X") == "challenge")
+
+    group("block_advice says what to DO")
+    advice = page_flow.block_advice(block, headless=False, has_pool=False)
+    ok &= check("it leads with the retry, because that is what was measured "
+                "to work", "--retries" in advice)
+    ok &= check("it says nothing was charged", "nothing was charged" in advice)
+    ok &= check("it names the rate as the real lever", "--delay" in advice)
+    ok &= check("with a pool it says something different",
+                "N exits" in page_flow.block_advice(block, headless=False,
+                                                    has_pool=True))
+    return ok
+
+
+def test_captcha_capability_claims_match_the_code():
+    """a sentence is the most expensive bug this family can ship.
+
+    Two directions, and this family has shipped both wrong:
+
+      * claiming a captcha CANNOT be solved, when what is true is that this
+        repo does not implement the task type. 2Captcha solves enterprise
+        reCAPTCHA and Cloudflare Turnstile and has for years, so such a
+        sentence tells a reader not to buy something that would have worked.
+        "Unsolvable" is a property of a PAGE carrying no widget, never of
+        the vendor.
+      * claiming this repo DOES solve something whose task type is built
+        nowhere in it, which is the same error facing the other way.
+
+    Nothing else in the suite can catch either: no test fails, no run
+    crashes, and the output is correct.
+    """
+    group("captcha capability claims")
+    ok = True
+    docs = {}
+    for name in ("README.md", "CHANGELOG.md"):
+        path = os.path.join(REPO_ROOT, name)
+        if os.path.exists(path):
+            docs[name] = open(path, encoding="utf-8", errors="replace").read()
+
+    # Conclusions about the PRODUCT. Phrases about a widget-less page are
+    # deliberately absent: such a page really does carry nothing to answer.
+    FORBIDDEN = ("cannot be solved", "can't be solved", "neither is solvable",
+                 "is not solvable", "solver is inapplicable", "no solver can",
+                 "nothing for a captcha solver to answer",
+                 "nothing to solve", "nothing for a solver to answer",
+                 "nothing to hand a solver", "nothing to hand 2captcha")
+    for name, text in docs.items():
+        if name == "CHANGELOG.md":
+            continue  # a released section is history and stays verbatim
+        low = text.lower()
+        for phrase in FORBIDDEN:
+            ok &= check(f"{name}: no {phrase!r} — write "
+                        f"'this repo does not implement X' instead",
+                        phrase not in low)
+
+    solver = open(os.path.join(REPO_ROOT, "captcha_solver.py"),
+                  encoding="utf-8").read()
+    engines = " ".join(_engine_source(e) or "" for e in ENGINES)
+    readme_low = docs.get("README.md", "").lower()
+    claims = ("turnstile" in readme_low and "does not implement" not in readme_low)
+    if claims:
+        ok &= check("README claims Turnstile solving, so the task type exists",
+                    "TurnstileTaskProxyless" in solver)
+        ok &= check("...and an engine installs the turnstile.render hook",
+                    "TURNSTILE_INTERCEPT_JS" in engines)
+    else:
+        ok &= check("README claims no Turnstile solve — nothing to back", True)
+    return ok
+
+
+def test_page_flow_policy():
+    group("STATE_POLICY — the triage as DATA, not three if-chains")
+    ok = True
+    for state in ("content", "empty", "shell", "challenge", "blocked"):
+        ok &= check(f"{state} has a full policy row",
+                    set(page_flow.STATE_POLICY[state]) ==
+                    {"parse", "retry", "solve", "blocked"})
+    ok &= check("content is parsed and not retried",
+                page_flow.should_parse("content") and not page_flow.should_retry("content"))
+    ok &= check("empty is a final answer, not a fault",
+                not page_flow.should_parse("empty") and not page_flow.should_retry("empty"))
+    ok &= check("shell is parsed after the wait, never refetched",
+                page_flow.should_parse("shell") and not page_flow.should_retry("shell"))
+    # THE DIFFERENCE FROM EVERY SIBLING REPO, and it was found by running
+    # the thing. A challenge is retried first; if the retries are spent
+    # and it is still a challenge, the run is BLOCKED (exit 3), not empty
+    # (exit 4). With this False the first live run parsed the 6 KB
+    # interstitial as a feed and reported "ran fine, found nothing" on a
+    # topic holding hundreds of answers.
+    ok &= check("a challenge that survives its retries counts as blocked",
+                page_flow.counts_as_blocked("challenge") is True)
+    ok &= check("but it is retried before that verdict is reached",
+                page_flow.should_retry("challenge") is True)
+    ok &= check("and it is never parsed",
+                page_flow.should_parse("challenge") is False)
+    ok &= check("blocked counts towards exit 3",
+                page_flow.counts_as_blocked("blocked")
+                and not page_flow.counts_as_blocked("empty"))
+    ok &= check("an unknown state falls back to the blocked row",
+                page_flow.should_parse("nonsense") is False)
+
+    group("Retrying a block DOES help here — and the engines CONSULT that")
+    # A policy constant nothing reads is the same defect as dead code.
+    ok &= check("RETRY_ON_BLOCKED is True on this site",
+                page_flow.RETRY_ON_BLOCKED is True)
+    ok &= check("the budget is non-zero", page_flow.BLOCK_RETRIES_WITHOUT_POOL > 0)
+    ok &= check("a pool buys more attempts",
+                page_flow.BLOCK_RETRIES_WITH_POOL >= page_flow.BLOCK_RETRIES_WITHOUT_POOL)
+    consulted = []
+    for engine in ENGINES:
+        src = open(os.path.join(REPO_ROOT, f"{engine}.py"), encoding="utf-8").read()
+        consulted.append("RETRY_ON_BLOCKED" in src)
+    ok &= check("every engine reads RETRY_ON_BLOCKED", all(consulted))
+
+    group("Readiness — a count poll, never an evaluated string")
+    ok &= check("MIN_CARD_MATCHES is above 1", page_flow.MIN_CARD_MATCHES > 1)
+    ok &= check("the anchor is the card itself, in every mode",
+                all(page_flow.ready_selector(m) == SELECTORS["item_card"]
+                    for m in ("topic", "question", "profile")))
+    # A question with a single answer can never reach the floor, so the
+    # site's own answer count lowers it.
+    ok &= check("min_matches is clamped by what the question says it holds",
+                page_flow.min_matches("question", 1) == 1)
+    ok &= check("and is not raised above the floor",
+                page_flow.min_matches("question", 50) == page_flow.MIN_CARD_MATCHES)
+    ok &= check("answers_expected reads the question own total",
+                page_flow.answers_expected(fixture("QUESTION_EN")) > 100)
+
+    calls = []
+
+    def count(_sel):
+        calls.append(1)
+        return 0 if len(calls) < 4 else 9
+
+    found = page_flow.wait_for_count(count, lambda ms: None, "x", 5, 5_000)
+    ok &= check("wait_for_count returns the count it reached", found == 9)
+    ok &= check("a wait that never satisfies still returns, bounded",
+                page_flow.wait_for_count(lambda s: 0, lambda ms: None, "x", 5, 400) == 0)
+    return ok
+
+
+def test_scroll_loop():
+    group("The scroll — the WINDOW, and THREE stable rounds")
+    ok = True
+    # The opposite of a sibling repo, whose body never scrolled. Here the
+    # window is what moves, and every engine must scroll to the document's
+    # own end rather than by a fixed wheel distance — a fixed wheel stopped
+    # three rounds short of the bottom on that sibling's grid, so the
+    # lazy-load trigger was never reached and a run took 30 of 50 cards while
+    # looking settled.
+    for engine in ENGINES:
+        src = _engine_source(engine)
+        if src is None:
+            continue
+        ok &= check(f"{engine} scrolls to document.body.scrollHeight",
+                    "document.body.scrollHeight" in src)
+        ok &= check(f"{engine} has no inner scroll container to chase",
+                    "scroll_container" not in src)
+
+    # A pause is not an ending: the next batch takes longer to arrive than a
+    # single pause, so the loop needs three quiet rounds rather than one.
+    counts = [3, 7, 13, 13, 13, 13, 13, 13]
+    state = {"i": 0}
+    heights = {"h": 1000}
+
+    def count(_sel):
+        return counts[min(state["i"], len(counts) - 1)]
+
+    def scroll():
+        state["i"] += 1
+        heights["h"] += 500
+
+    reached = page_flow.scroll_until_settled(
+        count, scroll, lambda: heights["h"], lambda ms: None, target=13)
+    ok &= check("it reaches the target the question states", reached == 13)
+    ok &= check("and stops there rather than spending the budget",
+                state["i"] <= 3)
+    ok &= check("three stable rounds, not one",
+                page_flow.SCROLL_STABLE_ROUNDS >= 3)
+
+    # With no target — which is every topic and profile run, because only a
+    # question page states a total — the stable-round heuristic IS the
+    # termination condition, and it must still terminate.
+    rounds = {"n": 0}
+
+    def scroll2():
+        rounds["n"] += 1
+
+    reached2 = page_flow.scroll_until_settled(
+        lambda s: 7, scroll2, lambda: 500, lambda ms: None, target=None)
+    ok &= check("with no target it settles and stops", reached2 == 7)
+    ok &= check("and does not spend the whole budget",
+                rounds["n"] <= page_flow.SCROLL_STABLE_ROUNDS + 1)
+
+    # A feed that grows forever must not hang the run — and on an infinite
+    # scroll that is not a hypothetical.
+    forever = {"n": 0}
+
+    def count3(_sel):
+        forever["n"] += 1
+        return forever["n"]
+
+    page_flow.scroll_until_settled(count3, lambda: None,
+                                   lambda: forever["n"] * 10,
+                                   lambda ms: None, target=None)
+    ok &= check("a forever-growing feed is bounded by the round budget",
+                forever["n"] <= page_flow.SCROLL_MAX_ROUNDS * 2 + 2)
+    return ok
+
+
+def test_throttle_is_not_completion():
+    group("A refused batch is NOT an exhausted listing")
+    ok = True
+    # The distinction this repo's policy turns on. A scroll that produced
+    # nothing new means one of two things, and they map to opposite run
+    # statuses: the feed ran out (COMPLETE) or the GraphQL call behind it was
+    # refused (PARTIAL). Collapsing them is how a throttled run reports
+    # "complete" while holding its first batch.
+    ok &= check("`no_new_products` is a COMPLETE stop reason",
+                "no_new_products" in COMPLETE_STOP_REASONS)
+    ok &= check("`next_batch_refused` is NOT",
+                "next_batch_refused" not in COMPLETE_STOP_REASONS)
+    ok &= check("advance_feed has two distinct outcomes, not a bool",
+                page_flow.ADVANCED != page_flow.NO_GROWTH)
+
+    # Driven with the browser stubbed out: a live run cannot always
+    # reach this, because batch 1 decides whether there is a batch 2 at all.
+    calls = {"scrolls": 0}
+    counts = iter([4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+                   4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+                   4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4])
+
+    def count(_selector):
+        return next(counts, 4)
+
+    def scroll():
+        calls["scrolls"] += 1
+
+    verdict = page_flow.advance_feed(scroll, count, lambda: 1000,
+                                     lambda _ms: None, timeout_ms=3_000)
+    ok &= check("a feed that never grows reports NO_GROWTH",
+                verdict == page_flow.NO_GROWTH)
+    ok &= check("and it did scroll rather than give up immediately",
+                calls["scrolls"] >= 1)
+
+    grown = iter([4, 4, 9])
+
+    def growing(_selector):
+        return next(grown, 9)
+
+    verdict = page_flow.advance_feed(lambda: None, growing, lambda: 1000,
+                                     lambda _ms: None, timeout_ms=5_000)
+    ok &= check("a feed that grows reports ADVANCED",
+                verdict == page_flow.ADVANCED)
+
+    group("Every engine must reach the same verdict")
+    # Selenium has no response listener, so the refused-GraphQL count comes
+    # out of Chrome's performance log instead. If it silently answered 0, one
+    # engine would report `complete` where its twins report `partial` on the
+    # identical run — which is exactly the drift the shared modules exist to
+    # prevent.
+    for engine in ENGINES:
+        source = _engine_source(engine)
+        if source is None:
+            continue
+        ok &= check(f"{engine} counts refused GraphQL responses",
+                    "_graphql_refused" in source)
+        # The same THRESHOLD in all three, not merely the same field name. A
+        # threshold that differed would mean one engine reporting `complete`
+        # where its twins report `partial` on the identical run — and this
+        # caught exactly that: the Playwright engine kept a sibling's
+        # `status == 429` while the other two used `>= 400`.
+        ok &= check(f"{engine} treats any >= 400 as a refusal, not only 429",
+                    ">= 400" in source and "== 429" not in source)
+        ok &= check(f"{engine} watches the same endpoint path",
+                    '_GRAPHQL_PATH = "/graphql/"' in source)
+        ok &= check(f"{engine} distinguishes exhausted from refused",
+                    "no_turnover" in source and "exhausted" in source)
+        # And from a third ending the canary's first dispatch produced: the
+        # page being REPLACED mid-scroll. A feed that stopped growing because
+        # Cloudflare arrived has not run out, and `exhausted` is a COMPLETE
+        # stop reason — so without this a run blocked halfway would claim the
+        # listing ended.
+        ok &= check(f"{engine} checks WHAT PAGE it is on before calling the "
+                    f"feed exhausted",
+                    "blocked_mid_scroll" in source
+                    and "counts_as_blocked" in source)
+    return ok
+
+
+def test_output_contract():
+    group("The output contract")
+    ok = True
+    ok &= check("every mode yields the same row class",
+                set(ROW_CLASS_BY_MODE.values()) == {Answer})
+    ok &= check("the three modes are the three feeds",
+                set(ROW_CLASS_BY_MODE) == {"topic", "question", "profile"})
+    ok &= check("every mode is one row per sku",
+                set(UNIQUE_BY_SKU_MODES) == set(ROW_CLASS_BY_MODE))
+    ok &= check("Product is kept as an alias so family code keeps importing",
+                Product is Answer)
+    ok &= check("JSON and CSV agree on column order",
+                [f.name for f in fields(Answer)]
+                == list(asdict(Answer()).keys()))
+    ok &= check("source defaults to the main host, never to an empty string",
+                SOURCE_DEFAULT == "www.quora.com" and Answer().source == SOURCE_DEFAULT)
+
+    group("Complete stop reasons")
+    ok &= check("`completed` is complete", "completed" in COMPLETE_STOP_REASONS)
+    ok &= check("`no_new_products` is complete — the data-side condition",
+                "no_new_products" in COMPLETE_STOP_REASONS)
+    ok &= check("a refused batch is NOT a complete stop reason",
+                "next_batch_refused" not in COMPLETE_STOP_REASONS)
+    ok &= check("nor is a block",
+                not any(r.startswith("blocked") for r in COMPLETE_STOP_REASONS))
+    return ok
+
+
+def test_writers_and_finish_run():
+    group("Writers")
+    ok = True
+    with tempfile.TemporaryDirectory() as tmp:
+        prefix = os.path.join(tmp, "out")
+        # A run that finds nothing writes NOTHING — never replacing last
+        # night's good output with [].
+        with open(prefix + ".json", "w") as f:
+            f.write('[{"sku": "keep-me"}]')
+        rc = save([], prefix, "both")
+        ok &= check("0 rows returns exit 4", rc == EXIT_NO_PRODUCTS)
+        ok &= check("0 rows leaves the previous good output alone",
+                    "keep-me" in open(prefix + ".json").read())
+        rc = save([], prefix, "json", allow_empty=True)
+        ok &= check("--allow-empty is the opt-out", rc == EXIT_NO_PRODUCTS
+                    and json.load(open(prefix + ".json")) == [])
+
+        # An empty CSV still carries its header, so a consumer reads a table
+        # with no rows instead of failing on a zero-byte file.
+        csv_path = os.path.join(tmp, "empty.csv")
+        write_csv([], csv_path, row_cls=Answer)
+        header = next(csv_module.reader(open(csv_path)))
+        ok &= check("an empty CSV keeps the header",
+                    header == [f.name for f in fields(Answer)])
+
+        # There is no list column on this row, and that is worth pinning
+        # rather than leaving as an accident: the family's CSV writer joins
+        # one with LIST_CSV_SEPARATOR, and a column added here later must
+        # either be scalar or be joined the same way.
+        row = rows_of("TOPIC_EN")[1]
+        csv2 = os.path.join(tmp, "rows.csv")
+        write_csv([row], csv2, row_cls=Answer)
+        body = list(csv_module.DictReader(open(csv2)))[0]
+        ok &= check("every column of this row is scalar",
+                    not any(isinstance(getattr(row, f.name), (list, dict))
+                            for f in fields(Answer)))
+        ok &= check("the CSV round-trips the sku",
+                    body["sku"] == row.sku)
+        ok &= check("the list separator is still available for the family",
+                    bool(LIST_CSV_SEPARATOR))
+
+        group("finish_run — the status/exit mapping all three engines share")
+        def run(rows, stop_reason, blocked=False, allow_empty=False):
+            out = os.path.join(tmp, f"r{abs(hash(stop_reason))}{len(rows)}{blocked}")
+            code = finish_run(rows, out, "json", allow_empty, blocked=blocked,
+                              stop_reason=stop_reason, pages_requested=2,
+                              pages_completed=1, start_url="u", final_url="u")
+            meta_path = out + ".meta.json"
+            meta = json.load(open(meta_path)) if os.path.exists(meta_path) else None
+            return code, meta
+
+        rows = rows_of("TOPIC_EN")
+        code, meta = run(rows, "completed")
+        ok &= check("a finished run is complete, exit 0",
+                    code == 0 and meta["status"] == "complete")
+        code, meta = run(rows, "next_batch_refused")
+        ok &= check("a REFUSED batch is partial, exit 6",
+                    code == EXIT_PARTIAL and meta["status"] == "partial")
+        code, meta = run(rows, "no_new_products")
+        ok &= check("a feed that added nothing new is complete, exit 0",
+                    code == 0 and meta["status"] == "complete")
+        code, meta = run(rows, "pagination_exhausted")
+        ok &= check("a feed that ran out is complete, exit 0",
+                    code == 0 and meta["status"] == "complete")
+        code, meta = run([], "blocked_cloudflare", blocked=True)
+        ok &= check("blocked with no rows is exit 3", code == EXIT_BLOCKED)
+        ok &= check("a FAILED run writes no sidecar beside good data",
+                    meta is None)
+        code, meta = run([], "completed")
+        ok &= check("empty and not blocked is exit 4", code == EXIT_NO_PRODUCTS)
+
+        # THE DISTINCTION A LIVE DEAD PROXY FOUND. Zero rows has three
+        # causes and they are not the same thing (blocked is not empty).
+        # This one used to return exit 4 — "ran fine, found nothing" — on a
+        # run that never reached the site at all, while the sidecar beside
+        # it correctly said `status: failed`, `pages_completed: 0`. A
+        # pipeline branching on the exit code, which is what this family
+        # says exit codes are for, would have recorded an empty catalogue.
+        code, meta = run([], "page_load_timeout", allow_empty=True)
+        ok &= check("0 rows because nothing was FETCHED is exit 5, not 4",
+                    code == EXIT_FETCH_FAILED)
+        ok &= check("and the sidecar says failed, not complete",
+                    meta is not None and meta["status"] == "failed")
+        code, meta = run([], "next_batch_refused", allow_empty=True)
+        ok &= check("a refused batch with no rows is exit 5 too",
+                    code == EXIT_FETCH_FAILED)
+        code, meta = run([], "blocked_cloudflare", blocked=True, allow_empty=True)
+        ok &= check("but a BLOCK still outranks both, at exit 3",
+                    code == EXIT_BLOCKED)
+
+        group("The sidecar records WHICH pages failed, by number")
+        out = os.path.join(tmp, "meta")
+        finish_run(rows, out, "json", False, blocked=False,
+                   stop_reason="blocked_x", pages_requested=5, pages_completed=3,
+                   pages_failed=[2, 4], start_url="u", final_url="u",
+                   mode="topic", source="es.quora.com",
+                   extra={"rows_new_per_batch": {2: 10},
+                          "pagination": "infinite-scroll"})
+        meta = json.load(open(out + ".meta.json"))
+        ok &= check("pages_failed is a list of numbers", meta["pages_failed"] == [2, 4])
+        ok &= check("mode and source are recorded",
+                    meta["mode"] == "topic" and meta["source"] == "es.quora.com")
+        ok &= check("the per-batch row counts ride in the sidecar",
+                    meta["rows_new_per_batch"] == {"2": 10})
+        ok &= check("and so does the pagination model, which a consumer "
+                    "needs before comparing two runs",
+                    meta["pagination"] == "infinite-scroll")
+        ok &= check("extra cannot overwrite a run field",
+                    meta["status"] == "partial")
+
+    group("Merging and dedupe")
+    seen = set()
+    p1 = rows_of("TOPIC_EN", 1)
+    ok &= check("a fresh batch keeps every row",
+                len(dedupe_by_key(p1, seen)) == len(p1))
+    # EXPECTED here rather than exceptional: a scroll batch re-parses the
+    # WHOLE feed, so batch 2 arrives holding batch 1's rows again by
+    # construction, and a batch that drops all of them is how this repo knows
+    # the feed is exhausted.
+    ok &= check("the same feed again is fully dropped",
+                dedupe_by_key(rows_of("TOPIC_EN", 2), seen) == [])
+    ok &= check("dedupe_by_sku is the same function",
+                dedupe_by_sku([], set()) == [])
+    # A row with no key is always kept: there is nothing to check a duplicate
+    # against, and dropping it would be a silent data loss.
+    keyless = [Answer(sku=None, title="a"), Answer(sku=None, title="b")]
+    ok &= check("keyless rows are kept, not collapsed",
+                len(dedupe_by_key(keyless, set())) == 2)
+    return ok
+
+
+def test_diff():
+    group("diff_runs — what counts as a change here")
+    ok = True
+
+    def row(**kw):
+        base = dict(sku="www.quora.com/Q/answer/A", title="What is x?",
+                    upvotes=100, views=1000, shares=1, comments=2,
+                    answer_count=50, text_chars=800,
+                    author_credential="Fixture credential",
+                    is_machine_answer=False, data_source="dom+inline")
+        base.update(kw)
+        return base
+
+    out = diff_products([row()], [row(upvotes=140)])
+    ok &= check("a real upvote move, same view, is `changed`",
+                len(out["changed"]) == 1 and not out["source_changed"])
+
+    # THE BUCKET THIS SITE NEEDS MOST. A row read off a topic feed has null
+    # counts; the same answer read off its question page has real ones. That
+    # is our two snapshots differing, not the site.
+    out = diff_products([row(data_source="dom", upvotes=None, views=None)],
+                        [row()])
+    ok &= check("a counter appearing with the view is `source_changed`, "
+                "not `changed`",
+                len(out["source_changed"]) == 1 and not out["changed"])
+    ok &= check("the bucket names both views",
+                out["source_changed"][0]["data_source"]
+                == {"old": "dom", "new": "dom+inline"})
+
+    # A truncated body growing into a full one is the same artefact.
+    out = diff_products([row(data_source="dom", text_chars=180)],
+                        [row(text_chars=3400)])
+    ok &= check("a body growing with the view is `source_changed` too",
+                len(out["source_changed"]) == 1 and not out["changed"])
+
+    # But a title moving alongside is a REAL change and must not be
+    # swallowed by the same bucket: Quora lets a question be edited.
+    out = diff_products([row(data_source="dom", upvotes=None)],
+                        [row(title="What is y?")])
+    ok &= check("a title change survives a view change",
+                len(out["changed"]) == 1
+                and "title" in out["changed"][0]["changes"])
+
+    group("The tolerance, which unlike the family's has a real use here")
+    out = diff_products([row(views=1000)], [row(views=1004)],
+                        price_tolerance_pct=1.0)
+    ok &= check("a live counter ticking is `within_tolerance`",
+                len(out["within_tolerance"]) == 1 and not out["changed"])
+    out = diff_products([row(views=1000)], [row(views=1004)])
+    ok &= check("and the DEFAULT reports it, deciding nothing for the reader",
+                len(out["changed"]) == 1 and not out["within_tolerance"])
+    out = diff_products([row(views=1000)], [row(views=1004, title="What is y?")],
+                        price_tolerance_pct=1.0)
+    ok &= check("a title change alongside is never absorbed by a tolerance",
+                len(out["changed"]) == 1 and not out["within_tolerance"])
+
+    group("added / removed / unmatchable")
+    out = diff_products([row()], [row(sku="www.quora.com/Q/answer/B")])
+    ok &= check("a new permalink is added and the old one removed",
+                len(out["added"]) == 1 and len(out["removed"]) == 1)
+    out = diff_products([row(sku=None)], [row(sku=None)])
+    ok &= check("a row with no sku is unmatchable, not added or removed",
+                out["unmatchable_old"] == 1 and out["unmatchable_new"] == 1
+                and not out["added"] and not out["removed"])
+    out = diff_products([row(), row()], [row()])
+    ok &= check("a duplicate sku within one file is counted, not clobbered",
+                out["unmatchable_old"] == 1)
+
+    group("lifecycle is emitted and always empty, for the family's shape")
+    ok &= check("the key is there", "lifecycle" in diff_products([], []))
+    ok &= check("and it is empty", diff_products([row()], [row(upvotes=1)])
+                ["lifecycle"] == [])
+
+    group("--fail-on-change ignores what is about US, not the site")
+    source = _fail_on_change_source()
+    ok &= check("it fails on added/removed/changed",
+                'result["added"] or result["removed"] or result["changed"]'
+                in source)
+    ok &= check("and on nothing else",
+                "source_changed" not in source.split("fail_on_change")[-1]
+                .split("return")[0])
+    return ok
+
+
+def _fail_on_change_source():
+    """The `--fail-on-change` condition, as written."""
+    src = open(os.path.join(REPO_ROOT, "diff_runs.py"), encoding="utf-8").read()
+    match = re.search(r"if args\.fail_on_change and \(([^)]*)\)", src)
+    return match.group(1) if match else src
+
+
+def test_env_config():
+    group("env_config — precedence and placeholders")
+    ok = True
+    ok &= check("every ENV_KEYS value is a real CLI destination",
+                set(env_config.ENV_KEYS.values()) ==
+                {"twocaptcha_key", "cdp_endpoint", "proxy", "url",
+                 "load_media", "proxy_budget_mb"})
+    # A variable mapped onto a flag with a non-empty default would be
+    # silently inert — a setting that looks configurable and is not.
+    ok &= check("--out is deliberately NOT mapped",
+                "out" not in env_config.ENV_KEYS.values())
+
+    # .env.example must document exactly what the code reads, both ways.
+    example = open(os.path.join(REPO_ROOT, ".env.example"), encoding="utf-8").read()
+    documented = set(re.findall(r"^([A-Z][A-Z0-9_]*)=", example, re.M))
+    ok &= check("every ENV_KEYS name is in .env.example",
+                set(env_config.ENV_KEYS) <= documented)
+    ok &= check("every .env.example name is read by the code",
+                documented <= set(env_config.ENV_KEYS))
+
+    group("A COPIED .env.example must read as unset")
+    # `cp .env.example .env` followed by a run used to connect with the
+    # literal string `{login}-zone-...` as a username and get a 401 — the
+    # confusing auth error a long way from its cause that this rule exists to
+    # prevent. Round-tripped through the real loader.
+    saved = {k: os.environ.get(k) for k in env_config.ENV_KEYS}
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, ".env")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(example)
+            with contextlib.redirect_stderr(io.StringIO()):
+                env_config.load_env(path, override=True)
+                # Every CREDENTIAL in the example must read as unset. The
+                # two credentialled URLs are written the way the vendor
+                # documents them, so a literal-only placeholder list misses
+                # both — `cp .env.example .env` then connected with the
+                # string `{login}-zone-...` as a username and got a 401 a
+                # long way from its cause.
+                for name in ("TWOCAPTCHA_KEY", "QUORA_CDP_ENDPOINT",
+                             "QUORA_PROXY"):
+                    ok &= check(f"{name} from a copied example reads as unset",
+                                env_config.env_value(name) is None)
+                # And the non-credential default must still be USABLE, or
+                # the check above would pass by making everything unset.
+                url = env_config.env_value("QUORA_URL")
+            ok &= check("QUORA_URL from the example survives and is usable",
+                        url is not None and is_supported_host(url))
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    return ok
+
+
+def test_fingerprint_is_read_through_the_shared_helper():
+    group("--fingerprint reads the UA through ONE helper")
+    ok = True
+    # The defect this pins was live in FOUR sibling repos at once and was
+    # live here too, in the Selenium engine, until a live call to the API
+    # showed what it returns. The UA is at `userAgent.userAgent` in the
+    # chromium format and at `data.ua` in the raw one; `userAgent.value` —
+    # which that engine read — exists in NEITHER. So `--fingerprint` set no
+    # user agent at all, silently, and the run presented a Windows
+    # fingerprint's screen, locale and timezone over a local Chromium's UA.
+    # That is the identity MISMATCH the flag exists to avoid.
+    for engine in ENGINES:
+        source = _engine_source(engine)
+        if source is None:
+            continue
+        if "fingerprint" not in source:
+            continue
+        ok &= check(f"{engine} does not reach into the response shape itself",
+                    'get("userAgent")' not in source
+                    and '["userAgent"]' not in source)
+
+    # And the helper itself, against the three shapes the API is known to
+    # return. Fixtures rather than a live call: the suite must pass offline.
+    ok &= check("chromium format: userAgent.userAgent",
+                fingerprint_user_agent({"userAgent": {"userAgent": "UA-1"}}) == "UA-1")
+    ok &= check("raw format: data.ua",
+                fingerprint_user_agent({"data": {"ua": "UA-2"}}) == "UA-2")
+    ok &= check("a bare string is accepted too",
+                fingerprint_user_agent({"userAgent": "UA-3"}) == "UA-3")
+    ok &= check("and `value`, which the API does NOT return, is still read "
+                "rather than being made an error — a response shape this "
+                "repo has not seen is not a reason to set no UA",
+                fingerprint_user_agent({"userAgent": {"value": "UA-4"}}) == "UA-4")
+    ok &= check("nothing recognisable -> None, never a fabricated UA",
+                fingerprint_user_agent({"userAgent": {}}) is None)
+
+    group("Its kwargs are ones the driver actually accepts")
+    # An unknown key in new_context(**kwargs) is a TypeError at launch, on
+    # the paid path, at runtime.
+    fp = {"userAgent": {"userAgent": "UA"},
+          "screen": {"width": 1920, "height": 1080},
+          "intl": {"contentLocale": "en-US", "timeZone": "America/New_York"}}
+    kwargs = playwright_context_kwargs(fp)
+    try:
+        from playwright.sync_api import Browser
+        allowed = set(inspect.signature(Browser.new_context).parameters)
+        unknown = sorted(set(kwargs) - allowed)
+        ok &= check(f"every context kwarg is a real one "
+                    f"{'' if not unknown else unknown}", not unknown)
+    except ImportError:
+        skips_note = "playwright absent, context-kwarg binding not checked"
+        ok &= check(skips_note, True)
+
+    # The locale must come from the fingerprint, not be built out of its
+    # country: a sibling family shipped `en-{country}` and gave every German
+    # fingerprint the locale `en-DE`, which is not a locale anyone has.
+    ok &= check("locale comes from the fingerprint's own intl block",
+                kwargs.get("locale") == "en-US")
+    ok &= check("and so does the timezone, which was never applied at all "
+                "in four sibling repos",
+                kwargs.get("timezone_id") == "America/New_York")
+    return ok
+
+
+def test_proxy_pool():
+    group("Credentials never reach argv or a log")
+    ok = True
+    url = "http://user:" + "s3cr3t" + "@exit.example.com:2334"
+    masked = mask(url)
+    ok &= check("the password is masked", "s3cr3t" not in masked)
+    ok &= check("the host and port are KEPT — that is the point of the log",
+                "exit.example.com" in masked and "2334" in masked)
+    scrubbed, credentials = split_credentials(url)
+    ok &= check("split_credentials strips them from the address",
+                "s3cr3t" not in scrubbed and credentials == ("user", "s3cr3t"))
+    pw = to_playwright(url)
+    ok &= check("Playwright gets them in its own fields, not in the server URL",
+                pw["password"] == "s3cr3t" and "s3cr3t" not in pw["server"])
+
+    group("A worker owns one exit; rotation is a fresh browser")
+    pool = ProxyPool(["http://a@h1:1", "http://b@h2:2", "http://c@h3:3"])
+    first = pool.current
+    pool.advance("test")
+    ok &= check("advance moves to a different exit", pool.current != first)
+    ok &= check("the pool knows its size", len(pool) == 3)
+    return ok
+
+
+def test_credentials_never_reach_a_log():
+    group("An EXCEPTION MESSAGE is a log")
+    ok = True
+    secret = "hunter2"
+    # Concatenated rather than interpolated, so no line in this file holds a
+    # complete `scheme://user:pass@host` literal. That keeps ci_checks.py's
+    # credential scan meaningful on the one file where a real credential is
+    # most likely to be pasted while debugging — an allowlist entry here
+    # would switch the check off exactly where it matters.
+    endpoint = "ws://user:" + secret + "@cb.2captcha.com:9222"
+    for engine in ENGINES:
+        try:
+            module = __import__(engine)
+        except ImportError:
+            continue
+        masker = getattr(module, "_mask_credentials", None)
+        if masker is None:
+            ok &= check(f"{engine} has a credential masker", False)
+            continue
+        # Globally, not once: a Playwright connection error repeats the
+        # endpoint five times, and a masker that handles the first prints the
+        # password the other four while looking like it works.
+        repeated = " ".join([endpoint] * 5)
+        ok &= check(f"{engine} masks EVERY occurrence",
+                    secret not in masker(repeated))
+        ok &= check(f"{engine} keeps the host and port",
+                    "cb.2captcha.com:9222" in masker(endpoint))
+    # And the solver redacts a key out of an error message, because the
+    # fingerprint API takes its key as a query parameter and `requests` puts
+    # the full URL into the text of every error it raises.
+    key = "a" * 32
+    redacted = captcha_solver._redact(f"GET https://x/y?key={key} failed")
+    ok &= check("the solver redacts a key from an error message",
+                key not in redacted)
+    return ok
+
+
+def test_driver_primitives_tolerate_a_navigation():
+    group("Every driver primitive survives the page moving under it")
+    ok = True
+    # The canary's FIRST dispatch caught this, which is exactly why the family rule says
+    # to dispatch it once rather than trusting the badge. A scroll batch was
+    # polling the card count when the page navigated — Cloudflare's challenge
+    # can arrive at any moment here — and one engine raised
+    # `Execution context was destroyed, most likely because of a navigation`.
+    # Exit 1, a CRASH, where the honest answer was "blocked".
+    #
+    # Its two twins had guarded the same call from the start. That is the
+    # same shape as the refused-GraphQL threshold: two engines agree, one
+    # does not, and only a live run in a different environment shows it.
+    #
+    # Checked as TEXT so this needs no engine library, and by structure
+    # rather than by phrasing: the function must contain a try and a return
+    # of 0.
+    for engine in ENGINES:
+        source = _engine_source(engine)
+        if source is None:
+            continue
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name != "_count":
+                continue
+            guarded = any(isinstance(child, ast.Try) for child in node.body)
+            zero = any(isinstance(child, ast.Return)
+                       and isinstance(child.value, ast.Constant)
+                       and child.value.value == 0
+                       for child in ast.walk(node))
+            ok &= check(f"{engine}._count catches the driver's error", guarded)
+            ok &= check(f"{engine}._count answers 0 rather than raising", zero)
+            break
+        else:
+            ok &= check(f"{engine} has a _count primitive", False)
+
+    # The other primitives the scroll loop drives, for the same reason.
+    for engine in ENGINES:
+        source = _engine_source(engine)
+        if source is None:
+            continue
+        tree = ast.parse(source)
+        for name in ("_page_height", "_scroll_to_bottom"):
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name == name:
+                    guarded = any(isinstance(c, ast.Try) for c in node.body)
+                    ok &= check(f"{engine}.{name} is guarded too", guarded)
+                    break
+            else:
+                ok &= check(f"{engine} has {name}", False)
+    return ok
+
+
+def test_engine_parity(skips):
+    group("The three engines agree — flags, in BOTH directions")
+    ok = True
+    flagsets = {}
+    for engine in ENGINES:
+        src = open(os.path.join(REPO_ROOT, f"{engine}.py"), encoding="utf-8").read()
+        flagsets[engine] = set(re.findall(r'p\.add_argument\("(--[a-z0-9-]+)"', src))
+
+    # The family contract. Every engine must carry all of these.
+    contract = {"--url", "--pages", "--category", "--format", "--out", "--delay",
+                "--retries", "--retry-delay", "--concurrency", "--proxy",
+                "--proxy-file", "--proxy-rotate", "--proxy-shuffle",
+                "--proxy-block-retries", "--twocaptcha-key", "--captcha-api",
+                "--solve-captcha", "--min-score", "--cdp-endpoint",
+                "--allow-empty", "--dump-html", "--headless", "--headful",
+                "--mode"}
+    for engine, flags in flagsets.items():
+        missing = contract - flags
+        ok &= check(f"{engine} carries the whole contract "
+                    f"{'' if not missing else sorted(missing)}", not missing)
+
+    # And the DOCUMENTED differences, asserted in both directions so closing
+    # one needs a README edit rather than a quiet patch.
+    documented_extra = {
+        # --cdp-connect-timeout is on the two engines that can actually USE
+        # an authenticated CDP endpoint. Selenium cannot (chromedriver's
+        # debuggerAddress has nowhere to put a password), so a connect
+        # timeout there would be a flag for a path that does not exist.
+        "playwright_scraper": {"--locale", "--fingerprint", "--fp-tags",
+                               "--fp-country", "--browser-channel",
+                               "--cdp-connect-timeout"},
+        "selenium_scraper": {"--locale", "--fingerprint", "--fp-tags",
+                             "--fp-country"},
+        "puppeteer_scraper": {"--chromium-path", "--cdp-connect-timeout"},
+    }
+    for engine, extra in documented_extra.items():
+        actual = flagsets[engine] - contract
+        ok &= check(f"{engine}'s extra flags are exactly the documented set",
+                    actual == extra)
+
+    group("Every shared-module call binds against the real signature")
+    problems = []
+    for engine in ENGINES:
+        path = os.path.join(REPO_ROOT, f"{engine}.py")
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        imported = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in SHARED_MODULES:
+                for alias in node.names:
+                    imported[alias.asname or alias.name] = (node.module, alias.name)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = None
+            if isinstance(node.func, ast.Name) and node.func.id in imported:
+                module, name = imported[node.func.id]
+                fn = getattr(SHARED_MODULES[module], name, None)
+            elif (isinstance(node.func, ast.Attribute)
+                  and isinstance(node.func.value, ast.Name)
+                  and node.func.value.id in SHARED_MODULES):
+                fn = getattr(SHARED_MODULES[node.func.value.id], node.func.attr, None)
+            if fn is None or not callable(fn):
+                continue
+            if any(isinstance(a, ast.Starred) for a in node.args):
+                continue
+            if any(k.arg is None for k in node.keywords):
+                continue
+            try:
+                signature = inspect.signature(fn)
+            except (TypeError, ValueError):
+                continue
+            try:
+                signature.bind(*[object()] * len(node.args),
+                               **{k.arg: object() for k in node.keywords})
+            except TypeError as exc:
+                problems.append(f"{engine}:{node.lineno} {getattr(fn,'__name__','?')}: {exc}")
+    ok &= check(f"no call site disagrees with its callee "
+                f"{'' if not problems else problems[:3]}", not problems)
+
+    group("Every engine imports its driver at MODULE level")
+    # Without this the module imports cleanly with no driver installed, the
+    # skip below never fires, and CI's engine-smoke job cannot notice a
+    # broken import.
+    drivers = {"playwright_scraper": "playwright",
+               "selenium_scraper": "selenium",
+               "puppeteer_scraper": "pyppeteer"}
+    for engine, driver in drivers.items():
+        tree = ast.parse(open(os.path.join(REPO_ROOT, f"{engine}.py"),
+                              encoding="utf-8").read())
+        top_level = []
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(driver):
+                top_level.append(node)
+            if isinstance(node, ast.Import):
+                top_level += [a for a in node.names if a.name.startswith(driver)]
+        ok &= check(f"{engine} imports {driver} at module level", bool(top_level))
+
+    group("The browser channel — unforced here, and that is a measurement")
+    # The opposite of a sibling repo, which must drive real Chrome or be
+    # refused. Quora was measured serving the BUNDLED Chromium the full feed,
+    # so no channel is forced — and pinning that here is what stops someone
+    # copying the sibling's default back in and quietly changing what the
+    # README's numbers describe.
+    try:
+        import playwright_scraper as pws
+        ok &= check("Playwright forces no browser channel",
+                    pws.DEFAULT_BROWSER_CHANNEL is None)
+    except ImportError:
+        skips.append("playwright_scraper (playwright not installed)")
+    sel = _engine_source("selenium_scraper") or ""
+    ok &= check("Selenium says there is nothing to choose",
+                "there is nothing to choose" in sel)
+    pup = _engine_source("puppeteer_scraper") or ""
+    ok &= check("pyppeteer says its bundled Chromium is accepted here",
+                "this site accepts it" in pup)
+    ok &= check("no engine claims a bundled Chromium is refused",
+                not any("refus" in (_engine_source(e) or "").lower()
+                        .split("bundled Chromium")[-1][:80] for e in ENGINES))
+
+    group("The coverage floor is one number, not three")
+    floors = []
+    for engine in ENGINES:
+        src = _engine_source(engine)
+        match = re.search(r"^FIELD_FLOOR = (\d+)", src or "", re.M)
+        floors.append(match.group(1) if match else None)
+    ok &= check(f"all three engines share a FIELD_FLOOR ({floors[0]})",
+                len(set(floors)) == 1 and floors[0] is not None)
+
+    group("Engines import cleanly (skipped if the driver is absent)")
+    for engine in ENGINES:
+        try:
+            __import__(engine)
+            ok &= check(f"{engine} imports", True)
+        except ImportError as exc:
+            skips.append(f"{engine} ({exc})")
+            print(f"  SKIP  {engine} — {exc}")
+    return ok
+
+
+def test_module_attributes_exist(skips):
+    group("Every `module.name` an engine reaches for actually exists")
+    ok = True
+    # The gap the signature-binding check leaves, found by a live run rather
+    # than by reading. `_min_matches` in one engine called
+    # `page_flow.expected_cards(...)` — a name renamed in the other two and
+    # not in that one — and the run died with AttributeError on its FIRST
+    # fetch, exit 1. Invisible to import, to --help, to compileall, to the
+    # undefined-NAME walk (it is an attribute, not a name) and to 490 green
+    # assertions, because nothing but a live fetch reaches that line.
+    #
+    # This walks every `page_flow.X` and `product_parser.X` in every engine
+    # and asserts X is really there. It needs no engine library: the modules
+    # being reached INTO are the shared ones, and the reaching files are read
+    # as text.
+    for engine in ENGINES:
+        source = _engine_source(engine)
+        if source is None:
+            skips.append(f"{engine} (source missing)")
+            continue
+        tree = ast.parse(source)
+        missing = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute):
+                continue
+            if not isinstance(node.value, ast.Name):
+                continue
+            module = SHARED_MODULES.get(node.value.id)
+            if module is None:
+                continue
+            if not hasattr(module, node.attr):
+                missing.append(f"{node.value.id}.{node.attr}")
+        ok &= check(f"{engine} reaches for nothing that is not there "
+                    f"{'' if not missing else sorted(set(missing))}",
+                    not missing)
+    return ok
+
+
+def test_no_dead_public_names():
+    group("Every public name in the policy modules has a reader")
+    ok = True
+    # the check 5, automated. A public name nothing reads is dead code, and
+    # a policy CONSTANT nothing reads is worse: the prose beside it reads
+    # like enforcement. A sibling repo shipped `RETRY_ON_BLOCKED` with a
+    # paragraph of measured justification and no engine consulting it.
+    #
+    # Scoped to the two modules that hold this repo's decisions, because the
+    # family core is shared and its unused corners are another repo's
+    # problem. References are counted across the whole repository INCLUDING
+    # the defining module, so a helper used only by its own neighbours
+    # counts — what this catches is a name with no reader anywhere at all.
+    scanned = []
+    for path in sorted(pathlib.Path(REPO_ROOT).rglob("*.py")):
+        parts = path.relative_to(REPO_ROOT).parts
+        # Skip local tools and any nested checkout. Matching on RELATIVE
+        # parts, not on the absolute path: the absolute one can itself sit
+        # under a directory this would otherwise exclude, and then the
+        # corpus comes back empty and every name reads as dead — which is
+        # how this check first "found" 91 dead names in a healthy module.
+        if path.name.startswith("_"):
+            continue
+        if any(part in {"worktrees", ".venv", "venv", "build", "dist"}
+               for part in parts):
+            continue
+        scanned.append(path.read_text(encoding="utf-8"))
+    corpus = "\n".join(scanned)
+    if len(corpus) < 10_000:
+        return check("the dead-name corpus is not empty (it would make "
+                     "every name look dead)", False)
+
+    for module in ("product_parser", "page_flow"):
+        source = open(os.path.join(REPO_ROOT, module + ".py"),
+                      encoding="utf-8").read()
+        tree = ast.parse(source)
+        names = []
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                if not node.name.startswith("_"):
+                    names.append(node.name)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id.isupper():
+                        names.append(target.id)
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                if node.target.id.isupper():
+                    names.append(node.target.id)
+        dead = []
+        for name in names:
+            # Two references minimum: the definition, and at least one read.
+            hits = len(re.findall(r"\b" + re.escape(name) + r"\b", corpus))
+            if hits < 2:
+                dead.append(name)
+        ok &= check(f"{module} has no unread public name "
+                    f"{'' if not dead else sorted(dead)}", not dead)
+    return ok
+
+
+def test_no_undefined_names():
+    group("Names that resolve, not just parse")
+    # `compileall` proves a file PARSES, not that its names RESOLVE. A live
+    # run of a sibling repo's engine died with NameError on a line reached
+    # only while fetching, after an import had been removed — invisible to
+    # import, --help, compileall and 400+ green assertions. Kept COARSE so it
+    # under-reports rather than inventing problems.
+    ok = True
+    for name in sorted(os.listdir(REPO_ROOT)):
+        if not name.endswith(".py") or name == "smoke_test.py":
+            continue
+        undefined = _undefined_names(os.path.join(REPO_ROOT, name))
+        ok &= check(f"{name}: no undefined names "
+                    f"{'' if not undefined else sorted(undefined)[:5]}", not undefined)
+    return ok
+
+
+def _undefined_names(path):
+    source = open(path, encoding="utf-8").read()
+    tree = ast.parse(source)
+    bound = set(dir(__builtins__) if not isinstance(__builtins__, dict)
+                else __builtins__.keys())
+    bound |= set(dir(__import__("builtins")))
+    # Module-level dunders are always bound and are not imports.
+    bound |= {"__file__", "__name__", "__doc__", "__package__", "__spec__",
+              "__loader__", "__builtins__", "__debug__"}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                args = node.args
+                for arg in (args.posonlyargs + args.args + args.kwonlyargs):
+                    bound.add(arg.arg)
+                if args.vararg:
+                    bound.add(args.vararg.arg)
+                if args.kwarg:
+                    bound.add(args.kwarg.arg)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bound.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, (ast.comprehension,)):
+            pass
+        elif isinstance(node, ast.Global) or isinstance(node, ast.Nonlocal):
+            bound.update(node.names)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+    used = {n.id for n in ast.walk(tree)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    return used - bound
+
+
+def test_dockerfile_matches_its_entrypoint():
+    group("The Dockerfile COPY list against the import graph")
+    # All three repos in this family once shipped an image that died with
+    # ModuleNotFoundError on every invocation, --help included, because one
+    # module was missing from an explicit COPY list. This check needs no
+    # Docker.
+    ok = True
+    path = os.path.join(REPO_ROOT, "Dockerfile")
+    if not os.path.exists(path):
+        return check("a Dockerfile exists", False)
+    dockerfile = open(path, encoding="utf-8").read()
+    # Join backslash continuations first: the COPY list spans five lines, and
+    # a line-by-line reader sees an empty list and passes vacuously.
+    joined = re.sub(r"\\\s*\n\s*", " ", dockerfile)
+    copied = set()
+    for line in joined.splitlines():
+        if line.strip().upper().startswith("COPY"):
+            # [1:-1]: the first token is COPY and the LAST is the
+            # destination. Including the destination made `./` look like
+            # "copy everything" and the check passed vacuously.
+            for token in line.split()[1:-1]:
+                if token.endswith(".py"):
+                    copied.add(os.path.basename(token))
+                elif token in ("./", "."):
+                    copied.update(n for n in os.listdir(REPO_ROOT)
+                                  if n.endswith(".py"))
+
+    # Walk the entrypoint's own import graph.
+    entrypoints = [n for n in ENGINES if f"{n}.py" in dockerfile]
+    if not entrypoints:
+        entrypoints = ["playwright_scraper"]
+    needed, queue = set(), list(entrypoints)
+    local = {n[:-3] for n in os.listdir(REPO_ROOT) if n.endswith(".py")}
+    while queue:
+        module = queue.pop()
+        if module in needed:
+            continue
+        needed.add(module)
+        tree = ast.parse(open(os.path.join(REPO_ROOT, f"{module}.py"),
+                              encoding="utf-8").read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in local:
+                queue.append(node.module)
+            elif isinstance(node, ast.Import):
+                queue += [a.name for a in node.names if a.name in local]
+    missing = {f"{m}.py" for m in needed} - copied
+    ok &= check(f"every module the entrypoint imports is COPYed "
+                f"{'' if not missing else sorted(missing)}", not missing)
+
+    group("The image carries no secrets and no test material")
+    for unwanted in (".env", "smoke_test.py", "fixtures_generated.json",
+                     "captures"):
+        ok &= check(f"{unwanted} is not COPYed into the image",
+                    unwanted not in copied and f"COPY {unwanted}" not in dockerfile)
+    return ok
+
+
+def test_no_file_describes_another_site():
+    group("No shipped file still describes a different site")
+    ok = True
+    # A sibling repo's audit found "a shipped file still described another
+    # site", and this repo inherited the same thing FOUR times over: a
+    # CONTRIBUTING section about `data-testid="divSRPContentProducts"` and
+    # sold counts, a list of invariants about auction lots and reserve
+    # prices, a captcha module explaining an Akamai "Access Denied" page, and
+    # an issue template about seller feedback scores. All four were copied in
+    # with the family core and all four read as authoritative.
+    #
+    # Nothing here can tell a paragraph about Quora from a paragraph about a
+    # rental site in general. What it CAN do is notice the vocabulary of the
+    # specific siblings this repo was copied from, which is where the real
+    # leakage comes from.
+    foreign = {
+        "akamai": "a sibling's bot manager",
+        "datadome": "a sibling's bot manager",
+        "bot or not": "a sibling's challenge page",
+        "reserve_price_set": "a sibling's auction column",
+        "seller_score": "a sibling's seller column",
+        "stay_dates": "a sibling's booking column",
+        "fewo-direkt": "a sibling's storefront",
+        "stayz.com.au": "a sibling's storefront",
+        "vrbo": "a sibling repo",
+        "tokopedia": "a sibling repo",
+        "catawiki": "a sibling repo",
+        "craigslist": "a sibling repo",
+        "mediamarkt": "a sibling repo",
+        "farfetch": "a sibling repo",
+        "divsrpcontentproducts": "a sibling's grid selector",
+        "lodging-card-responsive": "a sibling's card selector",
+    }
+    # A CONTEXT allowlist, the same shape ci_checks.py uses for credentials,
+    # because one of these words is legitimate in exactly one place. The family rule says
+    # captcha DETECTION stays broad — which challenge a visitor meets depends
+    # on the exit and on what the address has been doing — so
+    # `BOT_CHALLENGE_MARKERS` names vendors this site has never served, on
+    # purpose. That is a marker list, not a description of the site, and the
+    # difference is the whole point of this check.
+    allowed = {("product_parser.py", "datadome")}
+
+    checked = 0
+    for path in sorted(pathlib.Path(REPO_ROOT).rglob("*")):
+        rel = path.relative_to(REPO_ROOT)
+        if not path.is_file() or path.suffix not in (".py", ".md", ".yml",
+                                                     ".yaml", ".toml",
+                                                     ".example"):
+            continue
+        if any(part in {"worktrees", ".venv", "venv", "build", "dist", ".git"}
+               for part in rel.parts) or path.name.startswith("_"):
+            continue
+        # The suite names these words in order to ban them, so it cannot be
+        # scanned for them without failing on its own check.
+        if path.name == "smoke_test.py":
+            continue
+        checked += 1
+        lowered = path.read_text(encoding="utf-8", errors="replace").lower()
+        hits = sorted({word for word in foreign
+                       if word in lowered
+                       and (path.name, word) not in allowed})
+        ok &= check(f"{rel} describes this site "
+                    f"{'' if not hits else hits}", not hits)
+    ok &= check(f"…and {checked} files were actually scanned", checked > 20)
+    return ok
+
+
+def test_wording():
+    group("Wording enforced by a test")
+    ok = True
+    banned = {
+        "cloud browser": "Scraping Browser API",
+        "antidetect browser": "Scraping Browser API",
+        "gate.2prx.com": "2captcha.com/proxy",
+        "2prx.com": "2captcha.com/proxy",
+        "--antidetect": "removed",
+        "ANTIDETECT_LOCAL_API": "removed",
+    }
+    shipped = [n for n in os.listdir(REPO_ROOT)
+               if n.endswith((".py", ".md", ".txt", ".toml", ".yml", ".example"))]
+    for name in shipped:
+        if name == "smoke_test.py":
+            continue  # this file names them in order to ban them
+        text = open(os.path.join(REPO_ROOT, name), encoding="utf-8",
+                    errors="replace").read().lower()
+        for phrase, instead in banned.items():
+            ok &= check(f"{name}: no {phrase!r} (write {instead!r})",
+                        phrase.lower() not in text)
+
+    group("Removed flags stay removed — scoped to the ENGINES")
+    # --country is banned on a scraper (it could disagree with the URL, and
+    # here the storefront IS the hostname) and legitimate on
+    # fingerprint_client.py, where it picks a fingerprint locale.
+    for engine in ENGINES:
+        src = open(os.path.join(REPO_ROOT, f"{engine}.py"), encoding="utf-8").read()
+        ok &= check(f"{engine} has no --country flag",
+                    'add_argument("--country"' not in src)
+    return ok
+
+
+def test_no_capture_leaks():
+    group("Committed fixtures carry no credential-shaped material")
+    ok = True
+    text = open(_FIXTURE_PATH, encoding="utf-8").read()
+    # PATTERNS, not the literals one capture happened to contain, so the next
+    # capture is caught too.
+    patterns = {
+        "a 24+ char hex run": r"\b[0-9a-fA-F]{24,}\b",
+        "a reCAPTCHA site key": r"\b6L[A-Za-z0-9_-]{20,}",
+        "a Turnstile site key": r"\b0x4[A-Za-z0-9]{15,}",
+        "an embedded credential": r"[a-z]+://[^\s\"/@]+:[^\s\"/@]+@",
+    }
+    for label, pattern in patterns.items():
+        found = re.findall(pattern, text)
+        ok &= check(f"no {label} in fixtures_generated.json "
+                    f"{'' if not found else found[:2]}", not found)
+    ok &= check("the challenge fixture still names its vendor after scrubbing",
+                detect_bot_challenge(fixture("BLOCK_CF")) == "cloudflare")
+
+    # And the PEOPLE, which is the other half of the family rule and the half a
+    # credential grep does not cover. make_fixtures.py replaces every author
+    # name, profile slug, credential and answer body before writing; these
+    # are the shapes that would show a pass having been skipped.
+    ok &= check("no author name survives except the placeholder",
+                "Fixture Author" in text)
+    ok &= check("every profile link is a placeholder slug",
+                not re.search(r"/profile/(?!Fixture-Author)[A-Za-z]", text))
+    ok &= check("no answer cites a third-party host",
+                not re.search(r"https?://(?!(?:[a-z0-9-]+\.)*quora\.com|"
+                              r"(?:[a-z0-9-]+\.)+quoracdn\.net|"
+                              r"example\.invalid|challenges\.cloudflare\.com|"
+                              r"www\.w3\.org|www\.twitter\.com)[a-z]", text))
+    return ok
+
+
+def test_ci_checks_is_wired_up():
+    group("One credential check, invoked from CI and from here")
+    ok = True
+    script = os.path.join(REPO_ROOT, ".github", "ci_checks.py")
+    ok &= check("ci_checks.py exists", os.path.exists(script))
+    workflow = os.path.join(REPO_ROOT, ".github", "workflows", "tests.yml")
+    if os.path.exists(workflow):
+        text = open(workflow, encoding="utf-8").read()
+        # A check nothing runs is not a check; two sources of truth that
+        # disagree is worse.
+        ok &= check("tests.yml CALLS ci_checks.py rather than reimplementing it",
+                    "ci_checks.py" in text)
+    if os.path.exists(script):
+        # And it must pass on THIS repo. A check that fails on its own
+        # repository is a check nobody can read.
+        import subprocess
+        result = subprocess.run([sys.executable, script, "--all"],
+                                cwd=REPO_ROOT, capture_output=True, text=True)
+        ok &= check(f"ci_checks.py passes on this repo "
+                    f"{'' if result.returncode == 0 else result.stdout[-300:]}",
+                    result.returncode == 0)
+    return ok
+
+
+def test_sample_output():
+    group("sample_output is cut from a real run")
+    ok = True
+    for name, loader in (("sample_output.json", json.load),):
+        path = os.path.join(REPO_ROOT, name)
+        if not os.path.exists(path):
+            ok &= check(f"{name} exists", False)
+            continue
+        rows = loader(open(path, encoding="utf-8"))
+        ok &= check(f"{name} is a non-empty list", isinstance(rows, list) and rows)
+        columns = [f.name for f in fields(Product)]
+        ok &= check(f"{name} columns match Product exactly",
+                    all(list(r) == columns for r in rows))
+        # Fabrication markers — a sample nobody ran reads exactly like one
+        # somebody did.
+        text = json.dumps(rows)
+        for marker in ("example.com", "lorem", "PLACEHOLDER", "TODO", "foo bar"):
+            ok &= check(f"{name}: no {marker!r}", marker.lower() not in text.lower())
+        ok &= check(f"{name}: every row is from a supported storefront",
+                    all(r["source"] in HOSTS for r in rows))
+        ok &= check(f"{name}: page+position unique",
+                    len({(r["page"], r["position"]) for r in rows}) == len(rows))
+    csv_path = os.path.join(REPO_ROOT, "sample_output.csv")
+    if os.path.exists(csv_path):
+        header = next(csv_module.reader(open(csv_path, encoding="utf-8")))
+        ok &= check("sample_output.csv header matches Product",
+                    header == [f.name for f in fields(Product)])
+    else:
+        ok &= check("sample_output.csv exists", False)
+    return ok
+
+
+def test_required_files_are_committed():
+    group("Everything the suite needs is tracked by git")
+    # A blanket `*.json` / `*.csv` in .gitignore — which this repo wants,
+    # because a scraper's own output is large and stale — silently swallowed
+    # `fixtures_generated.json`. The suite was green on the machine that
+    # wrote it and every CI job died with FileNotFoundError at import. A
+    # check that a file EXISTS cannot see that; only asking git can.
+    ok = True
+    import subprocess
+    required = ("fixtures_generated.json", "sample_output.json",
+                "sample_output.csv", ".env.example", "README.md",
+                "CHANGELOG.md", "Dockerfile", "requirements.txt",
+                ".github/ci_checks.py", ".github/workflows/tests.yml",
+                ".github/workflows/canary.yml", "tests/test_smoke.py")
+    result = subprocess.run(["git", "ls-files"], cwd=REPO_ROOT,
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        print("  SKIP  not a git checkout — cannot verify what is committed")
+        return ok
+    tracked = set(result.stdout.split())
+    for name in required:
+        ok &= check(f"{name} is committed, not just present on disk",
+                    name in tracked)
+    # And the other direction: nothing a scraper produced should be.
+    leaked = [f for f in tracked
+              if re.search(r"_debug\.(html|png)$|\.meta\.json$|^captures/|^\.env$",
+                           f)]
+    ok &= check(f"no run output or capture is committed "
+                f"{'' if not leaked else leaked[:3]}", not leaked)
+    return ok
+
+
+def test_readme_claims():
+    group("README numbers exist and are dated")
+    ok = True
+    path = os.path.join(REPO_ROOT, "README.md")
+    if not os.path.exists(path):
+        return check("README.md exists", False)
+    readme = open(path, encoding="utf-8").read()
+    ok &= check("the README names every supported language host",
+                all(h.split(".")[0] + "." in readme for h in HOSTS))
+    ok &= check("it states what the block actually is",
+                "403" in readme and "managed" in readme.lower())
+    ok &= check("it says a captcha solve buys nothing here",
+                "no sitekey" in readme or "sitekey" in readme)
+    ok &= check("it warns that a topic run has no counts",
+                "null on every topic row" in readme)
+    ok &= check("it says the page parameter is IGNORED rather than failing",
+                "?page=2" in readme and "ignored" in readme)
+    ok &= check("it says concurrency is refused",
+                "--concurrency" in readme)
+    # Every claim is measured or absent: a number without a date goes stale
+    # invisibly.
+    ok &= check("measurements carry a date", "2026-09-15" in readme)
+
+    group("The README's numbers match the artefacts on disk")
+    # A number a reader can check is worth more than one they cannot. These
+    # are re-derived from the committed fixtures rather than retyped.
+    topic_rows = rows_of("TOPIC_EN")
+    ok &= check("a topic row really is DOM-only, as the README says",
+                all(r.data_source == "dom" for r in topic_rows))
+    question_rows = rows_of("QUESTION_EN")
+    backed = [r for r in question_rows if r.data_source != "dom"]
+    ok &= check("a question row really is payload-backed, as the README says",
+                backed)
+    ok &= check("the column count the README shows matches the dataclass",
+                len(fields(Answer)) == 30)
+    return ok
+
+
+# The floor the README and CHANGELOG state. A FLOOR rather than the exact
+# count, because an exact count goes stale the next time anyone adds a check
+# and a stale number in a README is worse than no number. Raise it when
+# it is comfortably passed; it can only ever be an under-claim.
+CLAIMED_CHECK_FLOOR = 500
+
+
+def test_x_debug_header_is_redacted():
+    """SECURITY.md names the Scraper API's x-debug header as a place
+    credentials reach a log unmasked. It was then logged verbatim.
+
+    The fixtures are assembled from pieces rather than written out whole,
+    because this file is scanned by the credential check like every other
+    and a fixture that LOOKS like a live key fails it. They are the SHAPES a
+    credential takes, not the literals this repo happens to contain today.
+    """
+    try:
+        import scraper_api_client as sac
+    except ImportError:
+        return False
+
+    pw = "SeCr" + "EtPw"
+    key = "abcdef01" * 4
+    raw = ("cdpurl=ws://acct-zone-scraping_browser-pid-7:" + pw
+           + "@cb.2captcha.com:9222 cost=0.00145 key=" + key + " status=200")
+    out = sac._redact_debug_header(raw)
+    ok = True
+    ok &= check("x-debug: the credential and the key are gone",
+                      pw not in out and key not in out)
+    ok &= check("x-debug: the cost, host and status survive",
+                      "cost=0.00145" in out and "cb.2captcha.com:9222" in out
+                      and "status=200" in out)
+
+    s1, s2 = "secret" + "one", "secret" + "two"
+    two = sac._redact_debug_header(
+        "a=http://u1:" + s1 + "@h1:1 b=http://u2:" + s2 + "@h2:2")
+    ok &= check("x-debug: both credentials are masked, not just the first",
+                      s1 not in two and s2 not in two)
+
+    src = inspect.getsource(sac)
+    ok &= check("x-debug: the log line calls the redactor",
+                      'logger.info("x-debug: %s", _redact_debug_header(debug))' in src)
+    return ok
+
+def test_scraper_api_payload_and_status():
+    """Measured 2026-09-23 against the live Scraper API: `waitFor` sent as
+    a JSON-encoded string is answered HTTP 422 and still billed, and the
+    response's `status` is the API's own "success" while the target's code
+    is `http_code`. Drive the real fetch_html with requests.post stubbed:
+    no network, no key spent."""
+    try:
+        import scraper_api_client as sac
+    except ImportError:
+        return False
+
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+        headers = {}
+        text = ""
+
+        def json(self):
+            return {"status": "success", "http_code": 403,
+                    "headers": {}, "body": "<html></html>"}
+
+    def fake_post(url, **kw):
+        captured.update(kw.get("json") or {})
+        return _Resp()
+
+    real_post, real_argv = sac.requests.post, sys.argv
+    sac.requests.post = fake_post
+    sys.argv = ["scraper_api_client.py", "--key", "k" * 8,
+                "--url", 'https://www.quora.com/What-is-machine-learning-4',
+                "--wait-text", 'machine learning']
+    try:
+        _html, status = sac.fetch_html(sac.parse_args())
+    finally:
+        sac.requests.post, sys.argv = real_post, real_argv
+
+    ok = True
+    ok &= check("scraper API: waitFor is sent as an object, not a JSON string",
+                captured.get("waitFor") == {"text": 'machine learning'})
+    ok &= check("scraper API: the target status comes from http_code (403), "
+                "not the API's own 'success'", status == 403)
+    return ok
+
+
+
+def test_audit_fixes():
+    group("Scroll reasons, --retries >= 1, atomic writes (2026-10 audit)")
+    import argparse
+    import stat
+    import tempfile
+    import output_writer
+
+    ok = True
+
+    # -- a scroll that stopped because it ran out of rounds is not settled --
+    def _grow():
+        n = {"v": 0}
+
+        def count(_sel):
+            n["v"] += 1
+            return n["v"]
+        return count, n
+
+    count, n = _grow()
+    got, why = page_flow.scroll_feed(count, lambda: None,
+                                     lambda: n["v"] * 10, lambda ms: None,
+                                     target=None)
+    ok &= check("a feed still growing at the budget stops as max_rounds",
+                why == page_flow.SCROLL_STOP_MAX_ROUNDS)
+    trace = page_flow.scroll_trace(1, got, None, why)
+    ok &= check("and the trace says settled=False, not True",
+                trace["settled"] is False
+                and trace["stopped_by"] == "max_rounds")
+
+    _, why2 = page_flow.scroll_feed(lambda s: 7, lambda: None, lambda: 500,
+                                    lambda ms: None, target=None)
+    ok &= check("a feed that holds still stops as stable, settled=True",
+                why2 == page_flow.SCROLL_STOP_STABLE
+                and page_flow.scroll_trace(7, 7, None, why2)["settled"])
+
+    _, why3 = page_flow.scroll_feed(lambda s: 13, lambda: None, lambda: 500,
+                                    lambda ms: None, target=13)
+    ok &= check("reaching the question's own count stops as target",
+                why3 == page_flow.SCROLL_STOP_TARGET)
+
+    # The last round may be the one that reaches the target: the budget must
+    # not be blamed for a feed that delivered what the site promised.
+    seq = {"i": 0}
+
+    def count_last(_sel):
+        seq["i"] += 1
+        return seq["i"]
+    got4, why4 = page_flow.scroll_feed(count_last, lambda: None,
+                                       lambda: seq["i"] * 10,
+                                       lambda ms: None,
+                                       target=page_flow.SCROLL_MAX_ROUNDS + 1)
+    ok &= check("a target reached on the final round is not max_rounds",
+                why4 == page_flow.SCROLL_STOP_TARGET)
+
+    for engine in ENGINES:
+        src = _engine_source(engine)
+        if src is None:
+            continue
+        ok &= check(f"{engine} reads the reason, not a constant True",
+                    "page_flow.scroll_feed(" in src
+                    and "page_flow.scroll_trace(" in src
+                    and '"settled": True' not in src)
+
+    # -- --retries counts attempts, and 0 attempts navigates nowhere --------
+    ok &= check("--retries 0 is refused", _raises(
+        lambda: page_flow.attempts_arg("0")))
+    ok &= check("--retries -1 is refused", _raises(
+        lambda: page_flow.attempts_arg("-1")))
+    ok &= check("--retries x is refused", _raises(
+        lambda: page_flow.attempts_arg("x")))
+    ok &= check("--retries 1 is accepted as one attempt",
+                page_flow.attempts_arg("1") == 1)
+    ok &= check("the refusal is an argparse error (exit 2)", isinstance(
+        _catch(lambda: page_flow.attempts_arg("0")),
+        argparse.ArgumentTypeError))
+    for engine in ENGINES:
+        src = _engine_source(engine)
+        if src is None:
+            continue
+        ok &= check(f"{engine} validates --retries through page_flow",
+                    '"--retries", type=page_flow.attempts_arg' in src)
+
+    # -- a write that dies half-way leaves the previous good file alone -----
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, "out.json")
+        rows = [Answer(sku="a", url="https://www.quora.com/x")]
+        output_writer.write_json(rows, target)
+        good = open(target, "rb").read()
+
+        class Boom(Exception):
+            pass
+
+        def explode(obj, *a, **k):
+            fp = a[0] if a else k["fp"]
+            fp.write("[{\"truncated")
+            raise Boom()
+
+        real_dump = output_writer.json.dump
+        output_writer.json.dump = explode
+        try:
+            died = _raises(lambda: output_writer.write_json(rows, target))
+        finally:
+            output_writer.json.dump = real_dump
+        ok &= check("a write that raises mid-dump propagates", died)
+        ok &= check("the previous good file is byte-identical afterwards",
+                    open(target, "rb").read() == good)
+        ok &= check("and no temporary file is left beside it",
+                    sorted(os.listdir(tmp)) == ["out.json"])
+
+        meta_prefix = os.path.join(tmp, "run")
+        output_writer.write_run_meta(meta_prefix, {"status": "complete"})
+        ok &= check("the sidecar is written and readable", json.load(
+            open(meta_prefix + ".meta.json"))["status"] == "complete")
+        csv_path = os.path.join(tmp, "out.csv")
+        write_csv([], csv_path, Answer)
+        ok &= check("an empty CSV still carries its header",
+                    open(csv_path, encoding="utf-8").read().startswith("source,"))
+
+        # NamedTemporaryFile is 0600 and a rename keeps it.
+        if os.name == "posix":
+            umask = os.umask(0)
+            os.umask(umask)
+            fresh = os.path.join(tmp, "fresh.json")
+            output_writer.write_json(rows, fresh)
+            ok &= check("a new output gets the mode open() would have given",
+                        stat.S_IMODE(os.stat(fresh).st_mode)
+                        == (0o666 & ~umask))
+            os.chmod(target, 0o640)
+            output_writer.write_json(rows, target)
+            ok &= check("an existing output keeps its own mode",
+                        stat.S_IMODE(os.stat(target).st_mode) == 0o640)
+
+    src = open(os.path.join(REPO_ROOT, "output_writer.py"),
+               encoding="utf-8").read()
+    ok &= check("no writer opens its destination for truncation any more",
+                'open(path, "w"' not in src)
+    ok &= check("the save message says rows, because these are answers",
+                "products ->" not in src)
+    return ok
+
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-14 audit: solve budget, CSV formulas, parser failure, status,
+# numeric flags, credential scan, and no private citations.
+# ---------------------------------------------------------------------------
+_CONTENT_FN = {"playwright_scraper": "_content_when_settled",
+               "selenium_scraper": "_content",
+               "puppeteer_scraper": "_content"}
+
+
+class _StubChallenge:
+    kind, source, sitekey, action = "recaptcha-v2", "stub", "stub-key", None
+
+
+def _stub_args(tmp, retries=1):
+    import argparse
+    return argparse.Namespace(
+        retries=retries, pages=1, retry_delay=0.0, delay=0.0, proxy_block_retries=2,
+        mode="topic", out=os.path.join(tmp, "out"), dump_html=None,
+        headless=True, solve_captcha="when-blocked",
+        twocaptcha_key="stub-not-a-key", captcha_api="v2", min_score=0.7)
+
+
+def _drive_engine(engine, state, detections=None, solver_raises=False,
+                  rows=None, status=None, goto_raises=None, retries=1):
+    """Run one `_fetch_one_page` with every driver primitive stubbed.
+
+    Returns (outcome, solver purchases). Nothing reaches the network: the
+    solver is a stub that counts, and the session is a MagicMock.
+    """
+    from unittest import mock
+    answers = list(detections or [])
+    purchases = []
+
+    def reconcile(*a, **k):
+        hit = answers.pop(0) if answers else True
+        return _StubChallenge() if hit else None
+
+    def solve(*a, **k):
+        purchases.append(1)
+        if solver_raises:
+            raise RuntimeError("stub solver failure")
+        return "stub-token"
+
+    session = mock.MagicMock()
+    goto_response = mock.MagicMock()
+    goto_response.status = status
+    session.page.goto.return_value = goto_response
+    session.bridge.run.return_value = goto_response
+    if goto_raises is not None:
+        # Every navigation fails with this error (pyppeteer's goto goes
+        # through bridge.run, Selenium's through driver.get).
+        session.page.goto.side_effect = goto_raises
+        session.bridge.run.side_effect = goto_raises
+        session.driver.get.side_effect = goto_raises
+    patches = {
+        "detect_recaptcha_v3": lambda *a, **k: None,
+        "detect_recaptcha_in_page": lambda *a, **k: None,
+        "reconcile_detections": reconcile,
+        "solve_recaptcha": solve,
+        _CONTENT_FN[engine.__name__]: lambda *a, **k: "<html></html>",
+        "_count": lambda *a, **k: 0,
+        "_classify": lambda *a, **k: state,
+        "_scroll_the_feed": lambda *a, **k: None,
+        "_parse_for_mode": lambda *a, **k: list(rows or []),
+    }
+    if hasattr(engine, "_sleep"):
+        patches["_sleep"] = lambda ms: None
+    saved = {n: getattr(engine, n) for n in patches}
+    try:
+        for n, v in patches.items():
+            setattr(engine, n, v)
+        with tempfile.TemporaryDirectory() as tmp:
+            outcome = engine._fetch_one_page(
+                session, _stub_args(tmp, retries), None, 1,
+                "https://www.quora.com/topic/Machine-Learning")
+    finally:
+        for n, v in saved.items():
+            setattr(engine, n, v)
+    return outcome, len(purchases)
+
+
+def _navigation_errors(name):
+    """(instant failure, timeout) exceptions as `name`'s driver raises them.
+
+    The texts follow Chromium's format. The first one carries a credential
+    in a URL, which must never reach a log or the sidecar."""
+    instant = ("Page.goto: net::ERR_CONNECTION_CLOSED at "
+               "https://www.quora.com/topic/Machine-Learning via "
+               "http://" + "canary-login" + ":" + "not-a-real-pass"
+               + "@proxy.invalid:8080\n"
+               "Call log:\n  - navigating to "
+               "\"https://www.quora.com/topic/Machine-Learning\"")
+    if name == "playwright_scraper":
+        from playwright.sync_api import Error, TimeoutError as PWTimeout
+        return Error(instant), PWTimeout("Page.goto: Timeout 60000ms exceeded.")
+    if name == "selenium_scraper":
+        from selenium.common.exceptions import (TimeoutException,
+                                                WebDriverException)
+        return (WebDriverException(instant),
+                TimeoutException("timeout: Timed out receiving message from renderer"))
+    return RuntimeError(instant), TimeoutError("Navigation Timeout Exceeded: 60000 ms exceeded.")
+
+
+def _check_load_error_reported(name, engine):
+    """A navigation that fails instantly is logged with its reason and not
+    as a timeout; the reason reaches the outcome, credentials masked.
+
+    The 2026-10-20 canary logged four "Timeout loading" lines 64 ms after
+    the navigation started, with no reason, and wrote a sidecar that said
+    page_load_timeout and nothing more."""
+    import io
+    import logging
+    instant, timeout = _navigation_errors(name)
+    ok = True
+    for exc, label in ((instant, "Navigation failed loading"),
+                       (timeout, "Timeout loading")):
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        engine.logger.addHandler(handler)
+        try:
+            oc, bought = _drive_engine(engine, "content", goto_raises=exc,
+                                       retries=2)
+        finally:
+            engine.logger.removeHandler(handler)
+        log = stream.getvalue()
+        first = str(exc).splitlines()[0].replace(
+            "canary-login" + ":" + "not-a-real-pass" + "@", "***:***@")
+        ok &= check(f"{name}: {type(exc).__name__} on every navigation -> "
+                    f"load_failed with the reason on the outcome",
+                    oc.load_failed and oc.load_error == first[:200]
+                    and bought == 0)
+        ok &= check(f"{name}: {type(exc).__name__} is logged as "
+                    f"'{label}' with its reason, and gives up naming it",
+                    label in log and log.count(first[:200]) == 2
+                    and ("Timeout loading" in log) == (label == "Timeout loading"))
+        ok &= check(f"{name}: no credential in the log or the outcome",
+                    "not-a-real-pass" not in log + (oc.load_error or ""))
+    return ok
+
+
+def _citation_tokens():
+    # Assembled from pieces so this file does not match its own guard.
+    return ("CLAUDE" + ".md", "claude_" + "2scraper", "2scraper_" + "repo_rules",
+            "play" + "book " + chr(167), "template " + chr(167))
+
+
+def test_audit_2026_10_14(skips):
+    group("Solve budget, CSV formulas, parser failure, HTTP status "
+          "(2026-10-14 audit)")
+    import argparse
+    import subprocess
+    import output_writer
+    ok = True
+
+    # -- every paid solve goes through ONE per-page allowance --------------
+    # Read off disk, so it runs with no driver installed.
+    for name in ENGINES:
+        src = _engine_source(name)
+        tree = ast.parse(src)
+        calls, claim_line, solve_line = [], None, None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and \
+                    node.name == "handle_captcha_if_present":
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Call):
+                        fn = sub.func
+                        if isinstance(fn, ast.Attribute) and fn.attr == "claim":
+                            claim_line = sub.lineno
+                        if getattr(fn, "id", None) == "solve_recaptcha":
+                            solve_line = sub.lineno
+            if isinstance(node, ast.Call) and \
+                    getattr(node.func, "id", None) == "handle_captcha_if_present":
+                calls.append(node)
+        ok &= check(f"{name}: has solve call sites to check", len(calls) >= 2)
+        unbudgeted = [c.lineno for c in calls
+                      if not any(getattr(a, "id", None) == "budget"
+                                 for a in c.args)]
+        ok &= check(f"{name}: every solve call site passes the page's budget "
+                    f"{unbudgeted or ''}", not unbudgeted)
+        ok &= check(f"{name}: the allowance is claimed BEFORE the purchase",
+                    claim_line is not None and solve_line is not None
+                    and claim_line < solve_line)
+        ok &= check(f"{name}: one budget object per page",
+                    "page_flow.SolveBudget(" in src)
+
+    budget = page_flow.SolveBudget(1)
+    ok &= check("SolveBudget grants the first claim and refuses the second",
+                budget.claim() is True and budget.claim() is False)
+
+    # Driven, where the engine is importable (engine-smoke installs each).
+    for name in ENGINES:
+        try:
+            engine = __import__(name)
+        except ImportError as e:
+            skips.append(f"{name} audit-2026-10-14 driving — {e}")
+            print("  SKIP  %s driving — %s" % (name, e))
+            continue
+        limit = page_flow.SOLVES_PER_PAGE
+        _, bought = _drive_engine(engine, "challenge")
+        ok &= check(f"{name}: a challenge seen on every attempt is bought "
+                    f"once per page ({bought} vs limit {limit})",
+                    bought == limit)
+        _, bought = _drive_engine(engine, "challenge", detections=[None])
+        ok &= check(f"{name}: a challenge first seen on a retry is still "
+                    f"offered once ({bought})", bought == limit)
+        _, bought = _drive_engine(engine, "challenge", solver_raises=True)
+        ok &= check(f"{name}: a failed purchase still counts ({bought})",
+                    bought == limit)
+        oc, _ = _drive_engine(engine, "content", detections=[None] * 9,
+                              rows=[])
+        ok &= check(f"{name}: a content page that parses to 0 rows is "
+                    f"parse_failed, not empty ({oc.state})",
+                    oc.state == "parse_failed")
+        oc, _ = _drive_engine(engine, "not_found", detections=[None] * 9,
+                              rows=[Answer(sku="x")])
+        ok &= check(f"{name}: a 404 is not_found, not parsed, not blocked",
+                    oc.state == "not_found" and not oc.products
+                    and oc.blocked_by is None)
+        ok &= _check_load_error_reported(name, engine)
+
+    # -- the engines map those states to the right stop reasons -------------
+    for name in ENGINES:
+        src = _engine_source(name)
+        ok &= check(f"{name}: parse_failed stops as parser_found_nothing on "
+                    f"batch 1 and later batches",
+                    src.count('stop_reason = "parser_found_nothing"') == 2)
+        ok &= check(f"{name}: not_found has its own stop reason",
+                    'stop_reason = "not_found"' in src)
+        ok &= check(f"{name}: the sidecar carries the first page's load_error",
+                    '"load_error": next((o.load_error for o in outcomes '
+                    'if o.load_error), None)' in src)
+        ok &= check(f"{name}: the navigation status reaches the classifier",
+                    src.count("_classify(session.page, html, http_status)"
+                              if name == "playwright_scraper" else
+                              "_classify(session, html, http_status)") == 3)
+    for reason in ("parser_found_nothing", "not_found"):
+        ok &= check(f"{reason} is not a complete stop reason",
+                    reason not in COMPLETE_STOP_REASONS)
+    with tempfile.TemporaryDirectory() as tmp:
+        rc = finish_run([], os.path.join(tmp, "o"), "json", False,
+                        blocked=False, stop_reason="parser_found_nothing",
+                        pages_requested=1, pages_completed=1, start_url="u",
+                        final_url="u")
+    ok &= check("0 rows from a parser failure exits 5, not 4",
+                rc == EXIT_FETCH_FAILED)
+
+    ok &= check("HTTP 404 classifies as not_found",
+                detect_page_state("<html>gone</html>", 404) == "not_found")
+    ok &= check("HTTP 403 on a page with no challenge marker is blocked",
+                detect_page_state("<html>nope</html>", 403) == "blocked")
+    ok &= check("not_found is terminal: not retried, not solved, not blocked",
+                not page_flow.should_retry("not_found")
+                and not page_flow.should_solve("not_found")
+                and not page_flow.counts_as_blocked("not_found")
+                and not page_flow.should_parse("not_found"))
+
+    # -- CSV formula neutralisation, CSV only --------------------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        prefix = os.path.join(tmp, "run")
+        rows = [Answer(sku="a", text="=HYPERLINK(\"http://x\")",
+                       author="+1 555", author_credential="@SUM(A1)",
+                       title="plain", upvotes=-5)]
+        rc = finish_run(rows, prefix, "both", False, blocked=False,
+                        stop_reason="completed", pages_requested=1,
+                        pages_completed=1, start_url="u", final_url="u",
+                        extra={"answers_available": 3})
+        with open(prefix + ".csv", newline="", encoding="utf-8") as fh:
+            got = list(csv_module.DictReader(fh))[0]
+        data = json.load(open(prefix + ".json", encoding="utf-8"))[0]
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        ok &= check("a formula-shaped answer body is escaped in CSV",
+                    got["text"].startswith("'="))
+        ok &= check("so are + and @ cells",
+                    got["author"] == "'+1 555"
+                    and got["author_credential"] == "'@SUM(A1)")
+        ok &= check("an ordinary string and a number are untouched",
+                    got["title"] == "plain" and got["upvotes"] == "-5")
+        ok &= check("JSON keeps the site's text exactly",
+                    data["text"].startswith("=") and data["upvotes"] == -5)
+        ok &= check("the sidecar declares csv_cells_escaped",
+                    rc == 0 and meta.get("csv_cells_escaped") == 3
+                    and meta.get("answers_available") == 3)
+        finish_run(rows, prefix, "csv", False, blocked=False,
+                   stop_reason="completed", pages_requested=1,
+                   pages_completed=1, start_url="u", final_url="u",
+                   extra={"csv_cells_escaped": "caller"})
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        ok &= check("the count merges UNDER the caller's extra",
+                    meta.get("csv_cells_escaped") == "caller")
+
+    # -- numeric flags refuse values that make no sense ---------------------
+    for fn, bad, good in ((page_flow.positive_int_arg, ("0", "-1"), "1"),
+                          (page_flow.nonneg_int_arg, ("-1",), "0"),
+                          (page_flow.nonneg_float_arg, ("-0.5", "nan"), "0"),
+                          (page_flow.positive_float_arg, ("0", "-1"), "2")):
+        ok &= check(f"{fn.__name__} refuses {bad}",
+                    all(isinstance(_catch(lambda b=b: fn(b)),
+                                   argparse.ArgumentTypeError) for b in bad))
+        ok &= check(f"{fn.__name__} accepts {good}", _catch(
+            lambda: fn(good)) is None)
+    for name in ENGINES:
+        src = _engine_source(name)
+        for flag, typ in (("--pages", "positive_int_arg"),
+                          ("--concurrency", "positive_int_arg"),
+                          ("--delay", "nonneg_float_arg"),
+                          ("--retry-delay", "nonneg_float_arg"),
+                          ("--proxy-block-retries", "nonneg_int_arg")):
+            ok &= check(f"{name}: {flag} is validated",
+                        f'"{flag}", type=page_flow.{typ}' in src)
+    api = open(os.path.join(REPO_ROOT, "scraper_api_client.py"),
+               encoding="utf-8").read()
+    ok &= check("scraper_api_client: --retries/--retry-delay refuse negatives",
+                '"--retries", type=_nonneg_int' in api
+                and '"--retry-delay", type=_nonneg_int' in api)
+
+    # -- the credential scan: relative exclusions, .json and .env* ----------
+    ci_path = os.path.join(REPO_ROOT, ".github", "ci_checks.py")
+    if not os.path.isdir(os.path.join(REPO_ROOT, ".github")):
+        # The Docker image deliberately carries no .github/. Only the WHOLE
+        # directory being absent skips this, never one file inside it.
+        print("  (no .github/ here — the image build; scan checks skipped)")
+    else:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_ci_checks", ci_path)
+        ci = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ci)
+        key = "".join("0123456789abcdef"[(i * 7) % 16] for i in range(32))
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = pathlib.Path(tmp) / "venv" / "quora-scraper"
+            repo.mkdir(parents=True)
+            (repo / "scratch.py").write_text("K = '%s'\n" % key)
+            (repo / ".env.bak").write_text("TWOCAPTCHA_KEY=%s\n" % key)
+            (repo / "fixture.json").write_text(
+                '{"page": "{\\"apiKey\\": \\"' + "Zq9" * 9 + '\\"}"}\n')
+            ci.REPO, ci._VENV_CACHE = repo, {}
+            failures = " ".join(ci.secret_check())
+            ok &= check("a clone under a directory named venv is still "
+                        "scanned", "scratch.py" in failures)
+            ok &= check("an untracked .env.bak is scanned",
+                        ".env.bak" in failures)
+            ok &= check("a JSON fixture with an ESCAPED key field is caught",
+                        "fixture.json" in failures)
+            empty = pathlib.Path(tmp) / "empty"
+            empty.mkdir()
+            ci.REPO, ci._VENV_CACHE = empty, {}
+            ok &= check("a scan that read 0 files fails rather than passes",
+                        any("0 files scanned" in f for f in ci.secret_check()))
+        canary = open(os.path.join(REPO_ROOT, ".github", "workflows",
+                                   "canary.yml"), encoding="utf-8").read()
+        ok &= check("the canary has no green 'did not test' path",
+                    "tested=false" not in canary and "::warning::" not in canary)
+
+    # -- no private instruction file is cited in a public file --------------
+    try:
+        tracked = subprocess.run(["git", "ls-files"], cwd=REPO_ROOT,
+                                 capture_output=True, text=True,
+                                 check=True).stdout.split()
+    except Exception:  # noqa: BLE001 — not a clone (the image build)
+        tracked = [str(p.relative_to(REPO_ROOT))
+                   for p in pathlib.Path(REPO_ROOT).rglob("*")
+                   if p.is_file() and "__pycache__" not in p.parts]
+    section = re.compile(chr(167) + r"\s*\d")
+    hits = []
+    for rel in tracked:
+        path = os.path.join(REPO_ROOT, rel)
+        if not os.path.isfile(path) or rel.endswith((".png", ".ico")):
+            continue
+        text = open(path, encoding="utf-8", errors="replace").read()
+        if section.search(text) or any(t in text for t in _citation_tokens()):
+            hits.append(rel)
+    ok &= check("no public file cites a private instruction file or its "
+                f"section numbers {hits or ''}", not hits)
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Proxy traffic savers: the pre-check and media blocking
+# ---------------------------------------------------------------------------
+_SAVERS_URL = "https://www.quora.com/topic/Machine-Learning"
+_SAVERS_SECRET = "s3cret-Pw-not-real"
+
+
+class _StubProxy:
+    """A one-port HTTP proxy on 127.0.0.1 that answers every request with a
+    fixed status and records the request heads it received."""
+
+    def __init__(self, status):
+        import socket
+        import threading
+        self.status, self.heads = status, []
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            with conn:
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                self.heads.append(data.decode("latin-1"))
+                reason = {407: "Proxy Authentication Required",
+                          402: "Payment Required", 200: "OK"}.get(
+                              self.status, "X")
+                conn.sendall(f"HTTP/1.1 {self.status} {reason}\r\n"
+                             "Content-Length: 0\r\nConnection: close\r\n\r\n"
+                             .encode())
+
+    def url(self, secret=_SAVERS_SECRET):
+        # Concatenated, so no line here looks like a credentialled URL.
+        return "http://user-zone-x:" + secret + "@127.0.0.1:" + str(self.port)
+
+    def close(self):
+        self.sock.close()
+
+
+def _closed_port():
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+@contextlib.contextmanager
+def _captured_output():
+    """stdout and every log record, as one string."""
+    import logging
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        with contextlib.redirect_stdout(buf):
+            yield buf
+    finally:
+        root.removeHandler(handler)
+
+
+class _FakeRoute:
+    def __init__(self, resource_type):
+        self.request = type("R", (), {"resource_type": resource_type})()
+        self.verdict = None
+
+    def abort(self):
+        self.verdict = "abort"
+
+    def continue_(self):
+        self.verdict = "continue"
+
+
+def _media_verdicts(handler):
+    out = {}
+    for rtype in ("image", "media", "font", "document", "script", "xhr",
+                  "fetch", "stylesheet"):
+        route = _FakeRoute(rtype)
+        handler(route)
+        out[rtype] = route.verdict
+    return out
+
+
+def _engine_args(engine, tmp, proxy_url, *extra):
+    """The engine's own parser, on a stubbed argv, with no .env in play."""
+    from unittest import mock
+    argv = [engine.__name__, "--url", _SAVERS_URL, "--out",
+            os.path.join(tmp, "out")]
+    if proxy_url:
+        argv += ["--proxy", proxy_url]
+    argv += list(extra)
+    with mock.patch.object(sys, "argv", argv), \
+            mock.patch.object(env_config, "load_env", lambda *a, **k: None):
+        return engine.parse_args()
+
+
+def test_proxy_traffic_savers(skips):
+    group("Proxy traffic savers: pre-check before the browser, media "
+          "blocking through a proxy")
+    import argparse
+    import asyncio
+    from unittest import mock
+    import output_writer
+    import proxy_check
+    ok = True
+
+    # -- the pre-check, against a stub proxy --------------------------------
+    stub = _StubProxy(407)
+    try:
+        res = proxy_check.precheck(stub.url(), _SAVERS_URL, timeout=5)
+        ok &= check("a 407 from the proxy is auth_failed and fatal "
+                    f"({res.outcome})", res.outcome == "auth_failed"
+                    and res.fatal and res.stop_reason == "proxy_auth_failed")
+        head = stub.heads[-1] if stub.heads else ""
+        ok &= check("the pre-check is ONE CONNECT to the target host, with "
+                    "the credential", len(stub.heads) == 1
+                    and head.startswith("CONNECT www.quora.com:443 ")
+                    and "Proxy-Authorization: Basic " in head)
+        with _captured_output() as buf:
+            gated = proxy_check.gate(ProxyPool([stub.url()]), _SAVERS_URL,
+                                     timeout=5)
+        text = buf.getvalue()
+        ok &= check("gate() returns the fatal check on a 407",
+                    gated is not None and gated.fatal)
+        ok &= check("the 407 message names the variable and the cause",
+                    proxy_check.PROXY_SOURCES.split()[0] in text
+                    and "refused the credential" in text
+                    and "traffic balance is exhausted" in text)
+        ok &= check("the 407 message never prints the credential",
+                    _SAVERS_SECRET not in text and "user-zone-x" not in text)
+    finally:
+        stub.close()
+
+    stub = _StubProxy(402)
+    try:
+        res = proxy_check.precheck(stub.url(), _SAVERS_URL, timeout=5)
+        msg = proxy_check.failure_message(res, stub.url())
+        ok &= check("a 402 is balance_exhausted and fatal",
+                    res.outcome == "balance_exhausted" and res.fatal
+                    and res.stop_reason == "proxy_balance_exhausted")
+        ok &= check("the 402 message says traffic/balance exhausted, no "
+                    "credential", "traffic/balance exhausted" in msg
+                    and _SAVERS_SECRET not in msg)
+    finally:
+        stub.close()
+
+    stub = _StubProxy(200)
+    try:
+        res = proxy_check.precheck(stub.url(), "http://127.0.0.1:9/x",
+                                   timeout=5)
+        head = stub.heads[-1] if stub.heads else ""
+        ok &= check("a plain-http target is one HEAD for its robots.txt",
+                    res.outcome == "ok" and not res.fatal
+                    and head.startswith("HEAD http://127.0.0.1:9/robots.txt "))
+    finally:
+        stub.close()
+
+    dead = "http://u:" + _SAVERS_SECRET + "@127.0.0.1:" + str(_closed_port())
+    res = proxy_check.precheck(dead, _SAVERS_URL, timeout=5)
+    ok &= check("a proxy that does not answer is a transport error, NOT "
+                "fatal (existing retry behaviour applies)",
+                res.outcome == "transport_error" and not res.fatal)
+    with _captured_output() as buf:
+        gated = proxy_check.gate(ProxyPool([dead]), _SAVERS_URL, timeout=5)
+    ok &= check("gate() lets a transport error through, credential unprinted",
+                gated is None and _SAVERS_SECRET not in buf.getvalue())
+    ok &= check("no pool means no pre-check",
+                proxy_check.gate(None, _SAVERS_URL) is None)
+    ok &= check("a socks5 exit is skipped, not refused",
+                proxy_check.precheck("socks5://127.0.0.1:1", _SAVERS_URL)
+                .outcome == "skipped")
+
+    # -- the attempt sidecar ------------------------------------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "out")
+        for name, body in (("out.json", "[1]"), ("out.meta.json", "{}")):
+            with open(os.path.join(tmp, name), "w") as f:
+                f.write(body)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = output_writer.finish_without_fetch(
+                out, stop_reason="proxy_auth_failed", pages_requested=3,
+                start_url=_SAVERS_URL)
+        with open(out + ".latest_attempt.meta.json") as f:
+            meta = json.load(f)
+        untouched = (open(out + ".json").read() == "[1]"
+                     and open(out + ".meta.json").read() == "{}")
+    ok &= check(f"a refused proxy exits 5 ({rc})", rc == 5)
+    ok &= check("...and records status failed / proxy_auth_failed in the "
+                "attempt sidecar", meta.get("status") == "failed"
+                and meta.get("stop_reason") == "proxy_auth_failed"
+                and meta.get("pages_completed") == 0)
+    ok &= check("...leaving the previous output and its .meta.json alone",
+                untouched)
+
+    # -- when media is blocked ----------------------------------------------
+    pool = ProxyPool(["http://127.0.0.1:1"])
+    ns = argparse.Namespace
+    ok &= check("blocked through a local proxy by default",
+                proxy_check.block_media(ns(load_media=False, block_media=False),
+                                        pool, remote=False)
+                is proxy_check.BLOCK_MEDIA_BY_DEFAULT)
+    ok &= check("not blocked without a proxy",
+                not proxy_check.block_media(
+                    ns(load_media=False, block_media=False), None, False))
+    ok &= check("not blocked over --cdp-endpoint, even when forced",
+                not proxy_check.block_media(
+                    ns(load_media=False, block_media=True), pool, True))
+    ok &= check("--load-media turns it off",
+                not proxy_check.block_media(
+                    ns(load_media=True, block_media=False), pool, False))
+    ok &= check("an env value of 0 does not count as --load-media",
+                proxy_check.block_media(ns(load_media="0", block_media=False),
+                                        pool, False)
+                is proxy_check.BLOCK_MEDIA_BY_DEFAULT)
+    ok &= check("the hidden --block-media forces it without a proxy",
+                proxy_check.block_media(ns(load_media=False, block_media=True),
+                                        None, False))
+    parser = argparse.ArgumentParser()
+    proxy_check.add_media_flags(parser)
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            parser.parse_args(["--load-media", "--block-media"])
+        exclusive = False
+    except SystemExit:
+        exclusive = True
+    ok &= check("--load-media and --block-media are mutually exclusive",
+                exclusive)
+    ok &= check("--block-media is hidden from --help",
+                "--block-media" not in parser.format_help()
+                and "--load-media" in parser.format_help())
+    ok &= check(f"{proxy_check.LOAD_MEDIA_ENV} maps onto --load-media",
+                env_config.ENV_KEYS.get(proxy_check.LOAD_MEDIA_ENV)
+                == "load_media")
+
+    # -- the route handler, on a stub page ----------------------------------
+    ctx = mock.MagicMock()
+    with _captured_output():
+        proxy_check.install_playwright(ctx)
+    pattern, handler = ctx.route.call_args[0]
+    verdicts = _media_verdicts(handler)
+    ok &= check(f"Playwright: route on every URL ({pattern})", pattern == "**/*")
+    ok &= check("Playwright: image/media/font aborted, everything else "
+                f"continues {verdicts}",
+                all(verdicts[t] == "abort" for t in ("image", "media", "font"))
+                and all(v == "continue" for t, v in verdicts.items()
+                        if t not in ("image", "media", "font")))
+
+    cdp = mock.MagicMock()
+    cdp.send = mock.AsyncMock()
+    page = mock.MagicMock()
+    page.target.createCDPSession = mock.AsyncMock(return_value=cdp)
+
+    async def _drive_pyppeteer():
+        await proxy_check.install_pyppeteer(page)
+        on_paused = cdp.on.call_args[0][1]
+        on_paused({"requestId": "r1", "resourceType": "Image"})
+        await asyncio.sleep(0)
+
+    with _captured_output():
+        asyncio.run(_drive_pyppeteer())
+    calls = [c[0] for c in cdp.send.await_args_list]
+    enable = next((c[1] for c in calls if c[0] == "Fetch.enable"), {})
+    kinds = sorted(pt.get("resourceType") for pt in enable.get("patterns", []))
+    ok &= check("pyppeteer: Fetch pauses ONLY Image/Media/Font, on its own "
+                f"CDP session {kinds}", cdp.on.call_args[0][0] ==
+                "Fetch.requestPaused" and kinds == ["Font", "Image", "Media"])
+    ok &= check("pyppeteer: a paused request is failed, not continued",
+                ("Fetch.failRequest", {"requestId": "r1",
+                                       "errorReason": "BlockedByClient"})
+                in calls)
+    ok &= check("pyppeteer: never the removed Network.setRequestInterception",
+                "setRequestInterception" not in inspect.getsource(
+                    proxy_check.install_pyppeteer).split('"""')[-1])
+
+    driver = mock.MagicMock()
+    with _captured_output():
+        installed = proxy_check.install_selenium(driver)
+    sent = {c[0][0]: c[0][1] for c in driver.execute_cdp_cmd.call_args_list}
+    urls = sent.get("Network.setBlockedURLs", {}).get("urls", [])
+    ok &= check("Selenium: Network.setBlockedURLs with image/video/font "
+                "patterns", installed and "*.png" in urls and "*.woff2" in urls
+                and "*.mp4?*" in urls)
+    ok &= check("Selenium: no pattern touches a document, script, JSON or "
+                "stylesheet", not [u for u in urls if re.search(
+                    r"\.(html?|js|json|css)\b", u)])
+    broken = mock.MagicMock()
+    broken.execute_cdp_cmd.side_effect = RuntimeError("no CDP")
+    with _captured_output():
+        ok &= check("Selenium: a driver that refuses CDP is not fatal",
+                    proxy_check.install_selenium(broken) is False)
+
+    # -- each engine, driven: no browser is started on a 407 ----------------
+    for name in ENGINES:
+        try:
+            engine = __import__(name)
+        except ImportError as e:
+            skips.append(f"{name} proxy savers driving — {e}")
+            print("  SKIP  %s proxy savers — %s" % (name, e))
+            continue
+        stub = _StubProxy(407)
+        launched = []
+        if name == "playwright_scraper":
+            target = "sync_playwright"
+        else:
+            target = "_Session"
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                args = _engine_args(engine, tmp, stub.url())
+                with mock.patch.object(
+                        engine, target,
+                        side_effect=lambda *a, **k: launched.append(1)), \
+                        _captured_output() as buf:
+                    try:
+                        rc = engine.scrape(args)
+                    except Exception as e:  # noqa: BLE001 — fail BY NAME
+                        rc = f"raised {type(e).__name__}"
+                side = os.path.join(tmp, "out.latest_attempt.meta.json")
+                meta = json.load(open(side)) if os.path.exists(side) else {}
+                wrote_rows = any(os.path.exists(os.path.join(tmp, "out" + s))
+                                 for s in (".json", ".csv", ".meta.json"))
+        finally:
+            stub.close()
+        ok &= check(f"{name}: a 407 exits 5 without starting a browser "
+                    f"(rc={rc}, launched={len(launched)})",
+                    rc == 5 and not launched)
+        ok &= check(f"{name}: ...with stop_reason proxy_auth_failed in the "
+                    "attempt sidecar and no output written",
+                    meta.get("stop_reason") == "proxy_auth_failed"
+                    and meta.get("status") == "failed" and not wrote_rows)
+        ok &= check(f"{name}: ...and the credential never reaches the log",
+                    _SAVERS_SECRET not in buf.getvalue())
+
+    # -- each engine installs blocking only through a local proxy -----------
+    for name in ENGINES:
+        try:
+            engine = __import__(name)
+        except ImportError:
+            continue  # already recorded as a skip above
+        for label, proxy, extra, want in (
+                ("through a proxy", "http://127.0.0.1:1", (), None),
+                ("with --load-media", "http://127.0.0.1:1",
+                 ("--load-media",), False),
+                ("without a proxy", None, (), False),
+                ("forced, no proxy", None, ("--block-media",), True)):
+            if want is None:
+                want = proxy_check.BLOCK_MEDIA_BY_DEFAULT
+            with tempfile.TemporaryDirectory() as tmp:
+                args = _engine_args(engine, tmp, proxy, *extra)
+            pool = ProxyPool([proxy]) if proxy else None
+            got = _engine_installs_blocking(engine, args, pool)
+            ok &= check(f"{name}: media blocking {label} = {want} (got {got})",
+                        got is want)
+    return ok
+
+
+def _engine_installs_blocking(engine, args, pool):
+    """Open the engine's local session on fakes; True if blocking went in."""
+    from unittest import mock
+    name = engine.__name__
+    with _captured_output():
+        if name == "playwright_scraper":
+            pw = mock.MagicMock()
+            browser = pw.chromium.launch.return_value
+            browser.version = "120.0.0.0"
+            ctx = browser.new_context.return_value
+            engine._launch_local(pw, args, pool)
+            return ctx.route.called
+        if name == "selenium_scraper":
+            with mock.patch.object(engine.webdriver, "Chrome") as chrome:
+                driver = chrome.return_value
+                driver.capabilities = {"browserVersion": "120.0.0.0"}
+                engine._Session(args, pool).open()
+            return any(c[0][0] == "Network.setBlockedURLs"
+                       for c in driver.execute_cdp_cmd.call_args_list)
+        page = mock.MagicMock()
+        for attr in ("setUserAgent", "setViewport", "authenticate",
+                     "setRequestInterception", "evaluateOnNewDocument",
+                     "setExtraHTTPHeaders"):
+            setattr(page, attr, mock.AsyncMock())
+        cdp = mock.MagicMock()
+        cdp.send = mock.AsyncMock()
+        page.target.createCDPSession = mock.AsyncMock(return_value=cdp)
+        browser = mock.MagicMock()
+        browser.newPage = mock.AsyncMock(return_value=page)
+        browser.version = mock.AsyncMock(return_value="HeadlessChrome/120.0")
+
+        async def fake_launch(*a, **k):
+            return browser
+        bridge = engine._AsyncBridge()
+        try:
+            with mock.patch.object(engine, "launch", fake_launch):
+                engine._Session(bridge, args, pool).open()
+        finally:
+            closer = getattr(bridge, "close", None)
+            if closer:
+                closer()
+        return any(c[0][0] == "Fetch.enable" for c in cdp.send.await_args_list)
+
+
+def _catch(fn):
+    """The exception `fn()` raises, or None."""
+    try:
+        fn()
+    except Exception as e:  # noqa: BLE001
+        return e
+    return None
+
+
+
+
+# ---------------------------------------------------------------------------
+# Proxy traffic meter and budget
+# ---------------------------------------------------------------------------
+
+class _ByteCountingProxy:
+    """A forward HTTP proxy on 127.0.0.1 that serves every plain-http GET
+    itself with a body of a known size, and counts every byte it received
+    and sent. The meter is judged against these two numbers."""
+
+    def __init__(self, sizes):
+        import socket
+        import threading
+        self.sizes = dict(sizes)            # path -> body length
+        self.received = self.sent = 0
+        # CONNECTs are the browser's own background connections (a system
+        # Chromium phones home through its proxy too); they are not page
+        # requests, this stub refuses them, and they are kept apart.
+        self.connects = 0
+        self.paths = []
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(32)
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        import threading
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._one, args=(conn,), daemon=True).start()
+
+    def _one(self, conn):
+        from urllib.parse import urlparse
+        with conn:
+            buf = b""
+            while True:
+                while b"\r\n\r\n" not in buf:
+                    try:
+                        chunk = conn.recv(65536)
+                    except OSError:
+                        return
+                    if not chunk:
+                        return
+                    buf += chunk
+                head, _, buf = buf.partition(b"\r\n\r\n")
+                lines = head.decode("latin-1").split("\r\n")
+                if lines[0].startswith("CONNECT "):
+                    self.connects += 1
+                    try:
+                        conn.sendall(b"HTTP/1.1 403 Forbidden\r\n"
+                                     b"Content-Length: 0\r\n\r\n")
+                    except OSError:
+                        pass
+                    return
+                self.received += len(head) + 4
+                length = 0
+                for line in lines[1:]:
+                    if line.lower().startswith("content-length:"):
+                        length = int(line.split(":", 1)[1])
+                while len(buf) < length:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        return
+                    buf += chunk
+                self.received += length
+                buf = buf[length:]
+                path = urlparse(lines[0].split(" ")[1]).path or "/"
+                self.paths.append(path)
+                size = self.sizes.get(path, 0)
+                ctype = ("text/html" if path == "/" else "text/css"
+                         if path.endswith(".css") else
+                         "application/javascript" if path.endswith(".js")
+                         else "application/octet-stream")
+                body = (b"<html><head><link rel=stylesheet href=/s.css>"
+                        b"<script src=/a.js></script></head><body><p id=t>"
+                        if path == "/" else b"")
+                body = body + b"x" * max(0, size - len(body))
+                if path == "/":
+                    body = body[:-11] + b"</p></body>"
+                status = b"200 OK" if path in self.sizes else b"404 Not Found"
+                out = (b"HTTP/1.1 " + status + b"\r\nContent-Type: "
+                       + ctype.encode() + b"\r\nContent-Length: "
+                       + str(len(body)).encode()
+                       + b"\r\nCache-Control: no-store\r\n\r\n" + body)
+                try:
+                    conn.sendall(out)
+                except OSError:
+                    return
+                self.sent += len(out)
+
+    @property
+    def total(self):
+        return self.received + self.sent
+
+    def url(self):
+        return "http://127.0.0.1:" + str(self.port)
+
+    def close(self):
+        self.sock.close()
+
+
+def _base_exception(fn):
+    try:
+        fn()
+    except BaseException as e:  # noqa: BLE001 — the point is to see it
+        return e
+    return None
+
+
+def test_proxy_meter_units(skips):
+    group("Proxy traffic meter: counting, the budget, the sidecar")
+    import argparse
+    from unittest import mock
+    import output_writer
+    import proxy_meter
+    ok = True
+    ns = argparse.Namespace
+
+    # -- the meter itself ----------------------------------------------------
+    m = proxy_meter.ProxyMeter(1)
+    fired = []
+    m.on_exceed(lambda: fired.append(1))
+    m.add(600_000)
+    m.add(400_000)
+    ok &= check("1 MB budget: exactly 1,000,000 bytes is not over it",
+                m.bytes == 1_000_000 and not m.exceeded and not fired)
+    m.add(1)
+    ok &= check("...one byte more is, and the refusal hook fires",
+                m.exceeded and fired == [1])
+    m.add(50)
+    ok &= check("...the hook fires once, not per request", fired == [1])
+    err = _base_exception(m.check)
+    ok &= check("check() raises ProxyBudgetExceeded once over budget",
+                isinstance(err, proxy_meter.ProxyBudgetExceeded))
+    ok &= check("ProxyBudgetExceeded passes an `except Exception` (a retry "
+                "loop cannot swallow it)",
+                not issubclass(proxy_meter.ProxyBudgetExceeded, Exception))
+    ok &= check("sidecar fields: bytes, budget in bytes, exceeded",
+                m.sidecar() == {"proxy_bytes": 1_000_051,
+                                "proxy_budget_bytes": 1_000_000,
+                                "proxy_budget_exceeded": True})
+    ok &= check(f"summary line ({m.summary()})",
+                m.summary() == "Proxy traffic: 1.0 MB of 1.0 MB budget")
+    late = []
+    m.on_exceed(lambda: late.append(1))
+    ok &= check("a hook added after the cap was crossed runs at once",
+                late == [1])
+    free = proxy_meter.ProxyMeter(0)
+    free.add(10 ** 12)
+    ok &= check("--proxy-budget-mb 0 means no cap (null budget in the "
+                "sidecar)", not free.exceeded and _base_exception(free.check)
+                is None and free.sidecar()["proxy_budget_bytes"] is None)
+
+    # -- the flag and the environment ----------------------------------------
+    parser = argparse.ArgumentParser()
+    proxy_meter.add_budget_flag(parser)
+    for bad in ("-1", "abc", "nan", "inf"):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                parser.parse_args(["--proxy-budget-mb", bad])
+            refused = False
+        except SystemExit as e:
+            refused = e.code == 2
+        ok &= check(f"--proxy-budget-mb {bad} is a usage error (exit 2)",
+                    refused)
+    ok &= check("--proxy-budget-mb 0 and 2.5 parse",
+                parser.parse_args(["--proxy-budget-mb", "0"]).proxy_budget_mb
+                == 0.0 and parser.parse_args(
+                    ["--proxy-budget-mb", "2.5"]).proxy_budget_mb == 2.5)
+    env = proxy_meter.BUDGET_ENV
+    with mock.patch.dict(os.environ, {env: ""}):
+        ok &= check("default budget is 10 MB",
+                    proxy_meter.budget_mb(ns(proxy_budget_mb=None)) == 10.0
+                    and proxy_meter.DEFAULT_BUDGET_MB == 10.0)
+    with mock.patch.dict(os.environ, {env: "2.5"}):
+        ok &= check(f"{env} sets the budget",
+                    proxy_meter.budget_mb(ns(proxy_budget_mb=None)) == 2.5)
+        ok &= check("...and the flag wins over it",
+                    proxy_meter.budget_mb(ns(proxy_budget_mb=1.0)) == 1.0)
+    with mock.patch.dict(os.environ, {env: "lots"}):
+        ok &= check(f"an unparseable {env} stops the run instead of "
+                    "silently using a default",
+                    isinstance(_base_exception(lambda: proxy_meter.budget_mb(
+                        ns(proxy_budget_mb=None))), SystemExit))
+    if hasattr(env_config, "ENV_KEYS"):
+        ok &= check(f"{env} maps onto --proxy-budget-mb",
+                    env_config.ENV_KEYS.get(env) == "proxy_budget_mb")
+    pool = ProxyPool(["http://127.0.0.1:1"])
+    ok &= check("metered only through a local proxy: not without one, not "
+                "over --cdp-endpoint",
+                proxy_meter.start(ns(proxy_budget_mb=None), None) is None
+                and proxy_meter.start(ns(proxy_budget_mb=None), pool,
+                                      remote=True) is None
+                and isinstance(proxy_meter.start(ns(proxy_budget_mb=None),
+                                                 pool), proxy_meter.ProxyMeter))
+
+    a = ns(proxy_budget_mb=0.001)
+    proxy_meter.start(a, pool).add(5_000)
+    ok &= check("proxy_meter.check(args) stops a run that is over budget",
+                isinstance(_base_exception(lambda: proxy_meter.check(a)),
+                           proxy_meter.ProxyBudgetExceeded)
+                and _base_exception(lambda: proxy_meter.check(
+                    ns(proxy_budget_mb=None))) is None)
+
+    # -- CDP events with known sizes (pyppeteer, Selenium) ------------------
+    m = proxy_meter.ProxyMeter(0)
+    c = proxy_meter.CdpCounter(m)
+    req = {"method": "GET", "url": "http://x.test/a", "headers": {"A": "b"}}
+    est = len("GET http://x.test/a HTTP/1.1\r\n") + 2 + len("A: b\r\n")
+
+    def _resp(rid, **extra):
+        return {"requestId": rid,
+                "response": dict({"url": "http://x.test/a", "status": 200},
+                                 **extra)}
+    c.feed("Network.requestWillBeSent", {"requestId": "1", "request": req})
+    c.feed("Network.responseReceived", _resp("1"))
+    c.feed("Network.dataReceived", {"requestId": "1", "encodedDataLength": 99})
+    c.feed("Network.loadingFinished", {"requestId": "1",
+                                       "encodedDataLength": 1234})
+    ok &= check(f"CDP: a finished request = its request + encodedDataLength "
+                f"({m.bytes} vs {est + 1234})", m.bytes == est + 1234)
+    c.feed("Network.requestWillBeSent", {"requestId": "2", "request": req})
+    c.feed("Network.loadingFailed", {"requestId": "2",
+                                     "errorText": "net::ERR_BLOCKED_BY_CLIENT"})
+    c.feed("Network.requestWillBeSent", {"requestId": "2b", "request": req})
+    c.feed("Network.loadingFailed", {"requestId": "2b", "errorText": "x",
+                                     "blockedReason": "inspector"})
+    ok &= check("CDP: a request the browser blocked costs nothing",
+                m.bytes == est + 1234)
+    c.feed("Network.requestWillBeSent", {"requestId": "3", "request": req})
+    c.feed("Network.responseReceived", _resp("3"))
+    c.feed("Network.dataReceived", {"requestId": "3", "encodedDataLength": 50})
+    c.feed("Network.loadingFailed", {"requestId": "3",
+                                     "errorText": "net::ERR_CONNECTION_RESET"})
+    ok &= check("CDP: a request that failed mid-body costs what arrived",
+                m.bytes == 2 * est + 1234 + 50)
+    c.feed("Network.requestWillBeSent", {"requestId": "4", "request": req})
+    c.feed("Network.requestWillBeSent", {
+        "requestId": "4", "request": req,
+        "redirectResponse": {"encodedDataLength": 300}})
+    c.feed("Network.responseReceived", _resp("4"))
+    c.feed("Network.loadingFinished", {"requestId": "4",
+                                       "encodedDataLength": 500})
+    ok &= check("CDP: a redirect hop is counted as its own exchange",
+                m.bytes == 4 * est + 1234 + 50 + 300 + 500)
+
+    # Only what crossed the network. A sibling repo's Selenium run counted
+    # Chrome's own new-tab page (chrome:// scripts, ~2.8 MB of
+    # loadingFinished) while its proxy carried ~6 KB.
+    before = m.bytes
+    tab = {"method": "GET", "url": "chrome://new-tab-page/x.js",
+           "headers": {"A": "b"}}
+    c.feed("Network.requestWillBeSent", {"requestId": "t", "request": tab})
+    c.feed("Network.responseReceived", {"requestId": "t", "response": {
+        "url": "chrome://new-tab-page/x.js", "status": 200}})
+    c.feed("Network.dataReceived", {"requestId": "t",
+                                    "encodedDataLength": 2_779_683})
+    c.feed("Network.loadingFinished", {"requestId": "t",
+                                       "encodedDataLength": 2_779_683})
+    for scheme_url in ("data:text/plain,x", "blob:http://x.test/1"):
+        c.feed("Network.requestWillBeSent", {"requestId": scheme_url,
+               "request": dict(req, url=scheme_url)})
+        c.feed("Network.loadingFinished", {"requestId": scheme_url,
+                                           "encodedDataLength": 900})
+    ok &= check(f"CDP: a chrome:// new-tab load, data: and blob: cost nothing "
+                f"({m.bytes - before} B)", m.bytes == before)
+    c.feed("Network.requestWillBeSent", {"requestId": "k1", "request": req})
+    c.feed("Network.requestServedFromCache", {"requestId": "k1"})
+    c.feed("Network.responseReceived", _resp("k1"))
+    c.feed("Network.loadingFinished", {"requestId": "k1",
+                                       "encodedDataLength": 5000})
+    for flag in ("fromDiskCache", "fromPrefetchCache", "fromServiceWorker"):
+        c.feed("Network.requestWillBeSent", {"requestId": flag, "request": req})
+        c.feed("Network.responseReceived", _resp(flag, **{flag: True}))
+        c.feed("Network.loadingFinished", {"requestId": flag,
+                                           "encodedDataLength": 5000})
+    ok &= check(f"CDP: a cache hit (requestServedFromCache, fromDiskCache, "
+                f"fromPrefetchCache, fromServiceWorker) costs nothing "
+                f"({m.bytes - before} B)", m.bytes == before)
+    c.feed("Network.requestWillBeSent", {"requestId": "e", "request": req})
+    c.feed("Network.loadingFinished", {"requestId": "e",
+                                       "encodedDataLength": 250_000})
+    ok &= check(f"CDP: Chrome's own error page (no responseReceived) costs only "
+                f"the request that was attempted ({m.bytes - before} B)",
+                m.bytes - before == est)
+
+    # -- Playwright: sizes() of every finished/failed request ---------------
+    m = proxy_meter.ProxyMeter(0.001)
+    ctx = mock.MagicMock()
+    proxy_meter.install_playwright(ctx, m)
+    on = {call[0][0]: call[0][1] for call in ctx.on.call_args_list}
+    request = mock.MagicMock()
+    request.sizes.return_value = {"requestHeadersSize": 100,
+                                  "requestBodySize": 20,
+                                  "responseHeadersSize": 200,
+                                  "responseBodySize": 500}
+    on.get("requestfinished", lambda r: None)(request)
+    dead = mock.MagicMock()
+    dead.sizes.side_effect = RuntimeError("no response")
+    on.get("requestfailed", lambda r: None)(dead)
+    ok &= check(f"Playwright: request.sizes() summed on requestfinished "
+                f"({m.bytes} of 820), a failed one without sizes is 0",
+                m.bytes == 820 and "requestfailed" in on)
+    pattern, gate = ctx.route.call_args[0]
+    route = mock.MagicMock()
+    gate(route)
+    ok &= check(f"Playwright: under budget the route falls through to the "
+                f"next handler ({pattern})", pattern == "**/*"
+                and route.fallback.called and not route.abort.called)
+    on["requestfinished"](request)
+    route = mock.MagicMock()
+    gate(route)
+    ok &= check("Playwright: over budget every new request is aborted",
+                route.abort.called and not route.fallback.called)
+    ok &= check("no meter, nothing installed",
+                proxy_meter.install_playwright(ctx, None) is None
+                and ctx.route.call_count == 1)
+
+    # -- Selenium: the performance log --------------------------------------
+    m = proxy_meter.ProxyMeter(0.001)
+    driver = mock.MagicMock()
+    log = [{"message": json.dumps({"message": {
+        "method": "Network.requestWillBeSent",
+        "params": {"requestId": "9", "request": req}}})},
+        {"message": json.dumps({"message": {
+            "method": "Network.responseReceived", "params": _resp("9")}})},
+        {"message": json.dumps({"message": {
+            "method": "Network.loadingFinished",
+            "params": {"requestId": "9", "encodedDataLength": 2000}}})},
+        {"message": "not json"}]
+    driver.get_log.return_value = log
+    proxy_meter.install_selenium(driver, m)
+    entries = proxy_meter.selenium_log(driver)
+    ok &= check(f"Selenium: the performance log is counted ({m.bytes} = "
+                f"{est + 2000}) and handed back to the engine's own reader",
+                m.bytes == est + 2000 and entries == log)
+    blocked = [call[0] for call in driver.execute_cdp_cmd.call_args_list]
+    ok &= check("Selenium: over budget, every URL is blocked over CDP",
+                ("Network.setBlockedURLs", {"urls": ["*"]}) in blocked)
+    options = mock.MagicMock()
+    proxy_meter.selenium_options(options, m)
+    ok &= check("Selenium: the performance log is requested",
+                options.set_capability.call_args[0] ==
+                ("goog:loggingPrefs", {"performance": "ALL"}))
+
+    # -- pyppeteer: its own CDP session -------------------------------------
+    import asyncio
+    m = proxy_meter.ProxyMeter(0.001)
+    cdp = mock.MagicMock()
+    cdp.send = mock.AsyncMock()
+    page = mock.MagicMock()
+    page.target.createCDPSession = mock.AsyncMock(return_value=cdp)
+
+    async def _drive():
+        await proxy_meter.install_pyppeteer(page, m)
+        on = {call[0][0]: call[0][1] for call in cdp.on.call_args_list}
+        on["Network.requestWillBeSent"]({"requestId": "p", "request": req})
+        on["Network.responseReceived"](_resp("p"))
+        on["Network.loadingFinished"]({"requestId": "p",
+                                       "encodedDataLength": 1500})
+        await asyncio.sleep(0)
+
+    asyncio.run(_drive())
+    sent = [call[0] for call in cdp.send.await_args_list]
+    ok &= check(f"pyppeteer: Network events counted ({m.bytes} = "
+                f"{est + 1500})", m.bytes == est + 1500
+                and ("Network.enable", {}) in sent)
+    ok &= check("pyppeteer: over budget, every URL is blocked over CDP",
+                ("Network.setBlockedURLs", {"urls": ["*"]}) in sent)
+
+    # The cap can be crossed on another thread (a concurrent worker) that has
+    # no event loop: the block must still reach this page's own loop.
+    import threading
+    m = proxy_meter.ProxyMeter(0.001)
+    cdp = mock.MagicMock()
+    cdp.send = mock.AsyncMock()
+    page = mock.MagicMock()
+    page.target.createCDPSession = mock.AsyncMock(return_value=cdp)
+    crossed = []
+
+    async def _drive_threaded():
+        await proxy_meter.install_pyppeteer(page, m)
+        worker = threading.Thread(target=lambda: crossed.append(
+            _base_exception(lambda: m.add(5_000))))
+        worker.start()
+        worker.join()
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    asyncio.run(_drive_threaded())
+    sent = [call[0] for call in cdp.send.await_args_list]
+    ok &= check(f"pyppeteer: a budget crossed on a worker thread still "
+                f"blocks every URL on the page's loop (thread raised "
+                f"{crossed})", crossed == [None]
+                and ("Network.setBlockedURLs", {"urls": ["*"]}) in sent)
+
+    # -- an HTTP client, through a real stub proxy with known sizes ---------
+    import requests
+    stub = _ByteCountingProxy({"/": 20_000})
+    try:
+        m = proxy_meter.ProxyMeter(0)
+        r = requests.get("http://meter.test/", proxies={"http": stub.url()},
+                         timeout=10)
+        proxy_meter.count_response(m, r)
+        import time as _time
+        for _ in range(50):
+            if stub.sent:
+                break
+            _time.sleep(0.02)
+        drift = abs(m.bytes - stub.total) / stub.total
+        ok &= check(f"HTTP client through a stub proxy: metered {m.bytes} B, "
+                    f"the proxy carried {stub.total} B ({drift:.1%}, "
+                    f"tolerance 5%)", drift <= 0.05)
+    finally:
+        stub.close()
+
+    # -- the sidecars --------------------------------------------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "out")
+        metered = proxy_meter.ProxyMeter(10)
+        metered.add(123_456)
+        rows = _meter_rows()
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = _meter_finish(rows, out, "completed", metered.sidecar())
+        meta = json.load(open(out + ".meta.json"))
+        attempt = json.load(open(out + ".latest_attempt.meta.json"))
+        ok &= check(f"a metered run records proxy_bytes / proxy_budget_bytes "
+                    f"/ proxy_budget_exceeded in .meta.json (rc={rc})",
+                    rc == 0 and meta.get("proxy_bytes") == 123_456
+                    and meta.get("proxy_budget_bytes") == 10_000_000
+                    and meta.get("proxy_budget_exceeded") is False)
+        ok &= check("...and the same in .latest_attempt.meta.json",
+                    attempt.get("proxy_bytes") == 123_456
+                    and attempt.get("status") == meta.get("status"))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "out")
+        over = proxy_meter.ProxyMeter(0.0001)
+        over.add(5_000)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = _meter_finish(_meter_rows(), out,
+                               proxy_meter.STOP_BUDGET_EXCEEDED, over.sidecar())
+        meta = json.load(open(out + ".meta.json"))
+        ok &= check(f"over budget WITH rows: exit 6, partial, "
+                    f"stop_reason proxy_budget_exceeded (rc={rc})",
+                    rc == 6 and meta.get("status") == "partial"
+                    and meta.get("stop_reason") == "proxy_budget_exceeded"
+                    and meta.get("proxy_budget_exceeded") is True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "out")
+        for name, body in (("out.json", "[1]"), ("out.meta.json", "{}")):
+            with open(os.path.join(tmp, name), "w") as f:
+                f.write(body)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = _meter_finish([], out, proxy_meter.STOP_BUDGET_EXCEEDED,
+                               over.sidecar())
+        attempt = json.load(open(out + ".latest_attempt.meta.json"))
+        untouched = (open(out + ".json").read() == "[1]"
+                     and open(out + ".meta.json").read() == "{}")
+        ok &= check(f"over budget with NO rows: exit 5 (rc={rc}), the "
+                    f"attempt sidecar says so, the previous output is kept",
+                    rc == 5 and untouched
+                    and attempt.get("stop_reason") == "proxy_budget_exceeded"
+                    and attempt.get("proxy_budget_exceeded") is True
+                    and attempt.get("status") == "failed")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "out")
+        with contextlib.redirect_stdout(io.StringIO()):
+            _meter_finish(_meter_rows(), out, "completed", None)
+        ok &= check("an unmetered run writes no attempt sidecar and no "
+                    "proxy fields (unchanged)",
+                    not os.path.exists(out + ".latest_attempt.meta.json")
+                    and "proxy_bytes" not in json.load(
+                        open(out + ".meta.json")))
+
+    with _captured_output() as buf:
+        a = ns(proxy_budget_mb=None)
+        setattr(a, "_proxy_meter", metered)
+        extra = proxy_meter.finish(a, {"site": 1})
+    ok &= check("the run ends with 'Proxy traffic: X.X MB of Y MB budget'",
+                "Proxy traffic: 0.1 MB of 10.0 MB budget" in buf.getvalue()
+                and extra.get("site") == 1 and extra.get("proxy_bytes"))
+    return ok
+
+
+# A request the PAGE makes after the cap. Navigations are stopped by the
+# engines' own check() before they are issued; this is what the in-browser
+# refusal (a route abort, CDP Network.setBlockedURLs) is for.
+_LATE_FETCH = ("fetch('/n').then(r => r.status).catch(e => 'refused')")
+
+
+def test_proxy_meter_in_a_real_browser(skips):
+    """Opt-in (PROXY_METER_BROWSER=1): each installed driver loads a page
+    through _ByteCountingProxy, and the meter must agree with what the proxy
+    carried. Needs a Chromium; not run in CI, which installs none."""
+    group("Proxy traffic meter in a real browser (opt-in)")
+    if os.environ.get("PROXY_METER_BROWSER") != "1":
+        print("  not run — set PROXY_METER_BROWSER=1 with a Chromium "
+              "installed to measure the meter against a stub proxy")
+        return True
+    import proxy_meter
+    import time as _time
+    ok = True
+    sizes = {"/": 60_000, "/s.css": 30_000, "/a.js": 90_000, "/n": 40_000}
+    chromium = os.environ.get("PROXY_METER_CHROMIUM", "/usr/bin/chromium")
+    target = "http://meter.test/"
+    ran = 0
+    for driver in ("playwright", "pyppeteer", "selenium"):
+        try:
+            __import__(driver)
+        except ImportError:
+            continue
+        ran += 1
+        stub = _ByteCountingProxy(sizes)
+        meter = proxy_meter.ProxyMeter(0.15)
+        stopped = None
+        try:
+            if driver == "playwright":
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as pw:
+                    b = pw.chromium.launch(headless=True,
+                                           proxy={"server": stub.url()})
+                    ctx = b.new_context()
+                    proxy_meter.install_playwright(ctx, meter)
+                    p = ctx.new_page()
+                    p.goto(target)
+                    p.wait_for_timeout(800)
+                    first = (meter.bytes, stub.total)
+                    p.evaluate(_LATE_FETCH)
+                    p.wait_for_timeout(500)
+                    stopped = _base_exception(meter.check)
+                    b.close()
+            elif driver == "pyppeteer":
+                import asyncio
+                from pyppeteer import launch
+
+                async def go():
+                    b = await launch(headless=True, executablePath=chromium,
+                                     args=["--no-sandbox",
+                                           f"--proxy-server={stub.url()}"],
+                                     handleSIGINT=False, handleSIGTERM=False,
+                                     handleSIGHUP=False)
+                    p = await b.newPage()
+                    await proxy_meter.install_pyppeteer(p, meter)
+                    await p.goto(target)
+                    await asyncio.sleep(0.8)
+                    snap = (meter.bytes, stub.total)
+                    await p.evaluate(_LATE_FETCH, force_expr=True)
+                    await asyncio.sleep(0.5)
+                    await b.close()
+                    return snap
+                first = asyncio.new_event_loop().run_until_complete(go())
+                stopped = _base_exception(meter.check)
+            else:
+                from selenium import webdriver
+                from selenium.webdriver.chrome.options import Options
+                from selenium.webdriver.chrome.service import Service
+                o = Options()
+                o.add_argument("--headless=new")
+                o.add_argument("--no-sandbox")
+                o.add_argument(f"--proxy-server={stub.url()}")
+                o.binary_location = chromium
+                proxy_meter.selenium_options(o, meter)
+                d = webdriver.Chrome(options=o, service=Service(
+                    os.environ.get("PROXY_METER_CHROMEDRIVER",
+                                   "/usr/bin/chromedriver")))
+                proxy_meter.install_selenium(d, meter)
+                d.get(target)
+                _time.sleep(0.8)
+                proxy_meter.drain_selenium(d)
+                first = (meter.bytes, stub.total)
+                d.execute_script("return " + _LATE_FETCH)
+                _time.sleep(0.5)
+                proxy_meter.drain_selenium(d)
+                stopped = _base_exception(meter.check)
+                d.quit()
+        except Exception as e:  # noqa: BLE001 — report by name
+            ok &= check(f"{driver}: real-browser meter run ({e!r:.160})", False)
+            stub.close()
+            continue
+        stub.close()
+        metered, carried = first
+        drift = abs(metered - carried) / max(1, carried)
+        ok &= check(f"{driver}: page + css + js through the stub proxy: "
+                    f"metered {metered} B, the proxy carried {carried} B "
+                    f"({drift:.1%}, tolerance 10%)", drift <= 0.10)
+        ok &= check(f"{driver}: past the 0.15 MB budget a request the page "
+                    f"makes never reaches the proxy, and check() stops the "
+                    f"run before its next navigation (proxy saw {stub.paths})",
+                    isinstance(stopped, proxy_meter.ProxyBudgetExceeded)
+                    and "/a.js" in stub.paths and "/n" not in stub.paths)
+    if not ran:
+        print("  no browser driver installed")
+    return ok
+
+
+def _meter_rows():
+    return rows_of("QUESTION_EN")[:3]
+
+
+def _meter_finish(rows, out, stop_reason, proxy_extra):
+    extra = {"site_fact": 1}
+    if proxy_extra:
+        extra.update(proxy_extra)
+    return finish_run(rows, out, "json", False, blocked=False,
+                      stop_reason=stop_reason, pages_requested=2,
+                      pages_completed=1 if rows else 0,
+                      start_url=_SAVERS_URL, final_url=_SAVERS_URL,
+                      mode="question", extra=extra)
+
+
+def _engine_meter_installed(engine, args, pool):
+    """Open the engine's local session on fakes; True if the meter went in."""
+    from unittest import mock
+    name = engine.__name__
+    with _captured_output():
+        if name == "playwright_scraper":
+            pw = mock.MagicMock()
+            browser = pw.chromium.launch.return_value
+            browser.version = "120.0.0.0"
+            ctx = browser.new_context.return_value
+            engine._launch_local(pw, args, pool)
+            return any(c[0][0] == "requestfinished" for c in ctx.on.call_args_list)
+        if name == "selenium_scraper":
+            with mock.patch.object(engine.webdriver, "Chrome") as chrome:
+                driver = chrome.return_value
+                driver.capabilities = {"browserVersion": "120.0.0.0"}
+                driver.get_log.return_value = []
+                engine._Session(args, pool).open()
+            return getattr(driver, "_proxy_meter_counter", None) is not None \
+                and not isinstance(driver._proxy_meter_counter, mock.MagicMock)
+        page = mock.MagicMock()
+        for attr in ("setUserAgent", "setViewport", "authenticate",
+                     "setRequestInterception", "evaluateOnNewDocument",
+                     "setExtraHTTPHeaders"):
+            setattr(page, attr, mock.AsyncMock())
+        cdp = mock.MagicMock()
+        cdp.send = mock.AsyncMock()
+        page.target.createCDPSession = mock.AsyncMock(return_value=cdp)
+        browser = mock.MagicMock()
+        browser.newPage = mock.AsyncMock(return_value=page)
+        browser.version = mock.AsyncMock(return_value="HeadlessChrome/120.0")
+
+        async def fake_launch(*a, **k):
+            return browser
+        bridge = engine._AsyncBridge()
+        try:
+            with mock.patch.object(engine, "launch", fake_launch):
+                engine._Session(bridge, args, pool).open()
+        finally:
+            closer = getattr(bridge, "close", None)
+            if closer:
+                closer()
+        return any(c[0][0] == "Network.enable" for c in cdp.send.await_args_list)
+
+
+def _engine_session_mocks(engine):
+    """Patch out everything in `scrape` that would start a browser."""
+    from unittest import mock
+    name = engine.__name__
+    if name == "playwright_scraper":
+        return [mock.patch.object(engine, "sync_playwright"),
+                mock.patch.object(engine, "_BrowserSession")]
+    if name == "puppeteer_scraper":
+        return [mock.patch.object(engine, "_AsyncBridge"),
+                mock.patch.object(engine, "_Session")]
+    return [mock.patch.object(engine, "_Session")]
+
+
+def _navigation_mock(engine, session):
+    name = engine.__name__
+    if name == "playwright_scraper":
+        return session.page.goto
+    if name == "puppeteer_scraper":
+        return session.bridge.run
+    return session.driver.get
+
+
+def _drive_budget_run(engine, tmp, rows_on_page_1):
+    """scrape() with the page fetch faked: page 1 spends past the budget,
+    page 2 goes through the meter's check like a real fetch does."""
+    import proxy_meter
+    from unittest import mock
+    args = _engine_args(engine, tmp, "http://127.0.0.1:" + str(_closed_port()),
+                        "--pages", "3", "--proxy-budget-mb", "0.01",
+                        "--delay", "0", "--format", "json")
+    calls = []
+
+    def fake_fetch(session, a, pool, page_num, url):
+        calls.append(page_num)
+        proxy_meter.check(a)
+        proxy_meter.of(a).add(20_000)
+        if not rows_on_page_1:
+            proxy_meter.check(a)
+        return engine.PageOutcome(page_num=page_num, url=url or _SAVERS_URL,
+                                  final_url=_SAVERS_URL,
+                                  products=_meter_rows(), state="ok")
+
+    with contextlib.ExitStack() as stack:
+        for patch in _engine_session_mocks(engine):
+            stack.enter_context(patch)
+        stack.enter_context(mock.patch.object(engine, "_fetch_one_page",
+                                              side_effect=fake_fetch))
+        stack.enter_context(mock.patch.object(engine.time, "sleep"))
+        buf = stack.enter_context(_captured_output())
+        try:
+            rc = engine.scrape(args)
+        except BaseException as e:  # noqa: BLE001 — fail BY NAME
+            rc = f"raised {type(e).__name__}"
+    out = os.path.join(tmp, "out")
+    meta = (json.load(open(out + ".meta.json"))
+            if os.path.exists(out + ".meta.json") else {})
+    attempt = (json.load(open(out + ".latest_attempt.meta.json"))
+               if os.path.exists(out + ".latest_attempt.meta.json") else {})
+    return rc, calls, meta, attempt, buf.getvalue()
+
+
+def test_proxy_meter_in_the_engines(skips):
+    group("Proxy traffic meter: wired into every engine")
+    import proxy_meter
+    from unittest import mock
+    ok = True
+    for name in ENGINES:
+        try:
+            engine = __import__(name)
+        except ImportError as e:
+            skips.append(f"{name} proxy meter driving — {e}")
+            print("  SKIP  %s proxy meter — %s" % (name, e))
+            continue
+        for label, proxy, extra, want in (
+                ("through a proxy", "http://127.0.0.1:1", (), True),
+                ("without a proxy", None, (), False)):
+            with tempfile.TemporaryDirectory() as tmp:
+                args = _engine_args(engine, tmp, proxy, *extra)
+            pool = ProxyPool([proxy]) if proxy else None
+            proxy_meter.start(args, pool, remote=False)
+            got = _engine_meter_installed(engine, args, pool)
+            ok &= check(f"{name}: meter installed {label} = {want} (got {got})",
+                        got is want)
+
+        # The real page fetch refuses to navigate once over budget.
+        with tempfile.TemporaryDirectory() as tmp:
+            args = _engine_args(engine, tmp, "http://127.0.0.1:1",
+                                "--proxy-budget-mb", "0.001")
+        meter = proxy_meter.start(args, ProxyPool(["http://127.0.0.1:1"]))
+        meter.add(5_000)
+        session = mock.MagicMock()
+        session.driver.get_log.return_value = []
+        with _captured_output():
+            err = _base_exception(lambda: engine._fetch_one_page(
+                session, args, None, 1, _SAVERS_URL))
+        ok &= check(f"{name}: over budget, the page fetch stops before "
+                    f"navigating ({type(err).__name__})",
+                    isinstance(err, proxy_meter.ProxyBudgetExceeded)
+                    and not _navigation_mock(engine, session).called)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, calls, meta, attempt, log = _drive_budget_run(engine, tmp, True)
+        ok &= check(f"{name}: budget crossed on page 1 of 3 → exit 6, rows "
+                    f"kept, no third page (rc={rc}, pages={calls})",
+                    rc == 6 and calls == [1, 2] and meta.get("products") == 3)
+        ok &= check(f"{name}: ...stop_reason proxy_budget_exceeded and the "
+                    f"proxy fields in both sidecars",
+                    meta.get("stop_reason") == "proxy_budget_exceeded"
+                    and meta.get("proxy_budget_exceeded") is True
+                    and meta.get("proxy_bytes") == 20_000
+                    and meta.get("proxy_budget_bytes") == 10_000
+                    and attempt.get("proxy_bytes") == 20_000)
+        ok &= check(f"{name}: ...and the log says 'Proxy traffic: 0.0 MB of "
+                    f"0.0 MB budget'", "Proxy traffic: 0.0 MB of 0.0 MB budget"
+                    in log)
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, calls, meta, attempt, log = _drive_budget_run(engine, tmp, False)
+        ok &= check(f"{name}: budget crossed before any row → exit 5, no "
+                    f"output, the attempt sidecar says why (rc={rc})",
+                    rc == 5 and not meta
+                    and attempt.get("stop_reason") == "proxy_budget_exceeded"
+                    and attempt.get("proxy_bytes") == 20_000)
+    return ok
+
+
+def test_canary_reports_proxy_traffic():
+    group("Canary: proxy traffic in the step summary, budget enforced")
+    import subprocess
+    ok = True
+    text = open(os.path.join(REPO_ROOT, ".github", "workflows", "canary.yml"),
+                encoding="utf-8").read()
+    steps = re.split(r"\n\s*- (?:name|uses):", text)
+    runs = [s for s in steps if re.search(r"\w+_scraper\.py", s)
+            and "--out" in s]
+    # The canary's budget (25 MB) is set above the scraper's default (10 MB):
+    # on 2026-10-21 a question run hit the 10 MB cap with media blocked.
+    ok &= check(f"every canary scrape passes --proxy-budget-mb 25 "
+                f"({len(runs)} run step(s))", bool(runs) and all(
+                    re.search(r"--proxy-budget-mb 25(?!\d)", r)
+                    for r in runs))
+    outs = set()
+    for r in runs:
+        outs.update(re.findall(r"--out\s+(\S+)", r))
+    reporters = [s for s in steps if ".github/proxy_traffic.py" in s
+                 and "!cancelled()" in s]
+    reported = set()
+    for s in reporters:
+        reported.update(re.findall(r"proxy_traffic\.py\s+\S+\s+(\S+)", s))
+    ok &= check(f"each run's proxy traffic goes to the step summary, even "
+                f"after a failed step (runs {sorted(outs)}, reported "
+                f"{sorted(reported)})", bool(outs) and outs <= reported)
+
+    # A step that judges a run's exit code comes after that run's proxy-traffic
+    # step, which fails when the budget was exceeded. Without !cancelled() /
+    # always() GitHub skips it then, and the run's own verdict is never shown.
+    judges = [s for s in steps if ".outputs.exit_code" in s
+              and "--out" not in s]
+    unguarded = [s.strip().splitlines()[0] for s in judges
+                 if not re.search(r"^\s*if:.*(!cancelled\(\)|always\(\))",
+                                  s, re.M)]
+    ok &= check(f"every exit-code verdict step runs after a failed proxy-"
+                f"traffic step ({len(judges)} step(s), unguarded "
+                f"{unguarded or 'none'})", len(judges) >= 3 and not unguarded)
+    verdict = [s for s in steps if s.strip().startswith("Interpret the exit code")]
+    ok &= check("the question run's 'Interpret the exit code' step is one of "
+                "them", len(verdict) == 1 and verdict[0] in judges
+                and "Interpret the exit code" not in unguarded)
+
+    script = os.path.join(REPO_ROOT, ".github", "proxy_traffic.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        summary = os.path.join(tmp, "summary.md")
+        results = {}
+        for case, meta in (
+                ("over", {"proxy_bytes": 12_300_000,
+                          "proxy_budget_bytes": 10_000_000,
+                          "proxy_budget_exceeded": True}),
+                ("under", {"proxy_bytes": 2_340_000,
+                           "proxy_budget_bytes": 10_000_000,
+                           "proxy_budget_exceeded": False}),
+                ("canary", {"proxy_bytes": 26_100_000,
+                            "proxy_budget_bytes": 25_000_000,
+                            "proxy_budget_exceeded": True}),
+                ("plain", {"status": "complete"}),
+                ("deadlogin", {"status": "failed",
+                               "stop_reason": "proxy_auth_failed"}),
+                ("parser", {"status": "failed", "proxy_bytes": 1_000_000,
+                            "proxy_budget_bytes": 25_000_000,
+                            "stop_reason": "parser_found_nothing"}),
+                ("missing", None)):
+            out = os.path.join(tmp, case)
+            if meta is not None:
+                with open(out + ".latest_attempt.meta.json", "w") as f:
+                    json.dump(meta, f)
+            proc = subprocess.run(
+                [sys.executable, script, "live/" + case, out],
+                capture_output=True, text=True,
+                env={**os.environ, "GITHUB_STEP_SUMMARY": summary})
+            results[case] = (proc.returncode, proc.stdout)
+        written = open(summary).read() if os.path.exists(summary) else ""
+    rc, out = results["over"]
+    ok &= check(f"over budget: '::error::stopped: proxy budget 10 MB "
+                f"exceeded' and the step fails (rc={rc})", rc == 1
+                and "::error::stopped: proxy budget 10 MB exceeded" in out)
+    ok &= check("under budget: '**live/under**: proxy traffic 2.3 MB of "
+                "10 MB' in the summary, step passes",
+                results["under"][0] == 0
+                and "**live/under**: proxy traffic 2.3 MB of 10 MB" in written
+                and "**live/over**: proxy traffic 12.3 MB of 10 MB" in written)
+    rc, out = results["canary"]
+    ok &= check(f"the budget text comes from the sidecar's proxy_budget_bytes, "
+                f"not a fixed 10 MB: '25 MB' (rc={rc})", rc == 1
+                and "::error::stopped: proxy budget 25 MB exceeded" in out
+                and "**live/canary**: proxy traffic 26.1 MB of 25 MB" in written)
+    ok &= check("no proxy fields / no sidecar: reported, not a crash",
+                results["plain"][0] == 0 and results["missing"][0] == 0
+                and "not metered" in written and "unknown" in written)
+    # Exit 5 is a dead proxy login and a parser regression alike; the
+    # summary line is where the run says which. A complete run gets no
+    # stop_reason suffix.
+    ok &= check("a failed run's stop_reason is on its summary line, with the "
+                "fix named for a refused proxy login",
+                results["deadlogin"][0] == 0
+                and "stop_reason `proxy_auth_failed`: the proxy refused its "
+                    "login" in written
+                and "**live/parser**: proxy traffic 1.0 MB of 25 MB — status "
+                    "failed, stop_reason `parser_found_nothing`" in written
+                and "**live/plain**: proxy traffic not metered (no traffic "
+                    "went through a local proxy on this run)\n" in written)
+    return ok
+
+
+def main() -> int:
+    ok = True
+    skips = []
+
+    ok &= test_numbers_and_prices()
+    ok &= test_values_on_real_fixtures()
+    ok &= test_a_question_page_holds_other_questions_answers()
+    ok &= test_urls()
+    ok &= test_pagination()
+    ok &= test_page_state()
+    ok &= test_challenge_is_not_always_solvable()
+    ok &= test_captcha_capability_claims_match_the_code()
+    ok &= test_page_flow_policy()
+    ok &= test_scroll_loop()
+    ok &= test_throttle_is_not_completion()
+    ok &= test_output_contract()
+    ok &= test_writers_and_finish_run()
+    ok &= test_diff()
+    ok &= test_env_config()
+    ok &= test_fingerprint_is_read_through_the_shared_helper()
+    ok &= test_proxy_pool()
+    ok &= test_credentials_never_reach_a_log()
+    ok &= test_driver_primitives_tolerate_a_navigation()
+    ok &= test_engine_parity(skips)
+    ok &= test_module_attributes_exist(skips)
+    ok &= test_no_dead_public_names()
+    ok &= test_no_undefined_names()
+    ok &= test_dockerfile_matches_its_entrypoint()
+    ok &= test_no_file_describes_another_site()
+    ok &= test_wording()
+    ok &= test_no_capture_leaks()
+    ok &= test_ci_checks_is_wired_up()
+    ok &= test_sample_output()
+    ok &= test_required_files_are_committed()
+    ok &= test_readme_claims()
+    ok &= test_x_debug_header_is_redacted()
+    ok &= test_scraper_api_payload_and_status()
+    ok &= test_audit_fixes()
+    ok &= test_audit_2026_10_14(skips)
+    ok &= test_proxy_traffic_savers(skips)
+    ok &= test_proxy_meter_units(skips)
+    ok &= test_proxy_meter_in_the_engines(skips)
+    ok &= test_proxy_meter_in_a_real_browser(skips)
+    ok &= test_canary_reports_proxy_traffic()
+
+    passed = _total_checks - len(_failures)
+    if passed < CLAIMED_CHECK_FLOOR:
+        ok = False
+        _failures.append(
+            f"the README and CHANGELOG claim over {CLAIMED_CHECK_FLOOR} "
+            f"checks and only {passed} ran — either checks were removed or "
+            f"the claim needs lowering")
+
+    print()
+    if _failures:
+        print("%d check(s) FAILED:" % len(_failures))
+        for f in _failures:
+            print("  - %s" % f)
+    if skips:
+        print("%d engine group(s) SKIPPED — an optional engine library is "
+              "absent. CI's engine-smoke job installs each engine in its own "
+              "venv and fails if this list is non-empty, because a skip reads "
+              "exactly like a passing run:" % len(skips))
+        for s in skips:
+            print("  - %s" % s)
+    print("smoke_test: %s" % ("OK" if ok else "FAILED"))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

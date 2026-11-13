@@ -1,0 +1,18 @@
+# Puppeteer engine, via pyppeteer.
+#
+#   pip install -r requirements.txt -r requirements-puppeteer.txt
+#
+# pyppeteer downloads its OWN Chromium on first run, and this site accepts
+# it: Quora reads the address and its recent request rate, not the browser
+# build. `--chromium-path` is a convenience here, for driving an installed
+# browser instead:
+#
+#   python3 puppeteer_scraper.py --chromium-path /usr/bin/google-chrome ...
+#
+# Note: pyppeteer pins pyee<12 and urllib3<2.0, which conflict with playwright
+# and selenium respectively. Use a separate virtualenv for this engine.
+#
+# pyppeteer is also effectively unmaintained and its own README points at
+# Playwright. It exists here so the family has three drivers behind one row
+# schema, not because it is the better choice.
+pyppeteer>=1.0.2
