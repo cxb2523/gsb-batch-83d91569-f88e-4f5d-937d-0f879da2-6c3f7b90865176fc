@@ -1,0 +1,3 @@
+jevfetch-only: correct 137/137 (0 awaiting votes); wrong []; split votes []
+webfetch-only: correct 132/137 (0 awaiting votes); wrong ['highlights_023', 'highlights_083', 'highlights_107', 'highlights_178', 'highlights_236']; split votes []
+regrade votes 822, cost $4.687

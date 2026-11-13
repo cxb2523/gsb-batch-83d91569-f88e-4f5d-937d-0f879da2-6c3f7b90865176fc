@@ -1,0 +1,468 @@
+[
+  {
+    "id": "functools-lru-maxsize-none",
+    "page": "python-functools.html",
+    "url": "https://docs.python.org/3/library/functools.html",
+    "question": "What happens when lru_cache is used with maxsize set to None?",
+    "question_source": "heading-list",
+    "facts": [
+      "If maxsize is set to None, the LRU feature is disabled and the cache can grow without bound."
+    ],
+    "keys": [
+      [
+        "grow without bound"
+      ]
+    ]
+  },
+  {
+    "id": "functools-lru-typed",
+    "page": "python-functools.html",
+    "url": "https://docs.python.org/3/library/functools.html",
+    "question": "What does the typed parameter of lru_cache change?",
+    "question_source": "heading-list",
+    "facts": [
+      "If typed is set to true, function arguments of different types will be cached separately."
+    ],
+    "keys": [
+      [
+        "cached separately"
+      ]
+    ]
+  },
+  {
+    "id": "functools-lru-cache-info",
+    "page": "python-functools.html",
+    "url": "https://docs.python.org/3/library/functools.html",
+    "question": "How can I see the hit and miss counts of a function decorated with lru_cache?",
+    "question_source": "heading-list",
+    "facts": [
+      "the wrapped function is instrumented with a cache_info() function that returns a named tuple showing hits, misses, maxsize and currsize."
+    ],
+    "keys": [
+      [
+        "cache_info"
+      ]
+    ]
+  },
+  {
+    "id": "subprocess-run-timeout",
+    "page": "python-subprocess.html",
+    "url": "https://docs.python.org/3/library/subprocess.html",
+    "question": "What does subprocess.run do to the child process when its timeout expires?",
+    "question_source": "heading-list",
+    "facts": [
+      "If the timeout expires, the child process will be killed and waited for."
+    ],
+    "keys": [
+      [
+        "killed"
+      ]
+    ]
+  },
+  {
+    "id": "subprocess-communicate-timeout",
+    "page": "python-subprocess.html",
+    "url": "https://docs.python.org/3/library/subprocess.html",
+    "question": "Is the child process killed when Popen.communicate raises TimeoutExpired?",
+    "question_source": "heading-list",
+    "facts": [
+      "The child process is not killed if the timeout expires, so in order to cleanup properly a well-behaved application should kill the child process and finish communication:"
+    ],
+    "keys": [
+      [
+        "not killed"
+      ]
+    ]
+  },
+  {
+    "id": "subprocess-shell-security",
+    "page": "python-subprocess.html",
+    "url": "https://docs.python.org/3/library/subprocess.html",
+    "question": "What are the security considerations when running a command with shell=True?",
+    "question_source": "heading-list",
+    "facts": [
+      "If the shell is invoked explicitly, via shell=True, it is the application’s responsibility to ensure that all whitespace and metacharacters are quoted appropriately to avoid shell injection vulnerabilities."
+    ],
+    "keys": [
+      [
+        "shell injection"
+      ]
+    ]
+  },
+  {
+    "id": "cache-control-max-age",
+    "page": "mdn-cache-control.html",
+    "url": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cache-Control",
+    "question": "What does the max-age response directive mean?",
+    "question_source": "heading-list",
+    "facts": [
+      "The max-age=N response directive indicates that the response remains fresh until N seconds after the response is generated."
+    ],
+    "keys": [
+      [
+        "N seconds"
+      ]
+    ]
+  },
+  {
+    "id": "cache-control-no-cache-vs-no-store",
+    "page": "mdn-cache-control.html",
+    "url": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cache-Control",
+    "question": "Does the no-cache directive stop a response from being stored?",
+    "question_source": "heading-list",
+    "facts": [
+      "no-cache allows caches to store a response but requires them to revalidate it before reuse."
+    ],
+    "keys": [
+      [
+        "revalidate"
+      ]
+    ]
+  },
+  {
+    "id": "cache-control-stale-while-revalidate",
+    "page": "mdn-cache-control.html",
+    "url": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cache-Control",
+    "question": "In the stale-while-revalidate example, for how long after becoming stale may the cache keep reusing the response?",
+    "question_source": "heading-list",
+    "facts": [
+      "After 7 days it becomes stale, but the cache is allowed to reuse it for any requests that are made in the following day (86400s), provided that they revalidate the response in the background."
+    ],
+    "keys": [
+      [
+        "86400s",
+        "86400"
+      ]
+    ]
+  },
+  {
+    "id": "array-sort-stability",
+    "page": "mdn-array-sort.html",
+    "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/sort",
+    "question": "Is Array.prototype.sort guaranteed to be a stable sort?",
+    "question_source": "heading-list",
+    "facts": [
+      "Since version 10 (or ECMAScript 2019), the specification dictates that Array.prototype.sort is stable."
+    ],
+    "keys": [
+      [
+        "ECMAScript 2019",
+        "ES2019"
+      ]
+    ]
+  },
+  {
+    "id": "array-sort-default-order",
+    "page": "mdn-array-sort.html",
+    "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/sort",
+    "question": "How are numbers ordered by sort() when no compare function is passed?",
+    "question_source": "heading-list",
+    "facts": [
+      "In a numeric sort, 9 comes before 80, but because numbers are converted to strings, \"80\" comes before \"9\" in the Unicode order."
+    ],
+    "keys": [
+      [
+        "converted to strings",
+        "converting them to strings"
+      ]
+    ]
+  },
+  {
+    "id": "array-sort-complexity",
+    "page": "mdn-array-sort.html",
+    "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/sort",
+    "question": "What is the time complexity of Array.prototype.sort()?",
+    "question_source": "heading-list",
+    "facts": [
+      "The time and space complexity of the sort cannot be guaranteed as it depends on the implementation."
+    ],
+    "keys": [
+      [
+        "cannot be guaranteed"
+      ]
+    ]
+  },
+  {
+    "id": "array-sort-max-length",
+    "page": "mdn-array-sort.html",
+    "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/sort",
+    "question": "What is the maximum number of elements that Array.prototype.sort() can sort?",
+    "question_source": "heading-list",
+    "answerable": false,
+    "negative_kind": "near-topic",
+    "status": "no_match",
+    "facts": [],
+    "keys": []
+  },
+  {
+    "id": "uv-pronounce",
+    "page": "uv-readme.md",
+    "url": "https://raw.githubusercontent.com/astral-sh/uv/main/README.md",
+    "question": "How is the name uv pronounced?",
+    "question_source": "heading-list",
+    "facts": [
+      "It's pronounced as \"you - vee\""
+    ],
+    "keys": [
+      [
+        "you - vee"
+      ]
+    ]
+  },
+  {
+    "id": "uv-install",
+    "page": "uv-readme.md",
+    "url": "https://raw.githubusercontent.com/astral-sh/uv/main/README.md",
+    "question": "What command installs uv on macOS or Linux?",
+    "question_source": "heading-list",
+    "facts": [
+      "curl -LsSf https://astral.sh/uv/install.sh | sh"
+    ],
+    "keys": [
+      [
+        "https://astral.sh/uv/install.sh",
+        "astral.sh/uv/install.sh"
+      ]
+    ]
+  },
+  {
+    "id": "json-utf8",
+    "page": "rfc8259.html",
+    "url": "https://www.rfc-editor.org/rfc/rfc8259.html",
+    "question": "Which character encoding must be used for JSON text exchanged between systems?",
+    "question_source": "heading-list",
+    "facts": [
+      "JSON text exchanged between systems that are not part of a closed ecosystem MUST be encoded using UTF-8"
+    ],
+    "keys": [
+      [
+        "UTF-8"
+      ]
+    ]
+  },
+  {
+    "id": "json-infinity-nan",
+    "page": "rfc8259.html",
+    "url": "https://www.rfc-editor.org/rfc/rfc8259.html",
+    "question": "Can a JSON number be Infinity or NaN?",
+    "question_source": "heading-list",
+    "facts": [
+      "Numeric values that cannot be represented in the grammar below (such as Infinity and NaN) are not permitted."
+    ],
+    "keys": [
+      [
+        "not permitted"
+      ]
+    ]
+  },
+  {
+    "id": "http-415-meaning",
+    "page": "rfc9110.html",
+    "url": "https://www.rfc-editor.org/rfc/rfc9110.html",
+    "question": "When does an origin server respond with 415 Unsupported Media Type?",
+    "question_source": "heading-list",
+    "facts": [
+      "The 415 (Unsupported Media Type) status code indicates that the origin server is refusing to service the request because the content is in a format not supported by this method on the target resource."
+    ],
+    "keys": [
+      [
+        "not supported by this method"
+      ]
+    ]
+  },
+  {
+    "id": "http-retry-after-values",
+    "page": "rfc9110.html",
+    "url": "https://www.rfc-editor.org/rfc/rfc9110.html",
+    "question": "What kinds of values can the Retry-After header field carry?",
+    "question_source": "heading-list",
+    "facts": [
+      "The Retry-After field value can be either an HTTP-date or a number of seconds to delay after receiving the response."
+    ],
+    "keys": [
+      [
+        "HTTP-date"
+      ]
+    ]
+  },
+  {
+    "id": "http-if-none-match-false",
+    "page": "rfc9110.html",
+    "url": "https://www.rfc-editor.org/rfc/rfc9110.html",
+    "question": "Which status code must an origin server send when an If-None-Match condition evaluates to false?",
+    "question_source": "heading-list",
+    "facts": [
+      "the origin server MUST respond with either a) the 304 (Not Modified) status code if the request method is GET or HEAD or b) the 412 (Precondition Failed) status code for all other request methods."
+    ],
+    "keys": [
+      [
+        "304"
+      ],
+      [
+        "412"
+      ]
+    ]
+  },
+  {
+    "id": "http-multiplexing",
+    "page": "rfc9110.html",
+    "url": "https://www.rfc-editor.org/rfc/rfc9110.html",
+    "question": "How does HTTP/2 multiplex several streams over one TCP connection?",
+    "question_source": "heading-list",
+    "answerable": false,
+    "negative_kind": "near-topic",
+    "status": "no_match",
+    "facts": [],
+    "keys": []
+  },
+  {
+    "id": "ww2-start-date",
+    "page": "wiki-world-war-ii.html",
+    "url": "https://en.wikipedia.org/wiki/World_War_II",
+    "question": "On what date did World War II begin according to most historians?",
+    "question_source": "heading-list",
+    "facts": [
+      "Most historians agree that World War II began with the German invasion of Poland on 1 September 1939"
+    ],
+    "keys": [
+      [
+        "1 September 1939"
+      ]
+    ]
+  },
+  {
+    "id": "ww2-un-founded",
+    "page": "wiki-world-war-ii.html",
+    "url": "https://en.wikipedia.org/wiki/World_War_II",
+    "question": "When did the United Nations officially come into existence after the war?",
+    "question_source": "heading-list",
+    "facts": [
+      "the Allies formed the United Nations, which officially came into existence on 24 October 1945"
+    ],
+    "keys": [
+      [
+        "24 October 1945"
+      ]
+    ]
+  },
+  {
+    "id": "ww2-death-toll",
+    "page": "wiki-world-war-ii.html",
+    "url": "https://en.wikipedia.org/wiki/World_War_II",
+    "question": "How many people are estimated to have died in World War II?",
+    "question_source": "heading-list",
+    "facts": [
+      "An estimated 60 million to more than 75 million people died in the war including at least 20 million who died from deprivation, famine and disease."
+    ],
+    "keys": [
+      [
+        "60 million"
+      ]
+    ]
+  },
+  {
+    "id": "python-naming",
+    "page": "wiki-python.html",
+    "url": "https://en.wikipedia.org/wiki/Python_(programming_language)",
+    "question": "Where does the name of the Python language come from?",
+    "question_source": "heading-list",
+    "facts": [
+      "Python's name is inspired by the British comedy group Monty Python, whom Python creator Guido van Rossum enjoyed while developing the language."
+    ],
+    "keys": [
+      [
+        "Monty Python"
+      ]
+    ]
+  },
+  {
+    "id": "python-first-release",
+    "page": "wiki-python.html",
+    "url": "https://en.wikipedia.org/wiki/Python_(programming_language)",
+    "question": "In what year was Python first released, and as which version?",
+    "question_source": "heading-list",
+    "facts": [
+      "Van Rossum first released it in 1991 as Python 0.9.0."
+    ],
+    "keys": [
+      [
+        "1991"
+      ],
+      [
+        "0.9.0"
+      ]
+    ]
+  },
+  {
+    "id": "python-unrelated-boiling-point",
+    "page": "wiki-python.html",
+    "url": "https://en.wikipedia.org/wiki/Python_(programming_language)",
+    "question": "What is the boiling point of water at sea level?",
+    "question_source": "author",
+    "answerable": false,
+    "negative_kind": "unrelated",
+    "status": "no_match",
+    "facts": [],
+    "keys": []
+  },
+  {
+    "id": "nist-password-min-length",
+    "page": "nist-sp800-63b.html",
+    "url": "https://pages.nist.gov/800-63-3/sp800-63b.html",
+    "question": "What minimum length must a verifier require for a memorized secret chosen by the subscriber?",
+    "question_source": "heading-list",
+    "facts": [
+      "Verifiers SHALL require subscriber-chosen memorized secrets to be at least 8 characters in length."
+    ],
+    "keys": [
+      [
+        "8 characters"
+      ]
+    ]
+  },
+  {
+    "id": "nist-password-max-length",
+    "page": "nist-sp800-63b.html",
+    "url": "https://pages.nist.gov/800-63-3/sp800-63b.html",
+    "question": "Up to what length should verifiers permit subscriber-chosen memorized secrets?",
+    "question_source": "heading-list",
+    "facts": [
+      "Verifiers SHOULD permit subscriber-chosen memorized secrets at least 64 characters in length."
+    ],
+    "keys": [
+      [
+        "64 characters"
+      ]
+    ]
+  },
+  {
+    "id": "nist-aal2-reauthentication",
+    "page": "nist-sp800-63b.html",
+    "url": "https://pages.nist.gov/800-63-3/sp800-63b.html",
+    "question": "At AAL2, how often must a subscriber reauthenticate during an extended session, and after how much inactivity?",
+    "question_source": "heading-list",
+    "facts": [
+      "At AAL2, authentication of the subscriber SHALL be repeated at least once per 12 hours during an extended usage session, regardless of user activity. Reauthentication of the subscriber SHALL be repeated following any period of inactivity lasting 30 minutes or longer."
+    ],
+    "keys": [
+      [
+        "12 hours"
+      ],
+      [
+        "30 minutes"
+      ]
+    ]
+  },
+  {
+    "id": "nist-unrelated-world-cup",
+    "page": "nist-sp800-63b.html",
+    "url": "https://pages.nist.gov/800-63-3/sp800-63b.html",
+    "question": "Which country won the 2018 FIFA World Cup?",
+    "question_source": "author",
+    "answerable": false,
+    "negative_kind": "unrelated",
+    "status": "no_match",
+    "facts": [],
+    "keys": []
+  }
+]

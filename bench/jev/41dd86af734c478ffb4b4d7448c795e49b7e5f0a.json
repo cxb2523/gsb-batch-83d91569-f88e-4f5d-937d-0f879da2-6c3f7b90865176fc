@@ -1,0 +1,1 @@
+{"model": "jev-1.13.0", "answers": {"p0": {"type": "noul", "noul": 0.1}, "p1": {"type": "noul", "noul": 0.03}, "p2": {"type": "noul", "noul": 0.41}, "p3": {"type": "noul", "noul": 0.09}, "p4": {"type": "noul", "noul": 0.15}}, "usage": {"input_tokens": 3952, "output_tokens": 89}}

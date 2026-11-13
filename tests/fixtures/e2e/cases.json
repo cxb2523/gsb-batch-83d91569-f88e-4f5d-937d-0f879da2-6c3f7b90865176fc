@@ -1,0 +1,48 @@
+[
+  {
+    "id": "size",
+    "question": "What is the maximum message size, and can larger messages be sent?",
+    "facts": [
+      "The maximum message size is 256 KB, including attributes.",
+      "Larger messages are rejected unless the queue has large-message offload enabled, in which case messages up to 2 GB are stored in object storage"
+    ]
+  },
+  {
+    "id": "reject-413",
+    "question": "When does the service reject a message with error 413?",
+    "facts": [
+      "Messages are rejected with error 413 when any of the following is true:",
+      "- the body exceeds 256 KB and offload is disabled",
+      "- the message has more than 10 attributes"
+    ]
+  },
+  {
+    "id": "throughput",
+    "question": "What is the send rate limit for a standard queue?",
+    "facts": ["Standard | 3,000 messages per second"]
+  },
+  {
+    "id": "visibility",
+    "question": "What happens if a consumer does not delete a message before the visibility timeout expires?",
+    "facts": [
+      "If the consumer does not delete the message before the visibility timeout expires, the message becomes visible again and may be delivered to another consumer."
+    ]
+  },
+  {
+    "id": "receive-wait",
+    "question": "What does receive do when wait_seconds is 0?",
+    "facts": ["If wait_seconds is 0, the call returns immediately even when the queue is empty"],
+    "heading": "receive(max_messages=1, wait_seconds=20)"
+  },
+  {
+    "id": "retention",
+    "question": "How long are messages kept by default, and how can that be changed?",
+    "facts": ["Messages are retained for 4 days by default.", "The retention period can be set from 60 seconds to 14 days."]
+  },
+  {
+    "id": "unrelated",
+    "question": "What is the boiling point of water at sea level?",
+    "facts": [],
+    "status": "no_match"
+  }
+]

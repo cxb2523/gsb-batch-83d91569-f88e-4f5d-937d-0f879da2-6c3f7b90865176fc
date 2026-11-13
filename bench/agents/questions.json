@@ -1,0 +1,708 @@
+[
+ {
+  "id": "gh-limits",
+  "url": "https://docs.github.com/en/actions/reference/limits",
+  "query": "GitHub Actions에서 한 job이 실행될 수 있는 최대 시간과 그 한도를 넘으면 어떻게 되는가 (GitHub-hosted와 self-hosted 구분)",
+  "gold": [
+   {
+    "id": "hosted-6h",
+    "must": [
+     "All GitHub-hosted runners | Job execution time | 6 hours"
+    ]
+   },
+   {
+    "id": "self-5d",
+    "must": [
+     "Self-hosted | Job execution time | 5 days"
+    ]
+   },
+   {
+    "id": "terminated",
+    "must": [
+     "If a job reaches this limit, the job is terminated and fails"
+    ]
+   }
+  ],
+  "query_ko": "GitHub Actions에서 한 job이 실행될 수 있는 최대 시간과 그 한도를 넘으면 어떻게 되는가 (GitHub-hosted와 self-hosted 구분)",
+  "query_en": "GitHub Actions maximum job execution time limit and what happens when a job exceeds it, GitHub-hosted vs self-hosted runners",
+  "lang": "ko",
+  "page_tokens": 2359
+ },
+ {
+  "id": "py-subprocess",
+  "url": "https://docs.python.org/3/library/subprocess.html",
+  "query": "subprocess.run 의 timeout 이 만료되면 자식 프로세스와 예외는 어떻게 처리되는가",
+  "gold": [
+   {
+    "id": "killed",
+    "must": [
+     "If the timeout expires, the child process will be killed and waited for"
+    ]
+   },
+   {
+    "id": "reraised",
+    "must": [
+     "The TimeoutExpired exception will be re-raised after the child process has terminated"
+    ]
+   }
+  ],
+  "query_ko": "subprocess.run 의 timeout 이 만료되면 자식 프로세스와 예외는 어떻게 처리되는가",
+  "query_en": "subprocess.run timeout expires what happens to the child process and the TimeoutExpired exception",
+  "lang": "ko",
+  "page_tokens": 12523
+ },
+ {
+  "id": "k8s-termination",
+  "url": "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/",
+  "query": "Pod 종료 시 기본 grace period 와 그 시간이 지나면 컨테이너에 무슨 일이 일어나는가",
+  "gold": [
+   {
+    "id": "default-30s",
+    "must": [
+     "30 seconds"
+    ]
+   },
+   {
+    "id": "sigkill",
+    "must": [
+     "When the grace period expires, if there is still any container running in the Pod, the kubelet triggers forcible shutdown",
+     "sends SIGKILL to any processes still running"
+    ]
+   },
+   {
+    "id": "prestop-2s",
+    "must": [
+     "If the preStop hook is still running after the grace period expires, the kubelet requests a small, one-off grace period extension of 2 seconds"
+    ]
+   }
+  ],
+  "query_ko": "Pod 종료 시 기본 grace period 와 그 시간이 지나면 컨테이너에 무슨 일이 일어나는가",
+  "query_en": "Pod termination default grace period and what happens to containers when the grace period expires",
+  "lang": "ko",
+  "page_tokens": 10802
+ },
+ {
+  "id": "pg-wraparound",
+  "url": "https://www.postgresql.org/docs/current/routine-vacuuming.html",
+  "query": "transaction ID wraparound 를 막기 위한 autovacuum 은 autovacuum 이 꺼져 있어도 실행되는가, 어떤 설정이 트리거하는가",
+  "gold": [
+   {
+    "id": "freeze-max-age",
+    "must": [
+     "autovacuum is invoked on any table that might contain unfrozen rows with XIDs older than the age specified by the configuration parameter autovacuum_freeze_max_age"
+    ]
+   },
+   {
+    "id": "even-disabled",
+    "must": [
+     "This will happen even if autovacuum is disabled."
+    ]
+   }
+  ],
+  "query_ko": "transaction ID wraparound 를 막기 위한 autovacuum 은 autovacuum 이 꺼져 있어도 실행되는가, 어떤 설정이 트리거하는가",
+  "query_en": "anti-wraparound autovacuum transaction ID wraparound runs even if autovacuum is disabled, which setting triggers it",
+  "lang": "ko",
+  "page_tokens": 7898
+ },
+ {
+  "id": "mdn-keepalive",
+  "url": "https://developer.mozilla.org/en-US/docs/Web/API/RequestInit",
+  "query": "fetch 의 keepalive 옵션을 쓸 때 요청 본문 크기 제한은 어떻게 되는가",
+  "gold": [
+   {
+    "id": "64kib",
+    "must": [
+     "The body size for keepalive requests is limited to 64 kibibytes."
+    ]
+   }
+  ],
+  "query_ko": "fetch 의 keepalive 옵션을 쓸 때 요청 본문 크기 제한은 어떻게 되는가",
+  "query_en": "fetch keepalive option request body size limit",
+  "lang": "ko",
+  "page_tokens": 3522
+ },
+ {
+  "id": "gdpr-fines",
+  "url": "https://en.wikipedia.org/wiki/General_Data_Protection_Regulation",
+  "query": "GDPR 위반 시 과징금 최대 금액은 어떻게 정해지는가",
+  "gold": [
+   {
+    "id": "20m-4pct",
+    "must": [
+     "€20million or up to 4% of the annual worldwide turnover of the preceding financial year in case of an enterprise, whichever is greater"
+    ]
+   },
+   {
+    "id": "10m-2pct",
+    "must": [
+     "€10million or up to 2% of the annual worldwide turnover of the preceding financial year in case of an enterprise, whichever is greater"
+    ]
+   }
+  ],
+  "query_ko": "GDPR 위반 시 과징금 최대 금액은 어떻게 정해지는가",
+  "query_en": "GDPR maximum fine amount for infringement",
+  "lang": "ko",
+  "page_tokens": 10921
+ },
+ {
+  "id": "claude-cache",
+  "url": "https://docs.claude.com/en/docs/build-with-claude/prompt-caching",
+  "query": "Claude prompt caching 의 최소 캐시 가능 프롬프트 길이와 캐시 수명(TTL)은?",
+  "gold": [
+   {
+    "id": "min-512",
+    "must": [
+     "the minimum cacheable prompt length is",
+     "512 tokens for Claude Fable 5.1"
+    ]
+   },
+   {
+    "id": "min-haiku",
+    "must": [
+     "4,096 tokens for Claude Haiku 4.5"
+    ]
+   },
+   {
+    "id": "ttl-5m",
+    "must": [
+     "5-minute TTL"
+    ]
+   },
+   {
+    "id": "ttl-1h",
+    "must": [
+     "1-hour TTL at 2x the base input token price"
+    ]
+   }
+  ],
+  "query_ko": "Claude prompt caching 의 최소 캐시 가능 프롬프트 길이와 캐시 수명(TTL)은?",
+  "query_en": "Claude prompt caching minimum cacheable prompt length and cache lifetime TTL",
+  "lang": "ko",
+  "page_tokens": 8794
+ },
+ {
+  "id": "rfc9111-heuristic",
+  "url": "https://www.rfc-editor.org/rfc/rfc9111.html",
+  "query": "HTTP 캐시가 명시적 만료 시간이 없는 응답에 heuristic freshness 를 적용할 수 있는 조건",
+  "gold": [
+   {
+    "id": "must-not",
+    "must": [
+     "A cache MUST NOT use heuristics to determine freshness when an explicit expiration time is present in the stored response"
+    ]
+   },
+   {
+    "id": "only-cacheable",
+    "must": [
+     "heuristics can only be used on responses without explicit freshness whose status codes are defined as \"heuristically cacheable\""
+    ]
+   },
+   {
+    "id": "fraction",
+    "must": [
+     "no more than some fraction of the interval since that time",
+     "10%"
+    ]
+   },
+   {
+    "id": "public",
+    "must": [
+     "If a response with the public directive has no explicit freshness information, it is heuristically cacheable"
+    ]
+   }
+  ],
+  "query_ko": "HTTP 캐시가 명시적 만료 시간이 없는 응답에 heuristic freshness 를 적용할 수 있는 조건",
+  "query_en": "conditions under which an HTTP cache may use heuristic freshness for a response without explicit expiration time",
+  "lang": "ko",
+  "page_tokens": 17625
+ },
+ {
+  "id": "ko-minwage",
+  "url": "https://ko.wikipedia.org/wiki/대한민국의_최저임금",
+  "query": "최저임금은 어떤 일정으로 결정되고, 이의 제기 기한과 효력 발생 시점은 언제인가",
+  "gold": [
+   {
+    "id": "mar31",
+    "must": [
+     "매년 3월 31일까지 최저임금 심의를 최저임금위원회에 요청한다"
+    ]
+   },
+   {
+    "id": "90d",
+    "must": [
+     "90일 이내(6월 29일)에 최저임금안을 제출해야한다"
+    ]
+   },
+   {
+    "id": "objection-10d",
+    "must": [
+     "고시한 날로부터 10일 이내에 고용노동부장관에게 이의를 제기할 수 있다"
+    ]
+   },
+   {
+    "id": "jan1",
+    "must": [
+     "매년 8월 5일까지 최저임금액을 결정하고, 다음연도 1월 1일부터 효력이 발생한다"
+    ]
+   }
+  ],
+  "query_ko": "최저임금은 어떤 일정으로 결정되고, 이의 제기 기한과 효력 발생 시점은 언제인가",
+  "query_en": "Korea minimum wage decision schedule objection deadline effective date",
+  "lang": "ko",
+  "page_tokens": 6790
+ },
+ {
+  "id": "gcs-lifecycle",
+  "url": "https://docs.cloud.google.com/storage/docs/lifecycle",
+  "query": "Cloud Storage lifecycle 규칙에서 여러 condition 을 지정하면 어떻게 평가되고, 규칙 변경이 적용되기까지 얼마나 걸리는가",
+  "gold": [
+   {
+    "id": "all-conds",
+    "must": [
+     "An object has to match all of the conditions specified in a rule for the action in the rule to be taken"
+    ]
+   },
+   {
+    "id": "any-rule",
+    "must": [
+     "the action is taken on an object when that object matches the conditions in any of the rules"
+    ]
+   },
+   {
+    "id": "24h",
+    "must": [
+     "can take up to 24 hours to go into effect",
+     "might still perform actions based on the old configuration"
+    ]
+   }
+  ],
+  "query_ko": "Cloud Storage lifecycle 규칙에서 여러 condition 을 지정하면 어떻게 평가되고, 규칙 변경이 적용되기까지 얼마나 걸리는가",
+  "query_en": "Cloud Storage lifecycle rule multiple conditions evaluation and how long configuration changes take to go into effect",
+  "lang": "ko",
+  "page_tokens": 4435
+ },
+ {
+  "id": "docker-swap",
+  "url": "https://docs.docker.com/engine/containers/resource_constraints/",
+  "query": "--memory-swap 을 -1 로 설정하거나 설정하지 않으면 컨테이너의 swap 사용은 어떻게 되는가",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "If --memory-swap is unset, and --memory is set, the container can use as much swap as the --memory setting, if the host has swap memory configured"
+    ]
+   },
+   {
+    "id": "f2",
+    "must": [
+     "If --memory-swap is explicitly set to -1 , the container is allowed to use unlimited swap, up to the amount available on the host system"
+    ]
+   }
+  ],
+  "query_ko": "--memory-swap 을 -1 로 설정하거나 설정하지 않으면 컨테이너의 swap 사용은 어떻게 되는가",
+  "query_en": "What happens to a container's swap usage when --memory-swap is set to -1 or left unset?",
+  "lang": "ko",
+  "page_tokens": 2737
+ },
+ {
+  "id": "nginx-read-timeout",
+  "url": "https://nginx.org/en/docs/http/ngx_http_proxy_module.html",
+  "query": "proxy_read_timeout 의 기본값과 타임아웃이 무엇을 기준으로 재어지는가",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "Default: | proxy_read_timeout 60s"
+    ]
+   },
+   {
+    "id": "f2",
+    "must": [
+     "The timeout is set only between two successive read operations, not for the transmission of the whole response"
+    ]
+   }
+  ],
+  "query_ko": "proxy_read_timeout 의 기본값과 타임아웃이 무엇을 기준으로 재어지는가",
+  "query_en": "What is the default value of proxy_read_timeout, and what exactly does the timeout measure?",
+  "lang": "ko",
+  "page_tokens": 12354
+ },
+ {
+  "id": "us-dst",
+  "url": "https://en.wikipedia.org/wiki/Daylight_saving_time_in_the_United_States",
+  "query": "미국 서머타임은 현재 규칙에서 언제 시작하고 언제 끝나는가",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "daylight saving time starts on the second Sunday in March and ends on the first Sunday in November"
+    ]
+   },
+   {
+    "id": "f2",
+    "must": [
+     "2:00 a.m. local time"
+    ]
+   }
+  ],
+  "query_ko": "미국 서머타임은 현재 규칙에서 언제 시작하고 언제 끝나는가",
+  "query_en": "Under the current rules, when does daylight saving time in the United States begin and end?",
+  "lang": "ko",
+  "page_tokens": 7085
+ },
+ {
+  "id": "ko-holiday",
+  "url": "https://ko.wikipedia.org/wiki/대한민국의_공휴일",
+  "query": "대체공휴일은 어떤 경우에 지정되는가",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "토요일이나 일요일, 다른 공휴일과 겹칠 경우에는 대체공휴일로 지정하여 운영할 수 있다"
+    ]
+   },
+   {
+    "id": "f2",
+    "must": [
+     "설날 연휴와 추석 연휴가 일요일을 포함한 다른 공휴일과 겹칠 경우에는 연휴 다음 첫번째 평일을 대체공휴일로 하고"
+    ]
+   },
+   {
+    "id": "f3",
+    "must": [
+     "어린이날 과 국경일 이 다른 공휴일이나 토요일과 겹칠 경우에는 그 다음 첫번째 평일을 대체공휴일로 한다"
+    ]
+   }
+  ],
+  "query_ko": "대체공휴일은 어떤 경우에 지정되는가",
+  "query_en": "In which cases is a substitute public holiday designated in Korea?",
+  "lang": "ko",
+  "page_tokens": 7796
+ },
+ {
+  "id": "npm-peer",
+  "url": "https://docs.npmjs.com/cli/v10/configuring-npm/package-json",
+  "query": "npm 에서 peerDependencies 는 설치할 때 자동으로 설치되는가, 버전에 따라 다른가",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "In npm versions 3 through 6, peerDependencies were not automatically installed"
+    ]
+   },
+   {
+    "id": "f2",
+    "must": [
+     "As of npm v7, peerDependencies are installed by default"
+    ]
+   },
+   {
+    "id": "f3",
+    "must": [
+     "Npm will not automatically install optional peer dependencies"
+    ]
+   }
+  ],
+  "query_ko": "npm 에서 peerDependencies 는 설치할 때 자동으로 설치되는가, 버전에 따라 다른가",
+  "query_en": "Does npm install peerDependencies automatically, and does that depend on the npm version?",
+  "lang": "ko",
+  "page_tokens": 7775
+ },
+ {
+  "id": "sqlite-length",
+  "url": "https://www.sqlite.org/limits.html",
+  "query": "SQLite 문자열이나 BLOB 의 최대 길이 기본값과 그 한도를 바꾸는 방법",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "The default value of this macro is 1 billion"
+    ]
+   },
+   {
+    "id": "f2",
+    "must": [
+     "You can raise or lower this value at compile-time"
+    ]
+   },
+   {
+    "id": "f3",
+    "must": [
+     "The maximum string or BLOB length can be lowered at run-time using the sqlite3_limit"
+    ]
+   }
+  ],
+  "query_ko": "SQLite 문자열이나 BLOB 의 최대 길이 기본값과 그 한도를 바꾸는 방법",
+  "query_en": "What is the default maximum length of a string or BLOB in SQLite, and how can that limit be changed?",
+  "lang": "ko",
+  "page_tokens": 3278
+ },
+ {
+  "id": "git-lease",
+  "url": "https://git-scm.com/docs/git-push",
+  "query": "git push --force-with-lease 에서 expected value 를 생략하면 어떻게 동작하는가",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "--force-with-lease alone, without specifying the details, will protect all remote refs that are going to be updated by requiring their current value to be the same as the remote-tracking branch we have for them"
+    ]
+   },
+   {
+    "id": "f2",
+    "must": [
+     "without specifying the expected value, will protect <refname> (alone), if it is going to be updated, by requiring its current value to be the same as the remote-tracking branch we have for it"
+    ]
+   }
+  ],
+  "query_ko": "git push --force-with-lease 에서 expected value 를 생략하면 어떻게 동작하는가",
+  "query_en": "How does git push --force-with-lease behave when the expected value is omitted?",
+  "lang": "ko",
+  "page_tokens": 11567
+ },
+ {
+  "id": "gh-rest-rate",
+  "url": "https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api",
+  "query": "GitHub REST API 에서 인증하지 않은 요청과 인증된 사용자의 primary rate limit 은 얼마인가",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "The primary rate limit for unauthenticated requests is 60 requests per hour"
+    ]
+   },
+   {
+    "id": "f2",
+    "must": [
+     "personal rate limit of 5,000 requests per hour"
+    ]
+   },
+   {
+    "id": "f3",
+    "must": [
+     "GitHub Enterprise Cloud organization have a higher rate limit of 15,000 requests per hour"
+    ]
+   }
+  ],
+  "query_ko": "GitHub REST API 에서 인증하지 않은 요청과 인증된 사용자의 primary rate limit 은 얼마인가",
+  "query_en": "What are GitHub REST API primary rate limits for unauthenticated requests and for authenticated users?",
+  "lang": "ko",
+  "page_tokens": 2373
+ },
+ {
+  "id": "http-415-meaning",
+  "url": "https://www.rfc-editor.org/rfc/rfc9110.html",
+  "query": "When does an origin server respond with 415 Unsupported Media Type?",
+  "lang": "en",
+  "source": "bench/cases.json",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "The 415 (Unsupported Media Type) status code indicates that the origin server is refusing to service the request because the content is in a format not supported by this method on the target resource."
+    ]
+   }
+  ],
+  "query_en": "When does an origin server respond with 415 Unsupported Media Type?",
+  "query_ko": "origin 서버는 어떤 경우에 415 Unsupported Media Type 으로 응답하는가?",
+  "page_tokens": 101353
+ },
+ {
+  "id": "http-retry-after-values",
+  "url": "https://www.rfc-editor.org/rfc/rfc9110.html",
+  "query": "What kinds of values can the Retry-After header field carry?",
+  "lang": "en",
+  "source": "bench/cases.json",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "The Retry-After field value can be either an HTTP-date or a number of seconds to delay after receiving the response."
+    ]
+   }
+  ],
+  "query_en": "What kinds of values can the Retry-After header field carry?",
+  "query_ko": "Retry-After 헤더 필드에는 어떤 종류의 값이 들어갈 수 있는가?",
+  "page_tokens": 101353
+ },
+ {
+  "id": "http-if-none-match-false",
+  "url": "https://www.rfc-editor.org/rfc/rfc9110.html",
+  "query": "Which status code must an origin server send when an If-None-Match condition evaluates to false?",
+  "lang": "en",
+  "source": "bench/cases.json",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "the origin server MUST respond with either a) the 304 (Not Modified) status code if the request method is GET or HEAD or b) the 412 (Precondition Failed) status code for all other request methods."
+    ]
+   }
+  ],
+  "query_en": "Which status code must an origin server send when an If-None-Match condition evaluates to false?",
+  "query_ko": "If-None-Match 조건이 거짓으로 평가되면 origin 서버는 어떤 상태 코드를 보내야 하는가?",
+  "page_tokens": 101353
+ },
+ {
+  "id": "ww2-start-date",
+  "url": "https://en.wikipedia.org/wiki/World_War_II",
+  "query": "On what date did World War II begin according to most historians?",
+  "lang": "en",
+  "source": "bench/cases.json",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "Most historians agree that World War II began with the German invasion of Poland on 1 September 1939"
+    ]
+   }
+  ],
+  "query_en": "On what date did World War II begin according to most historians?",
+  "query_ko": "대다수 역사학자들에 따르면 제2차 세계대전은 어느 날짜에 시작되었는가?",
+  "page_tokens": 32826
+ },
+ {
+  "id": "ww2-un-founded",
+  "url": "https://en.wikipedia.org/wiki/World_War_II",
+  "query": "When did the United Nations officially come into existence after the war?",
+  "lang": "en",
+  "source": "bench/cases.json",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "the Allies formed the United Nations, which officially came into existence on 24 October 1945"
+    ]
+   }
+  ],
+  "query_en": "When did the United Nations officially come into existence after the war?",
+  "query_ko": "전쟁 후 국제연합(UN)은 언제 공식적으로 출범했는가?",
+  "page_tokens": 32826
+ },
+ {
+  "id": "ww2-death-toll",
+  "url": "https://en.wikipedia.org/wiki/World_War_II",
+  "query": "How many people are estimated to have died in World War II?",
+  "lang": "en",
+  "source": "bench/cases.json",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "An estimated 60 million to more than 75 million people died in the war including at least 20 million who died from deprivation, famine and disease."
+    ]
+   }
+  ],
+  "query_en": "How many people are estimated to have died in World War II?",
+  "query_ko": "제2차 세계대전에서 사망한 사람은 몇 명으로 추정되는가?",
+  "page_tokens": 32826
+ },
+ {
+  "id": "nist-password-min-length",
+  "url": "https://pages.nist.gov/800-63-3/sp800-63b.html",
+  "query": "What minimum length must a verifier require for a memorized secret chosen by the subscriber?",
+  "lang": "en",
+  "source": "bench/cases.json",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "Verifiers SHALL require subscriber-chosen memorized secrets to be at least 8 characters in length."
+    ]
+   }
+  ],
+  "query_en": "What minimum length must a verifier require for a memorized secret chosen by the subscriber?",
+  "query_ko": "가입자가 직접 고른 memorized secret 에 대해 verifier 가 요구해야 하는 최소 길이는?",
+  "page_tokens": 36558
+ },
+ {
+  "id": "nist-password-max-length",
+  "url": "https://pages.nist.gov/800-63-3/sp800-63b.html",
+  "query": "Up to what length should verifiers permit subscriber-chosen memorized secrets?",
+  "lang": "en",
+  "source": "bench/cases.json",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "Verifiers SHOULD permit subscriber-chosen memorized secrets at least 64 characters in length."
+    ]
+   }
+  ],
+  "query_en": "Up to what length should verifiers permit subscriber-chosen memorized secrets?",
+  "query_ko": "verifier 는 가입자가 고른 memorized secret 을 어느 길이까지 허용해야 하는가?",
+  "page_tokens": 36558
+ },
+ {
+  "id": "nist-aal2-reauthentication",
+  "url": "https://pages.nist.gov/800-63-3/sp800-63b.html",
+  "query": "At AAL2, how often must a subscriber reauthenticate during an extended session, and after how much inactivity?",
+  "lang": "en",
+  "source": "bench/cases.json",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "At AAL2, authentication of the subscriber SHALL be repeated at least once per 12 hours during an extended usage session, regardless of user activity. Reauthentication of the subscriber SHALL be repeated following any period of inactivity lasting 30 minutes or longer."
+    ]
+   }
+  ],
+  "query_en": "At AAL2, how often must a subscriber reauthenticate during an extended session, and after how much inactivity?",
+  "query_ko": "AAL2 에서 장시간 세션 중 재인증은 얼마나 자주 해야 하고, 얼마나 오래 활동이 없으면 재인증해야 하는가?",
+  "page_tokens": 36558
+ },
+ {
+  "id": "subprocess-run-timeout",
+  "url": "https://docs.python.org/3/library/subprocess.html",
+  "query": "What does subprocess.run do to the child process when its timeout expires?",
+  "lang": "en",
+  "source": "bench/cases.json",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "If the timeout expires, the child process will be killed and waited for."
+    ]
+   }
+  ],
+  "query_en": "What does subprocess.run do to the child process when its timeout expires?",
+  "query_ko": "subprocess.run 의 timeout 이 만료되면 자식 프로세스는 어떻게 되는가?",
+  "page_tokens": 12523
+ },
+ {
+  "id": "subprocess-communicate-timeout",
+  "url": "https://docs.python.org/3/library/subprocess.html",
+  "query": "Is the child process killed when Popen.communicate raises TimeoutExpired?",
+  "lang": "en",
+  "source": "bench/cases.json",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "The child process is not killed if the timeout expires, so in order to cleanup properly a well-behaved application should kill the child process and finish communication:"
+    ]
+   }
+  ],
+  "query_en": "Is the child process killed when Popen.communicate raises TimeoutExpired?",
+  "query_ko": "Popen.communicate 가 TimeoutExpired 를 일으키면 자식 프로세스는 종료되는가?",
+  "page_tokens": 12523
+ },
+ {
+  "id": "subprocess-shell-security",
+  "url": "https://docs.python.org/3/library/subprocess.html",
+  "query": "What are the security considerations when running a command with shell=True?",
+  "lang": "en",
+  "source": "bench/cases.json",
+  "gold": [
+   {
+    "id": "f1",
+    "must": [
+     "If the shell is invoked explicitly, via shell=True, it is the application’s responsibility to ensure that all whitespace and metacharacters are quoted appropriately to avoid shell injection vulnerabilities."
+    ]
+   }
+  ],
+  "query_en": "What are the security considerations when running a command with shell=True?",
+  "query_ko": "shell=True 로 명령을 실행할 때의 보안 고려 사항은 무엇인가?",
+  "page_tokens": 12523
+ }
+]

@@ -1,0 +1,7 @@
+items 137: highlights 137; a reader failed to fetch on 4 ['highlights_023', 'highlights_107', 'highlights_178', 'highlights_236']
+webfetch_single: fetch failed 4; on the 133 items every reader fetched: excerpt 10, sufficient 120/133 (0 awaiting votes), seconds 419.6; over all 137 items: tokens 26180, seconds 423.1, cost $2.678
+webfetch_cont: fetch failed 4; on the 133 items every reader fetched: excerpt 10, sufficient 123/133 (0 awaiting votes), seconds 453.0; over all 137 items: tokens 27093, seconds 456.5, cost $0.275
+jevfetch_0.3: fetch failed 0; on the 133 items every reader fetched: excerpt 121, sufficient 133/133 (0 awaiting votes), seconds 183.2; over all 137 items: tokens 106121, seconds 192.7, cost $0.165
+jevfetch_0.6: fetch failed 0; on the 133 items every reader fetched: excerpt 121, sufficient 133/133 (0 awaiting votes), seconds 123.7; over all 137 items: tokens 105474, seconds 127.7, cost $0.154
+judge votes 444, cost $4.365
+excerpt with jevfetch_0.3 only: 0 []; with jevfetch_0.6 only: 0 []

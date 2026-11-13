@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 410" width="880" height="410" role="img" aria-label="jevfetch splits a page into blocks, keeps the blocks that answer the question, and passes them to the agent verbatim">
+<style>
+text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace}
+.bg{fill:#FFFFFF}
+.panel,.pill{fill:#F6F8FA;stroke:#D1D9E0;stroke-width:1}
+.blk{fill:#1F2328;opacity:.28}
+.hl{fill:#D9480F}
+.scan{fill:#D9480F;fill-opacity:.18}
+.barbg{fill:#D1D9E0}
+.bar{fill:#D9480F;transform-box:fill-box;transform-origin:left center}
+.arr{fill:none;stroke:#D9480F;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.t{fill:#1F2328;font-size:13px}
+.tq{fill:#D9480F;font-size:13px;font-weight:600}
+.tc{fill:#1F2328;font-size:12px}
+.th{fill:#D9480F;font-size:12px;font-weight:600}
+.tm{fill:#59636E;font-size:12px}
+.tb{fill:#1F2328;font-size:14px;font-weight:600}
+.mid{text-anchor:middle}
+.all{animation:in 9s ease-in-out infinite both}
+.scanmove{animation:scan 9s linear infinite both}
+.drop{opacity:.14;animation:drop 9s ease-in-out infinite both}
+.keep{animation:keep 9s ease-in-out infinite both}
+.out{animation:out 9s ease-out infinite both}
+.bar{animation:bar 9s ease-out infinite both}
+.before{opacity:0;animation:before 9s ease-in-out infinite both}
+.after{animation:after 9s ease-in-out infinite both}
+.arrowg{animation:arrow 9s ease-in-out infinite both}
+@keyframes in{0%{opacity:0}6%{opacity:1}92%{opacity:1}100%{opacity:0}}
+@keyframes scan{0%,12%{transform:translateY(0);opacity:0}14%{opacity:1}40%{transform:translateY(240px);opacity:1}43%,100%{transform:translateY(240px);opacity:0}}
+@keyframes drop{0%,42%{opacity:1}48%,100%{opacity:.14}}
+@keyframes keep{0%,42%{opacity:0}48%,100%{opacity:1}}
+@keyframes out{0%,50%{opacity:0;transform:translateX(-36px)}60%,100%{opacity:1;transform:translateX(0)}}
+@keyframes bar{0%,44%{transform:scaleX(0)}54%,100%{transform:scaleX(1)}}
+@keyframes before{0%,44%{opacity:1}50%,100%{opacity:0}}
+@keyframes after{0%,48%{opacity:0}54%,100%{opacity:1}}
+@keyframes arrow{0%,46%{opacity:.25}52%,100%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.all,.scanmove,.drop,.keep,.out,.bar,.before,.after,.arrowg{animation:none}.scanmove{opacity:0}}
+</style>
+<rect class="bg" width="880" height="410" rx="8"/>
+<g class="all">
+<rect class="pill" x="40" y="20" width="520" height="40" rx="20"/>
+<text class="tq" x="60" y="45">Q</text>
+<text class="t" x="80" y="45">What happens if lru_cache maxsize is None?</text>
+<text class="tm" x="40" y="80">docs.python.org/3/library/functools.html</text>
+<rect class="panel" x="40" y="88" width="300" height="262" rx="8"/>
+<rect class="blk" x="56" y="98" width="200" height="14" rx="3"/>
+<g class="drop">
+<rect class="blk" x="56" y="118" width="260" height="8" rx="3"/>
+<rect class="blk" x="56" y="132" width="240" height="16" rx="3"/>
+<rect class="blk" x="56" y="154" width="180" height="8" rx="3"/>
+<rect class="blk" x="56" y="168" width="268" height="20" rx="3"/>
+<rect class="blk" x="56" y="194" width="220" height="8" rx="3"/>
+<rect class="blk" x="56" y="208" width="250" height="12" rx="3"/>
+<rect class="blk" x="56" y="226" width="160" height="8" rx="3"/>
+<rect class="blk" x="56" y="240" width="262" height="16" rx="3"/>
+<rect class="blk" x="56" y="278" width="200" height="8" rx="3"/>
+<rect class="blk" x="56" y="292" width="268" height="18" rx="3"/>
+<rect class="blk" x="56" y="316" width="190" height="8" rx="3"/>
+<rect class="blk" x="56" y="330" width="240" height="8" rx="3"/>
+</g>
+<rect class="blk" x="56" y="262" width="230" height="10" rx="3"/>
+<g class="keep">
+<rect class="hl" x="56" y="98" width="200" height="14" rx="3"/>
+<rect class="hl" x="56" y="262" width="230" height="10" rx="3"/>
+</g>
+<rect class="scan scanmove" x="48" y="92" width="284" height="16" rx="4"/>
+<rect class="barbg" x="40" y="362" width="300" height="8" rx="4"/>
+<rect class="bar" x="40" y="362" width="19.4" height="8" rx="4"/>
+<text class="tm before" x="40" y="392">7,141 tokens on the page</text>
+<text class="tb after" x="40" y="393">461 of 7,141 tokens</text>
+<g class="arrowg">
+<text class="tb mid" x="426" y="205">jevfetch</text>
+<path class="arr" d="M356 219 H496"/>
+<path class="arr" d="M488 212 L497 219 L488 226"/>
+<text class="tm mid" x="426" y="244">Jev judges each block</text>
+</g>
+<text class="tm" x="520" y="80">What the agent gets</text>
+<rect class="panel" x="520" y="88" width="320" height="262" rx="8"/>
+<g class="out">
+<rect class="hl" x="536" y="104" width="4" height="34" rx="2"/>
+<text class="th" x="550" y="116">## functools</text>
+<text class="tc" x="550" y="134">Source code: Lib/functools.py</text>
+<rect class="hl" x="536" y="158" width="4" height="88" rx="2"/>
+<text class="th" x="550" y="170">## functools &gt; @functools.lru_cache</text>
+<text class="tc" x="550" y="190">If maxsize is set to None, the LRU</text>
+<text class="tc" x="550" y="208">feature is disabled and the cache</text>
+<text class="tc" x="550" y="226">can grow without bound.</text>
+<text class="tm" x="536" y="334">quoted verbatim, with heading paths</text>
+</g>
+<text class="tm after" x="520" y="392">8 of 133 blocks</text>
+</g>
+</svg>

@@ -1,0 +1,1098 @@
+{
+ "highlights_001": {
+  "f1": [
+   [
+    "judge",
+    "The histogram name is \"WebRTC.Screenshare.DesktopCapturerFullscreenDetector\", logged as a boolean via RTC_HISTOGRAM_BOOLEAN."
+   ]
+  ]
+ },
+ "highlights_003": {
+  "f1": [
+   [
+    "judge",
+    "sendfile is only used if the protocol is http, not https"
+   ]
+  ]
+ },
+ "highlights_005": {
+  "f1": [
+   [
+    "judge",
+    "The fallback default rates are $0.001 per 1K input tokens and $0.002 per 1K output tokens, used when the model isn't in COST_TABLE."
+   ]
+  ]
+ },
+ "highlights_006": {
+  "f1": [
+   [
+    "judge",
+    "TESTGO_GOHOSTOS and TESTGO_GOHOSTARCH environment variables are used instead of runtime.GOOS and runtime.GOARCH."
+   ]
+  ]
+ },
+ "highlights_011": {
+  "f1": [
+   [
+    "judge",
+    "Approximately 476GB, since 500³ leaf pages at 4KB each yields about 476GB of data, requiring only 4 page reads to find any record."
+   ]
+  ]
+ },
+ "highlights_015": {
+  "f1": [
+   [
+    "judge",
+    "The `ci-parallel-vars` npm package provides the list of supported CI environments for AVA's automatic parallel builds detection."
+   ]
+  ]
+ },
+ "highlights_016": {
+  "f1": [
+   [
+    "judge",
+    "Pass `{ suspense: true }` as the second argument to the update function returned by useContextUpdate, e.g. `update(() => setState(...), { suspense: true })`."
+   ]
+  ]
+ },
+ "highlights_018": {
+  "f1": [
+   [
+    "judge",
+    "They only have an effect when used together with `#[serde(default)]`, ensuring the generated type is correct for both serialization and deserialization."
+   ]
+  ]
+ },
+ "highlights_019": {
+  "f1": [
+   [
+    "judge",
+    "Debug logs are written to /tmp/extBrowse-* when using the --debug flag with gh extension browse."
+   ]
+  ]
+ },
+ "highlights_021": {
+  "f1": [
+   [
+    "judge",
+    "lsp4j was updated to version 1.0.0 in the language servers"
+   ]
+  ]
+ },
+ "highlights_023": {
+  "f1": [
+   [
+    "judge",
+    "Both restitution and rolling friction are set to 0.1f on the environment RigidBody."
+   ]
+  ]
+ },
+ "highlights_025": {
+  "f1": [
+   [
+    "judge",
+    "compression_level 0 produces 52MB, compression_level 5 (default) produces 45MB, and compression_level 12 produces 43MB."
+   ]
+  ]
+ },
+ "highlights_026": {
+  "f1": [
+   [
+    "judge",
+    "The attribute `#[specta(collect = false)]` is applied to the struct to exclude it from bulk export via `specta::export()`."
+   ]
+  ]
+ },
+ "highlights_029": {
+  "f1": [
+   [
+    "judge",
+    "Better i18n React SDK's TypeScript support is described as \"Full (inferred)\", whereas react-intl and react-i18next are both characterized as having \"Strong\" TypeScript support."
+   ]
+  ]
+ },
+ "highlights_032": {
+  "f1": [
+   [
+    "judge",
+    "The recommended rate limits are 10-20 requests per minute for unauthenticated requests limited by IP address, and 60-100 requests per minute for authenticated requests limited by API key."
+   ]
+  ]
+ },
+ "highlights_033": {
+  "f1": [
+   [
+    "judge",
+    "spotatui is described as a direct fork of spotify-tui (which is unmaintained), while spotify-player is listed as an independent alternative."
+   ]
+  ]
+ },
+ "highlights_035": {
+  "f1": [
+   [
+    "judge",
+    "According to Runpod's analysis, the A100 costs about 3× more per hour than a lower-end GPU, but it might train a model 4–5× faster, resulting in greater overall cost efficiency despite the higher hourly rate."
+   ]
+  ]
+ },
+ "highlights_037": {
+  "f1": [
+   [
+    "judge",
+    "The first 30 characters of the branch name are extracted using substr(var.branch_name, 0, 30), then lowercased and non-alphanumeric characters are replaced with hyphens."
+   ]
+  ]
+ },
+ "highlights_038": {
+  "f1": [
+   [
+    "judge",
+    "findByNameContaining(String keyword) for partial name matching via SQL LIKE, and findByPriceLessThan(BigDecimal maxPrice) for prices below a threshold."
+   ]
+  ]
+ },
+ "highlights_039": {
+  "f1": [
+   [
+    "judge",
+    "He recommends a well-structured modular monolith with hexagonal architecture inside, noting that the modular boundaries make it straightforward to extract services if the system outgrows it."
+   ]
+  ]
+ },
+ "highlights_040": {
+  "f1": [
+   [
+    "judge",
+    "Error code 3 implies the runtime does not need to perform any container network cleanup, for example calling the DEL action on the container."
+   ]
+  ]
+ },
+ "highlights_041": {
+  "f1": [
+   [
+    "judge",
+    "Atlassian develops pragmatic-drag-and-drop internally, with updates synchronized to GitHub by a bot. There is no public roadmap or direct insight into upcoming changes, and external community contributions do not follow the traditional open-source model."
+   ]
+  ]
+ },
+ "highlights_045": {
+  "f1": [
+   [
+    "judge",
+    "The training set contains 15261 rows and the testing set contains 1500 rows."
+   ]
+  ]
+ },
+ "highlights_046": {
+  "f1": [
+   [
+    "judge",
+    "The monolithic context combines user, theme, notifications, settings, and permissions into a single createContext call, causing every consumer to re-render when any domain updates."
+   ]
+  ]
+ },
+ "highlights_047": {
+  "f1": [
+   [
+    "judge",
+    "SQL Server 2016 SP3 is the oldest version patched, with no patches available for SQL Server 2014 or SQL Server 2012 ESU versions."
+   ]
+  ]
+ },
+ "highlights_051": {
+  "f1": [
+   [
+    "judge",
+    "RMCP uses schemars for JSON Schema generation with version 2020-12."
+   ]
+  ]
+ },
+ "highlights_054": {
+  "f1": [
+   [
+    "judge",
+    "The mixed training task ratio is T2I:T2V:I2V = 1:6:3 during the video pretraining stages."
+   ]
+  ]
+ },
+ "highlights_057": {
+  "f1": [
+   [
+    "judge",
+    "Target keywords with KD under 30 and volume of 100+ monthly searches, along with clear search intent you can satisfy."
+   ]
+  ]
+ },
+ "highlights_058": {
+  "f1": [
+   [
+    "judge",
+    "The VISIT command displays a blue pending state until the page finishes loading."
+   ]
+  ]
+ },
+ "highlights_059": {
+  "f1": [
+   [
+    "judge",
+    "In GitLab 17.0, the rate was three requests per minute for each project webhook; in GitLab 17.1, it changed to five requests per minute for each project and authenticated user."
+   ]
+  ]
+ },
+ "highlights_062": {
+  "f1": [
+   [
+    "judge",
+    "The maximum dimension count for BINARY vectors is 65528, compared to 65535 for non-BINARY vectors."
+   ]
+  ]
+ },
+ "highlights_063": {
+  "f1": [
+   [
+    "judge",
+    "Next.js provides its own type declarations for `server-only` and `client-only` when the TypeScript `noUncheckedSideEffectImports` option is active."
+   ]
+  ]
+ },
+ "highlights_064": {
+  "f1": [
+   [
+    "judge",
+    "408 Request Timeout, 409 Conflict, 429 Rate Limit, and >=500 Internal errors are all retried by default."
+   ]
+  ]
+ },
+ "highlights_066": {
+  "f1": [
+   [
+    "judge",
+    "Cache purge requests are rate-limited to 30 requests per minute."
+   ]
+  ]
+ },
+ "highlights_067": {
+  "f1": [
+   [
+    "judge",
+    "Around 100-500 concurrent users, depending on feature requirements such as ordering, persistence, presence, and typing indicators."
+   ]
+  ]
+ },
+ "highlights_072": {
+  "f1": [
+   [
+    "judge",
+    "The light theme's border color is set to '#e5e5e5' in the ThemeConfig Record example."
+   ]
+  ]
+ },
+ "highlights_074": {
+  "f1": [
+   [
+    "judge",
+    "Banks, insurance firms, or large enterprises with Java/C# backend developers, due to familiar strict typing and OOP patterns."
+   ]
+  ]
+ },
+ "highlights_077": {
+  "f1": [
+   [
+    "judge",
+    "The header padding is set to 0.5rem for screens at max-width 768px."
+   ]
+  ]
+ },
+ "highlights_078": {
+  "f1": [
+   [
+    "judge",
+    "The Context API indirectly helps improve performance \"by reducing the need for prop drilling\" which makes code \"more efficient\" and easier to maintain/update. The `useMemo` hook is recommended to memoize context values that change frequently, since all components consuming the context will re-render when the value changes."
+   ]
+  ]
+ },
+ "highlights_080": {
+  "f1": [
+   [
+    "judge",
+    "The five preparation steps are: create the diff, create the pipelines, check mergeability, link all Git LFS objects, and send notifications. The field does not update if more changes are added afterward."
+   ]
+  ]
+ },
+ "highlights_081": {
+  "f1": [
+   [
+    "judge",
+    "S3 Tables compaction (binpack) is charged at $0.002 per 1,000 objects plus $0.005 per GB processed."
+   ]
+  ]
+ },
+ "highlights_082": {
+  "f1": [
+   [
+    "judge",
+    "Under 2025-03-26, clients may declare `roots` and `sampling` capabilities; under 2025-06-18, clients may declare `elicitation` and `sampling` capabilities."
+   ]
+  ]
+ },
+ "highlights_083": {
+  "f1": [
+   [
+    "judge",
+    "16384m, making the maximum upload size equal to 16 GB"
+   ]
+  ]
+ },
+ "highlights_085": {
+  "f1": [
+   [
+    "judge",
+    ".thinMaterial is applied via .background(.thinMaterial) after setting .scrollContentBackground(.hidden) on the TextEditor."
+   ]
+  ]
+ },
+ "highlights_086": {
+  "f1": [
+   [
+    "judge",
+    "At container width > 600px, the card layouts horizontally with image left and text right."
+   ]
+  ]
+ },
+ "highlights_090": {
+  "f1": [
+   [
+    "judge",
+    "CLDR was upgraded from v36.1 to v48.1 as part of moving to a new locales library."
+   ]
+  ]
+ },
+ "highlights_091": {
+  "f1": [
+   [
+    "judge",
+    "The redirect URI must either contain \"/google-callback/\" in its path or end with \"/google-callback\"."
+   ]
+  ]
+ },
+ "highlights_092": {
+  "f1": [
+   [
+    "judge",
+    "The single-issue comments endpoint only accepts the `since` parameter (an ISO 8601 timestamp). The `sort` and `direction` parameters available on the repository-wide listing endpoint are not supported."
+   ]
+  ]
+ },
+ "highlights_093": {
+  "f1": [
+   [
+    "judge",
+    "Rspack has ~400ms dev cold start, ~50ms HMR update speed, and ~10s production build time for a 500-component app."
+   ]
+  ]
+ },
+ "highlights_095": {
+  "f1": [
+   [
+    "judge",
+    "The workflow triggers on pushes to main that change paths: 'model/**', 'app.py', or 'Dockerfile'."
+   ]
+  ]
+ },
+ "highlights_096": {
+  "f1": [
+   [
+    "judge",
+    "Approximately $350/month, driven by OpenSearch Serverless requiring a minimum of 2 OCUs (OpenSearch Compute Units) for redundancy at ~$0.24 per OCU/hour, even with zero queries."
+   ]
+  ]
+ },
+ "highlights_097": {
+  "f1": [
+   [
+    "judge",
+    "The excluded upper-bound version for SQL Server 2025 CU branch is 17.0.4020.2 (versions from 17.0.4006.2 up to but excluding 17.0.4020.2 are affected)."
+   ]
+  ]
+ },
+ "highlights_099": {
+  "f1": [
+   [
+    "judge",
+    "useMount(fn), useEffectOnce(fn), and useUpdateEffect(fn) — they are anti-pattern lifecycle wrappers that don't fit the React paradigm."
+   ]
+  ]
+ },
+ "highlights_100": {
+  "f1": [
+   [
+    "judge",
+    "A direct CFURL to String conversion is avoided because it requires at least two CoreFoundation functions to be called. Instead, CFURL to CFString and CFString to String conversions are provided separately as a performance-minded design choice."
+   ]
+  ]
+ },
+ "highlights_101": {
+  "f1": [
+   [
+    "judge",
+    "At least 160 bits when using SHA-1 as the underlying hash function for HMAC."
+   ]
+  ]
+ },
+ "highlights_102": {
+  "f1": [
+   [
+    "judge",
+    "The invalid username value is 'a' (single character) and the invalid email is the literal string 'invalid-email'."
+   ]
+  ]
+ },
+ "highlights_104": {
+  "f1": [
+   [
+    "judge",
+    "Better Auth is approximately 15KB, Auth.js v5 is approximately 30KB, and a custom JWT implementation is approximately 2KB."
+   ]
+  ]
+ },
+ "highlights_107": {
+  "f1": [
+   [
+    "judge",
+    "The query is wrapped in a no-syntax block using `<@- query -@>` delimiters, preventing Coveo from interpreting special symbols such as $ as query expression operators."
+   ]
+  ]
+ },
+ "highlights_109": {
+  "f1": [
+   [
+    "judge",
+    "A separate type alias `export type Usize=number;` is emitted, and the field references it as `types.Usize` rather than inlining `number` directly."
+   ]
+  ]
+ },
+ "highlights_110": {
+  "f1": [
+   [
+    "judge",
+    "The MCP Inspector opens at http://127.0.0.1:6274 when launched via npx @modelcontextprotocol/inspector."
+   ]
+  ]
+ },
+ "highlights_114": {
+  "f1": [
+   [
+    "judge",
+    "HTTP status 503 with the message \"AI service is temporarily unavailable.\" — intentionally masking the auth error from end users."
+   ]
+  ]
+ },
+ "highlights_117": {
+  "f1": [
+   [
+    "judge",
+    "Third-party packages provide TensorFlow language bindings for C#, Haskell, Julia, MATLAB, Object Pascal, R, Scala, Rust, OCaml, and Crystal."
+   ]
+  ]
+ },
+ "highlights_120": {
+  "f1": [
+   [
+    "judge",
+    "SA-Co contains 120K images and 1.7K videos annotated with exhaustive concept-level masks spanning over 200K unique concepts."
+   ]
+  ]
+ },
+ "highlights_121": {
+  "f1": [
+   [
+    "judge",
+    "Tomcat 11 or Jetty 12.1 are the supported embedded servlet container alternatives after Undertow's removal in Spring Boot 4."
+   ]
+  ]
+ },
+ "highlights_122": {
+  "f1": [
+   [
+    "judge",
+    "The keyboard event listeners must be added to the \"window\" object. Setting the event listener on the scene-containing div was tried but did not work."
+   ]
+  ]
+ },
+ "highlights_124": {
+  "f1": [
+   [
+    "judge",
+    "The foreground layer uses a 680px base offset for mobile and 820px for desktop, switching at a viewport width of 768px."
+   ]
+  ]
+ },
+ "highlights_126": {
+  "f1": [
+   [
+    "judge",
+    "The best ControlNet claims to be trained with over 10,000,000 images, and it is a union controlnet."
+   ]
+  ]
+ },
+ "highlights_127": {
+  "f1": [
+   [
+    "judge",
+    "It is incompatible with the block_sharing_cart plugin; copying a DisCourse with Sharing-Cart may create an incomplete and unusable DisCourse."
+   ]
+  ]
+ },
+ "highlights_128": {
+  "f1": [
+   [
+    "judge",
+    "The left ear is offset by subtracting 26 pixels on the x-axis and subtracting 10 pixels on the y-axis from the scaled landmark position (left.x * canvas.width - 26, left.y * canvas.height - 10)."
+   ]
+  ]
+ },
+ "highlights_129": {
+  "f1": [
+   [
+    "judge",
+    "The two action group names are \"analysis-query action group\" and \"iac-deployment action group,\" referenced in the instruction attached to the Bedrock agent."
+   ]
+  ]
+ },
+ "highlights_130": {
+  "f1": [
+   [
+    "judge",
+    "The `.or()` method can be chained on getBy* locator queries to try alternative selectors as fallbacks, and the documentation explicitly notes that Vitest doesn't have `page.locator()` — users should use specific getBy* methods instead."
+   ]
+  ]
+ },
+ "highlights_131": {
+  "f1": [
+   [
+    "judge",
+    "The async FastAPI version handled the load with roughly 8x fewer workers than the equivalent synchronous Flask setup."
+   ]
+  ]
+ },
+ "highlights_133": {
+  "f1": [
+   [
+    "judge",
+    "Configu supports custom configuration storage implementations, configuration formatters, and injectors."
+   ]
+  ]
+ },
+ "highlights_135": {
+  "f1": [
+   [
+    "judge",
+    "presenterm lists kitty, iterm2, wezterm, ghostty, and foot as terminals supporting images and animated gifs"
+   ]
+  ]
+ },
+ "highlights_136": {
+  "f1": [
+   [
+    "judge",
+    "The `inputsFrom` list is reversed using `lib.reverseList` before the current derivation's attrs are appended and shellHook values are extracted with `lib.catAttrs \"shellHook\"` and joined with `lib.concatStringsSep \"\\n\"`."
+   ]
+  ]
+ },
+ "highlights_137": {
+  "f1": [
+   [
+    "judge",
+    "Listed rate is $0.50–$0.80/hr; effective rate is $0.65–$1.00/hr after accounting for downtime, restarts, and variable host quality on unverified hosts."
+   ]
+  ]
+ },
+ "highlights_138": {
+  "f1": [
+   [
+    "judge",
+    "The property is `access.status.for-user.bitstream` in the dspace.cfg configuration file."
+   ]
+  ]
+ },
+ "highlights_139": {
+  "f1": [
+   [
+    "judge",
+    "A scheduler queue length unexpectedly increasing to 50+ indicates resource allocation or configuration issues. A large queue length causes delays in app deployment or workload scalability, negatively affecting availability and user experience."
+   ]
+  ]
+ },
+ "highlights_142": {
+  "f1": [
+   [
+    "judge",
+    "Less than 5% overhead compared to direct device access, with 100% of registration handled through out-of-tree extensions."
+   ]
+  ]
+ },
+ "highlights_146": {
+  "f1": [
+   [
+    "judge",
+    "The customProperties field only supports arrays when used with programmable email content."
+   ]
+  ]
+ },
+ "highlights_148": {
+  "f1": [
+   [
+    "judge",
+    "The S0 SKU is required for stateful features including the agent service, and `project_management_enabled = true` must be set on the cognitive account for agent operations."
+   ]
+  ]
+ },
+ "highlights_149": {
+  "f1": [
+   [
+    "judge",
+    "The shake animation runs for a maximum count of 6 shakes with a 50ms delay between each step, alternating the widget position by 5 pixels."
+   ]
+  ]
+ },
+ "highlights_153": {
+  "f1": [
+   [
+    "judge",
+    "Server Action IDs are cached for a maximum of 14 days, and are regenerated when a new build is initiated or the build cache is invalidated."
+   ]
+  ]
+ },
+ "highlights_154": {
+  "f1": [
+   [
+    "judge",
+    "Both `RCT_HERMES_V1_ENABLED=0` and `RCT_USE_PREBUILT_RNCORE=0` must be passed when installing CocoaPods dependencies."
+   ]
+  ]
+ },
+ "highlights_155": {
+  "f1": [
+   [
+    "judge",
+    "Redux Toolkit combined with React-Redux is listed at approximately 9kB, while Zustand is approximately 3kB — roughly one-third the size."
+   ]
+  ]
+ },
+ "highlights_159": {
+  "f1": [
+   [
+    "judge",
+    "Vercel CLI version 21.0.1 or higher is required for development environment variable features."
+   ]
+  ]
+ },
+ "highlights_160": {
+  "f1": [
+   [
+    "judge",
+    "Send analytics from route change event handlers instead of Effects, and use intersection observers to track which components are in the viewport and how long they remain visible."
+   ]
+  ]
+ },
+ "highlights_161": {
+  "f1": [
+   [
+    "judge",
+    "Approximately 30% memory gain for Mistral models, compared to more than 2x reduction for Llama3 which has a larger vocabulary size."
+   ]
+  ]
+ },
+ "highlights_163": {
+  "f1": [
+   [
+    "judge",
+    "Knit applies an additional encryption layer specifically for personally identifiable information (PII), beyond the standard dual encryption for data at rest and in transit."
+   ]
+  ]
+ },
+ "highlights_165": {
+  "f1": [
+   [
+    "judge",
+    "The `description_template` URL parameter, introduced in GitLab 17.9, is used for tasks, OKRs, issues with the new look, and epics."
+   ]
+  ]
+ },
+ "highlights_166": {
+  "f1": [
+   [
+    "judge",
+    "The CI pipeline should ideally complete in under 15 minutes per commit."
+   ]
+  ]
+ },
+ "highlights_168": {
+  "f1": [
+   [
+    "judge",
+    "The four allowed type values are \"info\", \"success\", \"loading\", and \"error\" — notably using \"loading\" rather than the more conventional \"warning\"."
+   ]
+  ]
+ },
+ "highlights_169": {
+  "f1": [
+   [
+    "judge",
+    "The default value of `is_component_build` is the current value of `is_debug` (i.e., it mirrors the `is_debug` setting)."
+   ]
+  ]
+ },
+ "highlights_172": {
+  "f1": [
+   [
+    "judge",
+    "30–50% GPU idle time indicates a dataloader bottleneck where mixed precision won't move the needle much"
+   ]
+  ]
+ },
+ "highlights_174": {
+  "f1": [
+   [
+    "judge",
+    "The Advanced JavaScript course on Scrimba is 9.8 hours long and taught by Tom Chant."
+   ]
+  ]
+ },
+ "highlights_178": {
+  "f1": [
+   [
+    "judge",
+    "Removing useMemo from values relied upon for referential stability in useEffect dependency arrays can trigger cascading re-renders or effect loops, and in impure code these changes can surface latent bugs."
+   ]
+  ]
+ },
+ "highlights_179": {
+  "f1": [
+   [
+    "judge",
+    "g6.12xlarge instance, Deep Learning Base AMI with Single CUDA (Amazon Linux 2023), and 100 GB gp3 storage."
+   ]
+  ]
+ },
+ "highlights_180": {
+  "f1": [
+   [
+    "judge",
+    "The `name` field (field number 2) is the only optional field in BasePath, defined as `optional string`."
+   ]
+  ]
+ },
+ "highlights_181": {
+  "f1": [
+   [
+    "judge",
+    "The `glass` utility uses blur(12px), `glass-strong` uses blur(15px), and `popup-blur` uses blur(5px)."
+   ]
+  ]
+ },
+ "highlights_182": {
+  "f1": [
+   [
+    "judge",
+    "testRigor claims 99.5% less maintenance upkeep compared to Selenium or Appium-based frameworks."
+   ]
+  ]
+ },
+ "highlights_183": {
+  "f1": [
+   [
+    "judge",
+    "The default style for `in: \"cookie\"` is `\"form\"` for compatibility reasons, but `style: \"cookie\"` SHOULD be used with `in: \"cookie\"` instead."
+   ]
+  ]
+ },
+ "highlights_184": {
+  "f1": [
+   [
+    "judge",
+    "The target for time-to-merge on a standard PR is under 48 hours; under 24 hours is considered excellent."
+   ]
+  ]
+ },
+ "highlights_186": {
+  "f1": [
+   [
+    "judge",
+    "It auto-renders native iOS 26+ liquid glass designs for those devices."
+   ]
+  ]
+ },
+ "highlights_191": {
+  "f1": [
+   [
+    "judge",
+    "The default classes checked in order are: NSNull, NSNumber, NSValue, NSString, NSData, NSDate, NSArray, NSSet, NSOrderedSet, NSDictionary, NSURL, and NSObject."
+   ]
+  ]
+ },
+ "highlights_192": {
+  "f1": [
+   [
+    "judge",
+    "Custom embedding dimensions are configured via '/embedding/embedding-model-dimensions.properties'"
+   ]
+  ]
+ },
+ "highlights_194": {
+  "f1": [
+   [
+    "judge",
+    "It checks for exact equality of the full key path set (using isEqualToSet:), not partial or subset matching of individual paths."
+   ]
+  ]
+ },
+ "highlights_196": {
+  "f1": [
+   [
+    "judge",
+    "Newer versions of SQLite avoid using the last six entries in the freelist trunk page array, to maintain compatibility with versions prior to 3.6.0 that would report the database as corrupt if those entries contained non-zero values."
+   ]
+  ]
+ },
+ "highlights_199": {
+  "f1": [
+   [
+    "judge",
+    "By calling `dump()` on a struct with a stored property containing a `nonisolated(nonsending)` function type, which triggers the crash through the standard library's Mirror type."
+   ]
+  ]
+ },
+ "highlights_200": {
+  "f1": [
+   [
+    "judge",
+    "Zoho BugTracker offers automated routing for incoming issues, with pricing starting from €3 per user per month."
+   ]
+  ]
+ },
+ "highlights_201": {
+  "f1": [
+   [
+    "judge",
+    "The background zsh process's stdin file descriptors become permanently corrupted, causing the CLI's internal TTY (interactive terminal) check to permanently fail, so Claude assumes it's running in a non-interactive background script."
+   ]
+  ]
+ },
+ "highlights_202": {
+  "f1": [
+   [
+    "judge",
+    "The callback is retried a maximum of 3 times with a 100ms delay between retries, and each request has a 5-second timeout."
+   ]
+  ]
+ },
+ "highlights_206": {
+  "f1": [
+   [
+    "judge",
+    "The maximum allowed value for max_length on a VARCHAR field is 65,535 bytes, with the valid range being [1, 65,535]."
+   ]
+  ]
+ },
+ "highlights_207": {
+  "f1": [
+   [
+    "judge",
+    "The `experimental.cachedNavigations` flag requires `cacheComponents` to be enabled."
+   ]
+  ]
+ },
+ "highlights_208": {
+  "f1": [
+   [
+    "judge",
+    "Explicitly adding a using directive for Microsoft.Maui.Maps.Platform in the MapPage.xaml.cs file restores event functionality despite the linker setting."
+   ]
+  ]
+ },
+ "highlights_209": {
+  "f1": [
+   [
+    "judge",
+    "Defaults to `minimal`, which omits sizes, timing, page, cookies, security and other HAR information not used when replaying from HAR."
+   ]
+  ]
+ },
+ "highlights_210": {
+  "f1": [
+   [
+    "judge",
+    "The default chunk_size is 100 rows per chunk, set via `options.get('chunk_size', 100)` in the import_csv task."
+   ]
+  ]
+ },
+ "highlights_211": {
+  "f1": [
+   [
+    "judge",
+    "The goal is to drive adoption by 10-15% of the targeted segment within the first 30 days of launch."
+   ]
+  ]
+ },
+ "highlights_215": {
+  "f1": [
+   [
+    "judge",
+    "The flag \"Enable individual request throttling in DevTools\" must be set because the feature was disabled by default in Chrome 144 due to a regression."
+   ]
+  ]
+ },
+ "highlights_216": {
+  "f1": [
+   [
+    "judge",
+    "Under the proposed LIBRARY.MAJOR.MINOR.PATCH scheme, the suggested version bump was 5.3.0.0, treating 5 as the LIBRARY version and incrementing MAJOR for the incompatible API change."
+   ]
+  ]
+ },
+ "highlights_217": {
+  "f1": [
+   [
+    "judge",
+    "The required header value is `issues_copilot_assignment_api_support,coding_agent_model_selection` — mutations will fail without it."
+   ]
+  ]
+ },
+ "highlights_218": {
+  "f1": [
+   [
+    "judge",
+    "The four job layer logging fields are: event id, job attempt, result, and full error stack (if any)."
+   ]
+  ]
+ },
+ "highlights_219": {
+  "f1": [
+   [
+    "judge",
+    "Search for the endpoints named `wcs_data_transfers` or `wcs_data_transfers_backup`."
+   ]
+  ]
+ },
+ "highlights_221": {
+  "f1": [
+   [
+    "judge",
+    "The persistence bug remains when running the app in debug mode from Xcode, even on a physical device upgraded to iOS 18.1.1. It only resolves when running exclusively on the device (not tethered to Xcode)."
+   ]
+  ]
+ },
+ "highlights_225": {
+  "f1": [
+   [
+    "judge",
+    "The JobTag pattern constraint is `[a-zA-Z0-9_.\\-:+=\\/]+` with a max length of 1024 characters."
+   ]
+  ]
+ },
+ "highlights_230": {
+  "f1": [
+   [
+    "judge",
+    "The existing `reviewThreadsQuery` and `reviewThreadNode` types in pullrequests.go must be avoided when choosing new type names."
+   ]
+  ]
+ },
+ "highlights_231": {
+  "f1": [
+   [
+    "judge",
+    "The predefined stroke width values are even integers from 2 to 20: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]."
+   ]
+  ]
+ },
+ "highlights_233": {
+  "f1": [
+   [
+    "judge",
+    "The arrays are concatenated, with project-level settings appearing earlier in the merged array."
+   ]
+  ]
+ },
+ "highlights_234": {
+  "f1": [
+   [
+    "judge",
+    "A newly created OAuth client will appear in search only after the next hourly Identity Domain (or IDCS) sync is complete."
+   ]
+  ]
+ },
+ "highlights_235": {
+  "f1": [
+   [
+    "judge",
+    "The default pagination limit is 50, and the maximum allowed limit is 200 (valid range is 1–200)."
+   ]
+  ]
+ },
+ "highlights_236": {
+  "f1": [
+   [
+    "judge",
+    "The format string is `\"Code: %s | Msg: %s | Cause: %v | Meta: %v\"`, producing a pipe-delimited representation of Code, UserMsg, Internal cause, and Metadata."
+   ]
+  ]
+ },
+ "highlights_237": {
+  "f1": [
+   [
+    "judge",
+    "By default, only `console` and `performance` are provided as builtins to a Worklet Runtime created with createWorkletRuntime."
+   ]
+  ]
+ },
+ "highlights_240": {
+  "f1": [
+   [
+    "judge",
+    "The whole artboard will be reset and paused."
+   ]
+  ]
+ },
+ "highlights_243": {
+  "f1": [
+   [
+    "judge",
+    "The useState hook uses a generic type of `string | null` (initialized to `null`), and the fallback text displayed before the client-side value is set is \"Loading time...\""
+   ]
+  ]
+ },
+ "highlights_246": {
+  "f1": [
+   [
+    "judge",
+    "`atomWithLocation` and `atomWithHash` are cited as the two-way data binding extension atom types."
+   ]
+  ]
+ },
+ "highlights_247": {
+  "f1": [
+   [
+    "judge",
+    "Flutter is recommended for offline-first apps with complex local data, with the reasoning being \"Hive/Drift + strong type safety.\""
+   ]
+  ]
+ },
+ "highlights_248": {
+  "f1": [
+   [
+    "judge",
+    "The MSRV for rootcause is Rust 1.89.0, with a policy of always supporting the latest five minor Rust versions."
+   ]
+  ]
+ },
+ "highlights_249": {
+  "f1": [
+   [
+    "judge",
+    "Callback-based async pattern is classified as High complexity, best suited for network requests and file I/O."
+   ]
+  ]
+ }
+}

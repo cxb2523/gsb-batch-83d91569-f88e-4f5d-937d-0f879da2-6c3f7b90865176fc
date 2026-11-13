@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Larkspur Queue: limits and behavior</title>
+</head>
+<body>
+<header>
+  <nav>
+    <a href="/">Larkspur</a> <a href="/docs">Docs</a> <a href="/pricing">Pricing</a> <a href="/status">Status</a>
+    <a href="/login">Sign in</a>
+  </nav>
+</header>
+<aside class="sidebar">
+  <ul>
+    <li><a href="/docs/queue">Queue overview</a></li>
+    <li><a href="/docs/queue/limits">Limits and behavior</a></li>
+    <li><a href="/docs/queue/sdk">SDK reference</a></li>
+    <li><a href="/docs/queue/billing">Billing</a></li>
+  </ul>
+</aside>
+<main>
+<article>
+<h1>Larkspur Queue: limits and behavior</h1>
+<p>Larkspur Queue is a managed message queue for passing work between services. Producers send messages to a queue,
+and consumers receive them, process them, and delete them when they are done. This page describes the limits that
+apply to every queue and how the service behaves at those limits. Limits are the same in every region unless a
+section says otherwise.</p>
+
+<h2>Queue types</h2>
+<p>There are two queue types. Standard queues deliver each message at least once and make a best effort to keep
+messages in the order they were sent. Ordered queues deliver each message exactly once, in the order it was sent
+within a message group, at a lower throughput.</p>
+<p>The queue type is chosen when the queue is created and cannot be changed later. To move from one type to the other,
+create a new queue, point producers at it, and drain the old queue before deleting it.</p>
+
+<h2>Throughput</h2>
+<p>Throughput limits apply per queue. Requests above the limit are rejected with error 429 and can be retried after
+the delay given in the Retry-After header.</p>
+<table>
+  <tr><th>Queue type</th><th>Send rate</th><th>Receive rate</th></tr>
+  <tr><td>Standard</td><td>3,000 messages per second</td><td>3,000 messages per second</td></tr>
+  <tr><td>Ordered</td><td>300 messages per second</td><td>300 messages per second</td></tr>
+</table>
+<p>Batching counts each message in a batch toward the limit, so a batch of ten messages uses ten units of the send
+rate. Throughput limits can be raised for standard queues by request; ordered queue limits are fixed.</p>
+
+<h2>Message size</h2>
+<p>The maximum message size is 256 KB, including attributes. Larger messages are rejected unless the queue has
+large-message offload enabled, in which case messages up to 2 GB are stored in object storage and the queue holds a
+pointer to them. Offloaded messages are billed for storage at the object storage rate.</p>
+<p>Messages are rejected with error 413 when any of the following is true:</p>
+<ul>
+  <li>the body exceeds 256 KB and offload is disabled</li>
+  <li>the message has more than 10 attributes</li>
+  <li>an attribute name is longer than 256 characters</li>
+</ul>
+<p>Attribute values count toward the message size. Attribute names and values must be valid UTF-8; binary data must
+be encoded before it is sent.</p>
+
+<h2>Retention</h2>
+<p>Messages are retained for 4 days by default. The retention period can be set from 60 seconds to 14 days. A message
+that is still in the queue when its retention period ends is deleted, even if it has never been received.</p>
+<p>Changing the retention period applies to messages already in the queue as well as new ones. Shortening it can
+therefore delete messages immediately.</p>
+
+<h2>Visibility timeout</h2>
+<p>When a consumer receives a message, the message stays in the queue but is hidden from other consumers for the
+visibility timeout, 30 seconds by default and at most 12 hours. If the consumer does not delete the message before
+the visibility timeout expires, the message becomes visible again and may be delivered to another consumer.</p>
+<p>A consumer that needs more time can extend the timeout for a message it has received. The total time a message
+can stay hidden, counting every extension, is still limited to 12 hours.</p>
+
+<h2>SDK calls</h2>
+<p>The SDK wraps the HTTP API. The calls below are the ones most often asked about.</p>
+<dl>
+  <dt><code>send(body, attributes=None, delay_seconds=0)</code></dt>
+  <dd>Sends one message. With a delay, the message becomes visible to consumers only after delay_seconds, at most
+  900 seconds.</dd>
+  <dt><code>receive(max_messages=1, wait_seconds=20)</code></dt>
+  <dd>Returns up to max_messages messages, at most 10 per call. If wait_seconds is 0, the call returns immediately
+  even when the queue is empty; otherwise it waits up to wait_seconds for a message to arrive.</dd>
+  <dt><code>delete(receipt)</code></dt>
+  <dd>Deletes a received message using the receipt from the receive call. A receipt is valid only until the
+  message's visibility timeout expires.</dd>
+</dl>
+
+<h2>Dead-letter queues</h2>
+<p>A queue can name a dead-letter queue and a maximum receive count. When a message has been received more times
+than the maximum receive count without being deleted, it is moved to the dead-letter queue instead of becoming
+visible again. The dead-letter queue must be of the same type and in the same region as the source queue.</p>
+<p>Moving a message to a dead-letter queue does not reset its retention period, so a message that was already close to
+the end of its retention period can expire soon after it arrives in the dead-letter queue.</p>
+
+<h2>Message groups</h2>
+<p>Ordered queues keep order within a message group, not across the whole queue. Each message carries a group ID, and
+messages with the same group ID are delivered one at a time in the order they were sent. Messages in different groups
+can be delivered in parallel, so spreading work across many groups raises the throughput a consumer fleet can reach.</p>
+<p>While a message from a group is hidden by its visibility timeout, no other message from that group is delivered.
+A consumer that fails to delete a message therefore blocks its group until the timeout expires or the message is
+moved to the dead-letter queue.</p>
+<p>Standard queues ignore group IDs. Sending a group ID to a standard queue is allowed and has no effect, which makes
+it possible to share producer code between the two queue types.</p>
+
+<h2>Long polling</h2>
+<p>A receive call with a wait time above zero is a long poll. The service holds the request open until a message
+arrives or the wait time ends, whichever comes first, which reduces the number of empty receives when a queue is
+quiet. The longest wait time is 20 seconds.</p>
+<p>Long polls count toward the receive rate only when they return. A consumer that keeps several long polls open at
+once can receive messages as soon as they arrive, at the cost of more open connections.</p>
+
+<h2>Encryption</h2>
+<p>All messages are encrypted at rest with keys managed by Larkspur. Customers who need to control the keys can
+attach their own key from the key service; the queue then uses that key for every new message, and messages already
+in the queue keep the key they were written with.</p>
+<p>If a customer key is disabled or deleted, messages encrypted with it can no longer be received. They stay in the
+queue until their retention period ends and are then deleted. Re-enabling the key makes them readable again.</p>
+<p>Messages are always encrypted in transit. Requests over plain HTTP are rejected.</p>
+
+<h2>Access control</h2>
+<p>Access to a queue is granted with policies attached to the queue or to the caller's role. A request is allowed only
+if a policy allows it and no policy denies it. The actions that can be granted are:</p>
+<ul>
+  <li>queue:Send, to send messages</li>
+  <li>queue:Receive, to receive messages and change their visibility timeout</li>
+  <li>queue:Delete, to delete received messages</li>
+  <li>queue:Admin, to change the queue's settings or delete the queue</li>
+</ul>
+<p>Policies that grant access to another account must name that account explicitly. Wildcard principals are
+rejected for queues that hold encrypted messages with a customer key.</p>
+
+<h2>Monitoring</h2>
+<p>Every queue publishes metrics once a minute. The most useful ones for capacity planning are the number of visible
+messages, the age of the oldest message, and the number of messages moved to the dead-letter queue. Alarms can be
+set on any of them.</p>
+<p>Metrics are kept for 15 months. After that, only daily aggregates remain.</p>
+
+<h2>Error codes</h2>
+<table>
+  <tr><th>Code</th><th>Meaning</th><th>What to do</th></tr>
+  <tr><td>400</td><td>The request is malformed</td><td>Fix the request; retrying will not help</td></tr>
+  <tr><td>403</td><td>No policy allows the action</td><td>Grant the action to the caller</td></tr>
+  <tr><td>404</td><td>The queue does not exist in this region</td><td>Check the queue name and the endpoint</td></tr>
+  <tr><td>413</td><td>The message is too large</td><td>Reduce the size or enable offload</td></tr>
+  <tr><td>429</td><td>The throughput limit was exceeded</td><td>Retry after the Retry-After delay</td></tr>
+  <tr><td>503</td><td>The service is temporarily unavailable</td><td>Retry with exponential backoff</td></tr>
+</table>
+
+<h2>Regions</h2>
+<p>Queues are regional. A queue and its messages stay in the region where the queue was created, and requests must be
+sent to that region's endpoint. Cross-region forwarding is not available; services in other regions must call the
+queue's regional endpoint directly.</p>
+<p>New regions are announced on the status page. Existing queues are not moved when a region is added.</p>
+
+<h2>Billing</h2>
+<p>Each send, receive, delete, or timeout change counts as one request. Requests are billed per million, and the first
+million requests each month are free. Payload size is billed in 64 KB chunks, so a 100 KB message counts as two
+requests. Empty receives, where no message was returned, are billed like any other receive.</p>
+<p>Data transfer within a region is free. Transfer to the internet is billed at the standard network rate.</p>
+
+<h2>Frequently asked questions</h2>
+<h3>Can I see how many messages are in a queue?</h3>
+<p>Yes. The queue's metrics report the approximate number of visible messages, the number of hidden messages, and the
+age of the oldest message. The counts are approximate because messages are spread across several servers.</p>
+<h3>Can a queue be renamed?</h3>
+<p>No. Queue names are fixed when the queue is created. Create a new queue with the new name and move producers and
+consumers to it.</p>
+<h3>What happens to messages when a queue is deleted?</h3>
+<p>Deleting a queue deletes every message in it, visible or hidden, and the deletion cannot be undone. A queue with
+the same name can be created again after 60 seconds; it starts empty and does not inherit the old queue's policies,
+dead-letter settings, or customer key.</p>
+<h3>Is there a limit on the number of queues?</h3>
+<p>An account can create up to 1,000 queues per region. The limit can be raised by request.</p>
+</article>
+</main>
+<footer>
+  <p>© Larkspur. All rights reserved.</p>
+  <a href="/terms">Terms</a> <a href="/privacy">Privacy</a> <a href="/careers">Careers</a>
+</footer>
+</body>
+</html>

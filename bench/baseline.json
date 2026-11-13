@@ -1,0 +1,973 @@
+{
+ "schema": 1,
+ "model": {
+  "requested": "jev-1.13.0",
+  "resolved": "jev-1.13.0"
+ },
+ "config": {
+  "candidate_threshold": 0.6,
+  "keep_threshold": 0.8,
+  "neighbor_threshold": 0.6,
+  "passthrough_tokens": 2000,
+  "min_output_tokens": 300,
+  "window_tokens": 3000,
+  "concurrency": 16,
+  "model": "jev-1.13.0",
+  "render_fallback": true,
+  "render_below_tokens": 200,
+  "score_notes": true
+ },
+ "cases_sha256": "2fe77585b740fd24ab2dcfa7702c62cf998963fea7c6c5d2756a9ef8787caf23",
+ "summary": {
+  "cases": 31,
+  "facts_total": 27,
+  "facts_passed": 27,
+  "keys_total": 30,
+  "keys_passed": 30,
+  "extraction_passed": 27,
+  "retention_pooled": 1.0,
+  "retention_case_mean": 1.0,
+  "retention_page_macro": 1.0,
+  "status_ok": 31,
+  "out_tokens": 20696,
+  "doc_tokens": 950611,
+  "workload": 3872727,
+  "live_tokens": 0,
+  "requests": 539,
+  "cost_usd": 0.1627
+ },
+ "cases": {
+  "functools-lru-maxsize-none": {
+   "id": "functools-lru-maxsize-none",
+   "question": "What happens when lru_cache is used with maxsize set to None?",
+   "snapshot_sha256": "7f8f3dbc9da24e479be8b124ba8ff971d611afe35372d1444e038782d3094a3d",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "a7f3e3c54b": true
+   },
+   "fact_positions": {
+    "a7f3e3c54b": 0.249
+   },
+   "doc_tokens": 6758,
+   "blocks_total": 133,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "a7f3e3c54b": true
+   },
+   "keys": {
+    "a552acbb15": true
+   },
+   "out_tokens": 395,
+   "blocks_kept": 6,
+   "workload": 36166,
+   "live_tokens": 0,
+   "requests": 8,
+   "model": "jev-1.13.0",
+   "span_density": 0.056,
+   "page": "python-functools.html"
+  },
+  "functools-lru-typed": {
+   "id": "functools-lru-typed",
+   "question": "What does the typed parameter of lru_cache change?",
+   "snapshot_sha256": "7f8f3dbc9da24e479be8b124ba8ff971d611afe35372d1444e038782d3094a3d",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "82dbf5828a": true
+   },
+   "fact_positions": {
+    "82dbf5828a": 0.252
+   },
+   "doc_tokens": 6758,
+   "blocks_total": 133,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "82dbf5828a": true
+   },
+   "keys": {
+    "b7bc660d60": true
+   },
+   "out_tokens": 382,
+   "blocks_kept": 7,
+   "workload": 34280,
+   "live_tokens": 0,
+   "requests": 5,
+   "model": "jev-1.13.0",
+   "span_density": 0.045,
+   "page": "python-functools.html"
+  },
+  "functools-lru-cache-info": {
+   "id": "functools-lru-cache-info",
+   "question": "How can I see the hit and miss counts of a function decorated with lru_cache?",
+   "snapshot_sha256": "7f8f3dbc9da24e479be8b124ba8ff971d611afe35372d1444e038782d3094a3d",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "3bd891ff41": true
+   },
+   "fact_positions": {
+    "3bd891ff41": 0.284
+   },
+   "doc_tokens": 6758,
+   "blocks_total": 133,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "3bd891ff41": true
+   },
+   "keys": {
+    "deaad5741c": true
+   },
+   "out_tokens": 405,
+   "blocks_kept": 4,
+   "workload": 35052,
+   "live_tokens": 0,
+   "requests": 6,
+   "model": "jev-1.13.0",
+   "span_density": 0.069,
+   "page": "python-functools.html"
+  },
+  "subprocess-run-timeout": {
+   "id": "subprocess-run-timeout",
+   "question": "What does subprocess.run do to the child process when its timeout expires?",
+   "snapshot_sha256": "7c10803839ac4676db04b333689d7c7844d4c9685e00ee93fdb08140cce75fe1",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "d53b0165e8": true
+   },
+   "fact_positions": {
+    "d53b0165e8": 0.057
+   },
+   "doc_tokens": 13481,
+   "blocks_total": 299,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "d53b0165e8": true
+   },
+   "keys": {
+    "666d5e1c8c": true
+   },
+   "out_tokens": 527,
+   "blocks_kept": 8,
+   "workload": 78778,
+   "live_tokens": 0,
+   "requests": 12,
+   "model": "jev-1.13.0",
+   "span_density": 0.028,
+   "page": "python-subprocess.html"
+  },
+  "subprocess-communicate-timeout": {
+   "id": "subprocess-communicate-timeout",
+   "question": "Is the child process killed when Popen.communicate raises TimeoutExpired?",
+   "snapshot_sha256": "7c10803839ac4676db04b333689d7c7844d4c9685e00ee93fdb08140cce75fe1",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "f625dcb310": true
+   },
+   "fact_positions": {
+    "f625dcb310": 0.573
+   },
+   "doc_tokens": 13481,
+   "blocks_total": 299,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "f625dcb310": true
+   },
+   "keys": {
+    "6ac888cf92": true
+   },
+   "out_tokens": 435,
+   "blocks_kept": 8,
+   "workload": 78256,
+   "live_tokens": 0,
+   "requests": 11,
+   "model": "jev-1.13.0",
+   "span_density": 0.074,
+   "page": "python-subprocess.html"
+  },
+  "subprocess-shell-security": {
+   "id": "subprocess-shell-security",
+   "question": "What are the security considerations when running a command with shell=True?",
+   "snapshot_sha256": "7c10803839ac4676db04b333689d7c7844d4c9685e00ee93fdb08140cce75fe1",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "0ede8c650b": true
+   },
+   "fact_positions": {
+    "0ede8c650b": 0.521
+   },
+   "doc_tokens": 13481,
+   "blocks_total": 299,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "0ede8c650b": true
+   },
+   "keys": {
+    "0aeccd3dc0": true
+   },
+   "out_tokens": 908,
+   "blocks_kept": 10,
+   "workload": 81489,
+   "live_tokens": 0,
+   "requests": 16,
+   "model": "jev-1.13.0",
+   "span_density": 0.04,
+   "page": "python-subprocess.html"
+  },
+  "cache-control-max-age": {
+   "id": "cache-control-max-age",
+   "question": "What does the max-age response directive mean?",
+   "snapshot_sha256": "956dbb7ab3f6759b82cb924993bf3f5380cd08594481497d089a083c08dd3b90",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "4bba77f528": true
+   },
+   "fact_positions": {
+    "4bba77f528": 0.174
+   },
+   "doc_tokens": 5696,
+   "blocks_total": 175,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "4bba77f528": true
+   },
+   "keys": {
+    "8135861c12": true
+   },
+   "out_tokens": 747,
+   "blocks_kept": 11,
+   "workload": 47893,
+   "live_tokens": 0,
+   "requests": 20,
+   "model": "jev-1.13.0",
+   "span_density": 0.028,
+   "page": "mdn-cache-control.html"
+  },
+  "cache-control-no-cache-vs-no-store": {
+   "id": "cache-control-no-cache-vs-no-store",
+   "question": "Does the no-cache directive stop a response from being stored?",
+   "snapshot_sha256": "956dbb7ab3f6759b82cb924993bf3f5380cd08594481497d089a083c08dd3b90",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "9c457357ff": true
+   },
+   "fact_positions": {
+    "9c457357ff": 0.232
+   },
+   "doc_tokens": 5696,
+   "blocks_total": 175,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "9c457357ff": true
+   },
+   "keys": {
+    "9236276984": true
+   },
+   "out_tokens": 543,
+   "blocks_kept": 10,
+   "workload": 49337,
+   "live_tokens": 0,
+   "requests": 23,
+   "model": "jev-1.13.0",
+   "span_density": 0.033,
+   "page": "mdn-cache-control.html"
+  },
+  "cache-control-stale-while-revalidate": {
+   "id": "cache-control-stale-while-revalidate",
+   "question": "In the stale-while-revalidate example, for how long after becoming stale may the cache keep reusing the response?",
+   "snapshot_sha256": "956dbb7ab3f6759b82cb924993bf3f5380cd08594481497d089a083c08dd3b90",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "e870d77eff": true
+   },
+   "fact_positions": {
+    "e870d77eff": 0.425
+   },
+   "doc_tokens": 5696,
+   "blocks_total": 175,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "e870d77eff": true
+   },
+   "keys": {
+    "a2b8a8070c": true
+   },
+   "out_tokens": 437,
+   "blocks_kept": 7,
+   "workload": 40179,
+   "live_tokens": 0,
+   "requests": 7,
+   "model": "jev-1.13.0",
+   "span_density": 0.096,
+   "page": "mdn-cache-control.html"
+  },
+  "array-sort-stability": {
+   "id": "array-sort-stability",
+   "question": "Is Array.prototype.sort guaranteed to be a stable sort?",
+   "snapshot_sha256": "762f5062a56a387fa4dbc4363fa3e51d065869a228455eea3fd30ad4bd86181e",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "2a7079be0e": true
+   },
+   "fact_positions": {
+    "2a7079be0e": 0.657
+   },
+   "doc_tokens": 4060,
+   "blocks_total": 69,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "2a7079be0e": true
+   },
+   "keys": {
+    "08258eeadc": true
+   },
+   "out_tokens": 472,
+   "blocks_kept": 10,
+   "workload": 20384,
+   "live_tokens": 0,
+   "requests": 8,
+   "model": "jev-1.13.0",
+   "span_density": 0.049,
+   "page": "mdn-array-sort.html"
+  },
+  "array-sort-default-order": {
+   "id": "array-sort-default-order",
+   "question": "How are numbers ordered by sort() when no compare function is passed?",
+   "snapshot_sha256": "762f5062a56a387fa4dbc4363fa3e51d065869a228455eea3fd30ad4bd86181e",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "a02aac4ef2": true
+   },
+   "fact_positions": {
+    "a02aac4ef2": 0.24
+   },
+   "doc_tokens": 4060,
+   "blocks_total": 69,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "a02aac4ef2": true
+   },
+   "keys": {
+    "2c780ed803": true
+   },
+   "out_tokens": 633,
+   "blocks_kept": 6,
+   "workload": 21887,
+   "live_tokens": 0,
+   "requests": 10,
+   "model": "jev-1.13.0",
+   "span_density": 0.052,
+   "page": "mdn-array-sort.html"
+  },
+  "array-sort-complexity": {
+   "id": "array-sort-complexity",
+   "question": "What is the time complexity of Array.prototype.sort()?",
+   "snapshot_sha256": "762f5062a56a387fa4dbc4363fa3e51d065869a228455eea3fd30ad4bd86181e",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "78bf0895bd": true
+   },
+   "fact_positions": {
+    "78bf0895bd": 0.144
+   },
+   "doc_tokens": 4060,
+   "blocks_total": 69,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "78bf0895bd": true
+   },
+   "keys": {
+    "720df2b637": true
+   },
+   "out_tokens": 407,
+   "blocks_kept": 5,
+   "workload": 17357,
+   "live_tokens": 0,
+   "requests": 3,
+   "model": "jev-1.13.0",
+   "span_density": 0.044,
+   "page": "mdn-array-sort.html"
+  },
+  "array-sort-max-length": {
+   "id": "array-sort-max-length",
+   "question": "What is the maximum number of elements that Array.prototype.sort() can sort?",
+   "snapshot_sha256": "762f5062a56a387fa4dbc4363fa3e51d065869a228455eea3fd30ad4bd86181e",
+   "expected_status": "no_match",
+   "answerable": false,
+   "extraction": {},
+   "fact_positions": {},
+   "doc_tokens": 4060,
+   "blocks_total": 69,
+   "missing_recording": false,
+   "status": "no_match",
+   "facts": {},
+   "keys": {},
+   "out_tokens": 340,
+   "blocks_kept": 5,
+   "workload": 16684,
+   "live_tokens": 0,
+   "requests": 2,
+   "model": "jev-1.13.0",
+   "span_density": null,
+   "page": "mdn-array-sort.html"
+  },
+  "uv-pronounce": {
+   "id": "uv-pronounce",
+   "question": "How is the name uv pronounced?",
+   "snapshot_sha256": "57a84a5a635f30e3a26541ebc16ca690944a7750f05713b1af92d3170b58f704",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "a697d05e2a": true
+   },
+   "fact_positions": {
+    "a697d05e2a": 0.796
+   },
+   "doc_tokens": 2785,
+   "blocks_total": 53,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "a697d05e2a": true
+   },
+   "keys": {
+    "6c6ba3f600": true
+   },
+   "out_tokens": 536,
+   "blocks_kept": 8,
+   "workload": 12831,
+   "live_tokens": 0,
+   "requests": 3,
+   "model": "jev-1.13.0",
+   "span_density": 0.019,
+   "page": "uv-readme.md"
+  },
+  "uv-install": {
+   "id": "uv-install",
+   "question": "What command installs uv on macOS or Linux?",
+   "snapshot_sha256": "57a84a5a635f30e3a26541ebc16ca690944a7750f05713b1af92d3170b58f704",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "aadc768ad8": true
+   },
+   "fact_positions": {
+    "aadc768ad8": 0.257
+   },
+   "doc_tokens": 2785,
+   "blocks_total": 53,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "aadc768ad8": true
+   },
+   "keys": {
+    "03da0d9e82": true
+   },
+   "out_tokens": 555,
+   "blocks_kept": 4,
+   "workload": 14200,
+   "live_tokens": 0,
+   "requests": 5,
+   "model": "jev-1.13.0",
+   "span_density": 0.031,
+   "page": "uv-readme.md"
+  },
+  "json-utf8": {
+   "id": "json-utf8",
+   "question": "Which character encoding must be used for JSON text exchanged between systems?",
+   "snapshot_sha256": "5302d6ccb6cf221817bdd1f8cd7221661d4519372e0ac0b4cf641e11e8037de7",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "5cec8b2eee": true
+   },
+   "fact_positions": {
+    "5cec8b2eee": 0.6
+   },
+   "doc_tokens": 7038,
+   "blocks_total": 16,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "5cec8b2eee": true
+   },
+   "keys": {
+    "663b90c899": true
+   },
+   "out_tokens": 1121,
+   "blocks_kept": 3,
+   "workload": 13619,
+   "live_tokens": 0,
+   "requests": 5,
+   "model": "jev-1.13.0",
+   "span_density": 0.018,
+   "page": "rfc8259.html"
+  },
+  "json-infinity-nan": {
+   "id": "json-infinity-nan",
+   "question": "Can a JSON number be Infinity or NaN?",
+   "snapshot_sha256": "5302d6ccb6cf221817bdd1f8cd7221661d4519372e0ac0b4cf641e11e8037de7",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "6f648f9326": true
+   },
+   "fact_positions": {
+    "6f648f9326": 0.463
+   },
+   "doc_tokens": 7038,
+   "blocks_total": 16,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "6f648f9326": true
+   },
+   "keys": {
+    "7be28244e6": true
+   },
+   "out_tokens": 711,
+   "blocks_kept": 2,
+   "workload": 12500,
+   "live_tokens": 0,
+   "requests": 4,
+   "model": "jev-1.13.0",
+   "span_density": 0.03,
+   "page": "rfc8259.html"
+  },
+  "http-415-meaning": {
+   "id": "http-415-meaning",
+   "question": "When does an origin server respond with 415 Unsupported Media Type?",
+   "snapshot_sha256": "d431760660ea44e130f6e919dab216df2d0b3a490567a98089267523368fe1e5",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "c65d72365f": true
+   },
+   "fact_positions": {
+    "c65d72365f": 0.748
+   },
+   "doc_tokens": 105813,
+   "blocks_total": 2122,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "c65d72365f": true
+   },
+   "keys": {
+    "9cdebefd6f": true
+   },
+   "out_tokens": 656,
+   "blocks_kept": 9,
+   "workload": 536879,
+   "live_tokens": 0,
+   "requests": 57,
+   "model": "jev-1.13.0",
+   "span_density": 0.058,
+   "page": "rfc9110.html"
+  },
+  "http-retry-after-values": {
+   "id": "http-retry-after-values",
+   "question": "What kinds of values can the Retry-After header field carry?",
+   "snapshot_sha256": "d431760660ea44e130f6e919dab216df2d0b3a490567a98089267523368fe1e5",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "70412c504e": true
+   },
+   "fact_positions": {
+    "70412c504e": 0.467
+   },
+   "doc_tokens": 105813,
+   "blocks_total": 2122,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "70412c504e": true
+   },
+   "keys": {
+    "805e6d79db": true
+   },
+   "out_tokens": 1458,
+   "blocks_kept": 8,
+   "workload": 535469,
+   "live_tokens": 0,
+   "requests": 54,
+   "model": "jev-1.13.0",
+   "span_density": 0.016,
+   "page": "rfc9110.html"
+  },
+  "http-if-none-match-false": {
+   "id": "http-if-none-match-false",
+   "question": "Which status code must an origin server send when an If-None-Match condition evaluates to false?",
+   "snapshot_sha256": "d431760660ea44e130f6e919dab216df2d0b3a490567a98089267523368fe1e5",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "b4df81c4cd": true
+   },
+   "fact_positions": {
+    "b4df81c4cd": 0.577
+   },
+   "doc_tokens": 105813,
+   "blocks_total": 2122,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "b4df81c4cd": true
+   },
+   "keys": {
+    "79816ecb0a": true,
+    "6e9b99384f": true
+   },
+   "out_tokens": 477,
+   "blocks_kept": 5,
+   "workload": 535148,
+   "live_tokens": 0,
+   "requests": 54,
+   "model": "jev-1.13.0",
+   "span_density": 0.094,
+   "page": "rfc9110.html"
+  },
+  "http-multiplexing": {
+   "id": "http-multiplexing",
+   "question": "How does HTTP/2 multiplex several streams over one TCP connection?",
+   "snapshot_sha256": "d431760660ea44e130f6e919dab216df2d0b3a490567a98089267523368fe1e5",
+   "expected_status": "no_match",
+   "answerable": false,
+   "extraction": {},
+   "fact_positions": {},
+   "doc_tokens": 105813,
+   "blocks_total": 2122,
+   "missing_recording": false,
+   "status": "no_match",
+   "facts": {},
+   "keys": {},
+   "out_tokens": 424,
+   "blocks_kept": 6,
+   "workload": 530029,
+   "live_tokens": 0,
+   "requests": 47,
+   "model": "jev-1.13.0",
+   "span_density": null,
+   "page": "rfc9110.html"
+  },
+  "ww2-start-date": {
+   "id": "ww2-start-date",
+   "question": "On what date did World War II begin according to most historians?",
+   "snapshot_sha256": "bfcb20df19196b948d65580219133ae6a8caa1efdf1e141ed4077d0a98880cc1",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "94a12848a2": true
+   },
+   "fact_positions": {
+    "94a12848a2": 0.057
+   },
+   "doc_tokens": 70144,
+   "blocks_total": 453,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "94a12848a2": true
+   },
+   "keys": {
+    "73b7e32ce7": true
+   },
+   "out_tokens": 2619,
+   "blocks_kept": 7,
+   "workload": 131240,
+   "live_tokens": 0,
+   "requests": 23,
+   "model": "jev-1.13.0",
+   "span_density": 0.008,
+   "page": "wiki-world-war-ii.html"
+  },
+  "ww2-un-founded": {
+   "id": "ww2-un-founded",
+   "question": "When did the United Nations officially come into existence after the war?",
+   "snapshot_sha256": "bfcb20df19196b948d65580219133ae6a8caa1efdf1e141ed4077d0a98880cc1",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "f4d4e7c531": true
+   },
+   "fact_positions": {
+    "f4d4e7c531": 0.397
+   },
+   "doc_tokens": 70144,
+   "blocks_total": 453,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "f4d4e7c531": true
+   },
+   "keys": {
+    "8dd7eab489": true
+   },
+   "out_tokens": 343,
+   "blocks_kept": 2,
+   "workload": 125650,
+   "live_tokens": 0,
+   "requests": 16,
+   "model": "jev-1.13.0",
+   "span_density": 0.055,
+   "page": "wiki-world-war-ii.html"
+  },
+  "ww2-death-toll": {
+   "id": "ww2-death-toll",
+   "question": "How many people are estimated to have died in World War II?",
+   "snapshot_sha256": "bfcb20df19196b948d65580219133ae6a8caa1efdf1e141ed4077d0a98880cc1",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "933752c100": true
+   },
+   "fact_positions": {
+    "933752c100": 0.424
+   },
+   "doc_tokens": 70144,
+   "blocks_total": 453,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "933752c100": true
+   },
+   "keys": {
+    "eb8d5cd9ea": true
+   },
+   "out_tokens": 752,
+   "blocks_kept": 7,
+   "workload": 132171,
+   "live_tokens": 0,
+   "requests": 25,
+   "model": "jev-1.13.0",
+   "span_density": 0.041,
+   "page": "wiki-world-war-ii.html"
+  },
+  "python-naming": {
+   "id": "python-naming",
+   "question": "Where does the name of the Python language come from?",
+   "snapshot_sha256": "8a9f4f48e9001c3d77b338bcbafba95d04c516e83f4c1c3fbc3a18266d75f5a8",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "d9265d7a23": true
+   },
+   "fact_positions": {
+    "d9265d7a23": 0.518
+   },
+   "doc_tokens": 17416,
+   "blocks_total": 162,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "d9265d7a23": true
+   },
+   "keys": {
+    "ccbc68bca2": true
+   },
+   "out_tokens": 359,
+   "blocks_kept": 4,
+   "workload": 44101,
+   "live_tokens": 0,
+   "requests": 8,
+   "model": "jev-1.13.0",
+   "span_density": 0.078,
+   "page": "wiki-python.html"
+  },
+  "python-first-release": {
+   "id": "python-first-release",
+   "question": "In what year was Python first released, and as which version?",
+   "snapshot_sha256": "8a9f4f48e9001c3d77b338bcbafba95d04c516e83f4c1c3fbc3a18266d75f5a8",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "7896be4168": true
+   },
+   "fact_positions": {
+    "7896be4168": 0.082
+   },
+   "doc_tokens": 17416,
+   "blocks_total": 162,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "7896be4168": true
+   },
+   "keys": {
+    "643fec50e7": true,
+    "314969396f": true
+   },
+   "out_tokens": 428,
+   "blocks_kept": 5,
+   "workload": 43971,
+   "live_tokens": 0,
+   "requests": 8,
+   "model": "jev-1.13.0",
+   "span_density": 0.044,
+   "page": "wiki-python.html"
+  },
+  "python-unrelated-boiling-point": {
+   "id": "python-unrelated-boiling-point",
+   "question": "What is the boiling point of water at sea level?",
+   "snapshot_sha256": "8a9f4f48e9001c3d77b338bcbafba95d04c516e83f4c1c3fbc3a18266d75f5a8",
+   "expected_status": "no_match",
+   "answerable": false,
+   "extraction": {},
+   "fact_positions": {},
+   "doc_tokens": 17416,
+   "blocks_total": 162,
+   "missing_recording": false,
+   "status": "no_match",
+   "facts": {},
+   "keys": {},
+   "out_tokens": 456,
+   "blocks_kept": 3,
+   "workload": 41988,
+   "live_tokens": 0,
+   "requests": 5,
+   "model": "jev-1.13.0",
+   "span_density": null,
+   "page": "wiki-python.html"
+  },
+  "nist-password-min-length": {
+   "id": "nist-password-min-length",
+   "question": "What minimum length must a verifier require for a memorized secret chosen by the subscriber?",
+   "snapshot_sha256": "3a063c76d0f3e229147860b25da6dac55e73fbb1c4cf2e4410048b6ec0c4ca5f",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "884a84f322": true
+   },
+   "fact_positions": {
+    "884a84f322": 0.209
+   },
+   "doc_tokens": 37747,
+   "blocks_total": 527,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "884a84f322": true
+   },
+   "keys": {
+    "ef811e2744": true
+   },
+   "out_tokens": 1235,
+   "blocks_kept": 9,
+   "workload": 153295,
+   "live_tokens": 0,
+   "requests": 26,
+   "model": "jev-1.13.0",
+   "span_density": 0.016,
+   "page": "nist-sp800-63b.html"
+  },
+  "nist-password-max-length": {
+   "id": "nist-password-max-length",
+   "question": "Up to what length should verifiers permit subscriber-chosen memorized secrets?",
+   "snapshot_sha256": "3a063c76d0f3e229147860b25da6dac55e73fbb1c4cf2e4410048b6ec0c4ca5f",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "4ee0dfd49d": true
+   },
+   "fact_positions": {
+    "4ee0dfd49d": 0.21
+   },
+   "doc_tokens": 37747,
+   "blocks_total": 527,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "4ee0dfd49d": true
+   },
+   "keys": {
+    "b5aa0ac614": true
+   },
+   "out_tokens": 991,
+   "blocks_kept": 8,
+   "workload": 155446,
+   "live_tokens": 0,
+   "requests": 29,
+   "model": "jev-1.13.0",
+   "span_density": 0.018,
+   "page": "nist-sp800-63b.html"
+  },
+  "nist-aal2-reauthentication": {
+   "id": "nist-aal2-reauthentication",
+   "question": "At AAL2, how often must a subscriber reauthenticate during an extended session, and after how much inactivity?",
+   "snapshot_sha256": "3a063c76d0f3e229147860b25da6dac55e73fbb1c4cf2e4410048b6ec0c4ca5f",
+   "expected_status": "filtered",
+   "answerable": true,
+   "extraction": {
+    "db229e9c26": true
+   },
+   "fact_positions": {
+    "db229e9c26": 0.143
+   },
+   "doc_tokens": 37747,
+   "blocks_total": 527,
+   "missing_recording": false,
+   "status": "filtered",
+   "facts": {
+    "db229e9c26": true
+   },
+   "keys": {
+    "dda5dba7b1": true,
+    "31bbe8890d": true
+   },
+   "out_tokens": 505,
+   "blocks_kept": 6,
+   "workload": 151515,
+   "live_tokens": 0,
+   "requests": 24,
+   "model": "jev-1.13.0",
+   "span_density": 0.101,
+   "page": "nist-sp800-63b.html"
+  },
+  "nist-unrelated-world-cup": {
+   "id": "nist-unrelated-world-cup",
+   "question": "Which country won the 2018 FIFA World Cup?",
+   "snapshot_sha256": "3a063c76d0f3e229147860b25da6dac55e73fbb1c4cf2e4410048b6ec0c4ca5f",
+   "expected_status": "no_match",
+   "answerable": false,
+   "extraction": {},
+   "fact_positions": {},
+   "doc_tokens": 37747,
+   "blocks_total": 527,
+   "missing_recording": false,
+   "status": "no_match",
+   "facts": {},
+   "keys": {},
+   "out_tokens": 439,
+   "blocks_kept": 3,
+   "workload": 144933,
+   "live_tokens": 0,
+   "requests": 15,
+   "model": "jev-1.13.0",
+   "span_density": null,
+   "page": "nist-sp800-63b.html"
+  }
+ }
+}
