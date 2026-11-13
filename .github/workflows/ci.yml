@@ -1,0 +1,177 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version-changed: ${{ steps.version-check.outputs.changed }}
+      version: ${{ steps.version-check.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - name: Check if version changed
+        id: version-check
+        run: |
+          # Get current version
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "Current version: $CURRENT_VERSION"
+
+          # For PRs, always run tests but skip deployment
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "PR detected - will run tests but skip deployment"
+          else
+            # Get previous version
+            git checkout HEAD~1 package.json 2>/dev/null || true
+            PREVIOUS_VERSION=$(node -p "require('./package.json').version" 2>/dev/null || echo "0.0.0")
+            git checkout HEAD package.json
+            echo "Previous version: $PREVIOUS_VERSION"
+
+            if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
+              echo "changed=true" >> $GITHUB_OUTPUT
+              echo "Version changed from $PREVIOUS_VERSION to $CURRENT_VERSION"
+            else
+              echo "changed=false" >> $GITHUB_OUTPUT
+              echo "Version unchanged - will run tests but skip deployment"
+            fi
+          fi
+
+  build:
+    runs-on: ubuntu-latest
+    needs: check-version
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run linter
+        run: pnpm lint
+
+      - name: Run type check
+        run: pnpm tsc -b
+
+      - name: Build application
+        run: pnpm build
+
+      - name: Run tests
+        run: pnpm test --if-present
+
+      # Lint and tsc prove the bundle compiles, not that it still renders.
+      # Keep it so a dependency PR can be served locally before it merges.
+      - name: Upload the built bundle for review
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-pr-${{ github.event.pull_request.number }}
+          path: dist/
+          retention-days: 7
+
+      - name: Use version from check
+        id: package-version
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Log in to the Container registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check-version.outputs.version-changed == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check-version.outputs.version-changed == 'true'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push Docker image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check-version.outputs.version-changed == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          # Without this the image is built, tagged and then discarded: no
+          # release since v0.1.1 ever reached ghcr.
+          push: true
+          cache-from: type=gha
+          # A failing cache export must not fail the release; the Actions cache
+          # service answered "error writing layer blob: not_found" and took the
+          # whole publish down with it.
+          cache-to: type=gha,mode=max,ignore-error=true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ steps.package-version.outputs.VERSION }}
+
+      - name: Create Git tag
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check-version.outputs.version-changed == 'true'
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          TAG="v${{ steps.package-version.outputs.VERSION }}"
+          if ! git rev-parse $TAG >/dev/null 2>&1; then
+            git tag $TAG
+            git push origin $TAG
+            echo "Created and pushed tag: $TAG"
+          else
+            echo "Tag $TAG already exists"
+          fi
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check-version.outputs.version-changed == 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ steps.package-version.outputs.VERSION }}
+          name: Release v${{ steps.package-version.outputs.VERSION }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
