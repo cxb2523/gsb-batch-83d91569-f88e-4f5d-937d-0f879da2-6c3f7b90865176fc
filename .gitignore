@@ -1,0 +1,68 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Build outputs
+dist/
+build/
+out/
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Testing
+coverage/
+.nyc_output/
+
+# TypeScript
+*.tsbuildinfo
+
+# Misc
+*.pem
+*.local
+
+# Pyodide cache (if any)
+.pyodide/
+
+# Python test tooling. The statistical engine is Python embedded in a JS
+# template literal, so it is tested with pytest (tests/python/) rather than
+# vitest. Running that suite creates these.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Pages assembly output (marketing site + app), built by deploy.yml
+_site/
+
+# Golden datasets are downloaded on first use and digest-verified (tests/python/golden.py)
+tests/python/fixtures/golden/*.csv
+
+# Live dashboard (site/) local outputs
+site/node_modules/
+site/dist/
+site/.rubric/

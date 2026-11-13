@@ -1,0 +1,557 @@
+/**
+ * PRISM Global Styles
+ * 
+ * TailwindCSS base with custom accessibility enhancements.
+ * Modern glassmorphism design with smooth animations.
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CSS CUSTOM PROPERTIES
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * REFRACTION tokens, matching web/styles.css so the application and the
+ * marketing site read as one product.
+ *
+ * What was here before was the 2021 purple-to-pink glassmorphism kit: a
+ * 135deg #667eea gradient, a five-stop candy mesh, and heavy frosted panels.
+ * It was competent and it was indistinguishable from a thousand other
+ * dashboards, which is the actual problem with it.
+ *
+ * The spectrum replaces it. A prism reveals the colours already inside the
+ * light without consuming it, which is precisely what this product does with
+ * a dataset, so the accent runs in wavelength order wherever something is
+ * being separated into parts. It is a reason, not a palette.
+ */
+:root {
+  /* The spectrum, in wavelength order. */
+  --sp-1: #a78bfa;  /* violet */
+  --sp-2: #60a5fa;  /* blue   */
+  --sp-3: #22d3ee;  /* cyan   */
+  --sp-4: #34d399;  /* green  */
+  --sp-5: #fbbf24;  /* amber  */
+  --sp-6: #fb7185;  /* rose   */
+
+  /* One beam, split. Used on the primary action, progress, and card edges. */
+  --beam: linear-gradient(90deg,
+            var(--sp-1), var(--sp-2), var(--sp-3),
+            var(--sp-4), var(--sp-5), var(--sp-6));
+
+  --gradient-primary: linear-gradient(135deg, #0891b2 0%, #0e7490 100%);
+  --gradient-secondary: linear-gradient(135deg, var(--sp-2) 0%, var(--sp-1) 100%);
+  --gradient-success: linear-gradient(135deg, #059669 0%, var(--sp-4) 100%);
+
+  /* Ambient light rather than a candy mesh: two soft washes, nothing more. */
+  --gradient-mesh:
+    radial-gradient(46vw 40vh at 18% 8%,  rgba(167, 139, 250, 0.12), transparent 65%),
+    radial-gradient(42vw 38vh at 82% 2%,  rgba(34, 211, 238, 0.10),  transparent 62%),
+    radial-gradient(60vw 32vh at 50% 34%, rgba(52, 211, 153, 0.06),  transparent 70%);
+
+  /* Panels are glass, not frosting. Less blur, more edge definition. */
+  --glass-bg: rgba(255, 255, 255, 0.78);
+  /* Refraction slate-900 (#0d1020), not Tailwind's stock slate-900. */
+  --glass-border: rgba(13, 16, 32, 0.10);
+  --glass-shadow: 0 1px 2px rgba(16, 20, 40, 0.06), 0 24px 56px -28px rgba(16, 20, 40, 0.28);
+
+  /* Film grain, inline so it costs no request. It is what stops the large flat
+     areas of a dashboard banding on wide gamut displays. */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.42'/%3E%3C/svg%3E");
+  --grain-opacity: 0.10;
+}
+
+.dark {
+  --glass-bg: rgba(13, 16, 32, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.07);
+  --glass-shadow: 0 2px 4px rgba(0, 0, 0, 0.4), 0 28px 60px -28px rgba(0, 0, 0, 0.85);
+  --grain-opacity: 0.26;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BASE STYLES
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@layer base {
+  /* Root font sizing - minimum 16px per EN 301 549 */
+  html {
+    font-size: 100%; /* 16px base */
+    scroll-behavior: smooth;
+  }
+
+  /* Respect reduced motion preference */
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+    
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  /* Focus styles - high visibility for keyboard navigation */
+  :focus-visible {
+    outline: 3px solid #0ea5e9;
+    outline-offset: 2px;
+  }
+
+  /* High contrast mode support */
+  @media (prefers-contrast: more) {
+    :focus-visible {
+      outline: 3px solid #ffff00;
+      outline-offset: 2px;
+    }
+  }
+
+  /* Forced colors mode (Windows High Contrast) */
+  @media (forced-colors: active) {
+    :focus-visible {
+      outline: 3px solid CanvasText;
+    }
+  }
+
+  /* Body defaults */
+  body {
+    @apply antialiased;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+      'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+    line-height: 1.6;
+  }
+
+  /* Ensure minimum touch targets (44x44px - WCAG 2.5.5) */
+  button,
+  [role="button"],
+  input[type="submit"],
+  input[type="button"],
+  input[type="reset"],
+  select,
+  a {
+    min-height: 44px;
+  }
+
+  /* Link styles with good contrast */
+  a {
+    @apply text-prism-600 dark:text-prism-400 underline;
+    text-underline-offset: 2px;
+  }
+
+  a:hover {
+    @apply text-prism-800 dark:text-prism-200;
+  }
+
+  /* Heading hierarchy */
+  h1 { @apply text-4xl font-bold tracking-tight; }
+  h2 { @apply text-3xl font-bold tracking-tight; }
+  h3 { @apply text-2xl font-semibold; }
+  h4 { @apply text-xl font-semibold; }
+  h5 { @apply text-lg font-medium; }
+  h6 { @apply text-base font-medium; }
+
+  /* Code blocks */
+  code {
+    @apply bg-prism-100 dark:bg-prism-800 px-1.5 py-0.5 rounded-md text-sm;
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+  }
+
+  /* Tables */
+  table {
+    @apply w-full border-collapse;
+  }
+
+  th, td {
+    @apply p-4 text-left border-b border-prism-200 dark:border-prism-700;
+  }
+
+  th {
+    @apply font-semibold bg-prism-100/50 dark:bg-prism-800/50;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   COMPONENT STYLES
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@layer components {
+  /* Skip link for accessibility */
+  .skip-link {
+    @apply absolute top-0 left-0 p-4 bg-prism-900 text-white font-bold;
+    @apply -translate-y-full focus:translate-y-0;
+    @apply transition-transform duration-200;
+    z-index: 9999;
+  }
+
+  /* Glass card component */
+  .glass-card {
+    background: var(--glass-bg);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--glass-shadow);
+    @apply rounded-2xl;
+  }
+
+  /* Solid card component */
+  .card {
+    @apply relative overflow-hidden bg-white dark:bg-slate-800 rounded-2xl;
+    @apply border border-slate-200 dark:border-slate-700;
+    box-shadow: var(--glass-shadow);
+    transition: border-color 0.3s ease, transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  /* A hairline of split light along the top edge, revealed on hover. The same
+     gesture as .col on the marketing site, so the two surfaces rhyme. */
+  .card::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 2px;
+    background: var(--beam);
+    opacity: 0;
+    transition: opacity 0.35s ease;
+  }
+
+  .card:hover::before { opacity: 1; }
+
+  /* Gradient background */
+  .gradient-bg {
+    background: linear-gradient(180deg, #ffffff 0%, #f4f5fa 100%);
+  }
+
+  .dark .gradient-bg {
+    background: linear-gradient(180deg, #0d1020 0%, #05060d 100%);
+  }
+
+  /* Ambient background. Carries the grain, so any surface using it gets the
+     texture that stops large flat panels banding. */
+  .mesh-bg {
+    position: relative;
+    background-color: #fbfbfd;
+    background-image: var(--gradient-mesh);
+    isolation: isolate;
+  }
+
+  .dark .mesh-bg {
+    background-color: #05060d;
+  }
+
+  .mesh-bg::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    opacity: var(--grain-opacity);
+    mix-blend-mode: overlay;
+    background-image: var(--grain);
+  }
+
+  /* Button variants */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2;
+    @apply px-6 py-3 rounded-xl font-semibold;
+    @apply transition-all duration-200 ease-out;
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-prism-500 focus-visible:ring-offset-2;
+    @apply disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none;
+    @apply active:scale-95;
+  }
+
+  /**
+   * The primary action carries the spectrum on its underside, as if the button
+   * itself were refracting. It is the one element every user looks at, and it
+   * is the same gesture as the marketing site's primary button, which is how
+   * the two surfaces read as one product.
+   */
+  .btn-primary {
+    @apply btn relative overflow-hidden;
+    background: var(--gradient-primary);
+    @apply text-white;
+    box-shadow: 0 1px 2px rgba(8, 145, 178, 0.28), 0 12px 28px -12px rgba(8, 145, 178, 0.45);
+    @apply hover:-translate-y-0.5;
+  }
+
+  .btn-primary::after {
+    content: "";
+    position: absolute;
+    left: 12%;
+    right: 12%;
+    bottom: 0;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--beam);
+    opacity: 0;
+    transition: opacity 0.3s ease, left 0.3s ease, right 0.3s ease;
+  }
+
+  .btn-primary:hover::after {
+    opacity: 1;
+    left: 4%;
+    right: 4%;
+  }
+
+  .btn-secondary {
+    @apply btn bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white;
+    @apply border border-slate-200 dark:border-slate-700;
+    @apply hover:bg-slate-200 dark:hover:bg-slate-700;
+  }
+
+  .btn-ghost {
+    @apply btn bg-transparent text-slate-600 dark:text-slate-300;
+    @apply hover:bg-slate-100 dark:hover:bg-slate-800;
+  }
+
+  /* Input styles */
+  .input {
+    @apply w-full px-4 py-3 rounded-xl;
+    @apply bg-white dark:bg-slate-900;
+    @apply border-2 border-slate-200 dark:border-slate-700;
+    @apply text-slate-900 dark:text-slate-100;
+    @apply placeholder-slate-400 dark:placeholder-slate-500;
+    @apply focus:outline-none focus:ring-2 focus:ring-prism-500 focus:border-transparent;
+    @apply transition-all duration-200;
+  }
+
+  /* Badge styles */
+  .badge {
+    @apply inline-flex items-center px-3 py-1 rounded-full text-sm font-medium;
+  }
+
+  .badge-primary {
+    @apply badge bg-prism-100 dark:bg-prism-900 text-prism-700 dark:text-prism-300;
+  }
+
+  .badge-success {
+    @apply badge bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-300;
+  }
+
+  .badge-warning {
+    @apply badge bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-300;
+  }
+
+  .badge-error {
+    @apply badge bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300;
+  }
+
+  /* Alert/notification styles */
+  .alert {
+    @apply p-4 rounded-xl border-l-4;
+  }
+
+  .alert-info {
+    @apply alert bg-blue-50 dark:bg-blue-950/50 border-blue-500 text-blue-800 dark:text-blue-200;
+  }
+
+  .alert-success {
+    @apply alert bg-emerald-50 dark:bg-emerald-950/50 border-emerald-500 text-emerald-800 dark:text-emerald-200;
+  }
+
+  .alert-warning {
+    @apply alert bg-amber-50 dark:bg-amber-950/50 border-amber-500 text-amber-800 dark:text-amber-200;
+  }
+
+  .alert-error {
+    @apply alert bg-red-50 dark:bg-red-950/50 border-red-500 text-red-800 dark:text-red-200;
+  }
+
+  /* Stat card */
+  .stat-card {
+    @apply glass-card p-6 flex flex-col;
+  }
+
+  .stat-value {
+    @apply text-3xl font-bold bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, #0e7490, #0891b2 55%, #22d3ee);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.03em;
+  }
+
+  .dark .stat-value {
+    background-image: linear-gradient(135deg, #a5f3fc, #22d3ee 55%, #34d399);
+  }
+
+  .stat-label {
+    @apply text-sm text-slate-500 dark:text-slate-400 mt-1;
+  }
+
+  /* Progress bar */
+  .progress-bar {
+    @apply h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden;
+  }
+
+  .progress-fill {
+    @apply h-full rounded-full transition-all duration-500 ease-out;
+    background: var(--beam);
+    background-size: 200% 100%;
+  }
+
+  /* Animated gradient border */
+  .gradient-border {
+    position: relative;
+    background: linear-gradient(var(--glass-bg), var(--glass-bg)) padding-box,
+                var(--beam) border-box;
+    border: 2px solid transparent;
+    border-radius: 1rem;
+  }
+
+  /* Floating animation */
+  .float {
+    animation: float 6s ease-in-out infinite;
+  }
+
+  @keyframes float {
+    0%, 100% { transform: translateY(0px); }
+    50% { transform: translateY(-20px); }
+  }
+
+  /* Pulse glow */
+  .pulse-glow {
+    animation: pulse-glow 2s ease-in-out infinite;
+  }
+
+  /* Cyan, not the old indigo. This was the last surviving colour from the
+     purple-to-pink kit, and it glowed the wrong hue on every panel using it. */
+  @keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 20px rgba(34, 211, 238, 0.28); }
+    50%      { box-shadow: 0 0 40px rgba(34, 211, 238, 0.55); }
+  }
+
+  /* Shimmer loading */
+  .shimmer {
+    background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.4) 50%, transparent 100%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+  }
+
+  @keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+
+  /* Spin animation */
+  .spin-slow {
+    animation: spin 3s linear infinite;
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   UTILITY STYLES
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@layer utilities {
+  /* Screen reader only - visually hidden but accessible */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
+
+  /* Remove sr-only */
+  .not-sr-only {
+    position: static;
+    width: auto;
+    height: auto;
+    padding: 0;
+    margin: 0;
+    overflow: visible;
+    clip: auto;
+    white-space: normal;
+  }
+
+  /* Focus visible ring utility */
+  .focus-visible-ring {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-prism-500 focus-visible:ring-offset-2;
+  }
+
+  /* Touch target minimum size */
+  .touch-target {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Text selection colors */
+  ::selection {
+    @apply bg-prism-200 dark:bg-prism-700 text-prism-900 dark:text-prism-100;
+  }
+
+  /* Scrollbar styling */
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: theme('colors.prism.400') transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    @apply bg-prism-300 dark:bg-prism-600 rounded-full;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    @apply bg-prism-400 dark:bg-prism-500;
+  }
+
+  /* Split-light text. The last of the old purple-to-pink kit, replaced with
+     the spectrum so headings match the wordmark on the marketing site. */
+  .gradient-text {
+    @apply bg-clip-text text-transparent;
+    background-image: var(--beam);
+  }
+
+  /* Text balance */
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   HIGH CONTRAST MODE OVERRIDES
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.high-contrast {
+  --color-text: #ffffff;
+  --color-bg: #000000;
+  --color-border: #ffffff;
+  --color-focus: #ffff00;
+}
+
+.high-contrast body {
+  background-color: #000000 !important;
+  color: #ffffff !important;
+}
+
+.high-contrast a {
+  color: #00ffff !important;
+}
+
+.high-contrast button,
+.high-contrast [role="button"] {
+  border: 2px solid #ffffff !important;
+}
+
+.high-contrast :focus-visible {
+  outline-color: #ffff00 !important;
+}
