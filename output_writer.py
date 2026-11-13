@@ -115,6 +115,21 @@ EXIT_INTERRUPTED = 130
 STOP_INTERRUPTED = "interrupted"
 
 
+# --- The per-page ledger ---------------------------------------------------
+#
+# One of four outcomes for EVERY requested page number, so a reader does
+# not have to reconstruct each page's fate from the three separate lists
+# (failed_pages / unattempted_pages / exhausted_pages). The four classes
+# partition pages 1..pages_requested: the lists stay authoritative, and
+# build_page_outcomes() derives the ledger from them, refusing to build on
+# an overlap -- an unattempted page must never be called a failure, and a
+# page skipped because the listing ended must never be called unattempted.
+PAGE_OUTCOME_CONTENT = "content"           # fetched, and the content was obtained
+PAGE_OUTCOME_FAILED = "failed"             # attempted, but blocked / errored / unparseable
+PAGE_OUTCOME_EXHAUSTED = "listing_ended"   # not requested: an earlier page ended the listing
+PAGE_OUTCOME_UNATTEMPTED = "unattempted"   # not requested: budget spent or Ctrl-C
+
+
 # --- What one fetched page turned out to be -------------------------------
 #
 # FIXED (external audit, 2026-10-07, P1/P2): every engine returned
@@ -272,6 +287,57 @@ class RunInterrupted(Exception):
                         unattempted_pages)
 
 
+def build_page_outcomes(pages_requested: int, failed_pages: List[int],
+                        unattempted_pages: List[int],
+                        exhausted_pages: List[int]) -> List[Dict[str, Any]]:
+    """Classify every requested page number into exactly one of four
+    outcomes, in ascending page order:
+
+    * `content`   -- the page was requested and its content was obtained
+                     (a page served empty or past the listing's end still
+                     counts: the answer, not a gap);
+    * `failed`    -- the page was requested but the content was never
+                     obtained (blocked, a fetch error or a parser
+                     failure);
+    * `listing_ended` -- the page was never requested because an earlier
+                     page had already ended the listing;
+    * `unattempted` -- the page was never requested because the proxy
+                     budget was spent or Ctrl-C stopped the run.
+
+    The three page lists remain the source of truth: this only merges
+    them. They must be disjoint, and together with the successful pages
+    cover 1..pages_requested exactly; anything else is a bug in an
+    engine's bookkeeping, raised here rather than silently mislabelled.
+    """
+    failed = set(failed_pages or [])
+    unattempted = set(unattempted_pages or [])
+    exhausted = set(exhausted_pages or [])
+    overlaps = (failed & unattempted) | (failed & exhausted) | (unattempted & exhausted)
+    if overlaps:
+        raise ValueError(
+            f"page lists overlap on {sorted(overlaps)}: a page cannot have two outcomes "
+            f"(failed={sorted(failed)}, unattempted={sorted(unattempted)}, "
+            f"exhausted={sorted(exhausted)})")
+    known = failed | unattempted | exhausted
+    stray = sorted(p for p in known if not (1 <= p <= pages_requested))
+    if stray:
+        raise ValueError(
+            f"page lists name pages outside 1..{pages_requested}: {stray}")
+
+    ledger: List[Dict[str, int]] = []
+    for page_num in range(1, pages_requested + 1):
+        if page_num in failed:
+            outcome = PAGE_OUTCOME_FAILED
+        elif page_num in exhausted:
+            outcome = PAGE_OUTCOME_EXHAUSTED
+        elif page_num in unattempted:
+            outcome = PAGE_OUTCOME_UNATTEMPTED
+        else:
+            outcome = PAGE_OUTCOME_CONTENT
+        ledger.append({"page": page_num, "outcome": outcome})
+    return ledger
+
+
 def selection_url(url: str) -> str:
     """The search a run covered, independent of which page was asked for:
     scheme and host lower-cased, the `page` parameter dropped, the rest of
@@ -411,6 +477,8 @@ def finish_without_fetch(out_prefix: str, *, stop_reason: str,
             "pages_completed": 0,
             "failed_pages": [],
             "unattempted_pages": list(range(1, pages_requested + 1)),
+            "page_outcomes": build_page_outcomes(
+                pages_requested, [], list(range(1, pages_requested + 1)), []),
             "selection": {"url": selection_url(url) if url else None,
                           "pages_requested": pages_requested},
             "product_count": 0,
@@ -485,6 +553,10 @@ def finish_run(
                 "failed_pages": sorted(set(failed_pages or [])
                                        | set(parser_failed_pages or [])),
                 "unattempted_pages": unattempted_pages or [],
+                "page_outcomes": build_page_outcomes(
+                    pages_requested,
+                    sorted(set(failed_pages or []) | set(parser_failed_pages or [])),
+                    unattempted_pages or [], exhausted_pages or []),
                 "selection": {"url": selection_url(url) if url else None,
                               "pages_requested": pages_requested},
                 "product_count": len(products),
@@ -666,6 +738,8 @@ def _finish_run(products, out_prefix, fmt, *, pages_requested, pages_completed,
         "parser_failed_pages": parser_failed_pages,
         "unattempted_pages": unattempted_pages,
         "exhausted_pages": exhausted_pages,
+        "page_outcomes": build_page_outcomes(
+            pages_requested, failed_pages, unattempted_pages, exhausted_pages),
         "listing_exhausted": bool(exhausted_pages) or listing_end_seen,
         "selection": {"url": selection_url(url) if url else None,
                       "pages_requested": pages_requested},

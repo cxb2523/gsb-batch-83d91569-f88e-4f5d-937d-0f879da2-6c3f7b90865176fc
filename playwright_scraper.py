@@ -745,6 +745,9 @@ def _scrape(args, cdp: Optional[CdpConnection]) -> int:
     # -- see _fetch_page's own docstring for why every call, including
     # this one in the main thread, manages its own context uniformly).
     url_1 = page_url(args.url, 1)
+    # A page the budget gate refused before a request went out is an
+    # UNATTEMPTED page, never a failed one: the site was never asked.
+    budget_stopped = False
     try:
         (products_1, ok_1, blocked_1, remote_1), parser_failed_1, result_counts[1] = \
             split_page_result(_fetch_page(url_1, 1, args, proxy_pool, worker_offset=0, cdp=cdp))
@@ -752,6 +755,7 @@ def _scrape(args, cdp: Optional[CdpConnection]) -> int:
         logger.error("Stopping: %s.", e)
         (products_1, ok_1, blocked_1, remote_1), parser_failed_1 = \
             ([], False, False, False), False
+        budget_stopped = True
     except KeyboardInterrupt:
         logger.warning("Interrupted (Ctrl-C) while fetching page 1.")
         (products_1, ok_1, blocked_1, remote_1), parser_failed_1 = \
@@ -759,12 +763,12 @@ def _scrape(args, cdp: Optional[CdpConnection]) -> int:
         interrupted = True
 
     page_results = {1: products_1}
-    failed_pages = [] if ok_1 or interrupted else [1]
+    failed_pages = [] if ok_1 or interrupted or budget_stopped else [1]
     any_blocked = blocked_1
     any_remote_error = remote_1
     pages_completed = 1 if ok_1 else 0
     parser_failed_pages: List[int] = [1] if parser_failed_1 else []
-    unattempted_pages: List[int] = []
+    unattempted_pages: List[int] = [1] if budget_stopped else []
     exhausted_pages: List[int] = []
 
     remaining_pages = list(range(2, args.pages + 1))
@@ -772,10 +776,16 @@ def _scrape(args, cdp: Optional[CdpConnection]) -> int:
         unattempted_pages = list(range(1, args.pages + 1))
         remaining_pages = []
     if remaining_pages and not products_1 and not ok_1:
-        logger.warning("Page 1 failed entirely -- not attempting pages 2..%d, since page "
-                        "1's own result decides whether the site can be addressed "
-                        "independently.", args.pages)
-        unattempted_pages = remaining_pages
+        if budget_stopped:
+            # The cap refused page 1 itself: every later page is
+            # unattempted for the same reason, not "blocked by page 1".
+            logger.warning("Page 1 was not fetched: the proxy budget is spent -- not "
+                           "attempting pages 2..%d.", args.pages)
+        else:
+            logger.warning("Page 1 failed entirely -- not attempting pages 2..%d, since page "
+                           "1's own result decides whether the site can be addressed "
+                           "independently.", args.pages)
+        unattempted_pages = sorted(set(unattempted_pages) | set(remaining_pages))
         remaining_pages = []
     if remaining_pages and meter is not None and meter.exceeded:
         logger.error("Stopping after page 1: the proxy budget is spent; pages "

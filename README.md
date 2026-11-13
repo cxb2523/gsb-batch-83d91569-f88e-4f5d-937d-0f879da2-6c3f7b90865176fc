@@ -393,6 +393,29 @@ parameter) and whether it read the listing to its end
 all by default** — pass `--allow-empty` to force writing (an empty CSV
 still carries its header row either way).
 
+`page_outcomes` gives the fate of every requested page in one
+ascending list, one `{ "page": n, "outcome": ... }` entry per page, so
+the three separate lists no longer have to be joined by hand. Each page
+is exactly one of:
+
+- `content` — the page was requested and its content was obtained (a
+  page served empty or past the listing's end still counts: it is an
+  answer, not a gap);
+- `failed` — the page was requested but no content was obtained (a
+  block, a fetch error or a parser failure; the same numbers as
+  `failed_pages`);
+- `listing_ended` — never requested because an earlier page had already
+  ended the listing (the same numbers as `exhausted_pages`);
+- `unattempted` — never requested because the proxy budget was spent or
+  Ctrl-C stopped the run (the same numbers as `unattempted_pages`).
+
+The four classes partition pages `1..pages_requested` and are derived
+from the three lists, which stay authoritative; the ledger never moves a
+page between "failed" and "unattempted" on its own. The identical
+`page_outcomes` is also written to
+`<out>.latest_attempt.meta.json` (and is the only sidecar present when a
+run writes no rows, e.g. the budget spent before the first request).
+
 How each page is judged, measured on zimmo.be 2026-10-07: a served search
 page is HTTP 200; Cloudflare's "Even geduld..." challenge is HTTP 403 and
 counts as **blocked** unless listings appear after it; a route the site

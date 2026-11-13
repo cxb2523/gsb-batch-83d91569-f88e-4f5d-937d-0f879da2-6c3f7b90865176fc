@@ -9,6 +9,24 @@ here rather than treated as a violation of the format.
 
 ## [Unreleased]
 
+> **Added.** `<out>.meta.json` and `<out>.latest_attempt.meta.json` now
+> carry `page_outcomes`: one `{ "page", "outcome" }` entry per requested
+> page, in ascending order, classifying every page as exactly one of
+> `content` (fetched), `failed` (blocked / fetch error / parser
+> failure), `listing_ended` (not requested because the listing had
+> ended) or `unattempted` (not requested because the proxy budget was
+> spent or Ctrl-C stopped the run). It is derived from the existing
+> `failed_pages` / `exhausted_pages` / `unattempted_pages` lists, whose
+> semantics are unchanged, and raises rather than mislabel a page if
+> those lists ever overlap.
+>
+> **Fix.** A page whose request the proxy-budget gate refused before it
+> went out — including page 1 when the budget was already spent — is now
+> recorded in `unattempted_pages`, never `failed_pages`: the site was
+> never asked, so it cannot have failed. Such a run still exits 6 when
+> it holds rows and 5 (with `stop_reason: proxy_budget_exceeded`) when
+> it holds none.
+>
 > **Behaviour change.** A run through a proxy now makes one pre-check
 > request before starting a browser. A proxy that answers **HTTP 407** or
 > **402** ends the run with **exit 5** and `<out>.latest_attempt.meta.json`
