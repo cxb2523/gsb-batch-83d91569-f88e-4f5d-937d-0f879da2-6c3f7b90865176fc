@@ -1,4 +1,7 @@
 """API response schemas."""
+from enum import Enum
+from typing import Generic, TypeVar
+
 from pydantic import BaseModel
 
 
@@ -22,6 +25,36 @@ class Metadata(BaseModel):
     supportedDateRanges: list[str]
     supportedProgrammingLanguagesCount: int
     supportedSpokenLanguagesCount: int
+
+
+class DataOrigin(str, Enum):
+    """Where the trending data of a response came from."""
+
+    upstream = "upstream"
+    cache = "cache"
+
+
+class UpstreamFailureReason(str, Enum):
+    """Category of an upstream GitHub Trending request failure."""
+
+    timeout = "timeout"
+    connection_error = "connection_error"
+
+
+class TrendingSource(BaseModel):
+    """Verifiable provenance metadata of a trending response."""
+
+    origin: DataOrigin
+    cacheAgeSeconds: int
+    cacheTtlSeconds: int
+
+
+class UpstreamFailure(BaseModel):
+    """Structured error body for upstream fetch failures (HTTP 502)."""
+
+    detail: str
+    retryable: bool
+    failureReason: UpstreamFailureReason
 
 
 class Contributor(BaseModel):
@@ -67,3 +100,17 @@ class Developer(BaseModel):
     avatar: str | None
     since: str
     popularRepository: PopularRepository
+
+
+TrendingItem = TypeVar("TrendingItem")
+
+
+class TrendingResponse(BaseModel, Generic[TrendingItem]):
+    """Envelope wrapping trending entries with fetch provenance.
+
+    The ``data`` entries keep their original fields and ordering; only the
+    surrounding provenance block is added.
+    """
+
+    data: list[TrendingItem]
+    source: TrendingSource

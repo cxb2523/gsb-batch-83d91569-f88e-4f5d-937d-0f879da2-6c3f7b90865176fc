@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 import bs4
 
+from app.schemas import UpstreamFailureReason
+
 REQUEST_TIMEOUT_SECONDS = 10
 USER_AGENT = (
     "Github-Trending-API/1.0 "
@@ -18,7 +20,19 @@ USER_AGENT = (
 
 
 class UpstreamRequestError(Exception):
-    """Raised when the GitHub Trending upstream request fails."""
+    """Raised when the GitHub Trending upstream request fails.
+
+    ``failure_reason`` distinguishes timeouts from connection failures so
+    the route layer can expose a structured, retryable error response.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        failure_reason: UpstreamFailureReason = UpstreamFailureReason.connection_error,
+    ) -> None:
+        super().__init__(message)
+        self.failure_reason = failure_reason
 
 
 async def get_request(
@@ -39,8 +53,17 @@ async def get_request(
             async with session.get(*args, **kwargs) as resp:
                 resp.raise_for_status()
                 return await resp.text()
-    except (aiohttp.ClientError, asyncio.TimeoutError) as request_error:
-        raise UpstreamRequestError("Unable to connect to GitHub") from request_error
+    except (asyncio.TimeoutError, aiohttp.ClientError) as request_error:
+        # ServerTimeoutError is also a ClientError, so check the timeout
+        # case first to preserve the correct failure category.
+        if isinstance(request_error, (asyncio.TimeoutError, TimeoutError)):
+            failure_reason = UpstreamFailureReason.timeout
+        else:
+            failure_reason = UpstreamFailureReason.connection_error
+        raise UpstreamRequestError(
+            "Unable to connect to GitHub",
+            failure_reason=failure_reason,
+        ) from request_error
 
 
 def filter_articles(raw_html: str) -> str:

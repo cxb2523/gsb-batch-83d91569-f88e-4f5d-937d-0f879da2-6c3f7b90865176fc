@@ -5,7 +5,7 @@ API serving data about trending github repositories/developers.
 # Copyright (c) 2021, Niklas Tiede.
 # All rights reserved. Distributed under the MIT License.
 import time
-from typing import Dict, List
+from typing import Any, Dict, NamedTuple
 
 import fastapi
 import uvicorn
@@ -15,7 +15,16 @@ from app.allowed_parameters import (
     AllowedProgrammingLanguages,
     AllowedSpokenLanguages,
 )
-from app.schemas import Developer, HealthStatus, Metadata, Repository
+from app.schemas import (
+    DataOrigin,
+    Developer,
+    HealthStatus,
+    Metadata,
+    Repository,
+    TrendingResponse,
+    TrendingSource,
+    UpstreamFailure,
+)
 from app.scraping import (
     UpstreamRequestError,
     get_request,
@@ -28,8 +37,37 @@ app = fastapi.FastAPI()
 APP_NAME = "GitHub Trending API"
 APP_VERSION = "2.0.0"
 CACHE_TTL_SECONDS = 300
+UPSTREAM_FAILURE_DETAIL = "Unable to fetch GitHub Trending data"
+UPSTREAM_FAILURE_RESPONSES: dict[int | str, dict[str, Any]] = {
+    502: {"model": UpstreamFailure},
+}
 CacheKey = tuple[str, tuple[tuple[str, str], ...]]
 _trending_html_cache: dict[CacheKey, tuple[float, str]] = {}
+
+
+class FetchResult(NamedTuple):
+    """Fetched trending HTML together with its provenance."""
+
+    html: str
+    origin: DataOrigin
+    cache_age_seconds: int
+
+
+@app.exception_handler(UpstreamRequestError)
+async def handle_upstream_request_error(
+    request: fastapi.Request,
+    request_error: UpstreamRequestError,
+) -> fastapi.responses.JSONResponse:
+    """Translate upstream fetch failures into structured 502 responses."""
+    failure = UpstreamFailure(
+        detail=UPSTREAM_FAILURE_DETAIL,
+        retryable=True,
+        failureReason=request_error.failure_reason,
+    )
+    return fastapi.responses.JSONResponse(
+        status_code=502,
+        content=failure.model_dump(),
+    )
 
 
 def build_payload(
@@ -45,23 +83,39 @@ def build_payload(
     return payload
 
 
-async def fetch_trending_html(url: str, payload: Dict[str, str]) -> str:
-    """Fetch GitHub Trending HTML and translate upstream failures."""
+def _cache_age_seconds(cached_at: float, now: float) -> int:
+    """Whole seconds elapsed since a cache entry was written (never negative)."""
+    return max(0, int(now - cached_at))
+
+
+async def fetch_trending_html(url: str, payload: Dict[str, str]) -> FetchResult:
+    """Fetch GitHub Trending HTML, reporting origin and cache age.
+
+    Fresh upstream data is marked ``upstream`` with an age of 0. Data served
+    from the in-memory cache is marked ``cache`` with the age in whole
+    seconds. Each distinct ``(url, payload)`` combination owns its cache
+    entry. Upstream failures propagate as ``UpstreamRequestError`` and are
+    translated into a structured 502 by the registered exception handler.
+    """
     cache_key = (url, tuple(sorted(payload.items())))
+    now = time.monotonic()
     cached_at, cached_html = _trending_html_cache.get(cache_key, (0.0, ""))
-    if cached_html and time.monotonic() - cached_at < CACHE_TTL_SECONDS:
-        return cached_html
+    if cached_html and now - cached_at < CACHE_TTL_SECONDS:
+        return FetchResult(
+            html=cached_html,
+            origin=DataOrigin.cache,
+            cache_age_seconds=_cache_age_seconds(cached_at, now),
+        )
 
-    try:
-        raw_html = await get_request(url, compress=True, params=payload)
-    except UpstreamRequestError as request_error:
-        raise fastapi.HTTPException(
-            status_code=502,
-            detail="Unable to fetch GitHub Trending data",
-        ) from request_error
+    raw_html = await get_request(url, compress=True, params=payload)
 
-    _trending_html_cache[cache_key] = (time.monotonic(), raw_html)
-    return raw_html
+    fetched_at = time.monotonic()
+    _trending_html_cache[cache_key] = (fetched_at, raw_html)
+    return FetchResult(
+        html=raw_html,
+        origin=DataOrigin.upstream,
+        cache_age_seconds=0,
+    )
 
 
 def clear_trending_cache() -> None:
@@ -69,26 +123,43 @@ def clear_trending_cache() -> None:
     _trending_html_cache.clear()
 
 
+def _build_source(fetch_result: FetchResult) -> TrendingSource:
+    """Build the provenance block attached to every trending response."""
+    return TrendingSource(
+        origin=fetch_result.origin,
+        cacheAgeSeconds=fetch_result.cache_age_seconds,
+        cacheTtlSeconds=CACHE_TTL_SECONDS,
+    )
+
+
 async def get_repository_trends(
     url: str,
     payload: Dict[str, str],
-) -> List[Repository]:
+) -> TrendingResponse[Repository]:
     """Fetch and parse GitHub Trending repository data."""
-    raw_html = await fetch_trending_html(url, payload)
-    soup = make_soup(raw_html)
+    fetch_result = await fetch_trending_html(url, payload)
+    soup = make_soup(fetch_result.html)
     repositories = scraping_repositories(soup, since=payload["since"])
-    return [Repository.model_validate(repository) for repository in repositories]
+    items = [Repository.model_validate(repository) for repository in repositories]
+    return TrendingResponse[Repository](
+        data=items,
+        source=_build_source(fetch_result),
+    )
 
 
 async def get_developer_trends(
     url: str,
     payload: Dict[str, str],
-) -> List[Developer]:
+) -> TrendingResponse[Developer]:
     """Fetch and parse GitHub Trending developer data."""
-    raw_html = await fetch_trending_html(url, payload)
-    soup = make_soup(raw_html)
+    fetch_result = await fetch_trending_html(url, payload)
+    soup = make_soup(fetch_result.html)
     developers = scraping_developers(soup, since=payload["since"])
-    return [Developer.model_validate(developer) for developer in developers]
+    items = [Developer.model_validate(developer) for developer in developers]
+    return TrendingResponse[Developer](
+        data=items,
+        source=_build_source(fetch_result),
+    )
 
 
 @app.get("/")
@@ -128,11 +199,15 @@ def metadata(request: fastapi.Request) -> Metadata:
     )
 
 
-@app.get("/repositories", response_model=list[Repository])
+@app.get(
+    "/repositories",
+    response_model=TrendingResponse[Repository],
+    responses=UPSTREAM_FAILURE_RESPONSES,
+)
 async def trending_repositories(
     since: AllowedDateRanges | None = None,
     spoken_language_code: AllowedSpokenLanguages | None = None,
-) -> List[Repository]:
+) -> TrendingResponse[Repository]:
     """Returns data about trending repositories (all programming
     languages, cannot be specified on this endpoint).
     """
@@ -140,12 +215,16 @@ async def trending_repositories(
     return await get_repository_trends("https://github.com/trending", payload)
 
 
-@app.get("/repositories/{prog_lang}", response_model=list[Repository])
+@app.get(
+    "/repositories/{prog_lang}",
+    response_model=TrendingResponse[Repository],
+    responses=UPSTREAM_FAILURE_RESPONSES,
+)
 async def trending_repositories_by_progr_language(
     prog_lang: AllowedProgrammingLanguages,
     since: AllowedDateRanges | None = None,
     spoken_language_code: AllowedSpokenLanguages | None = None,
-) -> List[Repository]:
+) -> TrendingResponse[Repository]:
     """Returns data about trending repositories. A specific programming
     language can be added as path parameter to specify search.
     """
@@ -154,22 +233,33 @@ async def trending_repositories_by_progr_language(
     return await get_repository_trends(url, payload)
 
 
-@app.get("/developers", response_model=list[Developer])
+@app.get(
+    "/developers",
+    response_model=TrendingResponse[Developer],
+    responses=UPSTREAM_FAILURE_RESPONSES,
+)
 async def trending_developers(
     since: AllowedDateRanges | None = None,
-) -> List[Developer]:
+) -> TrendingResponse[Developer]:
     """Returns data about trending developers (all programming languages,
     cannot be specified on this endpoint).
     """
     payload = build_payload(since)
-    return await get_developer_trends("https://github.com/trending/developers", payload)
+    return await get_developer_trends(
+        "https://github.com/trending/developers",
+        payload,
+    )
 
 
-@app.get("/developers/{prog_lang}", response_model=list[Developer])
+@app.get(
+    "/developers/{prog_lang}",
+    response_model=TrendingResponse[Developer],
+    responses=UPSTREAM_FAILURE_RESPONSES,
+)
 async def trending_developers_by_progr_language(
     prog_lang: AllowedProgrammingLanguages,
     since: AllowedDateRanges | None = None,
-) -> List[Developer]:
+) -> TrendingResponse[Developer]:
     """Returns data about trending developers. A specific programming
     language can be added as path parameter to specify search.
     """

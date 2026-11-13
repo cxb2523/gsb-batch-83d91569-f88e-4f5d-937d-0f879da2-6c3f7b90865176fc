@@ -1,10 +1,15 @@
 """Functions for web scraping are tested
 """
+import asyncio
 import json
 
+import aiohttp
 import pytest
 
+from app.schemas import UpstreamFailureReason
 from app.scraping import (
+    UpstreamRequestError,
+    get_request,
     make_soup,
     scraping_developers,
     scraping_repositories,
@@ -77,3 +82,47 @@ def test_developer_scraping(input_html, expected_json):
     soup = make_soup(raw_html)
     repo_json = scraping_developers(soup, since="daily")
     assert repo_json == correct_repo_json
+
+
+class _FailingSession:
+    """aiohttp.ClientSession stand-in raising a chosen error on GET."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        return None
+
+    def get(self, *args, **kwargs):
+        raise self._error
+
+
+def test_get_request_classifies_timeout(monkeypatch):
+    """Timeout errors keep the timeout failure category, offline."""
+
+    def failing_session(*args, **kwargs):
+        return _FailingSession(asyncio.TimeoutError())
+
+    monkeypatch.setattr(aiohttp, "ClientSession", failing_session)
+
+    with pytest.raises(UpstreamRequestError) as exc_info:
+        asyncio.run(get_request("https://github.com/trending"))
+
+    assert exc_info.value.failure_reason == UpstreamFailureReason.timeout
+
+
+def test_get_request_classifies_connection_error(monkeypatch):
+    """Connection errors keep the connection_error failure category, offline."""
+
+    def failing_session(*args, **kwargs):
+        return _FailingSession(aiohttp.ClientConnectionError())
+
+    monkeypatch.setattr(aiohttp, "ClientSession", failing_session)
+
+    with pytest.raises(UpstreamRequestError) as exc_info:
+        asyncio.run(get_request("https://github.com/trending"))
+
+    assert exc_info.value.failure_reason == UpstreamFailureReason.connection_error

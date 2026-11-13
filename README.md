@@ -27,6 +27,8 @@ There is currently no hosted public instance of this API. Run it locally or use 
 - Optional repository `spoken_language_code` filter.
 - Typed OpenAPI responses via Pydantic models.
 - Short in-memory cache for upstream GitHub Trending HTML responses.
+- Verifiable fetch provenance on every trending response (upstream vs. cache, cache age, TTL).
+- Structured, retryable 502 errors that distinguish timeouts from connection failures.
 - `/health` and `/metadata` operational endpoints.
 - Docker image with non-root runtime user and healthcheck.
 
@@ -38,53 +40,106 @@ Data you can retrieve from this API after starting it locally.
 
 ```json
 ❯ curl -X GET "http://127.0.0.1:1313/repositories" -H  "accept: application/json"
-[
-  {
-    "rank": 1,
-    "username": "sherlock-project",
-    "repositoryName": "sherlock",
-    "url": "https://github.com/sherlock-project/sherlock",
-    "description": "Hunt down social media accounts by username across social networks",
-    "language": "Python",
-    "languageColor": "#3572A5",
-    "totalStars": 21977,
-    "forks": 2214,
-    "starsSince": 462,
-    "since": "daily",
-    "builtBy": [
-      {
-        "username": "hoadlck",
-        "url": "https://github.com/hoadlck",
-        "avatar": "https://avatars.githubusercontent.com/u/1666888?s=40&v=4"
-      },
-      ...
-    ]
-  },
-  ...
-]
+{
+  "data": [
+    {
+      "rank": 1,
+      "username": "sherlock-project",
+      "repositoryName": "sherlock",
+      "url": "https://github.com/sherlock-project/sherlock",
+      "description": "Hunt down social media accounts by username across social networks",
+      "language": "Python",
+      "languageColor": "#3572A5",
+      "totalStars": 21977,
+      "forks": 2214,
+      "starsSince": 462,
+      "since": "daily",
+      "builtBy": [
+        {
+          "username": "hoadlck",
+          "url": "https://github.com/hoadlck",
+          "avatar": "https://avatars.githubusercontent.com/u/1666888?s=40&v=4"
+        },
+        ...
+      ]
+    },
+    ...
+  ],
+  "source": {
+    "origin": "upstream",
+    "cacheAgeSeconds": 0,
+    "cacheTtlSeconds": 300
+  }
+}
 ```
 
 ## Trending Developers
 
 ```json
 ❯ curl -X GET "http://127.0.0.1:1313/developers" -H  "accept: application/json"
-[
-  {
-    "rank": 1,
-    "username": "felangel",
-    "name": "Felix Angelov",
-    "url": "https://github.com/felangel",
-    "avatar": "https://avatars.githubusercontent.com/u/8855632?s=96&v=4",
-    "since": "daily",
-    "popularRepository": {
-      "repositoryName": "bloc",
-      "description": "A predictable state management library that helps implement the BLoC design pattern",
-      "url": "https://github.com/felangel/bloc"
-    }
-  },
-  ...
-]
+{
+  "data": [
+    {
+      "rank": 1,
+      "username": "felangel",
+      "name": "Felix Angelov",
+      "url": "https://github.com/felangel",
+      "avatar": "https://avatars.githubusercontent.com/u/8855632?s=96&v=4",
+      "since": "daily",
+      "popularRepository": {
+        "repositoryName": "bloc",
+        "description": "A predictable state management library that helps implement the BLoC design pattern",
+        "url": "https://github.com/felangel/bloc"
+      }
+    },
+    ...
+  ],
+  "source": {
+    "origin": "cache",
+    "cacheAgeSeconds": 42,
+    "cacheTtlSeconds": 300
+  }
+}
 ```
+
+## Response provenance
+
+Every trending response wraps the entries in `data` and adds a `source` block.
+The entries keep their original fields and ordering; only the surrounding
+provenance is new.
+
+| field | meaning |
+| --- | --- |
+| `source.origin` | `upstream` when the data was just fetched from GitHub, `cache` when served from the in-memory cache |
+| `source.cacheAgeSeconds` | whole seconds since the cache entry was written; `0` for a fresh upstream fetch |
+| `source.cacheTtlSeconds` | cache validity window, currently `300` seconds |
+
+The first request for a parameter combination is fetched upstream
+(`origin: "upstream"`, `cacheAgeSeconds: 0`). Repeated requests with the same
+path and query parameters within 300 seconds hit the cache
+(`origin: "cache"`) and the age increases. Different `since`,
+`spoken_language_code`, or programming-language path values never share a
+cache entry. Once an entry expires, the next request fetches upstream again
+and the age resets to `0`.
+
+## Upstream failures
+
+When GitHub Trending cannot be reached the API answers with HTTP `502`. The
+`detail` text stays `Unable to fetch GitHub Trending data`, and the body adds
+a retryable flag plus a failure category so clients can decide whether to
+retry:
+
+```json
+{
+  "detail": "Unable to fetch GitHub Trending data",
+  "retryable": true,
+  "failureReason": "timeout"
+}
+```
+
+`failureReason` is either `timeout` (the upstream request exceeded its
+deadline) or `connection_error` (the connection could not be established).
+Both categories are marked `retryable: true`.
 
 ## API
 

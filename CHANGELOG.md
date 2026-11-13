@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Trending responses now carry a `source` provenance block indicating whether
+  the data was fetched `upstream` or served from the `cache`, with
+  `cacheAgeSeconds` (0 for a fresh fetch) and `cacheTtlSeconds` (300).
+- Structured HTTP 502 responses add a `retryable` flag and a `failureReason`
+  category (`timeout` / `connection_error`) while keeping the existing
+  `detail` text.
+- Tests covering first fetch, cache hit, parameter isolation, expiry refetch,
+  and upstream failure paths, using local HTML samples and stubs only.
+
+### Changed
+- Trending endpoints return a `data`/`source` envelope; the trending entries
+  themselves keep their original fields, values, and ordering.
+- `UpstreamRequestError` preserves the upstream failure category instead of
+  flattening all request errors into one message.
+
 ## [2.0.0] - 2026-04-29
 
 ### Added
