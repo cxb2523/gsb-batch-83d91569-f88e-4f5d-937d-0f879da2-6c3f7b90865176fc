@@ -23,10 +23,33 @@ All notable changes to this project are documented here. Format follows
 > unlimited): the rows read so far are kept and the run exits 6 (5 with
 > none), `stop_reason: proxy_budget_exceeded`. A proxied run that writes no
 > rows now writes `<out>.latest_attempt.meta.json` with its outcome and byte
-> count.
+> count. (5) Playwright's category runs now also write a `<out>.pages.json`
+> per-page collection log beside `<out>.meta.json` (and
+> `<out>.latest_attempt.pages.json` when the run writes no data). It is
+> additive: no existing field of `<out>.meta.json` changes meaning, and
+> exit codes are untouched.
 
 ### Added
 
+- **Per-page collection log in the Playwright engine.** A category run now
+  writes `<out>.pages.json` beside `<out>.meta.json`: one record per PLANNED
+  listing page, with `page`, `url`, `status` (`success` / `failed` /
+  `skipped`), `new_products` (rows added after dedupe — summing it reproduces
+  the row count the run wrote), `products_parsed`, `http_status`,
+  `stop_reason` (`http_404`, `blocked`, `navigation_failed`, `no_products`,
+  `no_new_products`, `max_pages_reached`, `max_results_reached`,
+  `proxy_budget_exceeded`, `proxy_auth_failed`), `detail`, and the
+  `--block-retries` `attempt` that made the request. The run-level meta
+  sidecar is unchanged: no existing field changes meaning. A run that writes
+  no data (zero rows without `--allow-empty`, or a proxy pre-check refusal
+  that started no browser) puts its log at
+  `<out>.latest_attempt.pages.json`, leaving a previous good run's `<out>`,
+  `<out>.meta.json` and `<out>.pages.json` byte-identical. Covered for
+  browser category runs (a mid-run navigation failure is `failed` while
+  pagination continues) and the browserless `--scraper-api` category path
+  (one record; that mode cannot paginate). Verified against a real browser,
+  local HTML fixtures and fake proxies (`local_e2e_test.py`), and offline
+  (`smoke_test.py`).
 - Proxy pre-check in all three browser engines (`ProxyPool.peek()` names the
   exit the run will use first). Selenium pre-checks the proxy without
   credentials, exactly as its browser uses it, and says so when a 407

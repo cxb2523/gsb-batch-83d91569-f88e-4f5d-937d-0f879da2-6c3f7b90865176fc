@@ -2586,12 +2586,26 @@ def _():
                     assert hits == [("CONNECT", "www.g2.com:443")], (label, hits)
                     assert words in text and "G2_PROXY" in text, (label, text[-400:])
                     assert "S3cretPw" not in text, label
-                    assert sorted(p.name for p in Path(td).iterdir()) == ["out.json.latest_attempt.meta.json"], (
+                    # A refused pre-check starts no browser, so the category
+                    # page log has exactly one `skipped` record; both attempt
+                    # sidecars are written and <out>/<out>.meta.json/<out>.pages.json
+                    # from an earlier good run are untouched.
+                    expected = ["out.json.latest_attempt.meta.json"]
+                    if mod is playwright_scraper:
+                        expected.append("out.json.latest_attempt.pages.json")
+                    assert sorted(p.name for p in Path(td).iterdir()) == sorted(expected), (
                         label, sorted(p.name for p in Path(td).iterdir()))
                     meta = json.loads((Path(td) / "out.json.latest_attempt.meta.json").read_text())
                     assert (meta["status"], meta["stop_reason"], meta["data_updated"]) == (
                         "failed", "proxy_auth_failed", False), (label, meta)
                     assert "S3cretPw" not in json.dumps(meta), label
+                    if mod is playwright_scraper:
+                        pages = json.loads((Path(td) / "out.json.latest_attempt.pages.json").read_text())
+                        assert len(pages) == 1, (label, pages)
+                        assert pages[0]["status"] == "skipped", (label, pages)
+                        assert pages[0]["stop_reason"] == "proxy_auth_failed", (label, pages)
+                        assert pages[0]["url"] == "https://www.g2.com/categories/crm", (label, pages)
+                        assert pages[0]["new_products"] == 0, (label, pages)
                     if mod is selenium_scraper:
                         assert "sends NO proxy credentials" in text, text[-400:]
             finally:
@@ -2842,7 +2856,9 @@ class _MeteredBrowser(_FakeBrowser):
 
 def _metered_pw_run(argv, answers, *, cost, proxy=True):
     """playwright_scraper.run() through a fake Playwright whose navigations
-    cost `cost` bytes. Returns (rc, output text, rows, meta, attempt, browser)."""
+    cost `cost` bytes. Returns (rc, output text, rows, meta, attempt, browser)
+    where `browser.page_log` is the run's page log read back from the sidecar
+    the run wrote (`<out>.pages.json` or its attempt-scoped counterpart)."""
     import contextlib
     import io
     browser = _MeteredBrowser(answers, cost)
@@ -2871,6 +2887,8 @@ def _metered_pw_run(argv, answers, *, cost, proxy=True):
             def read(suffix):
                 path = Path(str(out) + suffix)
                 return json.loads(path.read_text()) if path.exists() else None
+            browser.page_log = read(output_writer.PAGES_SUFFIX) or \
+                read(output_writer.ATTEMPT_PAGES_SUFFIX) or []
             return rc, buf.getvalue(), read(""), read(".meta.json"), \
                 read(output_writer.ATTEMPT_META_SUFFIX), browser
     finally:
@@ -3149,6 +3167,417 @@ def _():
         assert status == 403 and not has_cards(html), (name, status)
         bound = captcha_solver.AUTOSOLVE_FINISH_TIMEOUT_S + captcha_solver.AUTOSOLVE_CONTENT_TIMEOUT_S
         assert sum(slept) <= bound, (name, sum(slept))
+
+
+@check(
+    "per-page collection log: scrape_category() records ONE record per planned listing page — "
+    "`success` + the pre-dedup product count for a page that parsed, `failed` for a page that was "
+    "requested and yielded nothing usable (404 / block / navigation failure / unreadable content), "
+    "and `skipped` for a planned page the run never requested because pagination stopped first. "
+    "The stop reason lands on the page that ended pagination; the log sums to the merged row count."
+)
+def _():
+    def scrape(answers, argv):
+        with tempfile.TemporaryDirectory() as td:
+            args = _pw_args(argv, td)
+            browser = _FakeBrowser(answers)
+            log = []
+            merged, blocked, remote, done, failed = asyncio.run(playwright_scraper.scrape_category(
+                args=args, start_url=gp.category_url("crm"), browser=browser, proxy_pool=None,
+                client=None, autosolve=False, user_agent=None, page_log=log, attempt=1,
+            ))
+            return merged, blocked, failed, log
+
+    # Healthy pagination all the way to --max-pages, plus the natural end
+    # (page 2 repeats page 1, so its `new_products` is 0 while the page
+    # itself parsed 3 products).
+    merged, blocked, failed, log = scrape(
+        [(200, listing_html(cards=3)), (200, listing_html(cards=3)), (200, listing_html(cards=3))],
+        ["--category", "crm", "--max-pages", "3"],
+    )
+    assert len(merged) == 3 and not blocked and failed == [], (len(merged), blocked, failed)
+    assert [r["page"] for r in log] == [1, 2, 3], log
+    assert [r["status"] for r in log] == ["success", "success", "skipped"], log
+    assert [r["new_products"] for r in log] == [3, 0, 0], log
+    assert log[0]["products_parsed"] == 3 and log[1]["products_parsed"] == 3, log
+    assert log[1]["stop_reason"] == playwright_scraper.STOP_NO_NEW_PRODUCTS, log
+    assert log[2]["stop_reason"] == playwright_scraper.STOP_NO_NEW_PRODUCTS, log
+    assert log[0]["url"] == gp.category_url("crm") and "page=2" in log[1]["url"], log
+    assert all(r["attempt"] == 1 for r in log), log
+    assert sum(r["new_products"] for r in log) == len(merged), log
+
+    # A block on page 2 after page 1 produced rows: page 2 is `failed` with
+    # stop_reason `blocked`, page 3 is `skipped`, and page 1 keeps its rows.
+    merged, blocked, failed, log = scrape(
+        [(200, listing_html(cards=3)), (403, DATADOME_WALL_HTML)], ["--category", "crm", "--max-pages", "3"],
+    )
+    assert len(merged) == 3 and blocked and failed == [2], (len(merged), blocked, failed)
+    assert [r["status"] for r in log] == ["success", "failed", "skipped"], log
+    assert log[1]["http_status"] == 403 and log[1]["stop_reason"] == playwright_scraper.STOP_BLOCKED, log
+    assert log[1]["new_products"] == 0, log
+
+    # HTTP 404 on the first page: not a block, no later page requested.
+    merged, blocked, failed, log = scrape(
+        [(404, "<html><head><title>Page not found | G2</title></head><body>404</body></html>")],
+        ["--category", "crm", "--max-pages", "2"],
+    )
+    assert merged == [] and not blocked, (merged, blocked)
+    assert log[0]["status"] == "failed" and log[0]["http_status"] == 404, log
+    assert log[0]["stop_reason"] == playwright_scraper.STOP_HTTP_404, log
+    assert log[1]["status"] == "skipped" and log[1]["stop_reason"] == playwright_scraper.STOP_HTTP_404, log
+
+    # A page that yields zero products ends the listing: `success` (the page
+    # was served and parsed fine — the listing just ended) with
+    # `no_products` as the stop reason.
+    merged, blocked, failed, log = scrape(
+        [(200, _listing_page(1, 0))], ["--category", "crm", "--max-pages", "2"],
+    )
+    assert merged == [] and not blocked and failed == [], (merged, blocked, failed)
+    assert log[0]["status"] == "success" and log[0]["stop_reason"] == playwright_scraper.STOP_NO_PRODUCTS, log
+    assert log[1]["status"] == "skipped", log
+
+    # --max-results reached on page 1: pages 2-3 are `skipped` with
+    # max_results_reached, and the log's own sum is still page 1's count.
+    merged, blocked, failed, log = scrape(
+        [(200, listing_html(cards=3)), (200, listing_html(cards=3))],
+        ["--category", "crm", "--max-pages", "3", "--max-results", "2"],
+    )
+    assert len(merged) == 2 and failed == [], (len(merged), failed)
+    assert log[0]["stop_reason"] == playwright_scraper.STOP_MAX_RESULTS, log
+    assert [r["status"] for r in log] == ["success", "skipped", "skipped"], log
+
+    # The structural vocabulary is fixed and exported, so a consumer can
+    # switch on it rather than guess: three statuses and a stop-reason key
+    # that is empty on a page that did NOT stop pagination.
+    assert (playwright_scraper.PAGE_STATUS_SUCCESS, playwright_scraper.PAGE_STATUS_FAILED,
+            playwright_scraper.PAGE_STATUS_SKIPPED) == ("success", "failed", "skipped")
+    assert playwright_scraper.STOP_PROXY_BUDGET == proxy_meter.STOP_REASON == "proxy_budget_exceeded"
+    assert all(set(r) >= {"page", "url", "status", "new_products", "stop_reason", "attempt"}
+               for r in log), log
+
+
+@check(
+    "per-page collection log is a SECOND sidecar beside <out>.meta.json — <out>.pages.json — and "
+    "never touches a field of the existing meta sidecar. A run that writes rows writes both; a "
+    "zero-row run (no --allow-empty) writes NEITHER <out> NOR <out>.meta.json NOR <out>.pages.json, "
+    "leaving a previous good run's three files untouched, and puts its page log at "
+    "<out>.latest_attempt.pages.json instead (same rule the meta sidecar already follows)."
+)
+def _():
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "out.json")
+        rows = [_mk_product("a")]
+        # A previous good run's complete set of files.
+        output_writer.finish_run(products=rows, out_path=out, fmt="json", engine="t", url="u",
+                                 pages_requested=1, pages_completed=1, failed_pages=None, blocked=False,
+                                 remote_api_error=False, allow_empty=False, started_at=0.0)
+        output_writer.write_page_log(
+            [{"page": 1, "url": "OLD", "status": "success", "new_products": 1, "products_parsed": 1,
+              "http_status": 200, "stop_reason": "", "detail": "", "attempt": 1}], out)
+        before = {p.name: Path(p).read_text() for p in Path(td).iterdir()}
+
+        # A zero-row, blocked run with no --allow-empty.
+        code = output_writer.finish_run(products=[], out_path=out, fmt="json", engine="t", url="u",
+                                        pages_requested=2, pages_completed=0, failed_pages=[1],
+                                        blocked=True, remote_api_error=False, allow_empty=False, started_at=0.0)
+        assert code == output_writer.EXIT_BLOCKED, code
+        output_writer.write_page_log(
+            [{"page": 1, "url": "NEW", "status": "failed", "new_products": 0, "products_parsed": 0,
+              "http_status": 403, "stop_reason": "blocked", "detail": "", "attempt": 1}],
+            out, attempt=True)
+        after = {p.name: Path(p).read_text() for p in Path(td).iterdir()}
+        # The three good-run files are byte-identical; only the attempt log
+        # is new.
+        for name in ("out.json", "out.json.meta.json", "out.json.pages.json"):
+            assert after[name] == before[name], name
+        attempt_name = "out.json.latest_attempt.pages.json"
+        assert attempt_name in after, sorted(after)
+        log = json.loads(after[attempt_name])
+        assert len(log) == 1 and log[0]["url"] == "NEW" and log[0]["status"] == "failed", log
+
+        # The naming pair mirrors the existing meta pair exactly.
+        assert output_writer.pages_path_for(out) == f"{out}.pages.json"
+        assert output_writer.attempt_pages_path_for(out) == f"{out}.latest_attempt.pages.json"
+        assert str(Path(output_writer.pages_path_for(out)).name) == (Path(out).name + ".pages.json")
+        meta = json.loads(after["out.json.meta.json"])
+        assert set(meta) >= {"status", "stop_reason", "engine", "url", "pages_requested",
+                             "pages_completed", "failed_pages", "product_count"}, meta
+        assert "page_log" not in meta and "pages" not in meta, (
+            "the per-page log must live in its own file, never inside the meta sidecar")
+
+
+@check(
+    "negative: a run whose first request the proxy pre-check refused (gateway 407/402) starts NO "
+    "browser and writes NO page's data — <out>, <out>.meta.json and <out>.pages.json from an "
+    "earlier good run are byte-identical, and the only new file is the attempt-scoped pair, where "
+    "the page log shows the single never-started attempt as `skipped`/proxy_auth_failed."
+)
+def _():
+    import json as _json
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "out.json")
+        rows = [_mk_product("a")]
+        output_writer.finish_run(products=rows, out_path=out, fmt="json", engine="t", url="u",
+                                 pages_requested=1, pages_completed=1, failed_pages=None, blocked=False,
+                                 remote_api_error=False, allow_empty=False, started_at=0.0)
+        output_writer.write_page_log(
+            [{"page": 1, "url": "OLD", "status": "success", "new_products": 1, "products_parsed": 1,
+              "http_status": 200, "stop_reason": "", "detail": "", "attempt": 1}], out)
+        before = {p.name: Path(p).read_bytes() for p in Path(td).iterdir()}
+
+        started = []
+        original = playwright_scraper.async_playwright
+
+        class _PW:
+            async def __aenter__(self):
+                started.append("playwright")
+                raise AssertionError("a browser must NOT be started after a refused pre-check")
+
+            async def __aexit__(self, *_a):
+                return False
+        playwright_scraper.async_playwright = lambda: _PW()
+        server, port, hits = _status_proxy(407)
+        try:
+            args = _parse(playwright_scraper, [
+                "--category", "crm", "--max-pages", "2", "--out", out,
+                "--proxy", "http://127.0.0.1:%d" % port,
+            ])
+            code = asyncio_run_maybe(playwright_scraper, args)
+        finally:
+            playwright_scraper.async_playwright = original
+            server.shutdown()
+            server.server_close()
+            proxy_meter.start(None, active=False)
+
+        assert code == output_writer.EXIT_REMOTE_API_ERROR, code
+        assert started == [], started
+        assert hits == [("CONNECT", "www.g2.com:443")], hits
+        after = {p.name: Path(p).read_bytes() for p in Path(td).iterdir()}
+        for name, content in before.items():
+            assert after.get(name) == content, f"a refused run overwrote {name}"
+        new_files = sorted(set(after) - set(before))
+        assert new_files == ["out.json.latest_attempt.meta.json",
+                             "out.json.latest_attempt.pages.json"], new_files
+        meta = _json.loads(after["out.json.latest_attempt.meta.json"])
+        assert (meta["status"], meta["stop_reason"], meta["data_updated"]) == (
+            "failed", "proxy_auth_failed", False), meta
+        log = _json.loads(after["out.json.latest_attempt.pages.json"])
+        assert len(log) == 1, log
+        assert log[0]["status"] == "skipped", log
+        assert log[0]["stop_reason"] == "proxy_auth_failed", log
+        assert log[0]["new_products"] == 0 and log[0]["products_parsed"] == 0, log
+        # The log is a sidecar, not a field of the meta sidecar.
+        assert "page_log" not in after.get("out.json.meta.json", b"").decode("utf-8"), after
+
+
+@check(
+    "per-page collection log boundary: a page whose navigation fails after every --retries attempt "
+    "is recorded `failed` (navigation_failed, empty stop_reason because the LOOP moves on) and "
+    "pagination CONTINUES to the next page — and when it is the FIRST page the loop stops and the "
+    "rest of the plan is recorded `skipped`, never silently dropped."
+)
+def _():
+    class _NavFailPage(_FakePage):
+        async def goto(self, url, **_kw):
+            self.gotos += 1
+            raise TimeoutError("Page.goto: Timeout 30000ms exceeded.")
+
+    class _NavFailContext(_FakeContext):
+        def __init__(self, browser, fail_first_n=0):
+            super().__init__(browser)
+            self.fail_first_n = fail_first_n
+            self.calls = 0
+
+        async def new_page(self):
+            self.calls += 1
+            cls = _NavFailPage if self.calls <= self.fail_first_n else _FakePage
+            page = cls(self.browser.answers, self)
+            self.browser.pages.append(page)
+            return page
+
+    class _NavFailBrowser(_FakeBrowser):
+        def __init__(self, answers, fail_first_pages=0):
+            super().__init__(answers)
+            self.fail_first_pages = fail_first_pages
+
+        async def new_context(self, **_kw):
+            return _NavFailContext(self, self.fail_first_pages)
+
+    # Page 1 loads; page 2's navigation fails permanently; page 3 loads.
+    # A fake that fails only the SECOND page needs its own page class, so
+    # drive this case with a page counter instead of per-context class picks.
+    class _SequencedPage(_FakePage):
+        async def goto(self, url, **_kw):
+            self.gotos += 1
+            if "page=2" in url:
+                raise TimeoutError("Page.goto: Timeout 30000ms exceeded.")
+            status, html = (self._answers.pop(0) if len(self._answers) > 1 else self._answers[0])
+            self._html = html
+            return _FakeResponse(status)
+
+    class _SeqBrowser(_FakeBrowser):
+        async def new_context(self, **_kw):
+            ctx = _FakeContext(self)
+
+            async def new_page():
+                page = _SequencedPage(self.answers, ctx)
+                self.pages.append(page)
+                return page
+            ctx.new_page = new_page
+            return ctx
+
+    with tempfile.TemporaryDirectory() as td:
+        args = _pw_args(["--category", "crm", "--max-pages", "3", "--retries", "0"], td)
+        browser = _SeqBrowser([(200, listing_html(cards=3)),
+                               (200, _listing_page(4, 3, next_disabled=True))])
+        log = []
+        merged, blocked, remote, done, failed = asyncio.run(playwright_scraper.scrape_category(
+            args=args, start_url=gp.category_url("crm"), browser=browser, proxy_pool=None,
+            client=None, autosolve=False, user_agent=None, page_log=log, attempt=1,
+        ))
+        assert failed == [2], failed
+        assert [r["status"] for r in log] == ["success", "failed", "success"], log
+        assert log[1]["stop_reason"] == "", (
+            "a mid-run navigation failure does not stop pagination — the page after it was fetched")
+        assert log[1]["detail"].startswith("Page.goto"), log
+        assert log[2]["stop_reason"] == playwright_scraper.STOP_MAX_PAGES, log
+
+    # The FIRST page failing ends pagination: `failed` + navigation_failed on
+    # page 1, and the remaining plan `skipped` with the same reason.
+    with tempfile.TemporaryDirectory() as td:
+        args = _pw_args(["--category", "crm", "--max-pages", "3", "--retries", "0"], td)
+        browser = _NavFailBrowser([(200, "")], fail_first_pages=1)
+        log = []
+        merged, blocked, remote, done, failed = asyncio.run(playwright_scraper.scrape_category(
+            args=args, start_url=gp.category_url("crm"), browser=browser, proxy_pool=None,
+            client=None, autosolve=False, user_agent=None, page_log=log, attempt=1,
+        ))
+        assert failed == [1] and not merged, (failed, merged)
+        assert [r["status"] for r in log] == ["failed", "skipped", "skipped"], log
+        assert log[0]["stop_reason"] == playwright_scraper.STOP_NAVIGATION_FAILED, log
+        assert all(r["stop_reason"] == playwright_scraper.STOP_NAVIGATION_FAILED for r in log), log
+
+
+@check(
+    "per-page collection log boundary: when the proxy budget runs out, the pages already collected "
+    "are kept and the records name `proxy_budget_exceeded` — the page the budget actually stopped on "
+    "(failed) and every never-requested page after it (skipped) — while the run's exit code stays the "
+    "one finish_run already gave a budget stop (6 with rows, 5 without)."
+)
+def _():
+    pages = [(200, _listing_page(1, 3)), (200, _listing_page(4, 3)), (200, _listing_page(7, 3))]
+    rc, text, rows, meta, _attempt, browser = _metered_pw_run(
+        ["--category", "crm", "--max-pages", "3", "--proxy-budget-mb", "0.001"], pages, cost=600)
+    assert rc == output_writer.EXIT_PARTIAL and len(browser.gotos) == 2, (rc, browser.gotos)
+    assert len(rows) == 6, rows
+    log = browser.page_log
+    assert [r["page"] for r in log] == [1, 2, 3], log
+    assert [r["status"] for r in log] == ["success", "success", "skipped"], log
+    assert [r["new_products"] for r in log] == [3, 3, 0], log
+    assert log[2]["stop_reason"] == "proxy_budget_exceeded", log
+    assert log[0]["stop_reason"] == "" and log[1]["stop_reason"] == "", log
+    assert sum(r["new_products"] for r in log) == len(rows), log
+
+    # Budget gone before a second page could be requested, and the first page
+    # itself yielded no rows: exit 5, and the page log goes to the
+    # attempt-scoped file. The budget stop outranks the page's own
+    # `no_products` end, exactly as finish_run gives it precedence.
+    rc, text, rows, meta, attempt, browser = _metered_pw_run(
+        ["--category", "crm", "--max-pages", "1", "--block-retries", "0",
+         "--proxy-budget-mb", "0.001"], [(200, _listing_page(1, 0))], cost=5000)
+    assert rc == output_writer.EXIT_REMOTE_API_ERROR and len(rows) == 0, (rc, rows)
+    log = browser.page_log
+    assert [r["status"] for r in log] == ["success"], log
+    assert log[0]["stop_reason"] == "proxy_budget_exceeded", log
+
+
+@check(
+    "per-page collection log covers the browserless --scraper-api category path too: ONE record for "
+    "the single page that mode requests, with the same vocabulary the browser loop uses — success "
+    "with the row count when it parsed, failed/blocked when the target answered >=400, failed with "
+    "remote_api_error when the fetch itself failed — written to <out>.pages.json and never to a "
+    "product or pricing run (those load one page and have no pagination to account for)."
+)
+def _():
+    import unittest.mock as mock
+
+    class _FakeClient:
+        solve_budget = scraper_api_client.SolveBudget()
+
+        def __init__(self, body, status=200):
+            self._body, self._status = body, status
+
+        def scrape_url(self, url, timeout=60, cdp_url=None):
+            return scraper_api_client.ScrapeResult(target_status=self._status, headers={}, body=self._body)
+
+    def scrape(argv, body, status=200, extra=()):
+        """Returns (exit code, <out>.pages.json or, when the run wrote no data,
+        <out>.latest_attempt.pages.json — the rule every other sidecar
+        follows — or None when neither exists)."""
+        with tempfile.TemporaryDirectory() as td:
+            out = str(Path(td) / "out.json")
+            args = _parse(playwright_scraper,
+                          argv + ["--scraper-api", "--twocaptcha-key", "k", "--out", out] + list(extra))
+            with mock.patch.object(playwright_scraper, "TwoCaptchaClient",
+                                   lambda *a, **kw: _FakeClient(body, status)):
+                code = asyncio_run_maybe(playwright_scraper, args)
+            for suffix in (output_writer.PAGES_SUFFIX, output_writer.ATTEMPT_PAGES_SUFFIX):
+                path = Path(out + suffix)
+                if path.exists():
+                    return code, json.loads(path.read_text())
+            return code, None
+
+    code, log = scrape(["--category", "crm"], listing_html(cards=4))
+    assert code == output_writer.EXIT_OK, code
+    assert len(log) == 1, log
+    assert log[0]["status"] == "success", log
+    assert log[0]["new_products"] == 4 and log[0]["products_parsed"] == 4, log
+    assert log[0]["stop_reason"] == "", log
+    assert log[0]["url"] == "https://www.g2.com/categories/crm", log
+
+    # A blocked zero-row run writes no data, so its page log is attempt-scoped
+    # (the previous good run's files stay put) — and it still says `failed`.
+    code, log = scrape(["--category", "crm", "--block-retries", "0"], DATADOME_WALL_HTML, status=403)
+    assert code == output_writer.EXIT_BLOCKED, code
+    assert len(log) == 1 and log[0]["status"] == "failed", log
+    assert log[0]["http_status"] == 403 and log[0]["stop_reason"] == "blocked", log
+
+    # --block-retries retries the SAME single page: each real request gets its
+    # own record, and the LAST attempt is the one that decided the run.
+    code, log = scrape(["--category", "crm", "--block-retries", "1"], DATADOME_WALL_HTML, status=403)
+    assert code == output_writer.EXIT_BLOCKED, code
+    assert [r["attempt"] for r in log] == [1, 2], log
+
+    # The transport failure path records a `failed` page with
+    # remote_api_error, not an empty "success" — the log must not claim a
+    # collection that never happened.
+    class _ExplodingClient(_FakeClient):
+        def scrape_url(self, url, timeout=60, cdp_url=None):
+            raise scraper_api_client.TwoCaptchaError("upstream 502")
+
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "out.json")
+        args = _parse(playwright_scraper,
+                      ["--category", "crm", "--scraper-api", "--twocaptcha-key", "k", "--out", out,
+                       "--block-retries", "0"])
+        with mock.patch.object(playwright_scraper, "TwoCaptchaClient", lambda *a, **kw: _ExplodingClient("")):
+            code = asyncio_run_maybe(playwright_scraper, args)
+        assert code == output_writer.EXIT_REMOTE_API_ERROR, code
+        attempt_log = json.loads(Path(out + output_writer.ATTEMPT_PAGES_SUFFIX).read_text())
+        assert len(attempt_log) == 1 and attempt_log[0]["status"] == "failed", attempt_log
+        assert attempt_log[0]["stop_reason"] == "remote_api_error", attempt_log
+
+    # Zero rows: no data is written, so the log is attempt-scoped (never
+    # <out>.pages.json), and its single record still says what happened.
+    code, log = scrape(["--category", "crm"], "<html>no cards</html>", status=200)
+    assert code == output_writer.EXIT_ZERO_PRODUCTS, code
+    assert len(log) == 1 and log[0]["status"] == "failed", log
+    assert log[0]["stop_reason"] == "no_products", log
+
+    # Non-category modes write no page log at all — a single detail page has
+    # no pagination to account for.
+    code, log = scrape(["--product", "hubspot-sales-hub"], product_html())
+    assert code == output_writer.EXIT_OK and log is None, (code, log)
 
 
 def run() -> int:

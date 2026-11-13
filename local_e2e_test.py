@@ -167,6 +167,22 @@ class _G2Handler(BaseHTTPRequestHandler):
         if parsed.path == "/categories/blocked":
             self._send(DATADOME_WALL_HTML)
             return
+        if parsed.path == "/categories/flaky":
+            # Page 1 is healthy; every later page drops the connection with
+            # no response at all. Chromium surfaces that as
+            # ERR_EMPTY_RESPONSE, i.e. a real navigation failure — the shape
+            # the per-page log must record as `failed` while pagination moves
+            # on (there are no further page numbers to move on TO here, but
+            # the failure must not abort the run and must not lose page 1).
+            if page == 1:
+                self._send(listing_html(cards=2, next_disabled=False, current=1, offset=0))
+            else:
+                self.close_connection = True
+                try:
+                    self.connection.close()
+                except OSError:
+                    pass
+            return
         if parsed.path == "/categories/slider":
             if f"datadome={SOLVED_COOKIE_VALUE}" in cookie_header:
                 self._send(listing_html(cards=3, next_disabled=True, current=1, offset=0))
@@ -241,6 +257,28 @@ def _start(handler_cls):
     return srv, srv.server_address[1]
 
 
+def _refusing_proxy(status):
+    """A local stand-in for a proxy gateway that answers every request,
+    CONNECT included, with `status` — the pre-check's 407/402 shape."""
+    import socketserver
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_a):
+            pass
+
+        def _answer(self):
+            self.send_response(status)
+            self.send_header("Content-Length", "0")
+            self.send_header("Proxy-Authenticate", 'Basic realm="stub"')
+            self.end_headers()
+        do_CONNECT = do_GET = do_HEAD = _answer
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, server.server_address[1]
+
+
 # --------------------------------------------------------------------------- #
 # Engine runner — same monkeypatch-BASE_URL trick, in-process
 # --------------------------------------------------------------------------- #
@@ -313,6 +351,100 @@ def main():
                     "the engine stopped on the disabled Next selector instead of probing "
                     "the data-terminated next page"
                 )
+
+        if engine == "playwright":
+            @check(f"{engine}: the per-page collection log beside <out>.meta.json says what each "
+                   f"PLANNED listing page produced — page 1 (3 rows), page 2 (2 rows), the probe "
+                   f"page 3 (page 2's cards again: 2 parsed, 0 new, pagination ends), and pages 4-5 "
+                   f"marked `skipped` because they were planned but never requested. Real browser, "
+                   f"local fake-g2, real output writer.")
+            def _(engine=engine):
+                with tempfile.TemporaryDirectory() as d:
+                    out = str(Path(d) / "out.json")
+                    code, stdout, stderr = _run(engine, ["--category", "crm", "--max-pages", "5",
+                                                         "--out", out, "--headless"], chromium_path=args.chromium_path)
+                    assert code == 0, f"exit {code}, stderr tail: {stderr[-800:]}"
+                    pages_path = Path(out + ".pages.json")
+                    assert pages_path.exists(), "no per-page log beside the run's output"
+                    log = json.loads(pages_path.read_text())
+                    # --max-pages 5 PLANS five pages; the run requests three
+                    # and records the other two as `skipped`, which is exactly
+                    # the "planned but never requested" distinction the log
+                    # exists to make.
+                    assert [r["page"] for r in log] == [1, 2, 3, 4, 5], log
+                    assert [r["status"] for r in log] == ["success", "success", "success",
+                                                          "skipped", "skipped"], log
+                    assert [r["new_products"] for r in log] == [3, 2, 0, 0, 0], log
+                    assert [r["products_parsed"] for r in log] == [3, 2, 2, 0, 0], log
+                    assert all(r["stop_reason"] == "no_new_products" for r in log[2:]), log
+                    assert log[0]["url"].endswith("/categories/crm"), log[0]
+                    assert log[1]["url"].endswith("?page=2") and log[2]["url"].endswith("?page=3"), log
+                    assert all(r["attempt"] == 1 for r in log), log
+                    # The log's own sum matches the rows the run wrote (5),
+                    # and every REQUESTED page's HTTP status came from the
+                    # real server (a `skipped` page was never requested, so it
+                    # has no status — that is the point of the distinction).
+                    assert sum(r["new_products"] for r in log) == 5, log
+                    assert all(r["http_status"] == 200 for r in log[:3]), log
+                    assert all(r["http_status"] is None for r in log[3:]), log
+
+            @check(f"{engine}: a listing page whose navigation fails after every retry is recorded "
+                   f"`failed` in the page log while page 1's rows are kept and the run is `partial` "
+                   f"(exit 6) — a dead page never discards the pages that already succeeded")
+            def _(engine=engine):
+                with tempfile.TemporaryDirectory() as d:
+                    out = str(Path(d) / "out.json")
+                    code, stdout, stderr = _run(engine, [
+                        "--url", f"http://127.0.0.1:{g2_port}/categories/flaky",
+                        "--max-pages", "2", "--retries", "0", "--out", out, "--headless",
+                    ], chromium_path=args.chromium_path)
+                    assert code == 6, f"expected exit 6 (partial), got {code}: {stderr[-800:]}"
+                    assert len(json.loads(Path(out).read_text())) == 2, "page 1's rows must survive"
+                    log = json.loads(Path(out + ".pages.json").read_text())
+                    assert [r["status"] for r in log] == ["success", "failed"], log
+                    assert log[0]["new_products"] == 2, log
+                    assert log[1]["new_products"] == 0 and log[1]["http_status"] is None, log
+                    # The page AFTER a mid-run failure is what the loop moves
+                    # on to; there is none here, so the failed page carries no
+                    # stop reason of its own — its `failed` status is the
+                    # finding, and nothing was suppressed by a stop.
+                    assert log[1]["stop_reason"] == "", log
+                    assert log[1]["detail"], log
+                    meta = json.loads(Path(out + ".meta.json").read_text())
+                    assert meta["status"] == "partial" and meta["failed_pages"] == [2], meta
+
+            @check(f"{engine}: --url with ?page=2 starts the per-page log at page 2, not at 1")
+            def _(engine=engine):
+                with tempfile.TemporaryDirectory() as d:
+                    out = str(Path(d) / "out.json")
+                    url = f"http://127.0.0.1:{g2_port}/categories/crm?page=2"
+                    code, stdout, stderr = _run(engine, ["--url", url, "--max-pages", "1",
+                                                         "--out", out, "--headless"], chromium_path=args.chromium_path)
+                    assert code == 0, f"exit {code}, stderr tail: {stderr[-800:]}"
+                    log = json.loads(Path(out + ".pages.json").read_text())
+                    assert [r["page"] for r in log] == [2], log
+                    assert log[0]["new_products"] == 2 and log[0]["status"] == "success", log
+                    assert log[0]["url"].endswith("?page=2"), log
+
+            @check(f"{engine}: a page that answers HTTP 404 is recorded `failed`/http_404 in the page "
+                   f"log, is not retried, and no later page is requested — while the run still exits 4 "
+                   f"(zero products), unchanged from before the page log existed")
+            def _(engine=engine):
+                with tempfile.TemporaryDirectory() as d:
+                    out = str(Path(d) / "out.json")
+                    # /categories/does-not-exist falls through to the fake
+                    # server's own 404, while keeping a category-shaped URL
+                    # the engine will paginate.
+                    code, stdout, stderr = _run(engine, [
+                        "--url", f"http://127.0.0.1:{g2_port}/categories/does-not-exist",
+                        "--max-pages", "2", "--out", out, "--headless",
+                    ], chromium_path=args.chromium_path)
+                    assert code == 4, f"expected exit 4 (empty), got {code}: {stderr[-600:]}"
+                    assert not Path(out).exists(), "a 404 run writes no data"
+                    log = json.loads(Path(out + ".latest_attempt.pages.json").read_text())
+                    assert [r["status"] for r in log] == ["failed", "skipped"], log
+                    assert log[0]["http_status"] == 404 and log[0]["stop_reason"] == "http_404", log
+                    assert log[1]["stop_reason"] == "http_404", log
 
         @check(f"{engine}: --url with ?page=2 actually starts at page 2 (regression for the bug fixed 2026-09-22)")
         def _(engine=engine):
@@ -424,6 +556,62 @@ def main():
                 assert meta["proxy_bytes"] > 2000 and meta["proxy_budget_bytes"] == 2000, meta
                 assert len(json.loads(Path(out).read_text())) == 3, "page 1's three products"
                 assert "Proxy traffic: 0.0 MB of 0.002 MB budget" in stderr, stderr[-400:]
+                if engine == "playwright":
+                    # The budget stop is named per page in the page log too:
+                    # page 1 succeeded and is kept, every later planned page
+                    # says proxy_budget_exceeded, and the log still sums to
+                    # the 3 rows the run actually wrote.
+                    log = json.loads(Path(out + ".pages.json").read_text())
+                    assert [r["status"] for r in log] == ["success", "skipped", "skipped",
+                                                          "skipped", "skipped"], log
+                    assert log[0]["new_products"] == 3, log
+                    assert all(r["stop_reason"] == "proxy_budget_exceeded" for r in log[1:]), log
+                    assert sum(r["new_products"] for r in log) == 3, log
+
+        @check(f"{engine}: a proxy gateway that refuses the pre-check with 407 ends the run with "
+               f"exit 5 BEFORE any browser starts — and the category run's page log, which can only "
+               f"say one thing (the attempt never started), lands in the attempt-scoped file beside "
+               f"the attempt meta sidecar, leaving a previous good run's <out>, <out>.meta.json and "
+               f"<out>.pages.json byte-identical")
+        def _(engine=engine):
+            server, port = _refusing_proxy(407)
+            try:
+                with tempfile.TemporaryDirectory() as d:
+                    out = Path(d) / "out.json"
+                    # A previous good run's complete set of files.
+                    out.write_text('[{"sku": "old-product"}]', encoding="utf-8")
+                    Path(str(out) + ".meta.json").write_text('{"status": "complete"}', encoding="utf-8")
+                    Path(str(out) + ".pages.json").write_text(
+                        '[{"page": 1, "url": "OLD", "status": "success", "new_products": 1,'
+                        ' "products_parsed": 1, "http_status": 200, "stop_reason": "",'
+                        ' "detail": "", "attempt": 1}]', encoding="utf-8")
+                    before = {p.name: p.read_bytes() for p in Path(d).iterdir()}
+
+                    code, stdout, stderr = _run(engine, [
+                        "--category", "crm", "--max-pages", "2", "--out", str(out), "--headless",
+                        "--proxy", f"http://127.0.0.1:{port}",
+                    ], chromium_path=args.chromium_path)
+                    assert code == 5, f"expected exit 5, got {code}: {stderr[-800:]}"
+                    after = {p.name: p.read_bytes() for p in Path(d).iterdir()}
+                    for name, content in before.items():
+                        assert after.get(name) == content, f"a refused run overwrote {name}"
+                    attempt_meta = Path(f"{out}.latest_attempt.meta.json")
+                    assert attempt_meta.exists(), sorted(after)
+                    meta = json.loads(attempt_meta.read_text())
+                    assert (meta["status"], meta["stop_reason"], meta["data_updated"]) == (
+                        "failed", "proxy_auth_failed", False), meta
+                    if engine == "playwright":
+                        # The page log exists and says the run never started;
+                        # no page is recorded as collected, and no later page
+                        # is claimed to have been requested.
+                        pages = json.loads(Path(f"{out}.latest_attempt.pages.json").read_text())
+                        assert len(pages) == 1, pages
+                        assert pages[0]["status"] == "skipped", pages
+                        assert pages[0]["stop_reason"] == "proxy_auth_failed", pages
+                        assert pages[0]["new_products"] == 0 and pages[0]["http_status"] is None, pages
+            finally:
+                server.shutdown()
+                server.server_close()
 
         if engine == "playwright":
             @check(f"{engine}: full DataDomeSliderTask solve round trip (cookie applied, page reloaded, healthy content served)")

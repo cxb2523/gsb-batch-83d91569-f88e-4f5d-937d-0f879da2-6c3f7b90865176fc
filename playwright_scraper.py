@@ -53,6 +53,16 @@ Pagination is `?page=N`. The loop reconstructs the next URL and stops on
 is logged as a diagnostic hint but is never the sole stop condition, so a
 selector change cannot silently truncate a successful run.
 
+**Every category run also writes a per-page collection log** —
+`<out>.pages.json`, one record per planned listing page, beside
+`<out>.meta.json` (see `PAGE_STATUS_*` / `STOP_*` and `_page_record()` below).
+The meta sidecar only carries sums (`pages_completed`, `failed_pages`); this
+is what says page 3 parsed N rows and page 4 was never requested. It is
+additive — no existing meta field changes meaning, and the exit codes are
+untouched. A run that writes no data puts its log at
+`<out>.latest_attempt.pages.json`, leaving a previous good run's files
+byte-identical.
+
 **`grids.json` enrichment is deliberately NOT wired up here.**
 `g2_parser.grids_json_url()` builds the URL for G2's own sanctioned
 category-ranking JSON, but its response's field names were never
@@ -91,7 +101,10 @@ from captcha_solver import (
     settle_after_autosolve, solve_when_blocked,
 )
 from fingerprint_client import fetch_fingerprint, refuse_if_cdp, user_agent_from
-from output_writer import EXIT_BAD_USAGE, EXIT_CRASH, LOAD_FAILED, Product, finish_run, merge_pages, precheck_or_stop, sku_key as _sku_key
+from output_writer import (
+    EXIT_BAD_USAGE, EXIT_CRASH, LOAD_FAILED, Product, finish_run, merge_pages, precheck_or_stop,
+    sku_key as _sku_key, write_page_log,
+)
 from proxy_pool import (
     Proxy, ProxyPool, ProxyParseError, is_proxy_dead_error, load_proxies, redact_credentials,
     playwright_media_route_async, should_block_media,
@@ -132,6 +145,70 @@ STILL_BLOCKED_ACTIONS = (
 
 log = logging.getLogger("playwright_scraper")
 
+# --- per-page collection log vocabulary -----------------------------------
+# The page log (<out>.pages.json, one record per listing page REQUESTED)
+# exists because `<out>.meta.json` only carries SUMS: `pages_completed`
+# counts pages that yielded data and `failed_pages` lists the rest, so a
+# reader cannot tell what page 3 contained or why page 4 was never fetched.
+# The record vocabulary is deliberately small and fixed, so a consumer can
+# switch on it without guessing:
+#
+#   status       "success" — page served, parsed, contributes rows
+#                "failed"  — page requested but no usable rows (HTTP 404,
+#                            block, navigation failure, parser failure,
+#                            unreadable document)
+#                "skipped" — planned but NEVER requested (the run stopped
+#                            first, or the proxy pre-check refused the run
+#                            before a browser was started)
+#   stop_reason  why pagination ended AT this page; "" when it did not
+#
+# `failed` on a page does not by itself end the run: a navigation failure or
+# a parser failure after retries marks the page failed and moves on to the
+# next page (that is what makes a partial run possible at all).
+PAGE_STATUS_SUCCESS = "success"
+PAGE_STATUS_FAILED = "failed"
+PAGE_STATUS_SKIPPED = "skipped"
+
+STOP_HTTP_404 = "http_404"
+STOP_BLOCKED = "blocked"
+STOP_NAVIGATION_FAILED = "navigation_failed"
+STOP_NO_PRODUCTS = "no_products"          # the listing itself ended here
+STOP_NO_NEW_PRODUCTS = "no_new_products"  # a page of already-seen products
+STOP_MAX_PAGES = "max_pages_reached"
+STOP_MAX_RESULTS = "max_results_reached"
+STOP_REMOTE_API_ERROR = "remote_api_error"  # --scraper-api's transport failure
+STOP_PROXY_BUDGET = proxy_meter.STOP_REASON  # "proxy_budget_exceeded"
+
+
+def _page_record(
+    *, page: int, url: str, status: str, new_products: int = 0, products_parsed: int = 0,
+    http_status: Optional[int] = None, stop_reason: str = "", detail: str = "", attempt: int = 1,
+) -> dict:
+    """One page-log record. `new_products` is the count of rows this page
+    added AFTER deduping against every earlier page of the SAME attempt —
+    the same identity (`output_writer.sku_key`) the merged output dedupes on,
+    so summing it over an attempt's records gives that attempt's row count
+    before `--max-results` was applied. `products_parsed` is what the page
+    itself yielded, duplicates included; it differs from `new_products`
+    exactly on the page that repeats already-seen products.
+
+    `attempt` is the 1-based `--block-retries` attempt that made this request
+    (always 1 when none was retried). A run that rotated through two proxies
+    logs the same page twice, once per attempt — each line is one real
+    request, which is the point of the log. The LAST attempt's records are
+    the ones that describe the run whose rows/exit code were reported."""
+    return {
+        "page": page,
+        "url": url,
+        "status": status,
+        "new_products": new_products,
+        "products_parsed": products_parsed,
+        "http_status": http_status,
+        "stop_reason": stop_reason,
+        "detail": detail,
+        "attempt": attempt,
+    }
+
 
 def _positive_int(value: str) -> int:
     ivalue = int(value)
@@ -152,6 +229,40 @@ def _nonnegative_float(value: str) -> float:
     if fvalue < 0:
         raise argparse.ArgumentTypeError(f"must be >= 0 (got {value!r})")
     return fvalue
+
+
+def _safe_write_page_log(records: List[dict], out_path: str, *, attempt: bool,
+                         context: str) -> Optional[str]:
+    """Write the page log, never letting its failure change the run's
+    outcome. The page log is a diagnostic sidecar beside data that is already
+    written (or a stop that is already decided): an unwritable directory, a
+    full disk or a bad `--out` path must not turn a completed run into a
+    crash, and must not mask the exit code the run actually earned."""
+    try:
+        return write_page_log(records, out_path, attempt=attempt)
+    except Exception as exc:  # noqa: BLE001 — a sidecar failure is never the run's verdict
+        log.warning("Could not write the page log (%s): %s", context, exc)
+        return None
+
+
+def _write_precheck_page_log(args: argparse.Namespace, start_url: str) -> None:
+    """The page log for a CATEGORY run the proxy pre-check refused: NO browser
+    started, so no page was ever requested. One `skipped` record naming the
+    starting page and the pre-check's own stop reason — the "attempt that
+    never started" the log must show — written to the ATTEMPT-scoped path so
+    a previous good run's <out>, <out>.meta.json and <out>.pages.json are all
+    untouched. The page number and URL come from the same helpers the real
+    loop uses, so this record and a real one are the same shape."""
+    from proxy_pool import PROXY_PRECHECK_STOP_REASON
+    page_num = gp.page_number_from_url(start_url)
+    slug = gp.category_slug_from_url(start_url)
+    url = gp.category_url(slug, page_num) if slug else start_url
+    _safe_write_page_log(
+        [_page_record(page=page_num, url=url, status=PAGE_STATUS_SKIPPED,
+                      stop_reason=PROXY_PRECHECK_STOP_REASON,
+                      detail="the proxy pre-check refused the run before a browser was started")],
+        args.out, attempt=True, context="proxy pre-check refusal",
+    )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -660,6 +771,7 @@ async def scrape_category(
     *, args: argparse.Namespace, start_url: str, browser: Browser,
     proxy_pool: Optional[ProxyPool], client: Optional[TwoCaptchaClient],
     autosolve: bool, user_agent: Optional[str],
+    page_log: Optional[List[dict]] = None, attempt: int = 1,
 ) -> Tuple[List[Product], bool, bool, int, List[int]]:
     """Paginate a category listing via `?page=N`.
 
@@ -671,6 +783,16 @@ async def scrape_category(
     in `failed_pages` and the loop moves on; it never discards the pages
     that already succeeded. That is what turns into EXIT_PARTIAL rather
     than losing a whole run to one bad page.
+
+    `page_log`, when the caller passes a list, receives one record per
+    PLANNED page of this attempt (see the page-log vocabulary above and
+    `_page_record()`): `success` for a page that was requested and parsed,
+    `failed` for one that was requested and produced nothing usable,
+    `skipped` for one the run never requested because pagination stopped
+    first. `attempt` is the 1-based `--block-retries` attempt, stamped into
+    every record, so a rotated run's log shows which attempt made which
+    request. The list is appended to, never cleared, so run() can collect
+    every attempt into one log.
     """
     blocked = False
     remote_api_error = False
@@ -683,6 +805,30 @@ async def scrape_category(
     # see gp.page_number_from_url()'s docstring for the full story (its own
     # docstring example, `--url ".../categories/crm?page=2"`, didn't work).
     start_page = gp.page_number_from_url(start_url) if slug else 1
+    planned_pages = tuple(range(start_page, start_page + args.max_pages))
+    records: List[dict] = page_log if page_log is not None else []
+
+    def _url_for(page_num: int) -> str:
+        return gp.category_url(slug, page_num) if slug else start_url
+
+    def _record(
+        *, page: int, status: str, new_products: int = 0, products_parsed: int = 0,
+        http_status: Optional[int] = None, stop_reason: str = "", detail: str = "",
+    ) -> dict:
+        record = _page_record(
+            page=page, url=_url_for(page), status=status, new_products=new_products,
+            products_parsed=products_parsed, http_status=http_status,
+            stop_reason=stop_reason, detail=detail, attempt=attempt,
+        )
+        records.append(record)
+        return record
+
+    def _skip_pages(from_index: int, reason: str, detail: str = "") -> None:
+        """Every planned page from `from_index` on was never requested."""
+        for page_num in planned_pages[from_index:]:
+            _record(page=page_num, status=PAGE_STATUS_SKIPPED,
+                    stop_reason=reason, detail=detail)
+
     proxy = proxy_pool.next() if proxy_pool else None
     log.info("Using proxy %s", proxy.masked() if proxy else "(no local proxy pool — direct connection, or a --cdp-endpoint session providing its own exit)")
     context = await _new_context(browser, proxy, user_agent, block_media=_media_policy(args, proxy))
@@ -694,18 +840,44 @@ async def scrape_category(
     last_html = ""
 
     for page_num in range(start_page, start_page + args.max_pages):
+        index = page_num - start_page
         if proxy_meter.exceeded():
-            break  # --proxy-budget-mb is spent; finish_run names the stop
-        page_url = gp.category_url(slug, page_num) if slug else start_url
+            # --proxy-budget-mb is spent: this page and every later one is
+            # never requested, which is what `skipped` records.
+            _skip_pages(index, STOP_PROXY_BUDGET, "proxy budget spent before this page was requested")
+            break  # --proxy-budget-mb is spent
+        page_url = _url_for(page_num)
         solve_mark = solve_events.mark() if solve_events else 0
         status, last_error = await _goto_with_retries(
             page, page_url, retries=args.retries, retry_delay=args.retry_delay,
             proxy_pool=proxy_pool, proxy=proxy,
         )
         if last_error is not None:
+            if last_error == proxy_meter.STOP_REASON:
+                # The budget tripped INSIDE _goto_with_retries (either before
+                # a navigation or between its retries): this page's fetch was
+                # abandoned, and no later one may start. Recorded as this
+                # page's own failure so the log names the page the budget
+                # actually stopped on, not just the ones after it.
+                _record(page=page_num, status=PAGE_STATUS_FAILED, http_status=status,
+                        stop_reason=STOP_PROXY_BUDGET,
+                        detail="proxy budget spent while fetching this page")
+                _skip_pages(index + 1, STOP_PROXY_BUDGET,
+                            "proxy budget spent before this page was requested")
+                break
             log.error("Listing page %d permanently failed to load: %s", page_num, last_error)
+            record = _record(page=page_num, status=PAGE_STATUS_FAILED, http_status=status,
+                             detail=last_error)
             failed_pages.append(page_num)
-            if page_num == start_page:
+            if index == 0:
+                # A failed first page ends the run under every branch below,
+                # so THIS record is where the stop belongs. (A later page's
+                # navigation failure is recorded `failed` with no stop_reason:
+                # the loop moves on to the next page, which is the whole
+                # point of a partial run.)
+                record["stop_reason"] = STOP_NAVIGATION_FAILED
+                _skip_pages(index + 1, STOP_NAVIGATION_FAILED,
+                            "pagination stopped on the first page's navigation failure")
                 if proxy_pool is not None and proxy is not None:
                     # Bug fixed 2026-09-23: this used to be an unconditional
                     # remote_api_error, which run()'s block_attempt loop
@@ -739,6 +911,8 @@ async def scrape_category(
             html = await page.content()
         except Exception as exc:  # noqa: BLE001 — one unreadable page degrades to a failed page
             log.warning("Could not read page %d's content: %s", page_num, exc)
+            _record(page=page_num, status=PAGE_STATUS_FAILED, http_status=status,
+                    detail=f"page content unreadable: {exc}")
             failed_pages.append(page_num)
             continue
         status, html = await _settle_autosolve(
@@ -754,6 +928,11 @@ async def scrape_category(
                             "--category/--url. Not a block, so not retried.", page_num)
             else:
                 log.info("Listing probe page %d returned HTTP 404 — treating it as catalogue exhaustion.", page_num)
+            _record(page=page_num, status=PAGE_STATUS_FAILED, http_status=404,
+                    stop_reason=STOP_HTTP_404,
+                    detail="g2.com has no such category" if page_num == start_page
+                    else "catalogue exhaustion")
+            _skip_pages(index + 1, STOP_HTTP_404, "pagination stopped on an HTTP 404")
             break
         if status is not None and status >= 400:
             # DataDome answers with a 403 rather than a redirect, so a >=400
@@ -803,6 +982,8 @@ async def scrape_category(
         if parse_result.failed:
             if page_num not in failed_pages:
                 failed_pages.append(page_num)
+            _record(page=page_num, status=PAGE_STATUS_FAILED, http_status=status,
+                    detail="g2_parser.parse_category_listing raised")
             log.error("Listing page %d could not be parsed; continuing with the next reconstructed page URL.", page_num)
             continue
         products = parse_result.products
@@ -823,6 +1004,17 @@ async def scrape_category(
                 failed_pages.append(page_num)
             if page_num == start_page:
                 pages_completed += 1
+            # Zero cards is a natural end of the listing when the page was
+            # served healthy; it is a failure only when the page was blocked.
+            _record(
+                page=page_num,
+                status=PAGE_STATUS_FAILED if blocked else PAGE_STATUS_SUCCESS,
+                http_status=status,
+                stop_reason=STOP_BLOCKED if blocked else STOP_NO_PRODUCTS,
+                detail="page was blocked" if blocked else "the listing ended here",
+            )
+            _skip_pages(index + 1, STOP_BLOCKED if blocked else STOP_NO_PRODUCTS,
+                        "pagination stopped on a page with no products")
             break
 
         pages_completed += 1
@@ -832,15 +1024,26 @@ async def scrape_category(
             # but isn't new either — output_writer.sku_key's own docstring
             # names this exact distinction. Stop rather than loop.
             log.info("Listing page %d added no new products — stopping pagination.", page_num)
+            _record(page=page_num, status=PAGE_STATUS_SUCCESS, http_status=status,
+                    new_products=0, products_parsed=len(products),
+                    stop_reason=STOP_NO_NEW_PRODUCTS,
+                    detail="every product on this page was already collected")
+            _skip_pages(index + 1, STOP_NO_NEW_PRODUCTS,
+                        "pagination stopped on a page with no new products")
             break
         seen_skus |= new_skus
         pages.append(products)
         if products:
             blocked = False
+        record = _record(page=page_num, status=PAGE_STATUS_SUCCESS, http_status=status,
+                         new_products=len(new_skus), products_parsed=len(products))
 
         if sum(len(pg) for pg in pages) >= args.max_results:
+            record["stop_reason"] = STOP_MAX_RESULTS
+            _skip_pages(index + 1, STOP_MAX_RESULTS, "--max-results reached")
             break
-        if page_num >= start_page + args.max_pages - 1:
+        if page_num >= planned_pages[-1]:
+            record["stop_reason"] = STOP_MAX_PAGES
             break
         if not gp.has_next_page(html):
             log.info(
@@ -848,6 +1051,15 @@ async def scrape_category(
                 "and stopping only when it yields no new product data.", page_num,
             )
         await asyncio.sleep(args.page_delay)
+
+    if proxy_meter.exceeded() and records and not any(
+            r["stop_reason"] == STOP_PROXY_BUDGET for r in records):
+        # The budget can trip DURING a page's own request, after the top-of-
+        # loop check: the run still stopped at the budget even when there was
+        # no later page to mark `skipped`. finish_run gives the budget stop
+        # precedence over every other outcome, so the last record names it
+        # too rather than claiming the page ended the listing normally.
+        records[-1]["stop_reason"] = STOP_PROXY_BUDGET
 
     merged = merge_pages(pages)[: args.max_results]
 
@@ -1054,12 +1266,18 @@ async def _enrich_with_pricing(
 
 def _scrape_via_scraper_api(
     *, args: argparse.Namespace, start_url: str, mode: str, client: TwoCaptchaClient,
-    cdp_url: Optional[str] = None,
+    cdp_url: Optional[str] = None, page_log: Optional[List[dict]] = None, attempt: int = 1,
 ) -> Tuple[List[Product], bool, bool, int, List[int]]:
     """`--scraper-api`'s own fetch path: one browserless HTTP call to
     2Captcha's Scraper API — no local/CDP browser, no pagination loop (a
     single static snapshot cannot paginate itself), no live DOM to inject
     a solved token into. Returns the same 5-tuple as the browser paths.
+
+    `page_log`, when given, gets ONE record for the single page this mode
+    requests — the same vocabulary the browser path's paginated loop uses,
+    so a category run is accounted for per page whichever way it was
+    fetched. There is never more than one record here: this mode cannot
+    request a second page.
 
     `--solve-captcha` is a documented no-op in this mode for exactly that
     reason: solving would hand back a token with nowhere to put it.
@@ -1074,23 +1292,37 @@ def _scrape_via_scraper_api(
     side of that session, not in
     this function; there is nothing this function itself needs to do
     differently to benefit from it beyond passing it through."""
+    page_num = gp.page_number_from_url(start_url) if mode == "category" else 1
+
+    def _one_status(status: str, *, stop_reason: str = "", detail: str = "",
+                    http_status: Optional[int] = None, new: int = 0, parsed: int = 0) -> None:
+        if page_log is not None:
+            page_log.append(_page_record(
+                page=page_num, url=start_url, status=status, new_products=new,
+                products_parsed=parsed, http_status=http_status,
+                stop_reason=stop_reason, detail=detail, attempt=attempt,
+            ))
+
     try:
         result = client.scrape_url(start_url, timeout=args.scraper_api_timeout, cdp_url=cdp_url)
     except TwoCaptchaAuthError as exc:
         log.error("Scraper API: %s", exc)
+        _one_status(PAGE_STATUS_FAILED, stop_reason=STOP_REMOTE_API_ERROR, detail=str(exc))
         return [], False, True, 0, []
     except TwoCaptchaError as exc:
         log.error("Scraper API request failed — treating as remote_api_error, not a crash: %s", exc)
+        _one_status(PAGE_STATUS_FAILED, stop_reason=STOP_REMOTE_API_ERROR, detail=str(exc))
         return [], False, True, 0, []
 
     html = result.body
     blocked = False
+    target_status = result.target_status
     not_found = result.target_status == 404
     if not_found:
         log.warning("Scraper API: target page returned HTTP 404 — no such page on g2.com; check "
                     "the URL/slug. Not a block, so not retried.")
-    elif result.target_status is not None and result.target_status >= 400:
-        log.warning("Scraper API: target page returned HTTP %d — treating as blocked.", result.target_status)
+    elif target_status is not None and target_status >= 400:
+        log.warning("Scraper API: target page returned HTTP %d — treating as blocked.", target_status)
         blocked = True
 
     if args.dump_html:
@@ -1109,7 +1341,11 @@ def _scrape_via_scraper_api(
                 "Product page fetched via Scraper API but no usable SoftwareApplication JSON-LD "
                 "was found (%s).", gp.diagnose_unexpected_page(html),
             )
+            _one_status(PAGE_STATUS_FAILED, http_status=target_status,
+                        stop_reason=STOP_NO_PRODUCTS, detail="no usable page data")
             return products, blocked, False, 0, [1]
+        _one_status(PAGE_STATUS_FAILED if blocked else PAGE_STATUS_SUCCESS,
+                    http_status=target_status, new=len(products), parsed=len(products))
         return products, blocked, False, 1, []
 
     if mode == "pricing":
@@ -1123,12 +1359,16 @@ def _scrape_via_scraper_api(
                 "(%s) — this parser is best-effort text matching, see g2_parser.py.",
                 gp.diagnose_unexpected_page(html),
             )
+        _one_status(PAGE_STATUS_FAILED if blocked else PAGE_STATUS_SUCCESS,
+                    http_status=target_status, new=len(products), parsed=len(products))
         return products, blocked, False, 1, []
 
     slug = gp.category_slug_from_url(start_url) or args.category
     parse_result = gp.parse_category_listing_safely(html, category_slug=slug, page_url=start_url)
     if parse_result.failed:
-        return [], blocked, False, 0, [gp.page_number_from_url(start_url) or 1]
+        _one_status(PAGE_STATUS_FAILED, http_status=target_status,
+                    detail="g2_parser.parse_category_listing raised")
+        return [], blocked, False, 0, [page_num]
     products = parse_result.products
     if detect_from_html(html, gp.BOT_CHALLENGE_MARKERS) and gp.count_result_cards(html) < MIN_CARD_MATCHES:
         blocked = True
@@ -1138,6 +1378,13 @@ def _scrape_via_scraper_api(
             "with --dump-html before assuming a parser regression.",
             gp.diagnose_unexpected_page(html),
         )
+    _one_status(
+        PAGE_STATUS_FAILED if (blocked or not products) else PAGE_STATUS_SUCCESS,
+        http_status=target_status, new=len(products[: args.max_results]),
+        parsed=len(products[: args.max_results]),
+        stop_reason=STOP_BLOCKED if blocked else (STOP_NO_PRODUCTS if not products else ""),
+        detail="page was blocked" if blocked else ("no products recognised" if not products else ""),
+    )
     return products[: args.max_results], blocked, False, 1, []
 
 
@@ -1228,9 +1475,11 @@ async def run(args: argparse.Namespace) -> int:
         merged: List[Product] = []
         blocked = remote_api_error = False
         pages_completed, failed_pages = 0, []
+        page_log: List[dict] = []
         for block_attempt in range(args.block_retries + 1):
             merged, blocked, remote_api_error, pages_completed, failed_pages = _scrape_via_scraper_api(
                 args=args, start_url=start_url, mode=mode, client=client, cdp_url=cdp_url,
+                page_log=page_log, attempt=block_attempt + 1,
             )
             if remote_api_error or not (blocked and not merged):
                 break
@@ -1241,12 +1490,20 @@ async def run(args: argparse.Namespace) -> int:
                 )
                 time.sleep(args.retry_delay)
         price_confirmed_pct = (sum(1 for p in merged if p.price is not None) / len(merged)) if merged else None
-        return finish_run(
+        exit_code = finish_run(
             products=merged, out_path=args.out, fmt=args.format, engine=ENGINE_NAME, url=start_url,
             pages_requested=1, pages_completed=pages_completed, failed_pages=failed_pages,
             blocked=blocked, remote_api_error=remote_api_error, allow_empty=args.allow_empty,
             started_at=started_at, price_confirmed_pct=price_confirmed_pct,
         )
+        if mode == "category" and page_log:
+            # Same sidecar rule as the browser path: a run that wrote no data
+            # keeps a previous good run's <out>.pages.json and logs this
+            # attempt at <out>.latest_attempt.pages.json instead.
+            _safe_write_page_log(page_log, args.out,
+                                 attempt=not merged and not args.allow_empty,
+                                 context="--scraper-api category outcome")
+        return exit_code
 
     if async_playwright is None:
         print(f"Error: playwright is not installed ({_PLAYWRIGHT_IMPORT_ERROR}). "
@@ -1275,6 +1532,13 @@ async def run(args: argparse.Namespace) -> int:
             started_at=started_at, env_var="G2_PROXY", site="g2.com",
         )
         if stopped is not None:
+            if mode == "category":
+                # No browser was started, so no page was ever requested: the
+                # log says exactly that, one `skipped` record per planned
+                # page. It goes to the ATTEMPT-scoped file — <out>,
+                # <out>.meta.json and <out>.pages.json of a previous good
+                # run are all left untouched.
+                _write_precheck_page_log(args, start_url)
             return stopped
 
     client = None
@@ -1294,6 +1558,13 @@ async def run(args: argparse.Namespace) -> int:
     merged: List[Product] = []
     blocked = remote_api_error = False
     pages_completed, failed_pages = 0, []
+    # The category listing's per-page log. Only category mode paginates, so
+    # only it has more than one page to account for; product/pricing runs
+    # load exactly one page and their outcome is already fully described by
+    # the meta sidecar. Records keep EVERY attempt's requests, in order —
+    # `--block-retries` can request the same page again through a new proxy,
+    # and each real request is a real request.
+    page_log: List[dict] = []
     cdp_connect_failed = False
     try:
         async with async_playwright() as pw:
@@ -1309,7 +1580,6 @@ async def run(args: argparse.Namespace) -> int:
                     browser = None
             else:
                 browser = await pw.chromium.launch(headless=args.headless)
-
             if cdp_connect_failed:
                 remote_api_error = True
             else:
@@ -1323,10 +1593,17 @@ async def run(args: argparse.Namespace) -> int:
                 # Each attempt gets a fresh context. A proxy pool advances to
                 # its next live exit; direct/CDP runs keep their fixed exit.
                 for block_attempt in range(args.block_retries + 1):
-                    merged, blocked, remote_api_error, pages_completed, failed_pages = await scrape_fn(
-                        args=args, start_url=start_url, browser=browser, proxy_pool=proxy_pool,
-                        client=client, autosolve=autosolve, user_agent=user_agent,
-                    )
+                    if mode == "category":
+                        merged, blocked, remote_api_error, pages_completed, failed_pages = await scrape_fn(
+                            args=args, start_url=start_url, browser=browser, proxy_pool=proxy_pool,
+                            client=client, autosolve=autosolve, user_agent=user_agent,
+                            page_log=page_log, attempt=block_attempt + 1,
+                        )
+                    else:
+                        merged, blocked, remote_api_error, pages_completed, failed_pages = await scrape_fn(
+                            args=args, start_url=start_url, browser=browser, proxy_pool=proxy_pool,
+                            client=client, autosolve=autosolve, user_agent=user_agent,
+                        )
                     if not (blocked and not merged) or proxy_meter.exceeded():
                         break
                     if block_attempt < args.block_retries:
@@ -1339,10 +1616,15 @@ async def run(args: argparse.Namespace) -> int:
                 await browser.close()
     except Exception:
         log.exception("Unhandled error — this is a crash, not a normal blocked/empty run")
+        if mode == "category":
+            # Attempt-scoped, so a crash mid-pagination cannot overwrite the
+            # <out>.pages.json of a previous good run.
+            _safe_write_page_log(page_log, args.out, attempt=True,
+                                 context="crash during category pagination")
         return EXIT_CRASH
 
     price_confirmed_pct = (sum(1 for p in merged if p.price is not None) / len(merged)) if merged else None
-    return finish_run(
+    exit_code = finish_run(
         products=merged,
         out_path=args.out,
         fmt=args.format,
@@ -1357,6 +1639,14 @@ async def run(args: argparse.Namespace) -> int:
         started_at=started_at,
         price_confirmed_pct=price_confirmed_pct,
     )
+    if mode == "category" and page_log:
+        # Same rule the meta sidecar follows: a run that wrote no data must
+        # not overwrite a previous good run's <out>.pages.json, so its log
+        # goes to <out>.latest_attempt.pages.json instead.
+        _safe_write_page_log(page_log, args.out,
+                             attempt=not merged and not args.allow_empty,
+                             context="category run outcome")
+    return exit_code
 
 
 async def _scrape_pricing_only(

@@ -216,6 +216,74 @@ output and no sidecar, so it can never overwrite a previous good run.
 that guard — it never turns a blocked or remote-API-error run into
 `complete`.
 
+Playwright's category runs additionally write a `<out>.pages.json` per-page
+collection log beside that sidecar (what each planned page produced, and why
+pagination stopped); it never changes a field of `<out>.meta.json`. See
+"The per-page collection log" below.
+
+`sample_output.json` / `sample_output.csv` show the schema with clearly
+labelled fictional rows (`[FICTIONAL SAMPLE ROW — not a live capture]` in
+each `title`).
+
+### The per-page collection log (Playwright engine)
+
+`<out>.meta.json` carries sums — `pages_completed` and `failed_pages` — so
+it cannot say what page 3 actually produced, or why page 4 was never
+fetched. The Playwright engine therefore writes a SECOND sidecar beside it,
+`<out>.pages.json`, with one record per PLANNED listing page:
+
+```json
+[
+  {"page": 1, "url": ".../categories/crm",        "status": "success",
+   "new_products": 3, "products_parsed": 3, "http_status": 200,
+   "stop_reason": "", "detail": "", "attempt": 1},
+  {"page": 2, "url": ".../categories/crm?page=2", "status": "success",
+   "new_products": 2, "products_parsed": 2, "http_status": 200,
+   "stop_reason": "", "detail": "", "attempt": 1},
+  {"page": 3, "url": ".../categories/crm?page=3", "status": "success",
+   "new_products": 0, "products_parsed": 2, "http_status": 200,
+   "stop_reason": "no_new_products", "detail": "every product on this page was already collected", "attempt": 1}
+]
+```
+
+| field | meaning |
+|---|---|
+| `page` | the `?page=N` number, starting at the `--url`'s own `?page=N` (not at 1) |
+| `url` | the URL this page was rebuilt from the slug as |
+| `status` | `success` — requested, parsed, contributed rows (a served page with zero cards also ends a listing: it is `success` with `stop_reason: no_products`); `failed` — requested but nothing usable (HTTP 404, a block, a navigation failure after every retry, an unreadable document, a parser exception); `skipped` — planned but NEVER requested, because pagination had already stopped |
+| `new_products` | rows this page added after deduping against every earlier page of the same attempt; summing it over the log gives the rows the attempt collected (at least the number written — `--max-results` can truncate the final page) |
+| `products_parsed` | what the page itself yielded, duplicates included (differs from `new_products` on the page that repeats earlier results) |
+| `http_status` | the document status actually served; `null` for a `skipped` page or a navigation failure that never got one |
+| `stop_reason` | why pagination ended at this page, or `""` when it did not. Values: `http_404`, `blocked`, `navigation_failed`, `no_products`, `no_new_products`, `max_pages_reached`, `max_results_reached`, `proxy_budget_exceeded`, and (pre-check only) `proxy_auth_failed` |
+| `detail` | a short human-readable explanation, never a credential |
+| `attempt` | the 1-based `--block-retries` attempt that made the request. A rotated run logs the same page once per attempt, in order; each line is one real request |
+
+A mid-run `failed` page does not stop pagination — the loop moves on to the
+next page (that is what makes a partial run possible), so that record's
+`stop_reason` stays empty and `failed_pages` in the meta sidecar carries it.
+The page the run actually stopped on is the one that names the stop.
+
+`proxy_budget_exceeded`: the page the budget stopped during is `failed`; every
+later planned page is `skipped`; the rows already collected are kept and the
+exit code is the one `finish_run` already gave a budget stop (6 with rows, 5
+without).
+
+**Which file.** A run that wrote rows writes `<out>.pages.json`, exactly
+beside `<out>.meta.json`. A run that wrote NO data (zero rows without
+`--allow-empty`, or a proxy pre-check refusal that started no browser)
+must not overwrite a previous good run's files, so its page log goes to
+`<out>.latest_attempt.pages.json` beside
+`<out>.latest_attempt.meta.json` — the same rule the meta sidecar already
+follows. A pre-check refusal records exactly one `skipped` record with
+`stop_reason: proxy_auth_failed`: the attempt that never started.
+
+The log is also written for a category run fetched through
+`--scraper-api` (one record — that mode requests one page and cannot
+paginate), and is not written for `--product` / `--pricing` runs (one
+detail page has no pagination to account for). Naming a `--out` whose
+directory is unwritable never costs the run its exit code: the sidecar is
+diagnostic, not the verdict.
+
 `sample_output.json` / `sample_output.csv` show the schema with clearly
 labelled fictional rows (`[FICTIONAL SAMPLE ROW — not a live capture]` in
 each `title`).

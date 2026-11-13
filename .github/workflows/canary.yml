@@ -107,6 +107,17 @@ jobs:
               assert share >= 0.8, (col, share)
           pages = {r['sku'] for r in rows}
           assert len(pages) == len(rows), 'duplicate sku in output'
+          # The per-page collection log must agree with the run-level
+          # sidecar: every page it calls requested really was requested (so
+          # there are at least as many as `pages_completed`, which only counts
+          # pages that yielded rows), and the NEW products each page added sum
+          # to at least the rows written (`--max-results` truncates, never
+          # invents).
+          log = json.load(open('canary_out.json.pages.json'))
+          requested = [p for p in log if p['status'] != 'skipped']
+          assert len(requested) >= meta['pages_completed'], (len(requested), meta['pages_completed'])
+          assert sum(p['new_products'] for p in log) >= len(rows), log
+          assert all(p['attempt'] >= 1 and 'page' in p and 'url' in p for p in log), log
           print(f\"canary: got {meta['product_count']} products in {meta['pages_completed']} pages\")
           "
 
@@ -119,6 +130,8 @@ jobs:
             canary_out.json
             canary_out.json.meta.json
             canary_out.json.latest_attempt.meta.json
+            canary_out.json.pages.json
+            canary_out.json.latest_attempt.pages.json
             canary_out_debug.html
           retention-days: 14
 

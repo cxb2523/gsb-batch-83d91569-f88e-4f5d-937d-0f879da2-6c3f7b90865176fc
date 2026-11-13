@@ -326,6 +326,54 @@ def meta_path_for(out_path: str) -> str:
     return f"{out_path}.meta.json"
 
 
+# --------------------------------------------------------------------------- #
+# Per-page collection log — a SECOND sidecar beside <out>.meta.json.
+#
+# The run-level sidecar answers "how did the run end" (status, stop_reason,
+# pages_completed, failed_pages). It cannot answer "what did page 3 actually
+# contain, and why did page 4 never happen" — `pages_completed` and
+# `failed_pages` are sums, not a per-page account. The page log is that
+# account: one record per listing page PLANNED (a requested page, or one the
+# run stopped before requesting — the record's own `status` says which),
+# written by the engine that paginates (Playwright's category mode), and never
+# folded into the meta sidecar so none of its existing fields change meaning.
+#
+# Naming mirrors the existing pair exactly:
+#   <out>.meta.json                  -> <out>.pages.json
+#   <out>.latest_attempt.meta.json   -> <out>.latest_attempt.pages.json
+# A run that writes no data (zero rows without --allow-empty) must not
+# overwrite a previous good run's <out>.pages.json either, so its page log
+# goes to the attempt-scoped path instead — same rule the meta sidecar
+# already follows. The proxy pre-check failure (no browser started) does the
+# same.
+# --------------------------------------------------------------------------- #
+PAGES_SUFFIX = ".pages.json"
+ATTEMPT_PAGES_SUFFIX = ".latest_attempt.pages.json"
+
+
+def pages_path_for(out_path: str) -> str:
+    return f"{out_path}{PAGES_SUFFIX}"
+
+
+def attempt_pages_path_for(out_path: str) -> str:
+    return f"{out_path}{ATTEMPT_PAGES_SUFFIX}"
+
+
+def write_page_log(records: Sequence[dict], out_path: str, *, attempt: bool = False) -> str:
+    """Write the per-page records as a JSON array (atomic, like every other
+    output file) and return the path used.
+
+    Always an array, even empty: a consumer iterating it gets an empty
+    listing rather than a special case. `attempt=True` is for a run that
+    wrote no data (or never started a browser); it lands beside
+    `<out>.latest_attempt.meta.json` and leaves `<out>` and `<out>.pages.json`
+    from an earlier good run untouched."""
+    path = attempt_pages_path_for(out_path) if attempt else pages_path_for(out_path)
+    with _atomic(path) as f:
+        json.dump(list(records), f, ensure_ascii=False, indent=2)
+    return path
+
+
 def write_meta(
     out_path: str,
     *,
