@@ -10,6 +10,22 @@ existing user would notice, the release notes lead with it.
 
 ## [Unreleased]
 
+### Added
+
+- **The Playwright engine's sidecar (`<out>.meta.json`) now carries
+  `page_outcomes`**, a per-page ledger for `--mode listing` runs. Each entry
+  records the page number (the listing's own — a run started at
+  `/c/c15_p10/` begins at 10, not 1), the requested URL, the final URL, the
+  parsed row count and an outcome label: `collected`, `empty`,
+  `duplicate_last_page` (the repeated last page this site serves past the
+  end of a category, which is what ended the run), `not_requested_site_cap`
+  (inside `--pages` but past the site's own `N／Mページ` counter),
+  `not_requested` and `failed`. Pages the site counter truncated away before
+  any request, and the page whose repetition stopped the run, are now
+  distinguishable from pages that were fetched. `pages_requested`,
+  `pages_completed`, `pages_failed` and `stop_reason` are unchanged. In
+  `--mode product` the ledger is exactly one entry.
+
 ### Changed
 
 - CI only: the scheduled canary now starts at 03:47 UTC (Mondays) instead of 05:40, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.

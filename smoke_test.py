@@ -3678,6 +3678,298 @@ def check_a_url_from_the_environment_does_not_block_the_builders():
               "captured after apply() it is the same value")
 
 
+# ---------------------------------------------------------------------------
+# The page_outcomes ledger, driven end-to-end through scrape() with the
+# browser replaced. Self-made category pages; no network anywhere.
+# ---------------------------------------------------------------------------
+
+def _listing_page_html(page, total, skus, cat="c15"):
+    """A self-made category page: the site's own tile markup, its N／Mページ
+    counter and its own asset references, holding `skus`."""
+    tiles = "".join(
+        '<li class="c-product__item">'
+        '<div class="c-product__thumb">'
+        '<a href="/site/cosmedecorte/g/g%s/" class="c-product__thumb__img">'
+        '<img src="/img/goods/S/%s_sub.png" alt="商品 %s" /></a></div>'
+        '<div class="c-product__about">'
+        '<p class="c-product__brand">コスメデコルテ</p>'
+        '<a href="/site/cosmedecorte/g/g%s/">'
+        '<p class="c-product__product-name">商品 %s</p></a>'
+        '<p class="c-product__price">1,000円<span>（税込）</span></p>'
+        '</div>'
+        '<div class="btn-items-cart"><a>カートに入れる</a></div>'
+        '</li>' % (sku, sku, sku, sku, sku)
+        for sku in skus)
+    return (
+        '<!doctype html><html lang="ja"><head><meta charset="UTF-8">'
+        '<meta name="keywords" content="%d／%dページMaison KOSE">'
+        '<link rel="canonical" '
+        'href="https://maison.kose.co.jp/site/cosmedecorte/c/%s/">'
+        '<script src="/js/sys/goods_filter.js"></script>'
+        '<script src="/js/sys/cart.js"></script>'
+        '</head><body>'
+        '<ul class="c-product-content__list js-goods-list-wrapper">'
+        '%s</ul></body></html>' % (page, total, cat, tiles))
+
+
+def _drive_scrape_offline(engine, pages_by_url, *, url, pages, mode="listing",
+                          concurrency=1, tmp):
+    """Run engine.scrape() with the browser replaced by a page server.
+
+    Every navigation is served out of `pages_by_url`; a URL missing from it
+    raises KeyError, so a run that requests a page it should not fails loudly
+    here instead of touching a network. Returns (exit_code, meta, requested).
+    """
+    import types
+    requested = []
+
+    class _Resp:
+        status = 200
+
+    class _Page:
+        def __init__(self):
+            self.url = "about:blank"
+
+        def goto(self, url, wait_until=None, timeout=None):
+            self.url = url
+            requested.append(url)
+            return _Resp()
+
+        def content(self):
+            return pages_by_url[self.url]
+
+        def wait_for_timeout(self, ms):
+            pass
+
+        def query_selector_all(self, selector):
+            return []
+
+        def evaluate(self, *a, **k):
+            return None
+
+    class _Session:
+        def __init__(self, pw, args, pool, remote=False):
+            self.page = _Page()
+            self.pool = pool
+
+        def open(self):
+            return self
+
+        def relaunch(self):
+            pass
+
+        def close(self):
+            pass
+
+    class _Playwright:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *a):
+            return False
+
+    args = types.SimpleNamespace(
+        mode=mode, url=url, pages=pages, concurrency=concurrency,
+        cdp_endpoint=None, delay=0, retries=1, retry_delay=0,
+        proxy_block_retries=0, out=os.path.join(tmp, "out"),
+        format="json", allow_empty=False, dump_html=None, category=None,
+        solve_captcha="when-blocked", twocaptcha_key=None, min_score=0.7,
+        captcha_api="v2", proxy=None, proxy_file=None,
+        proxy_rotate="per-run", proxy_shuffle=False,
+        headless=True, fingerprint=False)
+
+    saved = (engine.sync_playwright, engine._BrowserSession,
+             engine.handle_captcha_if_present)
+    engine.sync_playwright = lambda: _Playwright()
+    engine._BrowserSession = _Session
+    engine.handle_captcha_if_present = lambda *a, **k: False
+    try:
+        code = engine.scrape(args)
+    finally:
+        (engine.sync_playwright, engine._BrowserSession,
+         engine.handle_captcha_if_present) = saved
+    with open(args.out + ".meta.json", encoding="utf-8") as f:
+        meta = json.load(f)
+    return code, meta, requested
+
+
+def _cat_url(page=None):
+    base = "https://maison.kose.co.jp/site/cosmedecorte/c/c15/"
+    return base if page in (None, 1) else base.replace("c15/", "c15_p%d/" % page)
+
+
+def check_page_outcomes_on_a_normal_multi_page_run():
+    """正常多页: every page fetched, every entry 'collected'."""
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    pages_by_url = {
+        _cat_url(1): _listing_page_html(1, 5, ["A1", "A2"]),
+        _cat_url(2): _listing_page_html(2, 5, ["B1", "B2"]),
+        _cat_url(3): _listing_page_html(3, 5, ["C1", "C2"]),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        code, meta, requested = _drive_scrape_offline(
+            engine, pages_by_url, url=_cat_url(1), pages=3, tmp=tmp)
+    equal("normal run: exit 0", code, 0)
+    equal("normal run: stop_reason", meta["stop_reason"], "completed")
+    equal("normal run: pages_requested", meta["pages_requested"], 3)
+    equal("normal run: pages_completed", meta["pages_completed"], 3)
+    equal("normal run: pages_failed", meta["pages_failed"], [])
+    equal("normal run: all rows kept", meta["products"], 6)
+    ledger = meta["page_outcomes"]
+    equal("normal run: ledger pages in order",
+          [e["page"] for e in ledger], [1, 2, 3])
+    equal("normal run: every page collected",
+          [e["outcome"] for e in ledger], ["collected"] * 3)
+    equal("normal run: row counts per page",
+          [e["rows"] for e in ledger], [2, 2, 2])
+    equal("normal run: ledger URLs are the requested ones",
+          [e["url"] for e in ledger], [_cat_url(1), _cat_url(2), _cat_url(3)])
+    equal("normal run: the run really requested those pages",
+          requested, [_cat_url(1), _cat_url(2), _cat_url(3)])
+
+
+def check_page_outcomes_when_the_site_counter_truncates_the_run():
+    """请求页数超过站点计数: unrequested pages are LISTED, not dropped."""
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    pages_by_url = {
+        _cat_url(1): _listing_page_html(1, 2, ["A1", "A2"]),
+        _cat_url(2): _listing_page_html(2, 2, ["B1", "B2"]),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        code, meta, requested = _drive_scrape_offline(
+            engine, pages_by_url, url=_cat_url(1), pages=5, tmp=tmp)
+    equal("capped run: exit 0", code, 0)
+    equal("capped run: stop_reason", meta["stop_reason"], "page_cap_reached")
+    equal("capped run: pages_requested unchanged", meta["pages_requested"], 5)
+    equal("capped run: pages_completed", meta["pages_completed"], 2)
+    equal("capped run: pages_failed", meta["pages_failed"], [])
+    equal("capped run: the site counter is beside the ledger",
+          meta["pages_available"], 2)
+    ledger = meta["page_outcomes"]
+    equal("capped run: the unrequested pages are IN the ledger",
+          [e["page"] for e in ledger], [1, 2, 3, 4, 5])
+    equal("capped run: outcomes",
+          [e["outcome"] for e in ledger],
+          ["collected", "collected"] + ["not_requested_site_cap"] * 3)
+    equal("capped run: unrequested pages carry their would-be URLs",
+          [e["url"] for e in ledger[2:]],
+          [_cat_url(3), _cat_url(4), _cat_url(5)])
+    check("capped run: unrequested pages have no final_url and no rows",
+          all(e["final_url"] is None and e["rows"] == 0 for e in ledger[2:]))
+    equal("capped run: pages 3-5 were never actually requested",
+          requested, [_cat_url(1), _cat_url(2)])
+
+
+def check_page_outcomes_when_a_repeated_last_page_ends_the_run():
+    """末页重复: the page that triggered the stop is labelled truthfully."""
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    # The counter says 3 pages, but page 3 comes back as page 2 again —
+    # exactly what the site does past the end of a category.
+    pages_by_url = {
+        _cat_url(1): _listing_page_html(1, 3, ["A1", "A2"]),
+        _cat_url(2): _listing_page_html(2, 3, ["B1", "B2"]),
+        _cat_url(3): _listing_page_html(2, 3, ["B1", "B2"]),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        code, meta, requested = _drive_scrape_offline(
+            engine, pages_by_url, url=_cat_url(1), pages=3, tmp=tmp)
+    equal("duplicate run: exit 0", code, 0)
+    equal("duplicate run: stop_reason", meta["stop_reason"], "no_new_products")
+    equal("duplicate run: pages_completed", meta["pages_completed"], 3)
+    equal("duplicate run: pages_failed", meta["pages_failed"], [])
+    equal("duplicate run: the repeated rows are deduped away",
+          meta["products"], 4)
+    ledger = meta["page_outcomes"]
+    equal("duplicate run: ledger pages", [e["page"] for e in ledger], [1, 2, 3])
+    equal("duplicate run: the terminating page is named",
+          [e["outcome"] for e in ledger],
+          ["collected", "collected", "duplicate_last_page"])
+    equal("duplicate run: ...with the rows it really parsed",
+          ledger[2]["rows"], 2)
+    equal("duplicate run: page 3 really was requested",
+          requested, [_cat_url(1), _cat_url(2), _cat_url(3)])
+
+
+def check_page_outcomes_when_the_run_starts_past_page_one():
+    """起始页非 1: the ledger numbers from the START page, not from 1."""
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    pages_by_url = {
+        _cat_url(10): _listing_page_html(10, 12, ["J1", "J2"]),
+        _cat_url(11): _listing_page_html(11, 12, ["K1", "K2"]),
+        _cat_url(12): _listing_page_html(12, 12, ["L1", "L2"]),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        code, meta, requested = _drive_scrape_offline(
+            engine, pages_by_url, url=_cat_url(10), pages=3, tmp=tmp)
+    equal("p10 run: exit 0", code, 0)
+    equal("p10 run: stop_reason", meta["stop_reason"], "completed")
+    equal("p10 run: pages_completed", meta["pages_completed"], 3)
+    ledger = meta["page_outcomes"]
+    equal("p10 run: the ledger starts at 10, not normalised to 1",
+          [e["page"] for e in ledger], [10, 11, 12])
+    equal("p10 run: every page collected",
+          [e["outcome"] for e in ledger], ["collected"] * 3)
+    equal("p10 run: ledger URLs keep the _pN pages",
+          [e["url"] for e in ledger],
+          [_cat_url(10), _cat_url(11), _cat_url(12)])
+    equal("p10 run: the FIRST request was page 10",
+          requested[0], _cat_url(10))
+
+
+def check_page_outcomes_stay_ordered_under_concurrency():
+    """并发路径: the ledger is by page number, not arrival order."""
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    skus = ["A1", "B1", "C1", "D1", "E1", "F1"]
+    pages_by_url = {
+        _cat_url(n): _listing_page_html(n, 6, [skus[n - 1], skus[n - 1] + "x"])
+        for n in range(1, 7)
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        code, meta, requested = _drive_scrape_offline(
+            engine, pages_by_url, url=_cat_url(1), pages=6,
+            concurrency=3, tmp=tmp)
+    equal("concurrent run: exit 0", code, 0)
+    equal("concurrent run: stop_reason", meta["stop_reason"], "completed")
+    equal("concurrent run: pages_completed", meta["pages_completed"], 6)
+    ledger = meta["page_outcomes"]
+    equal("concurrent run: ledger ascending regardless of arrival",
+          [e["page"] for e in ledger], [1, 2, 3, 4, 5, 6])
+    equal("concurrent run: every page collected",
+          [e["outcome"] for e in ledger], ["collected"] * 6)
+    equal("concurrent run: every page was requested exactly once",
+          sorted(requested), sorted(_cat_url(n) for n in range(1, 7)))
+
+
+def check_page_outcomes_in_product_mode_is_a_single_entry():
+    """--mode product: one page, one entry, no invented pagination."""
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        code, meta, requested = _drive_scrape_offline(
+            engine, {PRODUCT_URL: PRODUCT_HTML}, url=PRODUCT_URL, pages=1,
+            mode="product", tmp=tmp)
+    equal("product run: exit 0", code, 0)
+    equal("product run: stop_reason", meta["stop_reason"], "single_page_mode")
+    ledger = meta["page_outcomes"]
+    equal("product run: exactly one ledger entry", len(ledger), 1)
+    equal("product run: the entry is page 1", ledger[0]["page"], 1)
+    equal("product run: collected", ledger[0]["outcome"], "collected")
+    equal("product run: one row", ledger[0]["rows"], 1)
+    equal("product run: only the product page was requested",
+          requested, [PRODUCT_URL])
+
+
 CHECKS = [v for k, v in sorted(globals().items()) if k.startswith("check_")]
 
 

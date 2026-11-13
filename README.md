@@ -382,6 +382,30 @@ code. `last_attempt.json` is the fix — a separate NAME, so both facts can be
 true at once. It carries the status, the stop reason, the engine, its driver
 version and how long the attempt took.
 
+### Which pages a listing run actually read
+
+The Playwright engine's sidecar also carries `page_outcomes`, a per-page
+ledger for the run, sorted by the listing's OWN page number (a run started
+at `/c/c15_p10/` begins its ledger at 10, not 1). Each entry records the
+page number, the requested URL, the final URL, how many rows the page
+parsed to, and an outcome label:
+
+| outcome | meaning |
+|---|---|
+| `collected` | fetched and parsed |
+| `empty` | fetched; the site served a page with no tiles (a tag listing's end) |
+| `duplicate_last_page` | fetched, but every row was already seen — the repeated last page this site serves past the end of a category, and the page that stopped the run |
+| `not_requested_site_cap` | inside the `--pages` count but past the site's own `N／Mページ` counter, so never fetched |
+| `not_requested` | planned but never fetched — the run stopped first |
+| `failed` | the load failed or the page was blocked |
+
+This is what tells "the site counter truncated the run" apart from "the run
+stopped on a repeated last page" apart from "the page was never asked for" —
+three causes a bare `stop_reason` cannot separate. `pages_requested`,
+`pages_completed`, `pages_failed` and `stop_reason` are unchanged; the
+ledger explains them, it does not replace them. In `--mode product` the
+ledger is exactly one entry.
+
 Every one of those files is written atomically — to a temporary file beside
 the target, then renamed — so a crash, a kill or a full disk cannot leave a
 truncated file where a complete one was.

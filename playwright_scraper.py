@@ -323,6 +323,91 @@ def page_url_start(url: str) -> int:
     return page_number_from_url(url) or 1
 
 
+# ---------------------------------------------------------------------------
+# The per-page ledger: `page_outcomes` in the sidecar
+# ---------------------------------------------------------------------------
+# `pages_completed` and `pages_failed` say HOW MANY pages a run got through;
+# they cannot say WHICH pages were fetched, which the site's own page counter
+# truncated away before they were ever requested, or which one ended the run
+# by coming back as a copy of the page before it. On this site that
+# distinction is the whole debugging story: a category listing walked past
+# its end answers HTTP 200 with its LAST PAGE AGAIN, so "the run stopped" has
+# three completely different causes that one stop_reason cannot separate.
+#
+# `page_outcomes` is therefore a per-page ledger in `<out>.meta.json`, one
+# entry per page, sorted by the listing's OWN page number — a run pointed at
+# /c/c15_p10/ starts its ledger at 10, not 1. Each entry:
+#
+#   page       the listing's own page number
+#   url        the address the page was (or would have been) requested with
+#   final_url  where the browser actually ended up; None for a page that was
+#              never requested
+#   rows       how many rows the page parsed to, before cross-page dedupe
+#   outcome    what became of the page:
+#
+#     collected              fetched and parsed
+#     empty                  fetched; the site served a page with no tiles
+#                            (a tag listing's genuine end)
+#     duplicate_last_page    fetched and held rows, but every one was already
+#                            seen — the repeated last page that ends a
+#                            category run, and the page that stopped it
+#     not_requested_site_cap inside the --pages count but past the site's own
+#                            N／Mページ counter, so never fetched
+#     not_requested          planned but never fetched: the run stopped first
+#     failed                 the load failed or the page was blocked
+#     not_found / parse_failed / unknown
+#                            the page_flow state, passed through, for a
+#                            fetched page in none of the shapes above
+#
+# It sits BESIDE pages_requested/pages_completed/pages_failed/stop_reason,
+# which keep their existing meanings exactly; the ledger explains them, it
+# does not replace them.
+def _page_outcome_label(outcome: "PageOutcome",
+                        duplicate_stop_page: Optional[int]) -> str:
+    """The ledger label for one FETCHED page."""
+    if outcome.load_failed or outcome.blocked_by:
+        return "failed"
+    if (duplicate_stop_page is not None
+            and outcome.page_num == duplicate_stop_page):
+        return "duplicate_last_page"
+    if outcome.state in ("empty", "not_found", "parse_failed", "unknown"):
+        return outcome.state
+    return "collected"
+
+
+def _page_outcomes_manifest(outcomes, unrequested, duplicate_stop_page):
+    """One ledger entry per page, ordered by the listing's own page number.
+
+    The page number is read back from each page's URL rather than taken from
+    the loop counter: the loop counts from 1 for the RUN, while the ledger
+    must count from the page the run was pointed at — a run starting at
+    /c/c15_p10/ records pages 10, 11, 12, and a consumer lining the ledger up
+    against the site's own N／Mページ counter needs the site's numbering.
+
+    `unrequested` is a list of (page, url, label) triples for pages inside
+    the requested range that were never fetched at all; they belong in the
+    ledger rather than vanishing, because "the site counter truncated the
+    run" and "the run stopped early" are exactly the two things a bare
+    stop_reason cannot tell apart.
+    """
+    entries = []
+    for oc in outcomes:
+        entries.append({
+            "page": page_number_from_url(oc.url) or oc.page_num,
+            "url": oc.url,
+            "final_url": oc.final_url,
+            "rows": len(oc.products),
+            "outcome": _page_outcome_label(oc, duplicate_stop_page),
+        })
+    for abs_page, url, label in unrequested:
+        entries.append({"page": abs_page, "url": url, "final_url": None,
+                        "rows": 0, "outcome": label})
+    # Page number, not arrival order: under --concurrency the outcomes list
+    # is in completion order, and the ledger must not be.
+    entries.sort(key=lambda e: e["page"])
+    return entries
+
+
 
 # Chromium's own names for "the proxy is the problem, not the site". Matched
 # on the error text because Playwright surfaces them as a generic Error.
@@ -1259,6 +1344,14 @@ def scrape(args) -> int:
     outcomes: List[PageOutcome] = []
     seen_keys = set()
     blocked = False
+    # Pages inside the requested range that were never REQUESTED, as
+    # (absolute_page, url, label) triples for the ledger — see
+    # _page_outcomes_manifest.
+    unrequested_pages = []
+    # The run-relative number of the page that ended the run by adding no
+    # new sku while HOLDING rows — the repeated last page this site serves
+    # past the end of a category. None when the run ended any other way.
+    duplicate_stop_page = None
     # Both modes are one row per product, so `sku` is the key for both.
     dedupe_key = "sku"
     # Why the loop ended. "completed" means every requested page was fetched;
@@ -1439,12 +1532,44 @@ def scrape(args) -> int:
                             logger.info("Page %d added no rows not already seen "
                                         "— treating that as the end of the "
                                         "listing.", page_num)
+                            if outcome.products:
+                                # The page HELD rows and every one was a
+                                # repeat: this is the repeated last page the
+                                # site serves past the end of a category,
+                                # and the ledger must say so about THIS page
+                                # rather than calling it "collected".
+                                duplicate_stop_page = outcome.page_num
                             stop_reason = "no_new_products"
                             break
 
                         if page_num - 1 < len(planned):
                             url = planned[page_num - 1]
                             time.sleep(args.delay)
+
+                # The ledger's missing half: pages inside the requested
+                # range that were never REQUESTED. Two kinds, and they must
+                # not be conflated. A page past the site's own N／Mページ
+                # counter was truncated away by the cap at planning time; a
+                # page that WAS planned but never fetched is one the run
+                # stopped before reaching (an early failure, a duplicate
+                # last page, or a concurrent dispatch that halted at the end
+                # of the listing). Recording both is what lets a reader tell
+                # "the site said there was no page 14" apart from "page 14
+                # was never asked for".
+                fetched_urls = {oc.url for oc in outcomes}
+                start_page = page_url_start(first.final_url)
+                for index, planned_url in enumerate(planned):
+                    if planned_url not in fetched_urls:
+                        unrequested_pages.append(
+                            (page_number_from_url(planned_url)
+                             or start_page + 1 + index,
+                             planned_url, "not_requested"))
+                if first.pages_available:
+                    for n in range(start_page + len(planned) + 1,
+                                   start_page + args.pages):
+                        unrequested_pages.append(
+                            (n, page_url(first.final_url, n),
+                             "not_requested_site_cap"))
         finally:
             if session is not None:
                 session.close()
@@ -1508,6 +1633,12 @@ def scrape(args) -> int:
     final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
                  if ok_pages else args.url)
 
+    # The per-page ledger, built once from the same outcomes the rows were
+    # merged from. In --mode product it is exactly one entry — a detail page
+    # has no page 2, and the ledger must not invent one.
+    page_outcomes = _page_outcomes_manifest(outcomes, unrequested_pages,
+                                            duplicate_stop_page)
+
     # One-per-run context, in the sidecar rather than repeated down a column.
     #
     # For a listing run that is the site's own arithmetic —
@@ -1557,7 +1688,7 @@ def scrape(args) -> int:
         _v = None
     _run_facts = {"engine": "playwright", "engine_version": _v,
                   "duration_seconds": round(time.monotonic() - _started, 1)}
-    extra = {**(extra or {}), **_run_facts}
+    extra = {**(extra or {}), "page_outcomes": page_outcomes, **_run_facts}
 
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       blocked=blocked, stop_reason=stop_reason,
