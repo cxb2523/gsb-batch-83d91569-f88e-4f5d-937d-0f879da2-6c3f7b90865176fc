@@ -134,6 +134,33 @@ class Mock:
             "http://127.0.0.1:%d/__reset" % self.port, timeout=5
         ).read()
 
+    def kill_session(self, session_id):
+        """Destroy a session out-of-band, as an upstream reaper would."""
+        url = (
+            "http://127.0.0.1:%d/__kill_session?session=%s"
+            % (self.port, urllib.parse.quote(session_id))
+        )
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def fail_requests(self, count=1):
+        """Arm the next ``count`` request.* commands to fail (solve error)."""
+        url = "http://127.0.0.1:%d/__fail_requests?count=%d" % (
+            self.port,
+            count,
+        )
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def stale_sessions(self, count=1):
+        """Arm the next ``count`` request.* commands to fail as stale sessions."""
+        url = "http://127.0.0.1:%d/__stale_sessions?count=%d" % (
+            self.port,
+            count,
+        )
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
     def stop(self):
         if self.proc.poll() is None:
             self.proc.terminate()
@@ -198,6 +225,11 @@ class Proxy:
 
     def post(self, target_url, body, timeout=REQUEST_TIMEOUT):
         return proxy_post(self.http_port, target_url, body, timeout=timeout)
+
+    def stats(self):
+        url = "http://127.0.0.1:%d/__flareproxy/stats" % self.http_port
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            return json.loads(resp.read().decode("utf-8"))
 
     def stop(self):
         if self.proc.poll() is None:
@@ -442,6 +474,208 @@ def test_max_timeout_env():
         mock.stop()
 
 
+@case("H. Stale session recovery on GET (upstream destroys session -> rebuild once, 200)")
+def test_stale_session_rebuild_get():
+    mock = Mock(delay=0.0)
+    proxy = Proxy(mock.port, {"FLAREPROXY_CACHE_TTL": "0"})
+    try:
+        url = "http://target.test/stale-get?n=1"
+
+        # 1. A normal request establishes the per-host session.
+        status, _body = proxy.get(url)
+        assert status == 200, "initial response status %s" % status
+        st = mock.state()
+        assert st["session_creates"] == 1, (
+            "expected 1 session create initially, got %r" % st["session_creates"]
+        )
+        assert len(st["sessions"]) == 1, "mock should hold exactly one session"
+        session_id = st["sessions"][0]
+        assert proxy.stats().get("session_rebuilds") == 0, (
+            "no rebuild should have happened yet: %r" % proxy.stats()
+        )
+
+        # 2. The upstream silently destroys the session (mock control channel).
+        mock.kill_session(session_id)
+        st = mock.state()
+        assert session_id not in st["sessions"], "session must be gone upstream"
+        creates_before = st["session_creates"]
+
+        # 3. The next request must recover: forget, rebuild once, replay.
+        status, body = proxy.get(url)
+        assert status == 200, (
+            "recovered response must be 200, got %s body=%r" % (status, body)
+        )
+
+        st = mock.state()
+        assert st["session_creates"] == creates_before + 1, (
+            "recovery must issue exactly one new sessions.create: %r"
+            % st["session_creates"]
+        )
+        assert st["sessions"] == [session_id], (
+            "the deterministic per-host session must be re-created: %r"
+            % st["sessions"]
+        )
+        # One failed attempt against the stale id, then a successful replay.
+        missing = [e for e in st["events"] if e["type"] == "missing_session"]
+        assert len(missing) == 1, (
+            "expected exactly one stale-session rejection, got %r" % missing
+        )
+        create_events = [e for e in st["events"] if e["type"] == "session_create"]
+        assert len(create_events) == 2, (
+            "expected initial + recovery session_create events, got %d"
+            % len(create_events)
+        )
+        ok_requests = [e for e in st["events"] if e["type"] == "request"]
+        assert len(ok_requests) == 2, (
+            "both the initial and the replayed request must reach upstream: %r"
+            % ok_requests
+        )
+
+        stats = proxy.stats()
+        assert stats.get("session_rebuilds") == 1, (
+            "session_rebuilds must be 1 after recovery, got %r" % stats
+        )
+    finally:
+        proxy.stop()
+        mock.stop()
+
+
+@case("I. Stale session recovery on POST (rebuild + replay, POST still not coalesced)")
+def test_stale_session_rebuild_post():
+    mock = Mock(delay=0.0)
+    proxy = Proxy(mock.port, {"FLAREPROXY_CACHE_TTL": "0"})
+    try:
+        url = "http://target.test/stale-post?op=1"
+        body_text = "action=update&value=42"
+
+        status, _ = proxy.post(url, body_text)
+        assert status == 200, "initial POST status %s" % status
+        st = mock.state()
+        assert st["session_creates"] == 1, (
+            "expected 1 session create initially, got %r" % st["session_creates"]
+        )
+        session_id = st["sessions"][0]
+
+        mock.kill_session(session_id)
+        creates_before = mock.state()["session_creates"]
+
+        # POSTs take the same recovery path but must never be coalesced.
+        status, resp_body = proxy.post(url, body_text)
+        assert status == 200, (
+            "recovered POST must be 200, got %s body=%r" % (status, resp_body)
+        )
+
+        st = mock.state()
+        assert st["session_creates"] == creates_before + 1, (
+            "POST recovery must create exactly one new session: %r"
+            % st["session_creates"]
+        )
+        # Only events recorded *after* the out-of-band kill belong to the
+        # recovery attempt: one stale rejection followed by one real POST
+        # replay (the warm-up POST happened earlier and must not be counted).
+        events = st["events"]
+        kill_idx = max(
+            i for i, e in enumerate(events) if e["type"] == "control_session_killed"
+        )
+        recovery_events = events[kill_idx + 1:]
+        post_events = [
+            e
+            for e in recovery_events
+            if e.get("type") == "request" and e.get("method") == "request.post"
+        ]
+        assert len(post_events) == 1, (
+            "the replay must be a single real POST reaching upstream: %r"
+            % post_events
+        )
+        assert post_events[0]["url"] == url
+        assert post_events[0]["session"] == session_id
+        missing = [e for e in recovery_events if e["type"] == "missing_session"]
+        assert len(missing) == 1 and missing[0]["method"] == "request.post", (
+            "the stale POST attempt must have been rejected upstream: %r" % missing
+        )
+        # The warm-up and the replay both used request.post (never coalesced).
+        all_posts = [
+            e
+            for e in events
+            if e.get("type") == "request" and e.get("method") == "request.post"
+        ]
+        assert len(all_posts) == 2, "both POSTs must reach upstream: %r" % all_posts
+        assert proxy.stats().get("session_rebuilds") == 1, (
+            "POST recovery must increment session_rebuilds: %r" % proxy.stats()
+        )
+    finally:
+        proxy.stop()
+        mock.stop()
+
+
+@case("J. Ordinary solve error does not rebuild the session (single 502, no new browser)")
+def test_solve_error_no_rebuild():
+    mock = Mock(delay=0.0)
+    proxy = Proxy(mock.port, {"FLAREPROXY_CACHE_TTL": "0"})
+    try:
+        url = "http://target.test/hard-challenge?x=1"
+
+        status, _ = proxy.get(url)
+        assert status == 200, "warm-up request status %s" % status
+        st = mock.state()
+        assert st["session_creates"] == 1
+        session_id = st["sessions"][0]
+        creates_before = st["session_creates"]
+
+        # Arm one non-session solve error (message contains no stale-session
+        # wording): the proxy must surface it as 502 and keep the session.
+        mock.fail_requests(1)
+        status, body = proxy.get(url)
+        assert status == 502, (
+            "a plain solve failure must return 502, got %s" % status
+        )
+        assert "FlareSolverr error" in body, "502 body should explain the error: %r" % body
+
+        st = mock.state()
+        assert st["session_creates"] == creates_before, (
+            "ordinary solve errors must not trigger sessions.create: %r"
+            % st["session_creates"]
+        )
+        assert st["sessions"] == [session_id], (
+            "the existing session must be retained, got %r" % st["sessions"]
+        )
+        assert proxy.stats().get("session_rebuilds") == 0, (
+            "session_rebuilds must stay 0 for non-session errors: %r"
+            % proxy.stats()
+        )
+
+        # The retained session is still usable for the next request.
+        status, _ = proxy.get(url)
+        assert status == 200, "subsequent request status %s" % status
+        st = mock.state()
+        assert st["session_creates"] == creates_before, (
+            "no further session should be created: %r" % st["session_creates"]
+        )
+    finally:
+        proxy.stop()
+        mock.stop()
+
+
+@case("K. Startup banner documents the stats read entry for session rebuilds")
+def test_startup_banner_stats_entry():
+    mock = Mock(delay=0.0)
+    proxy = Proxy(mock.port, {"FLAREPROXY_CACHE_TTL": "0"})
+    try:
+        text = Path(proxy.log_path).read_text(errors="replace")
+        assert "/__flareproxy/stats" in text, (
+            "banner must document the stats endpoint:\n%s" % text
+        )
+        assert "session_rebuilds" in text, (
+            "banner must explain the session_rebuilds counter:\n%s" % text
+        )
+        # The documented endpoint really exists and serves the counter.
+        stats = proxy.stats()
+        assert "session_rebuilds" in stats, "stats payload missing counter: %r" % stats
+    finally:
+        proxy.stop()
+        mock.stop()
+
+
 CASES = [
     test_session_reuse,
     test_cache,
@@ -450,6 +684,10 @@ CASES = [
     test_cache_disabled,
     test_post_not_coalesced,
     test_max_timeout_env,
+    test_stale_session_rebuild_get,
+    test_stale_session_rebuild_post,
+    test_solve_error_no_rebuild,
+    test_startup_banner_stats_entry,
 ]
 
 

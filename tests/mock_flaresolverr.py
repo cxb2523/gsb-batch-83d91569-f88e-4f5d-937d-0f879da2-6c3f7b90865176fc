@@ -6,11 +6,25 @@ Usage::
     python tests/mock_flaresolverr.py <port>
 
 The mock speaks the JSON-in / JSON-out ``POST /v1`` protocol used by
-FlareSolverr and additionally exposes two control endpoints that only the test
+FlareSolverr and additionally exposes control endpoints that only the test
 harness is expected to call::
 
-    GET /__state  -> JSON snapshot of counters + recorded events
-    GET /__reset  -> zero all counters and forget sessions
+    GET /__state                      -> JSON snapshot of counters + events
+    GET /__reset                      -> zero all counters and forget sessions
+    GET /__kill_session?session=<id>  -> drop a session out-of-band, as if the
+                                         upstream browser had been reaped
+    GET /__fail_requests?count=<n>    -> make the next n request.get/post
+                                         commands fail with an ordinary
+                                         (non-session) solve error
+    GET /__stale_sessions?count=<n>   -> make the next n request.get/post
+                                         commands fail with a "session not
+                                         found" error regardless of whether
+                                         the session exists (deterministic
+                                         stale-session simulation)
+
+When a ``request.*`` command references a session the mock does not know
+about, it answers ``status=error`` with a "session not found" message, the
+same way a real FlareSolverr instance reacts to a stale session id.
 
 Environment:
     MOCK_DELAY  float seconds to sleep before answering any ``request.*``
@@ -24,6 +38,7 @@ import os
 import sys
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MOCK_DELAY = float(os.getenv("MOCK_DELAY", "0") or 0)
@@ -48,6 +63,14 @@ class _State:
         self.events = []
         self.session_visits = {}    # session id -> monotonic visit counter
         self.fresh_visits = 0       # cold "fresh browser" visit counter
+        # Remaining request.* commands that must fail with an ordinary
+        # (non-session) solve error; 0 means all requests succeed.
+        self.fail_requests_remaining = 0
+        self.request_failures = 0
+        # Remaining request.* commands that must fail with a stale-session
+        # error even if a session with that id still exists upstream.
+        self.stale_sessions_remaining = 0
+        self.stale_session_failures = 0
 
     def snapshot(self):
         with self.lock:
@@ -61,6 +84,10 @@ class _State:
                 "sessions": list(self.sessions),
                 "session_visits": dict(self.session_visits),
                 "fresh_visits": self.fresh_visits,
+                "fail_requests_remaining": self.fail_requests_remaining,
+                "request_failures": self.request_failures,
+                "stale_sessions_remaining": self.stale_sessions_remaining,
+                "stale_session_failures": self.stale_session_failures,
                 "events": list(self.events),
             }
 
@@ -70,6 +97,31 @@ STATE = _State()
 
 def _record(event):
     STATE.events.append(event)
+
+
+def _kill_session(sid):
+    """Forget a session out-of-band, like an upstream reaper would."""
+    with STATE.lock:
+        existed = sid in STATE.session_set
+        STATE.session_set.discard(sid)
+        STATE.sessions = [s for s in STATE.sessions if s != sid]
+        if existed:
+            _record({"type": "control_session_killed", "session": sid})
+    return existed
+
+
+def _arm_request_failures(count):
+    """Make the next ``count`` request.* commands fail with a solve error."""
+    with STATE.lock:
+        STATE.fail_requests_remaining = max(0, int(count))
+    return STATE.fail_requests_remaining
+
+
+def _arm_stale_sessions(count):
+    """Make the next ``count`` request.* commands fail as stale-session errors."""
+    with STATE.lock:
+        STATE.stale_sessions_remaining = max(0, int(count))
+    return STATE.stale_sessions_remaining
 
 
 def _handle_command(payload):
@@ -122,16 +174,66 @@ def _handle_command(payload):
         with STATE.lock:
             STATE.requests += 1
             STATE.urls[url] = STATE.urls.get(url, 0) + 1
+            if STATE.stale_sessions_remaining > 0:
+                # Deterministic stale-session simulation: even an existing
+                # session id is reported as gone for the next few requests.
+                STATE.stale_sessions_remaining -= 1
+                STATE.stale_session_failures += 1
+                _record(
+                    {
+                        "type": "stale_session_error",
+                        "method": cmd,
+                        "url": url,
+                        "session": sid,
+                    }
+                )
+                return {
+                    "status": "error",
+                    "message": (
+                        "Session not found. Please create a session first."
+                    ),
+                }
+            if STATE.fail_requests_remaining > 0:
+                # An ordinary solve failure: no mention of the session being
+                # gone, so the proxy must treat it as a non-session error.
+                STATE.fail_requests_remaining -= 1
+                STATE.request_failures += 1
+                _record(
+                    {
+                        "type": "request_error",
+                        "method": cmd,
+                        "url": url,
+                        "session": sid,
+                        "reason": "injected_solve_failure",
+                    }
+                )
+                return {
+                    "status": "error",
+                    "message": (
+                        "Error solving the challenge. Unable to solve "
+                        "the challenge."
+                    ),
+                }
             if sid:
                 STATE.requests_with_session += 1
                 if sid not in STATE.session_set:
-                    # Be forgiving: auto-register an unknown session so the
-                    # mock never crashes on ordering races. This does NOT count
-                    # as a sessions.create call.
-                    STATE.session_set.add(sid)
-                    STATE.sessions.append(sid)
-                    STATE.session_visits.setdefault(sid, 0)
-                    _record({"type": "session_implicit", "session": sid})
+                    # The browser behind this id has been destroyed/reaped.
+                    # Mimic a real FlareSolverr answering a stale session
+                    # instead of silently resurrecting it.
+                    _record(
+                        {
+                            "type": "missing_session",
+                            "method": cmd,
+                            "url": url,
+                            "session": sid,
+                        }
+                    )
+                    return {
+                        "status": "error",
+                        "message": (
+                            "Session not found. Please create a session first."
+                        ),
+                    }
                 STATE.session_visits[sid] = STATE.session_visits.get(sid, 0) + 1
                 visit = STATE.session_visits[sid]
                 label = sid
@@ -193,13 +295,45 @@ class MockHandler(BaseHTTPRequestHandler):
             pass
 
     def do_GET(self):
-        if self.path.startswith("/__state"):
+        parsed = urllib.parse.urlsplit(self.path)
+        path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
+        if path == "/__state":
             self._send_json(STATE.snapshot())
             return
-        if self.path.startswith("/__reset"):
+        if path == "/__reset":
             with STATE.lock:
                 STATE.reset()
             self._send_json({"status": "ok"})
+            return
+        if path == "/__kill_session":
+            sid = (query.get("session") or [""])[0]
+            if not sid:
+                self._send_json(
+                    {"status": "error", "message": "session parameter required"},
+                    status=400,
+                )
+                return
+            existed = _kill_session(sid)
+            self._send_json({"status": "ok", "session": sid, "existed": existed})
+            return
+        if path == "/__fail_requests":
+            try:
+                count = int((query.get("count") or ["1"])[0])
+            except ValueError:
+                count = 1
+            armed = _arm_request_failures(count)
+            self._send_json({"status": "ok", "fail_requests_remaining": armed})
+            return
+        if path == "/__stale_sessions":
+            try:
+                count = int((query.get("count") or ["1"])[0])
+            except ValueError:
+                count = 1
+            armed = _arm_stale_sessions(count)
+            self._send_json(
+                {"status": "ok", "stale_sessions_remaining": armed}
+            )
             return
         self._send_json({"status": "error", "message": "not found"}, status=404)
 

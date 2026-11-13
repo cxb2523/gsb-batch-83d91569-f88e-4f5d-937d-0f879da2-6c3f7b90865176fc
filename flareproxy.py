@@ -271,9 +271,32 @@ class _FlareSolverrError(Exception):
     """Raised when FlareSolverr answers with ``status = "error"``."""
 
 
-# Errors after which a session's browser may be in an indeterminate state (a
-# failed or timed-out solve), so the session must be dropped and recreated.
-_SESSION_ERRORS = (_FlareSolverrError, requests.exceptions.Timeout)
+# Fragments of FlareSolverr error messages that mean the referenced browser
+# session no longer exists upstream (destroyed externally or reaped while
+# idle). Only these errors justify the costly destroy/recreate cycle; an
+# ordinary solve failure must not cause the proxy to reopen browsers.
+_SESSION_GONE_MARKERS = (
+    "session not found",
+    "session does not exist",
+    "no such session",
+    "invalid session",
+    "session expired",
+    "session has expired",
+    "session is not active",
+    "session has been destroyed",
+)
+
+
+def _is_session_gone_error(exc):
+    """True when a FlareSolverr error says the browser session is gone.
+
+    A plain solve failure (challenge failure, timeout message, ...) returns
+    ``False`` so it is surfaced as a 502 without rebuilding any session.
+    """
+    if not isinstance(exc, _FlareSolverrError):
+        return False
+    message = str(exc).lower()
+    return any(marker in message for marker in _SESSION_GONE_MARKERS)
 
 
 class _Inflight:
@@ -328,6 +351,7 @@ class FlareSolverrClient:
             "cache_hits": 0,
             "coalesced": 0,
             "session_creates": 0,
+            "session_rebuilds": 0,
             "session_errors": 0,
         }
         self._stats_lock = threading.Lock()
@@ -431,6 +455,17 @@ class FlareSolverrClient:
             self._call({"cmd": "sessions.destroy", "session": session_id})
         except Exception:  # noqa: BLE001 - best-effort cleanup
             pass
+
+    def _forget_session(self, host):
+        """Drop the local record of a host's session without calling upstream.
+
+        Used when FlareSolverr reports the session is already gone: an extra
+        ``sessions.destroy`` for an unknown id would just produce another
+        error.
+        """
+        with self._state_lock:
+            self._sessions.pop(host, None)
+            self._last_used.pop(host, None)
 
     def _reap_idle_sessions(self):
         """Drop browser sessions that have been idle for too long."""
@@ -546,19 +581,33 @@ class FlareSolverrClient:
         self._bump("requests")
         host = _host_of(url)
         if SESSION_ENABLED and host:
+            # The per-host lock serialises every request for this host and
+            # guards session (re)creation as well, so concurrent requests to
+            # the same host can never each open their own browser session.
             with self._host_lock(host):
                 session_id = self._ensure_session(host)
                 if session_id is not None:
                     try:
-                        result = self._request(url, method, post_data, session_id)
-                    except _SESSION_ERRORS:
-                        # The solve failed or timed out; the driver may be in an
-                        # indeterminate state, so drop the session and retry once
-                        # with a fresh browser.
+                        result = self._request(
+                            url, method, post_data, session_id
+                        )
+                    except _FlareSolverrError as exc:
+                        if not _is_session_gone_error(exc):
+                            # Ordinary solve failure (or any other non-session
+                            # error): do not burn a browser rebuild on it, just
+                            # let it surface as a 502.
+                            raise
+                        # The upstream session vanished out from under us
+                        # (destroyed externally or reaped while idle). Forget
+                        # the stale local record, rebuild exactly once and
+                        # replay the identical request with the new session.
                         self._bump("session_errors")
-                        self._destroy_session(host)
+                        self._forget_session(host)
+                        self._bump("session_rebuilds")
                         session_id = self._ensure_session(host)
                         if session_id is None:
+                            # Rebuild itself failed: fall back to a one-shot
+                            # sessionless request instead of failing outright.
                             return self._request_sessionless(
                                 url, method, post_data
                             )
@@ -566,8 +615,12 @@ class FlareSolverrClient:
                             result = self._request(
                                 url, method, post_data, session_id
                             )
-                        except _SESSION_ERRORS:
-                            self._destroy_session(host)
+                        except _FlareSolverrError as retry_exc:
+                            # A second failure is terminal (caller gets 502);
+                            # if the fresh session is already gone again, drop
+                            # the stale record so the next call starts clean.
+                            if _is_session_gone_error(retry_exc):
+                                self._forget_session(host)
                             raise
                     self._touch(host)
                     return result
@@ -795,6 +848,17 @@ class ProxyHTTPRequestHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionError, OSError):
             pass
 
+    def _serve_stats(self):
+        body = json.dumps(_CLIENT.stats(), indent=2, sort_keys=True).encode("utf-8")
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionError, OSError):
+            pass
+
     def _handle_http(self, method):
         try:
             url = self._resolve_target_url()
@@ -829,6 +893,9 @@ class ProxyHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/__flareproxy/ca.crt":
             self._serve_ca_cert()
+            return
+        if self.path == "/__flareproxy/stats":
+            self._serve_stats()
             return
         self._handle_http("GET")
 
@@ -1023,6 +1090,12 @@ def main():
     print(
         "  Response cache: %s"
         % ("%gs TTL" % CACHE_TTL if CACHE_TTL > 0 else "disabled"),
+        flush=True,
+    )
+    print(
+        "  Stats endpoint: http://<host>:%d/__flareproxy/stats"
+        " (session_rebuilds = stale-session rebuild count)"
+        % FLAREPROXY_PORT,
         flush=True,
     )
     print(
