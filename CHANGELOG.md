@@ -8,6 +8,23 @@ that changes a default is called out at the top of its entry.
 
 ## [Unreleased]
 
+### Added
+* `<out>.meta.json` now records one final verdict per requested URL in
+  `page_outcomes`, with per-verdict totals in `page_outcome_counts`. Each
+  entry is `{url, verdict, detail, requests}` and distinguishes `row_read`,
+  `page_not_found`, `login_wall`, `rate_limited` (the page was served
+  without its data), `parse_error` (unread/unparseable/transport failure;
+  an undecidable page is never reported as a row), and `not_requested`
+  (queued or expanded but never fetched — `already_seen` from
+  `--incremental-from`, `before_since` from `--since`, `not_attempted`,
+  `interrupted` or `proxy_budget_exceeded`). Every post expanded by
+  `--posts` gets its own entry. A retried or `--resume`d URL leaves a
+  single entry — its final outcome — and is counted once; `requests` shows
+  the navigations behind it. The existing `status`, `stop_reason`,
+  `failed_urls` and exit-code semantics (3 blocked with no rows, 4 nothing
+  found, 6 rows but incomplete) are unchanged, and `not_requested` URLs are
+  never counted as failures.
+
 ## [0.4.0] - 2026-11-05
 
 > **Behaviour changes.**

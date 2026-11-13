@@ -318,6 +318,29 @@ through a local proxy that collects nothing (see
 [Traffic through a paid proxy](#traffic-through-a-paid-proxy)): those runs
 record themselves in `<out>.latest_attempt.meta.json`, a separate file.
 
+### Per-URL page outcomes
+
+The sidecar carries one final verdict per requested URL in
+`page_outcomes` (fetch order, including every post expanded by `--posts`),
+with the per-verdict totals in `page_outcome_counts`. Each entry is
+`{"url", "verdict", "detail", "requests"}`; `requests` is how many times
+the URL was actually navigated to, so a retried or `--resume`d URL still
+leaves exactly one entry — its final outcome — and is counted once.
+
+| `verdict` | Meaning |
+|---|---|
+| `row_read` | the page's embedded data was read into a row (`detail: embedded_json`) |
+| `page_not_found` | Instagram's "page isn't available" route — no such profile or post |
+| `login_wall` | the login route, a bot challenge or an HTTP 401/403 answered instead of the page |
+| `rate_limited` | the right page route was served but its data was left out (the exit is throttled) |
+| `parse_error` | the page was fetched but could not be read, or a transport/remote failure stopped it — an undecidable page lands here, never `row_read` |
+| `not_requested` | the URL was queued or expanded but never fetched; `detail` says why: `already_seen` (`--incremental-from`), `before_since` (`--since`), `not_attempted` (the run stopped early), `interrupted`, or `proxy_budget_exceeded` |
+
+A `not_requested` URL is an incomplete run, not a failed page: it has zero
+or filtered traffic and is never counted among the failures, so a page that
+was genuinely empty or blocked is no longer confused with one that was
+simply never asked for.
+
 | Exit | Meaning |
 |---|---|
 | `0` | complete |

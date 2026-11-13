@@ -52,6 +52,75 @@ BLOCKING_STATUSES = (401, 403, 429)
 STOP_AFTER_CONSECUTIVE_BLOCKS = 3
 MAX_TIMELINE_POSTS = 12  # what a logged-out profile page embeds (measured on 20 profiles, 2026-10-04)
 
+# --------------------------------------------------------------------------- #
+# Per-URL verdicts, written one per requested URL into the sidecar
+# (`page_outcomes`). The same six values describe every engine: a fetched
+# page's verdict comes from its decide()/Outcome, and a URL the run never
+# asked for (skipped, filtered or left pending) is `not_requested` with the
+# reason named — never silently lumped with the failures. When a page cannot
+# be classified with confidence it falls to `parse_error`, never `row_read`:
+# an undecided page must not look like data.
+# --------------------------------------------------------------------------- #
+VERDICT_ROW_READ = "row_read"            # the page's embedded data was read into a row
+VERDICT_PAGE_NOT_FOUND = "page_not_found"  # Instagram's "page isn't available" route
+VERDICT_LOGIN_WALL = "login_wall"        # the login route or another block answered
+VERDICT_RATE_LIMITED = "rate_limited"    # the right route, served without its data
+VERDICT_PARSE_ERROR = "parse_error"      # unread/unparseable/transport failure: our side's failure
+VERDICT_NOT_REQUESTED = "not_requested"  # queued or expanded, but never fetched (reason named)
+
+PAGE_VERDICTS = (VERDICT_ROW_READ, VERDICT_PAGE_NOT_FOUND, VERDICT_LOGIN_WALL, VERDICT_RATE_LIMITED,
+                 VERDICT_PARSE_ERROR, VERDICT_NOT_REQUESTED)
+
+# Failures recorded for a URL that was never fetched: the verdict is
+# `not_requested` (an incomplete run, not a bad page), and the detail names
+# why. Every other fetch/parse failure is a `parse_error` verdict.
+# `interrupted` is the STOP handler's reason; `proxy_budget_exceeded` is the
+# proxy meter's stop reason (_meter.STOP_REASON).
+NOT_REQUESTED_FAILURES = ("not_attempted", "interrupted", "proxy_budget_exceeded")
+
+
+def page_outcome(record: dict) -> dict:
+    """One requested URL's final verdict from its checkpoint record.
+
+    A retried or --resume'd URL carries only its LAST record here (the
+    records dict is keyed by URL), so the verdict is the final one and the
+    URL is counted once. `detail` keeps the machine-readable reason the rest
+    of the sidecar already uses (`blocked`, `rate_limited`, `parse_error`,
+    `fetch_error`, `before_since`, ...); `requests` is how many times the URL
+    was actually fetched in this run (0 for every `not_requested`).
+    """
+    excluded = record.get("excluded")
+    if excluded:
+        return {"verdict": VERDICT_NOT_REQUESTED, "detail": excluded, "requests": record.get("requests", 0)}
+    if record.get("not_found"):
+        return {"verdict": VERDICT_PAGE_NOT_FOUND, "detail": "page_not_found", "requests": record.get("requests", 0)}
+    if record.get("rate_limited"):
+        return {"verdict": VERDICT_RATE_LIMITED, "detail": "rate_limited", "requests": record.get("requests", 0)}
+    if record.get("blocked"):
+        return {"verdict": VERDICT_LOGIN_WALL, "detail": record.get("failure") or "blocked",
+                "requests": record.get("requests", 0)}
+    failure = record.get("failure")
+    if failure in NOT_REQUESTED_FAILURES:
+        return {"verdict": VERDICT_NOT_REQUESTED, "detail": failure, "requests": record.get("requests", 0)}
+    if record.get("product"):
+        # A row with a recorded failure (e.g. an unreadable timeline or a
+        # timestamp the --since filter could not parse) is not clean data:
+        # report the failure rather than laundering it into a successful read.
+        if failure:
+            return {"verdict": VERDICT_PARSE_ERROR, "detail": failure, "requests": record.get("requests", 0)}
+        return {"verdict": VERDICT_ROW_READ, "detail": "embedded_json", "requests": record.get("requests", 0)}
+    # No product and no confident verdict: a parse/transport failure, and
+    # never a default "read".
+    return {"verdict": VERDICT_PARSE_ERROR, "detail": failure or "unknown", "requests": record.get("requests", 0)}
+
+
+def summarize_page_outcomes(outcomes: List[dict]) -> dict:
+    """Count each verdict exactly once (one entry per URL, its final one)."""
+    counts = {verdict: 0 for verdict in PAGE_VERDICTS}
+    for entry in outcomes:
+        counts[entry["verdict"]] = counts.get(entry["verdict"], 0) + 1
+    return counts
+
 
 def is_challenge(html: str) -> bool:
     """A bot-challenge marker on a page that is NOT one of Instagram's own
@@ -71,6 +140,9 @@ class Outcome:
     rate_limited: bool = False
     post_codes: List[str] = field(default_factory=list)
     timeline_status: Optional[str] = None
+    # How many times this URL was actually navigated to (a retried fetch is
+    # still ONE page verdict, but the count shows the attempts behind it).
+    requests: int = 0
 
 
 def _block_hint(scraper_api: bool) -> str:
@@ -281,6 +353,7 @@ async def fetch_item(engine: Engine, args, url: str, index: int, proxy_pool, cli
         return Outcome(None, False, False, "none", failure="fetch_error")
     try:
         last_error, status = None, None
+        requests = 0  # actual navigations to this URL, across every retry
         # `?hl=en`: Instagram localises the alt text to the visitor's language
         # (Accept-Language, the OS locale, a remote profile's, or the Scraper
         # API exit's country), and the parameter outranks all of them —
@@ -294,6 +367,7 @@ async def fetch_item(engine: Engine, args, url: str, index: int, proxy_pool, cli
                 last_error = INTERRUPTED
                 break
             try:
+                requests += 1
                 status = await session.goto(target)
                 last_error = None
                 break
@@ -327,16 +401,17 @@ async def fetch_item(engine: Engine, args, url: str, index: int, proxy_pool, cli
                         except Exception as open_exc:  # noqa: BLE001
                             _log.error("Browser connection failed — treating this URL as failed, not a crash: %s",
                                        _redact(str(open_exc)))
-                            return Outcome(None, False, False, "none", failure="fetch_error")
+                            return Outcome(None, False, False, "none", failure="fetch_error", requests=requests)
                     await engine.sleep(args.retry_delay)
         if last_error == _meter.STOP_REASON:
-            return Outcome(None, False, False, "none", failure=_meter.STOP_REASON)
+            return Outcome(None, False, False, "none", failure=_meter.STOP_REASON, requests=requests)
         if last_error in (INTERRUPTED, "proxy_pool_exhausted"):
-            return Outcome(None, False, False, "none", failure=last_error)
+            return Outcome(None, False, False, "none", failure=last_error, requests=requests)
         if last_error is not None:
             _log.error("%s permanently failed to load: %s", url, last_error)
             return Outcome(None, False, False, "none",
-                           failure="remote_api_error" if getattr(engine, "last_remote_error", False) else "fetch_error")
+                           failure="remote_api_error" if getattr(engine, "last_remote_error", False) else "fetch_error",
+                           requests=requests)
 
         html = await session.content()
         waited = 0.0
@@ -373,10 +448,12 @@ async def fetch_item(engine: Engine, args, url: str, index: int, proxy_pool, cli
                 _log.warning("Could not save --dump-html for %s: %s", url, exc)
         if getattr(engine, "last_remote_error", False) and outcome.product is None:
             outcome.failure = "remote_api_error"
+        outcome.requests = requests
         return outcome
     except Exception as exc:
         _log.warning("Fetch failed for %s: %s", url, _redact(str(exc)))
-        return Outcome(None, False, False, "none", failure="fetch_error")
+        return Outcome(None, False, False, "none", failure="fetch_error",
+                       requests=locals().get("requests", 0))
     finally:
         await _close_session(session)
 
@@ -435,7 +512,7 @@ async def run(engine: Engine, args, *, urls: List[str], proxy_pool, client, star
         if records.get(url, {}).get("done"):
             continue
         if _already_seen(args, url):
-            records[url] = {"done": True, "excluded": "already_seen"}
+            records[url] = {"done": True, "excluded": "already_seen", "requests": 0}
             run_state.save(args, urls, queue, records)
             continue
         outcome = await fetch_item(engine, args, url, i, proxy_pool, client)
@@ -465,7 +542,8 @@ async def run(engine: Engine, args, *, urls: List[str], proxy_pool, client, star
         record = {"done": not (outcome.failure or outcome.blocked),
                   "product": asdict(outcome.product) if outcome.product else None,
                   "blocked": outcome.blocked, "rate_limited": outcome.rate_limited,
-                  "failure": outcome.failure, "not_found": outcome.not_found, "excluded": excluded}
+                  "failure": outcome.failure, "not_found": outcome.not_found, "excluded": excluded,
+                  "requests": outcome.requests}
         if trimmed:
             record["trimmed_posts"] = trimmed  # kept in the checkpoint, so a --resume still reports them
         records[url] = record
@@ -485,6 +563,7 @@ async def run(engine: Engine, args, *, urls: List[str], proxy_pool, client, star
         if i < min(len(queue), args.max_results):
             await engine.sleep(args.delay_between_pages)
     products, failures, failed_pages, not_found, exclusions = [], [], [], [], []
+    page_outcomes = []  # one final verdict per requested URL, in queue order
     completed = 0
     blocked = rate_limited = remote_error = False
     for index, url in enumerate(queue[:args.max_results], 1):
@@ -505,12 +584,14 @@ async def run(engine: Engine, args, *, urls: List[str], proxy_pool, client, star
         if record.get("excluded"):
             exclusions.append({"url": url, "reason": record["excluded"]})
         exclusions.extend({"url": u, "reason": "max_results"} for u in record.get("trimmed_posts") or [])
+        verdict = page_outcome(record)
+        page_outcomes.append({"url": url, **verdict})
     code = finish(args, products=products, blocked=blocked, remote_api_error=remote_error,
                   engine_name=engine.name, urls=urls, fetched=queue[:args.max_results], started_at=started_at,
                   pages_completed=completed, failed_pages=failed_pages, failures=failures,
                   rate_limited=rate_limited, not_found=not_found,
                   capped=len(queue) > args.max_results or posts_per_profile > 0, exclusions=exclusions,
-                  media_blocked=bool(getattr(engine, "media_blocked", False)))
+                  media_blocked=bool(getattr(engine, "media_blocked", False)), page_outcomes=page_outcomes)
     if interrupted or any(f["reason"] == INTERRUPTED for f in failures):
         return STOP.report(args, rows=len(products), done=completed, total=len(queue[:args.max_results]))
     return code
@@ -519,15 +600,29 @@ async def run(engine: Engine, args, *, urls: List[str], proxy_pool, client, star
 def finish(args, *, products: List[Product], blocked: bool, remote_api_error: bool, engine_name: str,
            urls: List[str], started_at: float, pages_completed: int, failed_pages: List[int],
            failures=None, rate_limited=False, fetched: Optional[List[str]] = None, not_found=None,
-           capped: Optional[bool] = None, exclusions=None, media_blocked: bool = False) -> int:
+           capped: Optional[bool] = None, exclusions=None, media_blocked: bool = False,
+           page_outcomes: Optional[List[dict]] = None) -> int:
     budget = getattr(args, "_solve_budget", None)
     fetched = list(urls if fetched is None else fetched)
     selection = run_state.selection(args, urls)
+    if page_outcomes is None:
+        # A finish() that bypassed the fetch loop (e.g. the browser could not
+        # be reached): every requested URL stays unread, so each is a named
+        # `not_requested` verdict rather than a missing one.
+        detail = "remote_api_error" if remote_api_error else ("blocked" if blocked else "not_attempted")
+        page_outcomes = [{"url": u, "verdict": VERDICT_NOT_REQUESTED, "detail": detail, "requests": 0}
+                         for u in fetched]
     extra = {"solves_spent": budget.spent if budget is not None else 0, "selection": selection,
              "failed_urls": failures or [], "not_found_urls": not_found or [],
              "excluded_urls": exclusions or [], "incremental": bool(getattr(args, "incremental_from", None)),
              "post_window": "embedded_pinned_first" if getattr(args, "posts", 0) else None,
              "media_blocked": bool(media_blocked),
+             # One final verdict per requested URL, in fetch order, with the
+             # count per verdict. Retries and a --resume leave one entry per
+             # URL; skipped/filtered/pending URLs are `not_requested`, never
+             # counted as failures.
+             "page_outcomes": page_outcomes,
+             "page_outcome_counts": summarize_page_outcomes(page_outcomes),
              # A post's date never changes, so one before --since stays excluded:
              # remembering it spares the next delta a fetch that only drops it.
              "seen_post_skus": sorted(set(getattr(args, "_known_posts", set())) |

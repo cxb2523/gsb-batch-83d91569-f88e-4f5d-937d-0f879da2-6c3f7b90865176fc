@@ -1176,6 +1176,109 @@ def _():
     assert rc == output_writer.EXIT_REMOTE_API_ERROR and meta is None, rc
 
 
+@check("page_outcomes: one final verdict per requested URL (six verdicts), posts expanded by --posts included, counts sum to the ledger, skipped/filtered/pending URLs are not_requested (never failures), and an undecidable page is parse_error never row_read")
+def _():
+    profile, post, login_wall, not_found = _fx("profile_natgeo"), _fx("post_image"), _fx("login_wall"), _fx("not_found")
+    expanded = pp.timeline_shortcodes(profile)[0]
+    expanded_url = pp.post_url(expanded)
+    good_post, block_post, gone_post = pp.post_url("Zgood0000001"), pp.post_url("Zblock000002"), pp.post_url("Zgone0000003")
+    pages = {
+        _PROFILE_URL: {"html": profile},
+        expanded_url: {"html": post.replace("DeAZ0uAgNuA", expanded)},
+        good_post: {"html": post.replace("DeAZ0uAgNuA", "Zgood0000001")},
+        block_post: {"html": login_wall},
+        gone_post: {"html": not_found},
+    }
+    # A good/finished page between blocks keeps the run under the consecutive-block stop.
+    inputs = ["@natgeo", good_post, block_post, gone_post]
+    rc, meta, rows, eng = _pflow(pages, ["--urls-file", str(_urls_file(inputs)), "--posts", "1", "--allow-empty"])
+    verdicts = {o["url"]: o for o in meta["page_outcomes"]}
+    assert [o["url"] for o in meta["page_outcomes"]] == [u.removesuffix("?hl=en") for u in eng.asked]
+    assert len(meta["page_outcomes"]) == meta["pages_requested"]
+    assert verdicts[_PROFILE_URL]["verdict"] == "row_read" and verdicts[expanded_url]["verdict"] == "row_read"
+    assert verdicts[good_post]["verdict"] == "row_read"
+    assert verdicts[block_post]["verdict"] == "login_wall"
+    assert verdicts[gone_post]["verdict"] == "page_not_found"
+    assert all(o["requests"] == 1 for o in meta["page_outcomes"])
+    assert set(meta["page_outcome_counts"]) == set(page_flow.PAGE_VERDICTS)
+    assert sum(meta["page_outcome_counts"].values()) == len(meta["page_outcomes"])
+    assert meta["page_outcome_counts"]["row_read"] == 3
+    assert meta["page_outcome_counts"]["login_wall"] == 1
+    assert meta["page_outcome_counts"]["page_not_found"] == 1
+    assert rc == output_writer.EXIT_PARTIAL  # rows read, but a blocked page remains
+
+    # --since filters a fetched post out: not_requested/before_since, not a failure.
+    rc, meta, rows, eng = _pflow({_PROFILE_URL: {"html": profile}, _IMAGE_URL: {"html": post}},
+                                 ["--urls-file", str(_urls_file(["natgeo", _IMAGE_URL])), "--since", "2099-01-01", "--allow-empty"])
+    entry = next(o for o in meta["page_outcomes"] if o["url"] == _IMAGE_URL)
+    assert (entry["verdict"], entry["detail"]) == ("not_requested", "before_since")
+    assert not any(f["url"] == _IMAGE_URL for f in meta["failed_urls"])
+
+    # --incremental-from skips a known post without fetching it. The _pflow
+    # helper owns its output dir, so this one drives page_flow.run directly.
+    with tempfile.TemporaryDirectory() as td:
+        base = str(Path(td) / "base.json")
+
+        def _run(out, extra):
+            args = playwright_scraper.build_arg_parser().parse_args(
+                ["--urls-file", str(_urls_file(["natgeo", _IMAGE_URL])), "--delay-between-pages", "0",
+                 "--allow-empty", "--out", out, *extra])
+            args._solve_budget = page_flow.SolveBudget(args.max_solves)
+            urls, _ = page_flow.resolve_urls(args)
+            engine = _FakeEngine({_PROFILE_URL: {"html": profile}, _IMAGE_URL: {"html": post}})
+            rc = asyncio.run(page_flow.run(engine, args, urls=urls, proxy_pool=None, client=None, started_at=0.0))
+            meta = json.loads(Path(out + ".meta.json").read_text())
+            return rc, meta, engine
+
+        rc0, _, _ = _run(base, [])
+        assert rc0 == output_writer.EXIT_OK
+        rc, meta, eng = _run(str(Path(td) / "delta.json"), ["--incremental-from", base])
+        entry = next(o for o in meta["page_outcomes"] if o["url"] == _IMAGE_URL)
+        assert (entry["verdict"], entry["detail"], entry["requests"]) == ("not_requested", "already_seen", 0)
+        assert _IMAGE_URL not in [u.removesuffix("?hl=en") for u in eng.asked]
+
+    # An unread, non-Instagram page is parse_error, never a defaulted row.
+    rc, meta, rows, eng = _pflow({"*": {"html": "<html>Chromium error page</html>"}},
+                                 ["--url", "natgeo", "--allow-empty"])
+    assert meta["page_outcomes"][0]["verdict"] == "parse_error"
+    assert rc == output_writer.EXIT_REMOTE_API_ERROR
+
+
+@check("page_outcomes: a retried URL keeps only its FINAL verdict, one entry and one count however many times it was fetched")
+def _():
+    image_url = _IMAGE_URL
+
+    class _RetryEngine(_FakeEngine):
+        def __init__(self, by_url):
+            super().__init__(by_url)
+            self.navigations = 0
+
+        async def open(self, proxy):
+            engine = self
+
+            class _S(_FakeSession):
+                async def goto(self, url):
+                    engine.navigations += 1
+                    if engine.navigations == 1:
+                        raise RuntimeError("net::ERR_TIMED_OUT")
+                    return await _FakeSession.goto(self, url)
+            return _S({"html": _fx("post_image")})
+
+    args = playwright_scraper.build_arg_parser().parse_args(
+        ["--url", image_url, "--retries", "1", "--retry-delay", "0",
+         "--delay-between-pages", "0", "--allow-empty"])
+    args._solve_budget = page_flow.SolveBudget(args.max_solves)
+    urls, _ = page_flow.resolve_urls(args)
+    with tempfile.TemporaryDirectory() as td:
+        args.out = str(Path(td) / "o.json")
+        rc = asyncio.run(page_flow.run(_RetryEngine({}), args, urls=urls, proxy_pool=None, client=None, started_at=0.0))
+        meta = json.loads(Path(args.out + ".meta.json").read_text())
+    assert rc == output_writer.EXIT_OK
+    entries = [o for o in meta["page_outcomes"] if o["url"] == image_url]
+    assert len(entries) == 1 and entries[0]["verdict"] == "row_read" and entries[0]["requests"] == 2
+    assert meta["page_outcome_counts"]["row_read"] == 1 and sum(meta["page_outcome_counts"].values()) == 1
+
+
 @check("page_flow and the paid-solve budget: a page carrying a generic challenge marker (no Instagram route) gets at most --max-solves solves across the WHOLE run")
 def _():
     challenge = '<html><div class="g-recaptcha" data-sitekey="x"></div></html>'
