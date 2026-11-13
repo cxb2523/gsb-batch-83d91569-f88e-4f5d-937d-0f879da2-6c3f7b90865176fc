@@ -41,6 +41,15 @@ EXIT_ZERO_PRODUCTS = 4
 EXIT_REMOTE_API_ERROR = 5
 EXIT_PARTIAL = 6
 
+# `stop_reason` for a blocked-with-no-products run that used up EVERY proxy
+# in a `--proxy-file` list. Distinct from plain "blocked" on purpose: the
+# remedy is a fresh/more proxy exits, not a captcha-solver setting.
+PROXY_BLOCKED_EXHAUSTED = "proxy_blocked_exhausted"
+# Same exhaustion, but every exit failed to CONNECT (auth refused /
+# tunnel dead) rather than being blocked by the site: the page was never
+# obtained, so the exit code stays 5 and only the reason is proxy-specific.
+PROXY_UNUSABLE = "proxy_unusable"
+
 STATUS_BY_EXIT = {
     EXIT_OK: "complete",
     EXIT_CRASH: "crashed",
@@ -325,6 +334,7 @@ def finish_run(
     rate_limited: bool = False,
     total_results: Optional[int] = None,
     parser_found_nothing: bool = False,
+    proxy_exhausted: bool = False,
 ) -> int:
     """Decide status/exit code, write output + sidecar (or neither), return
     the process exit code. NEVER writes a sidecar for a failed run, and
@@ -351,11 +361,21 @@ def finish_run(
     if zero_products:
         if remote_api_error:
             status, exit_code = "remote_api_error", EXIT_REMOTE_API_ERROR
-            stop_reason = status
+            # Still exit 5 (the page was never obtained), but say which
+            # layer failed when the whole proxy list could not connect.
+            stop_reason = PROXY_UNUSABLE if proxy_exhausted else status
         elif blocked:
             status, exit_code = "blocked", EXIT_BLOCKED
-            # A throttle is not a block: say which one stopped the run.
-            stop_reason = "rate_limited" if rate_limited else "blocked"
+            # Say exactly WHICH cause stopped the run, most specific first.
+            # A block the proxy list could not get past is not a generic
+            # block: the remedy is fresh proxy exits, not a solver tweak.
+            # A throttle is a separate cause again.
+            if proxy_exhausted:
+                stop_reason = PROXY_BLOCKED_EXHAUSTED
+            elif rate_limited:
+                stop_reason = "rate_limited"
+            else:
+                stop_reason = "blocked"
         elif parser_found_nothing:
             # The page was served and SHEIN itself stated it holds products,
             # yet nothing parsed: that is OUR parser failing, not an empty
@@ -370,7 +390,10 @@ def finish_run(
         status, exit_code = "partial", EXIT_PARTIAL
         # A throttle is not a block: "blocked" sends the
         # reader to buy a proxy, "rate_limited" to slow down.
-        stop_reason = ("remote_api_error" if remote_api_error else "rate_limited" if rate_limited and blocked
+        stop_reason = ("remote_api_error" if remote_api_error
+                       else PROXY_BLOCKED_EXHAUSTED if proxy_exhausted and blocked
+                       else PROXY_UNUSABLE if proxy_exhausted
+                       else "rate_limited" if rate_limited and blocked
                        else "blocked" if blocked else "failed_pages" if partial else "rejected_rows")
     else:
         status, exit_code = "complete", EXIT_OK

@@ -9,6 +9,40 @@ rather than being a silent violation of that.
 
 ## [Unreleased]
 
+### Added
+
+- **Proxy rotation for a multi-entry `--proxy-file`**, with the run's
+  proxy decisions recorded in the sidecar. A fetch session is pinned to
+  one proxy and retried on it `--proxy-block-retries` times
+  (`--proxy-shuffle` randomises the order the list is tried in); it is
+  then retired and the next untried proxy is used. When every entry has
+  been tried and the last one is still blocked, the run exits **3**,
+  writes no output unless `--allow-empty`, and records
+  `stop_reason: proxy_blocked_exhausted` instead of a bare `blocked` —
+  and never falls back to a direct connection. `.meta.json` gains
+  `proxies_configured`, `proxy_shuffle`, `proxies_tried`,
+  `proxies_blocked`, `proxy_rotations` and `proxy_exhausted`. A single
+  `--proxy`/one-line file keeps the previous behaviour exactly, using
+  `--block-retries` as before. A list whose exits all fail to CONNECT
+  (auth refused / tunnel dead) is the "page never obtained" family: exit
+  **5**, no output unless `--allow-empty`, `stop_reason: proxy_unusable`.
+- **Proxy credentials are masked everywhere**: `Proxy.masked()` (logs,
+  errors and `.meta.json`) now keeps only `scheme://host:port` — the
+  username is a credential too, and the old `login=***@` form still
+  leaked it. A malformed proxy line is reported with a redacted form
+  (never the raw `user:password@...` text), and `Proxy.__repr__` is
+  masked as well.
+- **`--proxy-file` format errors are loud**: a bad line (or an
+  empty/comment-only file, or an unreadable path) exits **2** with an
+  error naming the file and line number — the whole file is never
+  silently skipped. Proxy parsing now happens BEFORE the engine's
+  driver-installed check in all three engines, so a bad file reports 2
+  even where the driver cannot run.
+- Offline tests for the three paths (rotation succeeds, every proxy
+  blocked, malformed proxy file), asserting the exit code, whether an
+  output file was written, and the masked proxy identifiers plus
+  `stop_reason` in `.meta.json`. No network is touched.
+
 ### Changed
 
 - CI only: the scheduled canary now starts at 08:27 UTC (Mondays) instead of 06:41, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.

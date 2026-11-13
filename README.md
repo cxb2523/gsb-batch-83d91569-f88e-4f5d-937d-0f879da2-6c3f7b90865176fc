@@ -139,6 +139,38 @@ two profiles were refused on every answer, including correct ones: SHEIN
 had flagged the profile itself, and only a different profile helps. The
 run then exits 3 rather than returning bad data.
 
+### Proxy rotation (`--proxy-file`)
+
+A single `--proxy` (or one entry in `--proxy-file`) behaves exactly as
+before: every attempt uses that exit, `--block-retries` retries a
+blocked-with-no-products fetch on it, and a final block exits 3 with
+`stop_reason: blocked`.
+
+Given a `--proxy-file` with **two or more entries**, each fetch session
+is pinned to one proxy:
+
+- `--proxy-shuffle` randomises the order the proxies are tried in (without
+  it, the file order is used);
+- a session that is blocked with no products is retried
+  `--proxy-block-retries` times on the **same** proxy;
+- after those retries it is retired and the **next untried** proxy in the
+  list is used (a proxy the driver reported dead — auth refused, tunnel
+  failed, repeated 403/429 — is skipped rather than tried);
+- if every proxy has been tried and the last one is still blocked, the
+  run stops with **exit 3**, writes no output unless `--allow-empty`, and
+  records `stop_reason: proxy_blocked_exhausted` — not a generic `blocked`, and
+  it never silently falls back to a direct connection. If the exits all
+  fail to CONNECT instead (auth refused, tunnel dead), the page was never
+  obtained: exit is **5** with `stop_reason: proxy_unusable`.
+
+The `.meta.json` of such a run also carries `proxies_configured`,
+`proxy_shuffle`, `proxies_tried`, `proxies_blocked`, `proxy_rotations` and
+`proxy_exhausted`. All proxy identifiers there (and in every log line and
+error message) are masked to `scheme://host:port`: neither the username
+nor the password is ever printed or written. A malformed `--proxy-file`
+line (or an empty/comment-only file) exits **2** with an error naming
+the file and line number.
+
 Paid solves are capped per run with `--max-solves` (default 8, `0` never
 pays). The count actually spent is recorded as `solves_spent` in the
 `.meta.json`.
@@ -155,9 +187,9 @@ file.
 |---|---|
 | `0` | complete |
 | `6` | partial: rows were written, but the run did not finish cleanly — `stop_reason` says why (`blocked`, `rate_limited`, `remote_api_error`, `failed_pages`, `rejected_rows`) |
-| `3` | blocked or rate-limited, no rows |
+| `3` | blocked or rate-limited (or, with a `--proxy-file` list, blocked on every proxy: `stop_reason: proxy_blocked_exhausted`), no rows |
 | `4` | the page loaded but had no products |
-| `5` | the content was never obtained, no rows: a remote service failed (Scraping Browser, Scraper API), the page never loaded, or SHEIN stated the listing holds products and none could be parsed (`stop_reason: parser_found_nothing` — the page layout has probably changed) |
+| `5` | the content was never obtained, no rows: a remote service failed (Scraping Browser, Scraper API), the page never loaded, every proxy in a `--proxy-file` list failed to connect (`stop_reason: proxy_unusable`), or SHEIN stated the listing holds products and none could be parsed (`stop_reason: parser_found_nothing` — the page layout has probably changed) |
 | `2` | bad usage |
 | `1` | crash (a bug; please report it) |
 
@@ -185,7 +217,8 @@ command line.
 | `--format` / `--out` | json / `shein_results.<format>` | output format and path |
 | `--max-scrolls` / `--stall-rounds` / `--scroll-delay` | 20 / 4 / 1.5s | how far to scroll a listing, and when to stop if nothing new appears |
 | `--cdp-endpoint` | `SHEIN_CDP_ENDPOINT` | connect to a Scraping Browser API profile instead of launching a browser |
-| `--proxy` / `--proxy-file` / `--proxy-shuffle` | `SHEIN_PROXY` | one proxy or a rotating pool (`http://login:pass@host:port` or `host:port:login:pass`) |
+| `--proxy` / `--proxy-file` / `--proxy-shuffle` | `SHEIN_PROXY` | one proxy, or a multi-entry list rotated per session (`http://login:pass@host:port` or `host:port:login:pass`) — see "Proxy rotation" above |
+| `--proxy-block-retries` | 3 | retries on the same proxy after a block with no products, before switching to the next `--proxy-file` entry (0 = switch immediately) |
 | `--solve-captcha` | when-blocked | `off` / `when-blocked` / `always` |
 | `--risk-challenge-rounds` | 5 | puzzle rounds per SHEIN challenge (0 = don't solve) |
 | `--max-solves` | 8 | paid 2Captcha solves per run (0 = never pay) |
@@ -250,7 +283,7 @@ Chromium.
 ## Development
 
 ```bash
-python3 smoke_test.py            # 108 offline checks, no network, no engine needed
+python3 smoke_test.py            # 115 offline checks, no network, no engine needed
 python3 .github/ci_checks.py     # credential scan
 ```
 

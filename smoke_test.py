@@ -337,15 +337,38 @@ def _():
         pass
 
 
-@check("proxy_pool parses a credentialed proxy and masks it in logs")
+@check("proxy_pool parses a credentialed proxy and masks BOTH credentials (username and password) in logs, keeping host:port recognisable")
 def _():
     proxies = proxy_pool.load_proxies("http://user:secretpass@host.example:8080", None)
     assert len(proxies) == 1
     p = proxies[0]
     assert p.has_auth
     masked = p.masked()
-    assert "secretpass" not in masked
-    assert "host.example" in masked
+    assert masked == "http://host.example:8080", masked
+    assert "secretpass" not in masked and "user" not in masked.replace("http://", "").split(":")[0]
+    assert "host.example" in masked and "8080" in masked
+    # A Proxy formatter accidentally used with %s / f-string must not leak:
+    assert "secretpass" not in repr(p) and "secretpass" not in str(p)
+
+
+@check("proxy_pool: a malformed proxy LINE is reported without echoing its credentials (both the URL form and the host:port:user:pass form), and an unreadable file is a ProxyParseError too")
+def _():
+    try:
+        proxy_pool.load_proxies("http://alice:hunter2@10.1.1.1:8080 extra", None)
+        raise AssertionError("expected ProxyParseError")
+    except proxy_pool.ProxyParseError as exc:
+        text = str(exc)
+    assert "alice" not in text and "hunter2" not in text, text
+
+    assert proxy_pool.redact_proxy_line("http://alice:hunter2@10.1.1.1:8080") == "http://***:***@10.1.1.1:8080"
+    assert proxy_pool.redact_proxy_line("10.1.1.1:8080:alice:hunter2") == "10.1.1.1:8080:***"
+    assert proxy_pool.redact_proxy_line("10.1.1.1:8080") == "10.1.1.1:8080"
+
+    try:
+        proxy_pool.load_proxies(None, "no-such-file.txt")
+        raise AssertionError("expected ProxyParseError for an unreadable file")
+    except proxy_pool.ProxyParseError:
+        pass
 
 
 @check("proxy_pool.redact_credentials strips login:password out of an arbitrary string")
@@ -2304,9 +2327,19 @@ class _FakeEngine:
 
     def __init__(self, scripts):
         self.scripts, self.sessions, self.slept = list(scripts), [], []
+        # mask (scheme://host:port) -> list of scripts, for proxy-rotation
+        # checks; when absent, the sequential `scripts` list is used.
+        self.by_proxy = None
+        self.opened_with = []
 
     async def open(self, proxy):
-        script = self.scripts.pop(0) if len(self.scripts) > 1 else dict(self.scripts[0])
+        self.opened_with.append(proxy.masked() if proxy is not None else None)
+        if self.by_proxy is not None:
+            key = proxy.masked() if proxy is not None else None
+            bucket = self.by_proxy.get(key) or self.by_proxy.get(None)
+            script = bucket.pop(0) if len(bucket) > 1 else dict(bucket[0])
+        else:
+            script = self.scripts.pop(0) if len(self.scripts) > 1 else dict(self.scripts[0])
         sess = _FakeSession(dict(script))
         self.sessions.append(sess)
         return sess
@@ -2315,17 +2348,32 @@ class _FakeEngine:
         self.slept.append(seconds)
 
 
-def _flow(scripts, argv=(), *, product=False, pool=None):
+def _flow(scripts, argv=(), *, product=False, pool=None, engine=None, outdir=None):
+    """One `run_browser` end-to-end pass with the fake engine.
+
+    `outdir` lets the caller inspect the OUTPUT/SIDE-CAR after the call
+    (proxy-rotation checks need `file written or not`); without it a throwaway
+    temp dir is used, exactly as before.
+    """
     import argparse as _ap
     args = playwright_scraper.build_arg_parser().parse_args(["--query", "dress", "--delay-jitter", "0", *argv])
     page_flow.init_run_state(args, shein_challenge.SolveBudget)
-    engine = _FakeEngine(scripts)
-    with tempfile.TemporaryDirectory() as td:
+    engine = engine if engine is not None else _FakeEngine(scripts)
+    if outdir is not None:
+        td = outdir
+    else:
+        td = tempfile.mkdtemp()
+    try:
         args.out = str(Path(td) / "o.json")
         url = "https://us.shein.com/x-p-1.html" if product else "https://us.shein.com/pdsearch/dress/"
         rc = asyncio.run(page_flow.run_browser(engine, args, start_url=url, is_product_page=product,
                                                proxy_pool=pool, client=None, started_at=0.0))
-        meta = json.loads(Path(args.out + ".meta.json").read_text()) if Path(args.out + ".meta.json").exists() else None
+        meta_path = Path(args.out + ".meta.json")
+        meta = json.loads(meta_path.read_text()) if meta_path.exists() else None
+    finally:
+        if outdir is None:
+            import shutil as _shutil
+            _shutil.rmtree(td, ignore_errors=True)
     assert all(s.closed for s in engine.sessions), "every opened session must be closed"
     assert isinstance(_ap, object)
     return rc, meta, engine
@@ -2369,6 +2417,9 @@ def _():
     calls = []
 
     class Pool:
+        def __len__(self):
+            return 1  # single proxy: no rotation policy applies
+
         def next(self):
             return proxy_pool.Proxy(host="10.0.0.1", port=8080)
 
@@ -2391,6 +2442,236 @@ def _():
     _flow([{"url": "https://us.shein.com/risk/challenge?captcha_type=909", "challenge_passes": True, "raw": _real_gb()}],
           ["--max-results", "5"], pool=Pool())
     assert ("fail", False) not in calls, f"a PASSED challenge must not mark the exit as failing: {calls}"
+
+
+_TEMP_PROXY_FILES: list = []
+
+
+def _write_proxy_file(lines):
+    """Write the given lines to a fresh temp file and return its path. The
+    temp file is registered in `_TEMP_PROXY_FILES`; `run()` unlinks them."""
+    fd, path = tempfile.mkstemp(suffix=".txt", prefix="proxies-")
+    import os as _os
+    with _os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    _TEMP_PROXY_FILES.append(path)
+    return path
+
+
+def _parse_argv(argv):
+    """A fully-formed args namespace, exactly as main() would hand to run()
+    (env applied, typed target preferred), so a CLI-level proxy check is
+    exercised at the same layer a user's command line reaches."""
+    args = playwright_scraper.build_arg_parser().parse_args(argv)
+    args = env_config.apply_env(args, dotenv_path="/nonexistent/.env")
+    page_flow.prefer_typed_target(args)
+    return args
+
+
+@check("proxy rotation, shuffled pool: --proxy-shuffle permutes a multi-entry --proxy-file (same entries, different starting order); without it the file's order is used verbatim; a single proxy is never shuffled")
+def _():
+    import random as _random
+    lines = [f"http://h{i}.example:80{i}" for i in range(5)]
+    path = _write_proxy_file(lines)
+    ordered = [p.masked() for p in proxy_pool.load_proxies(None, path)]
+    assert ordered == [f"http://h{i}.example:80{i}" for i in range(5)], ordered
+
+    pool = proxy_pool.ProxyPool(proxy_pool.load_proxies(None, path), shuffle=False)
+    assert [pool.next().masked() for _ in range(3)] == ordered[:3]
+    assert pool.sidecar()["proxy_shuffle"] is False
+
+    _random.seed(1234)
+    shuffled_pool = proxy_pool.ProxyPool(proxy_pool.load_proxies(None, path), shuffle=True)
+    seen = [shuffled_pool.next().masked() for _ in range(5)]
+    assert sorted(seen) == sorted(ordered), "shuffle must permute, never lose/repeat an entry"
+    assert seen != ordered, f"seeded shuffle produced the file order verbatim: {seen}"
+    assert shuffled_pool.sidecar()["proxy_shuffle"] is True
+
+    single = proxy_pool.ProxyPool(proxy_pool.load_proxies("http://only.example:8080", None), shuffle=True)
+    assert single.sidecar()["proxy_shuffle"] is False, "a single proxy has no order to shuffle"
+
+
+@check("single proxy / no proxy: the rotation policy never engages — one proxy is retried `--block-retries` times and ends as a plain `blocked`, exactly as before")
+def _():
+    gate = {"url": "https://us.shein.com/risk/challenge?captcha_type=909", "raw": None}
+    single_pool = proxy_pool.ProxyPool(
+        proxy_pool.load_proxies("http://alice:hunter2@10.1.1.1:8080", None), block_retries=3)
+    rc, meta, eng = _flow([gate], ["--block-retries", "2"], pool=single_pool, outdir=None)
+    assert rc == output_writer.EXIT_BLOCKED, rc
+    assert len(eng.sessions) == 3, len(eng.sessions)
+    assert eng.opened_with == ["http://10.1.1.1:8080"] * 3, eng.opened_with
+
+    rc, meta, eng = _flow([gate], ["--block-retries", "0"], pool=None)
+    assert rc == output_writer.EXIT_BLOCKED and len(eng.sessions) == 1, (rc, len(eng.sessions))
+    assert eng.opened_with == [None], eng.opened_with
+
+
+@check("proxy rotation, multi-proxy: --proxy-file with 2 entries rotates 1 -> 2 after --proxy-block-retries exhausted on the same proxy; the run completes on the second; .meta.json lists both exits MASKED and never the credentials")
+def _():
+    proxies = proxy_pool.load_proxies(None, _write_proxy_file([
+        "http://alice:hunter2@10.1.1.1:8080",
+        "http://bob:letmein@10.2.2.2:9090",
+    ]))
+    pool = proxy_pool.ProxyPool(proxies, shuffle=False, block_retries=1)
+    gate = {"url": "https://us.shein.com/risk/challenge?captcha_type=909", "raw": None}
+    eng = _FakeEngine([])
+    eng.by_proxy = {
+        "http://10.1.1.1:8080": [gate, gate],          # 1 block retry, then blocked again -> rotate
+        "http://10.2.2.2:9090": [{"raw": _real_gb()}],  # succeeds
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, meta, eng = _flow([], ["--max-results", "5", "--proxy-block-retries", "1", "--block-retries", "0"],
+                              pool=pool, engine=eng, outdir=td)
+        out_exists = (Path(td) / "o.json").exists()
+        meta_text = (Path(td) / "o.json.meta.json").read_text()
+    assert rc == output_writer.EXIT_OK and out_exists and meta is not None, (rc, out_exists, meta)
+    assert meta["product_count"] == 5, meta
+    assert eng.opened_with == ["http://10.1.1.1:8080", "http://10.1.1.1:8080", "http://10.2.2.2:9090"], eng.opened_with
+    assert meta["proxy_rotations"] == 1 and meta["proxies_configured"] == 2 and meta["proxy_exhausted"] is False, meta
+    assert meta["proxies_tried"] == ["http://10.1.1.1:8080", "http://10.2.2.2:9090"], meta["proxies_tried"]
+    for secret in ("alice", "hunter2", "bob", "letmein"):
+        assert secret not in meta_text, f"{secret!r} leaked into .meta.json"
+
+
+@check("proxy rotation, dead exit: a proxy the DRIVER reports dead (ERR_PROXY_CONNECTION_FAILED) is skipped for the next entry, not retried and not the end of the run")
+def _():
+    proxies = proxy_pool.load_proxies(None, _write_proxy_file([
+        "http://alice:hunter2@10.1.1.1:8080",
+        "http://bob:letmein@10.2.2.2:9090",
+    ]))
+    pool = proxy_pool.ProxyPool(proxies, shuffle=False, block_retries=3)
+    eng = _FakeEngine([])
+    eng.by_proxy = {
+        "http://10.1.1.1:8080": [{"goto": Exception("net::ERR_PROXY_CONNECTION_FAILED at https://us.shein.com"),
+                                  "raw": None}],
+        "http://10.2.2.2:9090": [{"raw": _real_gb()}],
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, meta, eng = _flow([], ["--max-results", "5", "--block-retries", "0"],
+                              pool=pool, engine=eng, outdir=td)
+        meta_text = (Path(td) / "o.json.meta.json").read_text()
+    assert rc == output_writer.EXIT_OK and meta["product_count"] == 5, (rc, meta)
+    assert eng.opened_with == ["http://10.1.1.1:8080", "http://10.2.2.2:9090"], eng.opened_with
+    for secret in ("alice", "hunter2", "bob", "letmein"):
+        assert secret not in meta_text, f"{secret!r} leaked into .meta.json"
+
+
+@check("proxy rotation, all proxies blocked: every --proxy-file entry is tried, exit is 3, NO output file without --allow-empty, and stop_reason names proxy exhaustion rather than a bare 'blocked'")
+def _():
+    proxies = proxy_pool.load_proxies(None, _write_proxy_file([
+        "http://alice:hunter2@10.1.1.1:8080",
+        "http://bob:letmein@10.2.2.2:9090",
+    ]))
+    pool = proxy_pool.ProxyPool(proxies, shuffle=False, block_retries=0)
+    gate = {"url": "https://us.shein.com/risk/challenge?captcha_type=909", "raw": None}
+    eng = _FakeEngine([])
+    eng.by_proxy = {
+        "http://10.1.1.1:8080": [gate],
+        "http://10.2.2.2:9090": [gate],
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, meta, eng = _flow([], ["--proxy-block-retries", "0", "--block-retries", "0"],
+                              pool=pool, engine=eng, outdir=td)
+        assert rc == output_writer.EXIT_BLOCKED, rc
+        assert not (Path(td) / "o.json").exists(), "a zero-product block must not write an output file"
+        assert not (Path(td) / "o.json.meta.json").exists(), "nor a sidecar, without --allow-empty"
+    assert eng.opened_with == ["http://10.1.1.1:8080", "http://10.2.2.2:9090"], eng.opened_with
+
+    # Same run with --allow-empty: the sidecar DOES get written and says
+    # exactly which proxy-level cause stopped it.
+    pool = proxy_pool.ProxyPool(proxy_pool.load_proxies(None, _write_proxy_file([
+        "http://alice:hunter2@10.1.1.1:8080",
+        "http://bob:letmein@10.2.2.2:9090",
+    ])), block_retries=0)
+    eng = _FakeEngine([])
+    eng.by_proxy = {"http://10.1.1.1:8080": [gate], "http://10.2.2.2:9090": [gate]}
+    with tempfile.TemporaryDirectory() as td:
+        rc, meta, eng = _flow([], ["--proxy-block-retries", "0", "--block-retries", "0", "--allow-empty"],
+                              pool=pool, engine=eng, outdir=td)
+        meta_text = (Path(td) / "o.json.meta.json").read_text()
+    assert rc == output_writer.EXIT_BLOCKED and meta is not None, (rc, meta)
+    assert meta["stop_reason"] == output_writer.PROXY_BLOCKED_EXHAUSTED, meta["stop_reason"]
+    assert meta["stop_reason"] != "blocked", "a proxy-exhausted block must not read as a bare 'blocked'"
+    assert meta["proxy_exhausted"] is True and meta["proxies_configured"] == 2, meta
+    assert meta["proxies_tried"] == ["http://10.1.1.1:8080", "http://10.2.2.2:9090"], meta["proxies_tried"]
+    for secret in ("alice", "hunter2", "bob", "letmein"):
+        assert secret not in meta_text, f"{secret!r} leaked into .meta.json"
+
+    # The same exhaustion via HTTP 403s (the other "this exit is burned"
+    # signal) reaches the same exit code and stop reason.
+    pool = proxy_pool.ProxyPool(proxy_pool.load_proxies(None, _write_proxy_file([
+        "http://alice:hunter2@10.1.1.1:8080",
+        "http://bob:letmein@10.2.2.2:9090",
+    ])), block_retries=1)
+    eng = _FakeEngine([])
+    eng.by_proxy = {"http://10.1.1.1:8080": [{"status": 403, "raw": None}],
+                    "http://10.2.2.2:9090": [{"status": 403, "raw": None}]}
+    with tempfile.TemporaryDirectory() as td:
+        rc, meta, eng = _flow([], ["--proxy-block-retries", "0", "--allow-empty"],
+                              pool=pool, engine=eng, outdir=td)
+        meta_text = (Path(td) / "o.json.meta.json").read_text()
+    assert rc == output_writer.EXIT_BLOCKED, rc
+    assert meta["stop_reason"] == output_writer.PROXY_BLOCKED_EXHAUSTED, meta["stop_reason"]
+    assert meta["proxy_exhausted"] is True and len(meta["proxies_blocked"]) == 2, meta
+    for secret in ("alice", "hunter2", "bob", "letmein"):
+        assert secret not in meta_text, f"{secret!r} leaked into .meta.json"
+
+    # All exits unable to CONNECT (auth/tunnel) is the "never obtained the
+    # page" family: still exit 5 (no output), but the sidecar names the
+    # proxy layer when --allow-empty asks for one.
+    pool = proxy_pool.ProxyPool(proxy_pool.load_proxies(None, _write_proxy_file([
+        "http://alice:hunter2@10.1.1.1:8080",
+        "http://bob:letmein@10.2.2.2:9090",
+    ])), block_retries=1)
+    both_dead = {"goto": Exception("net::ERR_PROXY_CONNECTION_FAILED at https://us.shein.com"), "raw": None}
+    eng = _FakeEngine([])
+    eng.by_proxy = {"http://10.1.1.1:8080": [both_dead], "http://10.2.2.2:9090": [both_dead]}
+    with tempfile.TemporaryDirectory() as td:
+        rc, meta, eng = _flow([], ["--block-retries", "0"], pool=pool, engine=eng, outdir=td)
+        assert rc == output_writer.EXIT_REMOTE_API_ERROR, rc
+        assert not (Path(td) / "o.json").exists(), "exit 5 promises no output file"
+        assert not (Path(td) / "o.json.meta.json").exists()
+    assert eng.opened_with == ["http://10.1.1.1:8080", "http://10.2.2.2:9090"], eng.opened_with
+
+    pool = proxy_pool.ProxyPool(proxy_pool.load_proxies(None, _write_proxy_file([
+        "http://alice:hunter2@10.1.1.1:8080",
+        "http://bob:letmein@10.2.2.2:9090",
+    ])), block_retries=1)
+    eng = _FakeEngine([])
+    eng.by_proxy = {"http://10.1.1.1:8080": [both_dead], "http://10.2.2.2:9090": [both_dead]}
+    with tempfile.TemporaryDirectory() as td:
+        rc, meta, eng = _flow([], ["--block-retries", "0", "--allow-empty"], pool=pool, engine=eng, outdir=td)
+        meta_text = (Path(td) / "o.json.meta.json").read_text()
+    assert rc == output_writer.EXIT_REMOTE_API_ERROR and meta["stop_reason"] == output_writer.PROXY_UNUSABLE, meta
+    for secret in ("alice", "hunter2", "bob", "letmein"):
+        assert secret not in meta_text, f"{secret!r} leaked into .meta.json"
+
+
+@check("proxy file format error: a malformed --proxy-file line exits 2 with an error naming the line (never the credential), and no direct/empty run silently proceeds; an empty/comment-only file does the same")
+def _():
+    import contextlib as _cl
+    import io as _io
+    bad_lines = ["http://alice:hunter2@10.1.1.1:8080", "not a proxy!! at all"]
+    path = _write_proxy_file(bad_lines)
+    err = _io.StringIO()
+    with _cl.redirect_stderr(err):
+        rc = asyncio.run(playwright_scraper.run(_parse_argv(["--query", "dress", "--proxy-file", path])))
+    text = err.getvalue()
+    assert rc == output_writer.EXIT_BAD_USAGE, (rc, text)
+    assert "line 2" in text, text
+    assert "alice" not in text and "hunter2" not in text, f"a credential leaked into the error: {text!r}"
+
+    empty_path = _write_proxy_file(["# only comments", "", "   "])
+    err = _io.StringIO()
+    with _cl.redirect_stderr(err):
+        rc = asyncio.run(playwright_scraper.run(_parse_argv(["--query", "dress", "--proxy-file", empty_path])))
+    assert rc == output_writer.EXIT_BAD_USAGE, rc
+    assert "no proxy entries" in err.getvalue(), err.getvalue()
+
+    # A parseable file must NOT be rejected: proves the check above is a
+    # format check, not "reject every file".
+    ok_path = _write_proxy_file(["http://alice:hunter2@10.1.1.1:8080"])
+    assert proxy_pool.load_proxies(None, ok_path)[0].masked() == "http://10.1.1.1:8080"
 
 
 @check("parser failure: a served listing whose gbRawData states 500 products but parses to none exits 5 with stop_reason parser_found_nothing, never 4/empty; a listing stating 0 is still a genuine empty (4)")
@@ -2650,6 +2931,12 @@ def run() -> int:
     """All @check-decorated functions above already ran at import time
     (that's the point — see the `check()` docstring) and self-registered
     into RESULTS. This just reports them."""
+    import os as _os
+    for _path in _TEMP_PROXY_FILES:
+        try:
+            _os.unlink(_path)
+        except OSError:
+            pass
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     failed = [(n, d) for n, ok, d in RESULTS if not ok]
     print(f"smoke_test: {passed}/{len(RESULTS)} checks passed")

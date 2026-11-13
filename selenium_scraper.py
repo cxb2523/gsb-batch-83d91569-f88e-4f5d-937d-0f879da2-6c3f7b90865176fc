@@ -128,10 +128,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Cap on PAID 2Captcha solves for the whole run, across every challenge round, block "
              "retry and scroll round (0 = never pay). Recorded as solves_spent in the sidecar.",
     )
-    p.add_argument("--proxy", default=None)
-    p.add_argument("--proxy-file", default=None)
-    p.add_argument("--proxy-shuffle", action="store_true")
-    p.add_argument("--proxy-block-retries", type=_nonnegative_int, default=3)
+    p.add_argument("--proxy", default=None, help="A single proxy, e.g. http://login:pass@host:port (or set SHEIN_PROXY)")
+    p.add_argument("--proxy-file", default=None, help="One proxy per line, same formats as --proxy. Two or more entries enable per-proxy rotation: a proxy blocked with no products is retired after --proxy-block-retries and the next one is tried")
+    p.add_argument("--proxy-shuffle", action="store_true", help="With a multi-entry --proxy-file, randomise the order proxies are tried in")
+    p.add_argument(
+        "--proxy-block-retries", type=_nonnegative_int, default=3,
+        help="With a multi-entry --proxy-file: extra retries on the SAME proxy after a blocked page with no "
+             "products before switching to the next proxy (0 = switch immediately). Single-proxy runs use --block-retries instead",
+    )
     p.add_argument("--twocaptcha-key", default=None)
     p.add_argument("--captcha-api", default=None, help="Override the 2Captcha API base URL (testing only)")
     p.add_argument("--solve-captcha", choices=["off", "when-blocked", "always"], default="when-blocked")
@@ -466,16 +470,20 @@ def run(args: argparse.Namespace) -> int:
             "for the Scraping Browser API.", file=sys.stderr,
         )
         return EXIT_BAD_USAGE
-    if webdriver is None:
-        print(f"Error: selenium is not installed ({_SELENIUM_IMPORT_ERROR}). "
-              f"pip install -r requirements-selenium.txt", file=sys.stderr)
-        return EXIT_CRASH
-
+    # Proxy arguments are validated BEFORE the driver check: a malformed
+    # --proxy/--proxy-file is a usage error (exit 2), and must be reported
+    # as such even on a machine where the engine's driver isn't installed.
     try:
         proxies = load_proxies(args.proxy, args.proxy_file)
     except ProxyParseError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_BAD_USAGE
+
+    if webdriver is None:
+        print(f"Error: selenium is not installed ({_SELENIUM_IMPORT_ERROR}). "
+              f"pip install -r requirements-selenium.txt", file=sys.stderr)
+        return EXIT_CRASH
+
     proxy_pool = ProxyPool(proxies, shuffle=args.proxy_shuffle, block_retries=args.proxy_block_retries) if proxies else None
     if args.cdp_endpoint and proxy_pool is not None:
         log.warning("Ignoring --proxy: a --cdp-endpoint session already carries its own exit IP.")

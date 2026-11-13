@@ -171,6 +171,25 @@ answers from it.
 python3 playwright_scraper.py --query "summer dress" --out /tmp/shein_proxy.json
 ```
 
+### 7a. Proxy rotation (`--proxy-file`), for real
+
+```bash
+python3 playwright_scraper.py --query "summer dress" --proxy-file proxies.txt \
+    --proxy-shuffle --proxy-block-retries 2 --out /tmp/shein_rotated.json
+```
+
+`proxies.txt` holds one proxy per line (`http://login:pass@host:port` or
+`host:port:login:pass`). The offline suite covers the three policy paths
+with a fake engine and a locally-written proxy list — a rotation that
+succeeds on the second exit, every exit blocked (`stop_reason:
+proxy_blocked_exhausted`, exit 3, no file without `--allow-empty`), and a
+malformed file (exit 2, error names the line, no credential in it) — and
+asserts every proxy identifier written to the sidecar is masked. What is
+**not** verified live: that a proxied block on one exit actually clears
+after rotation against SHEIN, and how many retries a real residential
+exit needs before it is worth rotating. That needs a real multi-exit
+proxy list and cannot be tested offline.
+
 ## 8. The Scraper API (`--scraper-api` / `--scraper-api-cdp`), for real
 
 ```bash

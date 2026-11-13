@@ -36,7 +36,7 @@ from typing import Any, List, Optional, Protocol
 import shein_parser as sp
 from captcha_solver import detect_from_html
 from output_writer import EXIT_REMOTE_API_ERROR, Product, finish_run, sku_key
-from proxy_pool import ProxyPool, is_proxy_dead_error, redact_credentials
+from proxy_pool import Proxy, ProxyPool, is_proxy_dead_error, redact_credentials
 from scraper_api_client import TwoCaptchaAuthError, TwoCaptchaClient, TwoCaptchaError
 
 log = logging.getLogger("page_flow")
@@ -121,16 +121,75 @@ def _on_gateway(url: str) -> bool:
     return any(marker in (url or "") for marker in sp.RISK_GATEWAY_URL_MARKERS)
 
 
+def _pick_proxy(proxy_pool: Optional[ProxyPool], args) -> Optional[Proxy]:
+    """The proxy a fetch session is PINNED to.
+
+    One proxy serves one session (including that session's `--block-retries`
+    retries); `run_attempts` is the only place that switches it, via
+    `ProxyPool.rotate()` after the retries were spent. Without pinning,
+    every block retry would silently consume the next pool entry and
+    `--proxy-block-retries` would never get to do its job.
+
+    The pool is consulted only for a MULTI-entry `--proxy-file`. A single
+    `--proxy`, a one-line file, or no proxy at all keeps the pre-existing
+    behaviour byte for byte: `next()` is called per attempt (a single dead
+    exit still stops the attempt, exactly as before) and no rotation can
+    ever happen.
+    """
+    if proxy_pool is None:
+        return None
+    if len(proxy_pool) < 2:
+        return proxy_pool.next()
+    pinned = getattr(args, "_pinned_proxy", None)
+    if pinned is not None and not proxy_pool.is_live(pinned):
+        # The driver already declared this exit dead (auth refused / tunnel
+        # failed / repeated 403-429). Do not re-pin to it; record the retire
+        # in the pool (so `.meta.json` says which exits were given up on)
+        # and take the next untried one.
+        proxy_pool.retire(pinned)
+        args._pinned_proxy = None
+        pinned = None
+    if pinned is None:
+        pinned = proxy_pool.next_untried(after=None)
+        if pinned is None:
+            return None
+        args._pinned_proxy = pinned
+    return pinned
+
+
 async def _open_and_navigate(engine: Engine, args, start_url: str, proxy_pool: Optional[ProxyPool], client):
     """(session, status, proxy) after a successful navigation, or
     (None, None, proxy) when the browser could not be opened or the page
     never loaded — both a remote failure, never a crash."""
-    proxy = proxy_pool.next() if proxy_pool else None
+    proxy = _pick_proxy(proxy_pool, args)
+    args._proxy_dead_error = False
+    if proxy_pool is not None and proxy is None and len(proxy_pool) > 1:
+        # Every configured proxy was reported dead by the driver (auth
+        # refused / tunnel failed / repeated 403-429). Falling back to a
+        # direct connection would silently change the exit IP the run
+        # egresses from; stop as a remote failure instead. A single proxy
+        # keeps the old behaviour: `next()` returning None already meant a
+        # direct connection before this policy existed.
+        log.error(
+            "No usable proxy left in the pool — all configured proxies failed (dead/auth). "
+            "Stopping instead of falling back to a direct connection.",
+        )
+        args._proxy_exhausted = True
+        return None, None, None
     log.info("Using proxy %s", proxy.masked() if proxy else "(no local proxy pool — direct connection, or a --cdp-endpoint session providing its own exit)")
     try:
         session = await engine.open(proxy)
     except RuntimeError as exc:
-        log.error("Browser connection failed — treating as remote_api_error, not a crash: %s", exc)
+        # Redact BEFORE logging: a driver's own message can repeat the
+        # proxy endpoint (credentials included). Logging it unredacted
+        # would leak exactly what the mask above is for.
+        message = redact_credentials(str(exc)) or type(exc).__name__
+        log.error("Browser connection failed — treating as remote_api_error, not a crash: %s", message)
+        if proxy is not None and is_proxy_dead_error(message) and proxy_pool is not None \
+                and len(proxy_pool) > 1:
+            proxy_pool.report_failure(proxy, dead=True)
+            proxy_pool.retire(proxy)
+            args._proxy_dead_error = True
         return None, None, proxy
     last_error = None
     status = None
@@ -142,10 +201,16 @@ async def _open_and_navigate(engine: Engine, args, start_url: str, proxy_pool: O
         except Exception as exc:  # noqa: BLE001 — every remote call must be bounded and reported
             last_error = redact_credentials(str(exc)).splitlines()[0] if str(exc) else type(exc).__name__
             if proxy_pool is not None and proxy is not None and is_proxy_dead_error(last_error):
-                # A dead proxy is not a timeout: report it,
-                # so the pool rotates instead of retrying the same exit.
+                # A dead proxy is not a timeout: report it, so the pool
+                # rotates instead of retrying the same exit. With another
+                # configured exit available, do not spend this session's
+                # navigation retries on an address that cannot answer at
+                # all (unchanged single-proxy path keeps them, as before).
                 proxy_pool.report_failure(proxy, dead=True)
                 log.warning("Proxy reported dead: %s", last_error)
+                if len(proxy_pool) > 1:
+                    args._proxy_dead_error = True
+                    break
             else:
                 log.warning("Navigation attempt %d/%d failed: %s", attempt + 1, args.retries + 1, last_error)
             if attempt < args.retries:
@@ -153,6 +218,11 @@ async def _open_and_navigate(engine: Engine, args, start_url: str, proxy_pool: O
     if last_error is not None:
         await session.close()
         log.error("Page permanently failed to load: %s", last_error)
+        if proxy is not None and is_proxy_dead_error(last_error) and proxy_pool is not None \
+                and len(proxy_pool) > 1:
+            # The exit itself cannot connect, and another exit is available:
+            # `run_attempts` rotates instead of ending the run on this one.
+            args._proxy_dead_error = True
         return None, None, proxy
     return session, status, proxy
 
@@ -314,11 +384,30 @@ async def fetch_product_page(engine: Engine, args, start_url: str, proxy_pool: O
         await session.close()
 
 
-async def run_attempts(attempt, args, *, sleep, label: str) -> Attempt:
-    """--block-retries ("retry before you rotate", on the SAME session) and
+async def run_attempts(attempt, args, *, sleep, label: str, proxy_pool: Optional[ProxyPool] = None) -> Attempt:
+    """--block-retries ("retry before you rotate", on the SAME proxy) and
     the ONE --rate-limit-cooldown retry, which never spends a block retry
     (audit 2026-09-30: `continue` on the last range() iteration ended the
-    loop, so the promised retry never ran)."""
+    loop, so the promised retry never ran).
+
+    Proxy rotation policy — one proxy per fetch session, retried on that
+    same proxy up to `--proxy-block-retries` times; only then is it retired
+    and the next pool entry tried (`--proxy-file` with more than one line).
+    A run blocked on its LAST available proxy ends as
+    `proxy_blocked_exhausted` (exit 3, no output unless `--allow-empty`),
+    never as a plain `blocked` and never by silently going direct.
+    Without a multi-proxy pool (single proxy / no proxy) this is exactly
+    the old behaviour: retry `--block-retries` times, then report `blocked`.
+    """
+    multi_proxy = proxy_pool is not None and len(proxy_pool) > 1
+    # Which budget governs "retry before you rotate": the proxy list's own
+    # `--proxy-block-retries` when several exits are in play, the session's
+    # `--block-retries` otherwise (single proxy / no proxy must behave
+    # exactly as before).
+    if multi_proxy:
+        retries_per_identity = proxy_pool.rotation_retries
+    else:
+        retries_per_identity = args.block_retries
     block_attempt = 0
     while True:
         result = await attempt()
@@ -338,16 +427,60 @@ async def run_attempts(attempt, args, *, sleep, label: str) -> Attempt:
                 continue
             log.warning("SHEIN rate limit reached; stopping this run without block retries. Try again after at least five minutes.")
             return result
+        if remote_api_error and multi_proxy and getattr(args, "_proxy_dead_error", False) \
+                and getattr(args, "_pinned_proxy", None) is not None:
+            # The failure WAS the exit itself (auth refused / tunnel dead /
+            # no supported proxy), and the list has more entries: rotate
+            # rather than end the run on one unusable address.
+            args._proxy_dead_error = False
+            pinned = args._pinned_proxy
+            nxt = proxy_pool.rotate(pinned)
+            if nxt is not None:
+                log.warning(
+                    "Proxy %s could not connect (driver reported it dead) — switching to the next of "
+                    "%d configured proxies.",
+                    pinned.masked(), len(proxy_pool),
+                )
+                args._pinned_proxy = nxt
+                block_attempt = 0
+                continue
+            args._proxy_exhausted = True
+            log.error("All %d configured proxies failed to connect — stopping (proxy rotation exhausted).",
+                      len(proxy_pool))
+            return result
         if remote_api_error or not (blocked and not merged):
             return result
-        if block_attempt >= args.block_retries:
-            return result
-        block_attempt += 1
-        log.warning(
-            "Blocked with zero products (%s attempt %d/%d) — retrying the same fetch before giving up.",
-            label, block_attempt, args.block_retries + 1,
-        )
-        await sleep(jittered_delay(args.retry_delay, args.delay_jitter))
+        if block_attempt < retries_per_identity:
+            block_attempt += 1
+            log.warning(
+                "Blocked with zero products (%s attempt %d/%d) — retrying the same fetch on the SAME "
+                "proxy before giving up.",
+                label, block_attempt, retries_per_identity + 1,
+            )
+            await sleep(jittered_delay(args.retry_delay, args.delay_jitter))
+            continue
+        if multi_proxy and getattr(args, "_pinned_proxy", None) is not None:
+            pinned = args._pinned_proxy
+            nxt = proxy_pool.rotate(pinned)
+            if nxt is not None:
+                log.warning(
+                    "Proxy %s blocked after %d attempt(s) with no products — switching to the next of "
+                    "%d configured proxies.",
+                    pinned.masked(), block_attempt + 1, len(proxy_pool),
+                )
+                args._pinned_proxy = nxt
+                block_attempt = 0
+                continue
+            # Retired, and no replacement: every configured exit has now
+            # been tried and blocked. Record WHY before returning, so the
+            # sidecar says `proxy_blocked_exhausted`, not a bare `blocked`.
+            args._proxy_exhausted = True
+            proxy_pool.exhausted = True
+            log.error(
+                "All %d configured proxies were tried and blocked this run (or reported dead) — stopping "
+                "(proxy rotation exhausted). A further run needs more/fresh proxy exits.", len(proxy_pool),
+            )
+        return result
 
 
 def scrape_via_scraper_api(*, args, start_url: str, is_product_page: bool, client: TwoCaptchaClient,
@@ -461,11 +594,12 @@ async def run_scraper_api(args, *, start_url: str, is_product_page: bool, engine
 
 def finish(args, *, merged: List[Product], blocked: bool, remote_api_error: bool, engine_name: str,
            start_url: str, started_at: float, pages_requested: int, pages_completed: int,
-           failed_pages: Optional[List[int]]) -> int:
+           failed_pages: Optional[List[int]], proxy_pool: Optional[ProxyPool] = None) -> int:
     """The one finish_run call, with every sidecar field the family and
     diff_runs rely on."""
     budget = getattr(args, "_solve_budget", None)
     total = getattr(args, "_total_results", None)
+    proxy_exhausted = bool(getattr(args, "_proxy_exhausted", False))
     # A served listing whose own state says it holds products, parsed to
     # nothing: a parser failure, never "the catalogue is empty".
     parser_found_nothing = bool(not merged and not blocked and not remote_api_error and total and total > 0)
@@ -475,14 +609,26 @@ def finish(args, *, merged: List[Product], blocked: bool, remote_api_error: bool
             "probably changed. Re-run with --dump-html and inspect the capture.", total,
         )
     price_confirmed_pct = (sum(1 for p in merged if p.price is not None) / len(merged)) if merged else None
+    extra_meta = {"solves_spent": budget.spent if budget is not None else 0, "sort": getattr(args, "sort", None)}
+    if proxy_pool is not None and len(proxy_pool) > 1:
+        # Rotation facts a reader needs to explain a proxy-level outcome;
+        # masked identifiers only (scheme://host:port, never credentials).
+        # Only a multi-proxy run gets them: a single `--proxy` (or no proxy
+        # at all) keeps its sidecar exactly as before this policy existed.
+        # `sidecar` is optional so a caller-supplied pool-like object
+        # (tests, older integrations) keeps working without implementing it.
+        describe = getattr(proxy_pool, "sidecar", None)
+        if callable(describe):
+            extra_meta.update(describe())
     return finish_run(
         products=merged, out_path=args.out, fmt=args.format, engine=engine_name, url=start_url,
         pages_requested=pages_requested, pages_completed=pages_completed, failed_pages=failed_pages,
         blocked=blocked, remote_api_error=remote_api_error, allow_empty=args.allow_empty,
         started_at=started_at, rejected_rows=getattr(args, "_rejected_rows", 0), max_results=args.max_results,
-        extra_meta={"solves_spent": budget.spent if budget is not None else 0, "sort": getattr(args, "sort", None)},
+        extra_meta=extra_meta,
         rate_limited=bool(getattr(args, "_rate_limited", False)), total_results=getattr(args, "_total_results", None),
         price_confirmed_pct=price_confirmed_pct, parser_found_nothing=parser_found_nothing,
+        proxy_exhausted=proxy_exhausted,
     )
 
 
@@ -496,13 +642,14 @@ async def run_browser(engine: Engine, args, *, start_url: str, is_product_page: 
         return await fetch(engine, args, start_url, proxy_pool, client)
 
     merged, blocked, remote_api_error, rounds, scroll_error = await run_attempts(
-        attempt, args, sleep=engine.sleep, label="browser-session",
+        attempt, args, sleep=engine.sleep, label="browser-session", proxy_pool=proxy_pool,
     )
     completed_rounds = rounds + 1
     return finish(args, merged=merged, blocked=blocked, remote_api_error=remote_api_error,
                   engine_name=engine.name, start_url=start_url, started_at=started_at,
                   pages_requested=args.max_scrolls, pages_completed=completed_rounds,
-                  failed_pages=[completed_rounds + 1] if scroll_error else None)
+                  failed_pages=[completed_rounds + 1] if scroll_error else None,
+                  proxy_pool=proxy_pool)
 
 
 def init_run_state(args, budget_factory) -> None:
@@ -512,6 +659,9 @@ def init_run_state(args, budget_factory) -> None:
     args._rejected_rows = 0
     args._total_results = None
     args._solve_budget = budget_factory(args.max_solves)
+    args._pinned_proxy = None
+    args._proxy_exhausted = False
+    args._proxy_dead_error = False
 
 
 __all__: List[Any] = [
