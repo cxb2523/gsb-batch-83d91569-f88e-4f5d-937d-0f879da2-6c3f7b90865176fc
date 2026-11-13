@@ -209,6 +209,46 @@ class PageOutcome:
         return not self.load_failed and self.blocked_by is None
 
 
+# The per-day manifest written to the sidecar as `archive_days` on every
+# archive run. One entry per REQUESTED day, so a reader can tell "the tag
+# published nothing that day" from "this run never asked about that day" —
+# which a single run-level stop reason cannot say. The statuses:
+DAY_OK = "ok"                         # served the day asked for; rows parsed
+DAY_REDIRECTED = "redirected"         # landed on another address (month view)
+DAY_BLOCKED = "blocked"               # a refusal page, not the listing
+DAY_LOAD_FAILED = "load_failed"       # no page arrived at all
+DAY_UNATTEMPTED = "unattempted"       # planned, but the run never tried it
+DAY_SKIPPED_EXHAUSTED = "skipped_exhausted"  # not fetched: the listing had ended
+
+
+def _day_entry(outcome: PageOutcome) -> dict:
+    """One `archive_days` row from a fetched page.
+
+    `new_skus` is filled in at merge time, when what the earlier days
+    contributed is known; until then it is 0.
+    """
+    if outcome.load_failed:
+        status = DAY_LOAD_FAILED
+    elif outcome.blocked_by is not None:
+        status = DAY_BLOCKED
+    elif redirected_away(outcome.url, outcome.final_url or outcome.url):
+        # A day with no stories redirects up to the month view: HTTP 200 and
+        # a page full of rows, for a day that has none. Recorded rather than
+        # silently merged, because those rows belong to another period.
+        status = DAY_REDIRECTED
+    else:
+        status = DAY_OK
+    return {"page": outcome.page_num, "requested_url": outcome.url,
+            "final_url": outcome.final_url, "status": status, "new_skus": 0}
+
+
+def _day_placeholder(page_num: int, url: Optional[str],
+                     status: str = DAY_UNATTEMPTED) -> dict:
+    """One `archive_days` row for a day the run never fetched."""
+    return {"page": page_num, "requested_url": url, "final_url": None,
+            "status": status, "new_skus": 0}
+
+
 # The lowest share of rows that must carry a title and an author before the
 # read is suspect. Every measured run in the README carried both on 100% of
 # rows, in every mode, so the floor sits high; 90% leaves room for a deleted
@@ -778,16 +818,16 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
     for t in threads:
         t.join()
 
-    # Anything still queued was never attempted (a worker died, or dispatch
-    # stopped at the end of the listing). NOT reported as failed pages: they
-    # were not tried, and claiming otherwise would overstate the damage.
-    unattempted = []
-    while True:
-        try:
-            unattempted.append(work.get_nowait()[0])
-        except queue.Empty:
-            break
-    return results, sorted(unattempted), exhausted.is_set()
+    # Anything without an outcome was never attempted: still queued when
+    # dispatch stopped, or checked out by a worker that died before it could
+    # record a result — a page lost that way used to vanish from the
+    # accounting entirely. NOT reported as failed pages: they were not
+    # tried, and claiming otherwise would overstate the damage. Returned as
+    # (page_num, url) pairs so the sidecar's per-day manifest can name the
+    # day that was never tried.
+    attempted = {o.page_num for o in results}
+    unattempted = sorted((n, u) for n, u in specs if n not in attempted)
+    return results, unattempted, exhausted.is_set()
 
 
 def _fetch_one_page(session, args, pool, page_num: int, url: Optional[str]) -> PageOutcome:
@@ -1177,6 +1217,10 @@ def scrape(args) -> int:
     blocked = False
     dedupe_key = "sku"
     stop_reason = "completed"
+    # The per-day manifest, archive mode only: one entry per requested day,
+    # written to the sidecar as `archive_days`. `new_skus` is filled in at
+    # merge time.
+    day_manifest: List[dict] = []
 
     pool = proxy_pool_from_args(args)
     if pool and args.cdp_endpoint:
@@ -1246,6 +1290,14 @@ def scrape(args) -> int:
                 stop_reason = ("page_load_timeout" if first.load_failed
                                else f"blocked_{first.blocked_by}")
                 blocked = first.blocked_by is not None
+                if by_url:
+                    # Day 1 is recorded, and every later day is one this run
+                    # never reached — the manifest says so rather than
+                    # leaving the gap to be read as an empty catalogue.
+                    day_manifest.append(_day_entry(first))
+                    day_manifest.extend(
+                        _day_placeholder(n, page_url(args.url, n))
+                        for n in range(2, args.pages + 1))
 
             elif by_url:
                 seen_keys.update(p.sku for p in first.products if p.sku is not None)
@@ -1260,6 +1312,10 @@ def scrape(args) -> int:
                 # another.
                 drift = redirected_away(args.url, first.final_url or args.url)
                 planned = None
+                # Day 1's entry records the redirect through its final_url —
+                # `_day_entry` reads the drift off the outcome. The rows it
+                # gathered are kept and written either way.
+                day_manifest.append(_day_entry(first))
                 if drift:
                     logger.warning(
                         "Not walking further days: %s. A day with no stories "
@@ -1269,6 +1325,9 @@ def scrape(args) -> int:
                         "the tag actually published on, or use --mode tag.",
                         drift)
                     stop_reason = "pagination_redirected"
+                    day_manifest.extend(
+                        _day_placeholder(n, page_url(args.url, n))
+                        for n in range(2, args.pages + 1))
                 elif args.pages > 1:
                     planned = [page_url(args.url, n)
                                for n in range(2, args.pages + 1)]
@@ -1290,24 +1349,45 @@ def scrape(args) -> int:
                     rest, unattempted, exhausted = _fetch_pages_concurrently(
                         args, pool, specs, concurrency)
                     outcomes.extend(rest)
+                    day_manifest.extend(_day_entry(o) for o in rest)
+                    # Days still queued when dispatch stopped (or held by a
+                    # worker that died) are UNATTEMPTED, not failed — and
+                    # their presence means this run cannot call itself
+                    # complete, however the fetched days went.
+                    day_manifest.extend(_day_placeholder(n, u)
+                                        for n, u in unattempted)
                     failed = [o for o in rest if not o.ok]
+                    redirected = [o for o in rest if o.ok and redirected_away(
+                        o.url, o.final_url or o.url)]
                     if failed:
                         worst = min(failed, key=lambda o: o.page_num)
                         stop_reason = ("page_load_timeout" if worst.load_failed
                                        else f"blocked_{worst.blocked_by}")
                         blocked = any(o.blocked_by for o in rest)
+                    elif unattempted:
+                        # Ahead of `exhausted` on purpose: a zero-row day
+                        # stops dispatch with days still in the queue, and
+                        # those days were never read — "no_new_products"
+                        # (a COMPLETE stop reason) would claim the listing
+                        # ended where the run simply stopped asking.
+                        stop_reason = "pages_unattempted"
+                    elif redirected:
+                        stop_reason = "pagination_redirected"
                     elif exhausted:
                         stop_reason = "no_new_products"
-                    elif unattempted:
-                        stop_reason = "pages_unattempted"
                     session = None       # already closed
                 elif planned:
+                    # Where the walk stopped, as (index into `planned`,
+                    # status for the days from that index on). None if every
+                    # planned day was fetched.
+                    remaining_from = None
                     for index, url in enumerate(planned):
                         page_num = index + 2
                         if page_flow.page_cap_reached(page_num):
                             logger.warning("Stopping at the %d-page cap.",
                                            PAGE_CAP)
                             stop_reason = "page_cap"
+                            remaining_from = (index, DAY_UNATTEMPTED)
                             break
                         if pool and pool.rotates_per_page():
                             pool.advance(f"per-page rotation, page {page_num}")
@@ -1316,11 +1396,30 @@ def scrape(args) -> int:
                         outcome = _fetch_one_page(session, args, pool,
                                                   page_num, url)
                         outcomes.append(outcome)
+                        day_manifest.append(_day_entry(outcome))
                         if not outcome.ok:
                             stop_reason = ("page_load_timeout"
                                            if outcome.load_failed
                                            else f"blocked_{outcome.blocked_by}")
                             blocked = outcome.blocked_by is not None
+                            remaining_from = (index + 1, DAY_UNATTEMPTED)
+                            break
+                        day_drift = redirected_away(url,
+                                                    outcome.final_url or url)
+                        if day_drift:
+                            # The same trap the page-1 check guards against,
+                            # met mid-walk: this day does not exist, the site
+                            # answered its month instead, and walking on
+                            # would file one period's stories under another.
+                            # What was gathered stays gathered — the manifest
+                            # marks this day redirected so its rows read as
+                            # the month view they came from.
+                            logger.warning(
+                                "Stopping the day walk: %s. The rows already "
+                                "gathered are kept, but no further days are "
+                                "planned from a redirected landing.", day_drift)
+                            stop_reason = "pagination_redirected"
+                            remaining_from = (index + 1, DAY_UNATTEMPTED)
                             break
                         fresh_count = sum(1 for p in outcome.products
                                           if p.sku is None or p.sku not in seen_keys)
@@ -1333,7 +1432,13 @@ def scrape(args) -> int:
                                         "seen — treating that as the end of "
                                         "the listing.", url)
                             stop_reason = "no_new_products"
+                            remaining_from = (index + 1, DAY_SKIPPED_EXHAUSTED)
                             break
+                    if remaining_from:
+                        from_index, status = remaining_from
+                        day_manifest.extend(
+                            _day_placeholder(i + 2, planned[i], status)
+                            for i in range(from_index, len(planned)))
 
             else:
                 seen_keys.update(p.sku for p in first.products if p.sku is not None)
@@ -1403,9 +1508,15 @@ def scrape(args) -> int:
     all_rows = []
     merged_seen = set()
     fresh_by_batch = {}
+    new_skus_by_batch = {}
     for oc in sorted(outcomes, key=lambda o: o.page_num):
+        seen_before = len(merged_seen)
         fresh = dedupe_by_key(oc.products, merged_seen, key=dedupe_key)
         fresh_by_batch[oc.page_num] = len(fresh)
+        # Distinct skus this day ADDED to the run — the manifest's per-day
+        # figure. Not len(fresh): a fresh row with no sku is kept but is not
+        # a sku.
+        new_skus_by_batch[oc.page_num] = len(merged_seen) - seen_before
         if len(fresh) < len(oc.products):
             # EXPECTED here, unlike in every sibling repo, and the number is
             # logged at info rather than warned about for that reason: a
@@ -1463,6 +1574,22 @@ def scrape(args) -> int:
         # scroll batch, not an address.
         "pagination": "infinite-scroll",
     }
+
+    if by_url:
+        # The per-day manifest. Every REQUESTED day appears exactly once —
+        # fetched, redirected, blocked, never tried, or skipped because the
+        # listing had ended — so a run that stopped early says WHICH days it
+        # never reached instead of leaving a silent hole. The safety net
+        # covers any day no branch above recorded (e.g. a day URL that
+        # could not be built).
+        recorded = {e["page"] for e in day_manifest}
+        for n in range(2, args.pages + 1):
+            if n not in recorded:
+                day_manifest.append(_day_placeholder(n, page_url(args.url, n)))
+        for entry in day_manifest:
+            entry["new_skus"] = new_skus_by_batch.get(entry["page"], 0)
+        day_manifest.sort(key=lambda e: e["page"])
+        extra["archive_days"] = day_manifest
 
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       blocked=blocked, stop_reason=stop_reason,

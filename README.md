@@ -290,6 +290,17 @@ Every run writes `<out>.meta.json` beside its output with `status`,
 `stop_reason`, which pages failed by number, and the scroll trace. A failed
 run writes no sidecar, so a `"failed"` sidecar never sits beside good data.
 
+An archive run (`--mode archive`, any `--pages`) also writes `archive_days`
+into the sidecar: one entry per requested day with the page number, the
+requested and landed URLs, a status (`ok`, `redirected`, `blocked`,
+`load_failed`, `unattempted`, `skipped_exhausted`) and how many new unique
+skus that day added. A day with no stories redirects up to its month view
+rather than 404ing, so the landed URL is compared against the requested one
+for every day; a mismatch stops the walk there, marks the day `redirected`,
+and keeps the rows already gathered. Days a run never reached — dispatch
+stopped, or a worker died — are `unattempted`, never `failed`, and their
+presence makes the run partial (exit 6) rather than complete.
+
 `diff_runs.py` compares two runs by `sku` and refuses to compare runs that
 are not both complete, or that used different modes.
 

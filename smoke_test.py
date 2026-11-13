@@ -1904,8 +1904,9 @@ def test_concurrency_machinery(skips):
     ok &= check("...and most of the queue is never fetched", len(seen) < 12)
     ok &= check("...with the unfetched days reported, not counted as failed",
                 len(unattempted) == 38 - len(seen))
-    ok &= check("unattempted days are page NUMBERS, in order",
-                unattempted == sorted(unattempted))
+    ok &= check("unattempted days are (page number, url) pairs, in order",
+                [n for n, u in unattempted] == sorted(n for n, u in unattempted)
+                and all(u.endswith("/%02d" % n) for n, u in unattempted))
 
     # 4. A worker that raises must not hang the run and must not take its
     #    siblings' pages with it. This is the one that would otherwise be
@@ -1922,6 +1923,8 @@ def test_concurrency_machinery(skips):
                 {o.page_num for o in results} >= {2, 3, 4})
     ok &= check("...and nothing claims the dead worker's pages succeeded",
                 5 not in {o.page_num for o in results})
+    ok &= check("...and the page the dead worker held is unattempted, not lost",
+                5 in {n for n, u in unattempted})
 
     # 5. The pool is refused where it cannot help, and that refusal is DATA
     #    rather than three copies of an if-chain.
@@ -1933,8 +1936,225 @@ def test_concurrency_machinery(skips):
                 "https://medium.com/p/d373fe2c96b7"):
         ok &= check("%s is capped at one worker" % url,
                     page_flow.concurrency_limit(url) == 1)
-        ok &= check("...with a reason naming the day archive",
-                    "day archive" in (page_flow.concurrency_refusal(url) or ""))
+    return ok
+
+
+def test_archive_day_manifest(skips):
+    """The archive walk's per-day sidecar manifest, over local snapshots.
+
+    Drives the REAL `scrape()` of the Playwright engine with the browser
+    stubbed out and the pages served from HTML snapshots written to a temp
+    directory — so the row counts in the output genuinely come from parsing
+    those files, and the sidecar's `archive_days` can be checked against
+    them. Four shapes, one per acceptance case:
+
+      1. three ordinary days in a row;
+      2. day 2 redirecting up to its month view (a day with no stories does
+         not 404 — it answers a DIFFERENT address);
+      3. a day refused mid-walk;
+      4. --concurrency 2 with a zero-row day truncating dispatch.
+    """
+    group("The archive walk writes an honest per-day manifest")
+    ok = True
+    try:
+        import playwright_scraper as eng
+    except ImportError:
+        skips.append("playwright_scraper (playwright not installed)")
+        return ok
+
+    import threading
+    import types
+
+    BASE = "https://medium.com/tag/python/archive/2026/09/10"
+    MONTH = "https://medium.com/tag/python/archive/2026/09"
+
+    def _snapshot_html(skus):
+        entities = [{"@type": "BlogPosting", "identifier": sku,
+                     "headline": "Story %s" % sku,
+                     "author": {"@type": "Person", "name": "An Author",
+                                "identifier": "anauthor"},
+                     "url": "https://medium.com/p/%s" % sku} for sku in skus]
+        return ('<html><head><script type="application/ld+json">%s</script>'
+                "</head><body></body></html>"
+                % json.dumps({"@context": "https://schema.org",
+                              "itemListElement": entities}))
+
+    def _sku(n):
+        return "%012x" % n
+
+    def _drive(behaviour, pages, concurrency=1):
+        """Run eng.scrape against stub pages; return (rc, meta, rows, fetched).
+
+        `behaviour(page_num, url)` returns a dict: `snapshot` names an HTML
+        file in the temp dir to parse with the REAL parser, `final_url`
+        overrides where the page landed, `blocked_by` makes the day a
+        refusal.
+        """
+        tmp = tempfile.mkdtemp(prefix="manifest_")
+        snapshots = {
+            "day1": [_sku(1), _sku(2), _sku(3)],
+            "day2": [_sku(4), _sku(5)],
+            "day3": [_sku(6), _sku(7)],
+            "month": [_sku(11), _sku(12), _sku(13), _sku(14), _sku(15)],
+            "empty": [],
+        }
+        for name, skus in snapshots.items():
+            with open(os.path.join(tmp, name + ".html"), "w",
+                      encoding="utf-8") as f:
+                f.write(_snapshot_html(skus))
+
+        out_prefix = os.path.join(tmp, "run")
+        args = types.SimpleNamespace(
+            url=BASE, mode="archive", pages=pages, concurrency=concurrency,
+            delay=0, out=out_prefix, format="json", allow_empty=False,
+            cdp_endpoint=None, proxy=None, proxy_file=None,
+            proxy_rotate="per-run", proxy_shuffle=False)
+
+        fetched = []
+        fake_session = types.SimpleNamespace(
+            pool=None, close=lambda: None, open=lambda: fake_session)
+
+        def fake_fetch(session, args, pool, page_num, url):
+            fetched.append(page_num)
+            step = behaviour(page_num, url)
+            o = eng.PageOutcome(page_num=page_num, url=url)
+            o.final_url = step.get("final_url", url)
+            if step.get("blocked_by"):
+                o.blocked_by = step["blocked_by"]
+                return o
+            with open(os.path.join(tmp, step["snapshot"] + ".html"),
+                      encoding="utf-8") as f:
+                html = f.read()
+            o.products = parse_posts(html, url, page=page_num, mode="archive")
+            o.state = "content"
+            return o
+
+        class _NoPlaywright:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, *exc):
+                return False
+
+        real = (eng._BrowserSession, eng._fetch_one_page, eng.sync_playwright)
+        eng._BrowserSession = lambda *a, **k: fake_session
+        eng._fetch_one_page = fake_fetch
+        eng.sync_playwright = _NoPlaywright
+        try:
+            rc = eng.scrape(args)
+        finally:
+            eng._BrowserSession, eng._fetch_one_page, eng.sync_playwright = real
+
+        with open(out_prefix + ".meta.json", encoding="utf-8") as f:
+            meta = json.load(f)
+        with open(out_prefix + ".json", encoding="utf-8") as f:
+            rows = json.load(f)
+        return rc, meta, rows, fetched
+
+    def _days(meta):
+        return meta.get("archive_days") or []
+
+    # -- 1. Three ordinary days -------------------------------------------
+    rc, meta, rows, fetched = _drive(
+        lambda n, u: {"snapshot": "day%d" % n}, pages=3)
+    days = _days(meta)
+    ok &= check("three good days: exit 0", rc == 0)
+    ok &= check("three good days: a complete run",
+                meta["status"] == "complete"
+                and meta["stop_reason"] == "completed")
+    ok &= check("three good days: one manifest entry per requested day",
+                [d["page"] for d in days] == [1, 2, 3])
+    ok &= check("three good days: every day ok, landing where it asked",
+                all(d["status"] == "ok"
+                    and d["requested_url"] == d["final_url"]
+                    for d in days))
+    ok &= check("three good days: the walk goes backwards a day at a time",
+                [d["requested_url"] for d in days] == [
+                    BASE,
+                    "https://medium.com/tag/python/archive/2026/09/09",
+                    "https://medium.com/tag/python/archive/2026/09/08"])
+    ok &= check("three good days: per-day new skus match the snapshots",
+                [d["new_skus"] for d in days] == [3, 2, 2])
+    ok &= check("three good days: the manifest sums to the output rows",
+                sum(d["new_skus"] for d in days) == len(rows)
+                and meta["products"] == len(rows))
+
+    # -- 2. Day 2 redirects up to its month view ---------------------------
+    rc, meta, rows, fetched = _drive(
+        lambda n, u: ({"snapshot": "month", "final_url": MONTH} if n == 2
+                      else {"snapshot": "day%d" % n}), pages=3)
+    days = _days(meta)
+    ok &= check("redirect mid-walk: the walk stops there", fetched == [1, 2])
+    ok &= check("redirect mid-walk: partial, not complete",
+                rc == 6 and meta["status"] == "partial"
+                and meta["stop_reason"] == "pagination_redirected")
+    ok &= check("redirect mid-walk: day 2 is marked redirected, with where "
+                "it landed",
+                days[1]["status"] == "redirected"
+                and days[1]["final_url"] == MONTH
+                and days[1]["requested_url"] != MONTH)
+    ok &= check("redirect mid-walk: day 3 is unattempted, not failed",
+                days[2]["status"] == "unattempted"
+                and days[2]["final_url"] is None
+                and 3 not in meta["pages_failed"])
+    ok &= check("redirect mid-walk: the rows already gathered are kept",
+                len(rows) == 3 + 5
+                and [d["new_skus"] for d in days] == [3, 5, 0]
+                and sum(d["new_skus"] for d in days) == len(rows))
+
+    # -- 3. A day refused mid-walk -----------------------------------------
+    rc, meta, rows, fetched = _drive(
+        lambda n, u: ({"blocked_by": "cloudflare"} if n == 2
+                      else {"snapshot": "day%d" % n}), pages=3)
+    days = _days(meta)
+    ok &= check("blocked mid-walk: the walk stops there", fetched == [1, 2])
+    ok &= check("blocked mid-walk: partial with the gathered rows kept",
+                rc == 6 and meta["status"] == "partial"
+                and meta["stop_reason"] == "blocked_cloudflare"
+                and len(rows) == 3)
+    ok &= check("blocked mid-walk: day 2 blocked, day 3 unattempted",
+                days[1]["status"] == "blocked"
+                and days[2]["status"] == "unattempted")
+    ok &= check("blocked mid-walk: only the blocked day is failed",
+                meta["pages_failed"] == [2]
+                and [d["new_skus"] for d in days] == [3, 0, 0])
+
+    # -- 4. --concurrency 2, a zero-row day truncates dispatch -------------
+    # The interleaving is made deterministic, or the test asserts nothing:
+    # day 2 does not report its emptiness until day 3 has been CHECKED OUT
+    # (so worker B cannot have moved on to day 4 yet), and day 3 stays busy
+    # long enough for the empty result to set the dispatcher's stop event
+    # before worker B comes back for more work.
+    import time as _time
+    taken_3 = threading.Event()
+
+    def _truncating(page_num, url):
+        if page_num == 3:
+            taken_3.set()
+            _time.sleep(0.5)
+            return {"snapshot": "day3"}
+        if page_num == 2:
+            taken_3.wait(10)
+            return {"snapshot": "empty"}
+        return {"snapshot": "day%d" % page_num}
+
+    rc, meta, rows, fetched = _drive(_truncating, pages=6, concurrency=2)
+    days = _days(meta)
+    ok &= check("zero-row truncation: dispatch stopped at the empty day",
+                sorted(fetched) == [1, 2, 3])
+    ok &= check("zero-row truncation: NOT a normal completion",
+                rc == 6 and meta["status"] == "partial"
+                and meta["stop_reason"] == "pages_unattempted")
+    ok &= check("zero-row truncation: the queued days are unattempted, "
+                "not failed",
+                [d["status"] for d in days]
+                == ["ok", "ok", "ok", "unattempted", "unattempted",
+                    "unattempted"]
+                and not set(meta["pages_failed"]) & {4, 5, 6})
+    ok &= check("zero-row truncation: the empty day shows 0 new skus",
+                [d["new_skus"] for d in days] == [3, 0, 2, 0, 0, 0]
+                and sum(d["new_skus"] for d in days) == len(rows)
+                and meta["products"] == len(rows))
     return ok
 
 
@@ -3288,6 +3508,7 @@ def main() -> int:
     ok &= test_cdp_connect_failure_names_its_cause()
     ok &= test_driver_primitives_tolerate_a_navigation()
     ok &= test_concurrency_machinery(skips)
+    ok &= test_archive_day_manifest(skips)
     ok &= test_engine_parity(skips)
     ok &= test_module_attributes_exist(skips)
     ok &= test_no_dead_public_names()

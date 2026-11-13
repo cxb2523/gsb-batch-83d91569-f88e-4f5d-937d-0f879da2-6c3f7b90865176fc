@@ -11,8 +11,33 @@ empty output file.
 
 ## [Unreleased]
 
+### Added
+
+- **Archive runs now write a per-day manifest into the sidecar.** Every
+  `--mode archive` run records `archive_days` in `<out>.meta.json`: one entry
+  per requested day with the page number, the requested URL, the URL the
+  browser actually landed on, a status (`ok`, `redirected`, `blocked`,
+  `load_failed`, `unattempted`, `skipped_exhausted`) and the number of new
+  unique skus that day contributed. Until now a stopped run left only a
+  run-level `stop_reason`, with no way to tell which days were read, which
+  were skipped and which were never tried.
+
 ### Changed
 
+- **A day that redirects mid-walk now stops the sequential day walk.** The
+  landed URL is compared against the requested one for every fetched day,
+  not only for day 1: a day with no stories redirects up to its month view
+  (a different renderer holding a different period's stories), and walking
+  on used to file those stories under the wrong dates. The rows already
+  gathered are kept and written; the redirected day is marked `redirected`
+  in `archive_days` and the stop reason is `pagination_redirected`.
+- **A concurrent run with unattempted days no longer reports a complete
+  stop reason.** When a zero-row day stops dispatch with days still in the
+  queue, or a worker dies holding a page, those days are recorded as
+  `unattempted` (never as failed), the stop reason is `pages_unattempted`
+  rather than `no_new_products`, and the run exits 6 (partial) as before for
+  incomplete runs. A page checked out by a worker that then died previously
+  vanished from the accounting entirely; it is now reported as unattempted.
 - CI only: the canary now runs weekly (Mondays 06:20 UTC) and on a manual dispatch, with its optional secret `MEDIUM_PROXY` passed on every run; the daily schedule is removed.
 - README: "Related scrapers" now lists all six related repositories; one Q&A sibling had been left out. The smoke check that keeps a sibling site's vocabulary out of shipped files rejected any mention of that repository's name, so the link could not be added; it now skips only the README's "Related scrapers" section (up to the next heading) and still fails on the same word anywhere else in the README or in any other file.
 
