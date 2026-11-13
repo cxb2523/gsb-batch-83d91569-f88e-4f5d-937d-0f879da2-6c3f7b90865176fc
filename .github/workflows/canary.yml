@@ -1,0 +1,152 @@
+# Real runs against makemytrip.com. tests.yml (deliberately) never touches
+# the site.
+#
+# Two jobs, because the site has two answers and both are claims the README
+# makes:
+#
+#   datacentre        DATACENTRE REFUSAL EXPECTED. No secrets, weekly. A
+#                     GitHub runner is a datacentre address, and from one
+#                     (a netcup VPS, 2026-09-24, and every scheduled run of
+#                     this job since) Akamai refused every client, real
+#                     Chromium included, by dropping the connection. The job
+#                     asserts the engine REPORTS that correctly: exit 3, a
+#                     refusal, never 1, 4 or 5. If the runner is served
+#                     instead (exit 0), the rows are checked as strictly as
+#                     the other job's, and the README's datacentre sentence
+#                     is due a re-measure. This job does NOT test extraction;
+#                     the next one does.
+#
+#   scraping-browser  the path measured to work, and the one that reads real
+#                     rows: a Scraping Browser profile with an Indian exit,
+#                     on the same schedule. It FAILS, with an error naming
+#                     the secret, when MAKEMYTRIP_CDP_ENDPOINT is not set,
+#                     and it fails on a refusal, on "never obtained" (a 401
+#                     is a refused endpoint: set a fresh secret) and on too
+#                     few rows. A green canary therefore means a real
+#                     three-page listing was read and parsed.
+#
+#     gh secret set MAKEMYTRIP_CDP_ENDPOINT --repo 2scraper/makemytrip-scraper
+#     gh workflow run canary.yml --repo 2scraper/makemytrip-scraper
+#
+# The secret goes through the ENVIRONMENT, not a flag: env_config.py reads
+# exactly that variable, an unset secret arrives as an empty string which
+# the loader treats as unset, and the credential never reaches a command
+# line.
+
+name: canary
+
+on:
+  schedule:
+    # 04:27 UTC. Not on the hour: every scheduled workflow fires at :00.
+    - cron: "27 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  datacentre:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+      - name: Environment (so a red run says whether the site or the runner moved)
+        run: python .github/env_report.py --chromium
+      - name: Run
+        id: run
+        run: |
+          set +e   # `run:` is `bash -e`; without this a non-zero exit aborts
+                   # the step before the echo below records it.
+          python playwright_scraper.py --city CTGOI --pages 3 \
+            --out canary --format both --dump-html canary_dump.json
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+      - name: Interpret
+        id: interpret
+        run: |
+          code="${{ steps.run.outputs.exit_code }}"
+          echo "exit code: $code"
+          case "$code" in
+            3) echo "::notice::Refused by Akamai from a GitHub runner, and reported as the refusal it is (exit 3). This is the README's datacentre measurement holding." ;;
+            0) echo "::warning::SERVED from a GitHub runner. The README says a datacentre is refused; re-measure it."; echo "served=1" >> "$GITHUB_OUTPUT" ;;
+            1) echo "::error::A crash. See the log."; exit 1 ;;
+            4) echo "::error::Zero rows, reported as an EMPTY listing. Goa is never empty: a refusal or a payload change was misread."; exit 1 ;;
+            5) echo "::error::Reported as 'never obtained' (exit 5). A datacentre refusal should be exit 3: the reset or Access Denied was not recognised."; exit 1 ;;
+            *) echo "::error::Unexpected exit $code."; exit 1 ;;
+          esac
+      - name: Assert
+        if: steps.interpret.outputs.served == '1'
+        run: python .github/canary_assert.py canary 60
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-datacentre
+          path: |
+            canary.json
+            canary.csv
+            canary.meta.json
+            canary_dump.json*
+            canary_page*_debug.html
+          if-no-files-found: ignore
+
+  scraping-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      MAKEMYTRIP_CDP_ENDPOINT: ${{ secrets.MAKEMYTRIP_CDP_ENDPOINT }}
+    steps:
+      - name: Require a Scraping Browser endpoint
+        if: env.MAKEMYTRIP_CDP_ENDPOINT == ''
+        run: |
+          echo "::error::The MAKEMYTRIP_CDP_ENDPOINT secret is not set, so nothing tested the site. It is the one path measured to get past Akamai from a datacentre; set it to a Scraping Browser endpoint with country-in in the login."
+          exit 1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+      - name: Environment (so a red run says whether the site or the runner moved)
+        run: python .github/env_report.py
+      # >= 3 pages, because with one page pagination is never exercised.
+      - name: Run
+        id: run
+        run: |
+          set +e
+          python playwright_scraper.py --city Goa --pages 3 \
+            --out canary --format both --dump-html canary_dump.json
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+      - name: Interpret
+        run: |
+          code="${{ steps.run.outputs.exit_code }}"
+          echo "exit code: $code"
+          case "$code" in
+            0) ;;
+            3) echo "::error::Refused through the Scraping Browser. That is the README's central claim failing; see the log for which refusal."; exit 1 ;;
+            4) echo "::error::Zero rows, reported as an EMPTY listing. Goa is never empty."; exit 1 ;;
+            5) echo "::error::Never obtained, or served and not parsed (see stop_reason in the log). A 401 in the log means the endpoint's credentials were refused: set a fresh MAKEMYTRIP_CDP_ENDPOINT secret."; exit 1 ;;
+            6) echo "::error::A partial run: a page failed after rows were gathered. See stop_reason in the log."; exit 1 ;;
+            *) echo "::error::Exit $code."; exit 1 ;;
+          esac
+      - name: Assert
+        run: python .github/canary_assert.py canary 60
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-scraping-browser
+          path: |
+            canary.json
+            canary.csv
+            canary.meta.json
+            canary_dump.json*
+            canary_page*_debug.html
+          if-no-files-found: ignore
