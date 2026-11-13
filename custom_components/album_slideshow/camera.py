@@ -1,0 +1,2366 @@
+from __future__ import annotations
+
+import asyncio
+from collections import OrderedDict, deque
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
+import itertools
+import logging
+import math
+import random
+import time
+from pathlib import Path
+from typing import Any
+
+import async_timeout
+from aiohttp import ClientResponseError
+from PIL import Image
+
+from homeassistant.components.camera import Camera
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
+
+from .const import (
+    DOMAIN,
+    CAMERA_METADATA_FIELDS,
+    DATE_FILTER_OFF,
+    DEFAULT_CUSTOM_LOOKBACK_DAYS,
+    DEFAULT_SHUFFLE_AGE_BIAS,
+    DEFAULT_MISSING_DATE_MODE,
+    MAX_RESOLUTION_SHORT_EDGE,
+    ORIENTATION_MISMATCH_PAIR,
+    ORIENTATION_MISMATCH_AVOID,
+    ORDER_ALBUM,
+    ORDER_RANDOM,
+    PROVIDER_GOOGLE_SHARED,
+)
+from . import image_processing as ip
+from . import playlist
+from . import video
+from .coordinator import AlbumCoordinator, MediaItem
+from .store import SlideshowStore
+from .viewers import async_get_tracker
+
+_LOGGER = logging.getLogger(__name__)
+
+# Cap a single download at 64 MB. Larger images are rejected before decode
+# to protect low-memory devices. This is well above any realistic camera
+# JPEG; RAW/NEF/etc. aren't supported as camera frames anyway.
+_MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
+
+# Image content types are accepted, with a narrow binary-image exception for
+# Apple's CDN below. HTML (captive portal, 404 page rendered as 200, etc.) is
+# still rejected early.
+_ACCEPTED_IMAGE_PREFIX = ("image/",)
+
+# How signed links (iCloud) answer once their signature has expired.
+_EXPIRED_LINK_STATUSES = frozenset({403, 410})
+
+
+class _ExpiredLink(Exception):
+    """A signed image link was rejected because it expired."""
+
+
+# Max candidates we'll scan when searching for a mismatched-orientation
+# pairing partner. Metadata-only checks are nearly free; decode-only checks
+# (no metadata available) are expensive.
+_PAIR_SEARCH_LIMIT = 12
+_SKIP_SEARCH_LIMIT = 30
+# Random order looks this far for a partner not yet shown this cycle.
+_PAIR_UNSHOWN_SCAN = 2000
+# Second photos of pairs that an ordered slideshow still has to step over.
+_PAIRED_MEMORY = 64
+
+_MAX_RENDER_ATTEMPTS = 10
+
+# How long a render waits for an item's metadata (faces for the crop,
+# caption fields) to be fetched on demand before rendering without it.
+# Upcoming slides render ahead of time, so this rarely delays a slide.
+_ENRICH_WAIT_SECONDS = 8.0
+
+_MB = 1024 * 1024
+
+# Fixed floor (in items) for the pairing cooldown exclusion zone, applied on
+# each side of the current index in addition to the percentage-based radius.
+# Keeps tiny albums from pairing consecutive/near-consecutive shots even when
+# a small percentage rounds down to zero.
+_PAIR_GAP_FLOOR = 2
+
+# Recent frame IDs remembered so navigation can start from a card's displayed slide.
+_FRAME_ID_MEMORY = 64
+
+# Longest the first slide waits for Home Assistant to restore the settings.
+_SETTINGS_RESTORE_WAIT = 30.0
+
+# Store settings that change how slides look or which photos play. Changing any
+# of them discards rendered slides; other settings (interval, pause, buffer
+# size, cache size) keep the navigation history.
+_RENDER_SETTINGS = (
+    "fill_mode",
+    "portrait_mode",
+    "order_mode",
+    "shuffle_age_bias",
+    "aspect_ratio",
+    "pair_divider_px",
+    "pair_divider_color",
+    "pair_min_gap_percent",
+    "max_resolution",
+    "date_filter",
+    "custom_lookback_days",
+    "missing_date_mode",
+    "face_debug",
+    "hidden_revision",
+)
+
+_next_frame_serial = itertools.count(1).__next__
+
+
+def _pair_exclusion_radius(n: int, min_gap_percent: float) -> int:
+    """Items to exclude on each side of the current index for pairing.
+
+    Combines ``_PAIR_GAP_FLOOR`` with a percentage of the album size so tiny
+    albums still get some separation while large albums scale
+    proportionally. A ``min_gap_percent`` of 0 disables the cooldown
+    entirely. The result is capped well below ``n / 2`` so eligible
+    candidates always remain, even for small albums (a ring buffer of
+    ``n`` items only has ``n - 1`` non-self candidates to begin with).
+    """
+    if n <= 3 or min_gap_percent <= 0:
+        return 0
+    radius = max(_PAIR_GAP_FLOOR, round(n * (min_gap_percent / 100.0)))
+    max_radius = (n - 3) // 2
+    return max(0, min(radius, max_radius))
+
+
+@dataclass(frozen=True, slots=True)
+class _NavigationCursor:
+    """All mutable ordering state needed to render the following slide."""
+
+    index: int
+    random_order: tuple[int, ...]
+    random_pos: int
+    recent_urls: tuple[str, ...]
+    rng_state: Any
+    paired_urls: tuple[str, ...] = ()
+    cycle_ids: tuple[str, ...] = ()
+    cycle_held: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _RenderedFrame:
+    """A complete slide that can be displayed without any further work."""
+
+    data: bytes
+    cursor: _NavigationCursor
+    meta: dict
+    serial: int = field(default_factory=_next_frame_serial, compare=False)
+
+
+def _ts_to_iso(ts_ms: int | None) -> str | None:
+    """Convert epoch milliseconds to an ISO-8601 string in UTC, or None."""
+    if not isinstance(ts_ms, int):
+        return None
+    try:
+        return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _utc_now_iso() -> str:
+    """Return the current time as an ISO-8601 UTC string."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _camera_metadata_attributes(item: MediaItem | None) -> dict[str, Any]:
+    metadata = getattr(item, "camera_metadata", None)
+    return {
+        field: metadata.get(field) if isinstance(metadata, dict) else None
+        for field in CAMERA_METADATA_FIELDS
+    }
+
+
+def _caption_frame(item: MediaItem | None) -> dict[str, Any]:
+    """Caption metadata for one photo of a slide."""
+    return {
+        "captured_at": _ts_to_iso(getattr(item, "captured_at", None)),
+        "location": getattr(item, "location", None),
+        "latitude": getattr(item, "latitude", None),
+        "longitude": getattr(item, "longitude", None),
+        "description": getattr(item, "description", None),
+        **_camera_metadata_attributes(item),
+        **_file_attributes(item),
+    }
+
+
+def _file_attributes(item: MediaItem | None) -> dict[str, Any]:
+    return {
+        "filename": getattr(item, "filename", None),
+        "path": getattr(item, "source_path", None),
+    }
+
+
+# Describe the stream a video slide is served as (see
+# ``AlbumCoordinator.async_video_info``); ``None`` for photos.
+VIDEO_INFO_FIELDS = (
+    "video_version", "video_bitrate_mbps", "video_size_bytes", "video_content_type",
+)
+
+
+def _is_video(item: Any) -> bool:
+    """A video slide (played alone). Live Photos are photos with motion."""
+    return bool(getattr(item, "video_url", None)) and not getattr(item, "live_photo", False)
+
+
+def _has_motion(item: Any) -> bool:
+    """A video, or a Live Photo whose motion clip can play over its still."""
+    return bool(getattr(item, "video_url", None))
+
+
+def _photo_key(item: Any) -> str:
+    """A photo's identity for the shuffle; some providers renew links on refresh."""
+    return getattr(item, "photo_id", None) or item.url
+
+
+def _item_faces(item: MediaItem | None) -> tuple[ip.FaceBox, ...] | None:
+    """Return the validated face boxes stored on a media item.
+
+    None means no face data; an empty tuple means the photo has no faces.
+    """
+    faces = getattr(item, "faces", None) if item is not None else None
+    if not isinstance(faces, (list, tuple)):
+        return None
+    valid: list[ip.FaceBox] = []
+    for face in faces:
+        if (
+            not isinstance(face, (list, tuple))
+            or len(face) not in (5, 6)
+            or not all(
+                not isinstance(value, bool) and isinstance(value, (int, float))
+                and math.isfinite(value) for value in face[:5]
+            )
+            or (len(face) == 6 and not isinstance(face[5], bool))
+        ):
+            continue
+        left, top, right, bottom, weight = (float(value) for value in face[:5])
+        if 0 <= left < right <= 1 and 0 <= top < bottom <= 1 and weight > 0:
+            selected = face[5] if len(face) == 6 else False
+            valid.append(ip.FaceBox(left, top, right, bottom, weight, selected))
+    return tuple(valid)
+
+
+class _DownloadCache:
+    """Byte-budget LRU cache for downloaded image data, O(1) per operation."""
+
+    def __init__(self, max_bytes: int) -> None:
+        self._cache: "OrderedDict[str, bytes]" = OrderedDict()
+        self._total_bytes: int = 0
+        self._max_bytes: int = max(max_bytes, 1)
+
+    @property
+    def total_bytes(self) -> int:
+        return self._total_bytes
+
+    def get(self, url: str) -> bytes | None:
+        data = self._cache.get(url)
+        if data is None:
+            return None
+        self._cache.move_to_end(url)
+        return data
+
+    def put(self, url: str, data: bytes) -> None:
+        if len(data) > self._max_bytes:
+            # Item exceeds the entire cache budget; skip caching but don't raise.
+            _LOGGER.debug(
+                "Image cache: not caching %.1f MB image, larger than the %.1f MB budget",
+                len(data) / _MB, self._max_bytes / _MB,
+            )
+            return
+        if url in self._cache:
+            self._total_bytes -= len(self._cache[url])
+            del self._cache[url]
+        self._cache[url] = data
+        self._total_bytes += len(data)
+        self._evict()
+
+    def resize(self, max_bytes: int) -> None:
+        max_bytes = max(max_bytes, 1)
+        if max_bytes != self._max_bytes:
+            _LOGGER.debug(
+                "Image cache: budget %.1f MB -> %.1f MB (%.1f MB in use)",
+                self._max_bytes / _MB, max_bytes / _MB, self._total_bytes / _MB,
+            )
+        self._max_bytes = max_bytes
+        self._evict()
+
+    def _evict(self) -> None:
+        count = freed = 0
+        while self._total_bytes > self._max_bytes and self._cache:
+            _, data = self._cache.popitem(last=False)
+            self._total_bytes -= len(data)
+            count += 1
+            freed += len(data)
+        if count:
+            _LOGGER.debug(
+                "Image cache: evicted %d image(s) (%.1f MB), now %.1f/%.1f MB, %d cached",
+                count, freed / _MB, self._total_bytes / _MB, self._max_bytes / _MB,
+                len(self._cache),
+            )
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
+    coordinator: AlbumCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    store: SlideshowStore = hass.data[DOMAIN][entry.entry_id]["store"]
+
+    cam = AlbumSlideshowCamera(hass, entry, coordinator, store)
+    hass.data[DOMAIN][entry.entry_id]["camera"] = cam
+
+    async_add_entities([cam])
+
+
+class AlbumSlideshowCamera(Camera):
+    _attr_should_poll = False
+    # The signed stream URL and the server's file paths stay out of history.
+    _unrecorded_attributes = frozenset({"video_url", "current_path"})
+    _paired_urls: tuple[str, ...] = ()
+    # Photo identities the random cycle's indices point at.
+    _cycle_ids: tuple[str, ...] = ()
+    # How many photos at the end of the cycle were held back from the last one.
+    _cycle_held: int = 0
+    # Wall-clock time the current slide went up.
+    _shown_at: float = 0.0
+    # When the slide resumed after a restart went up, so it keeps the time it had left.
+    _resume_anchor: float | None = None
+    # Partner index tried first when resuming a paired slide.
+    _preferred_partner: int | None = None
+    # The first slide after setup resumes the saved one.
+    _starting: bool = False
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: AlbumCoordinator, store: SlideshowStore) -> None:
+        super().__init__()
+        self.hass = hass
+        self.entry = entry
+        self.coordinator = coordinator
+        self.store = store
+
+        self._attr_name = f"Album Slideshow {entry.title}"
+        self._attr_unique_id = f"{entry.entry_id}_camera"
+
+        self._rng = random.Random()
+        self._index = 0
+        self._random_order: list[int] = []
+        self._random_pos = 0
+        self._starting = True
+
+        self._download_cache = _DownloadCache(
+            max_bytes=store.image_cache_mb * 1024 * 1024
+        )
+        self._recent_urls: list[str] = []
+        self._last_is_portrait: bool | None = None
+        # Full per-half caption metadata for a paired frame: a list of two
+        # dicts (top/left first) each carrying captured_at / location /
+        # latitude / longitude. None for single frames. Lets the Lovelace
+        # card overlay an accurate caption on each half of a pair.
+        self._last_pair_frames: list[dict] | None = None
+        # ``horizontal`` (side-by-side, left/right) or ``vertical`` (stacked,
+        # top/bottom) for a paired frame; None for single frames.
+        self._last_pair_orientation: str | None = None
+        # ``{"photo_id", "duration_ms"}`` when the current slide is a video
+        # (always unpaired); ``_video_url`` is its signed proxy URL.
+        self._last_video: dict | None = None
+        self._video_url: str | None = None
+        # Cached effective playlist (after date filter + ordering). Invalidated
+        # by any store change or coordinator update.
+        self._effective_cache: tuple[int, list[MediaItem]] | None = None
+
+        self._framebuffer: bytes | None = None
+
+        # Monotonic counter incremented every time a new still is committed.
+        # Exposed as the ``frame_id`` state attribute so the Lovelace card
+        # has an unambiguous "new frame ready" signal even when other
+        # attributes happen not to change between slides.
+        self._frame_id: int = 0
+        # Recent frame IDs mapped to frame serials, oldest first.
+        self._frame_serials: dict[int, int] = {}
+
+        self._interrupt_event: asyncio.Event = asyncio.Event()
+        self._slide_deadline: float | None = None
+        # Navigation runs directly in the button/service coroutine. The lock
+        # serialises rapid presses while buffered swaps remain independent of
+        # the background timer loop.
+        self._navigation_lock: asyncio.Lock = asyncio.Lock()
+        self._navigation_pending: int = 0
+        # Rendered timeline around the current frame. Previous frames and future
+        # frames are final encoded JPEGs, so both navigation directions are an
+        # O(1) deque swap. The future deque is replenished in the background.
+        self._current_frame: _RenderedFrame | None = None
+        self._previous_frames: deque[_RenderedFrame] = deque()
+        self._next_frames: deque[_RenderedFrame] = deque()
+        self._timeline_generation: int = 0
+        self._timeline_dirty: bool = False
+        self._next_ready_event: asyncio.Event = asyncio.Event()
+        self._preload_task: asyncio.Task | None = None
+        # Visible navigation diagnostics. These are state attributes rather
+        # than debug-only log messages so they remain observable when Home
+        # Assistant's UI filters debug logs.
+        self._last_nav_direction: str | None = None
+        self._last_nav_requested_at: str | None = None
+        self._last_nav_started_at: str | None = None
+        self._last_nav_committed_at: str | None = None
+        self._last_nav_outcome: str | None = None
+        self._last_nav_error: str | None = None
+        self._consecutive_failures: int = 0
+        self._render_task: asyncio.Task | None = None
+        self._render_settings = self._current_render_settings()
+        self._viewers = async_get_tracker(hass)
+        self._unsub_viewers = None
+
+        def _on_coordinator_update() -> None:
+            previous_items = self._effective_cache[1] if self._effective_cache else None
+            self._effective_cache = None
+            if self._keep_timeline(previous_items):
+                self.async_write_ha_state()
+            else:
+                self._invalidate_timeline()
+
+        coordinator.async_add_listener(_on_coordinator_update)
+
+        self._pause_when_unwatched = bool(store.pause_when_unwatched)
+
+        def _on_store_change() -> None:
+            enabled = bool(self.store.pause_when_unwatched)
+            if enabled and not self._pause_when_unwatched and self._unsub_viewers is not None:
+                # Cards stay quiet while the setting is off; let them check in.
+                self._viewers.async_restart_grace(self.entry.entry_id)
+            self._pause_when_unwatched = enabled
+            self._download_cache.resize(self.store.image_cache_mb * 1024 * 1024)
+            self._slide_deadline = None
+            settings = self._current_render_settings()
+            if settings != self._render_settings:
+                self._render_settings = settings
+                self._effective_cache = None
+                self._invalidate_timeline()
+                return
+            # Interval, pause and buffer changes keep the rendered slides.
+            self._schedule_preload()
+            self._interrupt_event.set()
+            self.async_write_ha_state()
+
+        store.add_listener(_on_store_change)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # Restore last framebuffer (if the store kept one) so the camera has
+        # something to show immediately after a restart, rather than a broken
+        # image placeholder while the first render completes.
+        restored = getattr(self.store, "last_frame", None)
+        if isinstance(restored, (bytes, bytearray)) and restored:
+            self._framebuffer = bytes(restored)
+        # Stagger the first render across multiple albums so they don't all
+        # decode + encode at the same instant on HA startup. Deterministic
+        # offset based on entry_id keeps the pattern stable across
+        # restarts. Up to ~3 s spread across albums.
+        startup_delay = (hash(self.entry.entry_id) % 3000) / 1000.0
+        self._unsub_viewers = self._viewers.async_track(
+            self.entry.entry_id, self._on_viewers_change
+        )
+        self._render_task = self.hass.async_create_background_task(
+            self._render_loop(initial_delay=startup_delay),
+            name="album_slideshow_render_loop",
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._unsub_viewers is not None:
+            self._unsub_viewers()
+            self._unsub_viewers = None
+        preload_task = self._preload_task
+        self._cancel_preload()
+        if self._render_task is not None:
+            self._render_task.cancel()
+            try:
+                await self._render_task
+            except asyncio.CancelledError:
+                pass
+        if preload_task is not None:
+            try:
+                await preload_task
+            except asyncio.CancelledError:
+                pass
+        # A reload reads the position back right away, so don't leave it pending.
+        flush = getattr(self.store, "async_flush_position", None)
+        if flush is not None:
+            try:
+                await flush()
+            except Exception as err:  # noqa: BLE001 - never block unloading
+                _LOGGER.debug("Album Slideshow: could not save the current slide: %s", err)
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, self.entry.entry_id)},
+            "name": f"Album Slideshow {self.entry.title}",
+            "manufacturer": "Album Slideshow",
+        }
+
+    @property
+    def icon(self) -> str:
+        if self.coordinator.provider == PROVIDER_GOOGLE_SHARED:
+            return "mdi:google-photos"
+        return "mdi:folder-multiple-image"
+
+    @property
+    def extra_state_attributes(self):
+        data = self.coordinator.data or {}
+        items: list[MediaItem] = self._effective_items()
+        cur = items[self._index] if items and 0 <= self._index < len(items) else None
+        captured_at = _ts_to_iso(getattr(cur, "captured_at", None))
+        caption_frames = self._caption_frames(cur)
+        # Paths go out separately as ``current_path``, which isn't recorded.
+        paths = [frame.get("path") for frame in caption_frames]
+        caption_frames = [
+            {key: value for key, value in frame.items() if key != "path"}
+            for frame in caption_frames
+        ]
+        captured_at_pair = (
+            [frame["captured_at"] for frame in caption_frames]
+            if self._last_pair_frames else None
+        )
+        return {
+            "entry_id": self.entry.entry_id,
+            "displayed_photo_ids": (
+                self._current_frame.meta.get("photo_ids", [])
+                if self._current_frame is not None and not any(
+                    photo_id in self.store.hidden_photo_ids
+                    for photo_id in self._current_frame.meta.get("photo_ids", [])
+                ) else []
+            ),
+            "hidden_photo_count": len(self.store.hidden_photo_ids),
+            "hidden_revision": self.store.hidden_revision,
+            "undo_hide_available": bool(self.store.last_hidden_photo_ids),
+            "empty_reason": (
+                None if items else (
+                    "all_hidden" if data.get("items") and all(
+                        item.photo_id in self.store.hidden_photo_ids
+                        for item in data["items"]
+                    ) else "no_matching_photos"
+                )
+            ),
+            "album_title": data.get("title"),
+            "media_count": len(items),
+            "media_count_total": len(data.get("items", []) or []),
+            "current_index": self._index,
+            "current_filename": getattr(cur, "filename", None),
+            "current_path": paths if self._last_pair_frames else getattr(cur, "source_path", None),
+            "current_url": getattr(cur, "url", None),
+            "current_is_portrait": self._last_is_portrait,
+            "captured_at": captured_at_pair if captured_at_pair else captured_at,
+            "captured_at_primary": captured_at,
+            "uploaded_at": _ts_to_iso(getattr(cur, "uploaded_at", None)),
+            "byte_size": getattr(cur, "byte_size", None),
+            "latitude": getattr(cur, "latitude", None),
+            "longitude": getattr(cur, "longitude", None),
+            "location": getattr(cur, "location", None),
+            "description": getattr(cur, "description", None),
+            **_camera_metadata_attributes(cur),
+            "google_metadata_enabled": bool(getattr(self.coordinator, "google_metadata_enabled", False)),
+            "google_location_enabled": bool(getattr(self.coordinator, "google_location_enabled", False)),
+            "google_reverse_geocode_enabled": bool(getattr(self.coordinator, "google_reverse_geocode_enabled", False)),
+            # Structured per-image caption metadata. A single-element list for
+            # normal slides; two elements (top/left first) for paired slides,
+            # so the card can overlay an accurate date/location on each half.
+            # ``pair_orientation`` tells the card how the two halves are laid
+            # out: ``horizontal`` (left/right) or ``vertical`` (top/bottom).
+            "caption_frames": caption_frames,
+            # Video slides: the camera image is the poster frame; the card
+            # plays ``video_url`` over it for ``video_hold_seconds``.
+            "media_kind": (
+                ("live_photo" if self._last_video.get("live") else "video")
+                if self._last_video else "image"
+            ),
+            "video_url": self._video_url if self._last_video else None,
+            "video_hold_seconds": (
+                self._slide_hold_seconds() if self._last_video else None
+            ),
+            **self._video_info_attributes(),
+            "pair_orientation": self._last_pair_orientation,
+            "slide_interval": int(self.store.slide_interval),
+            "fill_mode": self.store.fill_mode,
+            "portrait_mode": self.store.portrait_mode,
+            "order_mode": self.store.order_mode,
+            "date_filter": self.store.date_filter,
+            "custom_lookback_days": int(self.store.custom_lookback_days),
+            "shuffle_age_bias": int(self.store.shuffle_age_bias),
+            "missing_date_mode": self.store.missing_date_mode,
+            "paused": bool(self.store.paused),
+            "pause_when_unwatched": bool(self.store.pause_when_unwatched),
+            "paused_unwatched": self._paused_unwatched,
+            "refresh_hours": int(self.store.refresh_hours),
+            "aspect_ratio": self.store.aspect_ratio,
+            "pair_divider_px": int(self.store.pair_divider_px),
+            "pair_divider_color": self.store.pair_divider_color,
+            "pair_min_gap_percent": int(self.store.pair_min_gap_percent),
+            "frame_id": self._frame_id,
+            "navigation_buffer_size": self._buffer_depth,
+            "previous_frames_cached": len(self._previous_frames),
+            "next_frames_preloaded": len(self._next_frames),
+            "navigation_preloading": bool(
+                self._preload_task is not None and not self._preload_task.done()
+            ),
+            "navigation_queue_size": self._navigation_pending,
+            "last_navigation_direction": self._last_nav_direction,
+            "last_navigation_requested_at": self._last_nav_requested_at,
+            "last_navigation_started_at": self._last_nav_started_at,
+            "last_navigation_committed_at": self._last_nav_committed_at,
+            "last_navigation_outcome": self._last_nav_outcome,
+            "last_navigation_error": self._last_nav_error,
+            "pagination_debug": data.get("pagination_debug"),
+        }
+
+    def _caption_frames(self, cur) -> list[dict]:
+        """Per-image caption metadata for the current slide.
+
+        Returns a list with one dict for a normal slide, or two (top/left
+        first) for a paired slide. Each dict carries ``captured_at`` (ISO
+        string or ``None``), ``location`` (human label or ``None``), and
+        ``latitude`` / ``longitude``. The card reads this to overlay an
+        accurate caption on each image, including each half of a pair.
+        Paired captions are read from the live items so metadata found after
+        the slide was rendered still shows.
+        """
+        if not self._last_pair_frames:
+            return [{**_caption_frame(cur), **self._video_info_attributes()}]
+        photo_ids = self._current_frame.meta.get("photo_ids", []) if self._current_frame else []
+        if len(photo_ids) != len(self._last_pair_frames):
+            return self._last_pair_frames
+        live = {
+            item.photo_id: item for item in self._effective_items()
+            if item.photo_id and item.photo_id in photo_ids
+        }
+        return [
+            _caption_frame(live[photo_id]) if photo_id in live else frame
+            for photo_id, frame in zip(photo_ids, self._last_pair_frames)
+        ]
+
+    @property
+    def entity_picture(self) -> str | None:
+        """Return the camera proxy URL with a per-frame cache-buster.
+
+        HA core's default ``entity_picture`` only changes when the access
+        token rotates (about every five minutes). Browsers happily serve
+        the cached image to the more-info dialog and other surfaces in
+        between rotations, so they end up showing the previous slide
+        while a fresh slide is already in the framebuffer. Appending the
+        ``frame_id`` invalidates that cache as soon as a new slide is
+        committed, no matter where in HA the picture is rendered.
+        """
+        base = super().entity_picture
+        if not base:
+            return base
+        sep = "&" if "?" in base else "?"
+        return f"{base}{sep}frame={self._frame_id}"
+
+    @property
+    def cache_usage_mb(self) -> float:
+        return round(self._download_cache.total_bytes / (1024 * 1024), 1)
+
+    def _effective_items(self) -> list[MediaItem]:
+        """Return the playlist after applying the date filter and order mode.
+
+        Cached until the coordinator or store changes (see invalidations
+        wired up in __init__).
+        """
+        data = self.coordinator.data or {}
+        raw: list[MediaItem] = data.get("items", []) or []
+        tz = dt_util.DEFAULT_TIME_ZONE
+        cache_key = (
+            id(raw),
+            self.store.date_filter,
+            getattr(self.store, "custom_lookback_days", DEFAULT_CUSTOM_LOOKBACK_DAYS),
+            self.store.missing_date_mode,
+            self.store.order_mode,
+            self.store.hidden_revision,
+            # Date filters move to the next day at local midnight.
+            datetime.now(tz).toordinal()
+            if self.store.date_filter not in (None, "", DATE_FILTER_OFF)
+            else None,
+        )
+        if self._effective_cache is not None and self._effective_cache[0] == hash(cache_key):
+            return self._effective_cache[1]
+
+        filtered = playlist.filter_items(
+            [item for item in raw if item.photo_id and item.photo_id not in self.store.hidden_photo_ids]
+            if self.store.hidden_photo_ids else raw,
+            mode=self.store.date_filter,
+            lookback_days=getattr(self.store, "custom_lookback_days", DEFAULT_CUSTOM_LOOKBACK_DAYS),
+            missing_date=self.store.missing_date_mode,
+            tz=tz,
+        )
+        ordered = playlist.order_items(filtered, self.store.order_mode)
+        self._effective_cache = (hash(cache_key), ordered)
+        return ordered
+
+    async def async_force_next(self, frame_id: int | None = None) -> None:
+        """Display the next buffered slide immediately.
+
+        ``frame_id`` is the frame a card is showing; when it is still retained,
+        the step starts from that slide rather than the camera's latest one.
+        """
+        await self._async_navigate(1, frame_id)
+
+    async def async_force_prev(self, frame_id: int | None = None) -> None:
+        """Display the previous retained slide immediately."""
+        await self._async_navigate(-1, frame_id)
+
+    async def _async_navigate(self, direction: int, frame_id: int | None = None) -> None:
+        """Serialise a manual navigation request and execute it directly."""
+        direction_name = "next" if direction > 0 else "previous"
+        self._navigation_pending += 1
+        self._last_nav_direction = direction_name
+        self._last_nav_requested_at = _utc_now_iso()
+        self._last_nav_outcome = "pending"
+        self._last_nav_error = None
+        # Wake the timer loop so the manual frame starts a fresh interval.
+        self._slide_deadline = None
+        self._interrupt_event.set()
+        self.async_write_ha_state()
+
+        try:
+            async with self._navigation_lock:
+                self._last_nav_started_at = _utc_now_iso()
+                if self._timeline_dirty:
+                    await self._rebuild_current_frame()
+                rewound = self._rewind_to_displayed(frame_id)
+                changed = (
+                    await self._show_next_frame()
+                    if direction > 0
+                    else await self._show_previous_frame()
+                )
+                if not changed and rewound:
+                    # Nothing older than the displayed slide: stay on it.
+                    self._apply_frame(self._current_frame)
+                if changed:
+                    self._last_nav_committed_at = _utc_now_iso()
+                    self._last_nav_outcome = "displayed"
+                else:
+                    self._last_nav_outcome = "not_available"
+        except Exception as err:
+            self._last_nav_outcome = "error"
+            self._last_nav_error = str(err)
+            _LOGGER.warning(
+                "Album Slideshow %s: manual %s navigation failed: %s",
+                self.entry.title,
+                direction_name,
+                err,
+            )
+        finally:
+            self._navigation_pending -= 1
+            self._slide_deadline = None
+            self._interrupt_event.set()
+            self.async_write_ha_state()
+
+    async def async_force_refresh(self) -> None:
+        await self.coordinator.async_request_refresh()
+
+    async def async_hide_photo(
+        self,
+        *,
+        photo_ids: list[str] | None = None,
+        position: str | None = None,
+        frame_id: int | None = None,
+    ) -> None:
+        async with self._navigation_lock:
+            if frame_id is not None and frame_id != self._frame_id:
+                raise ValueError("The displayed slide changed; try again")
+            if photo_ids is not None and position is not None:
+                raise ValueError("Choose photo IDs or a position, not both")
+            if photo_ids is None:
+                current_ids = (
+                    self._current_frame.meta.get("photo_ids", [])
+                    if self._current_frame is not None else []
+                )
+                if not current_ids:
+                    raise ValueError("There is no photo to hide")
+                if len(current_ids) > 1 and position is None:
+                    raise ValueError("This slide is paired; choose first, second, or both")
+                if position == "second" and len(current_ids) < 2:
+                    raise ValueError("This slide has no second photo")
+                if position not in (None, "first", "second", "both"):
+                    raise ValueError("Invalid photo position")
+                photo_ids = (
+                    current_ids if position == "both"
+                    else [current_ids[1 if position == "second" else 0]]
+                )
+            known_ids = {
+                item.photo_id for item in (self.coordinator.data or {}).get("items", [])
+                if item.photo_id
+            }
+            for frame in [self._current_frame, *self._previous_frames, *self._next_frames]:
+                if frame is not None:
+                    known_ids.update(photo_id for photo_id in frame.meta.get("photo_ids", []) if photo_id)
+            if not photo_ids or any(not photo_id or photo_id not in known_ids for photo_id in photo_ids):
+                raise ValueError("Photo identifier unavailable; refresh the album and try again")
+            await self._async_change_exclusions(photo_ids, hidden=True)
+
+    async def async_restore_photos(
+        self, photo_ids: list[str] | None = None, *, undo: bool = False
+    ) -> None:
+        async with self._navigation_lock:
+            selected = (
+                self.store.last_hidden_photo_ids if undo
+                else self.store.hidden_photo_ids if photo_ids is None
+                else photo_ids
+            )
+            await self._async_change_exclusions(selected, hidden=False)
+
+    async def _async_change_exclusions(self, photo_ids, *, hidden: bool) -> None:
+        generation = self._timeline_generation
+        buffered_frames = (
+            () if self._timeline_dirty
+            else tuple(frame for frame in (self._current_frame, *self._next_frames) if frame is not None)
+        )
+        if await self.store.async_set_photos_hidden(photo_ids, hidden=hidden):
+            if self._timeline_generation != generation + 1:
+                buffered_frames = ()
+            await self._rebuild_after_exclusion_change(buffered_frames)
+
+    async def _rebuild_after_exclusion_change(
+        self, buffered_frames: tuple[_RenderedFrame, ...] = ()
+    ) -> None:
+        self._effective_cache = None
+        self._invalidate_timeline()
+        self._random_order = []
+        self._random_pos = 0
+        self._recent_urls = []
+        self._paired_urls = ()
+        self._cycle_ids = ()
+        self._cycle_held = 0
+        items = self._effective_items()
+        positions = {item.photo_id: index for index, item in enumerate(items) if item.photo_id}
+        reusable = []
+        for frame in buffered_frames:
+            photo_ids = frame.meta.get("photo_ids", [])
+            if not photo_ids or any(photo_id not in positions for photo_id in photo_ids):
+                continue
+            cursor = replace(
+                frame.cursor,
+                index=positions[photo_ids[0]],
+                random_order=(),
+                random_pos=0,
+                recent_urls=(),
+                cycle_ids=(),
+                cycle_held=0,
+            )
+            reusable.append(replace(frame, cursor=cursor))
+        if reusable:
+            self._timeline_dirty = False
+            self._next_frames.extend(reusable[1:])
+            self._trim_timeline()
+            self._apply_frame(reusable[0])
+            self._schedule_preload()
+            return
+        generation = self._timeline_generation
+        await self._clear_current_frame()
+        for frame in buffered_frames:
+            if generation != self._timeline_generation:
+                break
+            photo_ids = frame.meta.get("photo_ids", [])
+            orientation = frame.meta.get("pair_orientation")
+            if len(photo_ids) != 2 or orientation not in ("horizontal", "vertical"):
+                continue
+            remaining = [
+                (half, photo_id) for half, photo_id in enumerate(photo_ids)
+                if photo_id in positions
+            ]
+            if len(remaining) != 1:
+                continue
+            half, photo_id = remaining[0]
+            try:
+                encoded = await self._async_image_job(
+                    ip.render_pair_photo, frame.data, half, orientation == "vertical",
+                    max(0, int(self.store.pair_divider_px)), self.store.fill_mode,
+                )
+            except Exception as err:
+                _LOGGER.debug("Album Slideshow: could not reuse paired photo: %s", err)
+                continue
+            if generation != self._timeline_generation:
+                break
+            cursor = replace(
+                frame.cursor, index=positions[photo_id],
+                random_order=(), random_pos=0, recent_urls=(),
+            )
+            meta = {
+                **frame.meta,
+                "photo_ids": [photo_id],
+                "captured_at_pair": None,
+                "pair_frames": None,
+                "pair_orientation": None,
+                "faces": faces[half:half + 1] if (faces := frame.meta.get("faces")) else None,
+            }
+            self._timeline_dirty = False
+            self._apply_frame(_RenderedFrame(encoded, cursor, meta))
+            self._schedule_preload()
+            return
+        try:
+            await self._rebuild_current_frame()
+        except Exception as err:
+            _LOGGER.warning("Album Slideshow: photos updated but replacement render failed: %s", err)
+
+    async def _clear_current_frame(self) -> None:
+        self._current_frame = None
+        self._framebuffer = None
+        self.store.last_frame = None
+        self._last_is_portrait = None
+        self._last_pair_frames = None
+        self._last_pair_orientation = None
+        self._last_video = None
+        self._video_url = None
+
+        def blank_frame():
+            with Image.new("RGB", (16, 9), "black") as image:
+                return ip.encode_image(image)
+
+        self._framebuffer = await self.hass.async_add_executor_job(blank_frame)
+        self._frame_id += 1
+        self.async_write_ha_state()
+
+    async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
+        return self._framebuffer
+
+    async def handle_async_mjpeg_stream(self, request):
+        """Serve the current slide as MJPEG for Home Assistant core surfaces.
+
+        This is what the more-info dialog and picture-glance live view use
+        (the camera advertises no live stream, so the frontend falls back to
+        ``/api/camera_proxy_stream``). We delegate to HA's still-stream
+        helper, which polls ``async_camera_image`` at ``frame_interval`` and
+        writes a correct multipart response.
+
+        Crucially it emits frames *continuously* rather than only on slide
+        change. A browser parsing ``multipart/x-mixed-replace`` holds the
+        current part until the next boundary arrives, so a stream that sent
+        one frame and then went quiet until the next slide (potentially many
+        seconds away, or never while paused) left the more-info view blank.
+        Polling keeps a boundary coming right away, so the current frame
+        renders immediately.
+        """
+        # Imported lazily so the module still loads in test environments
+        # that stub out homeassistant.
+        from homeassistant.components.camera import async_get_still_stream
+
+        # Someone is watching the stream, so "Pause when not viewed" holds off.
+        close = self._viewers.async_add_stream(self.entry.entry_id)
+        try:
+            return await async_get_still_stream(
+                request,
+                self.async_camera_image,
+                self.content_type,
+                self.frame_interval,
+            )
+        finally:
+            close()
+
+    # Older HA cores may dispatch via the alt name; alias for compatibility.
+    async def async_handle_async_mjpeg_stream(self, request):
+        return await self.handle_async_mjpeg_stream(request)
+
+    @property
+    def _buffer_depth(self) -> int:
+        """Configured number of rendered frames retained in each direction."""
+        return min(10, max(0, int(self.store.navigation_buffer_size)))
+
+    def _capture_cursor(self, source=None) -> _NavigationCursor:
+        """Snapshot ordering state from this camera or a private renderer."""
+        source = source or self
+        return _NavigationCursor(
+            index=int(source._index),
+            random_order=tuple(source._random_order),
+            random_pos=int(source._random_pos),
+            recent_urls=tuple(source._recent_urls),
+            rng_state=source._rng.getstate(),
+            paired_urls=source._paired_urls,
+            cycle_ids=source._cycle_ids,
+            cycle_held=source._cycle_held,
+        )
+
+    def _make_renderer(self, cursor: _NavigationCursor):
+        """Create an isolated render context sharing only immutable services/cache.
+
+        Composition helpers historically operate on ``self._index`` and random
+        ordering fields. A private camera-shaped context lets background
+        preloading reuse those mature helpers without ever mutating the live
+        entity's current frame or navigation cursor.
+        """
+        renderer = AlbumSlideshowCamera.__new__(AlbumSlideshowCamera)
+        renderer.hass = self.hass
+        renderer.entry = self.entry
+        renderer.coordinator = self.coordinator
+        renderer.store = self.store
+        renderer._download_cache = self._download_cache
+        renderer._index = cursor.index
+        renderer._random_order = list(cursor.random_order)
+        renderer._random_pos = cursor.random_pos
+        renderer._recent_urls = list(cursor.recent_urls)
+        renderer._paired_urls = cursor.paired_urls
+        renderer._cycle_ids = cursor.cycle_ids
+        renderer._cycle_held = cursor.cycle_held
+        renderer._rng = random.Random()
+        renderer._rng.setstate(cursor.rng_state)
+        return renderer
+
+    async def _render_available_frame(
+        self,
+        cursor: _NavigationCursor,
+        items: list[MediaItem],
+        *,
+        advance: bool,
+        partner: int | None = None,
+    ) -> _RenderedFrame:
+        """Render the current or next usable slide from ``cursor``.
+
+        Broken candidates are skipped, matching the old loop's retry behavior.
+        All state mutations occur on a private renderer. The returned JPEG and
+        cursor are therefore safe to place in the future buffer.
+        """
+        if not items:
+            raise RuntimeError("No media available")
+
+        attempts = min(len(items), _MAX_RENDER_ATTEMPTS)
+        last_error: Exception | None = None
+        should_advance = advance
+
+        for _ in range(attempts):
+            renderer = self._make_renderer(cursor)
+            renderer._index %= len(items)
+            if should_advance:
+                renderer._do_advance(len(items), items)
+            else:
+                renderer._preferred_partner = partner
+
+            composed: Image.Image | None = None
+            try:
+                composed, meta = await renderer._compose_for_index(items)
+                meta = dict(meta or {})
+                shown = items[renderer._index]
+                meta.setdefault("photo_ids", [getattr(shown, "photo_id", None)])
+                # Faces used for the crop, so later face data can be detected.
+                meta.setdefault("faces", (_item_faces(shown),))
+                # A paired Live Photo shows only its still.
+                if _has_motion(shown) and len(meta["photo_ids"]) == 1 and shown.photo_id:
+                    if _is_video(shown):
+                        meta["video"] = {
+                            "photo_id": shown.photo_id,
+                            "duration_ms": shown.duration_ms,
+                            **await self._video_info(shown),
+                        }
+                    else:
+                        meta["video"] = {"photo_id": shown.photo_id, "live": True}
+                cursor = self._capture_cursor(renderer)
+                if composed is None:
+                    raise RuntimeError("Image composition returned no frame")
+                encoded = await self._async_image_job(ip.encode_image, composed)
+                return _RenderedFrame(encoded, cursor, meta or {})
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                last_error = err
+                cursor = self._capture_cursor(renderer)
+                should_advance = True
+                _LOGGER.debug(
+                    "Album Slideshow %s: skipping unrenderable buffered slide: %s",
+                    self.entry.title,
+                    err,
+                )
+            finally:
+                ip.safe_close(composed)
+
+        raise RuntimeError(
+            f"Could not render a usable slide after {attempts} attempts: {last_error}"
+        )
+
+    def _apply_frame(self, frame: _RenderedFrame) -> None:
+        """Make a rendered frame current and publish it to Home Assistant."""
+        previous_frame = getattr(self, "_current_frame", None)
+        self._current_frame = frame
+        self._framebuffer = frame.data
+        self.store.last_frame = frame.data
+        self._index = frame.cursor.index
+        self._random_order = list(frame.cursor.random_order)
+        self._random_pos = frame.cursor.random_pos
+        self._recent_urls = list(frame.cursor.recent_urls)
+        self._paired_urls = frame.cursor.paired_urls
+        self._cycle_ids = frame.cursor.cycle_ids
+        self._cycle_held = frame.cursor.cycle_held
+        self._rng.setstate(frame.cursor.rng_state)
+
+        meta = frame.meta
+        self._last_is_portrait = meta.get("is_portrait")
+        self._last_pair_frames = meta.get("pair_frames")
+        self._last_pair_orientation = meta.get("pair_orientation")
+        previous_video = getattr(self, "_last_video", None)
+        self._last_video = meta.get("video")
+        if not self._last_video:
+            self._video_url = None
+        elif not (
+            previous_video
+            and previous_video.get("photo_id") == self._last_video["photo_id"]
+            and getattr(self, "_video_url", None)
+        ):
+            # Re-rendering the same clip (metadata refreshes do this) keeps its
+            # URL, so the card lets it play on instead of restarting it.
+            self._video_url = video.sign_video_path(
+                self.hass, video.video_path(self.entry.entry_id, self._last_video["photo_id"])
+            )
+        self._frame_id += 1
+        self._frame_serials[self._frame_id] = frame.serial
+        while len(self._frame_serials) > _FRAME_ID_MEMORY:
+            del self._frame_serials[next(iter(self._frame_serials))]
+        if previous_frame is None or previous_frame.meta.get("photo_ids") != meta.get("photo_ids"):
+            # A different slide is up: restart the clock with its own hold
+            # (a video's length), whichever path put it here. Re-renders and
+            # exclusion rebuilds can swap the slide without going through the
+            # timer; a re-render of the same slide keeps the running clock.
+            self._slide_deadline = None
+            self._interrupt_event.set()
+            self._resume_anchor = None
+            self._shown_at = time.time()
+            self._save_position()
+
+        _LOGGER.debug(
+            "Album Slideshow %s: displayed buffered frame_id=%d index=%d "
+            "previous=%d next=%d hold=%.1fs",
+            self.entry.title,
+            self._frame_id,
+            self._index,
+            len(self._previous_frames),
+            len(self._next_frames),
+            self._slide_hold_seconds(),
+        )
+        self.async_write_ha_state()
+
+    def _trim_timeline(self) -> None:
+        """Enforce the configured frame count on both sides of current."""
+        depth = self._buffer_depth
+        while len(self._previous_frames) > depth:
+            self._previous_frames.popleft()
+        while len(self._next_frames) > depth:
+            self._next_frames.pop()
+
+    def _cancel_preload(self) -> None:
+        task = self._preload_task
+        self._preload_task = None
+        if task is not None and not task.done():
+            task.cancel()
+        self._next_ready_event.set()
+
+    def _invalidate_timeline(self) -> None:
+        """Drop frames rendered from stale media/settings and wake the loop."""
+        self._timeline_generation += 1
+        self._timeline_dirty = True
+        self._previous_frames.clear()
+        self._next_frames.clear()
+        self._cancel_preload()
+        self._interrupt_event.set()
+        self.async_write_ha_state()
+
+    def _current_render_settings(self) -> tuple:
+        return tuple(getattr(self.store, name) for name in _RENDER_SETTINGS)
+
+    def _keep_timeline(self, previous_items: list[MediaItem] | None) -> bool:
+        """Keep rendered slides that are still valid after a coordinator update.
+
+        Metadata-only updates (dates, places, captions) keep every slide. If the
+        playlist itself changed, slides already shown are kept and re-anchored
+        to their new positions, and upcoming slides are rendered again. Returns
+        False when the timeline has to be rebuilt instead.
+        """
+        current = self._current_frame
+        if current is None or self._timeline_dirty or self._navigation_lock.locked():
+            return False
+        items = self._effective_items()
+        found = {item.photo_id: (index, item) for index, item in enumerate(items) if item.photo_id}
+
+        def faces_changed(frame: _RenderedFrame) -> bool:
+            recorded = frame.meta.get("faces")
+            photo_ids = frame.meta.get("photo_ids") or []
+            return (
+                recorded is not None
+                and all(photo_id in found for photo_id in photo_ids)
+                and recorded != tuple(_item_faces(found[photo_id][1]) for photo_id in photo_ids)
+            )
+
+        if previous_items is not None and [
+            item.photo_id or item.url for item in previous_items
+        ] == [item.photo_id or item.url for item in items]:
+            return not any(
+                faces_changed(frame)
+                for frame in (*self._previous_frames, current, *self._next_frames)
+            )
+
+        def remap(frame: _RenderedFrame) -> _RenderedFrame | None:
+            photo_ids = frame.meta.get("photo_ids") or []
+            if not photo_ids or any(photo_id not in found for photo_id in photo_ids) or faces_changed(frame):
+                return None
+            return replace(frame, cursor=replace(frame.cursor, index=found[photo_ids[0]][0]))
+
+        current = remap(current)
+        if current is None:
+            return False
+        previous = [frame for frame in map(remap, self._previous_frames) if frame is not None]
+        self._timeline_generation += 1
+        self._cancel_preload()
+        self._previous_frames.clear()
+        self._previous_frames.extend(previous)
+        self._next_frames.clear()
+        self._current_frame = current
+        self._index = current.cursor.index
+        self._schedule_preload()
+        return True
+
+    def _rewind_to_displayed(self, frame_id: int | None) -> bool:
+        """Make the retained slide a card is still showing the current one.
+
+        A card holds its photo while its controls are open, so the camera may
+        already be further ahead. Navigation then starts from what is on screen.
+        """
+        serial = self._frame_serials.get(frame_id) if frame_id is not None else None
+        current = self._current_frame
+        if serial is None or current is None or current.serial == serial:
+            return False
+        timeline = [*self._previous_frames, current, *self._next_frames]
+        position = next(
+            (index for index, frame in enumerate(timeline) if frame.serial == serial),
+            None,
+        )
+        if position is None:
+            return False
+        self._previous_frames.clear()
+        self._previous_frames.extend(timeline[:position])
+        self._next_frames.clear()
+        self._next_frames.extend(timeline[position + 1:])
+        self._current_frame = timeline[position]
+        return True
+
+    def _schedule_preload(self) -> None:
+        """Start the single per-camera worker that fills future frames."""
+        self._trim_timeline()
+        if (
+            self._buffer_depth <= 0
+            or self._current_frame is None
+            or len(self._next_frames) >= self._buffer_depth
+        ):
+            return
+        if self._preload_task is not None and not self._preload_task.done():
+            return
+
+        generation = self._timeline_generation
+        self._preload_task = self.hass.async_create_background_task(
+            self._preload_loop(generation),
+            name="album_slideshow_preload",
+        )
+
+    async def _preload_loop(self, generation: int) -> None:
+        """Render future slides sequentially until the configured buffer is full."""
+        this_task = asyncio.current_task()
+        try:
+            while generation == self._timeline_generation:
+                self._trim_timeline()
+                if len(self._next_frames) >= self._buffer_depth:
+                    return
+
+                base = self._next_frames[-1] if self._next_frames else self._current_frame
+                if base is None:
+                    return
+                items = self._effective_items()
+                if not items:
+                    return
+
+                frame = await self._render_available_frame(
+                    base.cursor,
+                    items,
+                    advance=True,
+                )
+                if generation != self._timeline_generation:
+                    return
+
+                # Navigation may have moved the base from future to current or
+                # vice versa while rendering. It is still valid if it remains
+                # the last frame in the known timeline.
+                current_tail = (
+                    self._next_frames[-1]
+                    if self._next_frames
+                    else self._current_frame
+                )
+                if current_tail is not base:
+                    continue
+                if len(self._next_frames) < self._buffer_depth:
+                    self._next_frames.append(frame)
+                    self._next_ready_event.set()
+                    self.async_write_ha_state()
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            _LOGGER.warning(
+                "Album Slideshow %s: could not fill navigation buffer: %s",
+                self.entry.title,
+                err,
+            )
+        finally:
+            if self._preload_task is this_task:
+                self._preload_task = None
+            self._next_ready_event.set()
+            self.async_write_ha_state()
+
+    async def _await_preloaded_frame(self) -> bool:
+        """Wait for the in-flight worker's first frame, without waiting for all X."""
+        if self._next_frames:
+            return True
+        if self._buffer_depth <= 0:
+            return False
+
+        self._schedule_preload()
+        while not self._next_frames:
+            task = self._preload_task
+            if task is None or task.done():
+                return False
+            self._next_ready_event.clear()
+            if self._next_frames:
+                return True
+            waiter = asyncio.create_task(self._next_ready_event.wait())
+            try:
+                await asyncio.wait(
+                    {task, waiter},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                waiter.cancel()
+                try:
+                    await waiter
+                except asyncio.CancelledError:
+                    pass
+        return True
+
+    async def _show_next_frame(self) -> bool:
+        """Display the next buffered frame, rendering on demand only if empty."""
+        if self._current_frame is None:
+            return await self._rebuild_current_frame()
+
+        await self._await_preloaded_frame()
+        if self._next_frames:
+            frame = self._next_frames.popleft()
+        else:
+            items = self._effective_items()
+            frame = await self._render_available_frame(
+                self._current_frame.cursor,
+                items,
+                advance=True,
+            )
+
+        if self._buffer_depth > 0:
+            self._previous_frames.append(self._current_frame)
+        self._trim_timeline()
+        self._apply_frame(frame)
+        self._schedule_preload()
+        return True
+
+    async def _show_previous_frame(self) -> bool:
+        """Restore the most recent retained frame without I/O or composition."""
+        if not self._previous_frames:
+            return False
+
+        frame = self._previous_frames.pop()
+        if self._current_frame is not None and self._buffer_depth > 0:
+            self._next_frames.appendleft(self._current_frame)
+        self._trim_timeline()
+        self._apply_frame(frame)
+        self._schedule_preload()
+        return True
+
+    async def _rebuild_current_frame(self) -> bool:
+        """Render the current cursor after startup or playlist/settings changes."""
+        generation = self._timeline_generation
+        self._timeline_dirty = False
+        items = self._effective_items()
+        if not items:
+            await self._clear_current_frame()
+            return False
+
+        resume = None
+        advance = False
+        if self._current_frame is not None:
+            cursor = self._current_frame.cursor
+        else:
+            cursor = self._capture_cursor()
+            if self._starting:
+                cursor, advance, resume = self._starting_position(cursor, items)
+        frame = await self._render_available_frame(
+            cursor, items, advance=advance, partner=resume["partner"] if resume else None
+        )
+        if generation != self._timeline_generation:
+            return False
+        self._previous_frames.clear()
+        self._next_frames.clear()
+        self._starting = False
+        self._apply_frame(frame)
+        if resume and (frame.meta.get("photo_ids") or [None])[0] == resume["photo_id"]:
+            self._resume_anchor = self._shown_at = resume["shown_at"]
+            self._save_position()
+        self._schedule_preload()
+        return True
+
+    def _starting_position(
+        self, cursor: _NavigationCursor, items: list[MediaItem]
+    ) -> tuple[_NavigationCursor, bool, dict | None]:
+        """Start on the slide saved before a restart, else a random photo in random order."""
+        saved = getattr(self.store, "resume_point", None)
+        if saved:
+            positions = {item.photo_id: index for index, item in enumerate(items) if item.photo_id}
+            first, *rest = saved["photo_ids"]
+            if first in positions:
+                resume = {
+                    "photo_id": first,
+                    "partner": positions.get(rest[0]) if rest else None,
+                    "shown_at": saved["shown_at"],
+                }
+                return replace(cursor, index=positions[first]), False, resume
+        return cursor, self.store.order_mode == ORDER_RANDOM, None
+
+    async def _wait_or_interrupt(self, timeout: float) -> bool:
+        """Wait for configuration/navigation or for the slide timer to expire."""
+        if self._timeline_dirty:
+            return True
+        self._interrupt_event.clear()
+        # Close the clear/wait race: callbacks cannot run between these two
+        # synchronous statements without setting the event again.
+        if self._timeline_dirty:
+            return True
+        try:
+            if self._held:
+                # Once it plays again, a held slide gets a full interval.
+                self._resume_anchor = None
+                await self._interrupt_event.wait()
+            else:
+                await asyncio.wait_for(
+                    self._interrupt_event.wait(),
+                    timeout=timeout,
+                )
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    @property
+    def _paused_unwatched(self) -> bool:
+        """Held by "Pause when not viewed": no card or stream is showing us."""
+        return bool(self.store.pause_when_unwatched) and self._viewers.is_unwatched(
+            self.entry.entry_id
+        )
+
+    @property
+    def _held(self) -> bool:
+        """Whether the slide timer is stopped (manual navigation still works)."""
+        return bool(self.store.paused) or self._paused_unwatched
+
+    def _on_viewers_change(self) -> None:
+        if not self.store.pause_when_unwatched:
+            return
+        _LOGGER.debug(
+            "Album Slideshow %s: %s",
+            self.entry.title,
+            "paused, no one is viewing it" if self._paused_unwatched
+            else "resumed, a viewer is back",
+        )
+        # Wake the render loop; a returning viewer gets a full interval on
+        # the slide they find.
+        self._slide_deadline = None
+        self._resume_anchor = None
+        self._interrupt_event.set()
+        self.async_write_ha_state()
+
+    async def _render_loop(self, initial_delay: float = 0.0) -> None:
+        """Display buffered frames on command/timer and refill them in the background."""
+        loop = asyncio.get_running_loop()
+        restored = getattr(self.store, "settings_restored", None)
+        if restored is not None:
+            # Restored settings decide which slide comes first.
+            try:
+                await asyncio.wait_for(restored.wait(), _SETTINGS_RESTORE_WAIT)
+            except TimeoutError:
+                pass
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+
+        while self._current_frame is None:
+            try:
+                async with self._navigation_lock:
+                    if self._current_frame is None:
+                        await self._rebuild_current_frame()
+                if self._current_frame is not None:
+                    self._consecutive_failures = 0
+                    break
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                self._consecutive_failures += 1
+                backoff = min(2 ** self._consecutive_failures, 60)
+                _LOGGER.warning(
+                    "Album Slideshow: initial render failed (attempt %d), retrying in %ds: %s",
+                    self._consecutive_failures,
+                    backoff,
+                    err,
+                )
+                await asyncio.sleep(backoff)
+            if not self._effective_items():
+                self._interrupt_event.clear()
+                if not self._effective_items():
+                    await self._interrupt_event.wait()
+
+        while True:
+            try:
+                if self._slide_deadline is None:
+                    self._slide_deadline = loop.time() + self._remaining_hold()
+                if self._timeline_dirty:
+                    async with self._navigation_lock:
+                        if self._timeline_dirty:
+                            await self._rebuild_current_frame()
+                    continue
+
+                interrupted = await self._wait_or_interrupt(
+                    max(0.0, self._slide_deadline - loop.time())
+                )
+                if not interrupted and not self._held:
+                    async with self._navigation_lock:
+                        if (
+                            not self._timeline_dirty
+                            and self._slide_deadline is not None
+                            and loop.time() >= self._slide_deadline
+                        ):
+                            await self._show_next_frame()
+                            self._slide_deadline = loop.time() + self._slide_hold_seconds()
+                self._consecutive_failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                self._slide_deadline = None
+                self._consecutive_failures += 1
+                _LOGGER.warning(
+                    "Album Slideshow: buffered navigation/render failed (attempt %d): %s",
+                    self._consecutive_failures,
+                    err,
+                )
+
+    async def _ensure_enriched(self, item: MediaItem) -> None:
+        """Fetch an item's metadata before rendering it, if still missing.
+
+        Faces steer the crop and caption fields are baked into paired slides,
+        so a slide rendered before the background pass reaches its photo
+        would otherwise be missing both. Bounded so a slow server only
+        delays the slide briefly; the fetch carries on in the background.
+        """
+        enrich = getattr(getattr(self, "coordinator", None), "async_enrich_item", None)
+        if enrich is None:
+            return
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        try:
+            fetched = await asyncio.wait_for(asyncio.shield(enrich(item)), _ENRICH_WAIT_SECONDS)
+            if fetched:
+                _LOGGER.debug(
+                    "Album Slideshow: fetched metadata for %s in %d ms before display",
+                    getattr(item, "filename", None), (loop.time() - started) * 1000,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 - render without metadata
+            _LOGGER.debug(
+                "Album Slideshow: metadata for %s not ready: %r",
+                getattr(item, "filename", None), err,
+            )
+
+    async def _video_info(self, item: MediaItem) -> dict[str, Any]:
+        """Which stream a video is served as; empty when it can't be told."""
+        fetch = getattr(self.coordinator, "async_video_info", None)
+        if fetch is None:
+            return {}
+        try:
+            info = await fetch(item)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 - a caption must not cost the slide
+            _LOGGER.debug("Album Slideshow: could not describe video %s: %s", item.filename, err)
+            return {}
+        return {field: info.get(field) for field in VIDEO_INFO_FIELDS if field in info}
+
+    def _video_info_attributes(self) -> dict[str, Any]:
+        video_meta = getattr(self, "_last_video", None) or {}
+        duration_ms = video_meta.get("duration_ms")
+        return {
+            "video_duration": duration_ms / 1000 if duration_ms else None,
+            **{field: video_meta.get(field) for field in VIDEO_INFO_FIELDS},
+        }
+
+    def _slide_hold_seconds(self) -> float:
+        """Seconds the current slide stays up: the interval, or the clip's length."""
+        interval = int(self.store.slide_interval)
+        if not self._last_video or self._last_video.get("live"):
+            # Photos, including Live Photos, keep the slide interval.
+            return float(interval)
+        return video.video_hold_seconds(
+            self._last_video.get("duration_ms"),
+            int(getattr(self.store, "video_max_seconds", interval)),
+            interval,
+        )
+
+    def _remaining_hold(self) -> float:
+        """Seconds left on the current slide; a resumed one keeps the time it had left."""
+        hold = self._slide_hold_seconds()
+        if self._resume_anchor is None:
+            return hold
+        return min(hold, max(0.0, hold - (time.time() - self._resume_anchor)))
+
+    def _save_position(self) -> None:
+        save = getattr(self.store, "save_position", None)
+        if save is not None and self._current_frame is not None:
+            save(self._current_frame.meta.get("photo_ids") or [], self._shown_at)
+
+    @property
+    def _compose_semaphore(self) -> asyncio.Semaphore:
+        """Return the domain-wide compose semaphore, creating it on demand.
+
+        ``__init__.py`` populates it during setup, but defensive
+        initialisation here means a partially-loaded integration can
+        still render without crashing.
+        """
+        domain_data = self.hass.data.setdefault(DOMAIN, {})
+        sem = domain_data.get("compose_semaphore")
+        if sem is None:
+            sem = asyncio.Semaphore(1)
+            domain_data["compose_semaphore"] = sem
+        return sem
+
+    async def _async_image_job(self, function, *args):
+        async with self._compose_semaphore:
+            return await self.hass.async_add_executor_job(function, *args)
+
+    def _do_advance(self, count: int, items: list) -> None:
+        """Advance _index to the next slide and commit random-order position."""
+        if count <= 0:
+            self._index = 0
+            return
+
+        self._index %= count
+        order_mode = self.store.order_mode
+
+        # Sequential modes (album order + sorted-by-time orderings) walk in
+        # order. The list is already pre-sorted by ``order_items``, so we
+        # only need to step forward, past photos a pair already showed.
+        if order_mode != ORDER_RANDOM:
+            self._index = (self._index + 1) % count
+            for _ in range(count - 1):
+                url = items[self._index].url
+                if url not in self._paired_urls:
+                    break
+                self._paired_urls = tuple(u for u in self._paired_urls if u != url)
+                self._index = (self._index + 1) % count
+            return
+
+        bias = getattr(self.store, "shuffle_age_bias", DEFAULT_SHUFFLE_AGE_BIAS)
+        self._index = self._next_age_weighted_index(items, bias) if bias else self._next_random_index(count, items)
+        self._remember_recent(items[self._index].url, count)
+
+    def _remember_recent(self, url: str, count: int) -> None:
+        self._recent_urls.append(url)
+        keep = min(20, max(1, count - 1))
+        if len(self._recent_urls) > keep:
+            self._recent_urls = self._recent_urls[-keep:]
+
+    def _random_cycle_active(self) -> bool:
+        """Whether plain random order is walking a shuffle cycle."""
+        return (
+            self.store.order_mode == ORDER_RANDOM
+            and not getattr(self.store, "shuffle_age_bias", DEFAULT_SHUFFLE_AGE_BIAS)
+            and bool(self._cycle_ids)
+            and len(self._random_order) == len(self._cycle_ids)
+        )
+
+    def _shown_this_cycle(self, items: list[MediaItem]):
+        """Return a check for photos already shown this cycle, if one applies.
+
+        In random order, photos held back to the end of the cycle count as
+        shown until the cycle reaches them.
+        """
+        if self._random_cycle_active():
+            ids, order, pos = self._cycle_ids, self._random_order, self._random_pos
+            end = len(order) - self._cycle_held
+            remaining = {ids[index] for index in order[pos:end if pos < end else None]}
+            return lambda index: _photo_key(items[index]) not in remaining
+        if self._paired_urls:
+            paired = set(self._paired_urls)
+            return lambda index: items[index].url in paired
+        return None
+
+    def _mark_partner_shown(self, index: int, items: list[MediaItem]) -> None:
+        """Count a pair's second photo as shown, so it isn't repeated soon."""
+        count = len(items)
+        url = items[index].url
+        if self.store.order_mode != ORDER_RANDOM:
+            if url not in self._paired_urls:
+                self._paired_urls = (*self._paired_urls, url)[-_PAIRED_MEMORY:]
+            return
+        if self._random_cycle_active():
+            key = _photo_key(items[index])
+            order, ids, pos = self._random_order, self._cycle_ids, self._random_pos
+            position = next((p for p in range(len(order)) if ids[order[p]] == key), None)
+            if position is not None and position >= pos:
+                if position >= len(order) - self._cycle_held:
+                    self._cycle_held -= 1
+                order.insert(pos, order.pop(position))
+                self._random_pos += 1
+            elif position is not None:
+                # Shown again this cycle, so it now counts as shown most recently.
+                order.insert(pos - 1, order.pop(position))
+        self._remember_recent(url, count)
+
+    def _peek_advance(self, count: int, items: list) -> None:
+        """Advance _index without committing to random-order bookkeeping.
+
+        Used by the orientation-avoid search so that rejected candidates
+        don't burn through the random cycle and cause premature repeats.
+        """
+        if count <= 0:
+            self._index = 0
+            return
+        self._index = (self._index + 1) % count
+
+    def _crop_hints(self, item: MediaItem | None) -> ip.CropHints:
+        return ip.CropHints(
+            faces=_item_faces(item),
+            debug=bool(getattr(getattr(self, "store", None), "face_debug", False)),
+            name=getattr(item, "filename", None),
+        )
+
+    async def _compose_for_index(
+        self, items: list[MediaItem]
+    ) -> tuple[Image.Image | None, dict | None]:
+        """Compose the slide at ``self._index`` into a PIL image.
+
+        Returns ``(composed, meta)`` where ``meta`` carries the orientation
+        and paired-capture metadata that ``_commit_composed`` will publish
+        as state attributes. Returns ``(None, None)`` if compose failed.
+
+        Pure compose - does NOT mutate ``self._framebuffer`` or
+        ``self._last_*`` state. The caller commits via ``_commit_composed``.
+        """
+        fill_mode = self.store.fill_mode
+        portrait_mode = self.store.portrait_mode
+        divider = max(0, int(self.store.pair_divider_px))
+        divider_fill, transparent_divider = ip.parse_divider_color(self.store.pair_divider_color)
+        max_short_edge = MAX_RESOLUTION_SHORT_EDGE.get(self.store.max_resolution)
+        width, height = ip.resolve_output_size(None, None, self.store.aspect_ratio, max_short_edge)
+
+        cur = items[self._index]
+        is_portrait_canvas = height > width
+
+        # Metadata fast path: if we can resolve orientation without downloading,
+        # we may short-circuit the mismatch handling before any bytes are read.
+        meta_portrait = ip.is_portrait_item_by_metadata(cur)
+        if (
+            meta_portrait is not None
+            and meta_portrait != is_portrait_canvas
+            and portrait_mode == ORIENTATION_MISMATCH_AVOID
+        ):
+            return await self._compose_skip_mismatch(items, width, height, fill_mode, is_portrait_canvas)
+
+        await self._ensure_enriched(cur)
+        cur_bytes = await self._fetch_bytes(cur.url)
+        if not cur_bytes:
+            raise RuntimeError(f"Failed to fetch image: {cur.url}")
+
+        img = await self._async_image_job(
+            ip.open_image, cur_bytes, (width, height)
+        )
+        try:
+            cur_is_portrait = ip.is_portrait_item(cur, img)
+            orientation_mismatch = cur_is_portrait != is_portrait_canvas
+
+            if orientation_mismatch and portrait_mode == ORIENTATION_MISMATCH_AVOID:
+                ip.safe_close(img)
+                img = None
+                return await self._compose_skip_mismatch(items, width, height, fill_mode, is_portrait_canvas)
+
+            # A video plays alone, so it is never split into a pair.
+            if (
+                orientation_mismatch
+                and portrait_mode == ORIENTATION_MISMATCH_PAIR
+                and not _is_video(cur)
+            ):
+                pair = await self._find_next_mismatch_image(
+                    items, is_portrait_canvas, width, height, limit=_PAIR_SEARCH_LIMIT
+                )
+                other_img = pair[0] if pair else None
+                other_item = pair[1] if pair else None
+                pair_meta: list[str | None] | None = None
+                pair_frames: list[dict] | None = None
+                try:
+                    if other_img is not None:
+                        composed = await self._async_image_job(
+                            ip.pair_images, img, other_img, width, height, fill_mode,
+                            is_portrait_canvas, divider, divider_fill, transparent_divider,
+                            self._crop_hints(cur), self._crop_hints(other_item),
+                        )
+                        pair_frames = [_caption_frame(cur), _caption_frame(other_item)]
+                        pair_meta = [f["captured_at"] for f in pair_frames]
+                    else:
+                        composed = await self._async_image_job(
+                            ip.render_image, img, fill_mode, width, height, self._crop_hints(cur),
+                        )
+                finally:
+                    ip.safe_close(other_img)
+                meta = {
+                    "photo_ids": (
+                        [getattr(cur, "photo_id", None), getattr(other_item, "photo_id", None)]
+                        if pair_frames else [getattr(cur, "photo_id", None)]
+                    ),
+                    "faces": (
+                        (_item_faces(cur), _item_faces(other_item))
+                        if pair_frames else (_item_faces(cur),)
+                    ),
+                    "is_portrait": cur_is_portrait,
+                    "captured_at_pair": pair_meta,
+                    "pair_frames": pair_frames,
+                    # ``pair_images`` stacks images top/bottom on a portrait
+                    # canvas and places them left/right on a landscape canvas.
+                    "pair_orientation": (
+                        ("vertical" if is_portrait_canvas else "horizontal")
+                        if pair_frames
+                        else None
+                    ),
+                }
+                return composed, meta
+
+            composed = await self._async_image_job(
+                ip.render_image, img, fill_mode, width, height, self._crop_hints(cur)
+            )
+            return composed, {
+                "is_portrait": cur_is_portrait,
+                "captured_at_pair": None,
+            }
+        finally:
+            ip.safe_close(img)
+
+    async def _compose_skip_mismatch(
+        self,
+        items: list[MediaItem],
+        width: int,
+        height: int,
+        fill_mode: str,
+        is_portrait_canvas: bool,
+    ) -> tuple[Image.Image | None, dict | None]:
+        """Skip-mismatch variant of ``_compose_for_index``.
+
+        Walks forward (peek-advancing for non-matches) until it finds an
+        image whose orientation matches the canvas, then composes it.
+        """
+        count = len(items)
+        if count <= 0:
+            return None, None
+
+        start = self._index
+
+        for _ in range(min(count, _SKIP_SEARCH_LIMIT)):
+            cur = items[self._index]
+
+            meta_portrait = ip.is_portrait_item_by_metadata(cur)
+            if meta_portrait is not None:
+                if meta_portrait != is_portrait_canvas:
+                    self._peek_advance(count, items)
+                    continue
+                if self._index != start:
+                    self._do_advance(count, items)
+                return await self._compose_single(cur, width, height, fill_mode)
+
+            b = await self._fetch_bytes(cur.url)
+            if not b:
+                self._peek_advance(count, items)
+                continue
+            img = await self._async_image_job(ip.open_image, b, (width, height))
+            try:
+                if ip.is_portrait_item(cur, img) != is_portrait_canvas:
+                    self._peek_advance(count, items)
+                    continue
+                if self._index != start:
+                    self._do_advance(count, items)
+                await self._ensure_enriched(cur)
+                composed = await self._async_image_job(
+                    ip.render_image, img, fill_mode, width, height, self._crop_hints(cur)
+                )
+                return composed, {
+                    "is_portrait": is_portrait_canvas,
+                    "captured_at_pair": None,
+                }
+            finally:
+                ip.safe_close(img)
+
+        self._index = start
+        return await self._compose_single(items[self._index], width, height, fill_mode)
+
+    async def _compose_single(
+        self,
+        item: MediaItem,
+        width: int,
+        height: int,
+        fill_mode: str,
+    ) -> tuple[Image.Image | None, dict | None]:
+        await self._ensure_enriched(item)
+        b = await self._fetch_bytes(item.url)
+        if not b:
+            return None, None
+        img = await self._async_image_job(ip.open_image, b, (width, height))
+        try:
+            cur_is_portrait = ip.is_portrait_item(item, img)
+            composed = await self._async_image_job(
+                ip.render_image, img, fill_mode, width, height, self._crop_hints(item)
+            )
+            return composed, {
+                "is_portrait": cur_is_portrait,
+                "captured_at_pair": None,
+            }
+        finally:
+            ip.safe_close(img)
+
+    async def _render_current(self, items: list[MediaItem]) -> bytes | None:
+        """Compatibility wrapper: compose + encode the current slide.
+
+        Kept as a thin wrapper because external code paths (e.g., tests)
+        may still call it. ``_render_cycle`` no longer does.
+        """
+        composed, _ = await self._compose_for_index(items)
+        if composed is None:
+            return None
+        try:
+            return await self._async_image_job(ip.encode_image, composed)
+        finally:
+            ip.safe_close(composed)
+
+    async def _find_next_mismatch_image(
+        self,
+        items: list[MediaItem],
+        is_portrait_canvas: bool,
+        width: int,
+        height: int,
+        limit: int = _PAIR_SEARCH_LIMIT,
+    ) -> tuple[Image.Image, MediaItem] | None:
+        """Find an image with the opposite orientation of the canvas.
+
+        By default (``pair_min_gap_percent`` = 0) this is the original
+        search: walk forward from the very next item, nearest candidate
+        wins, fully deterministic. Setting ``pair_min_gap_percent`` above 0
+        opts into a cooldown search instead - candidates within that
+        percentage of the current index (wrapping on both sides, since the
+        album is a ring buffer) are excluded so the partner comes from a
+        meaningfully different part of the collection, and the remaining
+        candidates are shuffled before scanning so the same nearby partner
+        isn't picked deterministically every time. Small albums where the
+        cooldown would leave no candidates fall back to the deterministic
+        search (see ``_pair_exclusion_radius``); no eligible partner at all
+        (orientation, recent-repeat, or download failures) is a normal
+        outcome and simply returns ``None``, which the caller renders as a
+        single unpaired image.
+
+        A partner that was already shown this cycle (random order) or
+        already used as a partner (ordered modes) is only picked when no
+        unshown one qualifies; in random order it is then the one shown
+        longest ago. The random-order search for an unshown partner reaches
+        past ``limit`` positions; only downloads count toward ``limit``
+        there. The chosen partner is then counted as shown (see
+        ``_mark_partner_shown``).
+
+        The result depends only on the ordering state that the navigation
+        buffer's cursor snapshots capture, and the cursor is captured after
+        this runs - so replaying a cached cursor (Previous/Next) always
+        reproduces the same paired frame; only rendering a slide for the
+        first time consumes new randomness.
+
+        Uses metadata wherever possible - only candidates without width/height
+        metadata are downloaded and decoded for their orientation. The returned
+        PIL image is the caller's to close. The matching ``MediaItem`` is
+        returned alongside so the caller can attribute timestamps etc.
+        """
+        if not items:
+            return None
+        n = len(items)
+        radius = _pair_exclusion_radius(n, self.store.pair_min_gap_percent)
+        shuffled: list[int] | None = None
+        excluded: set[int] = set()
+        if radius > 0:
+            excluded = {(self._index + d) % n for d in range(-radius, radius + 1)}
+            shuffled = [idx for idx in range(n) if idx not in excluded]
+            self._rng.shuffle(shuffled)
+
+        def candidates(span: int):
+            if shuffled is not None:
+                return shuffled[:span]
+            return ((self._index + offset) % n for offset in range(1, min(n, span + 1)))
+
+        tried: set[int] = set()
+        found = None
+        if self._preferred_partner is not None:
+            found = await self._scan_for_partner(
+                items, (self._preferred_partner,), is_portrait_canvas, width, height, 1, tried=tried,
+            )
+        whole_cycle = False
+        shown = self._shown_this_cycle(items)
+        if found is None and shown is not None:
+            whole_cycle = self._random_cycle_active()
+            found = await self._scan_for_partner(
+                items,
+                candidates(_PAIR_UNSHOWN_SCAN if whole_cycle else limit),
+                is_portrait_canvas,
+                width,
+                height,
+                limit,
+                tried=tried,
+                skip=shown,
+                downloads_only=whole_cycle,
+            )
+        if found is None and whole_cycle:
+            found = await self._scan_for_partner(
+                items,
+                self._shown_oldest_first(items),
+                is_portrait_canvas,
+                width,
+                height,
+                limit,
+                tried=tried,
+                skip=excluded.__contains__ if excluded else None,
+                downloads_only=True,
+            )
+        if found is None:
+            found = await self._scan_for_partner(
+                items, candidates(limit), is_portrait_canvas, width, height, limit, tried=tried,
+            )
+        if found is None:
+            return None
+        img, index = found
+        self._mark_partner_shown(index, items)
+        return img, items[index]
+
+    def _shown_oldest_first(self, items: list[MediaItem]):
+        """Indices of photos shown this cycle, the one shown longest ago first."""
+        where: dict[str, int] = {}
+        for index, item in enumerate(items):
+            where.setdefault(_photo_key(item), index)
+        ids = self._cycle_ids
+        for old in self._random_order[: self._random_pos]:
+            index = where.get(ids[old])
+            if index is not None and index != self._index:
+                yield index
+
+    async def _scan_for_partner(
+        self,
+        items: list[MediaItem],
+        candidates,
+        is_portrait_canvas: bool,
+        width: int,
+        height: int,
+        limit: int,
+        *,
+        tried: set[int],
+        skip=None,
+        downloads_only: bool = False,
+    ) -> tuple[Image.Image, int] | None:
+        """Return the first usable partner among ``candidates`` and its index."""
+        tries = 0
+        for idx in candidates:
+            if tries >= limit:
+                break
+            it = items[idx]
+            if not downloads_only:
+                tries += 1
+
+            if idx in tried or (skip is not None and skip(idx)):
+                continue
+            if it.url in self._recent_urls or _is_video(it):
+                continue
+
+            meta_portrait = ip.is_portrait_item_by_metadata(it)
+            if meta_portrait is not None and meta_portrait == is_portrait_canvas:
+                # Metadata says this one is the wrong orientation for pairing; skip.
+                continue
+
+            if downloads_only:
+                tries += 1
+            tried.add(idx)
+            b = await self._fetch_bytes(it.url)
+            if not b:
+                continue
+
+            try:
+                img = await self._async_image_job(ip.open_image, b, (width, height))
+            except Exception:
+                continue
+
+            if ip.is_portrait_item(it, img) != is_portrait_canvas:
+                # Only the chosen partner needs faces and caption fields.
+                await self._ensure_enriched(it)
+                return img, idx
+            ip.safe_close(img)
+
+        return None
+
+    def _next_age_weighted_index(self, items: list[MediaItem], bias: int) -> int:
+        weights = playlist.age_weights(
+            items, bias, missing_date=getattr(self.store, "missing_date_mode", DEFAULT_MISSING_DATE_MODE),
+        )
+        count = len(items)
+        if count <= 1 or min(weights) == max(weights):
+            return self._next_random_index(count, items)
+        cooldown = min(5, max(1, count // 10))
+        recent = set(self._recent_urls[-cooldown:])
+        candidates = [
+            index for index, item in enumerate(items)
+            if index != self._index and item.url not in recent
+        ]
+        if not candidates:
+            candidates = [index for index in range(count) if index != self._index]
+        return self._rng.choices(candidates, weights=[weights[index] for index in candidates], k=1)[0]
+
+    def _next_random_index(self, count: int, items: list[MediaItem]) -> int:
+        if count <= 1:
+            self._random_order = [0]
+            self._random_pos = 0
+            self._cycle_ids = ()
+            self._cycle_held = 0
+            return 0
+
+        ids = tuple(_photo_key(item) for item in items)
+        if ids != self._cycle_ids and self._random_pos < len(self._random_order):
+            self._carry_cycle_over(ids)
+        if ids != self._cycle_ids or self._random_pos >= len(self._random_order):
+            self._start_random_cycle(ids)
+
+        idx = self._random_order[self._random_pos]
+        self._random_pos += 1
+        return idx
+
+    def _carry_cycle_over(self, ids: tuple[str, ...]) -> None:
+        """Map an unfinished cycle onto a changed playlist; shown photos stay shown."""
+        old_ids, order, pos = self._cycle_ids, self._random_order, self._random_pos
+        position: dict[str, int] = {}
+        for index, key in enumerate(ids):
+            position.setdefault(key, index)
+        shown: dict[int, None] = {}
+        for old in order[:pos]:
+            new = position.get(old_ids[old]) if old < len(old_ids) else None
+            if new is not None:
+                shown.setdefault(new)
+        held_from = max(pos, len(order) - self._cycle_held)
+        held_ids = {old_ids[old] for old in order[held_from:] if old < len(old_ids)}
+        rest = [index for index in range(len(ids)) if index not in shown and ids[index] not in held_ids]
+        held = [index for index in range(len(ids)) if index not in shown and ids[index] in held_ids]
+        self._rng.shuffle(rest)
+        self._rng.shuffle(held)
+        self._random_order = [*shown, *rest, *held]
+        self._random_pos = len(shown)
+        self._cycle_ids = ids
+        self._cycle_held = len(held)
+
+    def _start_random_cycle(self, ids: tuple[str, ...]) -> None:
+        """Shuffle a new cycle with the previous cycle's last half at the end.
+
+        Every photo then waits at least half the album before it comes back.
+        """
+        old_ids = self._cycle_ids
+        previous = [old_ids[old] for old in self._random_order[: self._random_pos] if old < len(old_ids)]
+        if previous:
+            held = set(previous[-max(1, len(ids) // 2):])
+        elif 0 <= self._index < len(ids):
+            held = {ids[self._index]}
+        else:
+            held = set()
+        order = list(range(len(ids)))
+        self._rng.shuffle(order)
+        tail = [i for i in order if ids[i] in held]
+        self._random_order = [i for i in order if ids[i] not in held] + tail
+        self._random_pos = 0
+        self._cycle_ids = ids
+        self._cycle_held = len(tail)
+
+    async def _fetch_bytes(self, url: str) -> bytes | None:
+        key = self._download_key(url)
+        cached = self._download_cache.get(key)
+        if cached is not None:
+            return cached
+
+        if url.startswith("file://"):
+            try:
+                p = Path(url[7:])
+                data = await self.hass.async_add_executor_job(p.read_bytes)
+            except Exception as err:
+                _LOGGER.warning("Album Slideshow: failed to read local image: %s", err)
+                return None
+            if len(data) > _MAX_DOWNLOAD_BYTES:
+                _LOGGER.warning(
+                    "Album Slideshow: local image %s is %d bytes, exceeds %d byte limit; skipping",
+                    url, len(data), _MAX_DOWNLOAD_BYTES,
+                )
+                return None
+        elif not url.startswith("http"):
+            # End-to-end encrypted providers (Ente) can't be fetched by URL:
+            # the coordinator downloads and decrypts the bytes for us.
+            data = await self._provider_bytes(url)
+            if data is None:
+                return None
+        else:
+            data = await self._fetch_remote(url)
+            if data is None:
+                return None
+
+        self._download_cache.put(key, data)
+        return data
+
+    def _signed_links(self) -> bool:
+        return getattr(self.coordinator, "signed_links", False) is True
+
+    def _download_key(self, url: str) -> str:
+        if self._signed_links() and url.startswith("http"):
+            return self.coordinator.download_key(url)
+        return url
+
+    async def _fetch_remote(self, url: str) -> bytes | None:
+        """Download a remote image, renewing its signed link once it expires."""
+        if not self._signed_links():
+            return await self._http_get(url)
+        if self.coordinator.link_expired(url):
+            url = await self.coordinator.async_renew_link(url) or url
+        try:
+            return await self._http_get(url, signed=True)
+        except _ExpiredLink:
+            fresh = await self.coordinator.async_renew_link(url)
+        if fresh is None:
+            _LOGGER.debug("Album Slideshow: expired image link, no newer one yet: %s", url)
+            return None
+        return await self._http_get(fresh)
+
+    async def _provider_bytes(self, url: str) -> bytes | None:
+        """Ask the coordinator for decrypted bytes behind a provider URL."""
+        fetcher = getattr(self.coordinator, "async_fetch_image_bytes", None)
+        if fetcher is None:
+            _LOGGER.warning("Album Slideshow: no handler for image url %s", url)
+            return None
+        try:
+            data = await fetcher(url)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Album Slideshow: failed to fetch %s: %s", url, err)
+            return None
+        if data is None:
+            return None
+        if len(data) > _MAX_DOWNLOAD_BYTES:
+            _LOGGER.warning(
+                "Album Slideshow: %s is %d bytes, exceeds %d byte limit; skipping",
+                url, len(data), _MAX_DOWNLOAD_BYTES,
+            )
+            return None
+        return data
+
+    def _image_request_headers(self, url: str) -> dict[str, str] | None:
+        """Auth headers required to fetch image bytes for some providers.
+
+        The Immich provider stores an ``x-api-key`` header on the coordinator;
+        it is sent server-side only, so the key never reaches the browser or
+        the camera's ``current_url`` attribute. Returns ``None`` when no extra
+        headers are needed (Google, local folder, media source).
+        """
+        headers = getattr(self.coordinator, "image_request_headers", None)
+        if headers and isinstance(url, str) and url.startswith("http"):
+            return dict(headers)
+        return None
+
+    def _image_request_params(self, url: str) -> dict[str, str] | None:
+        """Query params added at fetch time only (UGREEN ``ugk``, media ``authSig``)."""
+        if not (isinstance(url, str) and url.startswith("http")):
+            return None
+        params = dict(getattr(self.coordinator, "image_request_params", None) or {})
+        sign = getattr(self.coordinator, "media_link_signature", None)
+        if sign is not None and (signature := sign(url)):
+            params["authSig"] = signature
+        return params or None
+
+    async def _http_get(self, url: str, *, signed: bool = False) -> bytes | None:
+        """Fetch one remote image with validation and a hard timeout.
+
+        With ``signed``, an expired link raises ``_ExpiredLink`` instead of
+        logging a failure, so the caller can renew it.
+        """
+        session = async_get_clientsession(
+            self.hass,
+            verify_ssl=getattr(self.coordinator, "image_request_verify_ssl", True),
+        )
+        try:
+            async with async_timeout.timeout(30):
+                async with session.get(
+                    url,
+                    headers=self._image_request_headers(url),
+                    params=self._image_request_params(url),
+                ) as resp:
+                    resp.raise_for_status()
+
+                    content_type = resp.headers.get("Content-Type", "")
+                    primary = content_type.split(";", 1)[0].strip().lower()
+                    icloud_binary_image = False
+                    if primary == "application/octet-stream":
+                        # Check the final response host after redirects, never
+                        # a substring of the original URL's path or query.
+                        host = (resp.url.host or "").lower()
+                        icloud_binary_image = (
+                            host == "icloud-content.com"
+                            or host.endswith(".icloud-content.com")
+                        )
+                    if (
+                        primary
+                        and not primary.startswith(_ACCEPTED_IMAGE_PREFIX)
+                        and not icloud_binary_image
+                    ):
+                        _LOGGER.debug(
+                            "Album Slideshow: rejecting %s, content-type %r is not an image",
+                            url, primary,
+                        )
+                        return None
+
+                    content_length = resp.headers.get("Content-Length")
+                    if content_length is not None:
+                        try:
+                            declared = int(content_length)
+                        except ValueError:
+                            declared = -1
+                        if declared > _MAX_DOWNLOAD_BYTES:
+                            _LOGGER.warning(
+                                "Album Slideshow: %s advertises %d bytes, exceeds %d byte limit; skipping",
+                                url, declared, _MAX_DOWNLOAD_BYTES,
+                            )
+                            return None
+
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in resp.content.iter_chunked(64 * 1024):
+                        total += len(chunk)
+                        if total > _MAX_DOWNLOAD_BYTES:
+                            _LOGGER.warning(
+                                "Album Slideshow: %s exceeded %d byte limit mid-download; aborting",
+                                url, _MAX_DOWNLOAD_BYTES,
+                            )
+                            return None
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+        except ClientResponseError as err:
+            if signed and err.status in _EXPIRED_LINK_STATUSES:
+                raise _ExpiredLink from None
+            # str(err) includes the full request URL, fetch-time params and all.
+            _LOGGER.warning(
+                "Album Slideshow: failed to fetch image %s: HTTP %s", url, err.status
+            )
+            return None
+        except Exception as err:
+            _LOGGER.warning("Album Slideshow: failed to fetch image: %s", err)
+            return None

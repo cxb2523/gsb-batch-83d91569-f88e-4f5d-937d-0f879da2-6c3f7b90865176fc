@@ -1,0 +1,137 @@
+hide_photo:
+  name: Hide photo
+  description: Exclude a photo from this slideshow without changing the source library. Paired slides require an explicit position or photo IDs.
+  fields:
+    entry_id:
+      name: Entry ID
+      required: true
+      selector:
+        text:
+    photo_ids:
+      name: Photo IDs
+      description: Optional list of IDs from displayed_photo_ids. These target the selected photos even if the slide changes.
+      selector:
+        object:
+    position:
+      name: Position
+      description: First is left or top; second is right or bottom. Omit for a single photo.
+      selector:
+        select:
+          options:
+            - first
+            - second
+            - both
+    frame_id:
+      name: Expected frame ID
+      description: Optional guard that rejects the action if the current frame has changed.
+      selector:
+        number:
+          min: 0
+          mode: box
+
+undo_hide:
+  name: Undo hide
+  description: Restore the photos hidden by the last hide action for this slideshow.
+  fields:
+    entry_id:
+      name: Entry ID
+      required: true
+      selector:
+        text:
+
+restore_photos:
+  name: Restore photos
+  description: Remove selected photo IDs from this slideshow's exclusion list.
+  fields:
+    entry_id:
+      name: Entry ID
+      required: true
+      selector:
+        text:
+    photo_ids:
+      name: Photo IDs
+      required: true
+      selector:
+        object:
+
+restore_all_photos:
+  name: Restore all hidden photos
+  description: Clear this slideshow's exclusion list. Previously hidden photos become eligible for display again.
+  fields:
+    entry_id:
+      name: Entry ID
+      required: true
+      selector:
+        text:
+
+list_hidden_photos:
+  name: List hidden photos
+  description: Return a page of hidden photo IDs and names without putting the full list into entity state.
+  fields:
+    entry_id:
+      name: Entry ID
+      required: true
+      selector:
+        text:
+    offset:
+      name: Offset
+      default: 0
+      selector:
+        number:
+          min: 0
+          mode: box
+    limit:
+      name: Page size
+      default: 50
+      selector:
+        number:
+          min: 1
+          max: 100
+          mode: box
+
+next_slide:
+  name: Next slide
+  description: Advance the slideshow to the next image for a specific config entry.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: The config entry id for the album slideshow instance.
+      required: true
+      selector:
+        text:
+    frame_id:
+      name: Displayed frame ID
+      description: Optional frame_id of the slide on screen. When it is still in the navigation buffer, the step starts from that slide.
+      selector:
+        number:
+          min: 0
+          mode: box
+
+previous_slide:
+  name: Previous slide
+  description: Go back to the previously shown image for a specific config entry.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: The config entry id for the album slideshow instance.
+      required: true
+      selector:
+        text:
+    frame_id:
+      name: Displayed frame ID
+      description: Optional frame_id of the slide on screen. When it is still in the navigation buffer, the step starts from that slide.
+      selector:
+        number:
+          min: 0
+          mode: box
+
+refresh_album:
+  name: Refresh album
+  description: Refresh the album list for a specific config entry.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: The config entry id for the album slideshow instance.
+      required: true
+      selector:
+        text:

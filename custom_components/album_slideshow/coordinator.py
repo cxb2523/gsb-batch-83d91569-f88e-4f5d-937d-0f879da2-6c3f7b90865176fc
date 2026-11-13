@@ -1,0 +1,3580 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from datetime import timedelta
+from hashlib import sha256
+import json
+import logging
+import math
+import os
+from pathlib import Path
+import re
+import time
+from typing import Any
+from urllib.parse import quote
+
+import aiohttp
+import async_timeout
+from yarl import URL
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.storage import Store
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+
+from .const import (
+    PUBLICALBUM_ENDPOINT,
+    CONF_PROVIDER,
+    CONF_ALBUM_URL,
+    CONF_GOOGLE_METADATA,
+    DEFAULT_GOOGLE_METADATA,
+    CONF_GOOGLE_LOCATION,
+    DEFAULT_GOOGLE_LOCATION,
+    DEFAULT_GOOGLE_REVERSE_GEOCODE,
+    CAMERA_METADATA_FIELDS,
+    CONF_LOCAL_PATH,
+    CONF_MEDIA_CONTENT_ID,
+    CONF_RECURSIVE,
+    CONF_REVERSE_GEOCODE,
+    CONF_HIDE_HOME_COUNTRY,
+    DEFAULT_HIDE_HOME_COUNTRY,
+    CONF_IMMICH_URL,
+    CONF_IMMICH_API_KEY,
+    CONF_IMMICH_SELECTION_TYPE,
+    CONF_IMMICH_SELECTION_ID,
+    CONF_IMMICH_IMAGE_SIZE,
+    CONF_IMMICH_INCLUDE_VIDEOS,
+    CONF_IMMICH_LIVE_PHOTOS,
+    CONF_IMMICH_FILTER,
+    DEFAULT_IMMICH_IMAGE_SIZE,
+    DEFAULT_IMMICH_INCLUDE_VIDEOS,
+    DEFAULT_IMMICH_LIVE_PHOTOS,
+    IMMICH_IMAGE_PREVIEW,
+    CONF_PHOTOPRISM_URL,
+    CONF_PHOTOPRISM_AUTH_METHOD,
+    CONF_PHOTOPRISM_TOKEN,
+    CONF_PHOTOPRISM_USERNAME,
+    CONF_PHOTOPRISM_PASSWORD,
+    CONF_PHOTOPRISM_SELECTION_TYPE,
+    CONF_PHOTOPRISM_SELECTION_ID,
+    CONF_PHOTOPRISM_IMAGE_SIZE,
+    CONF_PHOTOPRISM_FILTER,
+    DEFAULT_PHOTOPRISM_IMAGE_SIZE,
+    CONF_ICLOUD_TOKEN,
+    CONF_ICLOUD_IMAGE_SIZE,
+    DEFAULT_ICLOUD_IMAGE_SIZE,
+    CONF_ICLOUD_BACKEND,
+    DEFAULT_ICLOUD_BACKEND,
+    ICLOUD_BACKEND_CLOUDKIT,
+    CONF_SYNOLOGY_URL,
+    CONF_SYNOLOGY_USERNAME,
+    CONF_SYNOLOGY_PASSWORD,
+    CONF_SYNOLOGY_DEVICE_ID,
+    CONF_SYNOLOGY_SPACE,
+    CONF_SYNOLOGY_ALBUM_ID,
+    CONF_SYNOLOGY_IMAGE_SIZE,
+    CONF_SYNOLOGY_PASSPHRASE,
+    CONF_SYNOLOGY_FAVORITE,
+    CONF_SYNOLOGY_SELECTION,
+    DEFAULT_SYNOLOGY_IMAGE_SIZE,
+    SYNOLOGY_SPACE_PERSONAL,
+    CONF_NEXTCLOUD_URL,
+    CONF_NEXTCLOUD_USERNAME,
+    CONF_NEXTCLOUD_PASSWORD,
+    CONF_NEXTCLOUD_FOLDER,
+    CONF_NEXTCLOUD_RECURSIVE,
+    CONF_NEXTCLOUD_IMAGE_SIZE,
+    CONF_NEXTCLOUD_SHARE_TOKEN,
+    CONF_NEXTCLOUD_AUTH_MODE,
+    NEXTCLOUD_AUTH_MODE_PUBLIC,
+    DEFAULT_NEXTCLOUD_AUTH_MODE,
+    DEFAULT_NEXTCLOUD_IMAGE_SIZE,
+    NEXTCLOUD_IMAGE_ORIGINAL,
+    NEXTCLOUD_PREVIEW_PX,
+    CONF_ENTE_URL,
+    CONF_ENTE_ACCESS_TOKEN,
+    CONF_ENTE_COLLECTION_KEY,
+    CONF_ENTE_API_ORIGIN,
+    CONF_ENTE_IMAGE_SIZE,
+    DEFAULT_ENTE_IMAGE_SIZE,
+    ENTE_IMAGE_PREVIEW,
+    CONF_UGREEN_URL,
+    CONF_UGREEN_USERNAME,
+    CONF_UGREEN_PASSWORD,
+    CONF_UGREEN_ALBUM_UUID,
+    CONF_UGREEN_ALBUM_TYPE,
+    CONF_UGREEN_VERIFY_SSL,
+    DEFAULT_REVERSE_GEOCODE,
+    DOMAIN,
+    ENRICHING_PROVIDERS,
+    PROVIDER_GOOGLE_SHARED,
+    PROVIDER_LOCAL_FOLDER,
+    PROVIDER_MEDIA_SOURCE,
+    PROVIDER_IMMICH,
+    PROVIDER_PHOTOPRISM,
+    PROVIDER_ICLOUD,
+    PROVIDER_SYNOLOGY,
+    PROVIDER_NEXTCLOUD,
+    PROVIDER_ENTE,
+    PROVIDER_UGREEN,
+)
+from .google_albums import album_urls_from_data
+from .store import SlideshowStore
+
+_LOGGER = logging.getLogger(__name__)
+_GOOGLE_METADATA_INTERVAL = 1.0
+# Signed iCloud links: renew this many seconds before they expire, and refresh
+# the album for new links at most this often.
+_LINK_EXPIRY_MARGIN = 60
+_LINK_RENEW_COOLDOWN = 60.0
+
+
+@dataclass
+class MediaItem:
+    url: str
+    width: int | None
+    height: int | None
+    mime_type: str | None
+    filename: str | None
+    # Epoch milliseconds; UTC. ``captured_at`` is when the photo was taken
+    # (EXIF-style), ``uploaded_at`` is when it was added to the album.
+    captured_at: int | None = None
+    uploaded_at: int | None = None
+    # File size of the original asset in bytes, when known.
+    byte_size: int | None = None
+    # GPS coordinates from EXIF (local-folder provider only); decimal
+    # degrees, signed (negative = South / West). ``location`` is a
+    # human-readable reverse-geocoded label such as
+    # ``"Lisbon, Portugal"`` and may be ``None`` even when coordinates
+    # are present (cache miss, opt-out, or geocoder offline).
+    latitude: float | None = None
+    longitude: float | None = None
+    location: str | None = None
+    # Free-text photo description / caption (local-folder provider only),
+    # read from EXIF ImageDescription, IPTC Caption-Abstract, or XMP
+    # dc:description. Used by the card's caption overlay when enabled.
+    description: str | None = None
+    # Provider-specific source identifier (e.g. the Immich asset id) used by
+    # background enrichment to fetch per-item metadata.
+    source_id: str | None = None
+    # Detected faces as normalised [x1, y1, x2, y2, weight, selected] boxes (0..1 in
+    # displayed-image coordinates). Cover-mode cropping keeps as many whole
+    # faces as fit. None means no face data (non-Immich source, not scanned
+    # yet or the face lookup failed); an empty list means "no faces".
+    faces: list[list[float | bool]] | None = None
+    # True once the local-folder EXIF reader has visited this file.
+    # Prevents re-reading EXIF on every coordinator refresh and lets the
+    # background enrichment task skip already-processed files even after
+    # an HA restart (the flag round-trips through the items cache).
+    exif_scanned: bool = False
+    photo_id: str | None = None
+    face_scanned: bool = False
+    camera_metadata: dict[str, Any] | None = None
+    google_location_scanned: bool = False
+    # True when ``location`` came from our OpenStreetMap lookup rather than
+    # the provider, so it can be re-formatted from the place cache.
+    location_geocoded: bool = False
+    # Upstream playback URL for a video item (``url`` is then its poster
+    # still), or for a Live Photo's motion clip (``live_photo``; ``url`` is
+    # the photo). Fetched server-side by the video proxy view only, so
+    # provider credentials never reach the browser. ``duration_ms`` is the
+    # clip length (videos only).
+    video_url: str | None = None
+    duration_ms: int | None = None
+    live_photo: bool = False
+    # Provider file path (Immich ``originalPath``), shown by the card's
+    # ``path`` caption.
+    source_path: str | None = None
+    # Google Photos only: the shared-album link this photo was read from.
+    # Entries can combine several albums, and per-photo metadata has to be
+    # requested from the album that actually contains the photo.
+    source_album_url: str | None = None
+    # Runtime-only description of the stream a video is served as (see
+    # ``async_video_info``); not persisted.
+    video_info: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.photo_id is None:
+            self.photo_id = _photo_identifier(self.source_id)
+
+    @property
+    def is_video(self) -> bool:
+        return bool(self.video_url) and not self.live_photo
+
+
+def _photo_identifier(source_id: str | None) -> str | None:
+    if not source_id:
+        return None
+    return "v1:" + sha256(str(source_id).encode("utf-8")).hexdigest()
+
+
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".mts", ".m2ts"}
+
+# Media Source browsing limits: cap total collected images and recursion
+# depth so a huge or self-referential tree can't hang the coordinator or
+# exhaust memory.
+_MEDIA_SOURCE_MAX_ITEMS = 5000
+_MEDIA_SOURCE_MAX_DEPTH = 8
+_MEDIA_LINK_LIFETIME = timedelta(minutes=5)
+
+# System/metadata folders and files that some sources (notably Synology)
+# expose but which are never user photos.
+_SKIP_MEDIA_TITLES = {"@eadir", ".ds_store", "thumbs.db", "@syno", "#recycle"}
+# Image formats a browser cannot render inline; skip so we don't queue
+# guaranteed fetch failures.
+_NON_WEB_IMAGE_EXTS = {
+    ".psd", ".tif", ".tiff", ".heic", ".heif",
+    ".cr2", ".nef", ".arw", ".dng", ".raw", ".orf", ".rw2",
+}
+
+
+def _is_junk_media_title(title: Any) -> bool:
+    """Return True for system folders / non-renderable files to skip."""
+    if not isinstance(title, str):
+        return False
+    t = title.strip().lower()
+    if not t:
+        return False
+    if t in _SKIP_MEDIA_TITLES:
+        return True
+    if t.startswith("@") or t.startswith("."):
+        return True
+    dot = t.rfind(".")
+    if dot != -1 and t[dot:] in _NON_WEB_IMAGE_EXTS:
+        return True
+    return False
+
+
+def _media_node_is_image(media_class: Any, media_content_type: Any) -> bool:
+    """Return True if a browsed media node looks like a still image.
+
+    ``media_class`` is Home Assistant's coarse category (e.g. ``image``,
+    ``video``, ``directory``); ``media_content_type`` is the MIME type when
+    known. We accept a node when either signals an image, and explicitly
+    reject anything that declares a video type.
+    """
+    mc = str(media_class or "").lower()
+    mime = str(media_content_type or "").lower()
+    if mc == "video" or mime.startswith("video/"):
+        return False
+    if mc == "image" or mime.startswith("image/"):
+        return True
+    return False
+
+
+def _normalize_resolved_url(url: str, base_url: str) -> str:
+    """Make a resolved media URL absolute so the fetch layer can load it.
+
+    ``async_resolve_media`` returns either an absolute ``http(s)`` URL or a
+    site-relative path such as ``/media/local/...`` (often already signed via
+    an ``authSig`` query param). Relative paths are prefixed with the
+    instance's internal base URL; absolute URLs pass through unchanged.
+    """
+    if not isinstance(url, str) or not url:
+        return url
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    if url.startswith("/") and base_url:
+        return f"{base_url.rstrip('/')}{url}"
+    return url
+
+
+def _without_auth_sig(url: str) -> str:
+    """Drop an ``authSig`` saved by older versions; links are signed per download."""
+    if "authSig=" not in url:
+        return url
+    parsed = URL(url)
+    return str(parsed.with_query([(k, v) for k, v in parsed.query.items() if k != "authSig"]))
+
+_SKIP_DIR_PREFIXES = (".", "@", "#")
+
+
+def _pick_url(item: dict[str, Any]) -> str | None:
+    for key in ("baseUrl", "url", "downloadUrl", "productUrl"):
+        v = item.get(key)
+        if isinstance(v, str) and v.startswith("http"):
+            return v
+    return None
+
+
+# Matches Google's ``=w1920-h1080`` (and variants) size suffix so two URLs for
+# the same photo at different sizes collapse to one stable key.
+_PHOTO_SIZE_SUFFIX_RE = re.compile(r"=[a-z0-9-]+$", re.IGNORECASE)
+
+
+def _photo_base_key(url: str | None) -> str | None:
+    """Return a stable per-photo key from a Google CDN URL.
+
+    Both album sources (``batchexecute`` and publicalbum.org) hand back
+    ``lh3.googleusercontent.com/<id>=w...-h...`` URLs for the same photo, just
+    at different sizes and sometimes with query params. Dropping the query
+    string and the size suffix leaves the shared ``<id>`` portion, which lets
+    us match a publicalbum item to its dated batchexecute twin.
+    """
+    if not isinstance(url, str) or not url:
+        return None
+    base = url.split("?", 1)[0]
+    base = _PHOTO_SIZE_SUFFIX_RE.sub("", base)
+    return base or None
+
+
+def _tag_album(items: list[MediaItem], album_url: str) -> None:
+    """Record which shared album each Google item was read from."""
+    for item in items:
+        item.source_album_url = album_url
+
+
+def _merge_album_items(item_lists: list[list[MediaItem]]) -> list[MediaItem]:
+    """Combine several albums' items into one list without duplicates.
+
+    The same photo in two shared albums gets a different media key and URL in
+    each, so it is matched by when it was taken, its size and its file size;
+    photos without a date fall back to the media key or the stable part of
+    the URL. Only photos already seen in an earlier album are dropped, so
+    burst shots within one album stay. The first album that contains a photo
+    keeps it; overall order is album by album.
+    """
+    merged: list[MediaItem] = []
+    seen: set[tuple] = set()
+    for items in item_lists:
+        album_keys: set[tuple] = set()
+        for item in items:
+            keys = {("id", item.source_id or _photo_base_key(item.url) or item.url)}
+            if item.captured_at and item.width and item.height:
+                keys.add(("shot", item.captured_at, item.width, item.height, item.byte_size))
+            if keys & seen:
+                continue
+            album_keys |= keys
+            merged.append(item)
+        seen |= album_keys
+    return merged
+
+
+def _enrich_missing_dates(
+    api_items: list["MediaItem"], scraped_items: list["MediaItem"]
+) -> int:
+    """Backfill missing dates on ``api_items`` from dated ``scraped_items``.
+
+    Matches photos across the two Google album sources by their stable
+    per-photo URL key and fills in any ``captured_at`` / ``uploaded_at`` that
+    the publicalbum item is missing. Mutates ``api_items`` in place and returns
+    how many items were touched. See issue #18.
+    """
+    if not api_items or not scraped_items:
+        return 0
+    dates_by_key: dict[str, tuple[int | None, int | None]] = {}
+    for it in scraped_items:
+        key = _photo_base_key(it.url)
+        if key and (it.captured_at is not None or it.uploaded_at is not None):
+            dates_by_key.setdefault(key, (it.captured_at, it.uploaded_at))
+    if not dates_by_key:
+        return 0
+    enriched = 0
+    for it in api_items:
+        if it.captured_at is not None and it.uploaded_at is not None:
+            continue
+        twin = dates_by_key.get(_photo_base_key(it.url))
+        if not twin:
+            continue
+        cap, up = twin
+        touched = False
+        if it.captured_at is None and cap is not None:
+            it.captured_at = cap
+            touched = True
+        if it.uploaded_at is None and up is not None:
+            it.uploaded_at = up
+            touched = True
+        if touched:
+            enriched += 1
+    return enriched
+
+
+def _pick_int(d: dict[str, Any], *path: str) -> int | None:
+    cur: Any = d
+    for p in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(p)
+    try:
+        return int(cur)
+    except Exception:
+        return None
+
+
+def _pick_timestamp_ms(d: dict[str, Any], *path: str) -> int | None:
+    """Pull a timestamp from a JSON path and normalise to epoch milliseconds.
+
+    Accepts ints (seconds or milliseconds based on magnitude) and ISO-8601
+    strings. Returns ``None`` if the value can't be parsed.
+    """
+    from datetime import datetime, timezone
+
+    cur: Any = d
+    for p in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(p)
+    if cur is None or isinstance(cur, bool):
+        return None
+    if isinstance(cur, int):
+        # Infer seconds only within the plausible 1800-2100 date range.
+        return cur * 1000 if -5_364_662_400 <= cur <= 4_102_444_800 else cur
+    if isinstance(cur, str):
+        try:
+            iso = cur.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp() * 1000)
+        except Exception:
+            return None
+    return None
+
+
+def _find_largest_item_list(obj: Any) -> list[dict[str, Any]]:
+    """Find the largest list of dicts that looks like media items.
+
+    First pass: look for lists under well-known key names.
+    Second pass: fall back to any list of dicts containing URL-like values.
+    """
+    best: list[dict[str, Any]] = []
+    fallback: list[dict[str, Any]] = []
+
+    _KNOWN_KEYS = {"mediaItems", "items", "photos", "images", "results", "data"}
+
+    def _has_url(d: dict[str, Any]) -> bool:
+        for v in d.values():
+            if isinstance(v, str) and (
+                v.startswith("http://") or v.startswith("https://")
+            ):
+                return True
+        return False
+
+    def _walk(node: Any) -> None:
+        nonlocal best, fallback
+        if isinstance(node, dict):
+            for key, val in node.items():
+                if isinstance(val, list):
+                    cleaned = [it for it in val if isinstance(it, dict)]
+                    if len(cleaned) >= 1:
+                        if key in _KNOWN_KEYS:
+                            if len(cleaned) > len(best):
+                                best = cleaned
+                        elif any(_has_url(it) for it in cleaned[:5]):
+                            if len(cleaned) > len(fallback):
+                                fallback = cleaned
+                _walk(val)
+        elif isinstance(node, list):
+            for val in node:
+                _walk(val)
+
+    _walk(obj)
+    return best or fallback
+
+
+def _looks_like_video(raw: dict[str, Any]) -> bool:
+    # publicalbum.org sends lowercase ``mimetype``; Google's own shapes use
+    # ``mimeType``.
+    mime = raw.get("mimeType") or raw.get("mimetype")
+    if isinstance(mime, str) and mime.startswith("video/"):
+        return True
+
+    meta = raw.get("mediaMetadata")
+    if isinstance(meta, dict):
+        if "video" in meta:
+            return True
+        if isinstance(meta.get("mediaType"), str) and meta.get("mediaType", "").upper() == "VIDEO":
+            return True
+
+    media_type = raw.get("mediaType") or raw.get("type")
+    if isinstance(media_type, str) and media_type.upper() == "VIDEO":
+        return True
+
+    filename = raw.get("filename") or raw.get("name")
+    if isinstance(filename, str):
+        suffix = Path(filename).suffix.lower()
+        if suffix in _VIDEO_EXTS:
+            return True
+
+    url = _pick_url(raw)
+    if isinstance(url, str):
+        base_url = url.split("?", 1)[0]
+        suffix = Path(base_url).suffix.lower()
+        if suffix in _VIDEO_EXTS:
+            return True
+
+        lowered = base_url.lower()
+        if any(marker in lowered for marker in ("/video", "=dv", "video-") ):
+            return True
+
+    def _has_video_markers(node: Any) -> bool:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                key = str(k).lower()
+                if key in {
+                    "isvideo",
+                    "hasvideo",
+                    "videometadata",
+                    "videovariant",
+                    "videostreams",
+                    "duration",
+                    "durationmillis",
+                    "playbackuri",
+                }:
+                    return True
+                if isinstance(v, str) and (v.lower() == "video" or v.lower().startswith("video/")):
+                    return True
+                if _has_video_markers(v):
+                    return True
+        elif isinstance(node, list):
+            for item in node:
+                if _has_video_markers(item):
+                    return True
+        return False
+
+    if _has_video_markers(raw):
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Local-folder EXIF + reverse-geocode helpers
+# ---------------------------------------------------------------------------
+
+# EXIF tag ids we care about. These are stable IANA-registered numbers, so
+# we can use them directly without depending on ``PIL.ExifTags.TAGS``
+# label lookups (which change wording across Pillow versions).
+_EXIF_TAG_DATETIME_ORIGINAL = 36867       # DateTimeOriginal
+_EXIF_TAG_OFFSET_TIME_ORIGINAL = 36881    # OffsetTimeOriginal (e.g. "+02:00")
+_EXIF_TAG_DATETIME = 306                  # DateTime (modification time)
+_EXIF_TAG_IMAGE_DESCRIPTION = 270         # ImageDescription (free text)
+_EXIF_TAG_GPS_IFD = 34853                 # Pointer to the GPS IFD
+_EXIF_GPS_LAT_REF = 1                     # "N" / "S"
+_EXIF_GPS_LAT = 2                         # rational tuple
+_EXIF_GPS_LON_REF = 3                     # "E" / "W"
+_EXIF_GPS_LON = 4                         # rational tuple
+_HEIF_EXIF_RE = re.compile(rb"Exif\x00\x00(?:MM\x00\x2a|II\x2a\x00)")
+
+# Nominatim (OpenStreetMap) is free but rate-limited to 1 request/second
+# per IP and asks integrators to identify themselves with a descriptive
+# User-Agent. See https://operations.osmfoundation.org/policies/nominatim/
+_NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/reverse"
+_NOMINATIM_MIN_INTERVAL_S = 1.1
+_NOMINATIM_TIMEOUT_S = 20
+# Next free request time, shared so several albums together stay within the limit.
+_nominatim_next_slot = 0.0
+
+# Nominatim address parts used for place labels, most specific first.
+_LOCALITY_KEYS = (
+    "city", "town", "village", "hamlet", "city_district", "suburb", "municipality",
+)
+_REGION_KEYS = ("state", "province", "region")
+_ADDRESS_KEYS = (*_LOCALITY_KEYS, *_REGION_KEYS, "country", "country_code")
+_PLACE_KEYS = (*_ADDRESS_KEYS, "display_name")
+# Administrative prefixes some areas carry in OpenStreetMap, longest first.
+_NAME_PREFIXES = (
+    "regional municipality of ", "rural municipality of ", "municipal district of ",
+    "municipality of ", "township of ", "district of ", "borough of ",
+    "village of ", "town of ", "city of ",
+)
+
+# How many EXIF reads to perform between listener updates, and the minimum
+# time between items-cache writes during a pass (the cache holds every item,
+# so writing it per batch is costly on large libraries; the pass still saves
+# when it finishes or is cancelled).
+_EXIF_BATCH_SAVE = 25
+_ENRICHMENT_SAVE_INTERVAL = 60.0
+_GEOCODE_BATCH_SAVE = 10
+
+# Cap a single Nextcloud enrichment download. EXIF/IPTC/XMP live in the first
+# blocks of the file, but we read the whole thing since Pillow needs a complete
+# image; this bounds memory for pathological files. 64 MB matches the camera.
+_NEXTCLOUD_ENRICH_MAX_BYTES = 64 * 1024 * 1024
+
+# Inserted between background-enrichment iterations so the event loop
+# stays responsive on the fast path (items that are already scanned and
+# need zero work).
+_ENRICHMENT_FAST_PATH_YIELD_EVERY = 100
+
+
+def _gps_to_decimal(dms: Any, ref: Any) -> float | None:
+    """Convert an EXIF GPS ``(deg, min, sec)`` rational tuple to a signed decimal.
+
+    ``ref`` is the matching reference tag (``"N"``/``"S"`` for latitude or
+    ``"E"``/``"W"`` for longitude). Returns ``None`` when the inputs are
+    malformed or out of the legal coordinate range.
+    """
+    if not isinstance(dms, (tuple, list)) or len(dms) != 3:
+        return None
+    try:
+        deg = float(dms[0])
+        minutes = float(dms[1])
+        sec = float(dms[2])
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    value = deg + minutes / 60.0 + sec / 3600.0
+    if isinstance(ref, bytes):
+        try:
+            ref = ref.decode("ascii", errors="ignore")
+        except Exception:
+            ref = ""
+    if isinstance(ref, str) and ref.strip().upper() in {"S", "W"}:
+        value = -value
+    if not (-180.0 <= value <= 180.0):
+        return None
+    return value
+
+
+def _geocode_cache_key(lat: float, lon: float) -> str:
+    """Return a stable cache key for a coordinate pair.
+
+    Coordinates are rounded to three decimal places (~111 m precision),
+    which is more than enough resolution for a city/neighbourhood label
+    while still folding hundreds of nearby photos into a single
+    Nominatim call. ``-0.0`` is normalised to ``0.0`` so the cache key
+    is identical regardless of which sign of zero the EXIF rounded into.
+    """
+    lat_r = round(float(lat), 3)
+    lon_r = round(float(lon), 3)
+    # ``round`` can yield ``-0.0`` for tiny negative inputs.
+    if lat_r == 0:
+        lat_r = 0.0
+    if lon_r == 0:
+        lon_r = 0.0
+    return f"{lat_r:.3f},{lon_r:.3f}"
+
+
+def _parse_exif_datetime(raw: Any, offset_raw: Any) -> int | None:
+    """Parse an EXIF ``DateTimeOriginal``/``DateTime`` string to epoch ms.
+
+    EXIF stores datetimes as ``"YYYY:MM:DD HH:MM:SS"`` without a timezone.
+    If the companion ``OffsetTimeOriginal`` tag is present (introduced
+    with EXIF 2.31, common on modern cameras and phones) we use it. When
+    it's missing we treat the value as the host's local time, which is
+    the closest thing to "what the user expects" for cameras that don't
+    record an offset.
+    """
+    from datetime import datetime, timezone
+
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    if not raw or raw.startswith(("0000", "    ")):
+        return None
+    try:
+        dt = datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
+    except ValueError:
+        return None
+
+    offset_str: str | None = None
+    if isinstance(offset_raw, bytes):
+        try:
+            offset_str = offset_raw.decode("ascii", errors="ignore").strip()
+        except Exception:
+            offset_str = None
+    elif isinstance(offset_raw, str):
+        offset_str = offset_raw.strip()
+
+    if offset_str:
+        try:
+            offset_dt = datetime.fromisoformat(f"2000-01-01T00:00:00{offset_str}")
+            dt = dt.replace(tzinfo=offset_dt.tzinfo)
+        except ValueError:
+            dt = dt.astimezone().replace(tzinfo=None).astimezone()
+    else:
+        # Interpret as the host's local time.
+        dt = dt.astimezone()
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        return int(dt.timestamp() * 1000)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _clean_description(value: Any) -> str | None:
+    """Normalise a raw description value to trimmed text or ``None``."""
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+    if not isinstance(value, str):
+        return None
+    text = value.strip().replace("\x00", "")
+    return text or None
+
+
+def _read_photo_description(img: Any, exif: Any) -> str | None:
+    """Extract a photo description from EXIF, IPTC, or XMP metadata.
+
+    Tries, in order: EXIF ``ImageDescription``, IPTC ``Caption-Abstract``
+    (record 2, dataset 120), and XMP ``dc:description``. Returns the first
+    non-empty value, or ``None``. All lookups are defensive because these
+    metadata blocks are frequently absent or malformed.
+    """
+    try:
+        desc = _clean_description(exif.get(_EXIF_TAG_IMAGE_DESCRIPTION))
+        if desc:
+            return desc
+    except Exception:
+        pass
+
+    try:
+        from PIL import IptcImagePlugin
+
+        iptc = IptcImagePlugin.getiptcinfo(img)
+        if iptc:
+            desc = _clean_description(iptc.get((2, 120)))
+            if desc:
+                return desc
+    except Exception:
+        pass
+
+    try:
+        xmp = img.getxmp()
+    except Exception:
+        xmp = None
+    if isinstance(xmp, dict):
+        found = _find_xmp_description(xmp)
+        if found:
+            return found
+
+    return None
+
+
+def _find_xmp_description(node: Any) -> str | None:
+    """Recursively search a parsed XMP tree for the ``dc:description`` text.
+
+    Pillow's ``getxmp()`` returns nested dicts. The relevant path is
+    ``xmpmeta -> RDF -> Description -> description -> Alt -> li``. We match
+    the ``dc:description`` *field* by its exact lowercase localname
+    ``description`` (case-sensitive) so we don't accidentally match the
+    ``rdf:Description`` *container* (capital ``D``) that wraps it.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            # Case-sensitive: dc:description is lowercase; the rdf:Description
+            # container is capitalised and must be skipped here.
+            if isinstance(key, str) and key.split(":")[-1] == "description":
+                text = _extract_xmp_text(value)
+                if text:
+                    return text
+        for value in node.values():
+            found = _find_xmp_description(value)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for value in node:
+            found = _find_xmp_description(value)
+            if found:
+                return found
+    return None
+
+
+def _extract_xmp_text(value: Any) -> str | None:
+    """Pull plain text out of an XMP language-alternative structure.
+
+    Handles the shapes Pillow produces for ``dc:description``:
+      - a plain string
+      - ``{"Alt"/"Bag"/"Seq": {"li": ...}}`` containers
+      - an ``li`` that is a string, a ``{"lang", "text"}`` dict, or a list of
+        such dicts (multiple languages)
+    Prefers the ``x-default`` language entry when several are present.
+    """
+    if isinstance(value, str):
+        return _clean_description(value)
+    if isinstance(value, dict):
+        # A language-alternative leaf: ``{"lang": ..., "text": ...}``.
+        if "text" in value:
+            return _clean_description(value.get("text"))
+        # Container wrappers: descend only through the known XMP keys so we
+        # never grab a sibling attribute value (e.g. a ``lang`` code).
+        for container in ("Alt", "Bag", "Seq"):
+            if container in value:
+                text = _extract_xmp_text(value[container])
+                if text:
+                    return text
+        if "li" in value:
+            return _extract_xmp_text(value["li"])
+        return None
+    if isinstance(value, list):
+        # Multiple ``rdf:li`` entries: prefer x-default, else the first
+        # non-empty one.
+        default = None
+        first = None
+        for v in value:
+            if isinstance(v, dict) and v.get("lang") == "x-default":
+                default = _clean_description(v.get("text"))
+                if default:
+                    return default
+            if first is None:
+                first = _extract_xmp_text(v)
+        return first
+    return None
+
+
+def _read_local_exif(path: Path) -> dict[str, Any]:
+    """Read EXIF metadata for a local file.
+
+    Returns a dict with any of the keys ``captured_at`` (epoch ms),
+    ``latitude`` and ``longitude``. All keys are optional - missing
+    metadata is just omitted. ``captured_at`` always falls back to the
+    file's modification time so date-sorting works even for screenshots
+    and scans without EXIF.
+
+    Designed to be called from an executor thread: it does only
+    synchronous Pillow + filesystem I/O.
+    """
+    out: dict[str, Any] = {}
+
+    # mtime fallback for captured_at. Cameras that don't record EXIF
+    # (screenshots, scans, certain Android camera apps) still need a
+    # plausible "taken on" timestamp for the date-filter sensors and
+    # ordering. The EXIF parse below overrides this when present.
+    try:
+        out["captured_at"] = int(path.stat().st_mtime * 1000)
+    except OSError:
+        pass
+
+    try:
+        from PIL import Image
+    except Exception:  # pragma: no cover - Pillow ships with HA core
+        return out
+
+    try:
+        with Image.open(path) as img:
+            _read_exif_from_image(img, out)
+    except Exception as err:
+        _LOGGER.debug("EXIF: failed to read %s: %s", path, err)
+
+    return out
+
+
+def _read_exif_from_image(img: Any, out: dict[str, Any]) -> None:
+    """Fill ``out`` with capture date / description / GPS from an open image.
+
+    Shared by ``_read_local_exif`` (opens from a filesystem path) and
+    ``_read_exif_from_bytes`` (opens from downloaded bytes, e.g. the
+    Nextcloud provider) - both hand this an already-``Image.open``'d image
+    plus a dict pre-seeded with a fallback ``captured_at``.
+    """
+    exif = img.getexif()
+
+    if exif:
+        dt_raw = exif.get(_EXIF_TAG_DATETIME_ORIGINAL) or exif.get(
+            _EXIF_TAG_DATETIME
+        )
+        offset_raw = exif.get(_EXIF_TAG_OFFSET_TIME_ORIGINAL)
+        parsed = _parse_exif_datetime(dt_raw, offset_raw)
+        if parsed is not None:
+            out["captured_at"] = parsed
+
+    # Description can come from IPTC / XMP even when the file has no EXIF
+    # IFD, so this runs regardless of ``exif`` being present.
+    description = _read_photo_description(img, exif)
+    if description:
+        out["description"] = description
+
+    if not exif:
+        return
+
+    gps = None
+    try:
+        gps = exif.get_ifd(_EXIF_TAG_GPS_IFD) or None
+    except Exception:
+        gps = None
+    if gps:
+        lat = _gps_to_decimal(gps.get(_EXIF_GPS_LAT), gps.get(_EXIF_GPS_LAT_REF))
+        lon = _gps_to_decimal(gps.get(_EXIF_GPS_LON), gps.get(_EXIF_GPS_LON_REF))
+        if lat is not None and lon is not None:
+            # Null Island guard: GPS chips and some editors stamp ``(0, 0)``
+            # when the fix is invalid. Treat that as no location rather than
+            # dropping every such photo onto the equator off the African coast.
+            if abs(lat) < 1e-6 and abs(lon) < 1e-6:
+                return
+            out["latitude"] = lat
+            out["longitude"] = lon
+
+
+def _read_exif_from_bytes(
+    data: bytes, mtime_fallback_ms: int | None, *, strict: bool = False,
+) -> dict[str, Any]:
+    """Read EXIF metadata from already-downloaded image bytes.
+
+    Same return shape as ``_read_local_exif``, for providers (Nextcloud)
+    whose files live on a remote server rather than the local filesystem -
+    the caller downloads the file once for enrichment, regardless of which
+    quality is used for display. ``mtime_fallback_ms`` takes the place of
+    the filesystem mtime fallback (e.g. the WebDAV ``Last-Modified`` date).
+    """
+    out: dict[str, Any] = {}
+    if isinstance(mtime_fallback_ms, int):
+        out["captured_at"] = mtime_fallback_ms
+
+    try:
+        from PIL import Image
+    except Exception:  # pragma: no cover - Pillow ships with HA core
+        return out
+
+    try:
+        import io
+
+        with Image.open(io.BytesIO(data)) as img:
+            _read_exif_from_image(img, out)
+    except Exception as err:
+        if strict:
+            raise
+        _LOGGER.debug("EXIF: failed to read image bytes: %s", err)
+
+    return out
+
+
+def _read_gps_from_header(data: bytes) -> dict[str, float]:
+    """Read GPS from an original-image prefix; raise ``ValueError`` if it is too short to tell."""
+    if data[:2] == b"\xff\xd8":
+        payload = _jpeg_exif_segment(data)
+    elif data[4:8] == b"ftyp":
+        match = _HEIF_EXIF_RE.search(data)
+        if match is None:
+            raise ValueError("HEIF EXIF not found in header")
+        payload = data[match.start():]
+    else:
+        metadata = _read_exif_from_bytes(data, None, strict=True)
+        return {key: metadata[key] for key in ("latitude", "longitude") if key in metadata}
+    if payload is None:
+        return {}
+
+    from PIL import Image
+
+    try:
+        exif = Image.Exif()
+        exif.load(payload)
+        gps = exif.get_ifd(_EXIF_TAG_GPS_IFD)
+    except Exception:
+        return {}
+    lat = _gps_to_decimal(gps.get(_EXIF_GPS_LAT), gps.get(_EXIF_GPS_LAT_REF))
+    lon = _gps_to_decimal(gps.get(_EXIF_GPS_LON), gps.get(_EXIF_GPS_LON_REF))
+    return {} if lat is None or lon is None else {"latitude": lat, "longitude": lon}
+
+
+def _jpeg_exif_segment(data: bytes) -> bytes | None:
+    pos = 2
+    while pos + 4 <= len(data):
+        if data[pos] != 0xFF:
+            return None
+        marker = data[pos + 1]
+        if marker == 0xFF:
+            pos += 1
+            continue
+        if marker in (0xD9, 0xDA):
+            return None
+        end = pos + 2 + int.from_bytes(data[pos + 2:pos + 4], "big")
+        if marker == 0xE1 and data[pos + 4:pos + 10] == b"Exif\x00\x00":
+            if end > len(data):
+                raise ValueError("JPEG EXIF segment is truncated")
+            return data[pos + 4:end]
+        pos = end
+    raise ValueError("JPEG header ends before image data")
+
+
+def _place_name(value: Any) -> str | None:
+    """A town or city name without prefixes like "City of"; parishes don't count."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    name = value.strip()
+    folded = name.casefold()
+    if folded.endswith(" parish") or folded.startswith("parish of "):
+        return None
+    for prefix in _NAME_PREFIXES:
+        if folded.startswith(prefix) and len(name) > len(prefix):
+            return name[len(prefix):].strip()
+    return name
+
+
+def _nominatim_place(payload: Any) -> dict[str, str] | None:
+    """Keep the parts of a Nominatim reverse-geocode response that labels use.
+
+    Caching these instead of a finished label lets label options change
+    without new lookups.
+    """
+    if not isinstance(payload, dict):
+        return None
+    address = payload.get("address") if isinstance(payload.get("address"), dict) else {}
+    place = {
+        key: value.strip()
+        for key in _ADDRESS_KEYS
+        if isinstance(value := address.get(key), str) and value.strip()
+    }
+    display = payload.get("display_name")
+    if not place and isinstance(display, str) and display.strip():
+        place["display_name"] = display.strip()
+    return place or None
+
+
+def _format_place(place: dict[str, str], home_country: str | None = None) -> str | None:
+    """Short label such as ``"Lisbon, Portugal"`` from cached address parts.
+
+    Uses the town or city, else the province/state, then the country, which
+    is left out when its code matches ``home_country``.
+    """
+    area = next(
+        (name for key in _LOCALITY_KEYS if (name := _place_name(place.get(key)))), None
+    ) or next((place[key] for key in _REGION_KEYS if place.get(key)), None)
+    country = place.get("country")
+    if home_country and place.get("country_code", "").upper() == home_country.upper():
+        country = None
+    parts = [part for part in (area, country) if part]
+    if len(parts) == 2 and parts[0].casefold() == parts[1].casefold():
+        parts.pop()
+    if parts:
+        return ", ".join(parts)
+    shown = [part.strip() for part in place.get("display_name", "").split(",") if part.strip()]
+    return ", ".join(shown[:2]) or None
+
+
+async def _wait_for_nominatim_slot() -> None:
+    global _nominatim_next_slot
+    now = asyncio.get_running_loop().time()
+    slot = max(now, _nominatim_next_slot)
+    _nominatim_next_slot = slot + _NOMINATIM_MIN_INTERVAL_S
+    if slot > now:
+        await asyncio.sleep(slot - now)
+
+
+async def _nominatim_lookup(
+    session: Any,
+    lat: float,
+    lon: float,
+    user_agent: str,
+) -> dict[str, str] | None:
+    """Reverse-geocode a coordinate pair via Nominatim.
+
+    Returns the cached address parts (see :func:`_nominatim_place`) or
+    ``None`` if the lookup failed or the response had no useful address.
+    Never raises - geocoding is best-effort and a failure must never stop
+    the slideshow.
+    """
+    params = {
+        "format": "jsonv2",
+        "lat": f"{lat:.5f}",
+        "lon": f"{lon:.5f}",
+        # Neighbourhood level: coarser levels can return an administrative
+        # area such as a parish instead of the town.
+        "zoom": "14",
+        "addressdetails": "1",
+    }
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "application/json",
+        "Accept-Language": "en",
+    }
+    try:
+        async with async_timeout.timeout(_NOMINATIM_TIMEOUT_S):
+            resp = await session.get(
+                _NOMINATIM_ENDPOINT, params=params, headers=headers
+            )
+            if resp.status == 429:
+                _LOGGER.warning(
+                    "Nominatim rate-limited the integration; pausing geocode"
+                )
+                # Honour the policy by sleeping a full second before the
+                # caller schedules another request.
+                await asyncio.sleep(_NOMINATIM_MIN_INTERVAL_S)
+                return None
+            if resp.status >= 400:
+                _LOGGER.debug("Nominatim returned HTTP %s", resp.status)
+                return None
+            try:
+                payload = await resp.json(content_type=None)
+            except Exception:
+                return None
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Nominatim lookup failed (%s, %s): %s", lat, lon, err)
+        return None
+
+    return _nominatim_place(payload)
+
+
+def _read_manifest_version(integration_dir: Path) -> str:
+    """Best-effort read of ``manifest.json`` version. Returns ``""`` on error."""
+    try:
+        manifest_path = integration_dir / "manifest.json"
+        with manifest_path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        version = data.get("version")
+        if isinstance(version, str):
+            return version
+    except Exception:
+        pass
+    return ""
+
+
+def _build_ente_item(
+    raw: dict[str, Any], collection_key: bytes, want_preview: bool
+) -> tuple[MediaItem, dict[str, Any]] | None:
+    """Decrypt one Ente file into a MediaItem plus its fetch material.
+
+    Runs in an executor: unsealing a key and opening two small secretstreams
+    is CPU work, and an album can hold thousands of files. Returns ``None``
+    for anything that is not a still image.
+    """
+    from . import ente as ente_api
+
+    file_key = ente_api.decrypt_file_key(raw, collection_key)
+    metadata = ente_api.decrypt_metadata(raw, file_key)
+    if not ente_api.is_image(metadata):
+        return None
+
+    magic = ente_api.decrypt_magic_metadata(raw, file_key)
+    fields = ente_api.build_media_fields(metadata, magic)
+
+    attrs = raw.get("thumbnail" if want_preview else "file")
+    if not isinstance(attrs, dict) or not attrs.get("decryptionHeader"):
+        return None
+    info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
+
+    item = MediaItem(
+        url=ente_api.build_item_url(raw["id"]),
+        width=fields["width"],
+        height=fields["height"],
+        mime_type=None,
+        filename=fields["filename"],
+        captured_at=fields["captured_at"],
+        uploaded_at=fields["uploaded_at"],
+        byte_size=info.get("thumbSize" if want_preview else "fileSize"),
+        latitude=fields["latitude"],
+        longitude=fields["longitude"],
+        description=fields["description"],
+        source_id=str(raw["id"]),
+        # Ente hands over full metadata up front, so there is nothing for the
+        # per-photo enrichment download to add.
+        exif_scanned=True,
+    )
+    meta = {
+        "key": file_key,
+        "header": attrs["decryptionHeader"],
+        "thumbnail": want_preview,
+    }
+    return item, meta
+
+
+def _merge_prior_enrichment(
+    new_items: list[MediaItem], prior_items: list[MediaItem]
+) -> None:
+    """Copy EXIF + geocode metadata from prior coordinator items by URL.
+
+    Local-folder scans rebuild the ``MediaItem`` list from scratch on
+    every refresh, but reading EXIF + reverse-geocoding the same files
+    again would be wasteful (and would re-bill the user against the
+    Nominatim rate limit). This in-place merge preserves anything we
+    learned about files whose URL (and therefore path) hasn't changed.
+    """
+    if not prior_items:
+        return
+    prior_by_url: dict[str, MediaItem] = {it.url: it for it in prior_items}
+    for item in new_items:
+        prev = prior_by_url.get(item.url)
+        if prev is None:
+            continue
+        if prev.captured_at is not None and item.captured_at is None:
+            item.captured_at = prev.captured_at
+        if prev.latitude is not None and item.latitude is None:
+            item.latitude = prev.latitude
+        if prev.longitude is not None and item.longitude is None:
+            item.longitude = prev.longitude
+        if prev.location and not item.location:
+            item.location = prev.location
+            item.location_geocoded = prev.location_geocoded
+        if prev.description and not item.description:
+            item.description = prev.description
+        if prev.faces is not None and item.faces is None:
+            item.faces = prev.faces
+        if prev.exif_scanned:
+            item.exif_scanned = True
+        if prev.face_scanned and prev.faces is not None:
+            item.face_scanned = True
+
+
+class AlbumCoordinator(DataUpdateCoordinator):
+    # Bump when the persisted item shape changes incompatibly.
+    # v3: added ``description``; forces a re-scan so already-cached items
+    # (exif_scanned=True) get their description read instead of being
+    # skipped forever.
+    _ITEM_CACHE_VERSION = 3
+    # Bump independently of the items cache - the geocode cache is
+    # keyed by coordinate and is safe to keep across item-shape changes.
+    _GEOCODE_CACHE_VERSION = 1
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, store: SlideshowStore) -> None:
+        self.hass = hass
+        self.entry = entry
+        self.store = store
+
+        self.provider: str = entry.data.get(CONF_PROVIDER, PROVIDER_GOOGLE_SHARED)
+        self._immich_cache_source = None
+        if self.provider == PROVIDER_IMMICH:
+            source = [entry.data.get(key) for key in (
+                CONF_IMMICH_URL, CONF_IMMICH_API_KEY, CONF_IMMICH_SELECTION_TYPE,
+                CONF_IMMICH_SELECTION_ID, CONF_IMMICH_FILTER, CONF_IMMICH_IMAGE_SIZE,
+            )]
+            # Appended only when enabled so existing caches stay valid.
+            if entry.data.get(CONF_IMMICH_INCLUDE_VIDEOS):
+                source.append("videos")
+            if entry.data.get(CONF_IMMICH_LIVE_PHOTOS):
+                source.append("live_photos")
+            self._immich_cache_source = sha256(json.dumps(source).encode()).hexdigest()
+        # Google: one or more shared-album links. ``album_url`` stays the
+        # first (primary) link for code paths that only need one.
+        self.album_urls: list[str] = album_urls_from_data(entry.data)
+        self.album_url: str | None = (
+            self.album_urls[0] if self.album_urls else entry.data.get(CONF_ALBUM_URL)
+        )
+        self.local_path: str | None = entry.data.get(CONF_LOCAL_PATH)
+        self.recursive: bool = bool(entry.data.get(CONF_RECURSIVE, True))
+        self.media_content_id: str | None = entry.data.get(CONF_MEDIA_CONTENT_ID)
+        # Extra headers the camera must send when fetching image bytes
+        # (Immich API key). Empty for providers that need no auth.
+        self.image_request_headers: dict[str, str] = {}
+        # Query params added only at fetch time (UGREEN ``ugk``), so stored
+        # URLs, attributes and logs never carry them.
+        self.image_request_params: dict[str, str] = {}
+        # False when the entry opted out of TLS certificate checks (UGREEN NAS
+        # with a self-signed certificate).
+        self.image_request_verify_ssl: bool = True
+        # Ente only: file id -> {key, header, thumbnail}, the material needed
+        # to decrypt each image. Rebuilt on every album refresh.
+        self._ente_fetch_meta: dict[str, dict[str, Any]] = {}
+        # UGREEN only: logged-in client + selected album, reused by the
+        # background enrichment pass instead of logging in again per photo.
+        self._ugreen_client: Any = None
+        self._ugreen_album_uuid: str | None = None
+        self._ugreen_album_type: int = 1
+
+        # Persist the most recent successful album fetch so that a transient
+        # network/Google failure doesn't blank the slideshow on restart.
+        self._items_cache_store: Store = Store(
+            hass,
+            self._ITEM_CACHE_VERSION,
+            f"{DOMAIN}.{entry.entry_id}.items",
+        )
+        self._items_cache_loaded: bool = False
+
+        # Reverse-geocode cache. Coordinates rounded to ~100 m via
+        # ``_geocode_cache_key``; mapping value -> Nominatim address parts
+        # (see ``_nominatim_place``). Shared across all items in the album,
+        # persisted independently of the items cache so changes to one don't
+        # invalidate the other.
+        self._geocode_cache_store: Store = Store(
+            hass,
+            self._GEOCODE_CACHE_VERSION,
+            f"{DOMAIN}.{entry.entry_id}.geocode",
+        )
+        self._geocode_cache: dict[str, dict[str, str]] = {}
+        # Finished labels from the older label-only cache, kept until each
+        # coordinate has been looked up again.
+        self._geocode_legacy: dict[str, str] = {}
+        self._geocode_cache_loaded: bool = False
+        # Per-coordinator User-Agent so OSM operators can track us if we
+        # ever misbehave. Resolved lazily because __init__ is sync.
+        self._integration_version: str | None = None
+        # Background EXIF + geocode worker. Cancelled and replaced on
+        # every refresh so a stalled run from a previous interval never
+        # accumulates.
+        self._enrichment_task: asyncio.Task | None = None
+        # Progress data exposed to the diagnostic sensor. ``phase`` is
+        # ``None``/``"exif"``/``"geocoding"``/``"done"``.
+        self._enrich_progress: dict[str, Any] = {
+            "phase": None,
+            "exif_total": 0,
+            "exif_done": 0,
+            "geocode_total": 0,
+            "geocode_done": 0,
+        }
+        # Per-item enrichment in flight, shared by the background pass and
+        # on-demand requests from the camera so an item is fetched once.
+        self._enrich_inflight: dict[int, asyncio.Task] = {}
+        self._last_items_save: float | None = None
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{entry.title} media list",
+            update_interval=timedelta(hours=int(store.refresh_hours)),
+        )
+
+        def _on_store_change() -> None:
+            self.update_interval = timedelta(hours=int(self.store.refresh_hours))
+
+        store.add_listener(_on_store_change)
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        # Cancel any in-flight enrichment from a previous interval before
+        # the new scan runs - it would otherwise race against the new
+        # item list and risk re-saving stale data over fresh state.
+        await self._cancel_enrichment()
+
+        try:
+            if self.provider == PROVIDER_LOCAL_FOLDER:
+                data = await self._update_local_folder()
+            elif self.provider == PROVIDER_GOOGLE_SHARED:
+                data = await self._update_google_shared()
+            elif self.provider == PROVIDER_MEDIA_SOURCE:
+                data = await self._update_media_source()
+            elif self.provider == PROVIDER_IMMICH:
+                data = await self._update_immich()
+            elif self.provider == PROVIDER_PHOTOPRISM:
+                data = await self._update_photoprism()
+            elif self.provider == PROVIDER_ICLOUD:
+                data = await self._update_icloud()
+            elif self.provider == PROVIDER_SYNOLOGY:
+                data = await self._update_synology()
+            elif self.provider == PROVIDER_NEXTCLOUD:
+                data = await self._update_nextcloud()
+            elif self.provider == PROVIDER_ENTE:
+                data = await self._update_ente()
+            elif self.provider == PROVIDER_UGREEN:
+                data = await self._update_ugreen()
+            else:
+                raise UpdateFailed(f"Unsupported provider: {self.provider}")
+        except UpdateFailed:
+            cached = await self._load_cached_items()
+            if cached and cached.get("items"):
+                _LOGGER.info(
+                    "Album scraper: refresh failed; serving %d cached items from disk",
+                    len(cached["items"]),
+                )
+                return cached
+            raise
+
+        items = data.get("items") or []
+        self._apply_google_location_privacy(items)
+        if (self.google_metadata_enabled or self.google_location_enabled) and items:
+            prior = (self.data or {}).get("items", []) if isinstance(self.data, dict) else []
+            if not self._items_cache_loaded:
+                cached = await self._load_cached_items()
+                prior = (cached or {}).get("items", []) + prior
+                self._items_cache_loaded = True
+            by_id = {item.source_id: item for item in prior if item.source_id}
+            for item in items:
+                previous = by_id.get(item.source_id)
+                if previous is None:
+                    continue
+                if self.google_metadata_enabled and isinstance(previous.camera_metadata, dict):
+                    item.camera_metadata = dict(previous.camera_metadata)
+                    item.description = previous.description
+                if self.google_location_enabled and previous.google_location_scanned:
+                    item.latitude = previous.latitude
+                    item.longitude = previous.longitude
+                    item.location = previous.location
+                    item.location_geocoded = previous.location_geocoded
+                    item.google_location_scanned = True
+            self._apply_google_location_privacy(items)
+            await self._relabel_from_place_cache(items)
+            self._schedule_enrichment(data)
+        elif self.provider in ENRICHING_PROVIDERS and items:
+            # Carry forward EXIF/geocode metadata for items we've already
+            # scanned, this session or (after a restart) in the items cache
+            # on disk; new items get filled in by the background worker
+            # below. Session items come last so they win over the cache.
+            prior_items = list((self.data or {}).get("items") or []) if isinstance(self.data, dict) else []
+            if not self._items_cache_loaded:
+                cached = await self._load_cached_items()
+                prior_items = (cached or {}).get("items", []) + prior_items
+                self._items_cache_loaded = True
+            if prior_items:
+                _merge_prior_enrichment(items, prior_items)
+                _LOGGER.debug(
+                    "Album cache: %d of %d items already have their details",
+                    sum(1 for it in items if not self._needs_enrichment(it)), len(items),
+                )
+            await self._relabel_from_place_cache(items)
+            self._schedule_enrichment(data)
+
+        if items:
+            # Only persist non-empty results so we never overwrite a good
+            # cache with a transient empty fetch.
+            await self._save_cached_items(data)
+        else:
+            cached = await self._load_cached_items()
+            if cached and cached.get("items"):
+                _LOGGER.info(
+                    "Album scraper: refresh returned 0 items; serving %d cached items from disk",
+                    len(cached["items"]),
+                )
+                return cached
+
+        return data
+
+    async def _cancel_enrichment(self) -> None:
+        """Cancel and reap any in-flight background enrichment task."""
+        task = self._enrichment_task
+        if task is None or task.done():
+            self._enrichment_task = None
+            return
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        finally:
+            self._enrichment_task = None
+
+    @property
+    def google_metadata_enabled(self) -> bool:
+        options = getattr(getattr(self, "entry", None), "options", None) or {}
+        return self.provider == PROVIDER_GOOGLE_SHARED and bool(
+            options.get(CONF_GOOGLE_METADATA, DEFAULT_GOOGLE_METADATA)
+        )
+
+    @property
+    def google_location_enabled(self) -> bool:
+        options = getattr(getattr(self, "entry", None), "options", None) or {}
+        return self.provider == PROVIDER_GOOGLE_SHARED and bool(
+            options.get(CONF_GOOGLE_LOCATION, DEFAULT_GOOGLE_LOCATION)
+        )
+
+    @property
+    def google_reverse_geocode_enabled(self) -> bool:
+        options = getattr(getattr(self, "entry", None), "options", None) or {}
+        return self.google_location_enabled and bool(
+            options.get(CONF_REVERSE_GEOCODE, DEFAULT_GOOGLE_REVERSE_GEOCODE)
+        )
+
+    def _apply_google_location_privacy(self, items: list[MediaItem]) -> None:
+        if getattr(self, "provider", None) != PROVIDER_GOOGLE_SHARED:
+            return
+        for item in items:
+            if not self.google_location_enabled:
+                item.latitude = None
+                item.longitude = None
+                item.location = None
+                item.location_geocoded = False
+                item.google_location_scanned = False
+            elif not self.google_reverse_geocode_enabled:
+                item.location = None
+                item.location_geocoded = False
+
+    @property
+    def reverse_geocode_enabled(self) -> bool:
+        if getattr(self, "provider", None) == PROVIDER_GOOGLE_SHARED:
+            return self.google_reverse_geocode_enabled
+        options = getattr(getattr(self, "entry", None), "options", None) or {}
+        return bool(options.get(CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE))
+
+    @property
+    def _hidden_home_country(self) -> str | None:
+        """Country code to leave out of place labels, if the user asked for that."""
+        options = getattr(getattr(self, "entry", None), "options", None) or {}
+        if not options.get(CONF_HIDE_HOME_COUNTRY, DEFAULT_HIDE_HOME_COUNTRY):
+            return None
+        return getattr(getattr(self.hass, "config", None), "country", None) or None
+
+    def _needs_geocode_lookup(self, item: MediaItem) -> bool:
+        """True for items with GPS whose place isn't cached yet."""
+        if item.latitude is None or item.longitude is None:
+            return False
+        if item.location and not item.location_geocoded:
+            return False  # The provider's own label.
+        return _geocode_cache_key(item.latitude, item.longitude) not in self._geocode_cache
+
+    def _label_items_from_geocode_cache(self, items: list[MediaItem]) -> int:
+        """Set OpenStreetMap labels from cached places; return how many changed.
+
+        Labels from the older label-only cache are adopted as ours, so they
+        stay visible until a new lookup replaces them.
+        """
+        home = self._hidden_home_country
+        changed = 0
+        for item in items:
+            if item.latitude is None or item.longitude is None:
+                continue
+            key = _geocode_cache_key(item.latitude, item.longitude)
+            legacy = self._geocode_legacy.get(key)
+            if item.location and not item.location_geocoded:
+                if item.location != legacy:
+                    continue
+                item.location_geocoded = True
+            place = self._geocode_cache.get(key)
+            if place is None:
+                if legacy and not item.location:
+                    item.location, item.location_geocoded = legacy, True
+                    changed += 1
+                continue
+            label = _format_place(place, home)
+            if label != item.location or not item.location_geocoded:
+                item.location, item.location_geocoded = label, True
+                changed += 1
+        return changed
+
+    async def _relabel_from_place_cache(self, items: list[MediaItem]) -> None:
+        """Apply current label options to known places without new lookups."""
+        if self.reverse_geocode_enabled and any(
+            it.latitude is not None and it.longitude is not None for it in items
+        ):
+            await self._ensure_geocode_cache_loaded()
+            self._label_items_from_geocode_cache(items)
+
+    def _needs_enrichment(self, item: MediaItem) -> bool:
+        if self.provider == PROVIDER_GOOGLE_SHARED:
+            return (
+                self.google_metadata_enabled and bool(item.source_id) and item.camera_metadata is None
+            ) or (self.google_location_enabled and not item.google_location_scanned)
+        if not item.exif_scanned:
+            return True
+        return self.provider == PROVIDER_IMMICH and not item.face_scanned
+
+    def _schedule_enrichment(self, data: dict[str, Any]) -> None:
+        """Kick off the background EXIF + geocode worker if there's work."""
+        items: list[MediaItem] = data.get("items") or []
+        unscanned = [it for it in items if self._needs_enrichment(it)]
+        # Providers that decrypt/return GPS inline (Ente) have nothing to scan
+        # but still need the coordinates turned into a place label.
+        needs_geocode = self.reverse_geocode_enabled and any(
+            self._needs_geocode_lookup(it) for it in items
+        )
+        if not unscanned and not needs_geocode:
+            # Even with nothing to do, mark the phase as ``done`` so the
+            # diagnostic sensor stops reporting an in-progress run from
+            # the previous refresh.
+            self._enrich_progress = {
+                "phase": "done",
+                "exif_total": len(items),
+                "exif_done": len(items),
+                "geocode_total": 0,
+                "geocode_done": 0,
+            }
+            _LOGGER.debug("Album enrichment: all %d items have their details", len(items))
+            return
+        _LOGGER.debug(
+            "Album enrichment: starting background pass for %d of %d items%s",
+            len(unscanned), len(items), " plus place names" if needs_geocode else "",
+        )
+        self._enrich_progress = {
+            "phase": "exif",
+            "exif_total": len(items),
+            "exif_done": len(items) - len(unscanned),
+            "geocode_total": 0,
+            "geocode_done": 0,
+        }
+        self._enrichment_task = self.hass.async_create_background_task(
+            self._enrich_google_items_background(data) if self.provider == PROVIDER_GOOGLE_SHARED
+            else self._enrich_items_background(data),
+            name=f"album_slideshow_enrich_{self.entry.entry_id}",
+        )
+
+    async def _load_cached_items(self) -> dict[str, Any] | None:
+        try:
+            payload = await self._items_cache_store.async_load()
+        except Exception as err:  # pragma: no cover - storage layer
+            _LOGGER.debug("Album cache: failed to load (%s)", err)
+            return None
+        if not isinstance(payload, dict):
+            _LOGGER.debug("Album cache: nothing saved yet")
+            return None
+
+        cached_source = payload.get("immich_source")
+        if cached_source is not None and cached_source != getattr(self, "_immich_cache_source", None):
+            _LOGGER.debug("Album cache: ignoring saved items, the Immich source changed")
+            return None
+
+        raw_items = payload.get("items")
+        if not isinstance(raw_items, list):
+            _LOGGER.debug("Album cache: ignoring saved data without an item list")
+            return None
+
+        items: list[MediaItem] = []
+        media_source = getattr(self, "provider", None) == PROVIDER_MEDIA_SOURCE
+        for raw in raw_items:
+            if not isinstance(raw, dict) or not raw.get("url"):
+                continue
+            try:
+                items.append(MediaItem(
+                    url=_without_auth_sig(raw["url"]) if media_source else raw["url"],
+                    width=raw.get("width"),
+                    height=raw.get("height"),
+                    mime_type=raw.get("mime_type"),
+                    filename=raw.get("filename"),
+                    captured_at=raw.get("captured_at"),
+                    uploaded_at=raw.get("uploaded_at"),
+                    byte_size=raw.get("byte_size"),
+                    latitude=raw.get("latitude"),
+                    longitude=raw.get("longitude"),
+                    location=raw.get("location"),
+                    description=raw.get("description"),
+                    source_id=raw.get("source_id"),
+                    faces=raw.get("faces"),
+                    exif_scanned=bool(raw.get("exif_scanned", False)),
+                    photo_id=raw.get("photo_id"),
+                    face_scanned=bool(raw.get("face_scanned", False))
+                    and isinstance(raw.get("faces"), list),
+                    camera_metadata={
+                        key: value for key, value in raw["camera_metadata"].items()
+                        if key in CAMERA_METADATA_FIELDS
+                    } if isinstance(raw.get("camera_metadata"), dict) else None,
+                    google_location_scanned=bool(raw.get("google_location_scanned", False)),
+                    location_geocoded=bool(raw.get("location_geocoded", False)),
+                    video_url=raw.get("video_url") if isinstance(raw.get("video_url"), str) else None,
+                    duration_ms=raw.get("duration_ms") if isinstance(raw.get("duration_ms"), int) else None,
+                    source_path=raw.get("source_path") if isinstance(raw.get("source_path"), str) else None,
+                    live_photo=bool(raw.get("live_photo", False)),
+                    source_album_url=raw.get("source_album_url")
+                    if isinstance(raw.get("source_album_url"), str) else None,
+                ))
+            except Exception:
+                continue
+
+        _LOGGER.debug(
+            "Album cache: loaded %d saved items (%d skipped as unreadable)",
+            len(items), len(raw_items) - len(items),
+        )
+        self._apply_google_location_privacy(items)
+        return {
+            "title": payload.get("title"),
+            "items": items,
+        }
+
+    async def _save_cached_items(self, data: dict[str, Any]) -> None:
+        items = data.get("items") or []
+        self._apply_google_location_privacy(items)
+        # Local-folder URLs are absolute paths on the host; persisting them
+        # is fine but they don't survive a host reformat. Persist anyway,
+        # the URL check at load time will skip any stale entries.
+        payload = {
+            "title": data.get("title"),
+            "items": [
+                {
+                    "url": it.url,
+                    "width": it.width,
+                    "height": it.height,
+                    "mime_type": it.mime_type,
+                    "filename": it.filename,
+                    "captured_at": it.captured_at,
+                    "uploaded_at": it.uploaded_at,
+                    "byte_size": it.byte_size,
+                    "latitude": it.latitude,
+                    "longitude": it.longitude,
+                    "location": it.location,
+                    "description": it.description,
+                    "source_id": it.source_id,
+                    "faces": it.faces,
+                    "exif_scanned": it.exif_scanned,
+                    "photo_id": it.photo_id,
+                    "face_scanned": it.face_scanned,
+                    "camera_metadata": it.camera_metadata,
+                    "google_location_scanned": it.google_location_scanned,
+                    "location_geocoded": it.location_geocoded,
+                    "video_url": it.video_url,
+                    "duration_ms": it.duration_ms,
+                    "source_path": it.source_path,
+                    "live_photo": it.live_photo,
+                    "source_album_url": it.source_album_url,
+                }
+                for it in items
+            ],
+        }
+        if source := getattr(self, "_immich_cache_source", None):
+            payload["immich_source"] = source
+        try:
+            await self._items_cache_store.async_save(payload)
+        except Exception as err:  # pragma: no cover - storage layer
+            _LOGGER.debug("Album cache: failed to save (%s)", err)
+        else:
+            _LOGGER.debug("Album cache: saved %d items", len(items))
+
+    async def _update_local_folder(self) -> dict[str, Any]:
+        if not self.local_path:
+            raise UpdateFailed("Missing local path")
+
+        root = Path(self.local_path)
+        if not root.exists() or not root.is_dir():
+            raise UpdateFailed("Local path does not exist or is not a directory")
+
+        def _scan() -> list[Path]:
+            it = root.rglob("*") if self.recursive else root.glob("*")
+            files: list[Path] = []
+            seen: set[str] = set()
+            for p in it:
+                if not p.is_file():
+                    continue
+                rel_parts = p.relative_to(root).parts
+                if any(
+                    part.startswith(_SKIP_DIR_PREFIXES)
+                    for part in rel_parts[:-1]
+                ):
+                    continue
+                if p.name.startswith("."):
+                    continue
+                ext = p.suffix.lower()
+                if ext in _VIDEO_EXTS:
+                    continue
+                if ext not in _IMAGE_EXTS:
+                    continue
+                # Deduplicate by resolved path (symlinks)
+                resolved = str(p.resolve())
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                files.append(p)
+            files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return files
+
+        try:
+            paths = await self.hass.async_add_executor_job(_scan)
+        except Exception as err:
+            raise UpdateFailed(f"Error scanning local folder: {err}") from err
+
+        items: list[MediaItem] = []
+        for p in paths:
+            items.append(
+                MediaItem(
+                    url=f"file://{p.as_posix()}",
+                    width=None,
+                    height=None,
+                    mime_type=None,
+                    filename=p.name,
+                    source_id=f"file://{os.path.abspath(p)}",
+                )
+            )
+
+        return {
+            "title": root.name,
+            "items": items,
+        }
+
+    async def _update_media_source(self) -> dict[str, Any]:
+        """Build the item list from a Home Assistant Media Source node.
+
+        Browses the configured ``media-source://`` content id recursively,
+        collecting image children, then resolves each to a playable URL.
+        Media Source exposes no per-photo EXIF, so date/GPS/description
+        features do not apply here (same as the Google provider).
+        """
+        content_id = self.media_content_id
+        if not content_id:
+            raise UpdateFailed("Missing media source content id")
+
+        try:
+            from homeassistant.components import media_source
+        except Exception as err:  # pragma: no cover - core ships media_source
+            raise UpdateFailed("media_source integration is not available") from err
+
+        collected: list[tuple[str, str | None]] = []
+        try:
+            await self._browse_media_source(media_source, content_id, collected, 0)
+        except UpdateFailed:
+            raise
+        except Exception as err:
+            raise UpdateFailed(f"Error browsing media source: {err}") from err
+
+        if not collected:
+            raise UpdateFailed("No images found in the selected media source")
+
+        base_url = self._internal_base_url()
+        items: list[MediaItem] = []
+        for cid, title in collected:
+            resolved = await self._resolve_media(media_source, cid)
+            if resolved is None:
+                continue
+            raw = resolved[0]
+            # Stored unsigned and signed before each download (see
+            # ``media_link_signature``): Home Assistant's signing key changes
+            # on every restart, so a saved signature stops working.
+            if isinstance(raw, str) and raw.startswith("/"):
+                raw = quote(raw)
+            url = _normalize_resolved_url(raw, base_url)
+            if not url:
+                continue
+            items.append(
+                MediaItem(
+                    url=url,
+                    width=None,
+                    height=None,
+                    mime_type=resolved[1],
+                    filename=title,
+                    source_id=cid,
+                )
+            )
+
+        if not items:
+            raise UpdateFailed("Could not resolve any media source images")
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
+    def media_link_signature(self, url: str) -> str | None:
+        """Return a fresh ``authSig`` for one of Home Assistant's own media links."""
+        if getattr(self, "provider", None) != PROVIDER_MEDIA_SOURCE:
+            return None
+        base = self._internal_base_url().rstrip("/")
+        if not base or not url.startswith(f"{base}/"):
+            return None
+        return URL(self._sign_media_path(url[len(base):])).query.get("authSig")
+
+    def _sign_media_path(self, path: str) -> str:
+        """Sign a quoted ``/media/...`` path so it can be fetched server-side.
+
+        Mirrors what Home Assistant's ``media_source/resolve_media`` websocket
+        handler does: append an ``authSig`` signature. Uses the content user
+        so signing works from a background task with no request context (the
+        same mechanism that lets Cast devices fetch local media). The download
+        follows right away, so the signature only needs to live briefly.
+        """
+        try:
+            from homeassistant.components.http.auth import async_sign_path
+        except Exception:  # pragma: no cover - http always present
+            return path
+
+        for kwargs in ({"use_content_user": True}, {}):
+            try:
+                return async_sign_path(self.hass, path, _MEDIA_LINK_LIFETIME, **kwargs)
+            except TypeError:
+                # Older/newer signature without ``use_content_user``.
+                continue
+            except Exception as err:
+                _LOGGER.debug("media_source: failed to sign %s: %s", path, err)
+                return path
+        return path
+
+    async def _browse_media_source(
+        self,
+        media_source,
+        content_id: str,
+        collected: list[tuple[str, str | None]],
+        depth: int,
+    ) -> None:
+        """Recursively walk a media source tree collecting image leaves."""
+        if len(collected) >= _MEDIA_SOURCE_MAX_ITEMS or depth > _MEDIA_SOURCE_MAX_DEPTH:
+            return
+        browsed = await media_source.async_browse_media(self.hass, content_id)
+        children = getattr(browsed, "children", None) or []
+        for child in children:
+            if len(collected) >= _MEDIA_SOURCE_MAX_ITEMS:
+                break
+            child_id = getattr(child, "media_content_id", None)
+            if not child_id:
+                continue
+            title = getattr(child, "title", None)
+            if _is_junk_media_title(title):
+                continue
+            if _media_node_is_image(
+                getattr(child, "media_class", None),
+                getattr(child, "media_content_type", None),
+            ):
+                collected.append((child_id, title))
+            elif getattr(child, "can_expand", False):
+                await self._browse_media_source(
+                    media_source, child_id, collected, depth + 1
+                )
+
+    async def _resolve_media(
+        self, media_source, content_id: str
+    ) -> tuple[str, str | None] | None:
+        """Resolve a media content id to ``(url, mime_type)`` or ``None``."""
+        try:
+            try:
+                play = await media_source.async_resolve_media(
+                    self.hass, content_id, None
+                )
+            except TypeError:
+                # Older cores: async_resolve_media(hass, content_id).
+                play = await media_source.async_resolve_media(self.hass, content_id)
+        except Exception as err:
+            _LOGGER.debug("media_source: failed to resolve %s: %s", content_id, err)
+            return None
+        url = getattr(play, "url", None)
+        if not url:
+            return None
+        return url, getattr(play, "mime_type", None)
+
+    def _internal_base_url(self) -> str:
+        """Best-effort internal base URL for site-relative media URLs."""
+        try:
+            from homeassistant.helpers.network import get_url
+
+            return get_url(self.hass, prefer_external=False, allow_ip=True)
+        except Exception:
+            return ""
+
+    async def _update_immich(self) -> dict[str, Any]:
+        """Build the item list from an Immich album or person via its API.
+
+        Unlike Media Source, the Immich API exposes per-photo metadata, so
+        capture date, GPS/location, and description all work. Dates come from
+        the asset list up front; location and description are filled in by the
+        background enrichment worker (one asset-detail call each, cached).
+        """
+        from . import immich as immich_api
+
+        url = self.entry.data.get(CONF_IMMICH_URL)
+        api_key = self.entry.data.get(CONF_IMMICH_API_KEY)
+        sel_type = self.entry.data.get(CONF_IMMICH_SELECTION_TYPE)
+        sel_id = self.entry.data.get(CONF_IMMICH_SELECTION_ID)
+        size = self.entry.data.get(CONF_IMMICH_IMAGE_SIZE, DEFAULT_IMMICH_IMAGE_SIZE)
+        include_videos = bool(
+            self.entry.data.get(CONF_IMMICH_INCLUDE_VIDEOS, DEFAULT_IMMICH_INCLUDE_VIDEOS)
+        )
+        live_photos = bool(
+            self.entry.data.get(CONF_IMMICH_LIVE_PHOTOS, DEFAULT_IMMICH_LIVE_PHOTOS)
+        )
+        if not url or not api_key or not sel_type:
+            raise UpdateFailed("Immich provider is missing URL, API key, or selection")
+
+        # ``album``/``albums`` and ``person``/``people`` need a target id;
+        # composite/favorites/all/random/search do not (an empty composite
+        # means "all photos").
+        if sel_type in ("album", "albums", "person", "people") and not sel_id:
+            raise UpdateFailed("Immich provider is missing the album/person id")
+
+        filter_body = None
+        raw_filter = self.entry.data.get(CONF_IMMICH_FILTER)
+        if sel_type in ("search", "composite") and raw_filter:
+            try:
+                parsed = json.loads(raw_filter)
+                if isinstance(parsed, dict):
+                    filter_body = parsed
+            except (ValueError, TypeError):
+                raise UpdateFailed("Immich search filter is not valid JSON")
+
+        client = immich_api.ImmichClient(self.hass, url, api_key)
+        # Auth header the camera must send when fetching image bytes. Sent
+        # server-side only, so the key never reaches the browser or the
+        # ``current_url`` attribute.
+        self.image_request_headers = dict(client.image_headers)
+
+        try:
+            assets = await client.async_collect_assets(
+                sel_type, sel_id, filter_body, include_videos
+            )
+        except Exception as err:
+            raise UpdateFailed(f"Error querying Immich: {err}") from err
+
+        if not assets:
+            raise UpdateFailed("No images found for the selected Immich source")
+
+        items: list[MediaItem] = []
+        for a in assets:
+            aid = a.get("id")
+            if not aid:
+                continue
+            captured = immich_api._to_epoch_ms(
+                a.get("localDateTime")
+            ) or immich_api._to_epoch_ms(a.get("fileCreatedAt"))
+            w = a.get("width")
+            h = a.get("height")
+            is_video = immich_api.is_video_item(a)
+            motion_id = immich_api.live_photo_video_id(a) if live_photos else None
+            if is_video:
+                video_url = immich_api.build_video_url(client.base_url, aid)
+            elif motion_id:
+                video_url = immich_api.build_video_url(client.base_url, motion_id)
+            else:
+                video_url = None
+            items.append(
+                MediaItem(
+                    # A video's poster still is its preview thumbnail: the
+                    # ``original`` endpoint would return the video file and
+                    # ``fullsize`` is only generated for images.
+                    url=immich_api.build_image_url(
+                        client.base_url, aid, IMMICH_IMAGE_PREVIEW if is_video else size
+                    ),
+                    width=w if isinstance(w, int) else None,
+                    height=h if isinstance(h, int) else None,
+                    mime_type=None,
+                    filename=a.get("originalFileName"),
+                    captured_at=captured,
+                    source_id=aid,
+                    video_url=video_url,
+                    live_photo=bool(motion_id),
+                    duration_ms=(
+                        immich_api.parse_duration_ms(a.get("duration")) if is_video else None
+                    ),
+                    source_path=(
+                        a.get("originalPath") if isinstance(a.get("originalPath"), str) else None
+                    ),
+                )
+            )
+
+        _LOGGER.debug(
+            "Immich %s: %d assets (%d videos, %d Live Photos)",
+            self.entry.title,
+            len(items),
+            sum(1 for item in items if item.is_video),
+            sum(1 for item in items if item.live_photo),
+        )
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
+    async def _update_photoprism(self) -> dict[str, Any]:
+        """Fetch photos from PhotoPrism via its REST API.
+
+        Unlike Immich, PhotoPrism returns per-photo metadata inline in the
+        search response, so every ``MediaItem`` is built fully here - there is
+        no background enrichment pass. Thumbnails carry a preview token in the
+        URL, so no auth header is needed to fetch the image bytes.
+        """
+        from . import photoprism as pp_api
+
+        url = self.entry.data.get(CONF_PHOTOPRISM_URL)
+        auth_method = self.entry.data.get(CONF_PHOTOPRISM_AUTH_METHOD)
+        sel_type = self.entry.data.get(CONF_PHOTOPRISM_SELECTION_TYPE)
+        sel_id = self.entry.data.get(CONF_PHOTOPRISM_SELECTION_ID)
+        size = self.entry.data.get(
+            CONF_PHOTOPRISM_IMAGE_SIZE, DEFAULT_PHOTOPRISM_IMAGE_SIZE
+        )
+        filter_query = self.entry.data.get(CONF_PHOTOPRISM_FILTER)
+        if not url or not auth_method or not sel_type:
+            raise UpdateFailed("PhotoPrism provider is missing URL, auth, or selection")
+
+        client = pp_api.PhotoprismClient(
+            self.hass,
+            url,
+            auth_method=auth_method,
+            token=self.entry.data.get(CONF_PHOTOPRISM_TOKEN),
+            username=self.entry.data.get(CONF_PHOTOPRISM_USERNAME),
+            password=self.entry.data.get(CONF_PHOTOPRISM_PASSWORD),
+        )
+
+        try:
+            photos = await client.async_collect_assets(sel_type, sel_id, filter_query)
+        except Exception as err:
+            raise UpdateFailed(f"Error querying PhotoPrism: {err}") from err
+
+        if not photos:
+            raise UpdateFailed("No images found for the selected PhotoPrism source")
+
+        token = client.preview_token
+        if not token:
+            raise UpdateFailed("PhotoPrism did not return a preview token")
+
+        items: list[MediaItem] = []
+        for p in photos:
+            uid = p.get("UID")
+            file_hash = p.get("Hash")
+            if not uid or not file_hash:
+                continue
+            meta = pp_api.parse_photo_meta(p)
+            w = p.get("Width")
+            h = p.get("Height")
+            items.append(
+                MediaItem(
+                    url=pp_api.build_image_url(client.base_url, file_hash, token, size),
+                    width=w if isinstance(w, int) else None,
+                    height=h if isinstance(h, int) else None,
+                    mime_type=None,
+                    filename=p.get("FileName") or p.get("Name"),
+                    captured_at=meta.get("captured_at"),
+                    latitude=meta.get("latitude"),
+                    longitude=meta.get("longitude"),
+                    location=meta.get("location"),
+                    description=meta.get("description"),
+                    source_id=uid,
+                    exif_scanned=True,
+                )
+            )
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
+    async def _update_icloud(self) -> dict[str, Any]:
+        """Fetch photos from a public iCloud Shared Album.
+
+        Two public backends are supported: the legacy "shared streams" API and
+        the newer CloudKit backend used by iOS 26/macOS 26 share links. Both
+        carry capture date and caption inline, so there is no enrichment pass.
+        Signed image URLs are resolved up front and expire after a while, so
+        they are refreshed on every album refresh, and sooner when one expires
+        (see ``async_renew_link``).
+        """
+        from . import icloud as icloud_api
+
+        token = self.entry.data.get(CONF_ICLOUD_TOKEN)
+        size = self.entry.data.get(CONF_ICLOUD_IMAGE_SIZE, DEFAULT_ICLOUD_IMAGE_SIZE)
+        backend = self.entry.data.get(CONF_ICLOUD_BACKEND, DEFAULT_ICLOUD_BACKEND)
+        if not token:
+            raise UpdateFailed("iCloud provider is missing the album token")
+
+        if backend == ICLOUD_BACKEND_CLOUDKIT:
+            return await self._update_icloud_cloudkit(icloud_api, token, size)
+
+        client = icloud_api.IcloudClient(self.hass, token)
+        try:
+            photos = await client.async_get_photos()
+            asset_urls = await client.async_get_asset_urls(
+                [p["photoGuid"] for p in photos if p.get("photoGuid")]
+            )
+        except Exception as err:
+            raise UpdateFailed(f"Error querying iCloud album: {err}") from err
+
+        if not photos:
+            raise UpdateFailed("No images found in the iCloud album")
+
+        items: list[MediaItem] = []
+        for p in photos:
+            guid = p.get("photoGuid")
+            checksum = icloud_api.pick_checksum(p, size)
+            if not guid or not checksum:
+                continue
+            url = icloud_api.build_image_url(asset_urls.get(checksum))
+            if not url:
+                continue
+            meta = icloud_api.parse_photo_meta(p)
+            w = p.get("width")
+            h = p.get("height")
+            items.append(
+                MediaItem(
+                    url=url,
+                    width=int(w) if str(w).isdigit() else None,
+                    height=int(h) if str(h).isdigit() else None,
+                    mime_type=None,
+                    filename=None,
+                    captured_at=meta.get("captured_at"),
+                    description=meta.get("description"),
+                    source_id=guid,
+                    exif_scanned=True,
+                )
+            )
+
+        if not items:
+            raise UpdateFailed("Could not resolve any iCloud image URLs")
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
+    async def _update_icloud_cloudkit(
+        self, icloud_api, token: str, size: str
+    ) -> dict[str, Any]:
+        """Fetch photos from a CloudKit-backed iCloud shared album."""
+        client = icloud_api.IcloudCloudKitClient(self.hass, token)
+        try:
+            photos = await client.async_get_items(size)
+        except Exception as err:
+            raise UpdateFailed(f"Error querying iCloud album: {err}") from err
+
+        if not photos:
+            raise UpdateFailed("No images found in the iCloud album")
+
+        items: list[MediaItem] = [
+            MediaItem(
+                url=p["url"],
+                width=p.get("width"),
+                height=p.get("height"),
+                mime_type=None,
+                filename=None,
+                captured_at=p.get("captured_at"),
+                description=p.get("description"),
+                source_id=p.get("source_id"),
+                exif_scanned=True,
+            )
+            for p in photos
+            if p.get("url")
+        ]
+
+        if not items:
+            raise UpdateFailed("Could not resolve any iCloud image URLs")
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
+    @property
+    def signed_links(self) -> bool:
+        """True when image links expire and each refresh signs them again."""
+        return self.provider == PROVIDER_ICLOUD
+
+    def download_key(self, url: str) -> str:
+        """Cache key for a downloaded image that survives its link being re-signed."""
+        from . import icloud as icloud_api
+
+        return f"icloud:{icloud_api.link_key(url)}" if self.signed_links else url
+
+    def link_expired(self, url: str) -> bool:
+        """True once a signed link is about to expire."""
+        if not self.signed_links:
+            return False
+        from . import icloud as icloud_api
+
+        expires_at = icloud_api.link_expires_at(url)
+        return expires_at is not None and time.time() >= expires_at - _LINK_EXPIRY_MARGIN
+
+    async def async_renew_link(self, url: str) -> str | None:
+        """Return a newer link for the same photo, refreshing the album if needed.
+
+        iCloud links expire long before the album's next scheduled refresh
+        (CloudKit links after about 15 minutes). Concurrent callers share one
+        refresh, and refreshes run at most once a minute. Returns ``None``
+        when there is no newer link.
+        """
+        if not self.signed_links:
+            return None
+        fresh = self._current_link(url)
+        if fresh == url:
+            task = getattr(self, "_link_renewal", None)
+            if task is None:
+                renewed_at = getattr(self, "_links_renewed_at", None)
+                if renewed_at is not None and time.monotonic() - renewed_at < _LINK_RENEW_COOLDOWN:
+                    return None
+                self._links_renewed_at = time.monotonic()
+                _LOGGER.debug("iCloud photo links expired, refreshing the album")
+                task = self._link_renewal = self.hass.async_create_background_task(
+                    self.async_refresh(),
+                    name=f"album_slideshow_renew_links_{self.entry.entry_id}",
+                )
+                task.add_done_callback(lambda _task: setattr(self, "_link_renewal", None))
+            # Shielded: a dropped preload must not cancel a refresh others await.
+            await asyncio.shield(task)
+            fresh = self._current_link(url)
+        return fresh if fresh != url else None
+
+    def _current_link(self, url: str) -> str | None:
+        """The album's current link for the photo behind ``url``, if still listed."""
+        from . import icloud as icloud_api
+
+        key = icloud_api.link_key(url)
+        for item in (getattr(self, "data", None) or {}).get("items") or ():
+            if icloud_api.link_key(item.url) == key:
+                return item.url
+        return None
+
+    async def _update_synology(self) -> dict[str, Any]:
+        """Fetch photos from a Synology Photos library via its web API.
+
+        Metadata (capture date, GPS, address, description) is returned inline
+        with each item, so every ``MediaItem`` is built fully here - there is
+        no background enrichment pass. Thumbnail URLs carry no SID; the session
+        cookie is stored on the coordinator and sent server-side by the camera
+        (like the Immich x-api-key), so the SID never reaches the browser.
+        """
+        from . import synology as syn_api
+
+        url = self.entry.data.get(CONF_SYNOLOGY_URL)
+        username = self.entry.data.get(CONF_SYNOLOGY_USERNAME)
+        password = self.entry.data.get(CONF_SYNOLOGY_PASSWORD)
+        device_id = self.entry.data.get(CONF_SYNOLOGY_DEVICE_ID)
+        space = self.entry.data.get(CONF_SYNOLOGY_SPACE, SYNOLOGY_SPACE_PERSONAL)
+        album_id = self.entry.data.get(CONF_SYNOLOGY_ALBUM_ID)
+        passphrase = self.entry.data.get(CONF_SYNOLOGY_PASSPHRASE)
+        favorite_only = bool(self.entry.data.get(CONF_SYNOLOGY_FAVORITE))
+        selection_raw = self.entry.data.get(CONF_SYNOLOGY_SELECTION)
+        size = self.entry.data.get(
+            CONF_SYNOLOGY_IMAGE_SIZE, DEFAULT_SYNOLOGY_IMAGE_SIZE
+        )
+        if not url or not username or not password:
+            raise UpdateFailed("Synology provider is missing URL or credentials")
+
+        client = syn_api.SynologyClient(
+            self.hass,
+            url,
+            username=username,
+            password=password,
+            device_id=device_id,
+            space=space,
+        )
+        try:
+            await client.async_login()
+            if selection_raw:
+                # Composite selection (albums + people + places + tags +
+                # subjects + favorites), merged client-side.
+                try:
+                    selection = json.loads(selection_raw)
+                except (TypeError, ValueError):
+                    selection = {}
+                photos = await client.async_collect_composite(selection)
+            else:
+                # Legacy single-source entries (favorites / one album / all).
+                photos = await client.async_collect_assets(
+                    album_id or None,
+                    passphrase=passphrase or None,
+                    favorite_only=favorite_only,
+                )
+        except syn_api.SynologyPermissionError as err:
+            raise UpdateFailed(str(err)) from err
+        except Exception as err:
+            raise UpdateFailed(f"Error querying Synology Photos: {err}") from err
+
+        if not photos:
+            await client.async_logout()
+            raise UpdateFailed("No images found for the selected Synology source")
+
+        # Store the session cookie so the camera can fetch thumbnail bytes
+        # server-side. Do not log out: the SID must stay valid until the next
+        # refresh re-authenticates.
+        self.image_request_headers = dict(client.image_headers)
+
+        items: list[MediaItem] = []
+        for p in photos:
+            ref = syn_api.thumbnail_ref(p)
+            if not ref:
+                continue
+            unit_id, cache_key = ref
+            meta = syn_api.parse_photo_meta(p)
+            # Items pulled from a shared-with-me album carry their own
+            # passphrase (composite path); fall back to the single-album
+            # passphrase for legacy entries.
+            item_pp = p.get("_passphrase") or passphrase or None
+            items.append(
+                MediaItem(
+                    url=syn_api.build_thumbnail_url(
+                        client.base_url,
+                        unit_id,
+                        cache_key,
+                        size,
+                        space,
+                        passphrase=item_pp,
+                    ),
+                    width=meta.get("width"),
+                    height=meta.get("height"),
+                    mime_type=None,
+                    filename=p.get("filename"),
+                    captured_at=meta.get("captured_at"),
+                    byte_size=meta.get("byte_size"),
+                    latitude=meta.get("latitude"),
+                    longitude=meta.get("longitude"),
+                    location=meta.get("location"),
+                    description=meta.get("description"),
+                    source_id=str(p.get("id")) if p.get("id") is not None else None,
+                    exif_scanned=True,
+                )
+            )
+
+        if not items:
+            raise UpdateFailed("Could not resolve any Synology images")
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
+    async def _update_ugreen(self) -> dict[str, Any]:
+        """Fetch photos from a UGREEN NAS UGOS Photos album.
+
+        Logs in fresh on every refresh, like the Synology provider. The
+        album is addressed by its stored uuid, so renaming it in UGOS Photos
+        needs no reconfiguration.
+        """
+        from . import ugreen as ugr_api
+
+        url = self.entry.data.get(CONF_UGREEN_URL)
+        username = self.entry.data.get(CONF_UGREEN_USERNAME)
+        password = self.entry.data.get(CONF_UGREEN_PASSWORD)
+        album_uuid = self.entry.data.get(CONF_UGREEN_ALBUM_UUID)
+        album_type = self.entry.data.get(
+            CONF_UGREEN_ALBUM_TYPE, ugr_api.ALBUM_TYPE_REGULAR
+        )
+        verify_ssl = bool(self.entry.data.get(CONF_UGREEN_VERIFY_SSL, True))
+        if not url or not username or not password or not album_uuid:
+            raise UpdateFailed("UGREEN provider is missing URL, credentials or album")
+
+        client = ugr_api.UGreenClient(
+            self.hass, url, username, password, verify_ssl=verify_ssl
+        )
+        try:
+            await client.async_login()
+            photos = await client.async_list_album_pictures(album_uuid, album_type)
+        except ugr_api.UGreenAuthError as err:
+            raise UpdateFailed(f"UGREEN login failed: {err}") from err
+        except ugr_api.UGreenApiError as err:
+            raise UpdateFailed(f"Error listing UGREEN album photos: {err}") from err
+
+        if not photos:
+            raise UpdateFailed(f"No images found in UGREEN album '{self.entry.title}'")
+
+        # Stored so the camera can fetch image bytes server-side (session
+        # cookie plus ``ugk``, added per request so stored URLs never carry it)
+        # with the same TLS setting as the login.
+        self.image_request_headers = dict(client.image_headers)
+        self.image_request_params = dict(client.image_params)
+        self.image_request_verify_ssl = verify_ssl
+        # Kept for the background enrichment pass (GPS/address lookups),
+        # which needs a logged-in client and the album context per photo.
+        self._ugreen_client = client
+        self._ugreen_album_uuid = album_uuid
+        self._ugreen_album_type = album_type
+
+        items: list[MediaItem] = []
+        for p in photos:
+            picture_id = p.get("picture_id")
+            if picture_id is None:
+                continue
+            # Backstop for type_option; a video would only show its poster frame.
+            ext = p.get("real_ext_name") or Path(str(p.get("file_name") or "")).suffix
+            if f".{str(ext).lstrip('.').lower()}" in _VIDEO_EXTS:
+                continue
+            meta = ugr_api.parse_photo_meta(p)
+            items.append(
+                MediaItem(
+                    url=ugr_api.build_image_url(
+                        client.base_url,
+                        picture_id,
+                        album_uuid,
+                        source_album_type=album_type,
+                        upload_time=p.get("upload_time", 0),
+                    ),
+                    width=meta.get("width"),
+                    height=meta.get("height"),
+                    mime_type=None,
+                    filename=p.get("file_name"),
+                    captured_at=meta.get("captured_at"),
+                    byte_size=meta.get("byte_size"),
+                    latitude=None,
+                    longitude=None,
+                    location=None,
+                    description=None,
+                    source_id=str(picture_id),
+                    # GPS/address isn't in this listing - the background
+                    # enrichment pass fills it in via picture/info.
+                    exif_scanned=False,
+                )
+            )
+
+        if not items:
+            raise UpdateFailed("Could not resolve any UGREEN images")
+
+        try:
+            album_name = await client.async_get_album_name(album_uuid)
+        except Exception as err:  # noqa: BLE001 - the title is cosmetic
+            _LOGGER.debug("UGREEN: could not read the album name: %s", err)
+            album_name = None
+
+        return {
+            "title": album_name or self.entry.title,
+            "items": items,
+        }
+
+    async def _update_nextcloud(self) -> dict[str, Any]:
+        """List photos from Nextcloud, dispatching on the configured auth mode."""
+        mode = self.entry.data.get(
+            CONF_NEXTCLOUD_AUTH_MODE, DEFAULT_NEXTCLOUD_AUTH_MODE
+        )
+        if mode == NEXTCLOUD_AUTH_MODE_PUBLIC:
+            return await self._update_nextcloud_public()
+        return await self._update_nextcloud_folder()
+
+    def _ente_share(self):
+        """Rebuild the parsed share (token + collection key) from entry data."""
+        from base64 import b64decode
+
+        from . import ente as ente_api
+
+        token = self.entry.data.get(CONF_ENTE_ACCESS_TOKEN)
+        raw_key = self.entry.data.get(CONF_ENTE_COLLECTION_KEY)
+        if not token or not raw_key:
+            raise UpdateFailed("Ente entry is missing its link credentials")
+        return ente_api.EnteShare(
+            token,
+            b64decode(raw_key),
+            self.entry.data.get(CONF_ENTE_URL) or "",
+        )
+
+    async def _update_ente(self) -> dict[str, Any]:
+        """List and decrypt an Ente public album.
+
+        Ente returns everything encrypted, so each file's key is unsealed from
+        the collection key and its metadata decrypted here. That metadata is
+        complete (capture date, GPS, caption), so unlike the folder-style
+        providers there is no per-photo enrichment download; items come back
+        already scanned and only need reverse-geocoding.
+        """
+        from . import ente as ente_api
+
+        share = self._ente_share()
+        client = ente_api.EnteClient(
+            self.hass, share, self.entry.data.get(CONF_ENTE_API_ORIGIN)
+        )
+
+        try:
+            files = await client.async_list_files()
+        except Exception as err:
+            raise UpdateFailed(f"Error listing Ente album: {err}") from err
+
+        want_preview = (
+            self.entry.data.get(CONF_ENTE_IMAGE_SIZE, DEFAULT_ENTE_IMAGE_SIZE)
+            == ENTE_IMAGE_PREVIEW
+        )
+
+        items: list[MediaItem] = []
+        fetch_meta: dict[str, dict[str, Any]] = {}
+        for f in files:
+            try:
+                built = await self.hass.async_add_executor_job(
+                    _build_ente_item, f, share.collection_key, want_preview
+                )
+            except Exception as err:  # noqa: BLE001 - one bad file must not fail the album
+                _LOGGER.debug("Ente: skipping file %s (%s)", f.get("id"), err)
+                continue
+            if built is None:
+                continue
+            item, meta = built
+            items.append(item)
+            fetch_meta[str(f["id"])] = meta
+
+        if not items:
+            raise UpdateFailed("No images found in the Ente album")
+
+        # Per-file keys + stream headers, so the camera can decrypt on demand
+        # without re-listing the album for every slide.
+        self._ente_fetch_meta = fetch_meta
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
+    async def async_fetch_image_bytes(self, url: str) -> bytes | None:
+        """Fetch and decrypt bytes for a provider-internal URL.
+
+        Only Ente uses this today: its images cannot be served by URL because
+        the bytes are end-to-end encrypted, so the camera hands the synthetic
+        ``ente://<fileID>`` id back here to be downloaded and decrypted.
+        Returns ``None`` for anything this coordinator does not own.
+        """
+        from . import ente as ente_api
+
+        if self.provider != PROVIDER_ENTE:
+            return None
+        file_id = ente_api.file_id_from_url(url)
+        if not file_id:
+            return None
+
+        meta = (self._ente_fetch_meta or {}).get(str(file_id))
+        if not meta:
+            _LOGGER.debug("Ente: no decryption material cached for %s", file_id)
+            return None
+
+        share = self._ente_share()
+        client = ente_api.EnteClient(
+            self.hass, share, self.entry.data.get(CONF_ENTE_API_ORIGIN)
+        )
+        try:
+            return await client.async_fetch_image(
+                file_id, meta["key"], meta["header"], meta["thumbnail"]
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Ente: failed to fetch image %s: %s", file_id, err)
+            return None
+
+    async def _update_nextcloud_folder(self) -> dict[str, Any]:
+        """List photos from an authenticated Nextcloud WebDAV folder.
+
+        The PROPFIND listing carries filename/size/content-type/mtime but no
+        EXIF, so capture date, GPS and description are filled in afterwards by
+        the background enrichment worker (one original-file download per photo -
+        Nextcloud has no metadata-only endpoint the way Immich does). The app
+        password is sent server-side only via the coordinator's image headers.
+        """
+        from . import nextcloud as nc_api
+
+        url = self.entry.data.get(CONF_NEXTCLOUD_URL)
+        username = self.entry.data.get(CONF_NEXTCLOUD_USERNAME)
+        password = self.entry.data.get(CONF_NEXTCLOUD_PASSWORD)
+        folder = self.entry.data.get(CONF_NEXTCLOUD_FOLDER) or ""
+        recursive = bool(self.entry.data.get(CONF_NEXTCLOUD_RECURSIVE, False))
+        size = self.entry.data.get(
+            CONF_NEXTCLOUD_IMAGE_SIZE, DEFAULT_NEXTCLOUD_IMAGE_SIZE
+        )
+        if not url or not username or not password:
+            raise UpdateFailed("Nextcloud provider is missing URL or credentials")
+
+        client = nc_api.NextcloudClient(self.hass, url, username, password, folder)
+        try:
+            photos = await client.async_list_photos(recursive=recursive)
+        except Exception as err:
+            raise UpdateFailed(f"Error listing Nextcloud folder: {err}") from err
+
+        if not photos:
+            raise UpdateFailed("No images found in the Nextcloud folder")
+
+        # The camera fetches image bytes server-side with this Basic-auth
+        # header, so the app password never appears in the browser URL.
+        self.image_request_headers = dict(client.image_headers)
+
+        items: list[MediaItem] = []
+        for p in photos:
+            href = p.get("href")
+            if not href:
+                continue
+            if size != NEXTCLOUD_IMAGE_ORIGINAL and p.get("file_id"):
+                display_url = nc_api.build_preview_url(
+                    client.base_url, p["file_id"], NEXTCLOUD_PREVIEW_PX
+                )
+            else:
+                display_url = href
+            items.append(
+                MediaItem(
+                    url=display_url,
+                    width=None,
+                    height=None,
+                    mime_type=p.get("content_type"),
+                    filename=p.get("filename"),
+                    uploaded_at=p.get("mtime_ms"),
+                    byte_size=p.get("size"),
+                    source_id=p.get("file_id") or href,
+                )
+            )
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
+    async def _update_nextcloud_public(self) -> dict[str, Any]:
+        """List photos from a Nextcloud Photos public collaborative album.
+
+        The PROPFIND listing carries filename/size/content-type/mtime but no
+        EXIF, so capture date, GPS and description are filled in afterwards
+        by the background enrichment worker (one original-file download per
+        photo - Nextcloud has no metadata-only endpoint the way Immich does).
+        No credentials are involved - the share token is embedded in the URL.
+        """
+        from . import nextcloud as nc_api
+
+        url = self.entry.data.get(CONF_NEXTCLOUD_URL)
+        token = self.entry.data.get(CONF_NEXTCLOUD_SHARE_TOKEN)
+        size = self.entry.data.get(
+            CONF_NEXTCLOUD_IMAGE_SIZE, DEFAULT_NEXTCLOUD_IMAGE_SIZE
+        )
+        if not url or not token:
+            raise UpdateFailed("Nextcloud provider is missing the URL or share token")
+
+        client = nc_api.NextcloudPublicClient(self.hass, url, token)
+        try:
+            photos = await client.async_list_photos()
+        except Exception as err:
+            raise UpdateFailed(f"Error listing Nextcloud album: {err}") from err
+
+        if not photos:
+            raise UpdateFailed("No images found in the Nextcloud album")
+
+        items: list[MediaItem] = []
+        for p in photos:
+            href = p.get("href")
+            if not href:
+                continue
+            if size != NEXTCLOUD_IMAGE_ORIGINAL and p.get("file_id"):
+                display_url = nc_api.build_preview_url_public(
+                    client.base_url, token, p["file_id"], NEXTCLOUD_PREVIEW_PX
+                )
+            else:
+                display_url = href
+            items.append(
+                MediaItem(
+                    url=display_url,
+                    width=None,
+                    height=None,
+                    mime_type=p.get("content_type"),
+                    filename=p.get("display_name") or p.get("filename"),
+                    uploaded_at=p.get("mtime_ms"),
+                    byte_size=p.get("size"),
+                    # The DAV href, so enrichment can fetch the original bytes
+                    # even when the display URL is a preview.
+                    source_id=href,
+                    photo_id=_photo_identifier(p.get("file_id") or href),
+                )
+            )
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
+    async def _enrich_nextcloud_item(self, item: MediaItem) -> None:
+        """Download one Nextcloud photo's original bytes and read its EXIF.
+
+        Nextcloud has no metadata-only endpoint for either auth mode (unlike
+        Immich's per-asset detail call), so enrichment costs one full-file
+        download per photo regardless of the display quality configured.
+        Dispatches on the configured auth mode to build the right download
+        URL/headers; the download-and-parse tail is identical either way.
+        """
+        mode = self.entry.data.get(
+            CONF_NEXTCLOUD_AUTH_MODE, DEFAULT_NEXTCLOUD_AUTH_MODE
+        )
+        if mode == NEXTCLOUD_AUTH_MODE_PUBLIC:
+            original_url, headers = self._nextcloud_public_original(item)
+        else:
+            original_url, headers = self._nextcloud_folder_original(item)
+        if not original_url:
+            item.exif_scanned = True
+            return
+
+        session = async_get_clientsession(self.hass)
+        try:
+            async with async_timeout.timeout(30):
+                async with session.get(original_url, headers=headers) as resp:
+                    resp.raise_for_status()
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in resp.content.iter_chunked(64 * 1024):
+                        total += len(chunk)
+                        if total > _NEXTCLOUD_ENRICH_MAX_BYTES:
+                            _LOGGER.debug(
+                                "Nextcloud: %s exceeded %d byte enrichment cap; skipping",
+                                item.filename, _NEXTCLOUD_ENRICH_MAX_BYTES,
+                            )
+                            item.exif_scanned = True
+                            return
+                        chunks.append(chunk)
+                    data = b"".join(chunks)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Nextcloud: failed to download %s for enrichment: %s",
+                item.filename, err,
+            )
+            item.exif_scanned = True
+            return
+
+        info = await self.hass.async_add_executor_job(
+            _read_exif_from_bytes, data, item.uploaded_at
+        )
+        if "captured_at" in info:
+            item.captured_at = info["captured_at"]
+        if "description" in info:
+            item.description = info["description"]
+        if "latitude" in info and "longitude" in info:
+            item.latitude = info["latitude"]
+            item.longitude = info["longitude"]
+        item.exif_scanned = True
+
+    def _nextcloud_folder_original(
+        self, item: MediaItem
+    ) -> tuple[str | None, dict[str, str]]:
+        """Return ``(original_url, headers)`` for a folder-mode item, or (None, {})."""
+        from . import nextcloud as nc_api
+        from urllib.parse import quote
+
+        url = self.entry.data.get(CONF_NEXTCLOUD_URL)
+        username = self.entry.data.get(CONF_NEXTCLOUD_USERNAME)
+        password = self.entry.data.get(CONF_NEXTCLOUD_PASSWORD)
+        folder = self.entry.data.get(CONF_NEXTCLOUD_FOLDER) or ""
+        if not username or not password or not url:
+            return None, {}
+
+        # Reconstruct the original-file URL: for preview items the display url
+        # is the preview endpoint, so fall back to the folder href by filename.
+        original_url = None
+        if isinstance(item.url, str) and "/remote.php/dav/files/" in item.url:
+            original_url = item.url
+        elif item.filename:
+            client = nc_api.NextcloudClient(self.hass, url, username, password, folder)
+            original_url = client.dav_root + quote(item.filename)
+        if not original_url:
+            return None, {}
+        return original_url, {"Authorization": nc_api.basic_auth_header(username, password)}
+
+    def _nextcloud_public_original(
+        self, item: MediaItem
+    ) -> tuple[str | None, dict[str, str]]:
+        """Return ``(original_url, headers)`` for a public-link item, or (None, {})."""
+        url = self.entry.data.get(CONF_NEXTCLOUD_URL)
+        token = self.entry.data.get(CONF_NEXTCLOUD_SHARE_TOKEN)
+        if not url or not token:
+            return None, {}
+
+        # For preview items the display url is the preview endpoint, so fall
+        # back to the DAV href stashed on the item at listing time.
+        for candidate in (item.url, item.source_id):
+            if isinstance(candidate, str) and (
+                "/remote.php/dav/photospublic/" in candidate
+            ):
+                return candidate, {}
+        return None, {}
+
+    async def async_video_info(self, item: MediaItem) -> dict[str, Any]:
+        """Describe the stream a video slide is served as; cached per item.
+
+        Used for the card's ``video_version`` caption: whether Immich serves
+        its transcoded copy or the original, and the stream's bitrate.
+        """
+        if item.video_info is not None:
+            return item.video_info
+        if self.provider != PROVIDER_IMMICH or not item.source_id or not item.is_video:
+            return {}
+        from . import immich as immich_api
+
+        client = immich_api.ImmichClient(
+            self.hass,
+            self.entry.data.get(CONF_IMMICH_URL),
+            self.entry.data.get(CONF_IMMICH_API_KEY),
+        )
+        content_type, served = await client.async_probe_video(item.source_id)
+        if item.byte_size is None:
+            # Enrichment may not have reached this item yet.
+            info = immich_api.parse_asset_exif(await client.async_get_asset(item.source_id))
+            item.byte_size = info.get("byte_size")
+        item.video_info = immich_api.describe_video(
+            content_type, served, item.byte_size, item.duration_ms
+        )
+        return item.video_info
+
+    async def _enrich_immich_item(self, item: MediaItem) -> None:
+        """Fetch Immich metadata and the face boxes used for cropping."""
+        from . import immich as immich_api
+
+        url = self.entry.data.get(CONF_IMMICH_URL)
+        api_key = self.entry.data.get(CONF_IMMICH_API_KEY)
+        if not item.source_id or not url or not api_key:
+            item.exif_scanned = True
+            return
+        client = immich_api.ImmichClient(self.hass, url, api_key)
+        person_ids = immich_api.selected_person_ids(
+            self.entry.data.get(CONF_IMMICH_SELECTION_TYPE),
+            self.entry.data.get(CONF_IMMICH_SELECTION_ID),
+        )
+
+        requests = {}
+        needs_faces = not item.face_scanned
+        if not item.exif_scanned or needs_faces:
+            requests["asset"] = client.async_get_asset(item.source_id)
+        if needs_faces:
+            requests["faces"] = client.async_get_faces(item.source_id)
+        results = await asyncio.gather(*requests.values(), return_exceptions=True)
+        asset = None
+
+        for kind, result in zip(requests, results):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, Exception):
+                _LOGGER.debug(
+                    "Immich: failed to fetch %s for asset %s: %s",
+                    kind,
+                    item.source_id,
+                    result,
+                )
+                continue
+            if kind == "asset":
+                if not isinstance(result, dict):
+                    continue
+                asset = result
+                info = immich_api.parse_asset_exif(result)
+                if "captured_at" in info:
+                    item.captured_at = info["captured_at"]
+                if "latitude" in info and "longitude" in info:
+                    item.latitude = info["latitude"]
+                    item.longitude = info["longitude"]
+                if "location" in info:
+                    item.location = info["location"]
+                    item.location_geocoded = False
+                if "description" in info:
+                    item.description = info["description"]
+                if "byte_size" in info:
+                    item.byte_size = info["byte_size"]
+                item.exif_scanned = True
+            else:
+                if asset is None:
+                    continue
+                edits = []
+                if asset.get("isEdited"):
+                    try:
+                        edits = await client.async_get_asset_edits(item.source_id)
+                        if not edits:
+                            continue
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        _LOGGER.debug("Immich: edit metadata unavailable for asset %s", item.source_id)
+                        continue
+                try:
+                    boxes = immich_api.parse_face_boxes(
+                        result, person_ids, edits=edits,
+                        original_size=immich_api.original_image_size(asset),
+                    )
+                except (TypeError, ValueError):
+                    _LOGGER.debug("Immich: unsupported face geometry for asset %s", item.source_id)
+                    continue
+                item.faces = boxes
+                item.face_scanned = True
+
+    async def _enrich_google_items_background(self, data: dict[str, Any]) -> None:
+        """Cache optional Google metadata without delaying or failing the playlist."""
+        from . import google_scraper
+
+        jobs = []
+        for item in data.get("items", []):
+            if self.google_metadata_enabled and item.source_id and item.camera_metadata is None:
+                jobs.append((item, False))
+            if self.google_location_enabled and not item.google_location_scanned:
+                jobs.append((item, True))
+        if not jobs:
+            try:
+                if self.google_reverse_geocode_enabled:
+                    await self._geocode_items_background(data)
+            finally:
+                self._enrich_progress["phase"] = "done"
+            return
+        failures = 0
+        completed = 0
+        next_request = 0.0
+        loop = asyncio.get_running_loop()
+        try:
+            async with aiohttp.ClientSession(
+                cookie_jar=aiohttp.DummyCookieJar(), trust_env=False,
+            ) as session:
+                # Metadata keys are per shared album; fetch each album's keys
+                # once, the first time one of its photos needs them.
+                keys_by_album: dict[str | None, Any] = {}
+                for item, location_job in jobs:
+                    delay = next_request - loop.time()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    try:
+                        if location_job:
+                            header = await google_scraper.fetch_photo_location_header(session, item.url)
+                            try:
+                                metadata = await self.hass.async_add_executor_job(
+                                    _read_gps_from_header, header,
+                                )
+                            except Exception as err:
+                                # A photo that cannot be parsed must not stop the scan for the rest.
+                                _LOGGER.debug("Google photo GPS unreadable (%s)", type(err).__name__)
+                                continue
+                            latitude = metadata.get("latitude")
+                            longitude = metadata.get("longitude")
+                            if (
+                                all(type(value) in (int, float) and math.isfinite(value)
+                                    for value in (latitude, longitude))
+                                and -90 <= latitude <= 90 and -180 <= longitude <= 180
+                                and (abs(latitude) > 1e-6 or abs(longitude) > 1e-6)
+                            ):
+                                item.latitude, item.longitude = latitude, longitude
+                            else:
+                                item.latitude = item.longitude = None
+                            item.location = None
+                            item.location_geocoded = False
+                            item.google_location_scanned = True
+                        else:
+                            album = item.source_album_url or self.album_url
+                            keys = keys_by_album.get(album)
+                            if keys is None:
+                                keys = await google_scraper.fetch_metadata_keys(session, album)
+                                keys_by_album[album] = keys
+                            metadata = await google_scraper.fetch_photo_metadata(
+                                session, keys, item.source_id,
+                            )
+                            item.description = metadata.pop("description", None)
+                            item.camera_metadata = metadata
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as err:
+                        failures += 1
+                        _LOGGER.debug(
+                            "Google photo metadata unavailable (%s, status=%s)",
+                            type(err).__name__, getattr(err, "status", None),
+                        )
+                        if failures >= 3 or getattr(err, "status", None) in (401, 403, 429):
+                            break
+                    else:
+                        failures = 0
+                        completed += 1
+                        if not self._needs_enrichment(item):
+                            self._enrich_progress["exif_done"] += 1
+                        if completed == 1 or completed % 10 == 0:
+                            await self._save_cached_items(data)
+                            self.async_set_updated_data(data)
+                    finally:
+                        next_request = loop.time() + _GOOGLE_METADATA_INTERVAL
+            if self.google_reverse_geocode_enabled:
+                await self._geocode_items_background(data)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            _LOGGER.debug("Google photo enrichment stopped (%s)", type(err).__name__)
+        finally:
+            self._enrich_progress["phase"] = "done"
+            await self._save_cached_items(data)
+            if completed:
+                self.async_set_updated_data(data)
+
+    async def _enrich_ugreen_item(self, item: MediaItem) -> None:
+        """Fetch GPS coordinates and a location label for one UGREEN photo.
+
+        Reuses the client stashed by ``_update_ugreen`` instead of logging in
+        again per photo. Image URLs are stable across refreshes, so
+        ``_merge_prior_enrichment`` carries results forward and only new
+        photos are looked up.
+        """
+        from . import ugreen as ugr_api
+
+        client = self._ugreen_client
+        if client is None or not item.source_id or not self._ugreen_album_uuid:
+            item.exif_scanned = True
+            return
+        try:
+            info = await client.async_get_picture_info(
+                item.source_id, self._ugreen_album_uuid, self._ugreen_album_type
+            )
+        except asyncio.CancelledError:
+            raise
+        except ugr_api.UGreenApiError as err:
+            _LOGGER.debug(
+                "UGREEN: picture/info failed for %s: %s", item.source_id, err
+            )
+            item.exif_scanned = True
+            return
+        meta = ugr_api.parse_picture_location(info)
+        if "latitude" in meta and "longitude" in meta:
+            item.latitude = meta["latitude"]
+            item.longitude = meta["longitude"]
+        if "location" in meta:
+            item.location = meta["location"]
+            item.location_geocoded = False
+        item.exif_scanned = True
+
+    async def async_enrich_item(self, item: MediaItem) -> bool:
+        """Enrich one item now, sharing the work with the background pass.
+
+        The camera calls this just before rendering a slide so faces (for
+        cropping) and caption metadata are in place without waiting for the
+        pass to reach the item. Concurrent callers await the same fetch.
+        Returns whether metadata was fetched (``False``: nothing to do).
+        """
+        if self.provider == PROVIDER_GOOGLE_SHARED or not self._needs_enrichment(item):
+            return False
+        inflight = getattr(self, "_enrich_inflight", None)
+        if inflight is None:
+            inflight = self._enrich_inflight = {}
+        key = id(item)
+        task = inflight.get(key)
+        if task is None:
+            task = self.hass.async_create_background_task(
+                self._enrich_one(item),
+                name=f"album_slideshow_enrich_item_{self.entry.entry_id}",
+            )
+            inflight[key] = task
+            task.add_done_callback(lambda _task: inflight.pop(key, None))
+        # Shielded: a cancelled caller (e.g. a dropped preload) must not
+        # abandon a fetch another caller is waiting on.
+        return await asyncio.shield(task)
+
+    async def _enrich_one(self, item: MediaItem) -> bool:
+        """Fetch one item's metadata from its provider; never raises."""
+        try:
+            if self.provider == PROVIDER_IMMICH:
+                await self._enrich_immich_item(item)
+            elif self.provider == PROVIDER_NEXTCLOUD:
+                await self._enrich_nextcloud_item(item)
+            elif self.provider == PROVIDER_UGREEN:
+                await self._enrich_ugreen_item(item)
+            elif item.url.startswith("file://"):
+                path = Path(item.url[len("file://"):])
+                info = await self.hass.async_add_executor_job(_read_local_exif, path)
+                if "captured_at" in info:
+                    item.captured_at = info["captured_at"]
+                if "description" in info:
+                    item.description = info["description"]
+                if "latitude" in info and "longitude" in info:
+                    item.latitude = info["latitude"]
+                    item.longitude = info["longitude"]
+                item.exif_scanned = True
+            else:
+                # Nothing to read for remote files without a provider API.
+                item.exif_scanned = True
+                return False
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("%s enrich error: %s", self.provider, err)
+            item.exif_scanned = True
+        self._enrich_progress["exif_done"] = self._enrich_progress.get("exif_done", 0) + 1
+        return True
+
+    async def _flush_enrichment(self, data: dict[str, Any]) -> None:
+        """Persist progress (at most once a minute) and notify listeners."""
+        now = time.monotonic()
+        last = getattr(self, "_last_items_save", None)
+        if last is None or now - last >= _ENRICHMENT_SAVE_INTERVAL:
+            self._last_items_save = now
+            await self._save_cached_items(data)
+        self.async_set_updated_data(data)
+
+    async def _enrich_items_background(self, data: dict[str, Any]) -> None:
+        """Read EXIF for unscanned local files, then reverse-geocode.
+
+        Runs as a background task so the coordinator's first update can
+        return immediately with the bare file list. Pushes incremental
+        updates to listeners after each EXIF batch so attributes appear
+        on the camera as soon as they are known.
+
+        Cancellation-safe: any progress made before a cancel is
+        persisted via the ``finally`` clause.
+        """
+        items: list[MediaItem] = data.get("items") or []
+        if not items:
+            return
+
+        pending = 0
+        try:
+            for idx, item in enumerate(items):
+                if not self._needs_enrichment(item):
+                    # Fast path: yield occasionally so we don't starve
+                    # the event loop when (re-)visiting a long list of
+                    # already-processed items (including ones the camera
+                    # enriched on demand).
+                    if idx % _ENRICHMENT_FAST_PATH_YIELD_EVERY == 0:
+                        await asyncio.sleep(0)
+                    continue
+
+                if not await self.async_enrich_item(item):
+                    continue
+                pending += 1
+                if pending >= _EXIF_BATCH_SAVE:
+                    pending = 0
+                    await self._flush_enrichment(data)
+
+            # Flush any tail items before the geocode phase.
+            if pending:
+                await self._flush_enrichment(data)
+
+            await self._geocode_items_background(data)
+        except asyncio.CancelledError:
+            _LOGGER.debug("Album enrichment: cancelled, persisting progress")
+            raise
+        finally:
+            # Always flush whatever progress we made, even on cancel.
+            try:
+                await self._save_cached_items(data)
+            except Exception:  # pragma: no cover - storage layer
+                pass
+            # Phase ``done`` lets the diagnostic sensor settle at 100%.
+            self._enrich_progress["phase"] = "done"
+
+    async def _geocode_items_background(self, data: dict[str, Any]) -> None:
+        """Label items with GPS from the place cache, looking up new places.
+
+        Honours the ``reverse_geocode`` option (default on) so privacy-
+        conscious users can disable the Nominatim calls without losing
+        the GPS coordinates themselves. Labels are written back into the
+        items in-place and persisted via the items cache.
+        """
+        if not self.reverse_geocode_enabled:
+            _LOGGER.debug("Reverse geocode disabled via options; skipping")
+            return
+
+        items: list[MediaItem] = data.get("items") or []
+        if not any(it.latitude is not None and it.longitude is not None for it in items):
+            return
+
+        await self._ensure_geocode_cache_loaded()
+        if self._label_items_from_geocode_cache(items):
+            self.async_set_updated_data(data)
+
+        pending: dict[str, list[MediaItem]] = {}
+        for item in items:
+            if self._needs_geocode_lookup(item):
+                key = _geocode_cache_key(item.latitude, item.longitude)
+                pending.setdefault(key, []).append(item)
+        if not pending:
+            return
+
+        self._enrich_progress["phase"] = "geocoding"
+        self._enrich_progress["geocode_total"] = sum(len(group) for group in pending.values())
+        self._enrich_progress["geocode_done"] = 0
+
+        session = async_get_clientsession(self.hass)
+        user_agent = await self._async_user_agent()
+        home = self._hidden_home_country
+        unsaved = 0
+
+        try:
+            for key, group in pending.items():
+                await _wait_for_nominatim_slot()
+                place = await _nominatim_lookup(
+                    session, group[0].latitude, group[0].longitude, user_agent
+                )
+
+                if place:
+                    self._geocode_cache[key] = place
+                    label = _format_place(place, home)
+                    for item in group:
+                        item.location, item.location_geocoded = label, True
+                    unsaved += 1
+
+                self._enrich_progress["geocode_done"] += len(group)
+
+                if unsaved >= _GEOCODE_BATCH_SAVE:
+                    unsaved = 0
+                    await self._save_geocode_cache()
+                    await self._save_cached_items(data)
+                    self.async_set_updated_data(data)
+        finally:
+            if unsaved:
+                try:
+                    await self._save_geocode_cache()
+                except Exception:  # pragma: no cover - storage layer
+                    pass
+            try:
+                await self._save_cached_items(data)
+            except Exception:  # pragma: no cover - storage layer
+                pass
+            self.async_set_updated_data(data)
+
+    async def _ensure_geocode_cache_loaded(self) -> None:
+        if self._geocode_cache_loaded:
+            return
+        try:
+            payload = await self._geocode_cache_store.async_load()
+        except Exception as err:  # pragma: no cover - storage layer
+            _LOGGER.debug("Geocode cache: failed to load (%s)", err)
+            payload = None
+        if isinstance(payload, dict):
+            entries = payload.get("entries")
+            if isinstance(entries, dict):
+                for key, value in entries.items():
+                    if isinstance(value, dict):
+                        place = {
+                            k: v for k, v in value.items()
+                            if k in _PLACE_KEYS and isinstance(v, str) and v
+                        }
+                        if place:
+                            self._geocode_cache[str(key)] = place
+                    elif isinstance(value, str) and value:
+                        self._geocode_legacy[str(key)] = value
+        self._geocode_cache_loaded = True
+
+    async def _save_geocode_cache(self) -> None:
+        # Old labels stay until their coordinate is looked up again, so an
+        # unfinished upgrade still has them after a restart.
+        entries: dict[str, Any] = {
+            key: label for key, label in self._geocode_legacy.items()
+            if key not in self._geocode_cache
+        }
+        entries.update(self._geocode_cache)
+        try:
+            await self._geocode_cache_store.async_save({"entries": entries})
+        except Exception as err:  # pragma: no cover - storage layer
+            _LOGGER.debug("Geocode cache: failed to save (%s)", err)
+
+    async def _async_user_agent(self) -> str:
+        """Return a Nominatim-friendly User-Agent string.
+
+        OSM operations explicitly require integrators to identify
+        themselves; using a generic Python/aiohttp UA gets you blocked.
+        We bundle the integration version (from ``manifest.json``) so
+        operators can correlate issues to releases.
+        """
+        if self._integration_version is None:
+            try:
+                self._integration_version = await self.hass.async_add_executor_job(
+                    _read_manifest_version, Path(__file__).parent
+                )
+            except Exception:
+                self._integration_version = ""
+        version = self._integration_version or "dev"
+        return (
+            f"album_slideshow/{version} "
+            "(+https://github.com/eyalgal/album_slideshow)"
+        )
+
+    async def _call_publicalbum(
+        self,
+        session,
+        max_items: int,
+        album_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Call the publicalbum.org API with automatic fallback on param errors.
+
+        Tries with image dimensions first (1920×1080), then without them
+        if the API rejects the size parameters.
+        """
+        album_url = album_url or self.album_url
+        param_sets: list[dict[str, Any]] = [
+            {
+                "sharedLink": album_url,
+                "imageWidth": 1920,
+                "imageHeight": 1080,
+                "includeThumbnails": False,
+                "videoQuality": "1080p",
+                "attachMetadata": True,
+                "maxResults": max_items,
+            },
+            {
+                "sharedLink": album_url,
+                "includeThumbnails": False,
+                "attachMetadata": True,
+                "maxResults": max_items,
+            },
+        ]
+
+        last_error: str | None = None
+        for params in param_sets:
+            payload = {
+                "method": "getGooglePhotosAlbum",
+                "params": params,
+                "id": 1,
+            }
+            try:
+                async with async_timeout.timeout(60):
+                    resp = await session.post(
+                        PUBLICALBUM_ENDPOINT,
+                        json=payload,
+                        headers={
+                            "accept": "application/json",
+                            "content-type": "application/json",
+                        },
+                    )
+                    resp.raise_for_status()
+                    data = await resp.json()
+            except Exception as err:
+                raise UpdateFailed(f"Error fetching album: {err}") from err
+
+            rpc_error = data.get("error") if isinstance(data, dict) else None
+            if isinstance(rpc_error, dict):
+                err_msg = rpc_error.get("message", "Unknown error")
+                last_error = err_msg
+                _LOGGER.debug(
+                    "publicalbum.org API error with params %s: %s (code: %s), "
+                    "will retry with different params",
+                    list(params.keys()),
+                    err_msg,
+                    rpc_error.get("code"),
+                )
+                continue
+
+            return data
+
+        raise UpdateFailed(
+            f"publicalbum.org API error: {last_error or 'Unknown error'}"
+        )
+
+    async def _update_google_shared(self) -> dict[str, Any]:
+        urls = getattr(self, "album_urls", None) or ([self.album_url] if self.album_url else [])
+        if not urls:
+            raise UpdateFailed("Missing album URL")
+
+        session = async_get_clientsession(self.hass)
+
+        if len(urls) == 1:
+            data = await self._fetch_google_album(session, urls[0])
+            _tag_album(data.get("items") or [], urls[0])
+            return data
+
+        # Several shared albums: fetch each, then merge into one pool. One
+        # album failing must not empty the slideshow, so its photos from the
+        # last successful refresh are kept until it loads again.
+        item_lists: list[list[MediaItem]] = []
+        failed: list[str] = []
+        last_error: Exception | None = None
+        for index, url in enumerate(urls, start=1):
+            try:
+                data = await self._fetch_google_album(session, url)
+            except Exception as err:  # noqa: BLE001 - one album must not sink the rest
+                last_error = err
+                failed.append(url)
+                _LOGGER.warning(
+                    "Google shared album %d of %d could not be loaded (%s); "
+                    "keeping its previously loaded photos",
+                    index, len(urls), err,
+                )
+                item_lists.append(await self._previous_album_items(url))
+                continue
+            items = data.get("items") or []
+            _tag_album(items, url)
+            item_lists.append(items)
+
+        if len(failed) == len(urls):
+            raise UpdateFailed(
+                f"None of the {len(urls)} Google shared albums could be loaded: {last_error}"
+            )
+        items = _merge_album_items(item_lists)
+        if not items:
+            raise UpdateFailed("No photos returned from the Google shared albums")
+        _LOGGER.info(
+            "Album scraper: combined %d shared albums into %d photos%s",
+            len(urls), len(items),
+            f" ({len(failed)} album(s) served from the last refresh)" if failed else "",
+        )
+        return {"title": self.entry.title, "items": items}
+
+    async def _previous_album_items(self, album_url: str) -> list[MediaItem]:
+        """Photos from ``album_url`` as of the last successful refresh.
+
+        Looks at the in-memory data first, then the on-disk items cache (after
+        a restart the in-memory data is empty, and memory may hold other
+        albums but none of this one).
+
+        Items saved before albums were tracked have no ``source_album_url``.
+        They can only come from the entry's original single album: editing
+        the album list clears the cache. So they count as the first album.
+        """
+        primary = self.album_urls[0] if getattr(self, "album_urls", None) else self.album_url
+
+        def from_album(items: list[MediaItem] | None) -> list[MediaItem]:
+            return [
+                item for item in items or []
+                if (item.source_album_url or primary) == album_url
+            ]
+
+        memory = (self.data or {}).get("items") if isinstance(self.data, dict) else None
+        matching = from_album(memory)
+        if matching:
+            return matching
+        cached = await self._load_cached_items()
+        return from_album((cached or {}).get("items"))
+
+    async def _fetch_google_album(self, session, album_url: str) -> dict[str, Any]:
+        """Fetch one Google Photos shared album: ``{"title", "items"}``."""
+
+        # Try direct scrape first - paginates via Google's batchexecute RPC
+        # to bypass publicalbum.org's ~300 cap.
+        scraped_items: list[MediaItem] = []
+        scraped_title: str | None = None
+        # Media keys the scraper identified as video. publicalbum.org returns
+        # no media type at all, so this is what lets us drop them there too.
+        video_keys: set[str] = set()
+        try:
+            from . import google_scraper
+
+            scraped_title, scraped_items, video_keys = await google_scraper.fetch_album(
+                session, album_url
+            )
+        except Exception as err:  # never let scrape failure break the integration
+            _LOGGER.debug(
+                "Google shared album: scrape raised %s; falling back to publicalbum.org",
+                err,
+            )
+
+        # Run publicalbum.org in parallel-ish: only call it if scrape was thin.
+        # Threshold: if scrape returns >= 250 items we trust it; otherwise we
+        # also call publicalbum.org and use whichever returns more.
+        if len(scraped_items) >= 250:
+            _LOGGER.info(
+                "Album scraper: source=batchexecute items=%d",
+                len(scraped_items),
+            )
+            return {
+                "title": scraped_title or self.entry.title,
+                "items": scraped_items,
+            }
+
+        try:
+            data = await self._call_publicalbum(session, 500, album_url)
+        except UpdateFailed:
+            if scraped_items:
+                _LOGGER.info(
+                    "Album scraper: source=batchexecute items=%d (publicalbum.org failed)",
+                    len(scraped_items),
+                )
+                return {
+                    "title": scraped_title or self.entry.title,
+                    "items": scraped_items,
+                }
+            raise
+
+        result = data.get("result") if isinstance(data, dict) else {}
+        if not isinstance(result, dict):
+            result = {}
+
+        page_items = _find_largest_item_list(result) or _find_largest_item_list(data)
+        api_items: list[MediaItem] = []
+        dropped_videos = 0
+        scraped_ids = {
+            _photo_base_key(item.url): item.source_id
+            for item in scraped_items
+            if item.source_id
+        }
+        if page_items:
+            seen_urls: set[str] = set()
+            for raw in page_items:
+                if _looks_like_video(raw):
+                    continue
+
+                # publicalbum.org gives no media type, so fall back to the
+                # scraper's verdict for the same photo (matched on media key).
+                if raw.get("id") in video_keys:
+                    dropped_videos += 1
+                    continue
+
+                url = _pick_url(raw)
+                if not url:
+                    continue
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+
+                filename = raw.get("filename") or raw.get("name")
+                width = _pick_int(raw, "mediaMetadata", "width") or _pick_int(raw, "width")
+                height = _pick_int(raw, "mediaMetadata", "height") or _pick_int(raw, "height")
+                mime = raw.get("mimeType") if isinstance(raw.get("mimeType"), str) else None
+                captured_at = _pick_timestamp_ms(
+                    raw, "mediaMetadata", "creationTime"
+                ) or _pick_timestamp_ms(raw, "creationTime")
+                byte_size = _pick_int(raw, "fileSize") or _pick_int(raw, "size")
+
+                api_items.append(MediaItem(
+                    url=url, width=width, height=height,
+                    mime_type=mime, filename=filename,
+                    captured_at=captured_at,
+                    uploaded_at=None,
+                    byte_size=byte_size,
+                    source_id=raw.get("id") or scraped_ids.get(_photo_base_key(url)),
+                ))
+
+        # Cross-source date enrichment: publicalbum.org often returns a fuller
+        # item list but with no (or partial) date metadata, while batchexecute
+        # returns dated items. Where the same photo appears in both, backfill
+        # the publicalbum item's captured_at / uploaded_at from its dated
+        # batchexecute twin (matched by the stable per-photo URL key). This
+        # keeps the larger item count while restoring the dates the date
+        # filter needs. See issue #18.
+        enriched = _enrich_missing_dates(api_items, scraped_items)
+        if enriched:
+            _LOGGER.info(
+                "Album scraper: enriched %d publicalbum item(s) with "
+                "batchexecute dates",
+                enriched,
+            )
+
+        # Pick the source with more items; prefer publicalbum.org on a tie
+        # because its URLs come pre-decorated with size hints.
+        if len(scraped_items) > len(api_items):
+            _LOGGER.info(
+                "Album scraper: source=batchexecute items=%d (publicalbum.org=%d)",
+                len(scraped_items), len(api_items),
+            )
+            return {
+                "title": scraped_title or result.get("title") or self.entry.title,
+                "items": scraped_items,
+            }
+
+        if not api_items and not scraped_items:
+            try:
+                raw_json = json.dumps(data, default=str)
+                _LOGGER.warning(
+                    "Google shared album API returned no recognizable items. "
+                    "Response (first 2000 chars): %s",
+                    raw_json[:2000],
+                )
+            except Exception:
+                _LOGGER.warning(
+                    "Google shared album API returned no items. "
+                    "Response keys: %s, result keys: %s",
+                    list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                    list(result.keys()) if isinstance(result, dict) else type(result).__name__,
+                )
+            raise UpdateFailed("No photos returned from Google shared album")
+
+        _LOGGER.info(
+            "Album scraper: source=publicalbum items=%d (batchexecute=%d, "
+            "videos dropped via scraper=%d)",
+            len(api_items), len(scraped_items), dropped_videos,
+        )
+        return {
+            "title": result.get("title") or self.entry.title,
+            "items": api_items,
+        }

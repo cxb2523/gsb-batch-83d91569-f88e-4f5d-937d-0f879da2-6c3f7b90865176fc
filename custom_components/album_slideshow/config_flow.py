@@ -1,0 +1,1877 @@
+from __future__ import annotations
+
+import json
+import logging
+import re
+from typing import Any
+
+import voluptuous as vol
+from homeassistant import config_entries
+from homeassistant.core import callback
+from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers import selector
+
+# Sentinel values for the "Select all" options in the multi-selects.
+_ALL_PEOPLE = "__all_people__"
+_ALL_ALBUMS = "__all_albums__"
+
+from .google_albums import album_url_data, album_urls_from_data, parse_album_urls
+from .const import (
+    DOMAIN,
+    CONF_PROVIDER,
+    CONF_ALBUM_NAME,
+    CONF_ALBUM_URL,
+    CONF_ALBUM_URLS,
+    CONF_GOOGLE_METADATA,
+    DEFAULT_GOOGLE_METADATA,
+    CONF_GOOGLE_LOCATION,
+    DEFAULT_GOOGLE_LOCATION,
+    DEFAULT_GOOGLE_REVERSE_GEOCODE,
+    CONF_LOCAL_PATH,
+    CONF_MEDIA_CONTENT_ID,
+    CONF_RECURSIVE,
+    CONF_REVERSE_GEOCODE,
+    CONF_HIDE_HOME_COUNTRY,
+    DEFAULT_HIDE_HOME_COUNTRY,
+    CONF_IMMICH_URL,
+    CONF_IMMICH_API_KEY,
+    CONF_IMMICH_SELECTION_TYPE,
+    CONF_IMMICH_SELECTION_ID,
+    CONF_IMMICH_IMAGE_SIZE,
+    CONF_IMMICH_INCLUDE_VIDEOS,
+    CONF_IMMICH_LIVE_PHOTOS,
+    CONF_IMMICH_FILTER,
+    DEFAULT_IMMICH_IMAGE_SIZE,
+    DEFAULT_IMMICH_INCLUDE_VIDEOS,
+    DEFAULT_IMMICH_LIVE_PHOTOS,
+    IMMICH_IMAGE_SIZE_OPTIONS,
+    IMMICH_SELECTION_COMPOSITE,
+    CONF_PHOTOPRISM_URL,
+    CONF_PHOTOPRISM_AUTH_METHOD,
+    CONF_PHOTOPRISM_TOKEN,
+    CONF_PHOTOPRISM_USERNAME,
+    CONF_PHOTOPRISM_PASSWORD,
+    CONF_PHOTOPRISM_SELECTION_TYPE,
+    CONF_PHOTOPRISM_SELECTION_ID,
+    CONF_PHOTOPRISM_IMAGE_SIZE,
+    CONF_PHOTOPRISM_FILTER,
+    DEFAULT_PHOTOPRISM_IMAGE_SIZE,
+    PHOTOPRISM_IMAGE_PREVIEW,
+    PHOTOPRISM_IMAGE_FULLSIZE,
+    PHOTOPRISM_IMAGE_ORIGINAL,
+    PHOTOPRISM_AUTH_APP_PASSWORD,
+    PHOTOPRISM_AUTH_USER_PASSWORD,
+    PHOTOPRISM_SELECTION_COMPOSITE,
+    CONF_ICLOUD_URL,
+    CONF_ICLOUD_TOKEN,
+    CONF_ICLOUD_IMAGE_SIZE,
+    DEFAULT_ICLOUD_IMAGE_SIZE,
+    CONF_ICLOUD_BACKEND,
+    ICLOUD_IMAGE_FULL,
+    ICLOUD_IMAGE_PREVIEW,
+    CONF_SYNOLOGY_URL,
+    CONF_SYNOLOGY_USERNAME,
+    CONF_SYNOLOGY_PASSWORD,
+    CONF_SYNOLOGY_DEVICE_ID,
+    CONF_SYNOLOGY_SPACE,
+    CONF_SYNOLOGY_ALBUM_ID,
+    CONF_SYNOLOGY_IMAGE_SIZE,
+    CONF_SYNOLOGY_PASSPHRASE,
+    CONF_SYNOLOGY_FAVORITE,
+    CONF_SYNOLOGY_SELECTION,
+    DEFAULT_SYNOLOGY_IMAGE_SIZE,
+    SYNOLOGY_SPACE_PERSONAL,
+    SYNOLOGY_SPACE_SHARED,
+    SYNOLOGY_IMAGE_SMALL,
+    SYNOLOGY_IMAGE_MEDIUM,
+    SYNOLOGY_IMAGE_LARGE,
+    CONF_NEXTCLOUD_URL,
+    CONF_NEXTCLOUD_USERNAME,
+    CONF_NEXTCLOUD_PASSWORD,
+    CONF_NEXTCLOUD_FOLDER,
+    CONF_NEXTCLOUD_RECURSIVE,
+    CONF_NEXTCLOUD_IMAGE_SIZE,
+    CONF_NEXTCLOUD_SHARE_TOKEN,
+    CONF_NEXTCLOUD_AUTH_MODE,
+    NEXTCLOUD_AUTH_MODE_FOLDER,
+    NEXTCLOUD_AUTH_MODE_PUBLIC,
+    DEFAULT_NEXTCLOUD_AUTH_MODE,
+    DEFAULT_NEXTCLOUD_IMAGE_SIZE,
+    NEXTCLOUD_IMAGE_PREVIEW,
+    NEXTCLOUD_IMAGE_ORIGINAL,
+    CONF_ENTE_URL,
+    CONF_ENTE_ACCESS_TOKEN,
+    CONF_ENTE_COLLECTION_KEY,
+    CONF_ENTE_API_ORIGIN,
+    CONF_ENTE_IMAGE_SIZE,
+    DEFAULT_ENTE_IMAGE_SIZE,
+    ENTE_IMAGE_FULL,
+    ENTE_IMAGE_PREVIEW,
+    CONF_UGREEN_URL,
+    CONF_UGREEN_USERNAME,
+    CONF_UGREEN_PASSWORD,
+    CONF_UGREEN_ALBUM_UUID,
+    CONF_UGREEN_ALBUM_TYPE,
+    CONF_UGREEN_ALBUM_NAME,
+    CONF_UGREEN_VERIFY_SSL,
+    DEFAULT_REVERSE_GEOCODE,
+    PROVIDER_GOOGLE_SHARED,
+    PROVIDER_LOCAL_FOLDER,
+    PROVIDER_MEDIA_SOURCE,
+    PROVIDER_IMMICH,
+    PROVIDER_PHOTOPRISM,
+    PROVIDER_ICLOUD,
+    PROVIDER_SYNOLOGY,
+    PROVIDER_NEXTCLOUD,
+    PROVIDER_ENTE,
+    PROVIDER_UGREEN,
+    DEFAULT_RECURSIVE,
+)
+
+
+def _normalize_local_path(hass, path: str) -> str:
+    p = path.strip()
+    if p.startswith("/local/"):
+        p = "/config/www/" + p[len("/local/"):]
+    elif p == "/local":
+        p = "/config/www"
+    elif p.startswith("local/"):
+        p = "/config/www/" + p[len("local/"):]
+    elif p.startswith("/media/local/"):
+        p = "/media/" + p[len("/media/local/"):]
+    elif p.startswith("media/local/"):
+        p = "/media/" + p[len("media/local/"):]
+    elif p.startswith("media/"):
+        p = "/media/" + p[len("media/"):]
+    elif p == "media":
+        p = "/media"
+    if not p.startswith("/"):
+        p = hass.config.path(p)
+    return p
+
+
+ALBUM_URL_RE = re.compile(r"^https?://photos\.app\.goo\.gl/[^/]+/?$")
+
+def _album_urls_selector() -> Any:
+    """One text field per shared-album link, with an Add button for more."""
+    return selector.TextSelector(selector.TextSelectorConfig(multiple=True))
+
+
+def _validate_album_urls(value: Any) -> tuple[list[str], str | None]:
+    """Parse the album-links field: (links, error key or None)."""
+    urls = parse_album_urls(value if isinstance(value, (str, list, tuple)) else "")
+    if not urls or not all(ALBUM_URL_RE.match(url) for url in urls):
+        return urls, "invalid_album_url"
+    return urls, None
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _describe_error(err: BaseException) -> str:
+    """Render an exception for the log, including an HTTP status when known."""
+    status = getattr(err, "status", None)
+    detail = str(err) or type(err).__name__
+    return f"HTTP {status}: {detail}" if status else f"{type(err).__name__}: {detail}"
+
+
+def _redact_token(token: str | None) -> str:
+    """Show enough of a share token to debug it without publishing the album."""
+    if not token:
+        return "<empty>"
+    shape = "".join("-" if c in "-_" else "x" for c in token)
+    return f"{token[:3]}...({len(token)} chars, shape {shape})"
+
+
+async def _fetch_immich_choices(
+    client: Any,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return id -> name maps of the albums and named people a key can see.
+
+    A key with limited permissions can read the server but not albums or
+    people; keep going with whatever it can see.
+    """
+    albums: list[dict[str, Any]] = []
+    people: list[dict[str, Any]] = []
+    for label, call in (
+        ("albums", client.async_list_albums),
+        ("people", client.async_list_people),
+    ):
+        try:
+            result = await call()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning(
+                "Immich %s listing failed for %s: %s",
+                label,
+                client.base_url,
+                _describe_error(err),
+            )
+        else:
+            if label == "albums":
+                albums = result
+            else:
+                people = result
+    album_map = {
+        a["id"]: (a.get("albumName") or a["id"]) for a in albums if a.get("id")
+    }
+    people_map = {
+        p["id"]: p["name"]
+        for p in people
+        if p.get("id") and (p.get("name") or "").strip()
+    }
+    return album_map, people_map
+
+
+def _immich_validation_error(err: BaseException) -> str:
+    return (
+        "immich_invalid_auth"
+        if getattr(err, "status", None) in (401, 403)
+        else "immich_cannot_connect"
+    )
+
+
+def _immich_select_schema(
+    albums: dict[str, str],
+    people: dict[str, str],
+    defaults: dict[str, Any] | None = None,
+) -> vol.Schema:
+    """Build the albums/people/favorites picker, optionally pre-filled."""
+    defaults = defaults or {}
+
+    def _default(key: str, fallback: Any = vol.UNDEFINED) -> Any:
+        return defaults.get(key, fallback)
+
+    fields: dict[Any, Any] = {
+        vol.Required(CONF_ALBUM_NAME, default=_default(CONF_ALBUM_NAME)): str
+    }
+    if albums:
+        album_options = [
+            selector.SelectOptionDict(value=_ALL_ALBUMS, label="Select all albums")
+        ] + [
+            selector.SelectOptionDict(value=aid, label=name)
+            for aid, name in albums.items()
+        ]
+        fields[vol.Optional("albums", default=_default("albums"))] = (
+            selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=album_options,
+                    multiple=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                    custom_value=False,
+                )
+            )
+        )
+    if people:
+        people_options = [
+            selector.SelectOptionDict(value=_ALL_PEOPLE, label="Select all people")
+        ] + [
+            selector.SelectOptionDict(value=pid, label=name)
+            for pid, name in people.items()
+        ]
+        fields[vol.Optional("people", default=_default("people"))] = (
+            selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=people_options,
+                    multiple=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                    custom_value=False,
+                )
+            )
+        )
+    fields[vol.Optional("favorites", default=_default("favorites", False))] = (
+        selector.BooleanSelector()
+    )
+    filter_default = _default(CONF_IMMICH_FILTER)
+    fields[
+        vol.Optional(
+            CONF_IMMICH_FILTER,
+            description=(
+                {"suggested_value": filter_default}
+                if filter_default is not vol.UNDEFINED
+                else None
+            ),
+        )
+    ] = str
+    fields[
+        vol.Optional(
+            CONF_IMMICH_IMAGE_SIZE,
+            default=_default(CONF_IMMICH_IMAGE_SIZE, DEFAULT_IMMICH_IMAGE_SIZE),
+        )
+    ] = vol.In(IMMICH_IMAGE_SIZE_OPTIONS)
+    fields[
+        vol.Optional(
+            CONF_IMMICH_INCLUDE_VIDEOS,
+            default=_default(CONF_IMMICH_INCLUDE_VIDEOS, DEFAULT_IMMICH_INCLUDE_VIDEOS),
+        )
+    ] = selector.BooleanSelector()
+    fields[
+        vol.Optional(
+            CONF_IMMICH_LIVE_PHOTOS,
+            default=_default(CONF_IMMICH_LIVE_PHOTOS, DEFAULT_IMMICH_LIVE_PHOTOS),
+        )
+    ] = selector.BooleanSelector()
+    return vol.Schema(fields)
+
+
+def _parse_immich_select(
+    user_input: dict[str, Any],
+    albums: dict[str, str],
+    people: dict[str, str],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Turn picker input into entry data fields; return ``(fields, errors)``."""
+    errors: dict[str, str] = {}
+    name = user_input[CONF_ALBUM_NAME].strip()
+    size = user_input.get(CONF_IMMICH_IMAGE_SIZE, DEFAULT_IMMICH_IMAGE_SIZE)
+    raw_filter = (user_input.get(CONF_IMMICH_FILTER) or "").strip()
+    favorites = bool(user_input.get("favorites"))
+
+    chosen_albums = [a for a in user_input.get("albums", []) if a]
+    if _ALL_ALBUMS in chosen_albums:
+        chosen_albums = list(albums.keys())
+    else:
+        chosen_albums = [a for a in chosen_albums if a in albums]
+
+    chosen_people = [p for p in user_input.get("people", []) if p]
+    if _ALL_PEOPLE in chosen_people:
+        chosen_people = list(people.keys())
+    else:
+        chosen_people = [p for p in chosen_people if p in people]
+
+    if raw_filter:
+        try:
+            parsed = json.loads(raw_filter)
+            if not isinstance(parsed, dict):
+                raise ValueError
+        except ValueError:
+            errors[CONF_IMMICH_FILTER] = "immich_filter_invalid"
+
+    selection = {
+        "albums": chosen_albums,
+        "people": chosen_people,
+        "favorites": favorites,
+    }
+    fields = {
+        CONF_IMMICH_SELECTION_TYPE: IMMICH_SELECTION_COMPOSITE,
+        CONF_IMMICH_SELECTION_ID: json.dumps(selection, sort_keys=True),
+        CONF_IMMICH_IMAGE_SIZE: size,
+        CONF_IMMICH_INCLUDE_VIDEOS: bool(user_input.get(CONF_IMMICH_INCLUDE_VIDEOS)),
+        CONF_IMMICH_LIVE_PHOTOS: bool(user_input.get(CONF_IMMICH_LIVE_PHOTOS)),
+        CONF_ALBUM_NAME: name,
+        CONF_IMMICH_FILTER: raw_filter,
+    }
+    return fields, errors
+
+
+def _immich_current_selection(data: dict[str, Any]) -> dict[str, Any]:
+    """Map an entry's stored Immich selection onto the picker's fields.
+
+    Composite entries map one to one. Older single-type entries are
+    translated where the picker can express them (albums, people,
+    favorites); ``all``/``random``/``search`` start with nothing ticked,
+    which the picker saves as "all photos" (plus any stored filter).
+    """
+    from . import immich as immich_api
+
+    sel_type = data.get(CONF_IMMICH_SELECTION_TYPE)
+    sel_id = data.get(CONF_IMMICH_SELECTION_ID) or ""
+    if sel_type == IMMICH_SELECTION_COMPOSITE:
+        return immich_api.parse_composite_selection(sel_id)
+    ids = [part for part in sel_id.split(",") if part]
+    return {
+        "albums": ids if sel_type in ("album", "albums") else [],
+        "people": ids if sel_type in ("person", "people") else [],
+        "favorites": sel_type == "favorites",
+    }
+
+
+class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+    VERSION = 1
+
+    def __init__(self) -> None:
+        self._provider: str | None = None
+        # Immich flow state carried between steps.
+        self._immich_url: str | None = None
+        self._immich_key: str | None = None
+        # id -> name maps for the Albums and People multi-selects.
+        self._immich_albums: dict[str, str] = {}
+        self._immich_people: dict[str, str] = {}
+        # PhotoPrism flow state carried between steps.
+        self._pp_url: str | None = None
+        self._pp_auth_method: str | None = None
+        self._pp_token: str | None = None
+        self._pp_username: str | None = None
+        self._pp_password: str | None = None
+        self._pp_albums: dict[str, str] = {}
+        self._pp_people: dict[str, str] = {}
+        # Synology flow state carried between steps.
+        self._syn_url: str | None = None
+        self._syn_username: str | None = None
+        self._syn_password: str | None = None
+        self._syn_device_id: str | None = None
+        self._syn_space: str = SYNOLOGY_SPACE_PERSONAL
+        self._syn_albums: dict[str, str] = {}
+        # option key -> {"album_id": id|None, "passphrase": str|None}
+        self._syn_album_meta: dict[str, dict[str, Any]] = {}
+        # id(str) -> name maps for the composite category multi-selects.
+        self._syn_people: dict[str, str] = {}
+        self._syn_places: dict[str, str] = {}
+        self._syn_tags: dict[str, str] = {}
+        self._syn_subjects: dict[str, str] = {}
+        # UGREEN flow state carried between steps.
+        self._ugr_url: str | None = None
+        self._ugr_username: str | None = None
+        self._ugr_password: str | None = None
+        self._ugr_verify_ssl: bool = True
+        self._ugr_albums: list[dict[str, Any]] = []
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> config_entries.OptionsFlow:
+        """Return the options flow handler.
+
+        Local-folder, Nextcloud, Ente and UGREEN entries expose the
+        reverse-geocode toggle; Immich entries reopen the
+        albums/people/favorites picker.
+        Other providers get a no-op handler so that the "Configure" button
+        doesn't appear empty in the UI.
+
+        Note: do NOT pass ``config_entry`` to the OptionsFlow constructor.
+        Since Home Assistant 2024.12 the base class manages
+        ``self.config_entry`` as a property and assigning to it in
+        ``__init__`` raises (the symptom is a 500 when the user clicks
+        Configure).
+        """
+        if config_entry.data.get(CONF_PROVIDER) in (
+            PROVIDER_LOCAL_FOLDER,
+            PROVIDER_NEXTCLOUD,
+            PROVIDER_ENTE,
+            PROVIDER_UGREEN,
+        ):
+            return LocalFolderOptionsFlow()
+        if config_entry.data.get(CONF_PROVIDER) == PROVIDER_IMMICH:
+            return ImmichOptionsFlow()
+        if config_entry.data.get(CONF_PROVIDER) == PROVIDER_GOOGLE_SHARED:
+            return GoogleOptionsFlow()
+        return _NoOptionsFlow()
+
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        if user_input is not None:
+            self._provider = user_input[CONF_PROVIDER]
+            if self._provider == PROVIDER_LOCAL_FOLDER:
+                return await self.async_step_local_folder()
+            if self._provider == PROVIDER_MEDIA_SOURCE:
+                return await self.async_step_media_source()
+            if self._provider == PROVIDER_IMMICH:
+                return await self.async_step_immich()
+            if self._provider == PROVIDER_PHOTOPRISM:
+                return await self.async_step_photoprism()
+            if self._provider == PROVIDER_ICLOUD:
+                return await self.async_step_icloud()
+            if self._provider == PROVIDER_SYNOLOGY:
+                return await self.async_step_synology()
+            if self._provider == PROVIDER_NEXTCLOUD:
+                return await self.async_step_nextcloud()
+            if self._provider == PROVIDER_ENTE:
+                return await self.async_step_ente()
+            if self._provider == PROVIDER_UGREEN:
+                return await self.async_step_ugreen()
+            return await self.async_step_google_shared()
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_PROVIDER, default=PROVIDER_GOOGLE_SHARED): vol.In({
+                    PROVIDER_GOOGLE_SHARED: "Google Photos",
+                    PROVIDER_LOCAL_FOLDER: "Local Folder",
+                    PROVIDER_IMMICH: "Immich (direct API, full metadata)",
+                    PROVIDER_PHOTOPRISM: "PhotoPrism (direct API, full metadata)",
+                    PROVIDER_ICLOUD: "iCloud Shared Album",
+                    PROVIDER_SYNOLOGY: "Synology Photos (direct API, full metadata)",
+                    PROVIDER_NEXTCLOUD: "Nextcloud (WebDAV folder or public album link)",
+                    PROVIDER_ENTE: "Ente Photos (public album link)",
+                    PROVIDER_UGREEN: "UGREEN NAS (UGOS Photos, experimental)",
+                    PROVIDER_MEDIA_SOURCE: "Media Source (any source, no metadata)",
+                })
+            }
+        )
+        return self.async_show_form(step_id="user", data_schema=schema)
+
+    async def async_step_google_shared(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            urls, error = _validate_album_urls(user_input.get(CONF_ALBUM_URL))
+            name = user_input[CONF_ALBUM_NAME].strip()
+
+            if error:
+                errors[CONF_ALBUM_URL] = error
+            else:
+                # The unique id keeps using the first link, exactly as before.
+                await self.async_set_unique_id(f"{DOMAIN}:{PROVIDER_GOOGLE_SHARED}:{urls[0]}:{name}")
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title=name,
+                    data={
+                        CONF_PROVIDER: PROVIDER_GOOGLE_SHARED,
+                        **album_url_data(urls),
+                        CONF_ALBUM_NAME: name,
+                    },
+                )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ALBUM_NAME): str,
+                # One empty field to start with; Add appends more.
+                vol.Required(CONF_ALBUM_URL, default=[""]): _album_urls_selector(),
+            }
+        )
+        return self.async_show_form(step_id="google_shared", data_schema=schema, errors=errors)
+
+    async def async_step_local_folder(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            path = _normalize_local_path(self.hass, user_input[CONF_LOCAL_PATH])
+            name = user_input[CONF_ALBUM_NAME].strip()
+            recursive = bool(user_input.get(CONF_RECURSIVE, DEFAULT_RECURSIVE))
+
+            if not path:
+                errors[CONF_LOCAL_PATH] = "invalid_path"
+            else:
+                await self.async_set_unique_id(f"{DOMAIN}:{PROVIDER_LOCAL_FOLDER}:{path}:{name}")
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title=name,
+                    data={
+                        CONF_PROVIDER: PROVIDER_LOCAL_FOLDER,
+                        CONF_LOCAL_PATH: path,
+                        CONF_RECURSIVE: recursive,
+                        CONF_ALBUM_NAME: name,
+                    },
+                )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ALBUM_NAME): str,
+                vol.Required(CONF_LOCAL_PATH): str,
+                vol.Optional(CONF_RECURSIVE, default=DEFAULT_RECURSIVE): bool,
+            }
+        )
+        return self.async_show_form(step_id="local_folder", data_schema=schema, errors=errors)
+
+    async def async_step_media_source(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            content_id = user_input[CONF_MEDIA_CONTENT_ID].strip()
+            name = user_input[CONF_ALBUM_NAME].strip()
+
+            if not content_id.startswith("media-source://"):
+                errors[CONF_MEDIA_CONTENT_ID] = "invalid_media_source"
+            else:
+                await self.async_set_unique_id(
+                    f"{DOMAIN}:{PROVIDER_MEDIA_SOURCE}:{content_id}:{name}"
+                )
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title=name,
+                    data={
+                        CONF_PROVIDER: PROVIDER_MEDIA_SOURCE,
+                        CONF_MEDIA_CONTENT_ID: content_id,
+                        CONF_ALBUM_NAME: name,
+                    },
+                )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ALBUM_NAME): str,
+                vol.Required(CONF_MEDIA_CONTENT_ID): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="media_source", data_schema=schema, errors=errors
+        )
+
+    async def async_step_immich(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect the Immich URL + API key and validate them."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            url = user_input[CONF_IMMICH_URL].strip()
+            key = user_input[CONF_IMMICH_API_KEY].strip()
+            from . import immich as immich_api
+
+            client = immich_api.ImmichClient(self.hass, url, key)
+            try:
+                await client.async_validate()
+            except Exception as err:  # noqa: BLE001 - any failure means bad URL/key
+                _LOGGER.warning(
+                    "Immich validation failed for %s: %s",
+                    client.base_url,
+                    _describe_error(err),
+                )
+                errors["base"] = _immich_validation_error(err)
+            else:
+                self._immich_url = client.base_url
+                self._immich_key = key
+                (
+                    self._immich_albums,
+                    self._immich_people,
+                ) = await _fetch_immich_choices(client)
+                return await self.async_step_immich_select()
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_IMMICH_URL): str,
+                vol.Required(CONF_IMMICH_API_KEY): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="immich", data_schema=schema, errors=errors
+        )
+
+    async def async_step_immich_select(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Build a composite Immich selection and finish the entry.
+
+        The user ticks any mix of albums, people and favorites (and may add a
+        custom JSON filter); the coordinator unions them. Leaving everything
+        empty means "all photos".
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            fields, errors = _parse_immich_select(
+                user_input, self._immich_albums, self._immich_people
+            )
+            if not errors:
+                name = fields[CONF_ALBUM_NAME]
+                raw_filter = fields.pop(CONF_IMMICH_FILTER)
+                unique = (
+                    f"{DOMAIN}:{PROVIDER_IMMICH}:{self._immich_url}:"
+                    f"composite:{fields[CONF_IMMICH_SELECTION_ID]}:{raw_filter}:{name}"
+                )
+                await self.async_set_unique_id(unique)
+                self._abort_if_unique_id_configured()
+                data = {
+                    CONF_PROVIDER: PROVIDER_IMMICH,
+                    CONF_IMMICH_URL: self._immich_url,
+                    CONF_IMMICH_API_KEY: self._immich_key,
+                    **fields,
+                }
+                if raw_filter:
+                    data[CONF_IMMICH_FILTER] = raw_filter
+                return self.async_create_entry(title=name, data=data)
+
+        return self.async_show_form(
+            step_id="immich_select",
+            data_schema=_immich_select_schema(
+                self._immich_albums, self._immich_people
+            ),
+            errors=errors,
+        )
+
+    async def async_step_photoprism(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect the PhotoPrism URL + credentials and validate them."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            url = user_input[CONF_PHOTOPRISM_URL].strip()
+            method = user_input[CONF_PHOTOPRISM_AUTH_METHOD]
+            token = (user_input.get(CONF_PHOTOPRISM_TOKEN) or "").strip()
+            username = (user_input.get(CONF_PHOTOPRISM_USERNAME) or "").strip()
+            password = user_input.get(CONF_PHOTOPRISM_PASSWORD) or ""
+
+            if method == PHOTOPRISM_AUTH_APP_PASSWORD and not token:
+                errors[CONF_PHOTOPRISM_TOKEN] = "photoprism_token_required"
+            elif method == PHOTOPRISM_AUTH_USER_PASSWORD and not (username and password):
+                errors[CONF_PHOTOPRISM_USERNAME] = "photoprism_user_required"
+
+            if not errors:
+                from . import photoprism as pp_api
+
+                client = pp_api.PhotoprismClient(
+                    self.hass,
+                    url,
+                    auth_method=method,
+                    token=token or None,
+                    username=username or None,
+                    password=password or None,
+                )
+                try:
+                    await client.async_validate()
+                    albums = await client.async_list_albums()
+                    people = await client.async_list_people()
+                except Exception as err:  # noqa: BLE001 - any failure means bad URL/creds
+                    _LOGGER.warning(
+                        "PhotoPrism validation failed for %s: %s",
+                        client.base_url,
+                        _describe_error(err),
+                    )
+                    errors["base"] = "photoprism_cannot_connect"
+                else:
+                    self._pp_url = client.base_url
+                    self._pp_auth_method = method
+                    self._pp_token = token or None
+                    self._pp_username = username or None
+                    self._pp_password = password or None
+                    self._pp_albums = {
+                        a["UID"]: (a.get("Title") or a["UID"])
+                        for a in albums
+                        if a.get("UID")
+                    }
+                    self._pp_people = {
+                        p["UID"]: p["Name"]
+                        for p in people
+                        if p.get("UID") and (p.get("Name") or "").strip()
+                    }
+                    return await self.async_step_photoprism_select()
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_PHOTOPRISM_URL): str,
+                vol.Required(
+                    CONF_PHOTOPRISM_AUTH_METHOD,
+                    default=PHOTOPRISM_AUTH_APP_PASSWORD,
+                ): vol.In(
+                    {
+                        PHOTOPRISM_AUTH_APP_PASSWORD: "App password (recommended)",
+                        PHOTOPRISM_AUTH_USER_PASSWORD: "Username + password",
+                    }
+                ),
+                vol.Optional(CONF_PHOTOPRISM_TOKEN): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(CONF_PHOTOPRISM_USERNAME): str,
+                vol.Optional(CONF_PHOTOPRISM_PASSWORD): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="photoprism", data_schema=schema, errors=errors
+        )
+
+    async def async_step_photoprism_select(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Build a composite PhotoPrism selection and finish the entry.
+
+        Same combined picker as Immich: tick any mix of albums, people and
+        favorites (optionally a custom search query); an empty selection means
+        the whole library.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            name = user_input[CONF_ALBUM_NAME].strip()
+            size = user_input.get(
+                CONF_PHOTOPRISM_IMAGE_SIZE, DEFAULT_PHOTOPRISM_IMAGE_SIZE
+            )
+            raw_filter = (user_input.get(CONF_PHOTOPRISM_FILTER) or "").strip()
+            favorites = bool(user_input.get("favorites"))
+
+            chosen_albums = [a for a in user_input.get("albums", []) if a]
+            if _ALL_ALBUMS in chosen_albums:
+                chosen_albums = list(self._pp_albums.keys())
+            else:
+                chosen_albums = [a for a in chosen_albums if a in self._pp_albums]
+
+            chosen_people = [p for p in user_input.get("people", []) if p]
+            if _ALL_PEOPLE in chosen_people:
+                chosen_people = list(self._pp_people.keys())
+            else:
+                chosen_people = [p for p in chosen_people if p in self._pp_people]
+
+            selection = {
+                "albums": chosen_albums,
+                "people": chosen_people,
+                "favorites": favorites,
+            }
+            sel_id = json.dumps(selection, sort_keys=True)
+            unique = (
+                f"{DOMAIN}:{PROVIDER_PHOTOPRISM}:{self._pp_url}:"
+                f"composite:{sel_id}:{raw_filter}:{name}"
+            )
+            await self.async_set_unique_id(unique)
+            self._abort_if_unique_id_configured()
+            data = {
+                CONF_PROVIDER: PROVIDER_PHOTOPRISM,
+                CONF_PHOTOPRISM_URL: self._pp_url,
+                CONF_PHOTOPRISM_AUTH_METHOD: self._pp_auth_method,
+                CONF_PHOTOPRISM_SELECTION_TYPE: PHOTOPRISM_SELECTION_COMPOSITE,
+                CONF_PHOTOPRISM_SELECTION_ID: sel_id,
+                CONF_PHOTOPRISM_IMAGE_SIZE: size,
+                CONF_ALBUM_NAME: name,
+            }
+            if self._pp_token:
+                data[CONF_PHOTOPRISM_TOKEN] = self._pp_token
+            if self._pp_username:
+                data[CONF_PHOTOPRISM_USERNAME] = self._pp_username
+            if self._pp_password:
+                data[CONF_PHOTOPRISM_PASSWORD] = self._pp_password
+            if raw_filter:
+                data[CONF_PHOTOPRISM_FILTER] = raw_filter
+            return self.async_create_entry(title=name, data=data)
+
+        fields: dict[Any, Any] = {vol.Required(CONF_ALBUM_NAME): str}
+        if self._pp_albums:
+            album_options = [
+                selector.SelectOptionDict(value=_ALL_ALBUMS, label="Select all albums")
+            ] + [
+                selector.SelectOptionDict(value=uid, label=name)
+                for uid, name in self._pp_albums.items()
+            ]
+            fields[vol.Optional("albums")] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=album_options,
+                    multiple=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                    custom_value=False,
+                )
+            )
+        if self._pp_people:
+            people_options = [
+                selector.SelectOptionDict(value=_ALL_PEOPLE, label="Select all people")
+            ] + [
+                selector.SelectOptionDict(value=uid, label=name)
+                for uid, name in self._pp_people.items()
+            ]
+            fields[vol.Optional("people")] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=people_options,
+                    multiple=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                    custom_value=False,
+                )
+            )
+        fields[vol.Optional("favorites", default=False)] = selector.BooleanSelector()
+        fields[vol.Optional(CONF_PHOTOPRISM_FILTER)] = str
+        fields[
+            vol.Optional(
+                CONF_PHOTOPRISM_IMAGE_SIZE, default=DEFAULT_PHOTOPRISM_IMAGE_SIZE
+            )
+        ] = vol.In(
+            {
+                PHOTOPRISM_IMAGE_PREVIEW: "Preview (1280px)",
+                PHOTOPRISM_IMAGE_FULLSIZE: "Full size (1920px)",
+                PHOTOPRISM_IMAGE_ORIGINAL: "High detail (2560px)",
+            }
+        )
+        schema = vol.Schema(fields)
+        return self.async_show_form(
+            step_id="photoprism_select", data_schema=schema, errors=errors
+        )
+
+    async def async_step_icloud(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect and validate an iCloud Shared Album link."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            name = user_input[CONF_ALBUM_NAME].strip()
+            raw_url = user_input[CONF_ICLOUD_URL].strip()
+            size = user_input.get(CONF_ICLOUD_IMAGE_SIZE, DEFAULT_ICLOUD_IMAGE_SIZE)
+
+            from . import icloud as icloud_api
+
+            parsed = icloud_api.parse_share(raw_url)
+            if not parsed:
+                errors[CONF_ICLOUD_URL] = "invalid_icloud_url"
+            else:
+                token, backend = parsed
+                if backend == icloud_api.BACKEND_CLOUDKIT:
+                    client = icloud_api.IcloudCloudKitClient(self.hass, token)
+                else:
+                    client = icloud_api.IcloudClient(self.hass, token)
+                try:
+                    await client.async_validate()
+                except Exception as err:  # noqa: BLE001 - any failure means bad/expired link
+                    _LOGGER.warning(
+                        "iCloud validation failed for token %s (%s backend): %s",
+                        _redact_token(token),
+                        backend,
+                        _describe_error(err),
+                    )
+                    errors["base"] = "icloud_cannot_connect"
+                else:
+                    await self.async_set_unique_id(
+                        f"{DOMAIN}:{PROVIDER_ICLOUD}:{token}:{name}"
+                    )
+                    self._abort_if_unique_id_configured()
+                    return self.async_create_entry(
+                        title=name,
+                        data={
+                            CONF_PROVIDER: PROVIDER_ICLOUD,
+                            CONF_ICLOUD_TOKEN: token,
+                            CONF_ICLOUD_BACKEND: backend,
+                            CONF_ICLOUD_IMAGE_SIZE: size,
+                            CONF_ALBUM_NAME: name,
+                        },
+                    )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ALBUM_NAME): str,
+                vol.Required(CONF_ICLOUD_URL): str,
+                vol.Optional(
+                    CONF_ICLOUD_IMAGE_SIZE, default=DEFAULT_ICLOUD_IMAGE_SIZE
+                ): vol.In(
+                    {
+                        ICLOUD_IMAGE_FULL: "Full size (best for slideshow)",
+                        ICLOUD_IMAGE_PREVIEW: "Preview (thumbnail, fastest)",
+                    }
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="icloud", data_schema=schema, errors=errors
+        )
+
+    async def async_step_synology(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect the Synology URL + credentials (and optional 2FA code)."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            url = user_input[CONF_SYNOLOGY_URL].strip()
+            username = user_input[CONF_SYNOLOGY_USERNAME].strip()
+            password = user_input.get(CONF_SYNOLOGY_PASSWORD) or ""
+            space = user_input.get(CONF_SYNOLOGY_SPACE, SYNOLOGY_SPACE_PERSONAL)
+            otp = (user_input.get("otp_code") or "").strip()
+
+            from . import synology as syn_api
+
+            client = syn_api.SynologyClient(
+                self.hass,
+                url,
+                username=username,
+                password=password,
+                space=space,
+            )
+            try:
+                await client.async_login(otp_code=otp or None)
+            except syn_api.SynologyOtpRequired:
+                errors["otp_code"] = "synology_otp_required"
+            except Exception as err:  # noqa: BLE001 - any failure means bad URL/creds
+                _LOGGER.warning(
+                    "Synology login failed for %s: %s", url, _describe_error(err)
+                )
+                errors["base"] = "synology_cannot_connect"
+
+            if not errors:
+                # Login worked, so the URL and credentials are fine. Albums and
+                # category browsing live only in the Personal space (there is no
+                # Shared Space album/category API). For the Shared Space we just
+                # validate access up front; any failure here means the Shared
+                # Space is not enabled or this account cannot reach it, not a
+                # credentials problem.
+                try:
+                    if space == SYNOLOGY_SPACE_SHARED:
+                        albums = people = places = tags = subjects = []
+                        await client.async_collect_assets(None)
+                    else:
+                        albums = await client.async_list_albums()
+                        people = await client.async_list_people()
+                        places = await client.async_list_places()
+                        tags = await client.async_list_tags()
+                        subjects = await client.async_list_subjects()
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "Synology listing failed for space %s: %s",
+                        space,
+                        _describe_error(err),
+                    )
+                    if space == SYNOLOGY_SPACE_SHARED:
+                        errors["base"] = "synology_shared_unavailable"
+                    else:
+                        errors["base"] = "synology_cannot_connect"
+
+            if not errors:
+                self._syn_url = client.base_url
+                self._syn_username = username
+                self._syn_password = password
+                self._syn_space = space
+                # A trusted-device token is captured only on the OTP login;
+                # store it so future logins skip the 2FA prompt.
+                self._syn_device_id = client.captured_device_id
+                # Key each album by a synthetic value so an own album and a
+                # shared-with-me album that happen to share a numeric id don't
+                # collide. Track album_id + passphrase per option.
+                self._syn_albums = {}
+                self._syn_album_meta = {}
+                for a in albums:
+                    if a.get("id") is None:
+                        continue
+                    shared = bool(a.get("shared"))
+                    key = f"{'shared' if shared else 'own'}:{a['id']}"
+                    label = a.get("name") or str(a["id"])
+                    self._syn_albums[key] = f"{label} (shared)" if shared else label
+                    self._syn_album_meta[key] = {
+                        "album_id": None if shared else a["id"],
+                        "passphrase": a.get("passphrase") if shared else None,
+                    }
+                self._syn_people = {
+                    str(p["id"]): p["name"] for p in people if p.get("id") is not None
+                }
+                self._syn_places = {
+                    str(p["id"]): p["name"] for p in places if p.get("id") is not None
+                }
+                self._syn_tags = {
+                    str(t["id"]): t["name"] for t in tags if t.get("id") is not None
+                }
+                self._syn_subjects = {
+                    str(s["id"]): s["name"] for s in subjects if s.get("id") is not None
+                }
+                await client.async_logout()
+                return await self.async_step_synology_select()
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_SYNOLOGY_URL): str,
+                vol.Required(CONF_SYNOLOGY_USERNAME): str,
+                vol.Required(CONF_SYNOLOGY_PASSWORD): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
+                vol.Required(
+                    CONF_SYNOLOGY_SPACE, default=SYNOLOGY_SPACE_PERSONAL
+                ): vol.In(
+                    {
+                        SYNOLOGY_SPACE_PERSONAL: "Personal (My Photos and albums shared with you)",
+                        SYNOLOGY_SPACE_SHARED: "Shared Space (all of its photos)",
+                    }
+                ),
+                vol.Optional("otp_code"): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="synology", data_schema=schema, errors=errors
+        )
+
+    async def async_step_synology_select(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Build a composite Synology selection and finish the entry.
+
+        Like the Immich/PhotoPrism providers: tick any mix of favorites,
+        albums, people, places, tags and subjects. Synology has no OR across
+        categories, so each member is queried on its own and merged. An empty
+        selection means the whole space.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            name = user_input[CONF_ALBUM_NAME].strip()
+            size = user_input.get(
+                CONF_SYNOLOGY_IMAGE_SIZE, DEFAULT_SYNOLOGY_IMAGE_SIZE
+            )
+            favorites = bool(user_input.get("favorites"))
+
+            album_ids: list[Any] = []
+            passphrases: list[str] = []
+            for key in user_input.get("albums", []) or []:
+                meta = self._syn_album_meta.get(key)
+                if not meta:
+                    continue
+                if meta.get("passphrase"):
+                    passphrases.append(meta["passphrase"])
+                elif meta.get("album_id") is not None:
+                    album_ids.append(meta["album_id"])
+
+            def _ids(field: str, valid: dict[str, str]) -> list[int]:
+                out: list[int] = []
+                for v in user_input.get(field, []) or []:
+                    if v in valid:
+                        try:
+                            out.append(int(v))
+                        except (TypeError, ValueError):
+                            pass
+                return out
+
+            selection = {
+                "favorites": favorites,
+                "album_ids": album_ids,
+                "passphrases": passphrases,
+                "person_ids": _ids("people", self._syn_people),
+                "geocoding_ids": _ids("places", self._syn_places),
+                "tag_ids": _ids("tags", self._syn_tags),
+                "concept_ids": _ids("subjects", self._syn_subjects),
+            }
+            sel_id = json.dumps(selection, sort_keys=True)
+            unique = (
+                f"{DOMAIN}:{PROVIDER_SYNOLOGY}:{self._syn_url}:"
+                f"{self._syn_space}:{sel_id}:{name}"
+            )
+            await self.async_set_unique_id(unique)
+            self._abort_if_unique_id_configured()
+            data = {
+                CONF_PROVIDER: PROVIDER_SYNOLOGY,
+                CONF_SYNOLOGY_URL: self._syn_url,
+                CONF_SYNOLOGY_USERNAME: self._syn_username,
+                CONF_SYNOLOGY_PASSWORD: self._syn_password,
+                CONF_SYNOLOGY_SPACE: self._syn_space,
+                CONF_SYNOLOGY_SELECTION: sel_id,
+                CONF_SYNOLOGY_IMAGE_SIZE: size,
+                CONF_ALBUM_NAME: name,
+            }
+            if self._syn_device_id:
+                data[CONF_SYNOLOGY_DEVICE_ID] = self._syn_device_id
+            return self.async_create_entry(title=name, data=data)
+
+        def _multi(options: dict[str, str]):
+            return selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(value=v, label=l)
+                        for v, l in options.items()
+                    ],
+                    multiple=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                    custom_value=False,
+                )
+            )
+
+        fields: dict[Any, Any] = {vol.Required(CONF_ALBUM_NAME): str}
+        # Favorites, albums and subjects are Personal-space concepts.
+        if self._syn_space == SYNOLOGY_SPACE_PERSONAL:
+            fields[vol.Optional("favorites", default=False)] = (
+                selector.BooleanSelector()
+            )
+        if self._syn_albums:
+            fields[vol.Optional("albums")] = _multi(self._syn_albums)
+        if self._syn_people:
+            fields[vol.Optional("people")] = _multi(self._syn_people)
+        if self._syn_places:
+            fields[vol.Optional("places")] = _multi(self._syn_places)
+        if self._syn_tags:
+            fields[vol.Optional("tags")] = _multi(self._syn_tags)
+        if self._syn_subjects:
+            fields[vol.Optional("subjects")] = _multi(self._syn_subjects)
+        fields[
+            vol.Optional(
+                CONF_SYNOLOGY_IMAGE_SIZE, default=DEFAULT_SYNOLOGY_IMAGE_SIZE
+            )
+        ] = vol.In(
+            {
+                SYNOLOGY_IMAGE_LARGE: "Large (best for slideshow)",
+                SYNOLOGY_IMAGE_MEDIUM: "Medium",
+                SYNOLOGY_IMAGE_SMALL: "Small (thumbnail, fastest)",
+            }
+        )
+        return self.async_show_form(
+            step_id=(
+                "synology_shared"
+                if self._syn_space == SYNOLOGY_SPACE_SHARED
+                else "synology_select"
+            ),
+            data_schema=vol.Schema(fields),
+            errors=errors,
+        )
+
+    async def async_step_synology_shared(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """The Shared Space has nothing to pick, so its step only names it."""
+        return await self.async_step_synology_select(user_input)
+
+    async def async_step_ugreen(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect the UGREEN NAS URL + account and log in.
+
+        The album is picked from a live dropdown in the next step rather
+        than typed in, so logging in here (and listing albums) doubles as
+        credential validation.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            url = user_input[CONF_UGREEN_URL].strip()
+            username = user_input[CONF_UGREEN_USERNAME].strip()
+            password = user_input.get(CONF_UGREEN_PASSWORD) or ""
+            verify_ssl = bool(user_input.get(CONF_UGREEN_VERIFY_SSL, True))
+
+            from . import ugreen as ugr_api
+
+            client = ugr_api.UGreenClient(
+                self.hass, url, username, password, verify_ssl=verify_ssl
+            )
+            albums: list[dict[str, Any]] = []
+            try:
+                await client.async_login()
+                albums = await client.async_list_albums()
+            except ugr_api.UGreenAuthError as err:
+                _LOGGER.warning(
+                    "UGREEN login failed for %s: %s", url, _describe_error(err)
+                )
+                errors["base"] = "ugreen_cannot_connect"
+            except ugr_api.UGreenApiError as err:
+                _LOGGER.warning(
+                    "UGREEN album listing failed for %s: %s", url, _describe_error(err)
+                )
+                errors["base"] = "ugreen_cannot_connect"
+
+            named_albums = [
+                a for a in albums if isinstance(a, dict) and a.get("album_name")
+            ]
+            if not errors and not named_albums:
+                errors["base"] = "ugreen_no_albums"
+
+            if not errors:
+                self._ugr_url = client.base_url
+                self._ugr_username = username
+                self._ugr_password = password
+                self._ugr_verify_ssl = verify_ssl
+                self._ugr_albums = named_albums
+                return await self.async_step_ugreen_select()
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_UGREEN_URL): str,
+                vol.Required(CONF_UGREEN_USERNAME): str,
+                vol.Required(CONF_UGREEN_PASSWORD): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(CONF_UGREEN_VERIFY_SSL, default=True): bool,
+            }
+        )
+        return self.async_show_form(step_id="ugreen", data_schema=schema, errors=errors)
+
+    async def async_step_ugreen_select(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Pick the UGOS Photos album from a live, searchable dropdown."""
+        from . import ugreen as ugr_api
+
+        # Keyed by uuid since album names aren't guaranteed unique.
+        albums_by_uuid = {a["album_uuid"]: a for a in self._ugr_albums}
+
+        if user_input is not None:
+            album_uuid = user_input[CONF_UGREEN_ALBUM_UUID]
+            album = albums_by_uuid[album_uuid]
+            unique = (
+                f"{DOMAIN}:{PROVIDER_UGREEN}:{self._ugr_url}:"
+                f"{self._ugr_username}:{album_uuid}"
+            )
+            await self.async_set_unique_id(unique)
+            self._abort_if_unique_id_configured()
+            data = {
+                CONF_PROVIDER: PROVIDER_UGREEN,
+                CONF_UGREEN_URL: self._ugr_url,
+                CONF_UGREEN_USERNAME: self._ugr_username,
+                CONF_UGREEN_PASSWORD: self._ugr_password,
+                CONF_UGREEN_VERIFY_SSL: self._ugr_verify_ssl,
+                CONF_UGREEN_ALBUM_UUID: album_uuid,
+                CONF_UGREEN_ALBUM_TYPE: album.get(
+                    "album_type", ugr_api.ALBUM_TYPE_REGULAR
+                ),
+                CONF_UGREEN_ALBUM_NAME: album["album_name"],
+            }
+            return self.async_create_entry(title=album["album_name"], data=data)
+
+        # A searchable dropdown (rather than a plain vol.In) keeps this
+        # usable for accounts with a large number of albums.
+        options = [
+            selector.SelectOptionDict(
+                value=a["album_uuid"],
+                label=f"{a['album_name']} ({ugr_api.describe_album_type(a.get('album_type'))})",
+            )
+            for a in self._ugr_albums
+        ]
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_UGREEN_ALBUM_UUID): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=options,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                        custom_value=False,
+                    )
+                )
+            }
+        )
+        return self.async_show_form(step_id="ugreen_select", data_schema=schema)
+
+    async def async_step_nextcloud(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Pick between an authenticated WebDAV folder and a public album link."""
+        if user_input is not None:
+            if user_input[CONF_NEXTCLOUD_AUTH_MODE] == NEXTCLOUD_AUTH_MODE_PUBLIC:
+                return await self.async_step_nextcloud_public()
+            return await self.async_step_nextcloud_folder()
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_NEXTCLOUD_AUTH_MODE, default=DEFAULT_NEXTCLOUD_AUTH_MODE
+                ): vol.In(
+                    {
+                        NEXTCLOUD_AUTH_MODE_FOLDER: "Authenticated WebDAV folder",
+                        NEXTCLOUD_AUTH_MODE_PUBLIC: "Public album link",
+                    }
+                ),
+            }
+        )
+        return self.async_show_form(step_id="nextcloud", data_schema=schema)
+
+    async def async_step_nextcloud_folder(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect and validate a Nextcloud WebDAV folder + app password."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            name = user_input[CONF_ALBUM_NAME].strip()
+            url = user_input[CONF_NEXTCLOUD_URL].strip()
+            username = user_input[CONF_NEXTCLOUD_USERNAME].strip()
+            password = user_input.get(CONF_NEXTCLOUD_PASSWORD) or ""
+            folder = (user_input.get(CONF_NEXTCLOUD_FOLDER) or "").strip()
+            recursive = bool(user_input.get(CONF_NEXTCLOUD_RECURSIVE, False))
+            size = user_input.get(
+                CONF_NEXTCLOUD_IMAGE_SIZE, DEFAULT_NEXTCLOUD_IMAGE_SIZE
+            )
+
+            from . import nextcloud as nc_api
+
+            client = nc_api.NextcloudClient(
+                self.hass, url, username, password, folder
+            )
+            try:
+                await client.async_validate()
+            except Exception as err:  # noqa: BLE001 - any failure means bad URL/creds/folder
+                _LOGGER.warning(
+                    "Nextcloud validation failed for %s (folder %r): %s",
+                    client.base_url,
+                    client.folder,
+                    _describe_error(err),
+                )
+                errors["base"] = "nextcloud_cannot_connect"
+            else:
+                await self.async_set_unique_id(
+                    f"{DOMAIN}:{PROVIDER_NEXTCLOUD}:{client.base_url}:"
+                    f"{username}:{client.folder}:{name}"
+                )
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title=name,
+                    data={
+                        CONF_PROVIDER: PROVIDER_NEXTCLOUD,
+                        CONF_NEXTCLOUD_AUTH_MODE: NEXTCLOUD_AUTH_MODE_FOLDER,
+                        CONF_NEXTCLOUD_URL: client.base_url,
+                        CONF_NEXTCLOUD_USERNAME: username,
+                        CONF_NEXTCLOUD_PASSWORD: password,
+                        CONF_NEXTCLOUD_FOLDER: client.folder,
+                        CONF_NEXTCLOUD_RECURSIVE: recursive,
+                        CONF_NEXTCLOUD_IMAGE_SIZE: size,
+                        CONF_ALBUM_NAME: name,
+                    },
+                )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ALBUM_NAME): str,
+                vol.Required(CONF_NEXTCLOUD_URL): str,
+                vol.Required(CONF_NEXTCLOUD_USERNAME): str,
+                vol.Required(CONF_NEXTCLOUD_PASSWORD): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(CONF_NEXTCLOUD_FOLDER, default=""): str,
+                vol.Optional(CONF_NEXTCLOUD_RECURSIVE, default=False): (
+                    selector.BooleanSelector()
+                ),
+                vol.Optional(
+                    CONF_NEXTCLOUD_IMAGE_SIZE, default=DEFAULT_NEXTCLOUD_IMAGE_SIZE
+                ): vol.In(
+                    {
+                        NEXTCLOUD_IMAGE_PREVIEW: "Preview (smoothest slideshow)",
+                        NEXTCLOUD_IMAGE_ORIGINAL: "Original (full quality, slower)",
+                    }
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="nextcloud_folder", data_schema=schema, errors=errors
+        )
+
+    async def async_step_nextcloud_public(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect and validate a Nextcloud Photos public album link."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            name = user_input[CONF_ALBUM_NAME].strip()
+            raw_url = user_input[CONF_NEXTCLOUD_URL].strip()
+            size = user_input.get(
+                CONF_NEXTCLOUD_IMAGE_SIZE, DEFAULT_NEXTCLOUD_IMAGE_SIZE
+            )
+
+            from . import nextcloud as nc_api
+
+            parsed = nc_api.parse_share_link(raw_url)
+            if parsed is None:
+                errors[CONF_NEXTCLOUD_URL] = "invalid_nextcloud_url"
+            else:
+                base_url, token = parsed
+                client = nc_api.NextcloudPublicClient(self.hass, base_url, token)
+                try:
+                    await client.async_validate()
+                except Exception as err:  # noqa: BLE001 - any failure means bad/expired link
+                    _LOGGER.warning(
+                        "Nextcloud public album validation failed for %s: %s",
+                        base_url,
+                        _describe_error(err),
+                    )
+                    errors["base"] = "nextcloud_public_cannot_connect"
+                else:
+                    await self.async_set_unique_id(
+                        f"{DOMAIN}:{PROVIDER_NEXTCLOUD}:{base_url}:{token}:{name}"
+                    )
+                    self._abort_if_unique_id_configured()
+                    return self.async_create_entry(
+                        title=name,
+                        data={
+                            CONF_PROVIDER: PROVIDER_NEXTCLOUD,
+                            CONF_NEXTCLOUD_AUTH_MODE: NEXTCLOUD_AUTH_MODE_PUBLIC,
+                            CONF_NEXTCLOUD_URL: base_url,
+                            CONF_NEXTCLOUD_SHARE_TOKEN: token,
+                            CONF_NEXTCLOUD_IMAGE_SIZE: size,
+                            CONF_ALBUM_NAME: name,
+                        },
+                    )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ALBUM_NAME): str,
+                vol.Required(CONF_NEXTCLOUD_URL): str,
+                vol.Optional(
+                    CONF_NEXTCLOUD_IMAGE_SIZE, default=DEFAULT_NEXTCLOUD_IMAGE_SIZE
+                ): vol.In(
+                    {
+                        NEXTCLOUD_IMAGE_PREVIEW: "Preview (smoothest slideshow)",
+                        NEXTCLOUD_IMAGE_ORIGINAL: "Original (full quality, slower)",
+                    }
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="nextcloud_public", data_schema=schema, errors=errors
+        )
+
+    async def async_step_ente(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect and validate an Ente Photos public album link."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            name = user_input[CONF_ALBUM_NAME].strip()
+            raw_url = user_input[CONF_ENTE_URL].strip()
+            api_origin = (user_input.get(CONF_ENTE_API_ORIGIN) or "").strip()
+            size = user_input.get(CONF_ENTE_IMAGE_SIZE, DEFAULT_ENTE_IMAGE_SIZE)
+
+            from . import ente as ente_api
+
+            share = ente_api.parse_share_link(raw_url)
+            if share is None:
+                errors[CONF_ENTE_URL] = "invalid_ente_url"
+            else:
+                client = ente_api.EnteClient(self.hass, share, api_origin)
+                try:
+                    await client.async_validate()
+                except Exception as err:  # noqa: BLE001 - bad, expired or private link
+                    _LOGGER.warning(
+                        "Ente validation failed for %s: %s",
+                        share.album_origin,
+                        _describe_error(err),
+                    )
+                    errors["base"] = "ente_cannot_connect"
+                else:
+                    from base64 import b64encode
+
+                    await self.async_set_unique_id(
+                        f"{DOMAIN}:{PROVIDER_ENTE}:{share.access_token}:{name}"
+                    )
+                    self._abort_if_unique_id_configured()
+                    return self.async_create_entry(
+                        title=name,
+                        data={
+                            CONF_PROVIDER: PROVIDER_ENTE,
+                            CONF_ENTE_URL: share.album_origin,
+                            CONF_ENTE_ACCESS_TOKEN: share.access_token,
+                            CONF_ENTE_COLLECTION_KEY: b64encode(
+                                share.collection_key
+                            ).decode("ascii"),
+                            CONF_ENTE_API_ORIGIN: ente_api.normalize_api_origin(
+                                api_origin
+                            ),
+                            CONF_ENTE_IMAGE_SIZE: size,
+                            CONF_ALBUM_NAME: name,
+                        },
+                    )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ALBUM_NAME): str,
+                vol.Required(CONF_ENTE_URL): str,
+                vol.Optional(
+                    CONF_ENTE_IMAGE_SIZE, default=DEFAULT_ENTE_IMAGE_SIZE
+                ): vol.In(
+                    {
+                        ENTE_IMAGE_FULL: "Full quality (original file)",
+                        ENTE_IMAGE_PREVIEW: "Preview (faster, softer)",
+                    }
+                ),
+                vol.Optional(CONF_ENTE_API_ORIGIN): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="ente",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={
+                "example_url": "https://albums.ente.io/?t=TOKEN#KEY"
+            },
+        )
+
+
+class GoogleOptionsFlow(config_entries.OptionsFlow):
+    """Edit a Google entry's shared albums and its metadata enrichment."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        return await self.async_step_google_menu()
+
+    async def async_step_google_menu(
+        self, user_input: dict[str, Any] | None = None,
+    ) -> FlowResult:
+        # Home Assistant rejects a menu whose step_id has no matching step method.
+        return self.async_show_menu(
+            step_id="google_menu",
+            menu_options=["google_albums", "google_metadata"],
+        )
+
+    async def async_step_google_albums(
+        self, user_input: dict[str, Any] | None = None,
+    ) -> FlowResult:
+        """Add or remove the shared albums this slideshow combines.
+
+        The links live in ``entry.data`` (the coordinator reads them from
+        there), so they are written back into the entry data and the update
+        listener reloads the entry. The entry id is unchanged, so entities,
+        their settings and the hidden-photo list are kept.
+        """
+        entry = self.config_entry
+        errors: dict[str, str] = {}
+        current = album_urls_from_data(entry.data)
+        if user_input is not None:
+            urls, error = _validate_album_urls(user_input.get(CONF_ALBUM_URLS))
+            if error:
+                errors[CONF_ALBUM_URLS] = error
+            else:
+                if urls == current:
+                    return self.async_create_entry(title="", data=dict(entry.options))
+                try:
+                    # The disk cache is served when a refresh fails; it must
+                    # not bring back photos from a removed album. If it can't
+                    # be cleared, leave the albums unchanged (as the Immich
+                    # source editor does).
+                    await _async_clear_item_cache(self.hass, entry.entry_id)
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "Could not clear Google album cache for %s (%s)",
+                        entry.entry_id, type(err).__name__,
+                    )
+                    errors["base"] = "google_cache_clear_failed"
+                else:
+                    new_data = {
+                        key: value for key, value in entry.data.items()
+                        if key not in (CONF_ALBUM_URL, CONF_ALBUM_URLS)
+                    }
+                    new_data.update(album_url_data(urls))
+                    self.hass.config_entries.async_update_entry(entry, data=new_data)
+                    return self.async_create_entry(title="", data=dict(entry.options))
+        return self.async_show_form(
+            step_id="google_albums",
+            data_schema=vol.Schema({
+                vol.Required(
+                    CONF_ALBUM_URLS, default=current,
+                ): _album_urls_selector(),
+            }),
+            errors=errors,
+        )
+
+    async def async_step_google_metadata(
+        self, user_input: dict[str, Any] | None = None,
+    ) -> FlowResult:
+        defaults = {
+            CONF_GOOGLE_METADATA: DEFAULT_GOOGLE_METADATA,
+            CONF_GOOGLE_LOCATION: DEFAULT_GOOGLE_LOCATION,
+            CONF_REVERSE_GEOCODE: DEFAULT_GOOGLE_REVERSE_GEOCODE,
+            CONF_HIDE_HOME_COUNTRY: DEFAULT_HIDE_HOME_COUNTRY,
+        }
+        if user_input is not None:
+            options = {
+                **self.config_entry.options,
+                **{
+                    field: bool(user_input.get(field, self.config_entry.options.get(field, default)))
+                    for field, default in defaults.items()
+                },
+            }
+            return self.async_create_entry(title="", data=options)
+        return self.async_show_form(
+            step_id="google_metadata",
+            data_schema=vol.Schema({
+                vol.Required(field, default=bool(self.config_entry.options.get(field, default))): bool
+                for field, default in defaults.items()
+            }),
+        )
+
+
+class LocalFolderOptionsFlow(config_entries.OptionsFlow):
+    """Options for local-folder entries.
+
+    Exposes the ``reverse_geocode`` toggle and ``hide_home_country``. Users with
+    privacy concerns about handing EXIF GPS coordinates to an external
+    OSM endpoint can turn geocoding off; the GPS coordinates remain available
+    as ``latitude``/``longitude`` attributes regardless.
+
+    ``self.config_entry`` is provided by ``OptionsFlow`` as a managed
+    property (HA 2024.12+); we deliberately do NOT define ``__init__``
+    or assign to it, since doing so raises in newer cores.
+    """
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        current = self.config_entry.options.get(
+            CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE
+        )
+        hide_home = self.config_entry.options.get(
+            CONF_HIDE_HOME_COUNTRY, DEFAULT_HIDE_HOME_COUNTRY
+        )
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_REVERSE_GEOCODE, default=bool(current)
+                ): bool,
+                vol.Required(
+                    CONF_HIDE_HOME_COUNTRY, default=bool(hide_home)
+                ): bool,
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)
+
+
+class ImmichOptionsFlow(config_entries.OptionsFlow):
+    """Change an Immich entry's source without re-creating the entry.
+
+    The selection lives in ``entry.data`` (the coordinator reads it from
+    there), so this flow writes the new selection back into the entry data;
+    the update listener then reloads the entry. The entry id is unchanged,
+    so entities, their settings and the hidden-photo list are kept.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._albums: dict[str, str] = {}
+        self._people: dict[str, str] = {}
+        self._url: str | None = None
+        self._key: str | None = None
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        from . import immich as immich_api
+
+        data = self.config_entry.data
+        client = immich_api.ImmichClient(
+            self.hass, data.get(CONF_IMMICH_URL), data.get(CONF_IMMICH_API_KEY)
+        )
+        try:
+            await client.async_validate()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning(
+                "Immich validation failed for %s: %s",
+                client.base_url,
+                _describe_error(err),
+            )
+            return await self.async_step_connection(
+                errors={"base": _immich_validation_error(err)}
+            )
+        self._url = client.base_url
+        self._key = data.get(CONF_IMMICH_API_KEY)
+        self._albums, self._people = await _fetch_immich_choices(client)
+        return await self.async_step_immich_select()
+
+    async def async_step_connection(
+        self,
+        user_input: dict[str, Any] | None = None,
+        errors: dict[str, str] | None = None,
+    ) -> FlowResult:
+        """Fix the URL or API key when the stored ones stop working."""
+        from . import immich as immich_api
+
+        errors = dict(errors or {})
+        data = self.config_entry.data
+        if user_input is not None:
+            url = user_input[CONF_IMMICH_URL].strip()
+            key = user_input[CONF_IMMICH_API_KEY].strip()
+            client = immich_api.ImmichClient(self.hass, url, key)
+            try:
+                await client.async_validate()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Immich validation failed for %s: %s",
+                    client.base_url,
+                    _describe_error(err),
+                )
+                errors["base"] = _immich_validation_error(err)
+            else:
+                self._url = client.base_url
+                self._key = key
+                self._albums, self._people = await _fetch_immich_choices(client)
+                return await self.async_step_immich_select()
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_IMMICH_URL, default=data.get(CONF_IMMICH_URL, "")
+                ): str,
+                vol.Required(
+                    CONF_IMMICH_API_KEY, default=data.get(CONF_IMMICH_API_KEY, "")
+                ): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="connection", data_schema=schema, errors=errors
+        )
+
+    async def async_step_immich_select(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        entry = self.config_entry
+        errors: dict[str, str] = {}
+        current = _immich_current_selection(entry.data)
+        for album_id in current["albums"]:
+            self._albums.setdefault(album_id, f"{album_id} (unavailable)")
+        for person_id in current["people"]:
+            self._people.setdefault(person_id, f"{person_id} (unavailable)")
+
+        if user_input is not None:
+            fields, errors = _parse_immich_select(
+                user_input, self._albums, self._people
+            )
+            if not errors:
+                new_data = {
+                    **entry.data,
+                    **fields,
+                    CONF_IMMICH_URL: self._url,
+                    CONF_IMMICH_API_KEY: self._key,
+                }
+                if not new_data[CONF_IMMICH_FILTER]:
+                    new_data.pop(CONF_IMMICH_FILTER)
+                try:
+                    if _immich_source_changed(entry.data, new_data):
+                        await _async_clear_item_cache(self.hass, entry.entry_id)
+                except Exception as err:
+                    _LOGGER.warning(
+                        "Could not clear Immich source cache for %s (%s)",
+                        entry.entry_id, type(err).__name__,
+                    )
+                    errors["base"] = "immich_cache_clear_failed"
+                else:
+                    options = {
+                        **entry.options,
+                        CONF_REVERSE_GEOCODE: user_input.get(
+                            CONF_REVERSE_GEOCODE,
+                            entry.options.get(CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE),
+                        ),
+                        CONF_HIDE_HOME_COUNTRY: user_input.get(
+                            CONF_HIDE_HOME_COUNTRY,
+                            entry.options.get(CONF_HIDE_HOME_COUNTRY, DEFAULT_HIDE_HOME_COUNTRY),
+                        ),
+                    }
+                    self.hass.config_entries.async_update_entry(
+                        entry, data=new_data, title=fields[CONF_ALBUM_NAME], options=options
+                    )
+                    return self.async_create_entry(title="", data=options)
+
+        defaults = {
+            CONF_ALBUM_NAME: entry.data.get(CONF_ALBUM_NAME) or entry.title,
+            "albums": current["albums"],
+            "people": current["people"],
+            "favorites": current["favorites"],
+            CONF_IMMICH_IMAGE_SIZE: entry.data.get(
+                CONF_IMMICH_IMAGE_SIZE, DEFAULT_IMMICH_IMAGE_SIZE
+            ),
+            CONF_IMMICH_INCLUDE_VIDEOS: bool(entry.data.get(
+                CONF_IMMICH_INCLUDE_VIDEOS, DEFAULT_IMMICH_INCLUDE_VIDEOS
+            )),
+            CONF_IMMICH_LIVE_PHOTOS: bool(entry.data.get(
+                CONF_IMMICH_LIVE_PHOTOS, DEFAULT_IMMICH_LIVE_PHOTOS
+            )),
+        }
+        if entry.data.get(CONF_IMMICH_FILTER):
+            defaults[CONF_IMMICH_FILTER] = entry.data[CONF_IMMICH_FILTER]
+        schema = _immich_select_schema(self._albums, self._people, defaults).extend({
+            vol.Required(CONF_REVERSE_GEOCODE, default=bool(entry.options.get(
+                CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE,
+            ))): bool,
+            vol.Required(CONF_HIDE_HOME_COUNTRY, default=bool(entry.options.get(
+                CONF_HIDE_HOME_COUNTRY, DEFAULT_HIDE_HOME_COUNTRY,
+            ))): bool,
+        })
+        return self.async_show_form(
+            step_id="immich_select",
+            data_schema=schema,
+            errors=errors,
+        )
+
+
+def _immich_source_changed(old: dict[str, Any], new: dict[str, Any]) -> bool:
+    """True when the set of photos an Immich entry shows may have changed."""
+    keys = (
+        CONF_IMMICH_URL,
+        CONF_IMMICH_API_KEY,
+        CONF_IMMICH_SELECTION_TYPE,
+        CONF_IMMICH_SELECTION_ID,
+        CONF_IMMICH_FILTER,
+        CONF_IMMICH_IMAGE_SIZE,
+    )
+    return any(old.get(key) != new.get(key) for key in keys) or any(
+        bool(old.get(key)) != bool(new.get(key))
+        for key in (CONF_IMMICH_INCLUDE_VIDEOS, CONF_IMMICH_LIVE_PHOTOS)
+    )
+
+
+async def _async_clear_item_cache(hass: Any, entry_id: str) -> None:
+    """Drop the persisted item list so a new source never shows old photos.
+
+    The coordinator serves this cache when a refresh fails or comes back
+    empty; after a source change that would resurrect the previous album.
+    Uses the same storage key as ``AlbumCoordinator._items_cache_store``.
+    """
+    from homeassistant.helpers.storage import Store
+
+    await Store(hass, 1, f"{DOMAIN}.{entry_id}.items").async_remove()
+
+
+class _NoOptionsFlow(config_entries.OptionsFlow):
+    """Fallback options flow for providers that expose nothing tunable."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        return self.async_create_entry(title="", data={})
