@@ -33,6 +33,13 @@ dependencies = [
     "beautifulsoup4<4.15",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
 [project.urls]
 Homepage = "https://github.com/meysam81/sitemap-harvester"
 
