@@ -58,6 +58,18 @@ Flashscore Scraper is a **free and open-source** scraper that gets you **unlimit
 
 `available_tabs` tells you exactly which of the 15 match endpoints will return data for this match, so you never waste a call.
 
+`/matches/details` also fetches the feed-backed tabs itself and reports them
+under `tabs`, so one call gets you the lineup, stats, head-to-head, commentary
+and injury data without five more requests. The three outcomes stay apart:
+`data` holds the successful payloads (each the same shape its standalone
+endpoint returns), `no_data` names tabs the match genuinely has nothing for,
+and `failed` lists `{name, category, error}` for tabs that could not be
+fetched — `category` is `blocked` (401/403/429), `upstream` (transport/5xx) or
+`error`. The response is always `200` while the match page exists, and when
+every tab fails the card is still returned with `has_tabs: false`. Tabs served
+by other surfaces (odds, player statistics, standings, news, …) are listed in
+`tabs.unmapped` for a follow-up call.
+
 ## 🚀 Unlimited Free Flashscore Data — Get It in 60 Seconds
 
 1️⃣ Clone and install:

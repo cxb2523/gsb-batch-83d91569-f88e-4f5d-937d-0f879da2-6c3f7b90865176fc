@@ -388,6 +388,68 @@ def gather(mapping):
     return dict(zip(keys, results))
 
 
+# Per-tab outcome vocabulary. A tab either produced a value, legitimately has
+# nothing for this entity, or failed; a failure keeps its category so a caller
+# can tell a block (retry on a fresh exit) from an upstream hiccup (retry) —
+# neither is ever collapsed into "no data".
+TAB_OK = "ok"
+TAB_NO_DATA = "no_data"
+TAB_FAILED = "failed"
+FAILURE_BLOCKED = "blocked"
+FAILURE_UPSTREAM = "upstream"
+FAILURE_ERROR = "error"
+
+
+def _tab_record(name, status, *, data=None, category=None, reason=None):
+    record = {"name": name, "status": status, "data": data}
+    if category is not None:
+        record["category"] = category
+    if reason is not None:
+        record["error"] = reason
+    return record
+
+
+def gather_tabs(mapping):
+    """Run {tab name: zero-arg callable} in parallel -> one record per tab.
+
+    Unlike `gather`, a failing tab is never reduced to a bare None: each key
+    keeps its own outcome, and the other tabs still run to completion.
+
+        {"name": k, "status": "ok", "data": <value>}
+        {"name": k, "status": "no_data", "data": None}
+        {"name": k, "status": "failed", "data": None,
+         "category": "blocked"|"upstream"|"error", "error": "<message>"}
+
+    NotFound / BadRequest (and a callable that returns None or an empty
+    string) mean the entity simply has nothing for that tab -> no_data.
+    Blocked (401/403/429) and UpstreamError (transport failure / 5xx) are
+    recorded with their category instead of being swallowed."""
+    keys = list(mapping)
+
+    def guarded(name, fn):
+        def run():
+            try:
+                value = fn()
+            except (NotFound, BadRequest) as e:
+                return _tab_record(name, TAB_NO_DATA, reason=str(e))
+            except Blocked as e:                  # includes FlashscoreBlocked
+                return _tab_record(name, TAB_FAILED, category=FAILURE_BLOCKED,
+                                   reason=str(e))
+            except UpstreamError as e:
+                return _tab_record(name, TAB_FAILED, category=FAILURE_UPSTREAM,
+                                   reason=str(e))
+            except Exception as e:                # a bug must not mask the rest
+                return _tab_record(name, TAB_FAILED, category=FAILURE_ERROR,
+                                   reason=f"{type(e).__name__}: {e}")
+            if value is None or value == "":
+                return _tab_record(name, TAB_NO_DATA)
+            return _tab_record(name, TAB_OK, data=value)
+        return run
+
+    results = run_parallel([guarded(k, mapping[k]) for k in keys])
+    return dict(zip(keys, results))
+
+
 if __name__ == "__main__":
     # Smoke test: python flashscore/fetch.py [feed name]
     target = sys.argv[1] if len(sys.argv) > 1 else "f_1_0_5_en_1"

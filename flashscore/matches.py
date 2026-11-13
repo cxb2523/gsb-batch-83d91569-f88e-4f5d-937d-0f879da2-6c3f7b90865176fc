@@ -13,11 +13,20 @@ LC commentary, HH head-to-head, SCR missing players, OD odds, LT/TA league
 table, TTS top scorers, MH point-by-point, DR draw, NF news, TV broadcasts).
 Every detail endpoint returns that list as `available_tabs` so a caller can
 tell "this match has no line-ups" from "the request failed".
+
+`/matches/details` goes one step further: after the page gives it the tab
+list, it fetches the feed-backed tabs (lineups, statistics, h2h, commentary,
+missing_players) in parallel through `fetch.gather_tabs`, so ONE call returns
+the base card plus every tab that could be fetched. The `tabs` block keeps
+the three outcomes apart — `data` (successes), `no_data` (the match genuinely
+has nothing there) and `failed` (with the failure category: blocked /
+upstream / error) — and a failure of any tab never fails the response.
 """
 from . import parsers as P
 from . import refs
-from .fetch import (FlashscoreNotFound, gather, get_feed, get_graphql,
-                    get_graphql_optional, get_page, run_parallel)
+from .fetch import (FlashscoreNotFound, gather, gather_tabs, get_feed, get_graphql,
+                    get_graphql_optional, get_page, run_parallel,
+                    TAB_NO_DATA, TAB_OK)
 
 _SPORT_SLOT = 1          # ignored by the upstream; any integer works
 
@@ -206,6 +215,16 @@ def _available_tabs(core):
     return seen
 
 
+def _tab_value(name, match_id):
+    """Fetch one `_DETAIL_TABS` entry -> its payload, or None when the
+    upstream has nothing for it (an empty body is the site's own "no data"
+    spelling, kept distinct from a raised NotFound/BadRequest by the same
+    outcome)."""
+    prefix, builder = _DETAIL_TABS[name]
+    text = _feed(f"{prefix}_{_SPORT_SLOT}_{match_id}")
+    return builder(text) if text else None
+
+
 def _core_summary(match_id, core):
     """The shared header every detail endpoint repeats, so each response
     stands on its own."""
@@ -230,9 +249,21 @@ def _core_summary(match_id, core):
 
 
 def get_details(match):
-    """The full match card: teams, competition, venue, status, scores, and
-    the tab list. The page is the only surface carrying the participants and
-    the competition together, so this is one HTML fetch plus nothing."""
+    """The full match card — teams, competition, venue, status, scores, the
+    tab list — plus the public tabs this match has, fetched in parallel.
+
+    The page is the only surface carrying the participants and the competition
+    together, so base info is one HTML fetch. Once it yields `available_tabs`,
+    every tab that maps to a feed here (`_DETAIL_TABS`) is fetched
+    concurrently and reported under `tabs`: a success carries the same payload
+    its standalone endpoint returns (minus the repeated core header), a tab
+    that legitimately has nothing is `status: "no_data"`, and a tab that
+    FAILED keeps its category (`blocked` / `upstream` / `error`) instead of
+    being silently dropped. A tab failing never fails the response, and when
+    every optional tab fails the base match card is still returned with
+    `has_tabs: false`. Tabs whose data comes from GraphQL or needs per-call
+    options are listed in `tabs.unmapped` so the caller knows what to request
+    separately."""
     match_id = _mid(match)
     try:
         html = get_page(f"/match/{match_id}/", expect=match_id)
@@ -278,7 +309,51 @@ def get_details(match):
         "has_missing_players": bool(info.get("hasMissingPlayers")),
         "audio_stream_link": P.clean(core.get("QJ")) or P.clean(core.get("QQ")),
     })
+    summary.update(_fetch_tabs(match_id, summary.get("available_tabs") or []))
     return summary
+
+
+def _fetch_tabs(match_id, available_tabs):
+    """Fetch every mappable tab of `available_tabs` in parallel -> the
+    `tabs` block `get_details` returns.
+
+    Shape:
+        {"data": {name: payload}, "available": [...], "failed": [...],
+         "no_data": [...], "unmapped": [...], "has_tabs": bool, "count": n}
+
+    `data` holds only the successes, keyed by public tab name, so a caller can
+    read the payloads directly; `failed` entries are `{name, category}` so a
+    block is distinguishable from an upstream hiccup; `no_data` names tabs the
+    match genuinely has nothing for."""
+    mapped = [name for name in available_tabs if name in _DETAIL_TABS]
+    unmapped = [name for name in available_tabs if name not in _DETAIL_TABS]
+    outcomes = gather_tabs({name: (lambda n=name: _tab_value(n, match_id))
+                            for name in mapped}) if mapped else {}
+    data = {}
+    failed = []
+    no_data = []
+    for name in mapped:
+        outcome = outcomes[name]
+        if outcome["status"] == TAB_OK:
+            data[name] = outcome["data"]
+        elif outcome["status"] == TAB_NO_DATA:
+            no_data.append(name)
+        else:
+            failure = {"name": name, "category": outcome.get("category")}
+            if outcome.get("error"):
+                failure["error"] = outcome["error"]
+            failed.append(failure)
+    return {
+        "tabs": {
+            "data": data,
+            "available": mapped,
+            "failed": failed,
+            "no_data": no_data,
+            "unmapped": unmapped,
+            "count": len(data),
+            "has_tabs": bool(data),
+        }
+    }
 
 
 def _page_participant(entries, fallback_country=None):
@@ -372,6 +447,13 @@ def get_statistics(match, period=None):
     match_id = _mid(match)
     core, text = run_parallel([lambda: _core(match_id),
                                lambda: _feed(f"df_st_{_SPORT_SLOT}_{match_id}")])
+    result = _core_summary(match_id, core)
+    result.update(statistics_payload(text, period))
+    return result
+
+
+def statistics_payload(text, period=None):
+    """A `df_st_` body -> per-period statistic groups (no core header)."""
     periods = []
     current_period = None
     current_group = None
@@ -406,10 +488,7 @@ def get_statistics(match, period=None):
     if period:
         wanted = str(period).strip().lower()
         periods = [p for p in periods if (p.get("period") or "").lower() == wanted] or []
-    result = _core_summary(match_id, core)
-    result["period_count"] = len(periods)
-    result["periods"] = periods
-    return result
+    return {"period_count": len(periods), "periods": periods}
 
 
 def get_lineups(match):
@@ -418,6 +497,13 @@ def get_lineups(match):
     match_id = _mid(match)
     core, text = run_parallel([lambda: _core(match_id),
                                lambda: _feed(f"df_li_{_SPORT_SLOT}_{match_id}")])
+    result = _core_summary(match_id, core)
+    result.update(lineups_payload(text))
+    return result
+
+
+def lineups_payload(text):
+    """A `df_li_` body -> {home, away} squads (no core header)."""
     sides = {"home": {"formation": None, "rating": None, "groups": []},
              "away": {"formation": None, "rating": None, "groups": []}}
     group_name = None
@@ -454,10 +540,7 @@ def get_lineups(match):
             target = {"name": group_name, "players": []}
             entry["groups"].append(target)
         target["players"].append(player)
-    result = _core_summary(match_id, core)
-    result["home"] = sides["home"]
-    result["away"] = sides["away"]
-    return result
+    return {"home": sides["home"], "away": sides["away"]}
 
 
 def _lineup_incident(record):
@@ -536,6 +619,13 @@ def get_h2h(match):
     match_id = _mid(match)
     core, text = run_parallel([lambda: _core(match_id),
                                lambda: _feed(f"df_hh_{_SPORT_SLOT}_{match_id}")])
+    result = _core_summary(match_id, core)
+    result.update(h2h_payload(text))
+    return result
+
+
+def h2h_payload(text):
+    """A `df_hh_` body -> head-to-head and form sections (no core header)."""
     sections = []
     current = None
     for record in P.parse_records(text):
@@ -569,10 +659,7 @@ def get_h2h(match):
             "result": {"w": "win", "l": "loss", "d": "draw"}.get(P.clean(record.get("WIS"))),
             "side": P.clean(record.get("KS")),
         })
-    result = _core_summary(match_id, core)
-    result["section_count"] = len(sections)
-    result["sections"] = sections
-    return result
+    return {"section_count": len(sections), "sections": sections}
 
 
 def get_commentary(match):
@@ -580,6 +667,13 @@ def get_commentary(match):
     match_id = _mid(match)
     core, text = run_parallel([lambda: _core(match_id),
                                lambda: _feed(f"df_lc_{_SPORT_SLOT}_{match_id}")])
+    result = _core_summary(match_id, core)
+    result.update(commentary_payload(text))
+    return result
+
+
+def commentary_payload(text):
+    """A `df_lc_` body -> {count, comments} (no core header)."""
     comments = []
     for record in P.parse_records(text):
         if "MD" not in record:
@@ -593,10 +687,7 @@ def get_commentary(match):
             "home_score": P.to_int(record.get("ML")),
             "away_score": P.to_int(record.get("MM")),
         })
-    result = _core_summary(match_id, core)
-    result["count"] = len(comments)
-    result["comments"] = comments
-    return result
+    return {"count": len(comments), "comments": comments}
 
 
 def get_report(match):
@@ -643,6 +734,13 @@ def get_missing_players(match):
     match_id = _mid(match)
     core, text = run_parallel([lambda: _core(match_id),
                                lambda: _feed(f"df_scr_{_SPORT_SLOT}_{match_id}")])
+    result = _core_summary(match_id, core)
+    result.update(missing_players_payload(text))
+    return result
+
+
+def missing_players_payload(text):
+    """A `df_scr_` body -> {home, away, count} injuries (no core header)."""
     sides = {"home": [], "away": []}
     for record in P.parse_records(text):
         if "SPI" not in record:
@@ -655,11 +753,23 @@ def get_missing_players(match):
             "reason": P.clean(record.get("SPE")),
             "likelihood": P.clean(record.get("SPD")),
         })
-    result = _core_summary(match_id, core)
-    result["home"] = sides["home"]
-    result["away"] = sides["away"]
-    result["count"] = len(sides["home"]) + len(sides["away"])
-    return result
+    return {"home": sides["home"], "away": sides["away"],
+            "count": len(sides["home"]) + len(sides["away"])}
+
+
+# The feed-backed tabs `/matches/details` can fetch itself, as
+# {public tab name: (feed prefix, payload builder)}. A tab's payload is the
+# dict its standalone endpoint adds on top of the shared core header. Tabs
+# served by GraphQL (player_statistics, odds, news) or needing per-call
+# options (standings) stay on their own endpoints and are listed in
+# `tabs.unmapped` so a caller knows what it still has to request.
+_DETAIL_TABS = {
+    "lineups": ("df_li", lineups_payload),
+    "statistics": ("df_st", statistics_payload),
+    "h2h": ("df_hh", h2h_payload),
+    "commentary": ("df_lc", commentary_payload),
+    "missing_players": ("df_scr", missing_players_payload),
+}
 
 
 def get_point_by_point(match, set=None):
