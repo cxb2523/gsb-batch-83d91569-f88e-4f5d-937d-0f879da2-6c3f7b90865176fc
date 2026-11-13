@@ -1,0 +1,64 @@
+{
+  "name": "@achamm/veilbrowser",
+  "version": "1.7.0",
+  "description": "Stealth browser automation for AI agents. Drives real Chrome over raw CDP\u2014no Playwright, no Puppeteer, no WebDriver. Zero runtime dependencies. Passes bot.sannysoft.com 57/57; bypasses Cloudflare's JS challenge.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "veil-mcp": "dist/mcp.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "doctor": "bun run tools/veil-doctor.ts",
+    "selftest": "bun run examples/selftest.ts",
+    "build": "tsc -p tsconfig.json && chmod +x dist/mcp.js",
+    "typecheck": "tsc -p tsconfig.check.json",
+    "test": "bun test tests/*.test.ts",
+    "prepublishOnly": "bun run build"
+  },
+  "keywords": [
+    "browser",
+    "automation",
+    "stealth",
+    "cdp",
+    "chrome",
+    "agent",
+    "ai",
+    "anti-bot",
+    "anti-detect",
+    "mcp",
+    "cloudflare",
+    "scraping",
+    "modelcontextprotocol",
+    "model-context-protocol",
+    "playwright-alternative",
+    "puppeteer-alternative",
+    "devtools-protocol"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/acunningham-ship-it/veilbrowser.git"
+  },
+  "homepage": "https://hamtek.dev/veil",
+  "bugs": {
+    "url": "https://github.com/acunningham-ship-it/veilbrowser/issues"
+  },
+  "author": "Armani Cunningham <acunningham@crazeemedia.com> (https://hamtek.dev)",
+  "engines": {
+    "node": ">=24.0.0",
+    "bun": ">=1.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "typescript": "6.0.3"
+  }
+}

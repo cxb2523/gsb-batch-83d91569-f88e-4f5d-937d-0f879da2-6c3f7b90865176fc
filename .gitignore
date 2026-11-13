@@ -1,0 +1,43 @@
+node_modules/
+bun.lock
+*.log
+
+# dist/ is committed so `bun add github:...` works without a build step
+# (bun blocks postinstall scripts by default). Rebuilt fresh on npm publish.
+
+# Test/scratch artifacts
+examples/out/
+profiles/
+*.png
+.veil-*
+veil-*/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# internal planning, not public
+LAUNCH.md
+examples/demo-record.ts
+LAUNCH_POSTS.md
+LAUNCH_POSTS_v*.md
+examples/endeavor_shot.ts
+examples/rmi_alpage.ts
+examples/amazon_check.ts
+examples/fetchdoc.ts
+examples/gabb_research.ts
+examples/ig_trail.ts
+
+# local agent worktrees / session state
+.claude/
+
+# Python build artifacts (the wheel/sdist are attached to the GitHub release, not committed)
+python/dist/
+python/build/
+python/*.egg-info/
+__pycache__/
+*.pyc
+.venv/
+# NOTE: python/veilbrowser/_assets/ IS committed. It is generated, but the package is
+# useless without it and the failure mode is silent (no patch, no error).

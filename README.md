@@ -1,0 +1,624 @@
+# Veil
+
+**A stealth automation runtime for AI agents. Drives real Chrome over raw CDP — no Playwright, no Puppeteer, no WebDriver, zero runtime dependencies.**
+
+[![npm](https://img.shields.io/npm/v/@achamm/veilbrowser?color=cb3837&logo=npm)](https://www.npmjs.com/package/@achamm/veilbrowser) [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen.svg) ![TypeScript native](https://img.shields.io/badge/TypeScript-native-3178c6.svg?logo=typescript&logoColor=white)
+
+Built by **[HamTek](https://hamtek.dev/veil)** — we build production-grade AI agents; veil is the proof.
+
+![Veil passing bot.sannysoft.com and Cloudflare's challenge](assets/demo.gif)
+
+*Veil driving real Chrome: bot.sannysoft.com all-green, then straight through Cloudflare's JS challenge — no patches, no plugins.*
+
+To Instagram, Google, Reddit, Cloudflare — Veil *is* Chrome. Same binary, same
+TLS, same JS engine, same canvas/WebGL/font fingerprint a human's browser has. We
+don't reimplement the browser (that's Chromium's 20-year, 1000-engineer job, and a
+hand-rolled engine is *easier* to fingerprint, not harder). We replace the part that
+gets you caught: **the automation layer.**
+
+---
+
+## Why not Playwright / Puppeteer?
+
+They're powerful and great for scripted QA. For *agents on hostile sites* they have three structural problems:
+
+| Problem | Playwright/Puppeteer | Veil |
+|---|---|---|
+| **Detectable** | `navigator.webdriver=true`, `--enable-automation`, the `Runtime.enable` CDP tell, `HeadlessChrome` UA | webdriver scrubbed, no automation switches, no `Runtime.enable`, UA + client-hints normalized |
+| **Robotic input** | instant teleport clicks, fixed-cadence typing → behavioural detection | curved Bézier mouse paths, eased timing, human keystroke cadence |
+| **Brittle for agents** | CSS/XPath selectors that break constantly | accessibility-tree snapshot → stable integer `ref`s; agents never write a selector |
+
+Veil is **dependency-free** — Node 24 / Bun ship a global `WebSocket`, so the entire
+CDP transport is ~120 lines we own. Nothing to patch, nothing to leak.
+
+## How Veil compares (honest)
+
+The "real Chrome over raw CDP" idea isn't new — Python's [`nodriver`](https://github.com/ultrafunkamsterdam/nodriver)
+pioneered it, and [Camoufox](https://camoufox.com) (a C++-patched Firefox) scores even
+better on pure stealth. Veil isn't claiming to out-stealth them. Its wedge is **where it
+lives and how agents use it**:
+
+- **TypeScript-native.** The JS/TS agent ecosystem (Vercel AI SDK, LangChain.js, MCP) has
+  no strong raw-CDP stealth driver — it's stuck on Playwright + stealth plugins, or
+  shelling out to Python `nodriver`. Veil is that missing piece.
+- **MCP-native.** Ships an MCP server, so any agent gets stealth browsing as tools with
+  zero glue.
+- **Agent-first, not scraper-first.** Accessibility-tree refs and human input are built for
+  an LLM driving the browser, not for a scraping script.
+- **Does two things the others don't.** Drives the native **"Sign in with Google" (FedCM)**
+  account chooser over CDP — agents are otherwise walled out of Google-SSO apps entirely —
+  and **blocks visited sites from port-scanning your localhost/LAN** (on by default). Neither
+  `nodriver`, Camoufox, nor Playwright-stealth does either.
+
+### Two more that get raised, and where they actually land
+
+Both of these came up when Veil was posted publicly, so they belong here rather than in a
+comment thread.
+
+- **[Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)** (Python + Node) — a
+  patched, drop-in Playwright replacement. It fixes Playwright's launch-flag and JS-surface
+  leaks: adds `--disable-blink-features=AutomationControlled`, drops `--enable-automation`,
+  corrects `navigator.webdriver` and the `HeadlessChrome` UA. Chromium only.
+  **If you already have Playwright code and want it less detectable, this is the lowest-friction
+  option and you should probably use it** — it's a dependency swap, not a rewrite.
+  Where it differs: it is still Playwright underneath, so it **launches its own browser** and
+  therefore hits the same `user-data-dir` lock — it cannot attach to a profile you're already
+  signed into. Attaching isn't a stealth patch, it's a different architecture, and it's the
+  thing that actually gets you past session-scored sites.
+- **[Claude for Chrome](https://www.anthropic.com/)** — an extension running inside your own
+  browser. It shares Veil's core insight (use the real browser, inherit the real session) and,
+  being a genuine extension rather than automation, it isn't fighting bot checks at all.
+  **If you want a human-in-the-loop assistant in your browser, it's a better fit than a
+  library.** Where it differs: it isn't programmable. You can't call it from a script, wire it
+  into CI, run it headless on a server, expose it as MCP tools to your own agent, or control the
+  fingerprint. Veil is a library your code drives; that's a different job, not a better one.
+
+If you're in Python and just want raw stealth, use `nodriver` or Camoufox — they're great. If
+you have Playwright code already, try Patchright first. If you want an assistant in your own
+browser, use Claude for Chrome. **Veil is for TypeScript agents and MCP hosts that need to
+drive a browser programmatically — and, uniquely among these, one you're already signed into.**
+
+## Quick start
+
+**Prerequisites:** Chrome/Chromium on PATH (or `VEIL_CHROME=/path/to/chrome`), and Bun.
+
+```bash
+bun install
+bun run examples/selftest.ts   # launches real Chrome, runs the full chain
+```
+
+**In your own project** — `bun add @achamm/veilbrowser` (or `npm install @achamm/veilbrowser`):
+
+```ts
+import { Browser } from "@achamm/veilbrowser";
+
+const browser = await Browser.launch({ headless: false });   // headful = stealthiest
+const page = await browser.newPage();
+await page.goto("https://example.com");
+
+// Accessibility-tree snapshot → stable integer refs (no selectors).
+const snap = await page.snapshot();
+console.log(snap.text);
+//  [1] textbox "Search"
+//  [2] button "Sign in"
+
+await page.fill(1, "hello");          // act by ref — human typing, jittered timing
+await page.click(2);                  // curved Bézier mouse path, real CDP input
+const png = await page.screenshot();  // PNG buffer for a vision model
+
+await browser.close();
+```
+
+## Drive a browser you're already signed into
+
+Chrome locks a `user-data-dir`. The one profile holding your real logged-in sessions
+therefore **cannot be opened by a second Chrome**, which is why launching your own browser
+always gets you a fresh, logged-out, brand-new-looking session — the shape that gets
+challenged. `Browser.connect()` attaches to a browser that is already running instead:
+
+```bash
+# start Chrome yourself, with the profile that has your sessions in it
+google-chrome --remote-debugging-port=9222 --user-data-dir=~/.config/agent-profile
+```
+
+```ts
+import { Browser } from "@achamm/veilbrowser";
+
+const browser = await Browser.connect("127.0.0.1:9222");  // ws:// URL, http:// origin, or host:port
+const [page] = await browser.pages();                     // the tab that's already open
+await page.goto("https://example.com");
+
+await browser.close();   // DETACHES ONLY — never kills a browser it didn't start
+```
+
+This matters because Google, Reddit, Meta and TikTok score the **session**, not the IP: an
+established profile passes where a fresh one hits a wall.
+
+> ### ⚠️ The profile becomes part of your agent's security boundary
+>
+> This is the real cost of attaching, and it is worth stating plainly rather than leaving in
+> the fine print. **Whatever that Chrome profile is signed into, the agent can reach.** Point
+> it at your everyday browser and an agent that wanders — or a prompt-injected page telling it
+> to — has your email, your bank, your admin panels. There is no per-site sandbox inside a
+> profile; a cookie jar is all-or-nothing.
+>
+> **Use a dedicated profile signed into only what the task needs.** A separate
+> `--user-data-dir` per agent, logged into the two or three sites it actually works with,
+> keeps the blast radius equal to those sites instead of your whole digital life. The
+> private-network block is on by default for a related reason (a page cannot port-scan your
+> LAN), but it does nothing about credentials that are legitimately in the jar.
+>
+> Credit to `u/zhonglin` on r/AI_Agents for naming this precisely: reusing an authenticated
+> browser solves session continuity and moves the profile inside the agent's trust boundary.
+>
+> A fingerprint is deliberately **not** re-applied to an attached page — changing `navigator`
+> properties under a document the site has already fingerprinted is more detectable than
+> leaving them alone.
+
+### Attach safety
+
+Attaching puts the whole profile inside the agent's trust boundary, and the origin allowlist
+is narrower than it sounds: it gates **document navigation** by the library (`allowOrigins`)
+and nothing else (not `fetch`, images, popups, `eval`, uploads, downloads or cookie reads).
+The MCP server does not apply the allowlist on this version. See
+[docs/SECURITY.md](docs/SECURITY.md) for the threat model, a per-control table with the test
+behind each `enforced` row, and the attach-safety env vars.
+
+## Python
+
+There is a Python front end in [`python/`](python/) with the same core API:
+
+```bash
+pip install git+https://github.com/acunningham-ship-it/veilbrowser.git#subdirectory=python
+```
+
+```python
+import asyncio
+from veilbrowser import Browser, Fingerprint
+
+async def main():
+    async with await Browser.launch(fingerprint=Fingerprint.preset("windows-chrome")) as b:
+        page = await b.new_page()
+        await page.goto("https://example.com")
+        print(await page.title())
+
+asyncio.run(main())
+```
+
+**The stealth layer has one implementation, not two.** The injected script, the launch
+flags, the profile identities and the keystroke table are generated from this
+TypeScript source into `python/veilbrowser/_assets/` by `tools-gen-python-assets.ts`,
+and `tests/python-parity.test.ts` fails the build if Python's assembled script differs
+from the TypeScript one by a single byte. That matters because a drifted stealth patch
+does not fail loudly — one front end simply becomes detectable while all of its own
+tests stay green. See [python/README.md](python/README.md) for the API and for what is
+deliberately not ported.
+
+## How the stealth works
+
+1. **Launch (`launcher.ts`)** — a real Chrome with the flags a *normal* profile uses,
+   minus the automation switches Playwright adds. `--disable-blink-features=AutomationControlled`
+   flips `navigator.webdriver` to `false` at the engine level. Persistent `userDataDir`
+   so the profile looks *used* (history, cookies), not freshly minted.
+2. **Transport (`cdp.ts`)** — raw WebSocket, flat session mode. **We never call
+   `Runtime.enable`** — that command is a primary CDP detection vector. `Runtime.evaluate`
+   works without it.
+3. **Page patch (`stealth.ts`)** — injected via `addScriptToEvaluateOnNewDocument`
+   *before* any site code, on every frame. Every patch is **self-gating**: it fires
+   only when a value is genuinely anomalous (a stripped/headless env leaked
+   `webdriver === true`, 0 plugins, an empty `languages`, or a missing `window.chrome`),
+   and is a no-op on a healthy real Chrome. That's the whole default surface — a
+   `webdriver`/`window.chrome`/`plugins`/`languages` backfill, nothing more. It
+   deliberately does **not** touch `permissions.query`: a patched `permissions.query`
+   is itself a signature deep fingerprinters score as "stealth detected". WebGL-vendor
+   spoofing (and the native-looking `toString()` mask that hides it) is **opt-in** via
+   `maskWebgl` — off by default, used only to disguise SwiftShader on GPU-less hosts;
+   with a real GPU the authentic vendor is left untouched. Kept deliberately small;
+   over-patching is its own fingerprint.
+4. **UA / client hints (`page.ts`)** — strips the `HeadlessChrome` token from the UA
+   *and* the `Sec-CH-UA` brand headers.
+5. **Human input (`human.ts`)** — seedable PRNG drives curved mouse paths and
+   jittered keystroke timing.
+
+## Coherent fingerprints / profiles
+
+By default Veil ships your *real* Chrome fingerprint — the strongest identity there
+is, because nothing is spoofed. When you instead need to present a **specific**
+identity (a Windows profile from a Linux server, a fixed profile across a pool),
+apply a `Fingerprint`. The design rule is **coherence, not spoof-count**: a
+half-spoofed profile is *worse* than none — if the UA says Windows but the client
+hints, `navigator.platform`, or WebGL vendor disagree, that contradiction is itself
+a detection signal. So a `Fingerprint` is applied as one internally-consistent set,
+and every derived value (client-hint platform, brand versions, Accept-Language) is
+computed *from* the profile so nothing can drift out of agreement.
+
+```ts
+import { Browser, type Fingerprint } from "@achamm/veilbrowser";
+
+const fp: Fingerprint = {
+  userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+             "(KHTML, like Gecko) Chrome/131.0.6778.86 Safari/537.36",
+  platform: "Win32", platformVersion: "15.0.0", architecture: "x86", model: "", mobile: false,
+  hardwareConcurrency: 16, deviceMemory: 8, languages: ["en-US", "en"],
+  screen: { width: 2560, height: 1440, availWidth: 2560, availHeight: 1400, colorDepth: 24 },
+  devicePixelRatio: 1,
+  webglVendor: "Google Inc. (NVIDIA)",
+  webglRenderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  timezone: "America/New_York", locale: "en-US", seed: 12345,
+};
+
+const browser = await Browser.launch({ headless: false, fingerprint: fp }); // applied to every page
+// or at runtime, before the first navigation:
+await page.applyFingerprint(fp);
+```
+
+Don't want to hand-build one? Use a preset or a self-consistent random profile:
+
+```ts
+import { Browser, Fingerprint, PRESETS } from "@achamm/veilbrowser";
+
+await Browser.launch({ fingerprint: PRESETS["mac-chrome"] });   // windows/mac/linux/android-chrome
+await Browser.launch({ fingerprint: Fingerprint.random() });    // fresh coherent identity
+await Browser.launch({ fingerprint: Fingerprint.random(42) });  // deterministic given a seed
+```
+
+`Fingerprint.random(seed?)` picks a platform first, then derives a matching UA,
+client hints, WebGL, screen and timezone — so a random profile is as internally
+consistent as a preset. Each preset is a real Chrome-131 identity for its OS (an
+Apple-Silicon Mac still reports the frozen `Intel Mac OS X 10_15_7` UA + `MacIntel`
+platform with an `arm` architecture and an Apple Metal renderer — exactly as a real
+one does).
+
+**How it's applied (two layers).** The bulk goes through Chrome itself — `UA` +
+the full `userAgentMetadata` client hints + the legacy `navigator.platform`, the
+`screen` size + `devicePixelRatio`, and the **timezone / locale / geolocation** —
+all via CDP `Emulation.*`. These are set by the browser, so there is **no JS getter
+to unmask** — the strongest kind of spoof, and they resolve natively
+(`Intl.DateTimeFormat().resolvedOptions().timeZone`, `navigator.language`,
+`navigator.geolocation`). A US profile should carry a US timezone/locale (and
+optional US coordinates) — a region that disagrees with the UA is a contradiction
+detectors score. Only
+the values CDP can't set are injected as page-level overrides — `hardwareConcurrency`,
+`deviceMemory`, `languages`, `screen.avail*`/colour depth, the **WebGL vendor/renderer**
+(the two `UNMASKED_*` parameters), and **deterministic canvas + audio noise**. Every
+one is defined on the *prototype* (inherited, so no own-property tell) with its
+`toString()` masked to `[native code]` by a single `Function.prototype.toString` proxy
+that hides itself and leaves genuine native/user functions untouched — the same
+discipline the base stealth uses.
+
+The canvas/audio noise is **seeded, not random per call**: repeated reads of the same
+canvas or audio buffer return *identical* bytes (a per-call random is itself a tell),
+while a different `seed` yields a different — but equally stable — hash. So a profile
+carries its own consistent canvas/audio fingerprint instead of leaking the host's.
+
+Honest scope: this is **coherent fingerprint control**, not a magic bullet. It lets
+you present a consistent identity; it does not by itself defeat any particular hard
+target. `navigator.oscpu` is deliberately left unset (it's Firefox-only — a Chrome
+profile exposing it would be an anomaly); `screen.colorDepth` follows the profile but
+the *rendered* pixels still come from the host GPU, so keep `webglVendor`/`webglRenderer`
+plausible for the platform you're claiming; and WebGL-*canvas* read-back (`toDataURL` on
+a WebGL canvas) is left to the vendor override, not noised.
+
+## Agent tooling (the other half of the product)
+
+The selling point isn't only stealth — it's that agents drive it *well*:
+
+- **`snapshot()`** returns the page as a flat numbered index from the accessibility
+  tree (the semantic layer screen readers use). The #1 cause of agent breakage —
+  guessed CSS/XPath selectors — is gone. The agent acts on a stable `ref`.
+  **A `ref` is an identity, not a position:** an element keeps its number for as long
+  as the document lives, so a number is never reused for a different element. Refs are
+  `1..N` on the first snapshot and may then develop gaps (something was removed) or
+  run out of order (something was inserted above older elements). That is deliberate —
+  renumbering per snapshot means a remembered `ref` can actuate the *wrong* element and
+  still report success. Here a stale ref is either still correct, or a clear error.
+- **`screenshot()`** returns a PNG buffer, ready for vision grounding — the viewport,
+  the whole `{fullPage}`, a single element `{ref}`, or an explicit `{clip}` rectangle.
+- **`click` / `fill` / `type`** drive real CDP input with human dynamics.
+- **`waitFor(expr)`** replaces flaky fixed sleeps — and, like `evaluate()`, is
+  timeout-bounded, so a wedged page rejects cleanly instead of hanging the agent.
+- **`goto()`** returns `{ status, ok }` for the main response, so callers can detect
+  a 4xx/5xx wall instead of only seeing a rendered error page.
+- **`blockResources(types, {urls})`** drops image/font/media/etc. and URL-matched
+  requests — a big speed and footprint win for scraping (shares one Fetch handler
+  with the private-network guard, so both are active at once).
+
+## Federated sign-in (FedCM)
+
+"Sign in with Google" one-tap and the newer `navigator.credentials.get({identity})`
+flows render their account chooser as **native browser UI** — the button is a
+cross-origin IdP iframe and the chooser is browser chrome, so no synthetic click can
+reach either. That's a wall for agents logging into Google-SSO apps. Veil drives it
+over CDP's FedCM domain instead:
+
+```ts
+// Passive / one-tap (fires on load once you're signed in to the IdP):
+await page.enableFedCm();          // autoSelectFirst — picks account 0 for you
+await page.goto("https://app.example.com/");
+await page.waitForFedCmDialog();   // chooser intercepted + auto-selected
+await page.disableFedCm();
+
+// Active "Sign in with Google" button, one call:
+const account = await page.signInWithFedCm({ triggerRef: btn.ref });
+```
+
+`enableFedCm` also `resetCooldown`s (Chrome silently suppresses the dialog after
+repeated dismissals) and binds account selection to the page's own CDP session — pick
+the wrong target and the dialog, plus the page's `credentials.get()`, hangs forever.
+Enable it **on demand**, right before the sign-in: turning it on globally hangs any
+site that silently probes FedCM at load. End-to-end run against the canonical demo IdP:
+`bun run examples/fedcm.ts`.
+
+## No localhost / LAN leak (private-network block)
+
+Fingerprinters (iphey, pixelscan, …) don't read your process list — they can't.
+They **port-scan `127.0.0.1` from page JavaScript**, timing which local ports answer,
+and map open ports to software: VNC on `:5900`, an antidetect API on `:3001`, a dev
+server on `:3000`. That both fingerprints you *and* leaks your LAN to every site you
+visit. Most stealth stacks (nodriver, Camoufox, Playwright-stealth) don't stop it.
+
+Veil does, **on by default**. Every HTTP-family request (`fetch`/XHR/`EventSource`/
+`<img>`/`<script>`) from a page to a loopback or private (`127.0.0.0/8`, `10/8`,
+`172.16/12`, `192.168/16`, `::1`, `.localhost`) address is failed **uniformly and
+instantly** — the same error whether the port is open or closed — so a scan can't tell
+them apart and comes back empty. (That's the vector real detectors use; the `:3001`
+antidetect API and `:5900` VNC probes are plain HTTP.)
+
+```ts
+const browser = await Browser.launch();                 // block is on
+const browser = await Browser.launch({ blockPrivateNetwork: false }); // opt out
+// per-page, toggle at runtime:
+await page.blockPrivateNetwork();
+await page.unblockPrivateNetwork();
+```
+
+### Origin allowlist — confine the agent when you attach to a signed-in profile
+
+`Browser.connect()` attaches to a Chrome you already run, which is the only way to drive
+a logged-in profile — and it hands the agent **every session in that jar**. An agent told
+"check my order" can navigate to your mailbox, because it's the same browser. The
+allowlist is how a run says *where it may go* instead of being trusted to stay on task:
+
+```ts
+const browser = await Browser.connect("127.0.0.1:9222", { allowOrigins: ["github.com"] });
+// or per page, at runtime:
+await page.restrictOrigins(["github.com", "api.github.com"]);
+await page.unrestrictOrigins();
+```
+
+Any **document navigation** — top-level or sub-frame — to a host outside the list fails
+with `AccessDenied`. An entry matches its own host and subdomains on a dot boundary:
+`github.com` covers `api.github.com` and **not** `notgithub.com`.
+
+**What it does not do, stated plainly, because a security control that is over-trusted is
+worse than none:**
+
+- **Subresources are not gated.** A real page pulls images, fonts and scripts from other
+  origins; gating those breaks every site, and a guard that breaks sites gets switched
+  off. Cross-origin *reads* are already stopped by the same-origin policy — what this
+  closes is the agent navigating somewhere and acting as the signed-in user.
+- **Everything on an allowed origin is fully reachable**, as that user. Allowlisting
+  `github.com` grants the agent your GitHub.
+- **A beacon-style POST to an unlisted origin is not blocked** (it isn't a document).
+
+Still allowed by the private-network block: the agent's own top-level navigation to a
+private host (`page.goto("http://localhost:3000")`), and a localhost page loading its own
+localhost resources — only a **public page reaching a private host** is blocked. Known gaps (honest):
+raw **WebSocket** to a private host isn't interceptable via CDP's Fetch domain, so those
+fall back to Chrome's own Private Network Access (a timeout, not a uniform block); and
+exotic IP encodings (decimal/hex) aren't matched — real-world scanners use the canonical
+forms above.
+
+## Detection scorecard (measured, Chrome 148)
+
+Run it yourself: `bun run examples/detect.ts` (headless) or `VEIL_HEADFUL=1 bun run
+examples/detect.ts` (headful — Veil auto-starts its own Xvfb, no wrapper needed).
+
+Measured on an AMD Radeon (Renoir APU) host, real hardware GL via ANGLE/EGL:
+
+| Detector | Mode | sannysoft | CreepJS "headless" | CreepJS "stealth" |
+|---|---|---|---|---|
+| **Veil — headful + auto-Xvfb + real GPU** | recommended | **57/57** | **0%** | **0%** |
+| Veil — headless + real GPU | server/fast | **57/57** | 33% | 0% |
+| _(earlier: SwiftShader + heavy stealth)_ | _superseded_ | 57/57 | 67% | 20% |
+
+**Live targets** — the full [scrapingcourse.com](https://www.scrapingcourse.com/) challenge
+suite, reproducible with `bun run examples/scrapingcourse.ts` (residential IP, headful):
+
+| Target | Result |
+|---|---|
+| Antibot Challenge | **Bypassed** — "You bypassed the Antibot challenge" (~3s auto-solve) |
+| Cloudflare JS Challenge | **Bypassed** — "You bypassed the Cloudflare challenge" |
+| Cloudflare Antibot + login | **Bypassed** — cleared the wall, rendered the real login form |
+| Cloudflare **Turnstile** + login | **Passed** — managed Turnstile issues its token to real Chrome (a 700+ char `cf-turnstile-response`); the form submits. We don't *solve* a captcha — the real browser *earns* the token |
+| Demo suite — JS rendering, infinite scroll, pagination, table parsing, load-more, CSRF/login | all served clean |
+| Reddit — incl. its JS challenge | served clean (challenge auto-solved) |
+| Instagram — public profile | served clean |
+
+**12/12 cleared** on a clean residential IP. Two honest caveats, not hidden:
+Cloudflare's JS *interstitial* difficulty scales with **IP reputation** — hammer one IP
+and it escalates (that's IP rep, not a browser tell; use proxies at volume). And what we
+do **not** yet claim: an **interactive checkbox** reCAPTCHA/Turnstile that demands a human
+click, enterprise DataDome/Kasada, and high-volume behavioural trust on logged-in sessions.
+We test before we claim.
+
+**What moved the needle (each verified by re-running the suite):**
+1. **Real GPU, not SwiftShader.** `--use-gl=angle --use-angle=gl-egl` drives the actual
+   AMD GPU → an authentic, self-consistent WebGL fingerprint. No vendor spoof = no *lie*
+   for CreepJS's pixel-hash to catch.
+2. **Headful on a server.** Veil manages its own Xvfb display, so "headful" needs no
+   desktop. Eliminates the headless render quirks + tiny-screen tell (33% → 0%).
+3. **Slim, self-gating stealth.** The biggest surprise: the *stealth patches themselves*
+   were the "20% stealth" signal. A correctly-launched Chrome already reports
+   `webdriver === false` (the right human value — forcing `undefined` is *worse*), 5
+   plugins, a real `chrome` object. So each patch now fires only when the value is
+   genuinely anomalous; on healthy Chrome it's a no-op. Smaller surface = nothing to detect.
+
+## Use from an AI agent (MCP)
+
+Veil ships an MCP server (`src/mcp.ts`) — already wired into **persoje**
+(`~/.config/persoje/mcp.json`), exposing 50 tools, including the composite/batch
+primitives built for agent-operation velocity (`goto_and_wait`, `click_and_wait`,
+`extract_many`, `fill_form`, `batch` — collapse an 8-call flow to as few as 3, see
+[`docs/AGENT-GUIDE.md`](docs/AGENT-GUIDE.md) for the full usage guide + a runnable
+demo) and `verify_url` (ground-truth check outside the browser session, no
+cookies/login). Tool-execution failures come back as `isError` results (the
+model reads and self-corrects) rather than JSON-RPC errors. Verified
+end-to-end through persoje's own MCP client (discover → goto → snapshot). Any
+MCP host works.
+
+### Driving a heavy/virtualized SPA (Ancestry, Notion, Figma-style editors)
+
+`veil_snapshot` walks the accessibility tree and can stall or time out on a big virtualized
+page. Don't hand-roll a workaround per site — three tools already solve the pieces:
+
+- **Find and click without a snapshot ref:** `veil_click_text` (or `veil_dom` first if you
+  need to see what's there) — one in-page pass that pierces shadow DOM, scrolls the match
+  into view, and does a TRUSTED click at freshly-read coordinates. This is what replaced the
+  original ad-hoc `evaluate(getBoundingClientRect) → click_at` dance.
+- **Wait for the page to catch up:** `veil_wait_for` (poll a JS expression) or
+  `veil_wait_for_selector` (poll a CSS selector, optionally `visible:true`) — a patient wait
+  instead of a fixed sleep.
+- **Capture a download it triggers:** `veil_enable_downloads` once, then click, then
+  `veil_wait_for_download` — Chrome under CDP silently cancels downloads otherwise. Driving
+  from a script instead of MCP? `Page.downloadAfter(trigger, {dir})` composes all three calls
+  in the order that avoids the finish-before-you-await race.
+
+The package ships a `veil-mcp` bin, so an installed user can launch the server without a
+checkout — copy-pasteable into any MCP host:
+
+```jsonc
+{ "servers": { "veil": {
+  "command": "npx",
+  "args": ["-y", "-p", "@achamm/veilbrowser", "veil-mcp"],
+  "env": {}                          // headful + auto-Xvfb + real GPU (0% CreepJS).
+                                     // Set VEIL_HEADLESS=1 for the faster server mode.
+} } }
+```
+
+Smoke-check the bin (returns the tools list, no browser launched):
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | npx -y -p @achamm/veilbrowser veil-mcp
+```
+
+Local dev alternative (from a checkout, no build step):
+
+```jsonc
+{ "servers": { "veil": {
+  "command": "bun",
+  "args": ["run", "src/mcp.ts"]      // run from the repo root
+} } }
+```
+
+### Point it at a browser you already have open
+
+Set `VEIL_CDP_URL` and the server drives an existing Chrome instead of launching its own —
+the MCP counterpart of `Browser.connect()`, and the only way an agent gets at sessions a
+human signed into by hand:
+
+```jsonc
+{ "servers": { "veil": {
+  "command": "npx",
+  "args": ["-y", "-p", "@achamm/veilbrowser", "veil-mcp"],
+  "env": { "VEIL_CDP_URL": "127.0.0.1:9333" }
+} } }
+```
+
+```bash
+google-chrome --user-data-dir=/path/to/profile --remote-debugging-port=9333 about:blank &
+```
+
+It takes the tab that is already open rather than adding a blank one, and if that Chrome is
+unreachable it falls back to launching — an absent browser downgrades the server, it does not
+kill it. **Read [docs/SECURITY.md](docs/SECURITY.md) before attaching an agent to a profile
+that holds your real sessions:** the agent can drive every logged-in session in that profile, and veil_eval can read any cookie the page can.
+`VEIL_ALLOW_ORIGINS` limits where it can navigate; popups, subresources and veil_eval are not covered
+(docs/SECURITY.md).
+
+Server env for attaching safely:
+
+| Variable | Effect |
+| --- | --- |
+| `VEIL_CDP_URL` | Attach to this Chrome (`host:port`) instead of launching one. |
+| `VEIL_ATTACH_STRICT=1` | If the attach fails, return an error naming the fix instead of launching a second Chrome on the same profile. |
+| `VEIL_ALLOW_ORIGINS` | Comma-separated navigation allowlist (`github.com, example.org`). Applies to launched tabs and to the tabs that exist when the server attaches; a tab opened later is not covered. |
+| `VEIL_ALLOW_COOKIE_VALUES=1` | `veil_get_cookies` returns values. By default it lists names, domains and expiry only. |
+| `VEIL_TOOL_DEADLINE_MS` | Per-call deadline (default 45 s, longer for wait/batch tools). A call's own `timeout` arg extends it to `timeout` + 10 s. The deadline abandons a stalled call, it does not cancel it. |
+
+Cookie redaction covers `veil_get_cookies` only. **`veil_eval("document.cookie")` still returns
+every cookie that is not HttpOnly**, and any page script the agent runs can read them. Redaction keeps
+values out of casual tool output; it does not stop an agent that sets out to read them.
+
+Two failure modes this removes, both of which surface as a bare `CDP connection closed` that
+reads like a network fault:
+
+- **A Chrome already holds the `user-data-dir`.** Chrome refuses a second instance on a
+  locked profile, so the launch path could never work on exactly the profile worth driving.
+- **The browser quits while the server lives on.** A cached connection to a dead Chrome
+  fails every later call until the *server* is restarted. It now notices and reconnects.
+
+```bash
+bun run examples/mcp-attach-check.ts 127.0.0.1:9333 --recovery   # checks both, end to end
+```
+
+## Testing
+
+```bash
+bun run examples/selftest.ts   # end-to-end: launch, stealth, snapshot, interact
+bun run examples/detect.ts     # bot-detection scorecard (bot.sannysoft.com, etc.)
+bun test                       # unit tests (browser-launching ones skip under CI)
+
+DISPLAY=:98 python3 python/tests/test_smoke.py   # 21 checks, Python front end vs real Chrome
+```
+
+Unit tests cover:
+- **PRNG (`human.test.ts`)**: xorshift32 determinism, range/int bounds, keystroke cadence, mouse timing
+- **Snapshot refs (`snapshot.test.ts`)**: ref numbering (1-based, sequential on a fresh document), AX-tree filtering
+- **Origin allowlist (`origin-allowlist.test.ts`)**: host+subdomain matching on a dot boundary (`notgithub.com` rejected), navigation to an unlisted host blocked, subresources deliberately not gated, unrestricted when unset
+- **Ref identity across snapshots (`ref-cross-snapshot.test.ts`)**: a survivor keeps its ref when an element above it is removed or inserted; a removed element's ref fails loudly; a stale ref never actuates a *different* element; numbering resets on navigation
+- **CDP framing (`cdp-messages.test.ts`)**: JSON-RPC structure, sessionId routing, command/response correlation
+- **Private-network classifier (`private-host.test.ts`)**: loopback/RFC1918 vs public host detection (the block's decision)
+- **Lifecycle (`lifecycle.test.ts`, local only)**: launch/close, process-group reaping, profile-lock refusal
+- **Python parity (`python-parity.test.ts`)**: the Python front end's assembled stealth script is byte-identical to this one for every preset, the committed generated assets match what the generator emits now, and the injected scripts are pure ASCII (bun's transpiler corrupts non-ASCII inside `String.raw`)
+
+## Status
+
+**Working today** (verified against Chrome 148):
+- Zero-dep CDP runtime (raw WebSocket, flat session mode)
+- Stealth launch + page-script injection (`--disable-blink-features=AutomationControlled`)
+- UA/client-hint scrub (no "HeadlessChrome" token)
+- WebGL backend selection (hardware GPU via ANGLE/EGL, or SwiftShader + vendor masking)
+- AX-tree snapshot → stable integer refs for agent-friendly interaction
+- Human-like input: curved Bézier mouse paths, jittered keystroke timing, real CDP input
+- PNG screenshots (vision-model ready)
+- Headful-on-server via **auto-managed Xvfb** — "headful" with no desktop (best fingerprint scores)
+- **FedCM sign-in** — drives the native "Sign in with Google" / `credentials.get()` account chooser over CDP (`examples/fedcm.ts`)
+- **No localhost/LAN leak** — blocks visited sites from port-scanning your private network (on by default)
+- Clean process lifecycle — detached process groups + a reaper, so Ctrl-C/crash never orphans Chrome
+- MCP server (`src/mcp.ts`) — stdio JSON-RPC; persoje, Claude, any MCP host drives Veil natively
+
+**Roadmap toward production:**
+- [ ] Adversarial fingerprint suite — continuous scoring (CreepJS, sannysoft, Datadome demo)
+- [ ] `Runtime.enable`-leak hardening via isolated worlds for all eval
+- [ ] Profile + residential-proxy pools (the "Veil Cloud" layer)
+- [ ] Vision-based element grounding fallback (sparse AX-trees, canvas apps)
+- [ ] Response-body capture; session persistence & profile warm-up
+- [ ] Per-tab concurrency (many tabs, one socket — transport already supports it)
+
+## Who builds this
+
+Veil is built and maintained by **[HamTek](https://hamtek.dev)**.
+
+We build it because we need it. Our own agents drive real browsers all day — posting,
+scraping, filling in forms on sites that actively look for automation. The standard
+tools announce themselves (see the table above), so we wrote the layer that doesn't.
+Veil is what we run in production, every day.
+
+That's also the work we do for other people: agents that hold up once real users get
+to them, not just in the demo. If that's the problem you have, we're at
+[hamtek.dev](https://hamtek.dev).
+
+## License
+
+MIT.
