@@ -1,0 +1,51 @@
+name: Llama Auto-Issue Generator
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, labeled]
+
+permissions: read-all
+
+concurrency:
+  group: ai-issue-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze_code:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+
+    steps:
+      # Actions are pinned to full commit SHAs so a compromised or force-pushed
+      # upstream tag cannot change what this workflow executes.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --no-cache-dir PyGithub==2.5.0 requests==2.32.3
+
+      - name: Run AI Analysis
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_MODELS_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
+          ALLOWED_USER: ${{ secrets.ALLOWED_USER }}
+        run: python "trigger action/trigger_action.py"

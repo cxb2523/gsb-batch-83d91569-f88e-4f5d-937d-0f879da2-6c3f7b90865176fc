@@ -1,0 +1,34 @@
+name: Label Sync
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/labels.yml'
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+
+    steps:
+      # The previously referenced `EndBug/add-and-update-labels` repository no
+      # longer resolves (HTTP 404): upstream renamed the action to
+      # `EndBug/label-sync`, which accepts the same `token` / `config-file`
+      # inputs. Pinned to a full commit SHA.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Sync labels
+        uses: EndBug/label-sync@52074158190acb45f3077f9099fea818aa43f97a # v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: .github/labels.yml

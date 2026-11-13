@@ -1,0 +1,55 @@
+name: SAST CodeQL Scan
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  codeql:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The `matrix` context is only available inside a job. Declaring this
+    # concurrency group at workflow level makes GitHub reject the whole file
+    # ("Unrecognized named-value: 'matrix'"), so no job is ever created.
+    concurrency:
+      group: codeql-${{ github.ref }}-${{ matrix.language }}
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Only languages actually present in the repository. CodeQL's
+        # JavaScript analysis fails at the Analyze step when it finds no
+        # JS/TS sources, so the entry is kept out until such files exist —
+        # add `- javascript` (or `- javascript-typescript`) back at that point.
+        language:
+          - python
+
+    steps:
+      # Pinned to full commit SHAs; all three CodeQL steps must stay on the
+      # same revision.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
+        with:
+          category: /language:${{ matrix.language }}
