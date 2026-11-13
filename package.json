@@ -8,7 +8,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
-    "test": "node --test test/*.test.mjs",
+    "test": "node --import ./test/json-hooks.mjs --test test/*.test.mjs",
     "screenshots": "node scripts/screenshots.mjs"
   },
   "devDependencies": {

@@ -167,6 +167,8 @@ hour: 6
 ```
 L'événement est la veille de la collecte (« Sortir les poubelles ») ? Ajoute `calendar_offset: 1`. Avec un capteur, `interval` (jours entre deux collectes) sert à estimer le remplissage.
 
+Si le calendrier est illisible (erreur du service, délai dépassé, réponse inattendue), la carte garde les dates lues la dernière fois et affiche *Lecture du calendrier échouée, nouvel essai bientôt*. S'il n'a jamais pu être lu, la date reste inconnue au lieu d'être devinée depuis le prochain événement de l'entité. Les essais reprennent automatiquement avec un délai croissant (15 s, 30 s, 1 min… jusqu'à 15 min) et le message disparaît dès qu'une lecture réussit. Un calendrier lisible mais sans événement correspondant à `calendar_filter` affiche *Calendrier disponible, aucun événement correspondant*. Les événements sont mis en cache par entité et par jour : plusieurs cartes sur le même calendrier partagent une seule requête.
+
 ### Options
 La liste complète des options est dans le [README anglais](README.en.md#options) ; les noms d'options sont les mêmes. `language: fr` force le français, sinon la carte suit la langue du profil HA.
 

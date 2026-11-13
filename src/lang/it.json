@@ -16,6 +16,8 @@
     "fill": "Livello di riempimento",
     "unknown": "Data sconosciuta",
     "moved": "spostato (giorno festivo)",
+    "cal_read_error": "Lettura del calendario non riuscita, nuovo tentativo a breve",
+    "cal_no_events": "Calendario disponibile, nessun evento corrispondente",
     "warn_no_holiday_calendar": "Nessun calendario dei giorni festivi trovato: aggiungi l'integrazione Holiday",
     "warn_no_workday_calendar": "Nessun calendario dei giorni lavorativi trovato: aggiungi l'integrazione Workday"
   },

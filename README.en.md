@@ -202,6 +202,8 @@ hour: 6
 ```
 Is the event the day before pickup (“Put the bins out”)? Add `calendar_offset: 1`.
 
+When the calendar can't be read (service error, timeout or an unexpected response), the card keeps showing the dates it last read and displays a short *Calendar read failed, retrying soon* hint. If the calendar was never read successfully, the date stays unknown instead of being guessed from the entity's own next event. Retries happen automatically with a growing delay (15 s, 30 s, 1 min… up to 15 min) and the hint disappears as soon as a read succeeds. A calendar that reads fine but has no event matching `calendar_filter` shows *Calendar available, no matching event* instead. The events are cached per calendar entity and day, so several cards using the same calendar share one request.
+
 ### Two cards side by side (sections view)
 ```yaml
 type: grid

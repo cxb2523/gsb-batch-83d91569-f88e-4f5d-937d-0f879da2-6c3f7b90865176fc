@@ -16,6 +16,8 @@
     "fill": "Remplissage",
     "unknown": "Date inconnue",
     "moved": "décalée (jour férié)",
+    "cal_read_error": "Lecture du calendrier échouée, nouvel essai bientôt",
+    "cal_no_events": "Calendrier disponible, aucun événement correspondant",
     "warn_no_holiday_calendar": "Aucun calendrier de jours fériés : ajoute l'intégration Holiday",
     "warn_no_workday_calendar": "Aucun calendrier de jours ouvrés : ajoute l'intégration Workday"
   },

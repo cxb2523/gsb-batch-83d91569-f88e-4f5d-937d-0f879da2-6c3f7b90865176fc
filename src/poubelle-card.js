@@ -7,7 +7,7 @@ import { PB_IMG, PB_BINS, PB_BODY_RATIO, PB_WHEEL_HOLE, PB_BAG_COLORS, pbBagSvg,
 import { normalizeConfig, BINS, HOLIDAY_MODES, HOLIDAY_NEEDS_WORKDAY } from './normalize.js';
 import { buildRule, computeFixed, midnight, addDays, dayKey, daysBetween, parseDate, weekdayIdx } from './schedule.js';
 import { cardLanguage, haLanguage, resolveLang, t, weekdayName, shortDate } from './localize.js';
-import { findCalendar, calendarDays } from './calendars.js';
+import { findCalendar, calendarEntry, refreshCalendar, onCalendarChange, CAL_OK } from './calendars.js';
 import './editor.js';
 
 // Set by the release workflow from the release tag (v2.1.0 -> '2.1.0'); don't edit by hand.
@@ -16,7 +16,7 @@ const CONTENT_ALIASES = { ordures: 'rubbish', recyclables: 'recycling', verre: '
 /* internal state → CSS class (French class names kept so existing card-mod styles still apply) */
 const STATE_CLASS = { eve: 'veille', today: 'jour', emptied: 'videe', unknown: '', '': '' };
 
-class PoubelleCard extends HTMLElement {
+export class PoubelleCard extends HTMLElement {
   static getStubConfig() { return { bin: 'yellow', days: [1], hour: 9 }; }
   static getConfigElement() { return document.createElement('poubelle-card-editor'); }
 
@@ -37,10 +37,11 @@ class PoubelleCard extends HTMLElement {
     this._bag = c.container === 'bag';
     this._bulky = c.container === 'bulky';
     this._c = Object.assign({ hour: 9, interval: 7, scale: 0.62, headroom: 70, language: 'auto' }, c);
-    this._cal = null; this._calAt = 0; this._calKey = null;
-    this._hol = null; this._work = null; this._holKey = null;
+    this._cal = null; this._calEntry = null;
+    this._hol = null; this._work = null; this._holEntry = null; this._workEntry = null;
+    this._unsubscribe();
     this._build();
-    this._loadCal(true);
+    this._loadCal();
     this._loadHolidays();
   }
 
@@ -48,32 +49,45 @@ class PoubelleCard extends HTMLElement {
     const old = this._hass;
     this._hass = h;
     const e = this._c && this._c.entity;
-    if (e && (!old || old.states[e] !== h.states[e])) this._loadCal(true);
+    // a new state object for the calendar is a good moment to look again (at most every 30 min;
+    // the per-day cache otherwise serves it without a request)
+    if (this._calendarEntity() && old && old.states[e] !== h.states[e]) refreshCalendar(calendarEntry(h, e, 'events'));
+    if (e) this._loadCal();
     if (!old || old.entities !== h.entities) this._loadHolidays();
-    if (!old || (e && old.states[e] !== h.states[e]) || (old.locale?.language !== h.locale?.language)) this._render();
+    // render only when something the card shows may have changed (hass is pushed very often)
+    if (!old || !e || old.states[e] !== h.states[e] || old.locale?.language !== h.locale?.language) this._render();
   }
 
   /* calendar.* entity: HA's state only shows the next event (any title), so read the events of the
-     past and next 60 days (calendar.get_events) to filter by title and base the fill on the real last pickup. */
-  async _loadCal(force) {
+     past and next 60 days (calendar.get_events) to filter by title and base the fill on the real last pickup.
+     The fetch itself (one per entity and day, shared by all cards, with retries) lives in calendars.js. */
+  _loadCal() {
     const c = this._c, e = c && c.entity, h = this._hass;
     if (!h || !e || !e.startsWith('calendar.') || !h.callWS) return;
-    const key = `${e}|${[].concat(c.calendar_filter ?? []).join('|')}|${c.calendar_offset ?? 0}`;
-    if (!force && this._calKey === key && Date.now() - this._calAt < 30 * 60000) return;
-    this._calKey = key; this._calAt = Date.now();
-    const start = midnight(new Date()); start.setDate(start.getDate() - 60);
-    const end = new Date(start); end.setDate(end.getDate() + 121);
-    try {
-      const r = await h.callWS({ type: 'call_service', domain: 'calendar', service: 'get_events', target: { entity_id: e },
-        service_data: { start_date_time: start.toISOString(), end_date_time: end.toISOString() }, return_response: true });
-      const words = [].concat(c.calendar_filter ?? []).map(w => String(w).trim().toLowerCase()).filter(Boolean);
-      const evs = (r?.response?.[e]?.events || []).filter(ev => !words.length
-        || words.some(w => String(ev.summary || '').toLowerCase().includes(w)));
-      // all-day event: "2026-11-03" must stay a local date (otherwise UTC shifts it)
-      this._cal = evs.map(ev => addDays(parseDate(String(ev.start?.date || ev.start?.dateTime || ev.start || '')) || new Date(NaN), c.calendar_offset))
-        .filter(d => !isNaN(d));
-    } catch (err) { this._cal = null; } // service unavailable: fall back to the entity's start_time
-    this._render();
+    const entry = calendarEntry(h, e, 'events');
+    if (entry !== this._calEntry || (entry && !this._unsubCal)) {
+      this._unsubCal?.();
+      this._calEntry = entry;
+      if (entry) {
+        const unsub = onCalendarChange(entry, () => { this._applyCal(entry); this._render(); });
+        this._unsubCal = () => { unsub(); this._unsubCal = null; };
+      }
+    }
+    this._applyCal(entry);
+  }
+
+  /* Filter the events by title, shift them by calendar_offset and store the pickup days.
+     entry.data is only ever a successful payload: a failed read keeps the previous dates. */
+  _applyCal(entry) {
+    const c = this._c;
+    if (!c) return;
+    if (!entry || !entry.everOk) { this._cal = null; return; } // never read: no dates at all
+    const words = [].concat(c.calendar_filter ?? []).map(w => String(w).trim().toLowerCase()).filter(Boolean);
+    const evs = (entry.data || []).filter(ev => !words.length
+      || words.some(w => String(ev.summary || '').toLowerCase().includes(w)));
+    // all-day event: "2026-11-03" must stay a local date (otherwise UTC shifts it)
+    this._cal = evs.map(ev => addDays(parseDate(String(ev.start?.date || ev.start?.dateTime || ev.start || '')) || new Date(NaN), c.calendar_offset))
+      .filter(d => !isNaN(d));
   }
 
   /* Holiday and Workday calendars (configured, or found automatically from the entity registry). */
@@ -86,16 +100,30 @@ class PoubelleCard extends HTMLElement {
     };
   }
 
-  async _loadHolidays() {
+  _loadHolidays() {
     const h = this._hass; if (!h || !this._c) return;
     const { holiday, workday } = this._calendars();
-    const key = `${holiday}|${workday}|${dayKey(new Date())}`;
-    if (key === this._holKey) return;
-    this._holKey = key;
-    const [hol, work] = await Promise.all([calendarDays(h, holiday), calendarDays(h, workday)]);
-    if (key !== this._holKey) return; // config changed meanwhile
-    this._hol = hol; this._work = work;
-    this._render();
+    // entries are shared per entity and day: calling this again after midnight re-reads them
+    const holEntry = calendarEntry(h, holiday, 'days');
+    const workEntry = calendarEntry(h, workday, 'days');
+    if (holEntry !== this._holEntry || workEntry !== this._workEntry
+      || ((holEntry || workEntry) && !this._unsubHol)) {
+      this._unsubHol?.();
+      this._holEntry = holEntry; this._workEntry = workEntry;
+      const unsubs = [holEntry, workEntry].filter(Boolean)
+        .map(en => onCalendarChange(en, () => { this._loadHolidayData(); this._render(); }));
+      this._unsubHol = unsubs.length ? () => { unsubs.forEach(u => u()); this._unsubHol = null; } : null;
+    }
+    this._loadHolidayData();
+  }
+
+  _loadHolidayData() {
+    this._hol = this._holEntry?.data ?? null;
+    this._work = this._workEntry?.data ?? null;
+  }
+
+  _unsubscribe() {
+    this._unsubCal?.(); this._unsubHol?.();
   }
 
   getCardSize() { return 4; }
@@ -103,9 +131,10 @@ class PoubelleCard extends HTMLElement {
   connectedCallback() {
     clearInterval(this._t);
     this._t = setInterval(() => { this._loadCal(); this._loadHolidays(); this._render(); }, 60000);
+    this._loadCal(); this._loadHolidays();
     this._render();
   }
-  disconnectedCallback() { clearInterval(this._t); }
+  disconnectedCallback() { clearInterval(this._t); this._unsubscribe(); }
 
   _lang() { return cardLanguage(this._c?.language, this._hass); }
 
@@ -232,9 +261,12 @@ class PoubelleCard extends HTMLElement {
   _compute() {
     const c = this._c, now = new Date();
     const h = now.getHours() + now.getMinutes() / 60, H = Number(c.hour);
-    if (c.entity && this._cal) {
-      // calendar: real next and last pickups, as with a fixed schedule
-      const ks = this._cal.map(d => daysBetween(now, d));
+    if (c.entity && this._calendarEntity()) {
+      // The event list is authoritative once read: never guess from the entity's start_time, which
+      // hid "calendar unavailable" (and mismatched titles) behind a plausible date.
+      // A failed refresh keeps `_cal` (last successful events); only "never read" is unknown.
+      if (!this._calEntry?.everOk) return { state: 'unknown', n: null, fill: 0 };
+      const ks = (this._cal || []).map(d => daysBetween(now, d));
       const next = ks.filter(k => k > 0 || (k === 0 && h < H)).sort((a, b) => a - b)[0];
       const last = ks.filter(k => k < 0 || (k === 0 && h >= H)).sort((a, b) => b - a)[0];
       if (next === undefined) return { state: last === 0 ? 'emptied' : 'unknown', n: null, fill: 0 };
@@ -261,6 +293,28 @@ class PoubelleCard extends HTMLElement {
       isHoliday: d => extra.has(dayKey(d)) || !!hol?.has(dayKey(d)),
       isWorkday: d => (work ? work.has(dayKey(d)) : null),
     });
+  }
+
+  /* Is the configured entity a calendar read through calendar.get_events? */
+  _calendarEntity() {
+    const e = this._c?.entity;
+    return !!e && e.startsWith('calendar.') && !!this._hass?.callWS;
+  }
+
+  /* Warning shown when a calendar the card depends on could not be read
+     (as opposed to a calendar that is fine but has no matching event). */
+  _calendarWarning(lang) {
+    if (this._calendarEntity() && this._calEntry) {
+      const outcome = this._calEntry.outcome;
+      if (outcome && outcome !== CAL_OK) return t(lang, 'card.cal_read_error');
+      if (outcome === CAL_OK && !this._cal?.length) return t(lang, 'card.cal_no_events');
+      return '';
+    }
+    // schedule card: a Holiday / Workday calendar that failed to load is a read failure, not a
+    // missing integration (that case is reported by _warning below)
+    const failed = e => !!e && !!e.outcome && e.outcome !== CAL_OK;
+    if (failed(this._holEntry) || failed(this._workEntry)) return t(lang, 'card.cal_read_error');
+    return this._warning(lang);
   }
 
   /* Warning shown when the holiday mode needs a calendar that doesn't exist */
@@ -293,7 +347,7 @@ class PoubelleCard extends HTMLElement {
     q('.name').textContent = this._c.name || (this._bulky ? t(lang, 'card.bulky') : t(lang, `card.${this._bag ? 'bag' : 'bin'}.${this._bin}`));
     const p = q('.pill'); p.className = 'pill ' + cls; p.textContent = pill;
     q('.status').textContent = moved && state !== 'emptied' ? `${text} · ${t(lang, 'card.moved')}` : text;
-    const w = this._warning(lang), we = q('.warn'); we.textContent = w; we.hidden = !w;
+    const w = this._calendarWarning(lang), we = q('.warn'); we.textContent = w; we.hidden = !w;
     q('.ml').textContent = t(lang, 'card.fill');
     const f = state === 'emptied' ? 0 : (state === 'today' ? 1 : fill), pct = Math.round(f * 100);
     q('.pct').textContent = pct + ' %'; q('.bar i').style.width = pct + '%';

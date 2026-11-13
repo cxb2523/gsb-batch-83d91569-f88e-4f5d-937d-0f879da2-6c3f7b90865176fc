@@ -38,6 +38,8 @@
     "fill": "Popunjenost",
     "unknown": "Nepoznat datum",
     "moved": "pomereno (državni praznik)",
+    "cal_read_error": "Čitanje kalendara nije uspelo, novi pokušaj uskoro",
+    "cal_no_events": "Kalendar dostupan, nema odgovarajućeg događaja",
     "warn_no_holiday_calendar": "Nije pronađen kalendar praznika: dodajte integraciju Holiday",
     "warn_no_workday_calendar": "Nije pronađen kalendar radnih dana: dodajte integraciju Workday"
   },

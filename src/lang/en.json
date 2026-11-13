@@ -16,6 +16,8 @@
     "fill": "Fill level",
     "unknown": "Unknown date",
     "moved": "moved (public holiday)",
+    "cal_read_error": "Calendar read failed, retrying soon",
+    "cal_no_events": "Calendar available, no matching event",
     "warn_no_holiday_calendar": "No holiday calendar found: add the Holiday integration",
     "warn_no_workday_calendar": "No workday calendar found: add the Workday integration"
   },
