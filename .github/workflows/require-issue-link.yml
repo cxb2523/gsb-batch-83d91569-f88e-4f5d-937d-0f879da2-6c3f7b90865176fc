@@ -1,0 +1,35 @@
+name: Require Linked Issue
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+jobs:
+  check-issue-link:
+    name: Check PR links an issue
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Check for linked issue
+        uses: actions/github-script@v9
+        with:
+          script: |
+            if (context.actor === 'dependabot[bot]') {
+              core.info('Dependabot PR — skipping linked issue check.');
+              return;
+            }
+            const body = context.payload.pull_request.body || '';
+            const linked = /(?:closes|fixes|resolves)\s+#\d+/i.test(body);
+            if (!linked) {
+              core.setFailed(
+                'No linked issue found.\n' +
+                'Add one of the following to your PR description:\n' +
+                '  Closes #<number>\n' +
+                '  Fixes #<number>\n' +
+                '  Resolves #<number>\n\n' +
+                'PRs without a linked issue may be closed without review.'
+              );
+            } else {
+              core.info('PR body contains a linked issue.');
+            }

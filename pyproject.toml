@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "psxdata"
+version = "1.5.0"
+description = "Free Python library for Pakistan Stock Exchange (PSX) data — historical prices, live quotes, KSE-100, sectors, indices"
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["psx", "pakistan", "stock", "market", "finance", "data", "kse", "kse-100", "karachi", "stock-exchange", "ohlcv", "historical-data"]
+license = {file = "LICENSE.md"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "requests>=2.28",
+    "httpx>=0.24",
+    "beautifulsoup4>=4.11",
+    "lxml>=4.9",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "python-dateutil>=2.8",
+    "tqdm>=4.64",
+    "diskcache>=5.4",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+socks = [
+    "requests[socks]>=2.28",
+]
+dev = [
+    "pytest>=7",
+    "pytest-cov",
+    "pytest-asyncio",
+    "pytest-timeout>=2.1",
+    "httpx>=0.24",
+    "ruff>=0.4",
+    "mypy>=1.0",
+    "types-requests>=2.28",
+    "types-python-dateutil>=2.8",
+]
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.25",
+]
+
+[project.urls]
+Homepage = "https://github.com/psxdata/psxdata"
+Source = "https://github.com/psxdata/psxdata"
+"Bug Tracker" = "https://github.com/psxdata/psxdata/issues"
+Changelog = "https://github.com/psxdata/psxdata/blob/main/CHANGELOG.md"
+Documentation = "https://psxdata.mintlify.app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["psxdata*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests as hitting real PSX servers (deselect with '-m not integration')",
+    "reliability: marks tests as failure-mode tests using mocks",
+]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true

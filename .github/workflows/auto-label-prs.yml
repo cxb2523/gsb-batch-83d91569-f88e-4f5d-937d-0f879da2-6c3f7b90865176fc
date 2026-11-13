@@ -1,0 +1,199 @@
+name: Auto Label PRs
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft, edited]
+  pull_request_review:
+    types: [submitted, dismissed]
+  # check_suite is intentionally omitted: it fires in the base-repo context even
+  # for fork PRs, making it safe, but it does not reliably carry a PR number for
+  # all check suites. checks: labels are handled by the label-checks-via-run job.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  # ── PR open / edit / sync / draft toggle ───────────────────────────────────
+  label-pr:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Apply PR labels
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            if (pr.user.type === 'Bot') return;
+
+            async function ensureLabel(name, color, description = '') {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner, repo: context.repo.repo, name,
+                });
+              } catch (e) {
+                if (e?.status !== 404) throw e;
+                try {
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner, repo: context.repo.repo,
+                    name, color, description,
+                  });
+                } catch (e2) { if (e2?.status !== 422) throw e2; }
+              }
+            }
+
+            async function removeLabel(name) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: pr.number, name,
+                });
+              } catch (e) { if (e?.status !== 404) throw e; }
+            }
+
+            // Labels exclusively managed by this job
+            const MANAGED = new Set([
+              'review: needs-review', 'review: in-progress',
+              'needs: linked-issue', 'needs: template-fix',
+            ]);
+            const current = new Set(pr.labels.map(l => l.name).filter(l => MANAGED.has(l)));
+            const desired = new Set();
+
+            // Draft → in-progress, ready → needs-review
+            desired.add(pr.draft ? 'review: in-progress' : 'review: needs-review');
+
+            // Linked issue check — body is from the trusted base repo, safe to read
+            const body = pr.body || '';
+            if (!/(?:closes|fixes|resolves)\s+#\d+/i.test(body)) {
+              desired.add('needs: linked-issue');
+            }
+
+            // Required template sections
+            const REQUIRED = ['## Summary', '## Related Issue', '## Type of Change'];
+            if (REQUIRED.some(s => !body.includes(s))) {
+              desired.add('needs: template-fix');
+            }
+
+            for (const label of current) {
+              if (!desired.has(label)) await removeLabel(label);
+            }
+            const toAdd = [...desired].filter(l => !current.has(l));
+            if (toAdd.length > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: pr.number, labels: toAdd,
+              });
+              core.info(`Applied: ${toAdd.join(', ')}`);
+            }
+
+  # ── Review submitted / dismissed ───────────────────────────────────────────
+  label-review:
+    if: github.event_name == 'pull_request_review'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Update review labels
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const review = context.payload.review;
+            const pr = context.payload.pull_request;
+
+            async function removeLabel(name) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: pr.number, name,
+                });
+              } catch (e) {
+                if (e?.status === 403) {
+                  core.warning(`403 removing label '${name}' from PR #${pr.number} — skipping`);
+                  return;
+                }
+                if (e?.status !== 404) throw e;
+              }
+            }
+
+            const REVIEW_LABELS = [
+              'review: needs-review', 'review: in-progress',
+              'review: approved', 'review: changes-requested',
+              'status: ready-to-merge',
+            ];
+            for (const label of REVIEW_LABELS) await removeLabel(label);
+
+            const toAdd =
+              review.state === 'approved'          ? ['review: approved', 'status: ready-to-merge'] :
+              review.state === 'changes_requested' ? ['review: changes-requested'] :
+                                                     ['review: needs-review'];
+
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: pr.number, labels: toAdd,
+              });
+              core.info(`Review '${review.state}' → applied: ${toAdd.join(', ')}`);
+            } catch (e) {
+              if (e?.status === 403) {
+                core.warning(`403 adding review labels to PR #${pr.number} — skipping`);
+              } else { throw e; }
+            }
+
+  # ── CI checks result (via workflow_run, safe for forks) ────────────────────
+  label-checks:
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Update checks label on associated PRs
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const run = context.payload.workflow_run;
+
+            // Fetch PRs associated with this workflow run's head SHA
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const associated = prs.filter(pr => pr.head.sha === run.head_sha);
+            if (associated.length === 0) {
+              core.info('No open PRs found for this workflow run.');
+              return;
+            }
+
+            const label = run.conclusion === 'success' ? 'checks: passing' : 'checks: failing';
+            const remove = run.conclusion === 'success' ? 'checks: failing' : 'checks: passing';
+
+            for (const pr of associated) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: pr.number, name: remove,
+                });
+              } catch (e) { if (e?.status !== 404) throw e; }
+
+              try {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: pr.number, labels: [label],
+                });
+                core.info(`PR #${pr.number}: CI '${run.conclusion}' → applied '${label}'`);
+              } catch (e) {
+                if (e?.status === 403) {
+                  core.warning(`403 adding checks label to PR #${pr.number} — skipping`);
+                } else { throw e; }
+              }
+            }
