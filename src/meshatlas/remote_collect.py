@@ -4,6 +4,17 @@ Usage: ``ssh host python3 - < remote_collect.py`` (MeshAtlas feeds it through st
 It only reads ``docker ps``, ``docker stats``, ``systemctl list-units`` and ``/proc``. It never runs
 ``docker inspect`` and never reads environment variables, because those may contain secrets.
 Must stay compatible with Python 3.8 and use only the standard library.
+
+Besides the legacy fields (``ok``, ``sys``, ``docker``, ``services``, ``hostname``, ``elapsed`` ...),
+the JSON carries a ``collection`` object. Every collection item there has a verifiable outcome:
+
+* ``ok``          -- data was collected successfully
+* ``missing``     -- the required tool is not installed on this host
+* ``error``       -- the command failed (``error`` holds a truncated stderr/exception summary)
+* ``parse_error`` -- the command ran but its output could not be parsed
+* ``skipped``     -- the step was not attempted (e.g. ``docker stats`` with ``--no-stats``)
+
+The legacy fields keep their exact meaning and structure; ``collection`` is additive only.
 """
 import json
 import os
@@ -17,7 +28,19 @@ import time
 # --no-stats skips `docker stats`, the slowest part on hosts with many containers.
 WANT_STATS = "--no-stats" not in sys.argv
 
-out ={"ok": True, "ts": time.time(), "hostname": socket.gethostname(), "system": platform.system()}
+out = {"ok": True, "ts": time.time(), "hostname": socket.gethostname(), "system": platform.system()}
+
+# 127 is the conventional "command not found" shell exit code; we reuse it when the OS
+# raises FileNotFoundError so callers can tell a missing tool apart from a real failure.
+RC_MISSING = 127
+ERR_LIMIT = 200
+
+# Outcome statuses used inside the `collection` field.
+ST_OK = "ok"
+ST_MISSING = "missing"
+ST_ERROR = "error"
+ST_PARSE = "parse_error"
+ST_SKIPPED = "skipped"
 
 
 def run(cmd, timeout=30):
@@ -25,8 +48,23 @@ def run(cmd, timeout=30):
         r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            universal_newlines=True, timeout=timeout)
         return r.returncode, r.stdout, r.stderr
-    except Exception as exc:  # noqa: BLE001
-        return -1, "", str(exc)
+    except FileNotFoundError as exc:
+        return RC_MISSING, "", short_err(str(exc))
+    except Exception as exc:  # noqa: BLE001  (includes TimeoutExpired)
+        return -1, "", short_err(str(exc))
+
+
+def short_err(text):
+    """Collapse whitespace and truncate an error summary to ERR_LIMIT characters, like the old docker path did."""
+    text = " ".join((text or "").split())
+    return text[-ERR_LIMIT:] if len(text) > ERR_LIMIT else text
+
+
+def outcome(status, error=None):
+    return {"status": status, "error": error}
+
+
+OK_OUTCOME = outcome(ST_OK)
 
 
 def disk_usage(path):
@@ -159,20 +197,8 @@ def mac_system():
     return info
 
 
-def docker_info():
-    if not shutil.which("docker"):
-        return None
-    prefix = None
-    listing = ""
-    err = ""
-    for candidate in ([], ["sudo", "-n"]):
-        rc, so, se = run(candidate + ["docker", "ps", "-a", "--no-trunc", "--format", "{{json .}}"], 30)
-        if rc == 0:
-            prefix, listing = candidate, so
-            break
-        err = se.strip()[-200:]
-    if prefix is None:
-        return {"error": err or "docker ps failed", "containers": []}
+def docker_ps(listing):
+    """Parse `docker ps` JSON-lines output into the legacy container records."""
     containers = []
     for line in listing.splitlines():
         try:
@@ -205,64 +231,147 @@ def docker_info():
             "runningFor": item.get("RunningFor", ""),
             "createdAt": item.get("CreatedAt", ""),
         })
+    return containers
+
+
+def docker_stats(prefix):
+    """Run and parse `docker stats`; returns (stats_by_name, outcome).
+
+    A failing stats command never removes the containers collected by `docker ps`: the legacy
+    docker dict stays intact and only this outcome reports the missing statistics.
+    """
+    if not WANT_STATS:
+        return {}, outcome(ST_SKIPPED)
+    rc, so, se = run(prefix + ["docker", "stats", "--no-stream", "--format", "{{json .}}"], 60)
+    if rc == RC_MISSING:
+        return {}, outcome(ST_MISSING, "docker: command not found")
+    if rc != 0:
+        return {}, outcome(ST_ERROR, short_err(se) or "docker stats failed (exit {0})".format(rc))
     stats = {}
-    rc, so = 1, ""
-    if WANT_STATS:
-        rc, so, _ = run(prefix + ["docker", "stats", "--no-stream", "--format", "{{json .}}"], 60)
-    if rc == 0:
-        for line in so.splitlines():
-            try:
-                item = json.loads(line)
-            except ValueError:
-                continue
-            try:
-                cpu = float(item.get("CPUPerc", "0").rstrip("%") or 0)
-            except ValueError:
-                cpu = None
-            try:
-                memp = float(item.get("MemPerc", "0").rstrip("%") or 0)
-            except ValueError:
-                memp = None
-            stats[item.get("Name", "")] = {"cpu": cpu, "memPct": memp,
-                                           "mem": (item.get("MemUsage", "").split("/")[0]).strip()}
+    for line in so.splitlines():
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        try:
+            cpu = float(item.get("CPUPerc", "0").rstrip("%") or 0)
+        except ValueError:
+            cpu = None
+        try:
+            memp = float(item.get("MemPerc", "0").rstrip("%") or 0)
+        except ValueError:
+            memp = None
+        stats[item.get("Name", "")] = {"cpu": cpu, "memPct": memp,
+                                       "mem": (item.get("MemUsage", "").split("/")[0]).strip()}
+    if not stats and so.strip():
+        # the command reported success with non-empty output, but none of it was parseable
+        return {}, outcome(ST_PARSE, "could not parse docker stats output: " + short_err(so))
+    return stats, OK_OUTCOME
+
+
+def docker_info():
+    """Returns (legacy_docker_dict_or_None, ps_outcome, stats_outcome)."""
+    if not shutil.which("docker"):
+        return None, outcome(ST_MISSING, "docker is not installed"), outcome(ST_MISSING, "docker is not installed")
+    prefix = None
+    listing = ""
+    err = ""
+    for candidate in ([], ["sudo", "-n"]):
+        rc, so, se = run(candidate + ["docker", "ps", "-a", "--no-trunc", "--format", "{{json .}}"], 30)
+        if rc == 0:
+            prefix, listing = candidate, so
+            break
+        if rc == RC_MISSING:
+            err = "docker: command not found"
+            break
+        err = short_err(se)
+    if prefix is None:
+        # docker ps failed: containers stay empty and the reason is recorded separately from stats
+        return ({"error": err or "docker ps failed", "containers": []},
+                outcome(ST_ERROR, err or "docker ps failed"),
+                outcome(ST_SKIPPED, "skipped because docker ps failed"))
+    if listing.strip():
+        containers = docker_ps(listing)
+        if not containers:
+            return ({"error": "could not parse docker ps output", "containers": []},
+                    outcome(ST_PARSE, "could not parse docker ps output: " + short_err(listing)),
+                    outcome(ST_SKIPPED, "skipped because docker ps output was unparseable"))
+    else:
+        containers = []
+    stats, stats_oc = docker_stats(prefix)
     for c in containers:
         s = stats.get(c["name"])
         if s:
             c.update(s)
-    return {"containers": containers, "sudo": bool(prefix), "stats": bool(stats)}
+    return {"containers": containers, "sudo": bool(prefix), "stats": bool(stats)}, OK_OUTCOME, stats_oc
+
+
+def systemd_scope(scope, extra):
+    """Collect one systemctl scope; returns (units, outcome) with its own independent status."""
+    rc, so, se = run(["systemctl"] + extra + ["list-units", "--type=service", "--all",
+                                              "--no-legend", "--plain", "--no-pager"], 15)
+    if rc == RC_MISSING:
+        return [], outcome(ST_MISSING, "systemctl: command not found")
+    if rc != 0:
+        return [], outcome(ST_ERROR, short_err(se) or "systemctl {0} list-units failed (exit {1})".format(scope, rc))
+    units, malformed = [], 0
+    for line in so.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 4:
+            if line.strip():
+                malformed += 1
+            continue
+        unit, load, active, sub = parts[:4]
+        desc = parts[4] if len(parts) > 4 else ""
+        if load == "not-found":
+            continue
+        if active not in ("active", "failed", "activating", "reloading"):
+            continue
+        units.append({"unit": unit, "active": active, "sub": sub, "desc": desc[:80], "scope": scope})
+    if not units and malformed:
+        return [], outcome(ST_PARSE,
+                           "could not parse systemctl {0} list-units output ({1} malformed line(s))".format(
+                               scope, malformed))
+    return units, OK_OUTCOME
 
 
 def systemd_info():
+    """Returns (legacy_units_list_or_None, {scope: outcome}).
+
+    system and user scopes are independent: if only one succeeds, services still carries the
+    successful scope's units and the two scopes record their own status.
+    """
     if not shutil.which("systemctl"):
-        return None
+        missing = outcome(ST_MISSING, "systemctl is not installed")
+        return None, {"system": missing, "user": missing}
+    outcomes = {}
     units = []
     for scope, extra in (("system", []), ("user", ["--user"])):
-        rc, so, _ = run(["systemctl"] + extra + ["list-units", "--type=service", "--all",
-                                                 "--no-legend", "--plain", "--no-pager"], 15)
-        if rc != 0:
-            continue
-        for line in so.splitlines():
-            parts = line.split(None, 4)
-            if len(parts) < 4:
-                continue
-            unit, load, active, sub = parts[:4]
-            desc = parts[4] if len(parts) > 4 else ""
-            if load == "not-found":
-                continue
-            if active not in ("active", "failed", "activating", "reloading"):
-                continue
-            units.append({"unit": unit, "active": active, "sub": sub, "desc": desc[:80], "scope": scope})
-    return units
+        scope_units, scope_oc = systemd_scope(scope, extra)
+        outcomes[scope] = scope_oc
+        units.extend(scope_units)
+    return units, outcomes
 
 
+collection = {}
 try:
     if out["system"] == "Darwin":
         out["sys"] = mac_system()
     else:
         out["sys"] = linux_system()
+    collection["system"] = OK_OUTCOME
 except Exception as exc:  # noqa: BLE001
     out["sys"] = {"error": str(exc)}
-out["docker"] = docker_info()
-out["services"] = systemd_info()
+    collection["system"] = outcome(ST_ERROR, short_err(str(exc)) or "system information collection failed")
+
+docker_data, docker_ps_oc, docker_stats_oc = docker_info()
+out["docker"] = docker_data
+collection["docker"] = {"ps": docker_ps_oc, "stats": docker_stats_oc}
+
+services, systemd_oc = systemd_info()
+out["services"] = services
+collection["systemd"] = systemd_oc
+
+out["collection"] = collection
 out["elapsed"] = round(time.time() - out["ts"], 2)
 print(json.dumps(out, ensure_ascii=False))
