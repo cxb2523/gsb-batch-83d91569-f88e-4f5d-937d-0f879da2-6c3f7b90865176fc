@@ -9,11 +9,24 @@ import * as cheerio from 'cheerio';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { SettingsService } from '../settings/settings.service';
 import type {
+  DeepDiveBatchResult,
+  DeepDiveNotStartedRecord,
+  DeepDiveQuestionRecord,
+  DeepDiveScrapeResult,
+  DeepDiveScraper,
   StackOverflowQuestionDetail,
 } from './decodo.types';
 
 function cleanText(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Extract the numeric Stack Overflow question id from a URL containing
+ * `/questions/<digits>`. Returns the original URL when no id can be extracted.
+ */
+export function extractQuestionId(url: string): string {
+  return url.match(/\/questions\/(\d+)/)?.[1] ?? url;
 }
 
 function parseMetric(value: string): number {
@@ -71,7 +84,9 @@ export class DecodoService implements OnModuleDestroy {
     const server = `http://${decodoProxyHost}:${decodoProxyPort}`;
     const channel = String(process.env.PLAYWRIGHT_CHANNEL ?? 'chrome').trim();
 
-    this.logger.log(`Launching headless Playwright browser via Decodo residential proxy ${decodoProxyHost}:${decodoProxyPort}`);
+    this.logger.log(
+      `Launching headless Playwright browser via Decodo residential proxy ${decodoProxyHost}:${decodoProxyPort}`,
+    );
 
     return chromium.launch({
       headless: true,
@@ -133,7 +148,9 @@ export class DecodoService implements OnModuleDestroy {
       context = await browser.newContext();
       const page = await context.newPage();
 
-      this.logger.log(`Deep dive ${url.match(/\/questions\/(\d+)/)?.[1] ?? url}: Playwright residential attempt ${attempt}/${MAX_ATTEMPTS}`);
+      this.logger.log(
+        `Deep dive ${extractQuestionId(url)}: Playwright residential attempt ${attempt}/${MAX_ATTEMPTS}`,
+      );
 
       const response = await page.goto(url, {
         waitUntil: 'domcontentloaded',
@@ -193,14 +210,29 @@ export class DecodoService implements OnModuleDestroy {
   }
 
   async scrapeQuestion(url: string, signal?: AbortSignal): Promise<StackOverflowQuestionDetail> {
+    const { detail } = await this.scrapeQuestionWithAttempts(url, signal);
+    return detail;
+  }
+
+  /**
+   * Run the existing single-question retry loop (at most {@link MAX_ATTEMPTS}
+   * fresh-context browser attempts, {@link RETRY_DELAY_MS} between attempts) and
+   * report which attempt succeeded. The retry behavior itself is unchanged from
+   * {@link scrapeQuestion}.
+   */
+  private async scrapeQuestionWithAttempts(
+    url: string,
+    signal?: AbortSignal,
+  ): Promise<DeepDiveScrapeResult> {
     let lastError: unknown;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       try {
-        return await this.scrapeQuestionAttempt(url, attempt, signal);
+        const detail = await this.scrapeQuestionAttempt(url, attempt, signal);
+        return { detail, attempts: attempt };
       } catch (error) {
         lastError = error;
-        const questionId = url.match(/\/questions\/(\d+)/)?.[1] ?? url;
+        const questionId = extractQuestionId(url);
         this.logger.warn(
           `Deep dive attempt ${attempt}/${MAX_ATTEMPTS} failed for ${questionId}: ` +
             `${error instanceof Error ? error.message : String(error)}`,
@@ -218,6 +250,77 @@ export class DecodoService implements OnModuleDestroy {
     );
   }
 
+  /**
+   * Deep dive a batch of Stack Overflow question URLs sequentially, in input
+   * order, reusing the existing single-question scrape logic. A failing
+   * question never interrupts the remaining questions.
+   *
+   * - If the signal is already aborted, the call rejects immediately and no
+   *   question is scraped.
+   * - If the signal fires during the batch, in-flight work settles, already
+   *   completed records are kept, and every not-yet-started question lands in
+   *   `notStarted` instead of being scraped.
+   */
+  async scrapeQuestions(
+    urls: string[],
+    signal?: AbortSignal,
+    scraper: DeepDiveScraper = (url, abortSignal) =>
+      this.scrapeQuestionWithAttempts(url, abortSignal),
+  ): Promise<DeepDiveBatchResult> {
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error('Request was cancelled');
+    }
+
+    const records: DeepDiveQuestionRecord[] = [];
+    const notStarted: DeepDiveNotStartedRecord[] = [];
+    let succeeded = 0;
+    let failed = 0;
+
+    for (const url of urls) {
+      if (signal?.aborted) {
+        notStarted.push({
+          url,
+          questionId: extractQuestionId(url),
+          outcome: 'not_started',
+          reason:
+            signal.reason instanceof Error
+              ? signal.reason.message
+              : String(signal.reason ?? 'Request was cancelled'),
+        });
+        continue;
+      }
+
+      try {
+        const { detail, attempts } = await scraper(url, signal);
+        records.push({
+          url,
+          questionId: extractQuestionId(url),
+          outcome: 'success',
+          attempts,
+          detail,
+        });
+        succeeded += 1;
+      } catch (error) {
+        records.push({
+          url,
+          questionId: extractQuestionId(url),
+          outcome: 'failure',
+          attempts: MAX_ATTEMPTS,
+          reason: error instanceof Error ? error.message : String(error ?? 'unknown error'),
+        });
+        failed += 1;
+      }
+    }
+
+    return {
+      records,
+      notStarted,
+      total: urls.length,
+      succeeded,
+      failed,
+    };
+  }
+
   private parseQuestionPage(html: string, url: string): StackOverflowQuestionDetail {
     const $ = cheerio.load(html);
     const question = $('#question, .question').first();
@@ -225,7 +328,9 @@ export class DecodoService implements OnModuleDestroy {
       throw new ServiceUnavailableException('Could not parse the Stack Overflow question page.');
     }
 
-    const id = String(question.attr('data-questionid') ?? question.attr('data-post-id') ?? '').trim();
+    const id = String(
+      question.attr('data-questionid') ?? question.attr('data-post-id') ?? '',
+    ).trim();
     const title = cleanText($('h1 a.question-hyperlink, h1').first().text());
     const body = cleanText(question.find('.js-post-body, .s-prose').first().text());
     const score = parseMetric(question.find('.js-vote-count').first().text());
@@ -239,10 +344,14 @@ export class DecodoService implements OnModuleDestroy {
         const root = $(element);
         return {
           id: String(root.attr('data-answerid') ?? root.attr('data-post-id') ?? ''),
-          author: cleanText(root.find('.user-details a, .s-user-card--link a').last().text()) || 'unknown',
+          author:
+            cleanText(root.find('.user-details a, .s-user-card--link a').last().text()) ||
+            'unknown',
           body: cleanText(root.find('.js-post-body, .s-prose').first().text()),
           score: parseMetric(root.find('.js-vote-count').first().text()),
-          isAccepted: root.hasClass('accepted-answer') || root.find('.js-accepted-answer-indicator').length > 0,
+          isAccepted:
+            root.hasClass('accepted-answer') ||
+            root.find('.js-accepted-answer-indicator').length > 0,
         };
       })
       .get()
@@ -264,12 +373,16 @@ export class DecodoService implements OnModuleDestroy {
       .filter((comment) => comment.body);
 
     const acceptedAnswers = answers.filter((answer) => answer.isAccepted);
-    const uniqueAnswerAuthorCount = new Set(answers.map((answer) => answer.author).filter((author) => author && author !== 'unknown')).size;
+    const uniqueAnswerAuthorCount = new Set(
+      answers.map((answer) => answer.author).filter((author) => author && author !== 'unknown'),
+    ).size;
 
     return {
       id,
       title,
-      author: cleanText(question.find('.user-details a, .s-user-card--link a').last().text()) || 'unknown',
+      author:
+        cleanText(question.find('.user-details a, .s-user-card--link a').last().text()) ||
+        'unknown',
       score,
       answerCount: answers.length,
       viewCount: 0,

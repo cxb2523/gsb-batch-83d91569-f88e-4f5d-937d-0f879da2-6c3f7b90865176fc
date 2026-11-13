@@ -31,6 +31,7 @@ The existing Forum Scraper infrastructure is retained, but the Reddit-specific d
 Runs headless Playwright through Decodo rotating residential proxies and contains Stack Overflow-specific HTML parsing.
 
 - `scrapeQuestion()` opens a fresh browser context, waits for Cloudflare challenges to resolve, and retries failed pages up to three times.
+- `scrapeQuestions()` runs the same single-question logic sequentially over a batch of URLs. One question's failure never interrupts the others; each record reports its outcome, the attempt that succeeded (or 3 on failure), and the existing error message. An `AbortSignal` rejects before any scraping when already aborted, and questions not yet started are reported as `not_started` when the signal fires mid-batch.
 - Success is determined by usable Stack Overflow question DOM content rather than the initial HTTP status.
 - The parser extracts question text, tags, score, answers, and visible comments from the rendered page.
 
