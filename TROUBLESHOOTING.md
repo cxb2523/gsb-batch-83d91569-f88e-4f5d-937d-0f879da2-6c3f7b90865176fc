@@ -34,6 +34,34 @@ into its life (recon, 2026-09-23). A redirect to potterybarn.co.uk is never
 followed, and it rotates to a freshly minted session. If every rotation
 lands there, check that the proxy login carries `-region-us`.
 
+The sidecar says exactly how much of the run was lost to it:
+
+* `transport_facts.geo_redirect_pages` — page numbers whose response was a
+  hop off the US store at any attempt, including ones a rotation then
+  answered. `states` holds the state each page ENDED in, so a page that
+  recovered reads `product` there; `attempt_states` keeps every attempt in
+  order (`["geo_redirect", "product"]`), which is where the refusal is still
+  visible.
+* `transport_facts.geo_redirect_failures` — pages that were geo-redirects
+  when the exits ran out, a subset of `refused_pages`. The stop reason keys
+  on these, so a run whose only other failure was a plain 403 reports
+  `blocked`, not `geo_redirect`.
+* `transport_facts.rotations` and `transport_facts.exits_used` — how many
+  exit changes were made and how many distinct masked exits were used.
+  `exit_sequence` is the per-attempt list, so a two-exit pool rotated three
+  times shows `rotations: 3` over two distinct exits. The last rotation is
+  not recorded when nothing was sent through it.
+* `transport_facts.offsite_targets` — one `{page, page_url, status, target,
+  exit}` entry per hop, so a run that burned three exits on one page shows
+  three entries with three different exits. Nothing was fetched from those
+  targets, so no body of theirs is stored anywhere.
+
+If every exit redirects away, the run stops with `stop_reason: geo_redirect`
+and exit 3 — not `completed`. Rows gathered before that are written with
+`status: partial` (exit 6); with no rows at all only
+`<out>.latest_attempt.meta.json` is written.
+
+
 ## Exit 5
 
 Our own plumbing failed, and the site never answered:

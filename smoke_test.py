@@ -88,6 +88,20 @@ def test_page_states():
     eq("state: a redirect to the UK store is a refusal, whatever the body",
        P.detect_page_state(fixture("product_delaney.html"), status=200,
                            url="https://www.potterybarn.co.uk/"), "geo_redirect")
+    # The transports that recognise a hop and do NOT fetch it mark the
+    # response instead; the body is empty and the URL need not be the UK
+    # host, so the mark alone has to carry the state. See
+    # tests/test_geo_redirect.py for the three end-to-end shapes.
+    eq("state: an UNFETCHED off-store hop is a geo redirect, body or no body",
+       P.detect_page_state("", status=302, url="https://www.potterybarn.co.uk/x",
+                           offsite_redirect=True), "geo_redirect")
+    eq("state: ...whatever host it named",
+       P.detect_page_state("", status=302, url="https://example.com/x",
+                           offsite_redirect=True), "geo_redirect")
+    eq("state: ...and it wins over a product-shaped body",
+       P.detect_page_state(fixture("product_delaney.html"), status=200,
+                           url="https://www.potterybarn.com/products/x/",
+                           offsite_redirect=True), "geo_redirect")
     eq("state: an EMPTY document is our plumbing, not the site (selenium, stripped proxy credential)",
        P.detect_page_state("<html><head></head><body></body></html>"), "transport_error")
     eq("state: ...but an empty body under a 403 is still the site refusing",

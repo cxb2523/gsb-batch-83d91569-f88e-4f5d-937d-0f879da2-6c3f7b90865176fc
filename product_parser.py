@@ -247,7 +247,8 @@ def page_shape(html: str) -> Dict[str, Any]:
 
 def detect_page_state(html: str, *, status: Optional[int] = None,
                       url: Optional[str] = None,
-                      headers: Optional[Dict[str, str]] = None) -> str:
+                      headers: Optional[Dict[str, str]] = None,
+                      offsite_redirect: bool = False) -> str:
     """One of product, listing, hub, geo_redirect, captcha, blocked, empty,
     or transport_error (an empty document: nothing was served at all).
 
@@ -256,7 +257,11 @@ def detect_page_state(html: str, *, status: Optional[int] = None,
     1. **geo_redirect** first. A non-US exit is 302'd to potterybarn.co.uk —
        a different store in GBP. Following it blindly silently changes WHICH
        STORE is being scraped, so a final URL on that host is a refusal,
-       whatever the page says.
+       whatever the page says. `offsite_redirect` says the same thing for a
+       transport that FOLLOWED the URL rather than the bytes: it marks a
+       hop that was recognised and deliberately NOT fetched, so an unfetched
+       hop to any host (the UK store, a sibling brand) reads as this state
+       even with an empty body and no UK host in the URL.
     2. **product** — a `productDetails` node with a `groupId`. A marker on a
        page whose product is already there guards nothing.
     3. **captcha** before block: a captcha is payable, a block is not.
@@ -270,6 +275,8 @@ def detect_page_state(html: str, *, status: Optional[int] = None,
     `headers` is accepted for signature parity with the family and unused:
     the branded 403 is told apart by status and text, not by a header.
     """
+    if offsite_redirect:
+        return "geo_redirect"
     if url and UK_HOST_MARKER in (urlparse(url).hostname or ""):
         return "geo_redirect"
     text = strip_extension_scripts(html or "")

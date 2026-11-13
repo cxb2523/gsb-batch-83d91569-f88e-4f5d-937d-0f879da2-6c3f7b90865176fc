@@ -39,8 +39,16 @@ stdin via `--config -`, so `ps` sees no password.
 Redirects are followed by hand, and only inside www.potterybarn.com. A
 non-US exit is redirected to potterybarn.co.uk — a different store in GBP —
 and curl's own `--location` would fetch it and hand us a UK page. A hop off
-the US host is returned unfetched and classified `geo_redirect`, which is a
-refusal of THIS exit and rotates to another.
+the US host is returned unfetched, marked `offsite_redirect`, and classified
+`geo_redirect`: a refusal of THIS exit that rotates to another. The mark is
+carried by the response itself rather than inferred from the landing URL, so
+a hop to any other host (a sibling brand, say) is refused the same way and
+the UK page's body is never parsed, dumped or written into the output.
+
+A redirect chain inside the store is followed up to MAX_REDIRECTS hops; one
+more hop raises instead of silently returning the truncated chain. Same-store
+is decided on the HOSTNAME only (case-insensitive, query string ignored), so
+`https://WWW.POTTERYBARN.COM/products/x/?N=1` is still the same store.
 """
 
 from __future__ import annotations
@@ -128,15 +136,23 @@ class ProxyAuthError(CurlError):
 
 
 class _Response:
-    __slots__ = ("status_code", "text", "url", "headers", "redirect_to")
+    __slots__ = ("status_code", "text", "url", "headers", "redirect_to",
+                 "offsite_redirect")
 
     def __init__(self, status_code: int, text: str, url: str,
-                 redirect_to: Optional[str] = None):
+                 redirect_to: Optional[str] = None,
+                 offsite_redirect: bool = False):
         self.status_code = status_code
         self.text = text
         self.url = url
         self.headers: Dict[str, str] = {}
         self.redirect_to = redirect_to
+        # True when `url` is a redirect's TARGET on another host and nothing
+        # was fetched from it. The body is empty by construction; carrying
+        # the fact on the response keeps a hop to any off-store host
+        # (potterybarn.co.uk, a sibling brand) classified the same way, and
+        # keeps the classifier from having to re-derive it from the URL.
+        self.offsite_redirect = offsite_redirect
 
 
 def _mask_text(text: str) -> str:
@@ -144,7 +160,16 @@ def _mask_text(text: str) -> str:
 
 
 def _same_store(url: str) -> bool:
-    return (urlparse(url).hostname or "").lower() in P.HOSTS
+    """Is `url` on the US store? Decided on the HOSTNAME alone.
+
+    The hostname is compared case-insensitively (urlparse lowercases it
+    already, the `.lower()` keeps this independent of that) and a trailing
+    root dot is ignored; the path, the query string and the port have no say.
+    A same-store redirect may therefore carry `?N=` facets or land on
+    `https://WWW.POTTERYBARN.COM/...` and is still followed.
+    """
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    return host in P.HOSTS
 
 
 class CurlSession:
@@ -220,8 +245,11 @@ class CurlSession:
                 return response
             target = urljoin(current, response.redirect_to)
             if not _same_store(target):
-                # Returned UNFETCHED: see the module docstring.
-                return _Response(response.status_code, "", target)
+                # Returned UNFETCHED: see the module docstring. The mark is
+                # on the response, so the state is `geo_redirect` whatever
+                # host the hop named, and its body is never read.
+                return _Response(response.status_code, "", target,
+                                 redirect_to=target, offsite_redirect=True)
             current = target
         raise CurlError("more than %d redirects from %s" % (MAX_REDIRECTS, url))
 
@@ -248,7 +276,8 @@ class _RequestsSession:
             if allow_redirects and 300 <= r.status_code < 400 and location:
                 target = urljoin(current, location)
                 if not _same_store(target):
-                    return _Response(r.status_code, "", target)
+                    return _Response(r.status_code, "", target,
+                                     redirect_to=target, offsite_redirect=True)
                 current = target
                 continue
             out = _Response(r.status_code, r.text, r.url)
@@ -283,12 +312,14 @@ def build_session(proxy: Optional[str], client: Optional[str] = None):
 
 class FetchResult:
     __slots__ = ("requested_url", "final_url", "status", "html", "attempts",
-                 "elapsed_ms", "error", "exit_used")
+                 "elapsed_ms", "error", "exit_used", "offsite_redirect",
+                 "attempt_states", "attempt_exits", "offsite_hops")
 
     def __init__(self, requested_url: str, final_url: str = "",
                  status: Optional[int] = None, html: str = "", attempts: int = 0,
                  elapsed_ms: int = 0, error: Optional[str] = None,
-                 exit_used: Optional[str] = None):
+                 exit_used: Optional[str] = None,
+                 offsite_redirect: bool = False):
         self.requested_url = requested_url
         self.final_url = final_url or requested_url
         self.status = status
@@ -297,31 +328,62 @@ class FetchResult:
         self.elapsed_ms = elapsed_ms
         self.error = error
         self.exit_used = exit_used
+        # Set when the last hop went to another host and was NOT fetched:
+        # the body is empty and the status is the redirect's own.
+        self.offsite_redirect = offsite_redirect
+        # The state and the masked exit of EVERY attempt, oldest first. A
+        # geo-redirect that was retried away is not the page's final state,
+        # so the final `state` alone would lose the evidence that the exit
+        # was refused at all — and the exit list must name only exits that
+        # actually issued a request.
+        self.attempt_states: List[str] = []
+        self.attempt_exits: List[Optional[str]] = []
+        # Every off-site hop made while fetching this page, with the exit
+        # that made it: `{"status", "target", "exit"}`. A retried page can
+        # hop off more than once, and all of those exits refused the page.
+        self.offsite_hops: List[Dict[str, Any]] = []
 
     @property
     def state(self) -> str:
         if self.error and self.status is None:
             return "transport_error"
-        return P.detect_page_state(self.html, status=self.status, url=self.final_url)
+        return P.detect_page_state(self.html, status=self.status,
+                                   url=self.final_url,
+                                   offsite_redirect=self.offsite_redirect)
 
 
 def fetch(session, url: str, timeout: int, *, retries: int = 2,
-          retry_delay: float = 2.0, log=None, rotate=None) -> Tuple[FetchResult, Any]:
+          retry_delay: float = 2.0, log=None, rotate=None,
+          exit_label: Optional[str] = None) -> Tuple[FetchResult, Any]:
     """One page with bounded retries. Returns `(result, session_now_in_use)`.
 
     A refusal (`blocked`, `geo_redirect`) asks `rotate()` for a DIFFERENT
     exit; a transport fault (timeout, reset, TLS error at the exit) tries the
     same exit again. Those want opposite responses.
+
+    `exit_label` is the masked exit `session` is currently using (the caller
+    holds it, because a rotation hands out a new one); it is stamped onto
+    every attempt so the sidecar can name WHICH exit refused a page.
     """
     started = time.time()
     last: Optional[FetchResult] = None
     attempts = max(1, retries + 1)
-    exit_label = None
+    attempt_states: List[str] = []
+    attempt_exits: List[Optional[str]] = []
+    hops: List[Dict[str, Any]] = []
     for attempt in range(1, attempts + 1):
+        # The exit this attempt's request goes through. Read BEFORE any
+        # rotation below, so the attempt is stamped with the exit that
+        # actually issued it, never the one a later rotation handed out.
+        used_exit = exit_label
         if proxy_meter.exceeded():
             # --proxy-budget-mb: no further request through the proxy.
+            if last is not None:
+                last.attempt_states = attempt_states
+                last.attempt_exits = attempt_exits
+                last.offsite_hops = hops
             return (last or FetchResult(url, error=proxy_meter.STOP_REASON, attempts=attempt - 1,
-                                        exit_used=exit_label)), session
+                                        exit_used=used_exit)), session
         try:
             response = session.get(url, timeout=timeout, allow_redirects=True)
         except ProxyAuthError:
@@ -329,29 +391,56 @@ def fetch(session, url: str, timeout: int, *, retries: int = 2,
         except Exception as exc:  # noqa: BLE001 - curl and requests raise widely
             last = FetchResult(url, error="%s: %s" % (type(exc).__name__,
                                                       _mask_text(str(exc))),
-                               attempts=attempt, exit_used=exit_label,
+                               attempts=attempt, exit_used=used_exit,
                                elapsed_ms=int((time.time() - started) * 1000))
             if log:
                 log("  attempt %d/%d failed: %s" % (attempt, attempts, last.error))
         else:
             last = FetchResult(url, final_url=str(response.url),
                                status=response.status_code, html=response.text,
-                               attempts=attempt, exit_used=exit_label,
+                               attempts=attempt, exit_used=used_exit,
+                               offsite_redirect=bool(getattr(
+                                   response, "offsite_redirect", False)),
                                elapsed_ms=int((time.time() - started) * 1000))
             state = last.state
+            if last.offsite_redirect:
+                # Nothing was fetched from the target: say which exit sent
+                # this page where, so the run records what it burned.
+                hops.append({"page_url": url, "status": last.status,
+                             "target": last.final_url, "exit": used_exit})
             if not page_flow.should_retry(state):
+                attempt_states.append(state)
+                attempt_exits.append(used_exit)
+                last.attempt_states = attempt_states
+                last.attempt_exits = attempt_exits
+                last.offsite_hops = hops
                 return last, session
             if log:
                 log("  attempt %d/%d: %s (HTTP %s, %d bytes)"
                     % (attempt, attempts, state, last.status, len(last.html)))
-            if page_flow.should_rotate_exit(state) and rotate is not None:
+            if page_flow.should_rotate_exit(state) and rotate is not None \
+                    and attempt < attempts:
+                # Not on the LAST attempt: there is no retry left to use the
+                # new exit, and minting one would (a) count an exit nothing
+                # was sent through and (b) leave `session` on an exit whose
+                # label the caller does not hold, so the next page would be
+                # logged against the wrong one.
                 rotated = rotate()
                 if rotated is not None:
                     session, exit_label = rotated
                     if log:
                         log("  rotating exit -> %s" % exit_label)
+        # Every attempt's state and exit is kept, not only the last one's: a
+        # refusal that a rotation then answered is still evidence about the
+        # exit that refused, and the run's sidecar has to be able to say it.
+        attempt_states.append(last.state)
+        attempt_exits.append(used_exit)
         if attempt < attempts:
             time.sleep(retry_delay)
+    if last is not None:
+        last.attempt_states = attempt_states
+        last.attempt_exits = attempt_exits
+        last.offsite_hops = hops
     return last, session  # type: ignore[return-value]
 
 
@@ -376,10 +465,31 @@ def make_rotator(args, pool, facts: Dict[str, Any]):
         else:
             return None
         state["rotations"] += 1
-        facts["rotations"] = state["rotations"]
-        facts["exit"] = proxy_pool.mask(nxt)
+        # `exits_used` is appended when the new exit ISSUES a request (see
+        # `scrape`), not here: the last rotation of a page that never retried
+        # again would otherwise name an exit nothing was ever sent through.
         return build_session(nxt, args.http_client), proxy_pool.mask(nxt)
     return rotate
+
+
+def _note_exit(facts: Dict[str, Any], label: Optional[str]) -> None:
+    """Record one attempt's exit: the sequence, the distinct set, and the
+    number of CHANGES between consecutive attempts.
+
+    Counted as changes rather than as `len(distinct) - 1`, because a pool of
+    two exits rotated three times goes back through the first one: the
+    distinct set is still two, but three rotations really happened, and a run
+    that burned exits must not under-report it.
+    """
+    if not label:
+        return
+    sequence = facts["exit_sequence"]
+    if sequence and sequence[-1] != label:
+        facts["rotations"] += 1
+    sequence.append(label)
+    facts["exit"] = label
+    if label not in facts["exits_used"]:
+        facts["exits_used"].append(label)
 
 
 def targets_from_args(args) -> List[str]:
@@ -440,10 +550,38 @@ def scrape(args) -> Tuple[List[SkuRow], Dict[str, Any]]:
     facts: Dict[str, Any] = {
         "transport": "http-%s" % args.http_client,
         "exit": proxy_pool.mask(proxy) if proxy else None,
+        # Every exit this run actually used, masked, in order: the first one
+        # plus each distinct rotation. `exit` above stays the LAST one, so a
+        # reader can see both how many exits were burned and which they were.
+        "exits_used": [proxy_pool.mask(proxy)] if proxy else [],
+        # One entry per ATTEMPT: which exit issued it, in order. `rotations`
+        # is how many CONSECUTIVE entries differ, so a two-exit pool rotated
+        # three times reports three, not one.
+        "exit_sequence": [],
         "pages_requested": len(targets),
         "pages_completed": 0,
         "failed_pages": [],
+        # Pages the site refused at least ONCE: the final state was a
+        # refusal (403 or a hop off the store), or an attempt was a
+        # geo-redirect even though a rotation later answered the page. A
+        # page that recovered is here but NOT in `failed_pages` — nothing
+        # was lost, yet the refusal still cost an exit and must be visible.
+        "refused_pages": [],
+        # Pages that hopped off the US store at ANY attempt.
+        "geo_redirect_pages": [],
+        # Pages whose FINAL state was `geo_redirect`. The stop reason keys
+        # on these, so a run that also met a plain 403 elsewhere is not
+        # reported as a geo-redirect run.
+        "geo_redirect_failures": [],
+        # Where an off-store hop was sent and which exit sent it there. The
+        # target is recorded, never fetched, so this is the only trace of
+        # the UK (or sibling-brand) page in the run.
+        "offsite_targets": [],
         "states": [],
+        # One entry per ATTEMPT, so a geo-redirect answered by the next exit
+        # is still visible; `attempt_counts` is the same list collapsed.
+        "attempt_states": [],
+        "attempt_counts": {},
         "products": [],
         "blocked": False,
         "transport_error": False,
@@ -453,6 +591,7 @@ def scrape(args) -> Tuple[List[SkuRow], Dict[str, Any]]:
         "final_url": targets[0],
     }
     rotate = make_rotator(args, pool, facts)
+    current_exit = proxy_pool.mask(proxy) if proxy else None
     rows: List[SkuRow] = []
     seen: set = set()
     for index, url in enumerate(targets, 1):
@@ -463,10 +602,43 @@ def scrape(args) -> Tuple[List[SkuRow], Dict[str, Any]]:
         log("product %d/%d: %s" % (index, len(targets), url))
         result, session = fetch(session, url, args.timeout, retries=args.retries,
                                 retry_delay=args.retry_delay, log=log,
-                                rotate=rotate)
+                                rotate=rotate, exit_label=current_exit)
+        # A rotation that happened inside `fetch` hands back a session on a
+        # NEW exit; that one carries over to the next page, so remember it.
+        # `attempt_exits[-1]` is the exit the LAST attempt actually used —
+        # never the one a final, unused rotation would have handed out.
+        if result.attempt_exits:
+            current_exit = result.attempt_exits[-1]
         state = result.state
         facts["states"].append(state)
-        _dump(args, result.html, index)
+        for attempt_state, attempt_exit in zip(result.attempt_states,
+                                               result.attempt_exits):
+            facts["attempt_states"].append(attempt_state)
+            facts["attempt_counts"][attempt_state] = \
+                facts["attempt_counts"].get(attempt_state, 0) + 1
+            # An exit is recorded only when it issued a request: the last
+            # rotation of a page that never retried again names an exit
+            # nothing was sent through, and that would inflate the count.
+            _note_exit(facts, attempt_exit)
+        if state == "geo_redirect" or "geo_redirect" in result.attempt_states:
+            # Counted whether the page was finally read or not: a redirect
+            # the next exit answered is still evidence that the first exit
+            # was refused, and the run has to report what it burned.
+            if index not in facts["geo_redirect_pages"]:
+                facts["geo_redirect_pages"].append(index)
+            if index not in facts["refused_pages"]:
+                facts["refused_pages"].append(index)
+        if not result.offsite_redirect:
+            # An off-store hop was NOT fetched: nothing from the other store
+            # reaches `--dump-html` (nor a stray empty file, which a reader
+            # could mistake for a served page).
+            _dump(args, result.html, index)
+        for hop in getattr(result, "offsite_hops", []):
+            # Every off-site hop, with the exit that made it: nothing was
+            # fetched from the target, so this is the only trace of the
+            # other store's page in the run, and after a retry it also
+            # names each exit that did not work for this page.
+            facts["offsite_targets"].append(dict(hop, page=index))
         if state != "product":
             facts["failed_pages"].append(index)
             if result.html:
@@ -477,6 +649,12 @@ def scrape(args) -> Tuple[List[SkuRow], Dict[str, Any]]:
                 facts["transport_error"] = True
             elif page_flow.counts_as_blocked(state):
                 facts["blocked"] = True
+                if index not in facts["refused_pages"]:
+                    facts["refused_pages"].append(index)
+                if state == "geo_redirect":
+                    # Only a page that was STILL refused when the exits ran
+                    # out counts toward the stop reason; see `_stop_reason`.
+                    facts["geo_redirect_failures"].append(index)
             print("product %d: %s (HTTP %s, %d bytes)%s"
                   % (index, state, result.status, len(result.html),
                      " — " + result.error if result.error else ""),
@@ -619,6 +797,14 @@ def _stop_reason(facts: Dict[str, Any], accept_mismatch: bool = False) -> str:
     if facts["transport_error"] and not facts["blocked"]:
         return "transport_error"
     if facts["blocked"]:
+        if facts.get("geo_redirect_failures"):
+            # The pages that defeated the run were geo-redirected. Named
+            # separately from `blocked` so the sidecar says WHICH refusal it
+            # was: exhausted exits on the UK redirect is a proxy-region
+            # problem (`-region-us`), not the branded 403's problem. A run
+            # whose final failure was any OTHER refusal reports `blocked`;
+            # see `geo_redirect_failures`.
+            return "geo_redirect"
         return "blocked"
     return "incomplete"
 

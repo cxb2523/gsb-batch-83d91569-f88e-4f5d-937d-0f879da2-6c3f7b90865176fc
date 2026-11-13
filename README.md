@@ -325,6 +325,38 @@ session has been seen drifting from El Paso to a Frankfurt AWS address
 minutes into its life (recon, 2026-09-23), and a fresh session fixed it every
 time. So `http_scraper.py` mints a fresh session on every refusal.
 
+The rule is stated in full, because it is easy to get half right:
+
+* **Same store, followed.** A redirect whose host is `potterybarn.com` or
+  `www.potterybarn.com` is followed by hand. The host is compared
+  case-insensitively and the query string is ignored, so
+  `https://WWW.POTTERYBARN.COM/products/x/?N=1` is still us. A chain is
+  allowed `MAX_REDIRECTS` (5) hops; the sixth **raises** (`CurlError`) rather
+  than returning a truncated chain that a caller could mistake for content.
+* **Off store, refused.** Any hop to another host — potterybarn.co.uk, a
+  sibling brand — is returned with an empty body, its redirect status, the
+  target URL, and an `offsite_redirect` mark. That mark makes
+  `detect_page_state` answer `geo_redirect` whatever the target host is, and
+  the run counts the page in `refused_pages` and `geo_redirect_pages`.
+* **Rotate, then retry.** `geo_redirect` rotates to a fresh exit and retries
+  up to `--proxy-block-retries` times. When the new exit serves the product
+  page, the row is parsed normally and both sidecars carry `rotations` (how
+  many exit changes the run made), `exits_used` (each distinct masked exit)
+  and `exit_sequence` (per attempt, so a two-exit pool rotated three times
+  shows three). The page stays in `geo_redirect_pages` and `refused_pages` —
+  the refusal cost an exit — but not in `failed_pages`.
+* **Exhausted.** If every exit redirects away, the run is **not** complete:
+  `stop_reason` is `geo_redirect` (exit 3), `pages_failed`,
+  `geo_redirect_failures` and `geo_redirect_pages` name the pages, and
+  `transport_facts.offsite_targets` records each hop with the exit that made
+  it. A run that ALSO met a plain 403 elsewhere reports `blocked` when that
+  is the reason, never `geo_redirect`. Rows read before the redirects stay
+  on disk, and the result is `partial`.
+* **The other store's page never reaches the output.** It is never fetched,
+  so there is no body to parse, no row to merge, nothing for `--dump-html`
+  to write, and no `unparsed_pages` shape. `offsite_targets` holds the URL
+  and status only.
+
 **A 200 is not a product page.** The 2Captcha Scraper API answered HTTP 200
 for two different product URLs with the *same* 137,461-byte prerendered page,
 titled "Timeless Furniture & Elevated Interiors", with no product in it. The
@@ -534,7 +566,7 @@ wrong page is worse than none, so none ships.
 | `0` | Complete |
 | `1` | Crash |
 | `2` | Bad usage, including a URL on another host or one robots.txt disallows |
-| `3` | Blocked: the site refused (a 403, a redirect to the UK store, a 429 from the API) |
+| `3` | Blocked: the site refused (a 403, a redirect to the UK store — `stop_reason: geo_redirect` once every exit has been rotated away — or a 429 from the API) |
 | `4` | Zero products, and the site said so: a listing that states 0 results, or a hub category, which is a correct answer |
 | `5` | Zero products because the content was never obtained: our plumbing (a timeout, a dropped CDP socket, a locked profile, a proxy 407), a page that failed with any other answer, a served page whose stated rows did not parse (`stop_reason: parser_found_nothing`), or a proxy budget spent before any row (`stop_reason: proxy_budget_exceeded`) |
 | `6` | Partial: some pages or products fetched, then stopped or failed (including `stop_reason: proxy_budget_exceeded`). A failed later page is never `complete` |

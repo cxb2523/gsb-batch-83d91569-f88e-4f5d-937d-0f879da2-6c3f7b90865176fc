@@ -8,6 +8,22 @@ behaviour for an existing user is called out at the top of its release.
 ## [Unreleased]
 
 > **Behaviour changes.**
+> - `http_scraper.py` records a geo-redirect as a first-class outcome. A hop
+>   off the US store — to potterybarn.co.uk or any other host — is returned
+>   unfetched with an `offsite_redirect` mark, classified `geo_redirect`,
+>   listed in `transport_facts.refused_pages` and `geo_redirect_pages`, and
+>   rotated to another exit. The sidecar now carries
+>   `transport_facts.exits_used` (every masked exit that issued a request)
+>   alongside `rotations`, plus `offsite_targets` and `attempt_states` /
+>   `attempt_counts`. A run whose exits ALL redirect away ends with
+>   `stop_reason: geo_redirect` (exit 3, or exit 6 with the rows already
+>   read) instead of a generic `blocked`, and the other store's body is
+>   never parsed, dumped or written. Same-store redirects are still followed,
+>   now with the host compared case-insensitively and the query string
+>   ignored; more than `MAX_REDIRECTS` (5) hops raises instead of returning
+>   a truncated chain. `detect_page_state` takes an `offsite_redirect`
+>   keyword so an unfetched hop classifies the same way as a landing URL on
+>   the UK host.
 > - The browser engines (`playwright_scraper.py`, `puppeteer_scraper.py`,
 >   `selenium_scraper.py`) send ONE `HEAD` for the site's `robots.txt`
 >   through `--proxy` / `--proxy-file` before starting a local browser. A
@@ -27,6 +43,12 @@ behaviour for an existing user is called out at the top of its release.
 
 ### Added
 
+- `tests/test_geo_redirect.py`: an offline suite for the redirect rule, with
+  synthetic HTML and stub sessions. Covers same-store redirects (including a
+  case-varied host and a `?N=` facet, and the 5-hop limit), a geo-redirect
+  that a rotated exit then answers, and one that exhausts every exit —
+  including that the already-parsed rows survive, that the UK page's body
+  never reaches the output, and that an over-long chain raises.
 - `--fingerprint`, `--fp-tags`, `--fp-country`, `--fp-refresh` on
   `playwright_scraper.py` (local browser only). Fetches a profile from the
   2Captcha Fingerprint API with `TWOCAPTCHA_KEY` and applies it: user agent
