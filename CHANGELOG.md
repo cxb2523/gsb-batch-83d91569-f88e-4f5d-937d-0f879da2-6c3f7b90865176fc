@@ -1,0 +1,219 @@
+# Changelog
+
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
+versions follow SemVer as closely as a CLI toolkit can. A patch release means
+**fixes**, not that every flag is frozen: a default that changes behaviour
+will be called out at the top of its entry rather than left to be discovered
+from a bill or an empty output file.
+
+## [Unreleased]
+
+### Changed
+
+- CI only: the scheduled canary now starts at 10:47 UTC (Mondays) instead of 07:37, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.
+- CI only: the canary now runs weekly (Mondays 07:37 UTC) and on a manual dispatch, with its optional secrets `GIVENCHY_CDP_ENDPOINT`, `GIVENCHY_PROXY` passed on every run; the daily schedule is removed.
+
+## [1.1.0] — 2026-10-15
+
+> **Behaviour changes for existing users (audit of 2026-10-14):**
+>
+> - **A run that never obtained its page now exits 5, not 4.** A load
+>   timeout or a dead proxy used to exit 4 ("zero products"), the same code
+>   as a category that genuinely lists nothing. Exit 4 now means only the
+>   latter.
+> - **An address that does not exist (HTTP 404/410, or the site's own error
+>   page) is `stop_reason: not_found`, exit 5.** Playwright used to call it
+>   blocked (exit 3, retried on every exit); Selenium and pyppeteer called
+>   it an empty category (exit 4).
+> - **Output files are created with the mode `open()` would give them**
+>   (`0o666 & ~umask`), and a replaced file keeps its own mode. They were
+>   0600 under every umask.
+> - **Negative `--delay`, `--retry-delay`, `--proxy-block-retries`,
+>   `--proxy-sessions` (and `--timeout` below 1 in `scraper_api_client.py`)
+>   are usage errors (exit 2)** naming the flag.
+> - **CSV cells starting with `=`, `+`, `-`, `@`, a tab or a line break are
+>   prefixed with `'`**, CSV only; `csv_cells_escaped` in the sidecar counts
+>   them.
+> - **The canary no longer skips green when the runner is blocked.** Exit 3,
+>   4, 5 or 6 fail it.
+
+### Fixed (audit of 2026-10-14)
+
+- `scraper_api_client.py`: `waitFor` is sent as an object (the string form
+  is now refused with a billed HTTP 422); the target's status is read from
+  `http_code` (the API's `status` is a verdict string and crashed the page
+  classifier); the `x-debug` header is logged with credentials masked.
+- Paid captcha solves are capped at one per page across every retry and
+  exit rotation, in all three engines (a three-exit pool reached the solver
+  three times for one page).
+- Typed `--category`/`--site-locale` are no longer overridden by a
+  `GIVENCHY_URL` in the environment or `.env`.
+- pyppeteer now passes the HTTP status to the page classifier.
+- `.gitignore` covers every `.env*` copy (`.env.bak`, `.env.local`), keeping
+  `.env.example` committable.
+- The credential scan judges paths relative to the repo (a clone under a
+  directory named `venv` scanned 0 files and reported clean), recognises a
+  virtualenv by `pyvenv.cfg` rather than by name, reads key-shaped fields in
+  JSON-escaped fixtures, and fails when it scanned nothing.
+- Text describing a sibling site removed from CONTRIBUTING, the issue
+  templates, the review prompt and log messages; two helper scripts that
+  measured that sibling site (`tools/waf_probe.sh`,
+  `tools/verify_browser_api.sh`) removed. The vocabulary check that guards
+  this now covers `.sh` files and was case-blind to one of its own words.
+- References to private family notes replaced by the rule in plain words,
+  with a check that fails if one reappears.
+
+Fixes from an external audit.
+
+Three of them change behaviour for an existing user:
+
+- **`diff_runs --fail-on-change` now fires in cases where it stayed silent.**
+  A row whose price and `price_source` both moved used to be routed wholesale
+  into `source_changed`, taking any other field with it — so a product going
+  out of stock, being renamed or losing its discount was ignored. Only
+  `price`/`currency` are routed now. A pipeline that was green may now go red,
+  and where it does, it was missing a real change.
+- **`--retries 0` is refused instead of silently doing nothing.** It used to
+  make the fetch loop empty, so the run reported a page it had never
+  requested. Scripts passing `0` now fail at argument parsing.
+- **A new `<out>.attempt.json` is written on every run**, including one that
+  wrote no data. `meta.json` keeps its meaning (what the data on disk is);
+  the attempt record says what the last run did, so a blocked run can no
+  longer leave a sidecar implying yesterday's success was fresh.
+
+Also: output files and sidecars are written atomically; `--dump-html` output
+is gitignored and the secret scanner reads `.html`/`.json`/`.csv`; the
+documentation no longer describes a sibling repo's site, with a test to keep
+it that way.
+
+## [1.0.1] — 2026-09-18
+
+A fix release cut the same day as 1.0.0, because 1.0.0 shipped a workflow
+that fails on checkout.
+
+### Fixed
+
+> **If you took the v1.0.0 source tarball, its `tests` workflow fails
+> immediately.** Cloning `main` was always fine; only the tagged snapshot is
+> affected. Nothing about the scraper itself is different — the parser, the
+> engines and the output are byte-identical between the two tags.
+
+- **`.github/workflows/tests.yml` carried its own inlined copies of two
+  checks that also exist in `.github/ci_checks.py`.** The sample-output copy
+  still imported `Player` and `Transfer`, the row classes this repo replaced
+  with a single `Product` before its first release, so the workflow failed on
+  a schema that is correct. Both steps now call the shipped checker — which
+  also widens the `--help` check from seven entry points to eight — and no
+  python heredocs remain in that workflow.
+
+### Added
+
+- The README now records the canary's first live run: a bare GitHub Actions
+  runner, a freshly installed Playwright Chromium and no secret configured
+  scraped `/us/makeup/lips/` and reported 16 rows, 16 priced,
+  `status=complete`, with every canary assertion passing. That is a third
+  independent address behind the "the paid path is not required" claim,
+  alongside a residential `curl` and the same connection through a real
+  browser.
+
+## [1.0.0] — 2026-09-18
+
+First release. Scrapes givenchybeauty.com — a Salesforce B2C Commerce
+storefront — into one row per product, over three browser engines plus a
+browserless HTTP client.
+
+### Added
+
+- **`--mode category`** — one listing page, one row per product tile.
+  **`--mode product`** — one product page, one row. `--category` and
+  `--site-locale` build the URL; `--url` overrides both.
+- **Eleven locales**, served as path prefixes on one hostname. `int/en` and
+  `ru` are showcase storefronts that publish no prices; rows from them carry
+  `price: null` and `currency: null`, and the price-coverage warning is
+  skipped for them rather than firing on a correct page.
+- **`Product`**, 24 columns, opening on the family's nine-column prefix so
+  output merges with the other repos in this family without translation.
+  `sku` is the variant id; `master_id` is the style id the product URL
+  carries.
+- **`price_source` on every row** — `tile-microdata`, `tile-text`, `jsonld`
+  or `pdp-text`. `diff_runs.py` gained a fifth bucket, `source_changed`: a
+  price difference that arrives with a `price_source` difference describes
+  our own two instruments, not the shelf price, and `--fail-on-change`
+  ignores it.
+- **robots.txt awareness** (`product_parser.is_robots_allowed`), new to this
+  family. The engines refuse a disallowed URL before fetching it, and
+  `parse_sitemap()` filters disallowed entries — which is not hypothetical:
+  93 of the 445 URLs in `ru`'s own category sitemap are `search?cgid=…`,
+  which the site's robots.txt forbids.
+- **A bounded wait for a self-clearing challenge**
+  (`page_flow.wait_out_self_clearing_challenge`), shared by all three
+  engines. This pays down an open debt the family has carried since
+  mediamarkt-scraper: the engines used to report a JS challenge as blocked
+  ~0.4s after the fetch, producing false exit 3s.
+
+### Measured
+
+Every claim below was measured on 2026-09-17/18 and is repeated in the
+README beside the command that produces it.
+
+- **317 tiles across 20 captured listings**: 284 priced from the tile's own
+  microdata, 7 from a gift-set tile's bare text, 26 with no price at all
+  (every one of those a showcase locale). Outside the showcase locales,
+  291 of 291 tiles carried a price.
+- **JSON-LD and the tile agree**, so the family's tile-price overlay is
+  deliberately **not** ported: a product page publishes `price: "50.00"`,
+  `priceCurrency: "USD"`, and the same product's tile carries
+  `content="50.00"` with the same currency.
+- **Listing pagination is robots-disallowed.** The site pages with
+  `?start=N&sz=25`; robots.txt forbids both parameters, there is no
+  `link[rel=next]` on a category page (0 occurrences across 26 listing
+  captures), so `page_url()` returns its input unchanged and `--pages N`
+  above 1 is reported and ignored. Full-locale coverage runs through
+  `sitemap_0-product.xml`, which robots allows.
+- **The paid path is not required.** `playwright_scraper.py` against a local
+  Chromium, with no key, no proxy and no `--cdp-endpoint`, returned exit 0
+  and 16 rows, 16/16 priced in USD, for `/us/makeup/lips/` from a
+  residential address in Moscow.
+
+### Traps this release already absorbs
+
+Each is encoded in the parser with the measurement that found it:
+
+- **`data-brand` on a tile holds the PRICE** (`data-brand="50"` on a $50.00
+  lipstick). The brand is in the tile's `data-gtm` JSON.
+- **A showcase tile still advertises a currency** — `data-currency="USD"`
+  and `data-gtm` `"price":0` on a page with no price anywhere. Neither is
+  read.
+- **Three tile price shapes, not one.** A gift set uses a different
+  container, which sometimes carries a struck list price and sometimes only
+  a bare `£82.00`. Anchoring on the ordinary container alone silently loses
+  8 of 25 tiles on `/gb/makeup/lips/`.
+- **A gb price node contains two prices**: `£41.00 (£1,025.00/Kg)`, where
+  the unit price's grouping is the better match for a naive money regex.
+- **Product ids are not one shape.** Across 763 product URLs in five locale
+  sitemaps: `F20100269`, `P000170`, `851113` and `PSETUK_00043`, in
+  `/p/slug-ID.html` and `/p-ID.html` forms, with jp slugs percent-encoded
+  and free to contain a `/`.
+
+### Fixed before release
+
+- **A challenge page read as an ordinary empty page.** Met live on
+  2026-09-18 through the Scraping Browser API: an Akamai `sec-cpt`
+  behavioural interstitial, 4,383 bytes, classified as `empty` — a state
+  this family does not retry — so the run reported **success with a row of
+  nulls**. It is now its own detected vendor, it is `blocked` rather than
+  `empty`, and the engines wait it out.
+- **The wait condition was wrong on the first attempt.** Waiting for the
+  challenge markers to disappear stopped one stage early, on a 2,173-byte
+  ThreatMetrix device-fingerprinting document that is neither the challenge
+  nor the page. The wait now runs until the site's own content hooks appear.
+- **`is_category_url` dropped a path with no locale prefix**, so a URL whose
+  first segment merely started with a locale code parsed to no category at
+  all. Caught by this repo's own suite.
+- **The Scraper API client re-fetched page 1 under page number 2** when
+  `--pages > 1` was passed by a caller that built its own args object.
+  Caught by this repo's own suite.
+
+[1.1.0]: https://github.com/2scraper/givenchy-scraper/releases/tag/v1.1.0
+[1.0.1]: https://github.com/2scraper/givenchy-scraper/releases/tag/v1.0.1
+[1.0.0]: https://github.com/2scraper/givenchy-scraper/releases/tag/v1.0.0

@@ -1,0 +1,231 @@
+name: canary
+
+# tests.yml (deliberately) never touches givenchybeauty.com — see its own
+# header for why. That leaves a real gap: a markup change on the site itself
+# only shows up when a user hits it and files an issue, while the offline
+# badge stays green throughout. This workflow is the other half — a real run,
+# on a real page, on a schedule — so a site-side break is caught here first.
+#
+# THIS CANARY NEEDS NO SECRET, AND A BLOCK IS A FAILURE.
+# -----------------------------------------------------------
+# The listing path is served to a bare GitHub runner with a local Playwright
+# browser: the last ten scheduled runs before 2026-10-15 all reached the
+# data checks below. So the run is ungated, and every outcome other than
+# real rows -- blocked (3), zero rows (4), never obtained (5), partial (6)
+# -- turns this check red. An earlier version skipped green on exit 3 from a
+# bare runner, which meant a canary that could pass without testing the site.
+#
+# GIVENCHY_CDP_ENDPOINT / GIVENCHY_PROXY are optional: if set, the run goes
+# through them instead of the runner's own address. Neither is required.
+#
+# Secrets reach the scraper through the ENVIRONMENT, never a command line —
+# `ps` reads argv. env_config.py reads exactly these variable names, and an
+# unset secret arrives as an empty string that the loader treats as unset,
+# so the same two lines are correct with and without them.
+on:
+  schedule:
+    # Once a week (Mondays), off the hour, so it is not competing with everyone else's
+    # on-the-hour cron jobs for runner availability.
+    - cron: "47 10 * * 1"
+  workflow_dispatch:
+
+jobs:
+  live-run:
+    runs-on: ubuntu-latest
+    env:
+      # `secrets` is not available in a job-level `if`, so presence is tested
+      # here, once, and read from each step's `if` and shell below. These are
+      # the strings "true"/"false", never the secret itself.
+      HAVE_CDP: ${{ secrets.GIVENCHY_CDP_ENDPOINT != '' }}
+      HAVE_PROXY: ${{ secrets.GIVENCHY_PROXY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Say which path this run is taking
+        run: |
+          if [ "$HAVE_CDP" = "true" ]; then
+            echo "::notice::Running through the Scraping Browser API (GIVENCHY_CDP_ENDPOINT is set) — the repo's documented default path. A block here is a real failure."
+          elif [ "$HAVE_PROXY" = "true" ]; then
+            echo "::notice::Running through GIVENCHY_PROXY. A block here is a real failure."
+          else
+            echo "::notice::Running from a bare runner with a local Playwright browser and no secret -- the path this repo documents as working without one. A block here fails the job."
+          fi
+
+      - name: Scrape a real, known-good category page
+        id: run
+        # One page: this site's listing paging is robots-disallowed, so a
+        # listing is a single fetch by design (see the README).
+        #
+        # set +e: GitHub Actions runs `run:` steps as `bash -e`, so without
+        # this a non-zero scraper exit aborts the script on THAT line and the
+        # `echo "exit_code=$?"` below never runs. continue-on-error only stops
+        # the step from failing the job; it does not touch the shell's errexit.
+        continue-on-error: true
+        env:
+          # Through the environment, never argv (see the header). Unset
+          # secrets arrive as "" and env_config.py treats that as unset, so
+          # these lines are correct in both configurations.
+          GIVENCHY_CDP_ENDPOINT: ${{ secrets.GIVENCHY_CDP_ENDPOINT }}
+          GIVENCHY_PROXY: ${{ secrets.GIVENCHY_PROXY }}
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --category makeup/lips --site-locale us \
+            --out canary_run --dump-html canary_run.html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Interpret the exit code
+        id: verdict
+        env:
+          CODE: ${{ steps.run.outputs.exit_code }}
+        run: |
+          code="$CODE"
+          case "$code" in
+            0)   echo "OK — rows parsed from a live run." ;;
+            3)   echo "::error::Blocked before parsing (exit 3) (cdp=$HAVE_CDP proxy=$HAVE_PROXY). The canary does not skip on a block: a run that never saw the listing has tested nothing. From a bare runner this may be the runner's address rather than the site -- the HTML dump in the artifacts shows which challenge was served; setting GIVENCHY_PROXY or GIVENCHY_CDP_ENDPOINT routes the run around it." ;;
+            4)   echo "::error::Ran fine but parsed 0 rows (exit 4) on a listing known to carry products. The site's markup has probably changed. The HTML dump in the artifacts tells you what the parser actually saw." ;;
+            5)   echo "::error::The page was never obtained (exit 5): a load timeout, a dead exit, or a 2captcha product path failing (cdp=$HAVE_CDP proxy=$HAVE_PROXY). canary_run.attempt.json names the stop_reason; not_found means the canary's own category path has been retired." ;;
+            6)   echo "::error::Partial run (exit 6) — the run stopped early. canary_run.meta.json names which pages failed. A listing here is a SINGLE page, so a partial run means that one page failed after some rows were already merged, not that pagination ran out." ;;
+            2)   echo "::error::Bad usage (exit 2) — the workflow's own arguments are wrong, not the site." ;;
+            *)   echo "::error::Unexpected exit code $code (see the step above for the traceback)." ;;
+          esac
+          test "$code" = "0"
+
+      - name: Sanity-check the scraped data
+        # Exit 0 only means "some rows were written". It says nothing about
+        # whether the page actually rendered: a snapshot taken too early still
+        # writes rows, just with fields empty. Every floor below is set from a
+        # measured figure and deliberately under it, so this fails on a
+        # collapse rather than on normal variation.
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          from pathlib import Path
+
+          sys.path.insert(0, ".")
+          import page_flow
+
+          # ONE page: this site's listing paging is robots-disallowed, so a
+          # listing run is a single fetch by design (product_parser.page_url
+          # is a no-op). See the README's "Pagination: there is none".
+          PAGES_REQUESTED = 1
+          # Measured 2026-09-18 against a live run of /us/makeup/lips/: 16
+          # rows, every one priced in USD, every field below populated
+          # 16/16. The floor is set below that so a merchandising change
+          # (a shade retired, a product delisted) does not flap the canary,
+          # while a parser that stopped finding tiles still trips it.
+          MIN_ROWS = 8
+          # page_flow.PRICE_COVERAGE_FLOOR is the same constant the runtime
+          # engines warn against, so this canary and the code it checks can
+          # never quietly disagree about what "enough" means. /us/ is a
+          # PRICED locale -- pointing this canary at /int/en/ or /ru/ would
+          # need this floor removed, because those publish no prices at all.
+          MIN_PRICED_SHARE = page_flow.PRICE_COVERAGE_FLOOR
+
+          rows = json.loads(Path("canary_run.json").read_text())
+          meta = json.loads(Path("canary_run.meta.json").read_text())
+          fail = []
+
+          if len(rows) < MIN_ROWS:
+              fail.append(f"only {len(rows)} rows, expected at least {MIN_ROWS}")
+
+          priced = sum(1 for r in rows if r.get("price") is not None)
+          if rows and priced / len(rows) < MIN_PRICED_SHARE:
+              fail.append(f"only {priced}/{len(rows)} rows have a price "
+                          f"(floor {MIN_PRICED_SHARE:.0%}) -- /us/ is a priced "
+                          f"locale, so this means the price node moved, not "
+                          f"that the products are unpriced")
+
+          # Fields measured at 100% on the live run of 2026-09-18. Kept below
+          # 1.0 where a single odd row is plausible, so the canary reports a
+          # moved anchor rather than flapping on merchandising.
+          for field, floor in (("title", 0.95), ("sku", 1.0), ("url", 1.0),
+                               ("currency", 0.9), ("category", 1.0),
+                               ("price_source", 0.9), ("master_id", 0.95),
+                               ("brand", 0.9), ("availability", 0.9),
+                               ("image_url", 0.95)):
+              got = sum(1 for r in rows if r.get(field) not in (None, ""))
+              if rows and got / len(rows) < floor:
+                  fail.append(f"{field} present on only {got}/{len(rows)} rows "
+                              f"(floor {floor:.0%})")
+
+          # One line, and it catches the regression
+          # forever: a struck price read from the wrong node (an EU 30-day-low
+          # disclosure rather than a list price) gives an original_price at or
+          # BELOW the price, which is a negative discount on a product that is
+          # not discounted.
+          for r in rows:
+              op, p = r.get("original_price"), r.get("price")
+              if op is not None and p is not None and op <= p:
+                  fail.append(f"{r.get('sku')}: original_price {op} is not "
+                              f"above price {p} -- the struck-price node is "
+                              f"being read as a was-price when it is not one")
+                  break
+
+          # sku is the VARIANT id and the product URL carries the MASTER id.
+          # If a future edit reads sku from the URL, every shade of one
+          # lipstick collapses into a single row -- which a row count alone
+          # would not show.
+          if rows and len({r.get("sku") for r in rows}) != len(rows):
+              fail.append("sku is not unique across the run -- rows are being "
+                          "keyed on something that is not the variant id")
+
+          # A page number never threaded
+          # into the parser produces (page, row_index) collisions that look,
+          # from the row count alone, like a healthy run.
+          pairs = [(r.get("page"), r.get("row_index")) for r in rows]
+          dupes = {p for p in pairs if pairs.count(p) > 1}
+          if dupes:
+              fail.append(f"{len(dupes)} (page, row_index) pair(s) repeated "
+                          f"across the run: {list(dupes)[:3]}")
+
+          if meta.get("pages_completed", 0) < PAGES_REQUESTED:
+              fail.append(f"only {meta.get('pages_completed')} of "
+                          f"{PAGES_REQUESTED} page(s) completed (stop_reason="
+                          f"{meta.get('stop_reason')!r})")
+          if meta.get("status") != "complete":
+              fail.append(f"run status is {meta.get('status')!r}, not 'complete'")
+          if meta.get("mode") != "category":
+              fail.append(f"run mode is {meta.get('mode')!r}, not 'category'")
+          # site_host() does not strip "www.", and every URL this repo builds
+          # is against https://www.givenchybeauty.com, so a real run's source
+          # is always the www host, never the bare domain.
+          if meta.get("source") != "www.givenchybeauty.com":
+              fail.append(f"run source is {meta.get('source')!r}, not "
+                          f"'www.givenchybeauty.com'")
+
+          for line in fail:
+              print(f"::error::{line}")
+          print(f"[canary] {len(rows)} rows, {priced} priced, "
+                f"status={meta.get('status')}, "
+                f"pages={meta.get('pages_completed')}/{PAGES_REQUESTED}")
+          sys.exit(1 if fail else 0)
+          EOF
+
+      - name: Upload run artifacts (output, HTML snapshot, debug dumps)
+        # Always, not just on failure: a run that returns the WRONG numbers
+        # with no error is exactly the regression that needs the actual bytes
+        # the parser saw, not a pass/fail badge.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-run-${{ github.run_id }}
+          path: |
+            canary_run.json
+            canary_run.csv
+            canary_run.meta.json
+            canary_run.attempt.json
+            canary_run.html*
+            canary_run_page*_debug.*
+          if-no-files-found: ignore
+          retention-days: 14

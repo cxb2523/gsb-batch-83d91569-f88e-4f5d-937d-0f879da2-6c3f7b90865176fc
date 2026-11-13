@@ -1,0 +1,79 @@
+name: Site changed / selectors broke
+description: givenchybeauty.com changed something and the parser no longer matches.
+labels: ["site-change"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most common way a scraper stops working, and it is worth its
+        own report because the fix is different from a code bug: something on
+        givenchybeauty.com moved.
+
+        Useful to know before filing: **where the data lives depends on the page
+        kind**. A category listing has no JSON-LD at all and every row comes off
+        the tile's own attributes (`data-pid`, `data-gtm`, the price
+        microdata). A product page on a priced locale publishes one complete
+        JSON-LD `Product` and that is primary; on `int/en` and `ru` there is
+        none and there is no price to read. Everything else anchors on the
+        theme's class names (`giv-ProductTile-*`, `pdp__*`). Saying which of
+        those broke narrows the fix a lot.
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Which --mode
+      options:
+        - category
+        - product
+        - not sure / more than one
+    validations:
+      required: true
+
+  - type: dropdown
+    id: what_broke
+    attributes:
+      label: What stopped matching
+      options:
+        - Rows (0 rows on a page that visibly has data)
+        - A specific field is null or wrong (price, currency, shade, availability, ...)
+        - Price coverage dropped below the floor logged in the run output
+        - Pagination stops early or repeats a page
+        - The bot-challenge detector finds nothing on a page that has one
+        - JSON-LD missing on a product page of a priced locale
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: URL
+      description: The exact page URL you ran against.
+      placeholder: "https://www.givenchybeauty.com/us/makeup/lips/"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence from the page
+      description: |
+        Whichever of these you can get. A capture beats a description.
+
+        - The relevant product tile's HTML (right-click the tile on the real
+          site -> Copy -> Copy outerHTML), or the output of
+          `--dump-html capture.html` against this URL.
+        - For a field problem: the value you got, and the value on the page.
+        - For a product-page problem: whether the page has a
+          `<script type="application/ld+json">` block with `"@type":"Product"`
+          at all (view source and search for it).
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it reproduces on a second engine, and when it last worked.
