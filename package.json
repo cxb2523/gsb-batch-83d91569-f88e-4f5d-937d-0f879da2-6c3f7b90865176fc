@@ -1,0 +1,49 @@
+{
+  "name": "openui-f1-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "openui generate src/library.ts --spec --out src/generated/spec.json",
+    "generate:apiKey": "openui generate-api-key --file .env.local",
+    "predev": "npm run generate",
+    "dev": "next dev --hostname 127.0.0.1",
+    "prebuild": "npm run generate",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1",
+    "preverify": "npm run generate",
+    "verify": "next build",
+    "snapshot:f1": "tsx scripts/snapshot-openf1.ts"
+  },
+  "dependencies": {
+    "@openuidev/lang-core": "1.0.0",
+    "@openuidev/react-headless": "0.18.0",
+    "@openuidev/react-lang": "1.0.0",
+    "@openuidev/react-ui": "0.18.0",
+    "@openuidev/server": "0.3.0",
+    "flag-icons": "^7.5.0",
+    "next": "16.4.0",
+    "openai": "^7.32.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "@openuidev/cli": "0.5.2",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "tsx": "^4.20.0",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@openuidev/lang-core",
+      "esbuild",
+      "sharp"
+    ]
+  }
+}
