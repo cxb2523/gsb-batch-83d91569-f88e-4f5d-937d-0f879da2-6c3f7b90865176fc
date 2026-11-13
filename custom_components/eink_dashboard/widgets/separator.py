@@ -1,0 +1,109 @@
+# Copyright 2026 Andreas Schneider
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Separator widget context builder."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from ..const import (
+    COLOR_BLACK,
+    COLOR_GRAY,
+    PADDING,
+    DisplayConfig,
+    color_to_hex,
+)
+from ._helpers import _color_context, _widget_dim
+
+if TYPE_CHECKING:
+    from ..widget_config import SeparatorWidget
+
+
+def _build_separator_context(
+    widget: SeparatorWidget,
+    config: DisplayConfig,
+) -> dict[str, object]:
+    """Build Jinja2 template context for the separator widget.
+
+    Computes the SVG viewport dimensions and the bounding rectangle
+    for the separator element.  Both ``"line"`` and ``"bar"`` styles
+    are represented as a single ``<rect>`` whose width and height are
+    pre-computed here so the template needs no conditionals.
+
+    The ``"bar"`` style widens to 10 px on 2-level displays
+    (``display_levels <= 2``) so the dithered dot pattern reads
+    clearly as a separator.
+
+    Args:
+        widget: Widget config dict.  Recognised keys:
+            ``direction`` (``"horizontal"`` | ``"vertical"``,
+            default ``"horizontal"``),
+            ``style`` (``"line"`` | ``"bar"``,
+            default ``"line"``),
+            ``length`` (explicit pixel length; omit for full
+            span), ``x`` (default ``PADDING``),
+            ``y`` (default 0).
+        config: Display config with ``width``, ``height``, and
+            optional ``display_levels`` (default 16).
+
+    Returns:
+        Dict consumed by ``separator.svg.j2``: ``w``, ``h``,
+        ``bar_w``, ``bar_h``, ``fill``.
+    """
+    x = widget.get("x", PADDING)
+    y = widget.get("y", 0)
+    direction = widget.get("direction", "horizontal")
+    style = widget.get("style", "line")
+    display_levels = config.get("display_levels", 16)
+
+    svg_w = _widget_dim(widget, "w", config["width"] - x)
+    svg_h = _widget_dim(widget, "h", config["height"] - y)
+
+    if style == "bar":
+        color: int = COLOR_GRAY
+        # Widen bar on 2-level displays so the dithered dot
+        # pattern reads clearly as a separator.
+        thickness = 10 if display_levels <= 2 else 6
+    else:
+        color = COLOR_BLACK
+        thickness = 2
+
+    # Default span: viewport dimension minus one PADDING unit,
+    # matching the PIL formula config[dim] - PADDING - pos.
+    explicit_length: int | None = widget.get("length")
+    if explicit_length is not None:
+        length = explicit_length
+    elif direction == "vertical":
+        length = svg_h - PADDING
+    else:
+        length = svg_w - PADDING
+
+    fill = color_to_hex(color)
+
+    if direction == "vertical":
+        bar_w: int = thickness
+        bar_h: int = length
+    else:
+        bar_w = length
+        bar_h = thickness
+
+    return {
+        "w": svg_w,
+        "h": svg_h,
+        "bar_w": bar_w,
+        "bar_h": bar_h,
+        "fill": fill,
+        **_color_context(),
+    }

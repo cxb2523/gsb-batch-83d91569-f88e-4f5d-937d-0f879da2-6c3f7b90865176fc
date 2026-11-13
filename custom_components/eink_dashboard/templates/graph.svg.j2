@@ -1,0 +1,236 @@
+{%- from "_macros.svg.j2" import card_container, icon_circle with context -%}
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="{{ w }}" height="{{ h }}">
+{#- Gradient definitions for color threshold line graphs.
+    Emitted before card_container so the IDs are in scope for any
+    stroke/fill url() references that appear inside it. -#}
+{%- if has_thresholds -%}
+<defs>
+{%- for s in series -%}
+{%- if s.has_threshold_gradient -%}
+<linearGradient id="thresh-stroke-{{ loop.index0 }}"
+  gradientUnits="userSpaceOnUse"
+  x1="0" y1="{{ gy1 }}" x2="0" y2="{{ gy2 }}">
+{%- for stop in s.threshold_stroke_stops -%}
+<stop offset="{{ stop.offset }}" stop-color="{{ stop.color }}"/>
+{%- endfor -%}
+</linearGradient>
+<linearGradient id="thresh-fill-{{ loop.index0 }}"
+  gradientUnits="userSpaceOnUse"
+  x1="0" y1="{{ gy1 }}" x2="0" y2="{{ gy2 }}">
+{%- for stop in s.threshold_fill_stops -%}
+<stop offset="{{ stop.offset }}" stop-color="{{ stop.color }}"/>
+{%- endfor -%}
+</linearGradient>
+{%- endif -%}
+{%- endfor -%}
+</defs>
+{%- endif -%}
+{%- if has_entity -%}
+{%- call card_container(
+    x=0, y=0, w=w, h=h,
+    card_style=card_style,
+    radius=m_radius, border=m_border,
+    bar_width=bar_width,
+    border_color=hex_black,
+    bar_color=hex_gray) -%}
+{#- Header row: icon right-aligned, name and value on the left. -#}
+{%- if icon_svg or letter -%}
+{{- icon_circle(icon_cx, icon_cy, icon_r,
+    icon_glyph_x, icon_glyph_y,
+    icon_stroke_w, icon_fill, icon_color,
+    hex_black, hex_white,
+    icon_svg=icon_svg,
+    icon_outline=icon_outline,
+    icon_no_circle=icon_no_circle,
+    letter=letter,
+    letter_font_sz=letter_font_sz) -}}
+{%- endif -%}
+{%- if show_name -%}
+<text
+  x="{{ name_x }}" y="{{ name_y }}"
+  font-family="{{ name_font_sz | font_family(font_family_name) }}"
+  font-size="{{ name_font_sz | font_px }}"
+  font-weight="{{ name_weight }}"
+  dominant-baseline="central"
+  fill="{{ hex_gray }}">{{ name_text }}</text>
+{%- endif -%}
+{%- if not hide_state -%}
+<text
+  x="{{ value_x }}" y="{{ value_y }}"
+  font-family="{{ value_font_sz | font_family(font_family_name) }}"
+  font-size="{{ value_font_sz | font_px }}"
+  font-weight="{{ value_weight }}"
+  dominant-baseline="central"
+  fill="{{ hex_black }}">{{ value_text }}</text>
+{%- if unit_text -%}
+<text
+  x="{{ unit_x }}" y="{{ unit_y }}"
+  font-family="{{ unit_font_sz | font_family(font_family_name) }}"
+  font-size="{{ unit_font_sz | font_px }}"
+  font-weight="{{ unit_weight }}"
+  dominant-baseline="central"
+  fill="{{ hex_gray }}">{{ unit_text }}</text>
+{%- endif -%}
+{%- endif -%}
+{#- Graph area: grid, fills, lines, labels, extrema, legend. -#}
+{%- if has_graph -%}
+{#- Horizontal grid lines at the graph top and bottom edges. -#}
+{%- if show_grid -%}
+<line x1="{{ x_label_left }}" y1="{{ grid_y_top }}"
+      x2="{{ x_label_right }}" y2="{{ grid_y_top }}"
+      stroke="{{ hex_light_gray }}"
+      stroke-width="{{ grid_stroke_w }}"/>
+<line x1="{{ x_label_left }}" y1="{{ grid_y_bot }}"
+      x2="{{ x_label_right }}" y2="{{ grid_y_bot }}"
+      stroke="{{ hex_light_gray }}"
+      stroke-width="{{ grid_stroke_w }}"/>
+{%- endif -%}
+{#- Grid lines at the ticks, behind the data.  Dotted black on
+    2-level displays so they stay faint without dithering. -#}
+{%- for g in grid_lines -%}
+<line x1="{{ g.x1 }}" y1="{{ g.y1 }}" x2="{{ g.x2 }}" y2="{{ g.y2 }}"
+      stroke="{{ grid_line_color }}"
+      stroke-width="{{ grid_stroke_w }}"
+{%- if grid_line_dash %}
+      stroke-dasharray="{{ grid_line_dash }}"
+{%- endif %}/>
+{%- endfor -%}
+{%- if is_bar -%}
+{#- Bar chart: one <rect> per data point per entity series. -#}
+{%- for s in series -%}
+{%- if s.has_data -%}
+{%- for bar in s.bars -%}
+<rect x="{{ bar.x }}" y="{{ bar.y }}"
+  width="{{ bar.w }}" height="{{ bar.h }}"
+  fill="{{ bar.bar_fill }}"
+  stroke="none"/>
+{%- endfor -%}
+{%- endif -%}
+{%- endfor -%}
+{%- else -%}
+{#- Line chart: fill areas first so lines appear on top. -#}
+{%- for s in series -%}
+{%- if s.fill_path -%}
+<path d="{{ s.fill_path }}"
+  fill="{{ 'url(#thresh-fill-' ~ loop.index0 ~ ')' if s.has_threshold_gradient else hex_light_gray }}"
+  stroke="none"/>
+{%- elif s.fill_points -%}
+<polygon points="{{ s.fill_points }}"
+  fill="{{ 'url(#thresh-fill-' ~ loop.index0 ~ ')' if s.has_threshold_gradient else hex_light_gray }}"
+  stroke="none"/>
+{%- endif -%}
+{%- endfor -%}
+{#- Graph lines rendered on top of fills. -#}
+{%- for s in series -%}
+{%- if s.graph_path -%}
+<path d="{{ s.graph_path }}"
+  fill="none"
+  stroke="{{ 'url(#thresh-stroke-' ~ loop.index0 ~ ')' if s.has_threshold_gradient else hex_black }}"
+  stroke-width="{{ graph_stroke_w }}"
+  stroke-linejoin="round"
+  stroke-linecap="round"
+{%- if s.stroke_dasharray %}
+  stroke-dasharray="{{ s.stroke_dasharray }}"
+{%- endif %}/>
+{%- elif s.polyline_points -%}
+<polyline points="{{ s.polyline_points }}"
+  fill="none"
+  stroke="{{ 'url(#thresh-stroke-' ~ loop.index0 ~ ')' if s.has_threshold_gradient else hex_black }}"
+  stroke-width="{{ graph_stroke_w }}"
+  stroke-linejoin="round"
+{%- if s.stroke_dasharray %}
+  stroke-dasharray="{{ s.stroke_dasharray }}"
+{%- endif %}/>
+{%- endif -%}
+{%- endfor -%}
+{%- endif -%}
+{#- Tick marks: short black strokes outside the plot area. -#}
+{%- for m in tick_marks -%}
+<line x1="{{ m.x1 }}" y1="{{ m.y1 }}" x2="{{ m.x2 }}" y2="{{ m.y2 }}"
+      stroke="{{ hex_black }}"
+      stroke-width="{{ grid_stroke_w }}"/>
+{%- endfor -%}
+{#- Primary Y-axis labels, one per tick. -#}
+{%- if show_labels -%}
+{%- for t in y_ticks -%}
+<text x="{{ y_label_x }}" y="{{ t.label_y }}"
+  font-family="{{ label_font_sz | font_family(font_family_name) }}"
+  font-weight="{{ axis_font_weight }}"
+  font-size="{{ label_font_sz | font_px }}"
+  dominant-baseline="{{ t.baseline }}"
+  fill="{{ hex_gray }}">{{ t.label }}</text>
+{%- endfor -%}
+{#- X-axis labels, one per tick.  Empty on very short widgets. -#}
+{%- for t in x_ticks -%}
+<text x="{{ t.label_x }}" y="{{ x_label_y }}"
+  font-family="{{ label_font_sz | font_family(font_family_name) }}"
+  font-weight="{{ axis_font_weight }}"
+  font-size="{{ label_font_sz | font_px }}"
+{%- if t.anchor != "start" %}
+  text-anchor="{{ t.anchor }}"
+{%- endif %}
+  dominant-baseline="hanging"
+  fill="{{ hex_gray }}">{{ t.label }}</text>
+{%- endfor -%}
+{%- endif -%}
+{#- Secondary Y-axis labels: right side, separate scale. -#}
+{%- if show_secondary_labels -%}
+{%- for t in y2_ticks -%}
+<text x="{{ y2_label_right_x }}" y="{{ t.label_y }}"
+  font-family="{{ label_font_sz | font_family(font_family_name) }}"
+  font-weight="{{ axis_font_weight }}"
+  font-size="{{ label_font_sz | font_px }}"
+  text-anchor="end"
+  dominant-baseline="{{ t.baseline }}"
+  fill="{{ hex_gray }}">{{ t.label }}</text>
+{%- endfor -%}
+{%- endif -%}
+{#- Extrema: min/max values with timestamps below the graph. -#}
+{%- if show_extrema -%}
+<text x="{{ extrema_left }}" y="{{ extrema_y }}"
+  font-family="{{ extrema_font_sz | font_family(font_family_name) }}"
+  font-weight="{{ axis_font_weight }}"
+  font-size="{{ extrema_font_sz | font_px }}"
+  dominant-baseline="hanging"
+  fill="{{ hex_gray }}">{{ extrema_min_str }}</text>
+<text x="{{ extrema_right }}" y="{{ extrema_y }}"
+  font-family="{{ extrema_font_sz | font_family(font_family_name) }}"
+  font-weight="{{ axis_font_weight }}"
+  font-size="{{ extrema_font_sz | font_px }}"
+  text-anchor="end"
+  dominant-baseline="hanging"
+  fill="{{ hex_gray }}">{{ extrema_max_str }}</text>
+{%- endif -%}
+{#- Legend: one swatch + label per entity (multi-entity only). -#}
+{%- if show_legend -%}
+{%- for entry in legend_entries -%}
+{%- if legend_is_bar -%}
+{#- Bar mode: filled rectangle swatch in the entity's fill color. -#}
+<rect x="{{ entry.swatch_x }}" y="{{ entry.swatch_y }}"
+  width="{{ entry.swatch_w }}" height="{{ entry.swatch_h }}"
+  fill="{{ entry.bar_fill }}"
+  stroke="none"/>
+{%- else -%}
+{#- Line mode: dash-pattern line sample. -#}
+<line x1="{{ entry.line_x1 }}" y1="{{ entry.line_y }}"
+      x2="{{ entry.line_x2 }}" y2="{{ entry.line_y }}"
+      stroke="{{ hex_black }}"
+      stroke-width="{{ graph_stroke_w }}"
+{%- if entry.stroke_dasharray %}
+      stroke-dasharray="{{ entry.stroke_dasharray }}"
+{%- endif %}/>
+{%- endif -%}
+<text x="{{ entry.text_x }}" y="{{ entry.text_y }}"
+  font-family="{{ entry.font_sz | font_family(font_family_name) }}"
+  font-size="{{ entry.font_sz | font_px }}"
+  font-weight="{{ axis_font_weight }}"
+  dominant-baseline="central"
+  fill="{{ hex_gray }}">{{ entry.name }}</text>
+{%- endfor -%}
+{%- endif -%}
+{%- endif -%}
+{%- endcall -%}
+{#- No entity: render blank SVG. -#}
+{%- endif -%}
+</svg>

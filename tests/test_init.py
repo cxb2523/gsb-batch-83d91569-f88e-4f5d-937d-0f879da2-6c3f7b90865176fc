@@ -1,0 +1,1155 @@
+# Copyright 2026 Andreas Schneider
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from homeassistant.components.frontend import (
+    DATA_EXTRA_MODULE_URL,
+    UrlManager,
+)
+from homeassistant.helpers import entity_registry as er
+from homeassistant.setup import async_setup_component
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components import eink_dashboard as eink_init
+from custom_components.eink_dashboard import (
+    _async_get_locale,
+    _enrich_display_precision,
+    _enrich_entity_icons,
+    _fetch_calendar_events,
+    _fetch_week_calendar_events,
+    _frontend_asset_version,
+    async_setup,
+    async_setup_entry,
+    async_unload_entry,
+)
+from custom_components.eink_dashboard.battery import resolve_battery_level
+from custom_components.eink_dashboard.const import DOMAIN, NumberFormat
+from custom_components.eink_dashboard.http import (
+    EinkLayoutView,
+    EinkPublicImageView,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from homeassistant.core import HomeAssistant
+
+
+async def _setup_http(hass: HomeAssistant) -> None:
+    """Set up real HTTP so ``async_setup`` can register views on it.
+
+    ``async_setup`` also calls ``add_extra_js_url``, which normally
+    requires the real ``frontend`` component. That component depends
+    on the ``hass_frontend`` PyPI package (a built frontend bundle)
+    which is not part of the test dependency group -- ``hass_frontend``
+    is stubbed in conftest.py for MDI icon lookups only. Pre-populating
+    ``DATA_EXTRA_MODULE_URL`` satisfies ``add_extra_js_url`` without
+    requiring the real ``frontend`` component to be set up.
+    """
+    assert await async_setup_component(hass, "http", {})
+    hass.data[DATA_EXTRA_MODULE_URL] = UrlManager(
+        lambda _event, _url: None, []
+    )
+
+
+@pytest.fixture
+def mock_store_class():
+    """Patch EinkDashboardStore with async_load returning [] by default.
+
+    Tests that need a specific widget list can override it via
+    ``mock_store_class.return_value.async_load.return_value = widgets``.
+    """
+    with patch(
+        "custom_components.eink_dashboard.EinkDashboardStore"
+    ) as mock_store:
+        mock_store.return_value.async_load = AsyncMock(return_value=[])
+        yield mock_store
+
+
+class TestAsyncSetup:
+    async def test_registers_http_views(self, hass: HomeAssistant) -> None:
+        # async_setup registers both HTTP view classes exactly once each.
+        await _setup_http(hass)
+
+        with patch.object(
+            hass.http, "register_view", wraps=hass.http.register_view
+        ) as mock_register_view:
+            await async_setup(hass, {})
+
+        assert mock_register_view.call_count == 2
+        view_types = {
+            type(call.args[0]) for call in mock_register_view.call_args_list
+        }
+        assert EinkPublicImageView in view_types
+        assert EinkLayoutView in view_types
+
+    async def test_registers_static_path(self, hass: HomeAssistant) -> None:
+        # async_setup registers the frontend, fonts, and icons dirs.
+        await _setup_http(hass)
+
+        with patch.object(
+            hass.http,
+            "async_register_static_paths",
+            wraps=hass.http.async_register_static_paths,
+        ) as mock_register_paths:
+            await async_setup(hass, {})
+
+        mock_register_paths.assert_called_once()
+        configs = mock_register_paths.call_args.args[0]
+        assert len(configs) == 3
+        assert configs[0].url_path == "/eink_dashboard/frontend"
+        assert configs[0].path.endswith("frontend")
+        assert configs[1].url_path == "/eink_dashboard/fonts"
+        assert configs[1].path.endswith("fonts")
+        assert configs[2].url_path == "/eink_dashboard/icons"
+        assert configs[2].path.endswith("icons")
+
+    async def test_returns_true(self, hass: HomeAssistant) -> None:
+        # async_setup reports success.
+        await _setup_http(hass)
+
+        result = await async_setup(hass, {})
+
+        assert result is True
+
+
+class TestFrontendAssetVersion:
+    def test_token_tracks_bundle_content(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The card URL's ?v= must change when the compiled bundle
+        # changes, so a redeploy busts the browser cache even though
+        # manifest.json's version stays the same between deploys.
+        monkeypatch.setattr(eink_init, "_FRONTEND_DIR", tmp_path)
+        (tmp_path / "bundle.js").write_text("first")
+
+        first = _frontend_asset_version()
+
+        assert first.startswith(f"{eink_init._VERSION}.")
+        assert len(first.rsplit(".", 1)[1]) == 12
+
+        (tmp_path / "bundle.js").write_text("second")
+        assert _frontend_asset_version() != first
+
+    def test_falls_back_to_version_without_bundle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # With no compiled assets (e.g. a cleaned tree) the token is
+        # just the manifest version rather than an error.
+        monkeypatch.setattr(eink_init, "_FRONTEND_DIR", tmp_path)
+
+        assert _frontend_asset_version() == eink_init._VERSION
+
+
+class TestAsyncSetupEntry:
+    async def test_populates_runtime_data(
+        self, hass: HomeAssistant, mock_store_class: MagicMock
+    ) -> None:
+        # Setting up an entry stores its runtime data on the entry itself.
+        await _setup_http(hass)
+        entry = MockConfigEntry(domain=DOMAIN)
+        entry.add_to_hass(hass)
+
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert hasattr(entry, "runtime_data")
+        assert entry.runtime_data.store is not None
+        assert entry.runtime_data.widgets == []
+
+    async def test_forwards_to_image_platform(
+        self, hass: HomeAssistant, mock_store_class: MagicMock
+    ) -> None:
+        # Setup forwards to the image and sensor platforms, which
+        # register their entities in the state machine.
+        await _setup_http(hass)
+        entry = MockConfigEntry(domain=DOMAIN, title="Test Dashboard")
+        entry.add_to_hass(hass)
+
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert hass.states.get("image.test_dashboard") is not None
+        assert hass.states.get("sensor.test_dashboard_battery") is not None
+
+    async def test_returns_true(
+        self, hass: HomeAssistant, mock_store_class: MagicMock
+    ) -> None:
+        # async_setup_entry reports success.
+        await _setup_http(hass)
+        entry = MockConfigEntry(domain=DOMAIN)
+        entry.add_to_hass(hass)
+
+        result = await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert result is True
+
+    async def test_registers_device_with_preset(
+        self, hass: HomeAssistant, mock_store_class: MagicMock
+    ) -> None:
+        # A recognised device_model plus area_id populates manufacturer,
+        # model, and suggested_area on the device registry entry.
+        #
+        # async_setup_entry is called directly (not via
+        # hass.config_entries.async_setup) and platform forwarding is
+        # mocked out: patching dr.async_get replaces the real
+        # homeassistant.helpers.device_registry.async_get globally
+        # (custom_components.eink_dashboard.dr *is* that module), which
+        # would otherwise break real image/sensor entity registration.
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            options={"device_model": "kindle_pw4", "area_id": "kitchen"},
+        )
+        entry.add_to_hass(hass)
+        mock_area = MagicMock()
+        mock_area.name = "Kitchen"
+        mock_area_reg = MagicMock()
+        mock_area_reg.async_get_area.return_value = mock_area
+        mock_dev_reg = MagicMock()
+
+        with (
+            patch(
+                "custom_components.eink_dashboard.ar.async_get",
+                return_value=mock_area_reg,
+            ),
+            patch(
+                "custom_components.eink_dashboard.dr.async_get",
+                return_value=mock_dev_reg,
+            ),
+            patch.object(
+                hass.config_entries,
+                "async_forward_entry_setups",
+                AsyncMock(),
+            ),
+        ):
+            await async_setup_entry(hass, entry)
+
+        mock_dev_reg.async_get_or_create.assert_called_once_with(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, entry.entry_id)},
+            name=entry.title,
+            manufacturer="Amazon",
+            model="Kindle Paperwhite 4",
+            suggested_area="Kitchen",
+        )
+
+    async def test_registers_device_custom_no_area(
+        self, hass: HomeAssistant, mock_store_class: MagicMock
+    ) -> None:
+        # device_model="custom" with no area falls back to Custom/None.
+        entry = MockConfigEntry(
+            domain=DOMAIN, options={"device_model": "custom"}
+        )
+        entry.add_to_hass(hass)
+        mock_dev_reg = MagicMock()
+
+        with (
+            patch(
+                "custom_components.eink_dashboard.dr.async_get",
+                return_value=mock_dev_reg,
+            ),
+            patch.object(
+                hass.config_entries,
+                "async_forward_entry_setups",
+                AsyncMock(),
+            ),
+        ):
+            await async_setup_entry(hass, entry)
+
+        mock_dev_reg.async_get_or_create.assert_called_once_with(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, entry.entry_id)},
+            name=entry.title,
+            manufacturer=None,
+            model="Custom",
+            suggested_area=None,
+        )
+
+    async def test_registers_device_no_model_key(
+        self, hass: HomeAssistant, mock_store_class: MagicMock
+    ) -> None:
+        # Missing device_model key defaults to the Custom model.
+        entry = MockConfigEntry(domain=DOMAIN)
+        entry.add_to_hass(hass)
+        mock_dev_reg = MagicMock()
+
+        with (
+            patch(
+                "custom_components.eink_dashboard.dr.async_get",
+                return_value=mock_dev_reg,
+            ),
+            patch.object(
+                hass.config_entries,
+                "async_forward_entry_setups",
+                AsyncMock(),
+            ),
+        ):
+            await async_setup_entry(hass, entry)
+
+        call_kwargs = mock_dev_reg.async_get_or_create.call_args.kwargs
+        assert call_kwargs["manufacturer"] is None
+        assert call_kwargs["model"] == "Custom"
+
+
+class TestAsyncUpdateListener:
+    async def test_update_listener_delegates_to_register_device(
+        self, hass: HomeAssistant
+    ) -> None:
+        # The update listener delegates to _register_device with the
+        # entry's current options.
+        from custom_components.eink_dashboard import _async_update_listener
+
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            options={"device_model": "kindle_pw4", "area_id": "kitchen"},
+        )
+        entry.add_to_hass(hass)
+        mock_area = MagicMock()
+        mock_area.name = "Kitchen"
+        mock_area_reg = MagicMock()
+        mock_area_reg.async_get_area.return_value = mock_area
+        mock_dev_reg = MagicMock()
+
+        with (
+            patch(
+                "custom_components.eink_dashboard.ar.async_get",
+                return_value=mock_area_reg,
+            ),
+            patch(
+                "custom_components.eink_dashboard.dr.async_get",
+                return_value=mock_dev_reg,
+            ),
+        ):
+            await _async_update_listener(hass, entry)
+
+        mock_dev_reg.async_get_or_create.assert_called_once_with(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, entry.entry_id)},
+            name=entry.title,
+            manufacturer="Amazon",
+            model="Kindle Paperwhite 4",
+            suggested_area="Kitchen",
+        )
+
+
+class TestResolveBatteryLevel:
+    def _make_sensor(
+        self, level: int | None, is_charging: bool = False
+    ) -> MagicMock:
+        sensor = MagicMock()
+        sensor.native_value = level
+        sensor.extra_state_attributes = {"is_charging": is_charging}
+        return sensor
+
+    def test_entity_id_takes_priority_over_sensor(self) -> None:
+        # battery_entity_id wins even when internal sensor has a value.
+        sensor = self._make_sensor(50)
+        states = {"sensor.trmnl_battery": {"state": "85", "attributes": {}}}
+        level, is_charging = resolve_battery_level(
+            "sensor.trmnl_battery", states, sensor
+        )
+        assert level == 85
+        assert is_charging is False
+
+    def test_falls_back_to_sensor_when_no_entity_id(self) -> None:
+        # No entity_id configured → internal sensor is used.
+        sensor = self._make_sensor(42, is_charging=True)
+        level, is_charging = resolve_battery_level(None, {}, sensor)
+        assert level == 42
+        assert is_charging is True
+
+    def test_entity_id_state_clamped_to_0_100(self) -> None:
+        # Values outside 0–100 are clamped.
+        states = {"sensor.trmnl_battery": {"state": "150", "attributes": {}}}
+        level, _ = resolve_battery_level("sensor.trmnl_battery", states, None)
+        assert level == 100
+
+        states = {"sensor.trmnl_battery": {"state": "-5", "attributes": {}}}
+        level, _ = resolve_battery_level("sensor.trmnl_battery", states, None)
+        assert level == 0
+
+    def test_entity_id_missing_from_states_falls_through_to_sensor(
+        self,
+    ) -> None:
+        # Entity ID configured but not present in states → sensor is used.
+        sensor = self._make_sensor(30)
+        level, _ = resolve_battery_level("sensor.trmnl_battery", {}, sensor)
+        assert level == 30
+
+    def test_entity_id_invalid_state_falls_through_to_sensor(self) -> None:
+        # Entity present but unparseable state → sensor is used.
+        sensor = self._make_sensor(25)
+        states = {
+            "sensor.trmnl_battery": {"state": "unavailable", "attributes": {}}
+        }
+        level, _ = resolve_battery_level(
+            "sensor.trmnl_battery", states, sensor
+        )
+        assert level == 25
+
+    def test_no_entity_no_sensor_returns_none(self) -> None:
+        # No data source → (None, False).
+        level, is_charging = resolve_battery_level(None, {}, None)
+        assert level is None
+        assert is_charging is False
+
+    def test_sensor_with_none_value_returns_none(self) -> None:
+        # Internal sensor exists but has no reading yet → (None, False).
+        sensor = self._make_sensor(None)
+        level, is_charging = resolve_battery_level(None, {}, sensor)
+        assert level is None
+        assert is_charging is False
+
+    def test_entity_id_float_state_truncated(self) -> None:
+        # Float state strings are truncated (not rounded) to int.
+        states = {
+            "sensor.trmnl_battery": {
+                "state": "78.9",
+                "attributes": {},
+            }
+        }
+        level, _ = resolve_battery_level("sensor.trmnl_battery", states, None)
+        assert level == 78
+
+    def test_entity_id_is_charging_read_from_attributes(self) -> None:
+        # is_charging is read from the entity's attributes, not hardcoded.
+        states = {
+            "sensor.trmnl_battery": {
+                "state": "50",
+                "attributes": {"is_charging": True},
+            }
+        }
+        level, is_charging = resolve_battery_level(
+            "sensor.trmnl_battery", states, None
+        )
+        assert level == 50
+        assert is_charging is True
+
+
+class TestAsyncUnloadEntry:
+    async def test_unloads_platforms(self, hass: HomeAssistant) -> None:
+        # Unloading forwards to config_entries.async_unload_platforms
+        # for both platforms and reports success.
+        entry = MockConfigEntry(domain=DOMAIN)
+
+        with patch.object(
+            hass.config_entries,
+            "async_unload_platforms",
+            AsyncMock(return_value=True),
+        ) as mock_unload_platforms:
+            result = await async_unload_entry(hass, entry)
+
+        mock_unload_platforms.assert_called_once_with(
+            entry, ["image", "sensor"]
+        )
+        assert result is True
+
+    async def test_unload_failure_returns_false(
+        self, hass: HomeAssistant
+    ) -> None:
+        # A failed platform unload is reported back to the caller.
+        # HA core preserves entry.runtime_data in this case; cleanup
+        # on success is also handled by HA core, not this function.
+        entry = MockConfigEntry(domain=DOMAIN)
+
+        with patch.object(
+            hass.config_entries,
+            "async_unload_platforms",
+            AsyncMock(return_value=False),
+        ):
+            result = await async_unload_entry(hass, entry)
+
+        assert result is False
+
+
+_FRONTEND_STORAGE = (
+    "homeassistant.components.frontend.storage.async_user_store"
+)
+
+
+def _make_hass_with_locale(
+    number_format: str = "language",
+    language: str = "en",
+    first_weekday: str = "language",
+    date_format: str = "language",
+    time_format: str = "language",
+) -> tuple[MagicMock, AsyncMock]:
+    """Return (hass, async_user_store_mock) with the given locale preferences.
+
+    Returns a hass mock whose owner has the given locale preferences and an
+    AsyncMock for ``async_user_store`` so callers can patch it via
+    ``_FRONTEND_STORAGE``.
+    """
+    hass = MagicMock()
+    hass.config.language = "en"
+    locale_data = {
+        "number_format": number_format,
+        "language": language,
+        "first_weekday": first_weekday,
+        "date_format": date_format,
+        "time_format": time_format,
+    }
+    store = MagicMock()
+    store.data = {"language": locale_data}
+    owner = MagicMock()
+    hass.auth.async_get_owner = AsyncMock(return_value=owner)
+    user_store_mock = AsyncMock(return_value=store)
+    return hass, user_store_mock
+
+
+class TestAsyncGetLocale:
+    async def test_returns_owner_locale_with_no_options(self) -> None:
+        # Without options, owner's locale is returned unchanged.
+        hass, user_store_mock = _make_hass_with_locale(
+            number_format="decimal_comma",
+            language="de",
+            first_weekday="monday",
+            date_format="dmy",
+            time_format="24",
+        )
+        with patch(_FRONTEND_STORAGE, user_store_mock):
+            nf, lang, fw, df, tf = await _async_get_locale(hass, {})
+
+        assert nf == "decimal_comma"
+        assert lang == "de"
+        assert fw == "monday"
+        assert df == "dmy"
+        assert tf == "24"
+
+    async def test_language_override_applied(self) -> None:
+        # locale_language in options overrides the owner's language.
+        hass, user_store_mock = _make_hass_with_locale(language="en")
+        with patch(_FRONTEND_STORAGE, user_store_mock):
+            _nf, lang, _fw, _df, _tf = await _async_get_locale(
+                hass, {"locale_language": "de"}
+            )
+
+        assert lang == "de"
+
+    async def test_number_format_override_applied(self) -> None:
+        # locale_number_format in options overrides the owner's number_format.
+        hass, user_store_mock = _make_hass_with_locale(
+            number_format="language"
+        )
+        with patch(_FRONTEND_STORAGE, user_store_mock):
+            nf, _lang, _fw, _df, _tf = await _async_get_locale(
+                hass, {"locale_number_format": "space_comma"}
+            )
+
+        assert nf == "space_comma"
+
+    async def test_first_weekday_override_applied(self) -> None:
+        # locale_first_weekday in options overrides the owner's preference.
+        hass, user_store_mock = _make_hass_with_locale(
+            first_weekday="language"
+        )
+        with patch(_FRONTEND_STORAGE, user_store_mock):
+            _nf, _lang, fw, _df, _tf = await _async_get_locale(
+                hass, {"locale_first_weekday": "sunday"}
+            )
+
+        assert fw == "sunday"
+
+    async def test_date_format_override_applied(self) -> None:
+        # locale_date_format in options overrides the owner's preference.
+        hass, user_store_mock = _make_hass_with_locale(date_format="language")
+        with patch(_FRONTEND_STORAGE, user_store_mock):
+            _nf, _lang, _fw, df, _tf = await _async_get_locale(
+                hass, {"locale_date_format": "dmy"}
+            )
+
+        assert df == "dmy"
+
+    async def test_time_format_override_applied(self) -> None:
+        # locale_time_format in options overrides the owner's preference.
+        hass, user_store_mock = _make_hass_with_locale(time_format="language")
+        with patch(_FRONTEND_STORAGE, user_store_mock):
+            _nf, _lang, _fw, _df, tf = await _async_get_locale(
+                hass, {"locale_time_format": "24"}
+            )
+
+        assert tf == "24"
+
+    async def test_empty_string_overrides_are_ignored(self) -> None:
+        # Empty string values in options do not override owner locale.
+        hass, user_store_mock = _make_hass_with_locale(
+            number_format="decimal_comma",
+            language="de",
+            first_weekday="monday",
+            date_format="dmy",
+            time_format="24",
+        )
+        with patch(_FRONTEND_STORAGE, user_store_mock):
+            nf, lang, fw, df, tf = await _async_get_locale(
+                hass,
+                {
+                    "locale_language": "",
+                    "locale_number_format": "",
+                    "locale_first_weekday": "",
+                    "locale_date_format": "",
+                    "locale_time_format": "",
+                },
+            )
+
+        assert nf == "decimal_comma"
+        assert lang == "de"
+        assert fw == "monday"
+        assert df == "dmy"
+        assert tf == "24"
+
+    async def test_none_options_returns_owner_locale(self) -> None:
+        # options=None behaves the same as no options (backward compat).
+        hass, user_store_mock = _make_hass_with_locale(
+            number_format="space_comma",
+            language="fr",
+            first_weekday="monday",
+            date_format="dmy",
+            time_format="24",
+        )
+        with patch(_FRONTEND_STORAGE, user_store_mock):
+            nf, lang, fw, df, tf = await _async_get_locale(hass, None)
+
+        assert nf == "space_comma"
+        assert lang == "fr"
+        assert fw == "monday"
+        assert df == "dmy"
+        assert tf == "24"
+
+    async def test_falls_back_when_no_owner(self) -> None:
+        # No owner → falls back to hass.config.language defaults.
+        hass = MagicMock()
+        hass.config.language = "en"
+        hass.auth.async_get_owner = AsyncMock(return_value=None)
+        store = MagicMock()
+        store.data = {}
+        user_store_mock = AsyncMock(return_value=store)
+
+        with patch(_FRONTEND_STORAGE, user_store_mock):
+            nf, lang, fw, df, tf = await _async_get_locale(hass, {})
+
+        assert nf == NumberFormat.LANGUAGE
+        assert lang == "en"
+        assert fw == "language"
+        assert df == "language"
+        assert tf == "language"
+
+
+_ICONS_JSON_TARGET = "custom_components.eink_dashboard.async_get_icons"
+
+_MOON_ICONS = {
+    "moon": {
+        "sensor": {
+            "phase": {
+                "default": "mdi:weather-night",
+                "state": {"full_moon": "mdi:moon-full"},
+            }
+        }
+    }
+}
+
+
+class TestCalendarFetchers:
+    """The calendar and week calendar widgets each have their own fetcher."""
+
+    @staticmethod
+    def _hass() -> MagicMock:
+        """Return a mocked hass whose calendar service returns no events."""
+        hass = MagicMock()
+        hass.services.async_call = AsyncMock(
+            return_value={"calendar.home": {"events": []}}
+        )
+        return hass
+
+    @staticmethod
+    def _states() -> dict[str, Any]:
+        """Return a states snapshot holding one calendar entity."""
+        return {"calendar.home": {"state": "off", "attributes": {}}}
+
+    async def test_calendar_fetcher_ignores_week_calendar_widgets(
+        self,
+    ) -> None:
+        # The calendar fetcher only serves calendar widgets; a week
+        # calendar widget causes no call and no events.
+        hass, states = self._hass(), self._states()
+        widgets = [{"type": "week_calendar", "entity": "calendar.home"}]
+
+        await _fetch_calendar_events(hass, widgets, states)
+
+        hass.services.async_call.assert_not_awaited()
+        assert "events" not in states["calendar.home"]["attributes"]
+
+    async def test_calendar_fetcher_writes_events(self) -> None:
+        # A calendar widget gets its upcoming events under "events".
+        hass, states = self._hass(), self._states()
+        widgets = [{"type": "calendar", "entity": "calendar.home"}]
+
+        await _fetch_calendar_events(hass, widgets, states)
+
+        assert hass.services.async_call.await_count == 1
+        attrs = states["calendar.home"]["attributes"]
+        assert "events" in attrs
+        assert "week_events" not in attrs
+
+    async def test_week_fetcher_ignores_calendar_widgets(self) -> None:
+        # The week fetcher only serves week calendar widgets; a calendar
+        # widget causes no call and no events.
+        hass, states = self._hass(), self._states()
+        widgets = [{"type": "calendar", "entity": "calendar.home"}]
+
+        await _fetch_week_calendar_events(hass, widgets, states)
+
+        hass.services.async_call.assert_not_awaited()
+        assert "week_events" not in states["calendar.home"]["attributes"]
+
+    async def test_week_fetcher_writes_week_events(self) -> None:
+        # A week calendar widget gets its events under "week_events",
+        # leaving the upcoming-events key alone.
+        hass, states = self._hass(), self._states()
+        widgets = [{"type": "week_calendar", "entity": "calendar.home"}]
+
+        await _fetch_week_calendar_events(hass, widgets, states)
+
+        assert hass.services.async_call.await_count == 1
+        attrs = states["calendar.home"]["attributes"]
+        assert "week_events" in attrs
+        assert "events" not in attrs
+
+    @pytest.mark.parametrize(
+        ("time_zone", "is_utc"),
+        [("Europe/Zurich", False), ("Nowhere/Land", True), ("", True)],
+    )
+    async def test_week_fetcher_queries_in_ha_time_zone(
+        self, time_zone: str, is_utc: bool
+    ) -> None:
+        # The query window starts at local midnight in HA's zone; an
+        # unknown or empty zone falls back to UTC.
+        hass, states = self._hass(), self._states()
+        hass.config.time_zone = time_zone
+        widgets = [{"type": "week_calendar", "entity": "calendar.home"}]
+
+        await _fetch_week_calendar_events(hass, widgets, states)
+
+        data = hass.services.async_call.await_args.args[2]
+        start = dt.datetime.fromisoformat(data["start_date_time"])
+        assert (start.utcoffset() == dt.timedelta(0)) is is_utc
+
+    async def test_week_fetcher_warns_when_fetch_fails(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # A failing calendar service leaves the widget blank, so the
+        # failure must reach the log at warning level.
+        hass, states = self._hass(), self._states()
+        hass.services.async_call.side_effect = Exception("service down")
+        widgets = [{"type": "week_calendar", "entity": "calendar.home"}]
+
+        await _fetch_week_calendar_events(hass, widgets, states)
+
+        assert "week_events" not in states["calendar.home"]["attributes"]
+        assert "Could not fetch week calendar events" in caplog.text
+        assert "service down" in caplog.text
+
+    async def test_fetchers_keep_separate_keys_on_one_entity(self) -> None:
+        # With both widget types on one calendar, each fetcher writes
+        # its own key, so neither overwrites the other.
+        hass, states = self._hass(), self._states()
+        widgets = [
+            {"type": "calendar", "entity": "calendar.home"},
+            {"type": "week_calendar", "entity": "calendar.home"},
+        ]
+
+        await _fetch_calendar_events(hass, widgets, states)
+        await _fetch_week_calendar_events(hass, widgets, states)
+
+        attrs = states["calendar.home"]["attributes"]
+        assert "events" in attrs
+        assert "week_events" in attrs
+
+    async def test_calendars_are_fetched_concurrently(self) -> None:
+        # Several calendars are requested at the same time instead of
+        # one after another.
+        running = peak = 0
+
+        async def call(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            await asyncio.sleep(0)
+            running -= 1
+            return {args[2]["entity_id"]: {"events": []}}
+
+        hass = MagicMock()
+        hass.services.async_call = AsyncMock(side_effect=call)
+        ids = ["calendar.a", "calendar.b", "calendar.c"]
+        states = {i: {"state": "off", "attributes": {}} for i in ids}
+        widgets = [
+            {"type": "week_calendar", "entity": ids},
+            *({"type": "calendar", "entity": i} for i in ids),
+        ]
+
+        await _fetch_week_calendar_events(hass, widgets, states)
+        assert peak == 3
+        peak = 0
+        await _fetch_calendar_events(hass, widgets, states)
+        assert peak == 3
+        for i in ids:
+            assert "week_events" in states[i]["attributes"]
+            assert "events" in states[i]["attributes"]
+
+    async def test_one_failing_calendar_does_not_block_others(self) -> None:
+        # A calendar whose service call fails stays blank while the
+        # others still get their events.
+        async def call(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            entity_id = args[2]["entity_id"]
+            if entity_id == "calendar.bad":
+                msg = "boom"
+                raise RuntimeError(msg)
+            return {entity_id: {"events": [{"start": "2026-10-19"}]}}
+
+        hass = MagicMock()
+        hass.services.async_call = AsyncMock(side_effect=call)
+        states = {
+            "calendar.bad": {"state": "off", "attributes": {}},
+            "calendar.good": {"state": "off", "attributes": {}},
+        }
+        widgets = [
+            {
+                "type": "week_calendar",
+                "entity": ["calendar.bad", "calendar.good"],
+            }
+        ]
+
+        await _fetch_week_calendar_events(hass, widgets, states)
+
+        assert "week_events" not in states["calendar.bad"]["attributes"]
+        assert states["calendar.good"]["attributes"]["week_events"]
+
+    async def test_processing_errors_are_not_swallowed(self) -> None:
+        # Only the service call is guarded: a snapshot entry without
+        # "attributes" is a bug and must surface.
+        hass = self._hass()
+        states: dict[str, Any] = {"calendar.home": {"state": "off"}}
+        widgets = [{"type": "week_calendar", "entity": "calendar.home"}]
+
+        with pytest.raises(KeyError):
+            await _fetch_week_calendar_events(hass, widgets, states)
+
+
+class TestEnrichEntityIcons:
+    async def test_state_icon_resolved_from_icons_json(
+        self, hass: HomeAssistant
+    ) -> None:
+        # An entity with no "icon" attribute but a registry entry
+        # carrying a translation_key gets its icon resolved from the
+        # matching icons.json state mapping.
+        er.async_get(hass).async_get_or_create(
+            "sensor",
+            "moon",
+            "unique_1",
+            suggested_object_id="phase",
+            translation_key="phase",
+        )
+        states = {"sensor.phase": {"state": "full_moon", "attributes": {}}}
+        with patch(_ICONS_JSON_TARGET, AsyncMock(return_value=_MOON_ICONS)):
+            await _enrich_entity_icons(hass, states)
+
+        assert states["sensor.phase"]["attributes"]["icon"] == "mdi:moon-full"
+
+    async def test_default_icon_used_when_no_state_match(
+        self, hass: HomeAssistant
+    ) -> None:
+        # A state value absent from the icons.json "state" map falls
+        # back to the "default" icon.
+        er.async_get(hass).async_get_or_create(
+            "sensor",
+            "moon",
+            "unique_2",
+            suggested_object_id="phase",
+            translation_key="phase",
+        )
+        states = {
+            "sensor.phase": {
+                "state": "waxing_crescent",
+                "attributes": {},
+            }
+        }
+        with patch(_ICONS_JSON_TARGET, AsyncMock(return_value=_MOON_ICONS)):
+            await _enrich_entity_icons(hass, states)
+
+        assert (
+            states["sensor.phase"]["attributes"]["icon"] == "mdi:weather-night"
+        )
+
+    async def test_existing_icon_not_overridden(
+        self, hass: HomeAssistant
+    ) -> None:
+        # Entities that already carry an icon attribute are left
+        # untouched and never queried against icons.json.
+        er.async_get(hass).async_get_or_create(
+            "sensor",
+            "moon",
+            "unique_3",
+            suggested_object_id="phase",
+            translation_key="phase",
+        )
+        states = {
+            "sensor.phase": {
+                "state": "full_moon",
+                "attributes": {"icon": "mdi:custom-icon"},
+            }
+        }
+        with patch(_ICONS_JSON_TARGET, AsyncMock()) as mock_icons:
+            await _enrich_entity_icons(hass, states)
+
+        mock_icons.assert_not_called()
+        assert (
+            states["sensor.phase"]["attributes"]["icon"] == "mdi:custom-icon"
+        )
+
+    async def test_entity_without_registry_entry_skipped(
+        self, hass: HomeAssistant
+    ) -> None:
+        # An entity_id with no matching registry entry (e.g. a
+        # template or YAML-defined entity) is skipped without error.
+        states = {
+            "sensor.not_in_registry": {
+                "state": "on",
+                "attributes": {},
+            }
+        }
+        with patch(_ICONS_JSON_TARGET, AsyncMock()) as mock_icons:
+            await _enrich_entity_icons(hass, states)
+
+        mock_icons.assert_not_called()
+        assert "icon" not in states["sensor.not_in_registry"]["attributes"]
+
+    async def test_entity_without_translation_key_skipped(
+        self, hass: HomeAssistant
+    ) -> None:
+        # A registry entry with no translation_key has no icons.json
+        # entry to look up, so it is skipped.
+        er.async_get(hass).async_get_or_create(
+            "sensor",
+            "moon",
+            "unique_4",
+            suggested_object_id="no_key",
+        )
+        states = {"sensor.no_key": {"state": "full_moon", "attributes": {}}}
+        with patch(_ICONS_JSON_TARGET, AsyncMock()) as mock_icons:
+            await _enrich_entity_icons(hass, states)
+
+        mock_icons.assert_not_called()
+        assert "icon" not in states["sensor.no_key"]["attributes"]
+
+    async def test_async_get_icons_failure_handled_gracefully(
+        self, hass: HomeAssistant
+    ) -> None:
+        # A broken or unloaded integration must not break rendering.
+        er.async_get(hass).async_get_or_create(
+            "sensor",
+            "moon",
+            "unique_5",
+            suggested_object_id="phase",
+            translation_key="phase",
+        )
+        states = {"sensor.phase": {"state": "full_moon", "attributes": {}}}
+        with patch(
+            _ICONS_JSON_TARGET,
+            AsyncMock(side_effect=Exception("integration not found")),
+        ):
+            await _enrich_entity_icons(hass, states)
+
+        assert "icon" not in states["sensor.phase"]["attributes"]
+
+    async def test_deduplicates_platforms(self, hass: HomeAssistant) -> None:
+        # Two entities on the same platform trigger only one
+        # async_get_icons call for that platform (platforms are
+        # deduplicated via a set before fetching).
+        er.async_get(hass).async_get_or_create(
+            "sensor",
+            "moon",
+            "unique_6",
+            suggested_object_id="phase",
+            translation_key="phase",
+        )
+        er.async_get(hass).async_get_or_create(
+            "sensor",
+            "moon",
+            "unique_7",
+            suggested_object_id="phase_2",
+            translation_key="phase",
+        )
+        states = {
+            "sensor.phase": {"state": "full_moon", "attributes": {}},
+            "sensor.phase_2": {
+                "state": "waxing_crescent",
+                "attributes": {},
+            },
+        }
+        with patch(
+            _ICONS_JSON_TARGET, AsyncMock(return_value=_MOON_ICONS)
+        ) as mock_icons:
+            await _enrich_entity_icons(hass, states)
+
+        mock_icons.assert_called_once()
+        assert states["sensor.phase"]["attributes"]["icon"] == "mdi:moon-full"
+        assert (
+            states["sensor.phase_2"]["attributes"]["icon"]
+            == "mdi:weather-night"
+        )
+
+    async def test_bad_platform_does_not_poison_good_platform(
+        self, hass: HomeAssistant
+    ) -> None:
+        # A stale registry entry pointing at an uninstalled or
+        # broken integration must not prevent icon resolution for
+        # entities on other, healthy platforms fetched in the same
+        # call to _enrich_entity_icons.
+        er.async_get(hass).async_get_or_create(
+            "sensor",
+            "moon",
+            "unique_8",
+            suggested_object_id="phase",
+            translation_key="phase",
+        )
+        er.async_get(hass).async_get_or_create(
+            "sensor",
+            "sun",
+            "unique_9",
+            suggested_object_id="solar_elevation",
+            translation_key="solar_elevation",
+        )
+        states = {
+            "sensor.phase": {"state": "full_moon", "attributes": {}},
+            "sensor.solar_elevation": {
+                "state": "42",
+                "attributes": {},
+            },
+        }
+
+        async def _fake_async_get_icons(
+            hass: HomeAssistant,
+            category: str,
+            integrations: set[str],
+        ) -> dict[str, Any]:
+            (platform,) = integrations
+            if platform == "sun":
+                raise Exception("integration not found")
+            return _MOON_ICONS
+
+        with patch(
+            _ICONS_JSON_TARGET,
+            AsyncMock(side_effect=_fake_async_get_icons),
+        ):
+            await _enrich_entity_icons(hass, states)
+
+        assert states["sensor.phase"]["attributes"]["icon"] == "mdi:moon-full"
+        assert "icon" not in states["sensor.solar_elevation"]["attributes"]
+
+
+class TestEnrichDisplayPrecision:
+    async def test_user_display_precision_injected(
+        self, hass: HomeAssistant
+    ) -> None:
+        # A user-configured display_precision in the entity registry
+        # is copied into the state dict.
+        er.async_get(hass).async_get_or_create(
+            "sensor", "test", "unique_1", suggested_object_id="temp"
+        )
+        er.async_get(hass).async_update_entity_options(
+            "sensor.temp", "sensor", {"display_precision": 0}
+        )
+        states = {"sensor.temp": {"state": "22.5", "attributes": {}}}
+        await _enrich_display_precision(hass, states)
+
+        assert states["sensor.temp"]["display_precision"] == 0
+
+    async def test_suggested_display_precision_used_as_fallback(
+        self, hass: HomeAssistant
+    ) -> None:
+        # Without a user override, the integration's
+        # suggested_display_precision is used instead.
+        er.async_get(hass).async_get_or_create(
+            "sensor", "test", "unique_2", suggested_object_id="temp2"
+        )
+        er.async_get(hass).async_update_entity_options(
+            "sensor.temp2",
+            "sensor",
+            {"suggested_display_precision": 1},
+        )
+        states = {"sensor.temp2": {"state": "22.456", "attributes": {}}}
+        await _enrich_display_precision(hass, states)
+
+        assert states["sensor.temp2"]["display_precision"] == 1
+
+    async def test_user_precision_overrides_suggested(
+        self, hass: HomeAssistant
+    ) -> None:
+        # The user's display_precision takes priority over the
+        # integration's suggested_display_precision.
+        er.async_get(hass).async_get_or_create(
+            "sensor", "test", "unique_3", suggested_object_id="temp3"
+        )
+        er.async_get(hass).async_update_entity_options(
+            "sensor.temp3",
+            "sensor",
+            {"display_precision": 2, "suggested_display_precision": 0},
+        )
+        states = {"sensor.temp3": {"state": "22.456", "attributes": {}}}
+        await _enrich_display_precision(hass, states)
+
+        assert states["sensor.temp3"]["display_precision"] == 2
+
+    async def test_no_precision_configured_key_absent(
+        self, hass: HomeAssistant
+    ) -> None:
+        # Entities with neither precision option configured are left
+        # untouched -- no display_precision key is added.
+        er.async_get(hass).async_get_or_create(
+            "sensor", "test", "unique_4", suggested_object_id="temp4"
+        )
+        states = {"sensor.temp4": {"state": "22.5", "attributes": {}}}
+        await _enrich_display_precision(hass, states)
+
+        assert "display_precision" not in states["sensor.temp4"]
+
+    async def test_entity_without_registry_entry_skipped(
+        self, hass: HomeAssistant
+    ) -> None:
+        # Entities missing from the registry entirely are left
+        # untouched rather than raising.
+        states = {"sensor.unregistered": {"state": "22.5", "attributes": {}}}
+        await _enrich_display_precision(hass, states)
+
+        assert "display_precision" not in states["sensor.unregistered"]
+
+    async def test_non_sensor_domain_skipped(
+        self, hass: HomeAssistant
+    ) -> None:
+        # Only sensor.* entities are consulted; display_precision is
+        # a sensor-specific HA option.
+        er.async_get(hass).async_get_or_create(
+            "number", "test", "unique_5", suggested_object_id="setpoint"
+        )
+        states = {"number.setpoint": {"state": "22.5", "attributes": {}}}
+        await _enrich_display_precision(hass, states)
+
+        assert "display_precision" not in states["number.setpoint"]

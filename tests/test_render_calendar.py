@@ -1,0 +1,1060 @@
+# Copyright 2026 Andreas Schneider
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for the calendar widget renderer."""
+
+from __future__ import annotations
+
+import datetime as dt
+import re
+from typing import TYPE_CHECKING, Any, ClassVar
+from unittest.mock import patch
+
+from custom_components.eink_dashboard.const import (
+    COLOR_GRAY,
+    COLOR_LIGHT_GRAY,
+    DEFAULT_ROW_H,
+    color_to_hex,
+)
+from custom_components.eink_dashboard.render import (
+    _compute_metrics,
+    _format_calendar_label,
+    _is_event_now,
+    _parse_calendar_dt,
+    render_dashboard,
+)
+from custom_components.eink_dashboard.svg_render import render_widget_svg
+from tests.helpers import (
+    assert_all_white,
+    assert_card_border,
+    assert_has_dark_pixels,
+    assert_has_gray_pixels,
+    assert_scales_proportionally,
+    assert_vertically_centered,
+    content_bbox,
+    make_config,
+    pixel,
+    render_to_image,
+)
+
+if TYPE_CHECKING:
+    from PIL import Image
+
+_TODAY = dt.date(2026, 6, 11)
+_TOMORROW = dt.date(2026, 6, 12)
+_FUTURE = dt.date(2026, 6, 15)  # Monday, 4 days from _TODAY
+_PATCH_NOW = "custom_components.eink_dashboard.render.date"
+
+
+def _card_top(img: Image.Image, h: int, x: int = 350) -> int:
+    """Return the y of a bordered card's top edge.
+
+    The border spans the full card width, and no other content
+    reaches ``x`` (the right-aligned value and the title both stay
+    clear of it), so the topmost dark pixel in that column is the
+    border's top edge.
+
+    Args:
+        img: Grayscale render of a widget with ``card_style``
+            ``"border"``.
+        h: Widget height in pixels.
+        x: Column to scan.
+
+    Returns:
+        The y coordinate of the card's top edge.
+    """
+    return next(y for y in range(h) if pixel(img, x, y) < 128)
+
+
+# End times are chosen so _is_event_now() always returns False
+# during any real test run (events ended before the day began),
+# giving deterministic "today but not now" = gray-filled icon.
+MOCK_CALENDAR_STATES: dict[str, Any] = {
+    "calendar.family": {
+        "state": "off",
+        "attributes": {
+            "friendly_name": "Family Calendar",
+            "events": [
+                {
+                    "start": "2026-06-12T10:00:00",
+                    "end": "2026-06-12T11:00:00",
+                    "summary": "Doctor Appointment",
+                    "all_day": False,
+                },
+                {
+                    "start": "2026-06-15T14:00:00",
+                    "end": "2026-06-15T15:00:00",
+                    "summary": "Team Meeting",
+                    "all_day": False,
+                },
+            ],
+        },
+    },
+    # today_cal: event today from 00:00–00:01 so is_now is always
+    # False but start_date == today → gray-filled icon.
+    "calendar.today_cal": {
+        "state": "off",
+        "attributes": {
+            "friendly_name": "Today Calendar",
+            "events": [
+                {
+                    "start": "2026-06-11T00:00:00",
+                    "end": "2026-06-11T00:01:00",
+                    "summary": "Morning Standup",
+                    "all_day": False,
+                },
+            ],
+        },
+    },
+    "calendar.allday_cal": {
+        "state": "off",
+        "attributes": {
+            "friendly_name": "All-Day Calendar",
+            "events": [
+                {
+                    "start": "2026-06-11",
+                    "end": "2026-06-12",
+                    "summary": "All Day Event",
+                    "all_day": True,
+                },
+            ],
+        },
+    },
+    "calendar.future_only": {
+        "state": "off",
+        "attributes": {
+            "friendly_name": "Future Calendar",
+            "events": [
+                {
+                    "start": "2026-06-15T14:00:00",
+                    "end": "2026-06-15T15:00:00",
+                    "summary": "Future Event",
+                    "all_day": False,
+                },
+            ],
+        },
+    },
+}
+
+
+class TestCalendarHelpers:
+    """Unit tests for calendar helper functions in render.py."""
+
+    def test_parse_date_only(self) -> None:
+        # All-day events use date-only strings; time part is None.
+        d, hm = _parse_calendar_dt("2026-06-11")
+        assert d == dt.date(2026, 6, 11)
+        assert hm is None
+
+    def test_parse_datetime_local(self) -> None:
+        # Local datetime (no timezone) returns (date, (hour, minute)).
+        d, hm = _parse_calendar_dt("2026-06-11T10:30:00")
+        assert d == dt.date(2026, 6, 11)
+        assert hm == (10, 30)
+
+    def test_parse_datetime_with_tz_offset(self) -> None:
+        # Timezone offset is stripped; local wall-clock values kept.
+        d, hm = _parse_calendar_dt("2026-06-11T14:00:00+02:00")
+        assert d == dt.date(2026, 6, 11)
+        assert hm == (14, 0)
+
+    def test_parse_datetime_space_separator(self) -> None:
+        # HA sometimes uses a space instead of "T" as separator.
+        d, hm = _parse_calendar_dt("2026-06-11 09:15:00")
+        assert d == dt.date(2026, 6, 11)
+        assert hm == (9, 15)
+
+    def test_parse_invalid_falls_back_to_today(self) -> None:
+        # An unparseable string falls back to date.today().
+        d, hm = _parse_calendar_dt("unavailable")
+        assert d == dt.date.today()
+        assert hm is None
+
+    def test_format_label_today_allday(self) -> None:
+        # All-day event today formats as bare "Today".
+        label = _format_calendar_label(
+            "2026-06-11",
+            all_day=True,
+            today=dt.date(2026, 6, 11),
+        )
+        assert label == "Today"
+
+    def test_format_label_today_timed(self) -> None:
+        # Timed event today appends "HH:MM" in 24-hour format.
+        label = _format_calendar_label(
+            "2026-06-11T14:30:00",
+            all_day=False,
+            today=dt.date(2026, 6, 11),
+        )
+        assert label == "Today 14:30"
+
+    def test_format_label_tomorrow_timed(self) -> None:
+        # Tomorrow's timed event uses "Tomorrow HH:MM".
+        label = _format_calendar_label(
+            "2026-06-12T10:00:00",
+            all_day=False,
+            today=dt.date(2026, 6, 11),
+        )
+        assert label == "Tomorrow 10:00"
+
+    def test_format_label_within_week(self) -> None:
+        # 3 days from now uses a weekday abbreviation.
+        # 2026-06-14 is a Sunday.
+        label = _format_calendar_label(
+            "2026-06-14T09:00:00",
+            all_day=False,
+            today=dt.date(2026, 6, 11),
+        )
+        assert label == "Sun 9:00"
+
+    def test_format_label_beyond_week_timed(self) -> None:
+        # Timed events 8+ days out use "Mon DD HH:MM".
+        label = _format_calendar_label(
+            "2026-06-22T09:00:00",
+            all_day=False,
+            today=dt.date(2026, 6, 11),
+        )
+        assert label == "Jun 22 9:00"
+
+    def test_format_label_beyond_week_allday(self) -> None:
+        # All-day events 8+ days out use bare "Mon DD" (no time).
+        label = _format_calendar_label(
+            "2026-06-22",
+            all_day=True,
+            today=dt.date(2026, 6, 11),
+        )
+        assert label == "Jun 22"
+
+    def test_format_label_12hour(self) -> None:
+        # 12-hour mode appends AM/PM.
+        label = _format_calendar_label(
+            "2026-06-12T14:30:00",
+            all_day=False,
+            today=dt.date(2026, 6, 11),
+            time_format="12",
+        )
+        assert label == "Tomorrow 2:30 PM"
+
+    def test_format_label_midnight(self) -> None:
+        # Midnight formats as 0:00 in 24-hour mode.
+        label = _format_calendar_label(
+            "2026-06-12T00:00:00",
+            all_day=False,
+            today=dt.date(2026, 6, 11),
+        )
+        assert label == "Tomorrow 0:00"
+
+    def test_format_label_today_german(self) -> None:
+        # language="de" translates "Today" to "Heute".
+        label = _format_calendar_label(
+            "2026-06-11",
+            all_day=True,
+            today=dt.date(2026, 6, 11),
+            language="de",
+        )
+        assert label == "Heute"
+
+    def test_format_label_tomorrow_german(self) -> None:
+        # language="de" translates "Tomorrow" to "Morgen".
+        label = _format_calendar_label(
+            "2026-06-12T10:00:00",
+            all_day=False,
+            today=dt.date(2026, 6, 11),
+            language="de",
+        )
+        assert label == "Morgen 10:00"
+
+    def test_format_label_within_week_german(self) -> None:
+        # language="de" localizes the weekday abbreviation.
+        # 2026-06-14 is a Sunday ("So." in German CLDR).
+        label = _format_calendar_label(
+            "2026-06-14T09:00:00",
+            all_day=False,
+            today=dt.date(2026, 6, 11),
+            language="de",
+        )
+        assert label == "So. 9:00"
+
+    def test_format_label_beyond_week_german(self) -> None:
+        # language="de" localizes the month abbreviation.
+        label = _format_calendar_label(
+            "2026-06-22",
+            all_day=True,
+            today=dt.date(2026, 6, 11),
+            language="de",
+        )
+        assert label == "Juni 22"
+
+    def test_is_event_now_timed_during(self) -> None:
+        # A timed event is "now" when current time is within its window.
+        now = dt.datetime(2026, 6, 11, 10, 30)
+        assert _is_event_now("2026-06-11T10:00:00", "2026-06-11T11:00:00", now)
+
+    def test_is_event_not_now_after(self) -> None:
+        # An event that already ended is not "now".
+        now = dt.datetime(2026, 6, 11, 12, 0)
+        assert not _is_event_now(
+            "2026-06-11T10:00:00", "2026-06-11T11:00:00", now
+        )
+
+    def test_is_event_not_now_before(self) -> None:
+        # An event that hasn't started is not "now".
+        now = dt.datetime(2026, 6, 11, 9, 0)
+        assert not _is_event_now(
+            "2026-06-11T10:00:00", "2026-06-11T11:00:00", now
+        )
+
+    def test_is_allday_event_now(self) -> None:
+        # All-day event is "now" when today falls within [start, end).
+        now = dt.datetime(2026, 6, 11, 15, 0)
+        assert _is_event_now("2026-06-11", "2026-06-12", now)
+
+    def test_is_allday_event_not_now_next_day(self) -> None:
+        # All-day event is not "now" the day after it ends.
+        now = dt.datetime(2026, 6, 12, 8, 0)
+        assert not _is_event_now("2026-06-11", "2026-06-12", now)
+
+
+class TestRenderCalendar:
+    """Verify rendering of calendar widgets."""
+
+    _DEFAULTS: ClassVar[dict[str, object]] = {
+        "width": 400,
+        "height": 300,
+        "display_levels": 16,
+        "time_format": "24",
+        "states": MOCK_CALENDAR_STATES,
+    }
+
+    def _config(self, **overrides: object) -> dict[str, object]:
+        """Build a display config with optional overrides."""
+        return make_config(self._DEFAULTS, **overrides)
+
+    def _widget(self, **overrides: object) -> dict[str, object]:
+        """Build a calendar widget config with sensible defaults."""
+        base: dict[str, object] = {
+            "type": "calendar",
+            "entity": "calendar.family",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 112,
+        }
+        base.update(overrides)
+        return base
+
+    # ── Structural tests ──────────────────────────────
+
+    def test_calendar_draws_event_content(self) -> None:
+        # Dark pixels appear in the widget area when events are present.
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([self._widget()], self._config())
+        assert_has_dark_pixels(img, 0, 0, 400, 112)
+
+    def test_calendar_12h_time_format(self) -> None:
+        # time_format="12" in the display config is forwarded to event
+        # labels; the widget renders successfully and produces content.
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image(
+                [self._widget()], self._config(time_format="12")
+            )
+        assert_has_dark_pixels(img, 0, 0, 400, 112)
+
+    def test_calendar_no_entity_white(self) -> None:
+        # Missing entity produces blank output without crashing.
+        w = self._widget(entity="calendar.nonexistent")
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([w], self._config())
+        assert_all_white(img, 0, 0, 400, 300)
+
+    def test_calendar_no_events_white(self) -> None:
+        # Empty events list produces blank output.
+        states: dict[str, Any] = {
+            "calendar.empty": {
+                "state": "off",
+                "attributes": {
+                    "friendly_name": "Empty",
+                    "events": [],
+                },
+            }
+        }
+        w = self._widget(entity="calendar.empty", h=56)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([w], self._config(states=states))
+        assert_all_white(img, 0, 0, 400, 300)
+
+    def test_calendar_card_border(self) -> None:
+        # card_style="border" draws dark pixels on all four edges.
+        h = 112
+        row_h = h // 2
+        m = _compute_metrics(row_h)
+        w = self._widget(h=h, card_style="border")
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([w], self._config())
+        assert_card_border(img, 400, h, m)
+
+    def test_calendar_card_style_none_is_default(self) -> None:
+        # Omitting card_style must produce byte-identical output to "none".
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            with_none = render_dashboard(
+                [self._widget(card_style="none")], self._config()
+            )
+            without = render_dashboard([self._widget()], self._config())
+        assert with_none == without
+
+    def test_calendar_card_left_bar(self) -> None:
+        # card_style="left_bar" draws a gray bar along the left edge.
+        h = 56
+        m = _compute_metrics(h)
+        w = self._widget(
+            entity="calendar.future_only",
+            h=h,
+            card_style="left_bar",
+        )
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([w], self._config())
+        assert_has_gray_pixels(
+            img,
+            0,
+            2,
+            m.left_bar + 2,
+            h - 2,
+            low=COLOR_GRAY - 20,
+            high=COLOR_GRAY + 20,
+        )
+
+    def test_calendar_divider_between_rows(self) -> None:
+        # Multiple events produce a light-gray divider at the row boundary.
+        h = 112
+        row_h = h // 2
+        m = _compute_metrics(row_h)
+        w = self._widget(h=h, max_events=2)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([w], self._config())
+        assert_has_gray_pixels(
+            img,
+            m.padding + 10,
+            row_h - m.divider,
+            380,
+            row_h + m.divider + 1,
+            low=COLOR_LIGHT_GRAY - 20,
+            high=COLOR_LIGHT_GRAY + 20,
+        )
+
+    def test_calendar_no_divider_single_event(self) -> None:
+        # Single event widget has no divider below the row.
+        h = 56
+        w = self._widget(entity="calendar.future_only", h=h)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([w], self._config())
+        assert_all_white(img, 0, h + 1, 400, h + 4)
+
+    def test_calendar_icon_present(self) -> None:
+        # Calendar icon (dark pixels) appears in the icon area.
+        h = 56
+        m = _compute_metrics(h)
+        w = self._widget(entity="calendar.future_only", h=h)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([w], self._config())
+        assert_has_dark_pixels(img, m.padding, 0, m.padding + m.icon_dia, h)
+
+    # ── Alignment tests ───────────────────────────────
+
+    def test_calendar_icon_vertically_centered(self) -> None:
+        # Icon circle is vertically centered with the primary text.
+        h = 56
+        m = _compute_metrics(h)
+        w = self._widget(entity="calendar.future_only", h=h)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([w], self._config())
+        icon_region = (m.padding, 0, m.padding + m.icon_dia, h)
+        text_x = m.padding + m.icon_dia + m.inner_gap
+        text_region = (text_x, 0, 380, h)
+        assert_vertically_centered(
+            img, icon_region, text_region, tolerance=3.0
+        )
+
+    # ── Scaling tests ─────────────────────────────────
+
+    def test_calendar_shrinks_when_too_small(self) -> None:
+        # A widget shorter than DEFAULT_ROW_H per row still shrinks
+        # its rows to fit (halving h halves the icon height).
+        half = DEFAULT_ROW_H // 2
+        m_small = _compute_metrics(half)
+        m_large = _compute_metrics(DEFAULT_ROW_H)
+        w_small = self._widget(entity="calendar.future_only", h=half)
+        w_large = self._widget(entity="calendar.future_only", h=DEFAULT_ROW_H)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img_s = render_to_image([w_small], self._config())
+            img_l = render_to_image([w_large], self._config())
+        assert_scales_proportionally(
+            img_s,
+            img_l,
+            region_small=(
+                m_small.padding,
+                0,
+                m_small.padding + m_small.icon_dia,
+                half,
+            ),
+            region_large=(
+                m_large.padding,
+                0,
+                m_large.padding + m_large.icon_dia,
+                DEFAULT_ROW_H,
+            ),
+            expected_ratio=2.0,
+        )
+
+    def test_calendar_rows_do_not_grow_beyond_default(self) -> None:
+        # A tall widget with one event keeps the standard row height
+        # and stacks it at the top instead of blowing it up.
+        w = self._widget(entity="calendar.future_only", h=240)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+            img = render_to_image([w], self._config())
+        assert 'height="240"' in svg
+        assert_has_dark_pixels(img, 0, 0, 400, DEFAULT_ROW_H)
+        assert_all_white(img, 0, DEFAULT_ROW_H + 2, 400, 240)
+
+    def test_calendar_border_wraps_rows_only(self) -> None:
+        # With a tall widget the border card hugs the rows instead of
+        # enclosing the empty space below them.
+        w = self._widget(
+            entity="calendar.future_only", h=240, card_style="border"
+        )
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([w], self._config())
+        assert_has_dark_pixels(
+            img, 40, DEFAULT_ROW_H - 4, 360, DEFAULT_ROW_H + 1
+        )
+        assert_all_white(img, 0, DEFAULT_ROW_H + 4, 400, 240)
+
+    def test_calendar_divider_width_configurable(self) -> None:
+        # divider_width sets a fixed divider stroke on any display.
+        w = self._widget(h=2 * DEFAULT_ROW_H, max_events=2, divider_width=1)
+        for levels in (2, 16):
+            with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+                mock_dt.today.return_value = _TODAY
+                svg = render_widget_svg(w, self._config(display_levels=levels))
+            assert re.search(r'<line[^>]*stroke-width="1"', svg)
+
+    def test_calendar_divider_width_zero_hides_divider(self) -> None:
+        # divider_width=0 removes the divider between rows.
+        w = self._widget(h=2 * DEFAULT_ROW_H, max_events=2, divider_width=0)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+        assert "<line" not in svg
+
+    # ── Auto-sizing tests ─────────────────────────────
+
+    def test_calendar_auto_height_single_event(self) -> None:
+        # Without explicit h and one event, height == DEFAULT_ROW_H.
+        w = {
+            "type": "calendar",
+            "entity": "calendar.future_only",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+        }
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+        m = re.search(r'height="(\d+)"', svg)
+        assert m is not None
+        assert int(m.group(1)) == DEFAULT_ROW_H
+
+    def test_calendar_auto_height_two_events(self) -> None:
+        # Without explicit h and two events, height == 2 * DEFAULT_ROW_H.
+        w = {
+            "type": "calendar",
+            "entity": "calendar.family",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "max_events": 2,
+        }
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+        m = re.search(r'height="(\d+)"', svg)
+        assert m is not None
+        assert int(m.group(1)) == 2 * DEFAULT_ROW_H
+
+    def test_calendar_explicit_h_preserved(self) -> None:
+        # An explicit h overrides auto-sizing regardless of event count.
+        w = self._widget(h=200)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+        m = re.search(r'height="(\d+)"', svg)
+        assert m is not None
+        assert int(m.group(1)) == 200
+
+    # ── Content / data tests ──────────────────────────
+
+    def test_calendar_max_events_limits_rows(self) -> None:
+        # max_events=1 forces only one row despite two events available.
+        w = {
+            "type": "calendar",
+            "entity": "calendar.family",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "max_events": 1,
+        }
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+        m = re.search(r'height="(\d+)"', svg)
+        assert m is not None
+        assert int(m.group(1)) == DEFAULT_ROW_H
+
+    def test_calendar_event_summary_in_svg(self) -> None:
+        # Event summary text appears in the rendered SVG.  The row is
+        # wide enough for the full summary next to the date label;
+        # narrower rows truncate it.
+        w = self._widget(max_events=1, w=800)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config(width=800))
+        assert "Doctor Appointment" in svg
+
+    def test_calendar_all_day_event_no_time(self) -> None:
+        # All-day event label is "Today" with no colon-separated time.
+        w = self._widget(entity="calendar.allday_cal", h=56)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+        assert "Today" in svg
+        # Extract the 10 characters after "Today" and verify no ":"
+        today_idx = svg.index("Today")
+        after = svg[today_idx + len("Today") : today_idx + len("Today") + 10]
+        assert ":" not in after
+
+    def test_calendar_timed_event_shows_time(self) -> None:
+        # Timed event label includes the start time in HH:MM format.
+        w = self._widget(entity="calendar.future_only", h=56)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+        # Future event starts at 14:00.
+        assert "14:00" in svg
+
+    def test_calendar_language_de_translates_label(self) -> None:
+        # config["language"] = "de" translates the "Tomorrow" label
+        # on calendar.family's first event (2026-06-12, one day
+        # after _TODAY) to "Morgen".
+        w = self._widget(entity="calendar.family", max_events=1)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config(language="de"))
+        assert "Morgen 10:00" in svg
+
+    def test_calendar_language_defaults_to_english(self) -> None:
+        # Without a language override, the label stays in English.
+        w = self._widget(entity="calendar.family", max_events=1)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+        assert "Tomorrow 10:00" in svg
+
+    def test_calendar_title_shown(self) -> None:
+        # When title is set, title text appears in the SVG output.
+        w = self._widget(h=80, title="My Events")
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+        assert "My Events" in svg
+
+    def test_calendar_date_right_aligned(self) -> None:
+        # Date/time label appears near the right edge of the widget.
+        h = 56
+        w = self._widget(entity="calendar.future_only", h=h)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([w], self._config())
+        assert_has_dark_pixels(img, 300, 0, 400, h, threshold=200)
+
+    def test_calendar_value_text_black(self) -> None:
+        # The right-aligned date/time value is rendered in black
+        # (the value is the most important element, so it gets the
+        # highest contrast).
+        h = 56
+        w = self._widget(entity="calendar.future_only", h=h)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([w], self._config())
+        assert any(
+            pixel(img, x, y) < 64 for y in range(0, h) for x in range(300, 400)
+        ), "date value text should be black (< 64)"
+
+    def test_calendar_name_text_gray(self) -> None:
+        # The event summary (name) is rendered in gray, secondary
+        # to the black date/time value.
+        h = 56
+        m = _compute_metrics(h)
+        w = self._widget(entity="calendar.future_only", h=h)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([w], self._config())
+        text_left = m.padding + m.icon_dia + m.inner_gap
+        assert_has_gray_pixels(img, text_left, 0, 300, h)
+
+    def test_calendar_default_value_not_bold(self) -> None:
+        # By default, the date/time value has no bold
+        # font-weight attribute.
+        w = self._widget()
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+        assert 'font-weight="bold"' not in svg
+
+    # ── Urgency / icon fill tests ─────────────────────
+
+    def test_calendar_today_event_gray_filled_icon(self) -> None:
+        # Today's event (not in progress) renders with a gray-filled
+        # icon circle.  The SVG should contain the gray hex color on a
+        # circle element.
+        w = self._widget(entity="calendar.today_cal", h=56)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+        # Gray fill hex (#787878) must appear — used as icon_fill
+        # on the filled-circle path in _macros.svg.j2.
+        assert color_to_hex(COLOR_GRAY) in svg
+
+    def test_calendar_future_event_outlined_icon(self) -> None:
+        # Future event renders with an outlined circle (black stroke,
+        # white fill).  The circle element has a stroke-width attribute.
+        w = self._widget(entity="calendar.future_only", h=56)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+        # Outlined mode emits stroke and stroke-width on the circle.
+        assert "stroke-width=" in svg
+
+    def test_calendar_future_event_white_interior(self) -> None:
+        # Outlined icon has a white interior (not filled with gray).
+        h = 80
+        m = _compute_metrics(h)
+        w = self._widget(entity="calendar.future_only", h=h)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([w], self._config())
+        ring_y = h // 2
+        # The leftmost arc pixel should be the black stroke.
+        assert pixel(img, m.padding, ring_y) < 64
+        # Just inside the stroke, before the glyph: white fill.
+        assert pixel(img, m.padding + m.border + 3, ring_y) > 200
+
+    # ── 2-level display tests ─────────────────────────
+
+    def test_calendar_2level_icon_stroke_widened(self) -> None:
+        # On 2-level displays the icon circle stroke is 3× m.border.
+        m = _compute_metrics(DEFAULT_ROW_H)
+        w = self._widget(
+            entity="calendar.future_only",
+            h=DEFAULT_ROW_H,
+        )
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config(display_levels=2))
+        expected = m.border * 3
+        assert f'stroke-width="{expected}"' in svg, (
+            f"2-level stroke-width should be {expected}"
+            f" (3 × m.border={m.border})"
+        )
+
+    def test_calendar_divider_defaults_to_one_pixel(self) -> None:
+        # Without divider_width the divider is 1 px on every display.
+        w = self._widget(h=2 * DEFAULT_ROW_H, max_events=2)
+        for levels in (2, 16):
+            with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+                mock_dt.today.return_value = _TODAY
+                svg = render_widget_svg(w, self._config(display_levels=levels))
+            assert re.findall(r'<line[^>]*stroke-width="(\d+)"', svg) == ["1"]
+
+    def test_calendar_hide_icon(self) -> None:
+        # hide_icon removes the icon circle and starts the text at
+        # the row's left padding.
+        m = _compute_metrics(DEFAULT_ROW_H)
+        w = self._widget(
+            entity="calendar.future_only", h=DEFAULT_ROW_H, hide_icon=True
+        )
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+        assert "<circle" not in svg
+        assert "<path" not in svg
+        assert f'<text\n  x="{m.padding}"' in svg
+
+    def test_calendar_row_height_caps_rows(self) -> None:
+        # row_height sets the maximum row height: a tall widget
+        # with one event renders one row_height-tall row at the top.
+        w = self._widget(entity="calendar.future_only", h=240, row_height=100)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+            img = render_to_image([w], self._config())
+        m = _compute_metrics(100)
+        assert f'r="{m.icon_dia // 2}"' in svg
+        assert_has_dark_pixels(img, 0, 0, 400, 100)
+        assert_all_white(img, 0, 102, 400, 240)
+
+    def test_calendar_row_height_drives_auto_height(self) -> None:
+        # Without explicit h the widget is num_rows * row_height tall.
+        w = {
+            "type": "calendar",
+            "entity": "calendar.family",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "max_events": 2,
+            "row_height": 40,
+        }
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+        assert 'height="80"' in svg
+
+    def test_calendar_border_single_padding(self) -> None:
+        # With card_style="border", card_container provides x_off=padding;
+        # card_row must not add its own padding again.  The icon circle's
+        # left arc should appear in the strip [m.padding, 2*m.padding].
+        h = DEFAULT_ROW_H
+        m = _compute_metrics(h)
+        w = self._widget(
+            entity="calendar.future_only",
+            h=h,
+            card_style="border",
+        )
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([w], self._config())
+        assert_has_dark_pixels(
+            img,
+            m.padding,
+            0,
+            2 * m.padding,
+            h,
+            threshold=200,
+        )
+
+    # ── Overlap tests ─────────────────────────────────
+
+    def test_calendar_long_summary_does_not_overlap_value(self) -> None:
+        # A summary too long for the row is truncated so it ends at
+        # least one inner gap before the right-aligned date label;
+        # the label itself is drawn unchanged.
+        h = DEFAULT_ROW_H
+        m = _compute_metrics(h)
+        long_summary = "Quarterly planning review with the whole team"
+
+        def states_for(summary: str) -> dict[str, Any]:
+            """Build a calendar state with one event titled summary."""
+            event = {
+                "start": "2026-06-15T14:00:00",
+                "end": "2026-06-15T15:00:00",
+                "summary": summary,
+                "all_day": False,
+            }
+            return {
+                "calendar.long": {
+                    "state": "off",
+                    "attributes": {"events": [event]},
+                }
+            }
+
+        states = states_for(long_summary)
+        empty_states = states_for("")
+        w = self._widget(entity="calendar.long", w=300, h=h)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config(states=states))
+            img = render_to_image([w], self._config(states=states))
+            ref = render_to_image([w], self._config(states=empty_states))
+        assert "\u2026" in svg, "long summary should be truncated"
+        # Leftmost dark column of the date label, from the render
+        # without a summary (right of the icon and text start).
+        text_x = m.padding + m.icon_dia + m.inner_gap
+        value_left = next(
+            x
+            for x in range(text_x, 300)
+            if any(pixel(ref, x, y) < 200 for y in range(h))
+        )
+        # The date label is identical with and without the summary.
+        for x in range(value_left, 300):
+            for y in range(h):
+                assert pixel(img, x, y) == pixel(ref, x, y), (x, y)
+        # The gap in front of the label stays white.
+        assert_all_white(img, value_left - m.inner_gap // 2, 0, value_left, h)
+
+    # ── Font customization tests ──────────────────────
+
+    def test_calendar_value_font_size_override(self) -> None:
+        # fonts.value.size enlarges the right-aligned date/time
+        # value relative to the widget's derived default size.
+        h = 56
+        base = self._widget(entity="calendar.future_only", h=h)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            default = render_to_image([base], self._config())
+            bigger = render_to_image(
+                [{**base, "fonts": {"value": {"size": 30}}}],
+                self._config(),
+            )
+        bbox_default = content_bbox(default, 250, 0, 400, h)
+        bbox_bigger = content_bbox(bigger, 250, 0, 400, h)
+        assert bbox_default is not None
+        assert bbox_bigger is not None
+        assert (bbox_bigger[3] - bbox_bigger[1]) > (
+            bbox_default[3] - bbox_default[1]
+        )
+
+    def test_calendar_primary_font_size_override(self) -> None:
+        # fonts.primary.size enlarges the gray event summary in the
+        # text column right of the icon.
+        h = 56
+        m = _compute_metrics(h)
+        text_left = m.padding + m.icon_dia + m.inner_gap
+        base = self._widget(entity="calendar.future_only", h=h)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            default = render_to_image([base], self._config())
+            bigger = render_to_image(
+                [{**base, "fonts": {"primary": {"size": 30}}}],
+                self._config(),
+            )
+        bbox_default = content_bbox(default, text_left, 0, 250, h)
+        bbox_bigger = content_bbox(bigger, text_left, 0, 250, h)
+        assert bbox_default is not None
+        assert bbox_bigger is not None
+        assert (bbox_bigger[3] - bbox_bigger[1]) > (
+            bbox_default[3] - bbox_default[1]
+        )
+
+    def test_calendar_title_font_size_override(self) -> None:
+        # fonts.title.size enlarges the title label above the card.
+        # Measuring up to the card's top border isolates the title:
+        # no other content draws between it and the widget top.
+        h = 112
+        base = self._widget(
+            entity="calendar.future_only",
+            h=h,
+            title="My Events",
+            max_events=1,
+            card_style="border",
+        )
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            default = render_to_image([base], self._config())
+            bigger = render_to_image(
+                [{**base, "fonts": {"title": {"size": 28}}}],
+                self._config(),
+            )
+        bbox_default = content_bbox(default, 0, 0, 250, _card_top(default, h))
+        bbox_bigger = content_bbox(bigger, 0, 0, 250, _card_top(bigger, h))
+        assert bbox_default is not None
+        assert bbox_bigger is not None
+        assert (bbox_bigger[3] - bbox_bigger[1]) > (
+            bbox_default[3] - bbox_default[1]
+        )
+
+    def test_calendar_large_title_size_clears_card_border(self) -> None:
+        # A title large enough to outgrow the default title band
+        # pushes the card down with it: the border must still sit
+        # below the title glyphs rather than crossing them.
+        h = 112
+        w = self._widget(
+            entity="calendar.future_only",
+            h=h,
+            title="My Events",
+            card_style="border",
+            fonts={"title": {"size": 40}},
+        )
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            img = render_to_image([w], self._config())
+        border_top = _card_top(img, h)
+        title_bbox = content_bbox(img, 0, 0, 250, border_top)
+        assert title_bbox is not None
+        assert title_bbox[3] < border_top - 2
+
+    def test_calendar_fonts_value_weight_bold(self) -> None:
+        # fonts.value.weight="bold" bolds the date/time value.
+        w = self._widget(fonts={"value": {"weight": "bold"}})
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config())
+        assert 'font-weight="bold"' in svg
+
+    def test_calendar_fonts_title_weight_bold(self) -> None:
+        # The title keeps its regular weight by default and honours a
+        # bold override.
+        base = self._widget(h=80, title="My Events")
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            plain = render_widget_svg(base, self._config())
+            bold = render_widget_svg(
+                {**base, "fonts": {"title": {"weight": "bold"}}},
+                self._config(),
+            )
+        assert 'font-weight="bold"' not in plain
+        assert 'font-weight="bold"' in bold
+
+    def test_calendar_fonts_primary_weight(self) -> None:
+        # The event summary keeps its historical medium weight by
+        # default and honours a bold override.
+        base = self._widget(entity="calendar.future_only", h=56)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            plain = render_widget_svg(base, self._config())
+            bold = render_widget_svg(
+                {**base, "fonts": {"primary": {"weight": "bold"}}},
+                self._config(),
+            )
+        assert 'font-weight="500"' in plain
+        assert 'font-weight="bold"' in bold
+
+    def test_calendar_font_scale_enlarges_value(self) -> None:
+        # A display-level font_scale multiplies the derived value
+        # size without any per-widget override.
+        h = 56
+        base = self._widget(entity="calendar.future_only", h=h)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            default = render_to_image([base], self._config())
+            scaled = render_to_image([base], self._config(font_scale=1.8))
+        bbox_default = content_bbox(default, 250, 0, 400, h)
+        bbox_scaled = content_bbox(scaled, 250, 0, 400, h)
+        assert bbox_default is not None
+        assert bbox_scaled is not None
+        assert (bbox_scaled[3] - bbox_scaled[1]) > (
+            bbox_default[3] - bbox_default[1]
+        )

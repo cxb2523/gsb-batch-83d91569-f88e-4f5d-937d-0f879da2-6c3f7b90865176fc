@@ -1,0 +1,902 @@
+# Copyright 2026 Andreas Schneider
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Weather widget context builder."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
+
+import markupsafe
+
+from ..const import (
+    DEFAULT_CARD_STYLE,
+    DEFAULT_WEATHER_MODE,
+    FONT_SIZE_WEATHER,
+    PADDING,
+    DisplayConfig,
+    FontWeight,
+)
+from ..svg_render import (
+    _ICONS_DIR,
+    _build_inline_svg,
+    _load_svg_paths,
+    _weather_svg_filter,
+)
+from ._helpers import (
+    _card_insets,
+    _color_context,
+    _fmt,
+    _metrics_context,
+    _temp_gradient_stops,
+    _widget_dim,
+)
+from .graph import _maybe_grayscale_stops
+
+if TYPE_CHECKING:
+    from ..widget_config import WeatherWidget
+
+# Weather base geometry at scale=1.0
+# (font_size == FONT_SIZE_WEATHER == 32).  Each value is multiplied
+# by `scale` in _build_weather_context() to adapt to the configured
+# font_size.  These constants are weather-specific and have no
+# equivalent in WidgetMetrics; padding and divider thickness are
+# derived from _compute_metrics() directly inside the builder.
+#
+# _WX_ROW_H must be defined first; other derived constants reference
+# it.
+_WX_ROW_H = 48  # 48, not DEFAULT_ROW_H (56): matches original PIL proportions
+_WX_NATURAL_W = 380  # natural card width
+# "current" mode is wider: room for the extra feels-like detail
+# chip and the min/max bar's side labels.
+_WX_NATURAL_W_CURRENT = 460
+_WX_ICON = 80  # condition icon diameter
+_WX_FONT_XL = 64  # temperature font size (bold)
+_WX_FONT_SM = 16  # hi/lo, detail, and forecast font
+_WX_FONT_XS = 14  # precipitation text font
+_WX_ICON_R_PAD = 16  # gap: condition icon → temp text
+_WX_DETAIL_GAP = 2  # vertical gap above detail row
+_WX_DETAIL_ICON_H = 20  # detail icon height
+_WX_ICON_GAP = 4  # gap: detail icon → its text
+_WX_SEP_GAP = 8  # gap above/below separator line
+_WX_FC_ZONE_H = 88  # forecast zone height
+_WX_PRECIP_H = _WX_FONT_SM  # line height matches font
+_WX_FC_ICON = 32  # forecast day icon diameter
+_WX_FC_ICON_CY = 34  # forecast icon centre Y offset
+_WX_FC_HI_Y = 52  # forecast hi-temp text Y offset
+_WX_FC_LO_Y = 70  # forecast lo-temp text Y offset
+_WX_FC_PRECIP_Y = _WX_FC_ZONE_H  # precip text at zone bottom
+_WX_MIN_FC_COLS = 5  # minimum forecast column count
+_WX_LO_Y_FRAC = 0.4  # lo temp Y as fraction of temp_h
+_WX_PRECIP_Y_FRAC = 0.72  # precip text Y as fraction of temp_h
+_WX_BAR_H = 24  # today min/max gradient bar height
+_WX_BAR_LABEL_W_LEFT = 70  # left text reserve: day abbrev + lo temp
+_WX_BAR_LABEL_W_RIGHT = 50  # right text reserve: hi temp
+_WX_BAR_GRADIENT_STEPS = 12  # color stops sampled across the bar
+
+_DETAIL_ICON_MAP: dict[str, str] = {
+    "humidity": "wi-humidity",
+    "barometer": "wi-barometer",
+    "wind": "wi-strong-wind",
+    "cloud": "wi-cloud",
+}
+
+
+def _none_if_empty(value: Any) -> Any:
+    """Normalize this module's "field absent" sentinel to ``None``.
+
+    Forecast entries represent a missing numeric field as ``""``
+    (see ``fc_hi_val``/``fc_lo_val`` below) rather than omitting the
+    key or using ``None``.
+
+    Args:
+        value: A forecast field value.
+
+    Returns:
+        ``None`` if ``value`` is ``""``, otherwise ``value`` unchanged.
+    """
+    return None if value == "" else value
+
+
+def _resolve_sensor_override(
+    entity_id: str,
+    states: dict[str, Any],
+    fallback_value: Any,
+    fallback_unit: str,
+) -> tuple[Any, str, bool]:
+    """Return (value, unit, sensor_used) from a sensor entity override.
+
+    Looks up ``entity_id`` in ``states``.  If found and the state is
+    numeric, parses it and returns the sensor's value together with
+    ``unit_of_measurement`` from its attributes.  If the entity is
+    absent or non-numeric, returns the fallback values unchanged.
+
+    Args:
+        entity_id: HA entity ID of the overriding sensor.
+        states: Snapshot of HA entity states from the display config.
+        fallback_value: Value to return when the sensor is unusable.
+        fallback_unit: Unit to return when the sensor is unusable.
+
+    Returns:
+        A 3-tuple ``(value, unit, sensor_used)`` where ``sensor_used``
+        is ``True`` when the sensor state was successfully applied.
+    """
+    sensor_state = states.get(entity_id)
+    if sensor_state is None:
+        return fallback_value, fallback_unit, False
+    try:
+        value = float(sensor_state["state"])
+    except (ValueError, TypeError):
+        return fallback_value, fallback_unit, False
+    unit = sensor_state.get("attributes", {}).get(
+        "unit_of_measurement", fallback_unit
+    )
+    return value, unit, True
+
+
+def _cap_weather_font_xl(
+    font_xl_size: int,
+    font_xl: Any,
+    font_sm: Any,
+    font_xs: Any,
+    temp_text: str,
+    avail: int,
+    today_hi: str,
+    today_lo: str,
+    today_precip: str,
+) -> int:
+    """Return font_xl capped so the temperature text fits.
+
+    Measures the widest hi/lo/precipitation string to determine
+    how far that column protrudes leftward from its right anchor,
+    then reduces font_xl proportionally if the temperature text
+    would overlap it.
+
+    Args:
+        font_xl_size: Nominal xl font size in pixels.
+        font_xl: PIL font loaded at font_xl_size (for text
+            measurement).
+        font_sm: PIL font for hi/lo text measurement.
+        font_xs: PIL font for precipitation text measurement.
+        temp_text: Formatted temperature string (e.g. "13.8°C").
+        avail: Pixel budget between temp_x and the hi/lo column.
+        today_hi: High-temperature string (may be empty).
+        today_lo: Low-temperature string (may be empty).
+        today_precip: Precipitation string (may be empty).
+
+    Returns:
+        Capped font size; equals font_xl_size when text already
+        fits.
+    """
+    hilo_w = 0
+    if today_hi:
+        hilo_w = max(hilo_w, round(font_sm.getlength(today_hi)))
+    if today_lo:
+        hilo_w = max(hilo_w, round(font_sm.getlength(today_lo)))
+    if today_precip:
+        hilo_w = max(hilo_w, round(font_xs.getlength(today_precip)))
+    budget = avail - hilo_w
+    temp_w = round(font_xl.getlength(temp_text))
+    if budget > 0 and temp_w > budget:
+        return round(font_xl_size * budget / temp_w)
+    return font_xl_size
+
+
+def _build_detail_items(
+    humidity: Any,
+    pressure: Any,
+    pressure_unit: str,
+    wind: Any,
+    wind_unit: str,
+    cloud_coverage: Any,
+    config: DisplayConfig,
+    content_left: int,
+    content_w: int,
+    detail_y: int,
+    detail_icon_h: int,
+    icon_gap: int,
+    font_sm: Any,
+) -> list[dict[str, object]]:
+    """Build the detail row's icon+text chips.
+
+    Lays out humidity, pressure, wind, and cloud-coverage chips
+    (whichever are present) as equal-width columns, each pairing
+    an inline icon SVG with its formatted text.
+
+    Args:
+        humidity: Humidity percentage, or None if unavailable.
+        pressure: Pressure reading, or None if unavailable.
+        pressure_unit: Unit suffix for the pressure chip.
+        wind: Wind speed, or None if unavailable.
+        wind_unit: Unit suffix for the wind chip.
+        cloud_coverage: Cloud coverage percentage, or None.
+        config: Display config, passed through to ``_fmt`` for
+            locale-aware number formatting.
+        content_left: Left edge of the content area in pixels.
+        content_w: Width of the content area in pixels.
+        detail_y: Y coordinate of the detail row's icons.
+        detail_icon_h: Detail icon height in pixels.
+        icon_gap: Gap between a detail icon and its text.
+        font_sm: PIL font used to measure detail text width.
+
+    Returns:
+        A list of per-chip context dicts with icon/text
+        positioning, ready to be rendered by the SVG template.
+    """
+    raw_details: list[tuple[str, str]] = []
+    if humidity is not None:
+        raw_details.append(("humidity", f"{_fmt(str(humidity), config)}%"))
+    if pressure is not None:
+        raw_details.append(
+            (
+                "barometer",
+                f"{_fmt(str(round(pressure)), config)}{pressure_unit}",
+            )
+        )
+    if wind is not None:
+        raw_details.append(
+            (
+                "wind",
+                f"{_fmt(str(round(wind)), config)}{wind_unit}",
+            )
+        )
+    if cloud_coverage is not None:
+        raw_details.append(
+            (
+                "cloud",
+                f"{_fmt(str(cloud_coverage), config)}%",
+            )
+        )
+
+    detail_cols = max(len(raw_details), 1)
+    col_w_detail = content_w // detail_cols
+    detail_items: list[dict[str, object]] = []
+
+    for i, (icon_name, text) in enumerate(raw_details):
+        col_cx = content_left + col_w_detail * i + col_w_detail // 2
+        text_w_i = round(font_sm.getlength(text))
+        svg_filename = _DETAIL_ICON_MAP.get(icon_name, "")
+        # Wrap in Markup so Jinja2 emits the SVG verbatim.  All
+        # icon strings added to the context must be Markup
+        # instances.
+        detail_icon_svg: markupsafe.Markup | str = ""
+        if svg_filename:
+            detail_path = (_ICONS_DIR / f"{svg_filename}.svg").resolve()
+            try:
+                detail_paths = _load_svg_paths(detail_path)
+                detail_icon_svg = markupsafe.Markup(
+                    _build_inline_svg(
+                        detail_paths,
+                        detail_icon_h,
+                        "0 0 30 30",
+                    )
+                )
+            except FileNotFoundError:
+                pass
+        has_detail_icon = bool(detail_icon_svg)
+        icon_w = detail_icon_h + icon_gap if has_detail_icon else 0
+        item_w = icon_w + text_w_i
+        item_x = col_cx - item_w // 2
+        detail_items.append(
+            {
+                "icon_svg": detail_icon_svg,
+                "icon_x": item_x,
+                "icon_y": detail_y,
+                "text_x": (
+                    item_x + detail_icon_h + icon_gap
+                    if has_detail_icon
+                    else item_x
+                ),
+                "text_y": detail_y + detail_icon_h // 2,
+                "text": text,
+            }
+        )
+    return detail_items
+
+
+def _forecast_divider_extra(
+    show_current: bool, sep_gap: int, sep_thickness: int
+) -> int:
+    """Extra height reserved for the forecast divider line.
+
+    "forecast" mode has no current-conditions block above the
+    forecast strip, so there is nothing to visually separate —
+    the divider line and its extra gap are omitted, and this
+    returns 0.
+
+    Args:
+        show_current: Whether the current-conditions block renders.
+        sep_gap: Gap size around the divider line.
+        sep_thickness: Divider line stroke thickness.
+
+    Returns:
+        The divider line thickness plus one gap, or 0 when the
+        divider is omitted.
+    """
+    if show_current:
+        return sep_thickness + sep_gap
+    return 0
+
+
+def _build_weather_context(
+    widget: WeatherWidget,
+    config: DisplayConfig,
+) -> dict[str, object]:
+    """Build Jinja2 template context for the weather widget.
+
+    Pre-computes every position and icon SVG string so the
+    Jinja2 template contains no layout logic.
+
+    Args:
+        widget: Widget config dict.  Recognised keys:
+            ``entity``, ``x``, ``y``, ``w``, ``font_size``,
+            ``forecast_days``, ``card_style``, ``mode``,
+            ``temperature_entity``, ``humidity_entity``,
+            ``fonts`` (per-role font weight overrides — a mapping
+            of role name to ``{"size": int, "weight": str}``; roles
+            are ``"temp"`` (default ``"bold"``), ``"detail"``
+            (default ``"regular"``), and ``"precip"`` (default
+            ``"regular"``).  Weather geometry is coupled to
+            ``font_size`` via a single scale factor, so an explicit
+            ``size`` is ignored for this widget — only ``weight`` is
+            read, letting a role be unbolded without disturbing the
+            layout.  An unrecognised weight keeps the role's
+            default).
+        config: Display config with ``width``, ``height``,
+            ``states``, ``display_levels``.
+
+    Returns:
+        Template context dict consumed by ``weather.svg.j2``.
+        Returns ``{"w": …, "h": …, "has_state": False}`` when
+        the entity is absent from ``states``.
+    """
+    # Lazy imports avoid circular dependency: render.py imports
+    # svg_render.py at module level; if svg_render.py imported
+    # render.py at module level the initialisation would fail.
+    from ..render import (
+        _babel_format_date,
+        _compute_metrics,
+        _fmt_temp,
+        _font_weight_svg,
+        _get_today,
+        _load_role_font,
+        _weekday_abbrev,
+        format_number,
+        resolve_font,
+    )
+
+    entity_id = widget.get("entity", "")
+    states = config.get("states", {})
+    state = states.get(entity_id)
+    x = widget.get("x", PADDING)
+    y = widget.get("y", 0)
+    svg_w = _widget_dim(widget, "w", config["width"] - x)
+
+    if state is None:
+        svg_h = _widget_dim(
+            widget,
+            "h",
+            config["height"] - y,
+        )
+        return {
+            "w": svg_w,
+            "h": svg_h,
+            "has_state": False,
+            **_color_context(),
+        }
+
+    font_size = widget.get("font_size", FONT_SIZE_WEATHER)
+    forecast_days = widget.get("forecast_days", 5)
+    card_style = widget.get("card_style", DEFAULT_CARD_STYLE)
+    mode = widget.get("mode", DEFAULT_WEATHER_MODE)
+    # Unrecognised values intentionally fall back to full mode,
+    # consistent with card_style's behaviour.
+    show_current = mode != "forecast"
+    show_forecast_section = mode != "current"
+    display_levels = config.get("display_levels", 16)
+
+    scale = font_size / FONT_SIZE_WEATHER
+
+    # Card width: use explicit w or natural width capped to
+    # canvas.
+    w_override = widget.get("w")
+    natural_w = _WX_NATURAL_W_CURRENT if mode == "current" else _WX_NATURAL_W
+    if w_override is not None:
+        card_w = w_override
+    else:
+        card_w = min(round(natural_w * scale), svg_w)
+        # Clip SVG to content width so the editor resize box
+        # matches the rendered content, not the full canvas.
+        svg_w = _widget_dim(widget, "w", card_w)
+
+    # Per-role font weights.  Weather geometry is driven entirely by
+    # ``font_size`` (via ``scale``) so the roles here expose
+    # weight-only overrides: the ``size`` half of each ``resolve_font``
+    # result is deliberately discarded, keeping every size derived
+    # from ``scale``.
+    temp_font_sz = round(_WX_FONT_XL * scale)
+    detail_font_sz = round(_WX_FONT_SM * scale)
+    precip_font_sz = round(_WX_FONT_XS * scale)
+    _, temp_weight = resolve_font(
+        widget, "temp", temp_font_sz, FontWeight.BOLD
+    )
+    _, detail_weight = resolve_font(widget, "detail", detail_font_sz)
+    _, precip_weight = resolve_font(widget, "precip", precip_font_sz)
+
+    # PIL fonts for text measurement only — never used for
+    # drawing.  Affects: temp_h, temp_bbox (getbbox) and
+    # text_w_i (getlength) below.  The weight-matched faces are
+    # required so measured advance widths match the rendered glyphs.
+    font_xl = _load_role_font(temp_font_sz, temp_weight)
+    font_sm = _load_role_font(detail_font_sz, detail_weight)
+    font_xs = _load_role_font(precip_font_sz, precip_weight)
+
+    # Entity attributes.
+    condition = state.get("state", "")
+    attrs = state.get("attributes", {})
+    temp = attrs.get("temperature", "--")
+    temp_unit = attrs.get("temperature_unit", "°C")
+    apparent_temperature = attrs.get("apparent_temperature")
+    humidity = attrs.get("humidity")
+    wind = attrs.get("wind_speed")
+    wind_unit = attrs.get("wind_speed_unit", "km/h")
+    pressure = attrs.get("pressure")
+    pressure_unit = attrs.get("pressure_unit", "hPa")
+    cloud_coverage = attrs.get("cloud_coverage")
+    forecast = attrs.get("forecast", [])
+    has_forecast = (
+        show_forecast_section and bool(forecast) and forecast_days > 0
+    )
+
+    # Forecast-only mode with no forecast data falls back to
+    # showing current conditions instead of rendering a near-blank
+    # sliver.
+    show_current = show_current or not has_forecast
+
+    # Today min/max gradient bar, "current" mode only.  Uses
+    # forecast[0] directly (not has_forecast, which reflects the
+    # forecast-strip's own visibility) so the bar still renders
+    # even though "current" mode always hides the strip.
+    today_forecast = forecast[0] if forecast else None
+    bar_lo = _none_if_empty(
+        today_forecast.get("templow") if today_forecast else None
+    )
+    bar_hi = _none_if_empty(
+        today_forecast.get("temperature") if today_forecast else None
+    )
+    show_bar = mode == "current" and bar_lo is not None and bar_hi is not None
+
+    # Optional sensor overrides for temperature and humidity.
+    # When a sensor entity is configured and present in states, its
+    # state value replaces the weather entity's attribute.
+    temp_entity = widget.get("temperature_entity", "")
+    temp, temp_unit, use_temp_sensor = (
+        _resolve_sensor_override(temp_entity, states, temp, temp_unit)
+        if temp_entity
+        else (temp, temp_unit, False)
+    )
+    humidity_entity = widget.get("humidity_entity", "")
+    if humidity_entity:
+        humidity, _, _ = _resolve_sensor_override(
+            humidity_entity, states, humidity, ""
+        )
+    # Sensor state is parsed as float; normalize whole-number floats
+    # back to int so str(73.0) doesn't produce "73.0%" in the detail chip.
+    if isinstance(humidity, float) and humidity == int(humidity):
+        humidity = int(humidity)
+
+    # Card metrics — 48 at scale=1 gives card-level metrics
+    # (padding~10, radius~10) matching the original PIL layout.
+    m = _compute_metrics(round(_WX_ROW_H * scale))
+
+    # Sizing constants, all proportional to scale.
+    icon_size = round(_WX_ICON * scale)
+    pad = m.padding
+    icon_right_pad = round(_WX_ICON_R_PAD * scale)
+    detail_gap = round(_WX_DETAIL_GAP * scale)
+    detail_icon_h = round(_WX_DETAIL_ICON_H * scale)
+    icon_gap = round(_WX_ICON_GAP * scale)
+    sep_gap = round(_WX_SEP_GAP * scale)
+    sep_thickness = m.divider
+    forecast_zone_h = round(_WX_FC_ZONE_H * scale)
+    precip_text_h = round(_WX_PRECIP_H * scale)
+    bar_height = round(_WX_BAR_H * scale)
+
+    # Measure temperature text height (PIL) for height
+    # estimation.
+    nf = config.get("number_format", "language")
+    lang = config.get("language", "en")
+    if use_temp_sensor:
+        # Sensor temperatures always show one decimal place (e.g.
+        # "22.0°C") so readings like 18.7 are not truncated and
+        # whole numbers still convey precision.
+        temp_text = f"{format_number(f'{temp:.1f}', nf, lang)}{temp_unit}"
+    else:
+        temp_text = f"{_fmt_temp(temp, nf, lang)}{temp_unit}"
+    # Pillow types getbbox() as floats; the layout below is integer
+    # pixel math.
+    temp_bbox = font_xl.getbbox(temp_text)
+    temp_top = round(temp_bbox[1])
+    temp_bottom = round(temp_bbox[3])
+    temp_h = temp_bottom - temp_top
+
+    top_pad = m.padding
+
+    # "current" mode reserves one extra line below the detail row
+    # for the feels-like temperature (own line: too long to share
+    # an equal-width column with the numeric detail chips without
+    # overlapping), another for the date string, and (when today's
+    # forecast has both a low and a high) another for the min/max
+    # gradient bar.
+    feels_like_h = (
+        detail_gap + detail_icon_h
+        if mode == "current" and apparent_temperature is not None
+        else 0
+    )
+    date_h = detail_gap + detail_icon_h if mode == "current" else 0
+    bar_h = sep_gap + bar_height if show_bar else 0
+
+    # Total card height, matching PIL's formula exactly.  In
+    # "forecast" mode row 1 and the detail row aren't drawn, so
+    # they contribute no height and the forecast section starts
+    # right after the top padding instead of a blank gap.
+    current_h = (
+        top_pad
+        + max(icon_size, temp_h)
+        + detail_gap
+        + detail_icon_h
+        + feels_like_h
+        + date_h
+        + bar_h
+        if show_current
+        else top_pad
+    )
+    sep_line_extra = _forecast_divider_extra(
+        show_current, sep_gap, sep_thickness
+    )
+    if has_forecast:
+        forecast_section_h = (
+            sep_gap + sep_line_extra + forecast_zone_h + precip_text_h
+        )
+    else:
+        forecast_section_h = pad
+    total_h = current_h + forecast_section_h + pad
+    # Default to content height so the SVG is no taller than
+    # its rendered content.  Without this, the editor resize box
+    # spans the full remaining canvas when no explicit h is
+    # configured.
+    svg_h = _widget_dim(widget, "h", total_h)
+
+    x_off, r_inset, bar_width = _card_insets(m, card_style, display_levels)
+    # Soft-pad when the card provides no inset on that side,
+    # consistent with tile/heading/entities/waste_schedule.
+    lpad = m.padding if x_off == 0 else 0
+    rpad = m.padding if r_inset == 0 else 0
+    content_left = x_off + lpad
+    content_w = card_w - content_left - r_inset - rpad
+
+    content_top = top_pad
+
+    # Row 1: condition icon + temperature + today hi/lo/precip.
+    icon_cy = content_top + icon_size // 2
+    icon_x = content_left
+    icon_y = content_top
+    temp_x = content_left + icon_size + icon_right_pad
+    # dominant-baseline="central" in template — centres em-square
+    # on icon_cy, matching PIL's visible-ink centering within a
+    # few pixels.
+    temp_y = icon_cy
+
+    # vis_top: top of the visible temperature glyph, used as
+    # anchor for the stacked hi/lo/precip text block.
+    vis_top = icon_cy - temp_h // 2
+    hilo_right = content_left + content_w - pad
+
+    today_hi = ""
+    today_lo = ""
+    today_precip = ""
+    lo_y = vis_top + round(temp_h * _WX_LO_Y_FRAC)
+    precip_y = vis_top + round(temp_h * _WX_PRECIP_Y_FRAC)
+    precip_unit_fc = attrs.get("precipitation_unit", "mm")
+    if forecast:
+        today = forecast[0]
+        hi_val = today.get("temperature")
+        lo_val = today.get("templow")
+        p_val = today.get("precipitation")
+        if hi_val is not None:
+            today_hi = f"{_fmt_temp(hi_val, nf, lang)}°"
+        if lo_val is not None:
+            today_lo = f"{_fmt_temp(lo_val, nf, lang)}°"
+        if p_val is not None:
+            today_precip = f"{_fmt(str(p_val), config)}{precip_unit_fc}"
+
+    # Cap font_xl so temp text doesn't overlap the hi/lo column.
+    font_xl_size = _cap_weather_font_xl(
+        temp_font_sz,
+        font_xl,
+        font_sm,
+        font_xs,
+        temp_text,
+        hilo_right - temp_x - pad,
+        today_hi,
+        today_lo,
+        today_precip,
+    )
+
+    # row1_bottom mirrors PIL's max() between icon bottom and
+    # the bottom of the temperature glyph.
+    temp_y_pil = icon_cy - temp_top - temp_h // 2
+    row1_bottom = max(
+        content_top + icon_size,
+        temp_y_pil + temp_bottom,
+    )
+
+    # Condition icon SVG and detail row are only needed when the
+    # current-conditions block is actually drawn.
+    cond_icon_svg: markupsafe.Markup | str = ""
+    detail_items: list[dict[str, object]] = []
+    if show_current:
+        try:
+            cond_icon_svg = _weather_svg_filter(condition, icon_size)
+        except (KeyError, FileNotFoundError):
+            cond_icon_svg = ""
+
+        detail_y = row1_bottom + detail_gap
+        detail_items = _build_detail_items(
+            humidity,
+            pressure,
+            pressure_unit,
+            wind,
+            wind_unit,
+            cloud_coverage,
+            config,
+            content_left,
+            content_w,
+            detail_y,
+            detail_icon_h,
+            icon_gap,
+            font_sm,
+        )
+
+    # In "forecast" mode the detail row isn't drawn either, so the
+    # forecast section anchors to content_top instead.
+    detail_bottom = detail_y + detail_icon_h if show_current else content_top
+
+    # Feels-like temperature and locale-aware date string, "current"
+    # mode only.  Each gets its own centred line below the detail
+    # row (rather than sharing an equal-width column with the
+    # numeric detail chips) since "Feels like: 19.5°C" is far
+    # longer than those chips and would overlap its neighbours.
+    # The date is anchored to forecast[0]'s date so it stays
+    # consistent with today's hi/lo/precip shown above; falls back
+    # to the real current date when no forecast data is available.
+    feels_like_text = ""
+    feels_like_x = 0
+    feels_like_y = 0
+    date_text = ""
+    date_x = 0
+    date_y = 0
+    bar_gradient_id = ""
+    bar_gradient_stops: list[dict[str, str]] = []
+    bar_x1 = 0
+    bar_y = 0
+    bar_w = 0
+    bar_cy = 0
+    bar_dot_cx: int | None = None
+    bar_label_left = ""
+    bar_label_right = ""
+    bar_left_x = 0
+    bar_right_x = 0
+    if mode == "current":
+        row_y = detail_bottom
+        if apparent_temperature is not None:
+            feels_like_text = (
+                f"Feels like: "
+                f"{_fmt_temp(apparent_temperature, nf, lang)}{temp_unit}"
+            )
+            feels_like_x = content_left + content_w // 2
+            feels_like_y = row_y + detail_gap + detail_icon_h // 2
+            row_y += feels_like_h
+
+        today_date = (
+            datetime.fromisoformat(forecast[0]["datetime"]).date()
+            if forecast
+            else _get_today()
+        )
+        date_text = _babel_format_date(today_date, "EEEE, yyyy-MM-dd", lang)
+        date_x = content_left + content_w // 2
+        date_y = row_y + detail_gap + detail_icon_h // 2
+        row_y += date_h
+
+        bar_x1 = content_left + round(_WX_BAR_LABEL_W_LEFT * scale)
+        bar_x2 = (
+            content_left + content_w - round(_WX_BAR_LABEL_W_RIGHT * scale)
+        )
+        bar_w = bar_x2 - bar_x1
+        if bar_w < 1:
+            show_bar = False
+
+        if show_bar:
+            bar_gradient_id = f"wx-bar-{x}-{y}"
+            bar_y = row_y + sep_gap
+            bar_cy = bar_y + bar_height // 2
+
+            frac = 0.5 if bar_hi == bar_lo else None
+            current_reading = temp if isinstance(temp, (int, float)) else None
+            if frac is None and current_reading is not None:
+                frac = (current_reading - bar_lo) / (bar_hi - bar_lo)
+            if frac is not None:
+                frac = min(1.0, max(0.0, frac))
+                bar_dot_cx = bar_x1 + round(frac * bar_w)
+
+            bar_gradient_stops = _maybe_grayscale_stops(
+                _temp_gradient_stops(
+                    [
+                        bar_lo + i / _WX_BAR_GRADIENT_STEPS * (bar_hi - bar_lo)
+                        for i in range(_WX_BAR_GRADIENT_STEPS + 1)
+                    ]
+                ),
+                config,
+            )
+            bar_label_left = (
+                f"{_weekday_abbrev(today_date, lang)} "
+                f"{_fmt_temp(bar_lo, nf, lang)}°"
+            )
+            bar_label_right = f"{_fmt_temp(bar_hi, nf, lang)}°"
+            bar_left_x = content_left
+            bar_right_x = content_left + content_w
+
+    # Forecast grid.
+    forecast_entries: list[dict[str, object]] = []
+    sep_x1 = 0
+    sep_x2 = 0
+    sep_y = 0
+
+    if has_forecast:
+        forecast_cols = max(forecast_days, _WX_MIN_FC_COLS)
+        col_width = content_w // forecast_cols
+        content_width = forecast_cols * col_width
+        separator_y = detail_bottom + sep_gap
+        sep_x1 = content_left
+        sep_x2 = content_left + content_width
+        sep_y = separator_y
+        # sep_line_extra accounts for the separator line height so
+        # forecast content starts below the stroke bottom, matching
+        # the sep_line_extra term in forecast_section_h; it's 0 in
+        # "forecast" mode, where no divider line is drawn.
+        forecast_y = separator_y + sep_line_extra
+        fc_icon_size = round(_WX_FC_ICON * scale)
+
+        if forecast_days >= forecast_cols:
+            col_positions = list(range(forecast_days))
+        elif forecast_days <= 1:
+            col_positions = [forecast_cols // 2]
+        else:
+            col_positions = [
+                round(i * (forecast_cols - 1) / (forecast_days - 1))
+                for i in range(forecast_days)
+            ]
+
+        for idx, day in enumerate(forecast[:forecast_days]):
+            col_i = col_positions[idx]
+            cx = content_left + col_width * col_i + col_width // 2
+            dt_str = day.get("datetime")
+            if dt_str:
+                day_label = _weekday_abbrev(
+                    datetime.fromisoformat(dt_str).date(), lang
+                )
+            else:
+                day_label = ""
+
+            day_condition = day.get("condition", "")
+            try:
+                fc_icon_svg: markupsafe.Markup | str = _weather_svg_filter(
+                    day_condition, fc_icon_size
+                )
+            except (KeyError, FileNotFoundError):
+                fc_icon_svg = ""
+
+            fc_hi_val = day.get("temperature", "")
+            fc_lo_val = day.get("templow", "")
+            fc_hi = (
+                f"{_fmt_temp(fc_hi_val, nf, lang)}°" if fc_hi_val != "" else ""
+            )
+            fc_lo = (
+                f"{_fmt_temp(fc_lo_val, nf, lang)}°" if fc_lo_val != "" else ""
+            )
+            fc_p = day.get("precipitation")
+            fc_precip = (
+                f"{_fmt(str(fc_p), config)}{precip_unit_fc}"
+                if fc_p is not None and fc_p > 0
+                else ""
+            )
+            icon_cy_fc = forecast_y + round(_WX_FC_ICON_CY * scale)
+            forecast_entries.append(
+                {
+                    "cx": cx,
+                    "label": day_label,
+                    "label_y": forecast_y,
+                    "icon_svg": fc_icon_svg,
+                    "icon_x": cx - fc_icon_size // 2,
+                    "icon_y": (icon_cy_fc - fc_icon_size // 2),
+                    "hi": fc_hi,
+                    "hi_y": forecast_y + round(_WX_FC_HI_Y * scale),
+                    "lo": fc_lo,
+                    "lo_y": forecast_y + round(_WX_FC_LO_Y * scale),
+                    "precip": fc_precip,
+                    "precip_y": forecast_y + round(_WX_FC_PRECIP_Y * scale),
+                }
+            )
+
+    return {
+        "w": svg_w,
+        "h": svg_h,
+        "has_state": True,
+        "card_w": card_w,
+        "total_h": total_h,
+        "card_style": card_style,
+        **_metrics_context(m),
+        "bar_width": bar_width,
+        "show_current": show_current,
+        "icon_svg": cond_icon_svg,
+        "icon_x": icon_x,
+        "icon_y": icon_y,
+        "icon_size": icon_size,
+        "temp_text": temp_text,
+        "temp_x": temp_x,
+        "temp_y": temp_y,
+        "font_xl": font_xl_size,
+        "font_sm": detail_font_sz,
+        # font_xs is template-only; no PIL measurement needed beyond
+        # the weight-matched face used for the temp-width cap above.
+        "font_xs": precip_font_sz,
+        "temp_font_weight": _font_weight_svg(temp_weight),
+        "detail_font_weight": _font_weight_svg(detail_weight),
+        "precip_font_weight": _font_weight_svg(precip_weight),
+        "hilo_right": hilo_right,
+        "hi_text": today_hi,
+        "hi_y": vis_top,
+        "lo_text": today_lo,
+        "lo_y": lo_y,
+        "precip_text": today_precip,
+        "precip_y": precip_y,
+        "detail_items": detail_items,
+        "feels_like_text": feels_like_text,
+        "feels_like_x": feels_like_x,
+        "feels_like_y": feels_like_y,
+        "date_text": date_text,
+        "date_x": date_x,
+        "date_y": date_y,
+        "show_bar": show_bar,
+        "bar_gradient_id": bar_gradient_id,
+        "bar_gradient_stops": bar_gradient_stops,
+        "bar_x1": bar_x1,
+        "bar_y": bar_y,
+        "bar_w": bar_w,
+        "bar_height": bar_height,
+        "bar_cy": bar_cy,
+        "bar_dot_cx": bar_dot_cx,
+        "bar_label_left": bar_label_left,
+        "bar_label_right": bar_label_right,
+        "bar_left_x": bar_left_x,
+        "bar_right_x": bar_right_x,
+        "has_forecast": has_forecast,
+        "sep_x1": sep_x1,
+        "sep_x2": sep_x2,
+        "sep_y": sep_y,
+        "sep_thickness": sep_thickness,
+        "forecast_entries": forecast_entries,
+        **_color_context(),
+    }

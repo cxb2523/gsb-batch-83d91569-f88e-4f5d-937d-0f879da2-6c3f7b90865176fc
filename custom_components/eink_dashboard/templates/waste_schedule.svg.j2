@@ -1,0 +1,53 @@
+{%- from "_macros.svg.j2" import widget_title, card_container,
+    card_row with context -%}
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="{{ w }}" height="{{ h }}">
+{%- if has_rows -%}
+{{ widget_title(title, title_font_sz, fill=hex_gray,
+    weight=title_weight) }}
+{%- call card_container(
+    x=0, y=content_y, w=w, h=content_h,
+    card_style=card_style,
+    radius=m_radius, border=m_border,
+    bar_width=bar_width,
+    border_color=hex_black, bar_color=hex_gray) -%}
+{%- for row in rows -%}
+{{ card_row(
+    x=x_off, y=row.y,
+    w=w - x_off - r_inset, row_h=row_h,
+    padding=m_padding, icon_dia=m_icon_dia,
+    inner_gap=m_inner_gap, border=icon_stroke_w,
+    font_primary=primary_font_sz,
+    font_secondary=secondary_font_sz,
+    font_value=value_font_sz,
+    icon_inner=m_icon_inner,
+    letter_font_sz=m_font_letter,
+    primary=row.primary,
+    secondary=row.secondary,
+    value=row.value,
+    icon_svg=row.icon_svg,
+    icon_fill=row.icon_fill,
+    icon_outline=row.icon_outline,
+    primary_fill=hex_gray,
+    value_fill=row.value_fill,
+    secondary_fill=row.secondary_fill,
+    hide_icon=hide_icon,
+    primary_weight=primary_weight,
+    secondary_weight=secondary_weight,
+    value_weight=value_weight,
+    letter=row.letter,
+    lpad=lpad, rpad=rpad,
+    hex_black=hex_black, hex_white=hex_white) }}
+{%- if not loop.last and divider_stroke_w -%}
+<line class="eink-divider"
+  x1="{{ x_off + lpad }}"
+  y1="{{ row.y + row_h + divider_y_off }}"
+  x2="{{ w - r_inset - rpad }}"
+  y2="{{ row.y + row_h + divider_y_off }}"
+  stroke="{{ hex_light_gray }}"
+  stroke-width="{{ divider_stroke_w }}"/>
+{%- endif -%}
+{%- endfor -%}
+{%- endcall -%}
+{%- endif -%}
+</svg>

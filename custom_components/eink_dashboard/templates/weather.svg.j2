@@ -1,0 +1,184 @@
+{%- from "_macros.svg.j2" import card_container with context -%}
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="{{ w }}" height="{{ h }}">
+{%- if has_state -%}
+{# Gradient for the "current" mode today min/max bar. #}
+{%- if show_bar -%}
+<defs>
+<linearGradient id="{{ bar_gradient_id }}" x1="0" y1="0" x2="1" y2="0">
+{%- for stop in bar_gradient_stops -%}
+<stop offset="{{ stop.offset }}" stop-color="{{ stop.color }}"/>
+{%- endfor -%}
+</linearGradient>
+</defs>
+{%- endif -%}
+{%- call card_container(
+    x=0, y=0, w=card_w, h=total_h,
+    card_style=card_style,
+    radius=m_radius, border=m_border,
+    bar_width=bar_width,
+    border_color=hex_black, bar_color=hex_gray) -%}
+{# Row 1: condition icon, temperature, today hi/lo/precip. #}
+{%- if show_current -%}
+{%- if icon_svg -%}
+<g transform="translate({{ icon_x }}, {{ icon_y }})">{{ icon_svg }}</g>
+{%- endif -%}
+<text
+  x="{{ temp_x }}" y="{{ temp_y }}"
+  font-family="{{ font_xl | font_family(font_family_name) }}"
+  font-size="{{ font_xl | font_px }}"
+  font-weight="{{ temp_font_weight }}"
+  dominant-baseline="central"
+  fill="{{ hex_black }}">{{ temp_text }}</text>
+{%- if hi_text -%}
+<text
+  x="{{ hilo_right }}" y="{{ hi_y }}"
+  font-family="{{ font_sm | font_family(font_family_name) }}"
+  font-size="{{ font_sm | font_px }}"
+  font-weight="{{ detail_font_weight }}"
+  text-anchor="end"
+  dominant-baseline="hanging"
+  fill="{{ hex_black }}">{{ hi_text }}</text>
+{%- endif -%}
+{%- if lo_text -%}
+<text
+  x="{{ hilo_right }}" y="{{ lo_y }}"
+  font-family="{{ font_sm | font_family(font_family_name) }}"
+  font-size="{{ font_sm | font_px }}"
+  font-weight="{{ detail_font_weight }}"
+  text-anchor="end"
+  dominant-baseline="hanging"
+  fill="{{ hex_gray }}">{{ lo_text }}</text>
+{%- endif -%}
+{%- if precip_text -%}
+<text
+  x="{{ hilo_right }}" y="{{ precip_y }}"
+  font-family="{{ font_xs | font_family(font_family_name) }}"
+  font-size="{{ font_xs | font_px }}"
+  font-weight="{{ precip_font_weight }}"
+  text-anchor="end"
+  dominant-baseline="hanging"
+  fill="{{ hex_gray }}">{{ precip_text }}</text>
+{%- endif -%}
+{# Detail row: icon + text pairs for each weather attribute. #}
+{%- for d in detail_items -%}
+{%- if d.icon_svg -%}
+<g transform="translate({{ d.icon_x }}, {{ d.icon_y }})">{{ d.icon_svg }}</g>
+{%- endif -%}
+<text
+  x="{{ d.text_x }}" y="{{ d.text_y }}"
+  font-family="{{ font_sm | font_family(font_family_name) }}"
+  font-size="{{ font_sm | font_px }}"
+  font-weight="{{ detail_font_weight }}"
+  dominant-baseline="central"
+  fill="{{ hex_black }}">{{ d.text }}</text>
+{%- endfor -%}
+{# "current" mode feels-like temperature, own centred line. #}
+{%- if feels_like_text -%}
+<text
+  x="{{ feels_like_x }}" y="{{ feels_like_y }}"
+  font-family="{{ font_sm | font_family(font_family_name) }}"
+  font-size="{{ font_sm | font_px }}"
+  font-weight="{{ detail_font_weight }}"
+  text-anchor="middle"
+  dominant-baseline="central"
+  fill="{{ hex_gray }}">{{ feels_like_text }}</text>
+{%- endif -%}
+{# "current" mode date string, centred below the detail row. #}
+{%- if date_text -%}
+<text
+  x="{{ date_x }}" y="{{ date_y }}"
+  font-family="{{ font_sm | font_family(font_family_name) }}"
+  font-size="{{ font_sm | font_px }}"
+  font-weight="{{ detail_font_weight }}"
+  text-anchor="middle"
+  dominant-baseline="central"
+  fill="{{ hex_gray }}">{{ date_text }}</text>
+{%- endif -%}
+{# "current" mode today min/max gradient bar. #}
+{%- if show_bar -%}
+<rect
+  x="{{ bar_x1 }}" y="{{ bar_y }}"
+  width="{{ bar_w }}" height="{{ bar_height }}"
+  rx="{{ bar_height // 2 }}"
+  fill="url(#{{ bar_gradient_id }})"/>
+{%- if bar_dot_cx is not none -%}
+<circle
+  cx="{{ bar_dot_cx }}" cy="{{ bar_cy }}"
+  r="{{ bar_height // 2 }}"
+  fill="{{ hex_black }}"/>
+{%- endif -%}
+<text
+  x="{{ bar_left_x }}" y="{{ bar_cy }}"
+  font-family="{{ font_sm | font_family(font_family_name) }}"
+  font-size="{{ font_sm | font_px }}"
+  font-weight="{{ detail_font_weight }}"
+  text-anchor="start"
+  dominant-baseline="central"
+  fill="{{ hex_black }}">{{ bar_label_left }}</text>
+<text
+  x="{{ bar_right_x }}" y="{{ bar_cy }}"
+  font-family="{{ font_sm | font_family(font_family_name) }}"
+  font-size="{{ font_sm | font_px }}"
+  font-weight="{{ detail_font_weight }}"
+  text-anchor="end"
+  dominant-baseline="central"
+  fill="{{ hex_black }}">{{ bar_label_right }}</text>
+{%- endif -%}
+{%- endif -%}
+{# Separator and forecast grid. #}
+{%- if has_forecast -%}
+{%- if show_current -%}
+<line class="eink-divider"
+  x1="{{ sep_x1 }}" y1="{{ sep_y }}"
+  x2="{{ sep_x2 }}" y2="{{ sep_y }}"
+  stroke="{{ hex_light_gray }}"
+  stroke-width="{{ sep_thickness }}"/>
+{%- endif -%}
+{%- for day in forecast_entries -%}
+<text
+  x="{{ day.cx }}" y="{{ day.label_y }}"
+  font-family="{{ font_sm | font_family(font_family_name) }}"
+  font-size="{{ font_sm | font_px }}"
+  font-weight="{{ detail_font_weight }}"
+  text-anchor="middle"
+  dominant-baseline="hanging"
+  fill="{{ hex_gray }}">{{ day.label }}</text>
+{%- if day.icon_svg -%}
+<g transform="translate({{ day.icon_x }}, {{ day.icon_y }})">{{ day.icon_svg }}</g>
+{%- endif -%}
+{%- if day.hi -%}
+<text
+  x="{{ day.cx }}" y="{{ day.hi_y }}"
+  font-family="{{ font_sm | font_family(font_family_name) }}"
+  font-size="{{ font_sm | font_px }}"
+  font-weight="{{ detail_font_weight }}"
+  text-anchor="middle"
+  dominant-baseline="hanging"
+  fill="{{ hex_black }}">{{ day.hi }}</text>
+{%- endif -%}
+{%- if day.lo -%}
+<text
+  x="{{ day.cx }}" y="{{ day.lo_y }}"
+  font-family="{{ font_sm | font_family(font_family_name) }}"
+  font-size="{{ font_sm | font_px }}"
+  font-weight="{{ detail_font_weight }}"
+  text-anchor="middle"
+  dominant-baseline="hanging"
+  fill="{{ hex_gray }}">{{ day.lo }}</text>
+{%- endif -%}
+{%- if day.precip -%}
+<text
+  x="{{ day.cx }}" y="{{ day.precip_y }}"
+  font-family="{{ font_xs | font_family(font_family_name) }}"
+  font-size="{{ font_xs | font_px }}"
+  font-weight="{{ precip_font_weight }}"
+  text-anchor="middle"
+  dominant-baseline="hanging"
+  fill="{{ hex_gray }}">{{ day.precip }}</text>
+{%- endif -%}
+{%- endfor -%}
+{%- endif -%}
+{%- endcall -%}
+{%- endif -%}
+</svg>

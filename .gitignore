@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.venv/
+.ruff_cache/
+.tox/
+.tmp/
+/EINK_DASHBOARD.md
+/test-results.xml
+/custom_components/eink_dashboard/frontend/test-results.xml
+node_modules/
+custom_components/eink_dashboard/frontend/eink-dashboard-card.js
+custom_components/eink_dashboard/frontend/eink-dashboard-editor.js
+custom_components/eink_dashboard/frontend/eink-widget-picker.js
+custom_components/eink_dashboard/frontend/resize-math.js
+custom_components/eink_dashboard/frontend/*.js.map

@@ -1,0 +1,1080 @@
+# Copyright 2026 Andreas Schneider
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import re
+from typing import ClassVar
+
+from custom_components.eink_dashboard.const import (
+    COLOR_GRAY,
+    DEFAULT_ROW_H,
+    PADDING,
+)
+from custom_components.eink_dashboard.fonts import (
+    font_family_context,
+    pixel_fonts_context,
+)
+from custom_components.eink_dashboard.render import (
+    _compute_metrics,
+    _load_font,
+    render_dashboard,
+)
+from custom_components.eink_dashboard.svg_render import render_widget_svg
+from tests.helpers import (
+    assert_all_white,
+    assert_card_border,
+    assert_has_dark_pixels,
+    assert_has_gray_pixels,
+    assert_scales_proportionally,
+    content_bbox,
+    make_config,
+    pixel,
+    render_to_image,
+)
+
+MOCK_HEADING_STATES = {
+    "sensor.temperature": {
+        "state": "22.5",
+        "attributes": {
+            "friendly_name": "Temperature",
+            "device_class": "temperature",
+            "unit_of_measurement": "°C",
+        },
+    },
+    "sensor.humidity": {
+        "state": "58",
+        "attributes": {
+            "friendly_name": "Humidity",
+            "device_class": "humidity",
+            "unit_of_measurement": "%",
+        },
+    },
+    "binary_sensor.motion": {
+        "state": "on",
+        "attributes": {
+            "friendly_name": "Motion",
+            "device_class": "motion",
+        },
+    },
+}
+
+
+class TestRenderHeading:
+    # Verify rendering of the Heading widget: optional icon, heading
+    # text with title/subtitle styling, and optional entity badges.
+    _DEFAULTS: ClassVar[dict[str, object]] = {
+        "width": 400,
+        "height": 300,
+        "states": MOCK_HEADING_STATES,
+    }
+
+    def _config(self, **overrides: object) -> dict[str, object]:
+        return make_config(self._DEFAULTS, **overrides)
+
+    # ── Structural tests ──────────────────────────────
+
+    def test_heading_card_border(self) -> None:
+        # Border style draws dark pixels on all four edges.
+        m = _compute_metrics(56)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "Living Room",
+                "card_style": "border",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        assert_card_border(img, 400, 56, m)
+
+    def test_heading_card_left_bar(self) -> None:
+        # Left_bar style draws gray pixels on the left edge;
+        # the right edge should be white.
+        m = _compute_metrics(56)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "Living Room",
+                "card_style": "left_bar",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        assert_has_gray_pixels(
+            img,
+            0,
+            2,
+            m.left_bar,
+            54,
+            low=COLOR_GRAY - 20,
+            high=COLOR_GRAY + 20,
+        )
+        assert_all_white(img, 395, 0, 400, 1)
+
+    def test_heading_border_no_double_padding(self) -> None:
+        # With card_style="border", x_off is already m.padding.
+        # Content must start at m.padding (single inset), not 2*m.padding.
+        # The strip [m.padding, 2*m.padding) should have dark pixels after
+        # the fix; it would be white if double-padding were applied.
+        # "XXXX" is chosen because TRMNL's X glyph has ink at its leftmost
+        # pixel, making the narrow-strip assertion reliable regardless of
+        # font hinting.
+        m = _compute_metrics(56)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "XXXX",
+                "card_style": "border",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        single_pad = m.padding
+        double_pad = m.padding * 2
+        assert_has_dark_pixels(img, single_pad, 4, double_pad, 52)
+
+    def test_heading_left_bar_no_double_padding(self) -> None:
+        # With card_style="left_bar", x_off = bar_w + m.padding.
+        # Content must start at x_off (single inset), not x_off + m.padding.
+        # The strip [x_off, x_off + m.padding) should have dark pixels after
+        # the fix; it would be white if double-padding were applied.
+        m = _compute_metrics(56)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "XXXX",
+                "card_style": "left_bar",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        x_off = m.left_bar + m.padding
+        assert m.left_bar > 0, "left_bar must be nonzero for this test"
+        assert_has_dark_pixels(img, x_off, 4, x_off + m.padding, 52)
+
+    def test_heading_card_none(self) -> None:
+        # No-decoration style has white corners — no border drawn.
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "Living Room",
+                "card_style": "none",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        assert_all_white(img, 0, 0, 3, 3)
+        assert_all_white(img, 397, 0, 400, 3)
+
+    def test_heading_card_style_none_is_default(self) -> None:
+        # Omitting card_style produces byte-identical output to
+        # card_style="none".
+        base = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 56,
+            "heading": "Living Room",
+        }
+        with_none = render_dashboard(
+            [{**base, "card_style": "none"}], self._config()
+        )
+        without = render_dashboard([base], self._config())
+        assert with_none == without
+
+    # ── Content tests ─────────────────────────────────
+
+    def test_heading_draws_text(self) -> None:
+        # Heading text renders dark pixels in the text region.
+        m = _compute_metrics(56)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "Living Room",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        # Text starts at m.padding (no icon) and spans the widget.
+        assert_has_dark_pixels(img, m.padding, 0, 380, 56)
+
+    def test_heading_with_icon_draws_icon(self) -> None:
+        # When an icon is provided, the icon area has dark pixels.
+        m = _compute_metrics(56)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "Living Room",
+                "icon": "mdi:home",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        # Icon occupies a small area at m.padding on the left.
+        assert_has_dark_pixels(
+            img, m.padding, 4, m.padding + 30, 52, threshold=200
+        )
+
+    def test_heading_no_icon_text_starts_at_padding(self) -> None:
+        # Without an icon the heading text starts at the padding offset;
+        # the strip left of m.padding should be white.
+        m = _compute_metrics(56)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "XXXX",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        # Strip left of padding is white (no decoration, no icon).
+        assert_all_white(img, 0, 0, m.padding - 1, 56)
+        # Text is present starting at m.padding.
+        assert_has_dark_pixels(img, m.padding, 0, m.padding + 60, 56)
+
+    # ── Heading style tests ───────────────────────────
+
+    def test_heading_title_style_draws_dark_text(self) -> None:
+        # Title style renders the heading in black (dark pixels).
+        m = _compute_metrics(56)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "Section",
+                "heading_style": "title",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        assert_has_dark_pixels(img, m.padding, 0, m.padding + 120, 56)
+
+    def test_heading_subtitle_style_draws_gray_text(self) -> None:
+        # Subtitle style renders the heading in gray (secondary color).
+        m = _compute_metrics(56)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "Section",
+                "heading_style": "subtitle",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        # Subtitle text should be gray, not solid black.
+        assert_has_gray_pixels(
+            img,
+            m.padding,
+            0,
+            m.padding + 120,
+            56,
+            low=COLOR_GRAY - 30,
+            high=COLOR_GRAY + 30,
+        )
+
+    def test_heading_subtitle_smaller_than_title(self) -> None:
+        # Subtitle content bounding box is shorter than title
+        # (smaller font yields smaller glyph height).
+        m = _compute_metrics(56)
+        text_x = m.padding
+        widgets_title = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "Section",
+                "heading_style": "title",
+            }
+        ]
+        widgets_subtitle = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "Section",
+                "heading_style": "subtitle",
+            }
+        ]
+        img_title = render_to_image(widgets_title, self._config())
+        img_subtitle = render_to_image(widgets_subtitle, self._config())
+        bb_title = content_bbox(img_title, text_x, 0, 400, 56)
+        bb_subtitle = content_bbox(img_subtitle, text_x, 0, 400, 56)
+        assert bb_title is not None, "title should draw content"
+        assert bb_subtitle is not None, "subtitle should draw content"
+        title_h = bb_title[3] - bb_title[1]
+        subtitle_h = bb_subtitle[3] - bb_subtitle[1]
+        assert subtitle_h < title_h, (
+            f"subtitle ({subtitle_h}px) should be shorter than "
+            f"title ({title_h}px)"
+        )
+
+    def test_heading_title_is_default_style(self) -> None:
+        # Omitting heading_style produces byte-identical output to
+        # heading_style="title".
+        base = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 56,
+            "heading": "Section",
+        }
+        with_title = render_dashboard(
+            [{**base, "heading_style": "title"}], self._config()
+        )
+        without = render_dashboard([base], self._config())
+        assert with_title == without
+
+    # ── Icon style tests ──────────────────────────────
+
+    def test_heading_icon_style_none_no_gray_circle(self) -> None:
+        # icon_style="none" (default) renders no gray circle background;
+        # the ring area above the icon glyph (where a filled circle
+        # would appear) should be white.
+        m = _compute_metrics(80)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 80,
+                "heading": "Section",
+                "icon": "mdi:home",
+                "icon_style": "none",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        cy = 80 // 2
+        r = m.icon_dia // 2
+        cx = m.padding + r
+        # Ring region where a filled circle would show gray fill.
+        ring_y1 = cy - r + 3
+        ring_y2 = cy - m.icon_inner // 2 - 1
+        ring_x1 = cx - r // 2 + 3
+        ring_x2 = cx + r // 2 - 3
+        assert ring_y2 > ring_y1 and ring_x2 > ring_x1, (
+            "ring region must be non-empty"
+        )
+        found_gray = any(
+            COLOR_GRAY - 20 < pixel(img, rx, ry) < COLOR_GRAY + 20
+            for ry in range(ring_y1, ring_y2)
+            for rx in range(ring_x1, ring_x2)
+        )
+        assert not found_gray, (
+            "icon_style=none should have no gray circle fill"
+        )
+
+    def test_heading_icon_style_filled(self) -> None:
+        # icon_style="filled" renders a gray circle background.
+        # The ring above the icon glyph has gray fill.
+        m = _compute_metrics(80)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 80,
+                "heading": "Section",
+                "icon": "mdi:home",
+                "icon_style": "filled",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        cy = 80 // 2
+        r = m.icon_dia // 2
+        cx = m.padding + r
+        ring_y1 = cy - r + 3
+        ring_y2 = cy - m.icon_inner // 2 - 1
+        ring_x1 = cx - r // 2 + 3
+        ring_x2 = cx + r // 2 - 3
+        assert ring_y2 > ring_y1 and ring_x2 > ring_x1, (
+            "ring region must be non-empty"
+        )
+        assert_has_gray_pixels(
+            img,
+            ring_x1,
+            ring_y1,
+            ring_x2,
+            ring_y2,
+            low=COLOR_GRAY - 20,
+            high=COLOR_GRAY + 20,
+        )
+
+    def test_heading_icon_style_outlined(self) -> None:
+        # icon_style="outlined" renders a circle outline (dark border,
+        # white fill); dark pixels appear at the circle boundary.
+        m = _compute_metrics(80)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 80,
+                "heading": "Section",
+                "icon": "mdi:home",
+                "icon_style": "outlined",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        cy = 80 // 2
+        r = m.icon_dia // 2
+        cx = m.padding + r
+        assert_has_dark_pixels(
+            img, cx - r, cy - r, cx + r, cy + r, threshold=128
+        )
+
+    def test_heading_icon_filled_with_left_bar(self) -> None:
+        # With card_style="left_bar" the icon circle center must be at
+        # content_left + r, where content_left = m.left_bar + m.padding
+        # (not m.padding alone). Asserts gray fill in the ring region
+        # around the correct center position.
+        m = _compute_metrics(80)
+        assert m.left_bar > 0, "left_bar must be nonzero for this test"
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 80,
+                "heading": "Section",
+                "icon": "mdi:home",
+                "icon_style": "filled",
+                "card_style": "left_bar",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        cy = 80 // 2
+        r = m.icon_dia // 2
+        x_off = m.left_bar + m.padding
+        cx = x_off + r
+        ring_y1 = cy - r + 3
+        ring_y2 = cy - m.icon_inner // 2 - 1
+        ring_x1 = cx - r // 2 + 3
+        ring_x2 = cx + r // 2 - 3
+        assert ring_y2 > ring_y1 and ring_x2 > ring_x1, (
+            "ring region must be non-empty"
+        )
+        assert_has_gray_pixels(
+            img,
+            ring_x1,
+            ring_y1,
+            ring_x2,
+            ring_y2,
+            low=COLOR_GRAY - 20,
+            high=COLOR_GRAY + 20,
+        )
+
+    def test_heading_icon_style_none_is_default(self) -> None:
+        # Omitting icon_style produces byte-identical output to
+        # icon_style="none".
+        base = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 56,
+            "heading": "Section",
+            "icon": "mdi:home",
+        }
+        with_none = render_dashboard(
+            [{**base, "icon_style": "none"}], self._config()
+        )
+        without = render_dashboard([base], self._config())
+        assert with_none == without
+
+    # ── Alignment tests ───────────────────────────────
+
+    def test_heading_align_left_is_default(self) -> None:
+        # Omitting heading_align produces byte-identical output to
+        # heading_align="left".
+        base = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 56,
+            "heading": "Section",
+        }
+        with_left = render_dashboard(
+            [{**base, "heading_align": "left"}], self._config()
+        )
+        without = render_dashboard([base], self._config())
+        assert with_left == without
+
+    def test_heading_align_right_changes_output(self) -> None:
+        # heading_align="right" changes the rendered output relative
+        # to the default left alignment.
+        base = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 56,
+            "heading": "Monday",
+        }
+        left = render_dashboard([base], self._config())
+        right = render_dashboard(
+            [{**base, "heading_align": "right"}], self._config()
+        )
+        assert left != right, (
+            "heading_align='right' should change rendered output"
+        )
+
+    def test_heading_align_right_text_near_right_edge(self) -> None:
+        # Right-aligned text has its rightmost ink near the right
+        # content edge of the widget.
+        m = _compute_metrics(56)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "Mon",
+                "heading_align": "right",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        right_edge = 400 - m.padding
+        bb = content_bbox(img, 0, 0, 400, 56)
+        assert bb is not None, "right-aligned heading should draw content"
+        assert bb[2] >= right_edge - 5, (
+            "heading_align='right' should place text near right edge"
+        )
+
+    def test_heading_align_right_with_icon(self) -> None:
+        # With an icon present, the icon stays left-anchored while
+        # the text anchors to the right edge.
+        m = _compute_metrics(56)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "Mon",
+                "icon": "mdi:home",
+                "heading_align": "right",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        # Icon draws dark pixels on the left.
+        assert_has_dark_pixels(
+            img, m.padding, 4, m.padding + 30, 52, threshold=200
+        )
+        # Text draws dark pixels near the right edge.
+        right_edge = 400 - m.padding
+        bb = content_bbox(img, 100, 0, 400, 56)
+        assert bb is not None
+        assert bb[2] >= right_edge - 5, (
+            "right-aligned text should reach the right edge"
+        )
+
+    def test_heading_align_right_long_text_clamps_to_icon(self) -> None:
+        # A heading too wide to fit between the icon and the right
+        # edge must not draw over the icon; its left edge clamps to
+        # the icon-derived boundary instead of extending further
+        # left, as it would with an unbounded right anchor.
+        m = _compute_metrics(56)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "A Really Very Long Heading Text That Overflows",
+                "icon": "mdi:home",
+                "heading_align": "right",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        # Icon still draws dark pixels on the left.
+        assert_has_dark_pixels(
+            img, m.padding, 4, m.padding + 30, 52, threshold=200
+        )
+        # The gap between the icon and the text's clamped left edge
+        # stays white — text does not creep left over the icon.
+        glyph_sz = max(10, m.font_primary)
+        icon_right = m.padding + glyph_sz
+        min_text_x = icon_right + m.inner_gap
+        assert_all_white(img, icon_right, 0, min_text_x, 56)
+
+    def test_heading_align_right_title_trmnl_matches_measurement(
+        self,
+    ) -> None:
+        # Right-aligned title text is anchored using PIL's width of the
+        # TRMNL Regular face (TRMNL has no Medium), while the SVG asks
+        # for font-weight 500.  resvg must fall back to the same
+        # Regular face, so the ink spans exactly the measured width.
+        text = "Living Room Ceiling Lights"
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": text,
+                "heading_style": "title",
+                "heading_align": "right",
+            }
+        ]
+        config = self._config(font_family="TRMNL", pixel_fonts=True)
+        img = render_to_image(widgets, config)
+        m = _compute_metrics(56)
+        with font_family_context("TRMNL"), pixel_fonts_context(True):
+            font = _load_font(m.font_primary, medium=True)
+            regular_w = font.getlength(text)
+            bold_w = _load_font(m.font_primary, bold=True).getlength(text)
+        assert regular_w != bold_w, "fixture text must tell faces apart"
+        bb = content_bbox(img, 0, 0, 400, 56)
+        assert bb is not None
+        right_edge = 400 - m.padding
+        assert abs(bb[2] - right_edge) <= 2, (bb, right_edge)
+        assert abs((bb[2] - bb[0]) - regular_w) <= 3, (bb, regular_w)
+
+    def test_heading_align_right_with_badges(self) -> None:
+        # With badges present, right-aligned text anchors to the left
+        # of the badge area rather than the widget edge — badges
+        # change where the text lands.
+        base = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 56,
+            "heading": "A",
+            "heading_align": "right",
+            "badges": ["sensor.temperature"],
+        }
+        without_badges = render_dashboard(
+            [{**base, "badges": []}], self._config()
+        )
+        with_badges = render_dashboard([base], self._config())
+        assert without_badges != with_badges, (
+            "badges should shift right-aligned text anchor leftward"
+        )
+
+    def test_heading_align_right_with_card_border(self) -> None:
+        # With card_style="border", right-aligned text respects the
+        # border's right inset rather than the widget's raw edge.
+        m = _compute_metrics(56)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "Mon",
+                "heading_align": "right",
+                "card_style": "border",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        right_edge = 400 - m.padding
+        bb = content_bbox(img, m.padding, 4, 400 - m.padding, 52)
+        assert bb is not None
+        assert bb[2] >= right_edge - 5, (
+            "right-aligned text should respect border inset"
+        )
+
+    # ── Badge tests ───────────────────────────────────
+
+    def test_heading_badges_change_output(self) -> None:
+        # Adding an entity badge changes the rendered output.
+        base = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 56,
+            "heading": "Section",
+        }
+        without_badges = render_dashboard([base], self._config())
+        with_badges = render_dashboard(
+            [{**base, "badges": ["sensor.temperature"]}],
+            self._config(),
+        )
+        assert without_badges != with_badges, (
+            "adding a badge should change rendered output"
+        )
+
+    def test_heading_no_badges_no_crash(self) -> None:
+        # Empty badges list renders without error; heading text present.
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "Section",
+                "badges": [],
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        assert_has_dark_pixels(img, PADDING, 0, 380, 56)
+
+    def test_heading_badge_missing_entity_skipped(self) -> None:
+        # A badge referencing a nonexistent entity is skipped silently.
+        # Output must be byte-identical to rendering with no badges —
+        # the missing entity leaves no trace in the image.
+        base = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 56,
+            "heading": "Section",
+        }
+        no_badges = render_dashboard([base], self._config())
+        missing = render_dashboard(
+            [{**base, "badges": ["sensor.nonexistent"]}],
+            self._config(),
+        )
+        assert no_badges == missing, (
+            "missing entity should produce same output as no badges"
+        )
+
+    def test_heading_badges_on_right_side(self) -> None:
+        # Badges appear in the right portion of the heading row.
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "A",
+                "badges": ["sensor.temperature"],
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        # Badge text (e.g. "22.5°C") should appear in the right half.
+        assert_has_dark_pixels(img, 200, 0, 400, 56)
+
+    def test_heading_badge_inset_with_border(self) -> None:
+        # The measured badge width should end at the single content inset.
+        m = _compute_metrics(56)
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "A",
+                "badges": ["sensor.temperature"],
+                "card_style": "border",
+            }
+        ]
+        svg = render_widget_svg(widgets[0], self._config())
+        badge_match = re.search(
+            r'<text\s+x="(\d+)"[^>]*>22\.5°C</text>', svg, re.DOTALL
+        )
+        assert badge_match is not None
+        badge_x = int(badge_match.group(1))
+        # Measure inside the pixel-font context the renderer uses by
+        # default so the snapped size matches the rendered one.
+        with pixel_fonts_context(True):
+            font = _load_font(m.font_secondary)
+        badge_w = round(font.getlength("22.5°C"))
+        assert badge_x + badge_w == 400 - m.padding
+
+    # ── Edge case tests ───────────────────────────────
+
+    def test_heading_empty_heading_is_white(self) -> None:
+        # Empty heading text with no icon and no badges → blank canvas.
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        assert_all_white(img, 0, 0, 400, 56)
+
+    def test_heading_invalid_icon_no_crash(self) -> None:
+        # An unrecognized MDI icon name does not crash; heading renders.
+        widgets = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "Section",
+                "icon": "mdi:this-icon-does-not-exist-xyz",
+            }
+        ]
+        img = render_to_image(widgets, self._config())
+        assert_has_dark_pixels(img, PADDING, 0, 380, 56)
+
+    # ── Scaling tests ─────────────────────────────────
+
+    def test_heading_scales_proportionally(self) -> None:
+        # Doubling the widget height approximately doubles the content
+        # (heading text) height.
+        widgets_small = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 56,
+                "heading": "Section",
+            }
+        ]
+        widgets_large = [
+            {
+                "type": "heading",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 112,
+                "heading": "Section",
+            }
+        ]
+        img_small = render_to_image(widgets_small, self._config())
+        img_large = render_to_image(
+            widgets_large, make_config(self._DEFAULTS, height=300)
+        )
+        assert_scales_proportionally(
+            img_small,
+            img_large,
+            region_small=(PADDING, 0, 380, 56),
+            region_large=(PADDING, 0, 380, 112),
+            expected_ratio=2.0,
+            tolerance=0.4,
+        )
+
+    # ── Auto-sizing tests ─────────────────────────────
+
+    def test_heading_auto_height(self) -> None:
+        # Without explicit h, the widget height equals DEFAULT_ROW_H.
+        w = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "heading": "Section",
+        }
+        svg = render_widget_svg(w, self._config())
+        m = re.search(r'height="(\d+)"', svg)
+        assert m is not None
+        assert int(m.group(1)) == DEFAULT_ROW_H
+
+    def test_heading_explicit_h_preserved(self) -> None:
+        # An explicit h overrides auto-sizing.
+        w = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 200,
+            "heading": "Section",
+        }
+        svg = render_widget_svg(w, self._config())
+        m = re.search(r'height="(\d+)"', svg)
+        assert m is not None
+        assert int(m.group(1)) == 200
+
+    # ── Font customization tests ──────────────────────
+
+    def test_heading_font_size_override_enlarges_text(self) -> None:
+        # fonts.heading.size enlarges the heading glyphs relative to
+        # the widget's derived default size.
+        base = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 112,
+            "heading": "Section",
+        }
+        default = render_to_image([base], self._config())
+        bigger = render_to_image(
+            [{**base, "fonts": {"heading": {"size": 64}}}],
+            self._config(),
+        )
+        bbox_default = content_bbox(default, 0, 0, 400, 112)
+        bbox_bigger = content_bbox(bigger, 0, 0, 400, 112)
+        assert bbox_default is not None
+        assert bbox_bigger is not None
+        assert (bbox_bigger[3] - bbox_bigger[1]) > (
+            bbox_default[3] - bbox_default[1]
+        )
+
+    def test_heading_font_scale_enlarges_text(self) -> None:
+        # A display-level font_scale multiplies the derived heading
+        # size without any per-widget override.
+        widget = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 56,
+            "heading": "Section",
+        }
+        default = render_to_image([widget], self._config())
+        scaled = render_to_image([widget], self._config(font_scale=2.0))
+        bbox_default = content_bbox(default, 0, 0, 400, 56)
+        bbox_scaled = content_bbox(scaled, 0, 0, 400, 56)
+        assert bbox_default is not None
+        assert bbox_scaled is not None
+        assert (bbox_scaled[3] - bbox_scaled[1]) > (
+            bbox_default[3] - bbox_default[1]
+        )
+
+    def test_heading_fonts_weight_bold(self) -> None:
+        # fonts.heading.weight="bold" renders the heading in bold.
+        widget = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 112,
+            "heading": "Section",
+            "fonts": {"heading": {"weight": "bold"}},
+        }
+        svg = render_widget_svg(widget, self._config())
+        assert 'font-weight="bold"' in svg
+
+    def test_heading_title_default_weight_is_medium(self) -> None:
+        # The title style keeps rendering at the medium (500) weight.
+        widget = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 112,
+            "heading": "Section",
+        }
+        svg = render_widget_svg(widget, self._config())
+        assert 'font-weight="500"' in svg
+
+    def test_heading_subtitle_default_weight_is_regular(self) -> None:
+        # The subtitle style keeps rendering at the regular (400)
+        # weight rather than inheriting the title's medium default.
+        widget = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 112,
+            "heading": "Section",
+            "heading_style": "subtitle",
+        }
+        svg = render_widget_svg(widget, self._config())
+        assert 'font-weight="400"' in svg
+
+    def test_heading_fonts_badge_weight_bold(self) -> None:
+        # fonts.badge.weight="bold" applies to the badge value text.
+        widget = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 56,
+            "heading": "Section",
+            "badges": ["sensor.temperature"],
+            "fonts": {"badge": {"weight": "bold"}},
+        }
+        svg = render_widget_svg(widget, self._config())
+        # The heading keeps its medium default; only the badge is bold.
+        assert 'font-weight="500"' in svg
+        assert 'font-weight="bold"' in svg
+
+    def test_heading_badge_size_override_enlarges_badge(self) -> None:
+        # fonts.badge.size enlarges the badge value text.
+        base = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 56,
+            "heading": "",
+            "badges": ["sensor.temperature"],
+        }
+        default = render_to_image([base], self._config())
+        bigger = render_to_image(
+            [{**base, "fonts": {"badge": {"size": 40}}}],
+            self._config(),
+        )
+        bbox_default = content_bbox(default, 200, 0, 400, 56)
+        bbox_bigger = content_bbox(bigger, 200, 0, 400, 56)
+        assert bbox_default is not None
+        assert bbox_bigger is not None
+        assert (bbox_bigger[3] - bbox_bigger[1]) > (
+            bbox_default[3] - bbox_default[1]
+        )
+
+    def test_selected_font_family_is_used_in_svg(self) -> None:
+        # The selected family is primary while TRMNL remains the fallback.
+        widget = {
+            "type": "heading",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "heading": "Section",
+        }
+        svg = render_widget_svg(widget, self._config(font_family="Roboto"))
+        assert 'font-family="Roboto, TRMNL16"' in svg

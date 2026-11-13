@@ -1,0 +1,565 @@
+# Copyright 2026 Andreas Schneider
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for the SVG rendering pipeline."""
+
+import io
+import re
+
+import jinja2
+import pytest
+import resvg_py
+from PIL import Image
+
+from custom_components.eink_dashboard.svg_render import (
+    _FONTS_DIR,
+    _TEMPLATE_DIR,
+    _fit_width_filter,
+    _jinja_env,
+    _make_jinja_env,
+    _mdi_svg_filter,
+    _svg_to_png,
+    _text_width_filter,
+    _weather_svg_filter,
+)
+from tests.helpers import (
+    assert_all_white,
+    assert_has_dark_pixels,
+    assert_has_gray_pixels,
+    pixel,
+)
+
+
+def test_resvg_rasterises_simple_svg():
+    """Verify resvg_py can rasterise a trivial SVG to valid PNG bytes."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50">'
+        '<rect width="100" height="50" fill="white"/>'
+        '<text x="10" y="30" font-size="16">hi</text>'
+        "</svg>"
+    )
+    result = bytes(resvg_py.svg_to_bytes(svg_string=svg, width=100, height=50))
+    # PNG magic header: \x89PNG\r\n\x1a\n
+    assert result[:8] == b"\x89PNG\r\n\x1a\n"
+    assert len(result) > 0
+
+
+def test_svg_to_png_produces_valid_png():
+    """Verify _svg_to_png() rasterises bundled TRMNL text to PNG."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80">'
+        '<rect width="200" height="80" fill="white"/>'
+        '<text x="10" y="50" font-family="TRMNL21" font-size="24">Test</text>'
+        "</svg>"
+    )
+    result = _svg_to_png(svg, 200, 80)
+    assert result[:8] == b"\x89PNG\r\n\x1a\n"
+    assert len(result) > 0
+
+
+def test_svg_to_png_extra_font_dirs_accepted(tmp_path):
+    """Verify _svg_to_png() accepts an extra_font_dirs argument."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80">'
+        '<rect width="200" height="80" fill="white"/>'
+        '<text x="10" y="50" font-family="TRMNL21" font-size="24">Test</text>'
+        "</svg>"
+    )
+    result = _svg_to_png(svg, 200, 80, extra_font_dirs=[str(tmp_path)])
+    assert result[:8] == b"\x89PNG\r\n\x1a\n"
+    assert len(result) > 0
+
+
+def test_svg_to_png_no_extra_font_dirs_still_works():
+    """Verify extra_font_dirs=None (the default) keeps working."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80">'
+        '<rect width="200" height="80" fill="white"/>'
+        '<text x="10" y="50" font-family="TRMNL21" font-size="24">Test</text>'
+        "</svg>"
+    )
+    result = _svg_to_png(svg, 200, 80, extra_font_dirs=None)
+    assert result[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_svg_to_png_use_system_fonts_produces_valid_png():
+    """Verify use_system_fonts=True still rasterises a valid PNG."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80">'
+        '<rect width="200" height="80" fill="white"/>'
+        '<text x="10" y="50" font-family="TRMNL21" font-size="24">Test</text>'
+        "</svg>"
+    )
+    result = _svg_to_png(svg, 200, 80, use_system_fonts=True)
+    assert result[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_svg_to_png_default_skips_system_fonts(monkeypatch):
+    """Verify the default (use_system_fonts=False) requests
+    skip_system_fonts=True from resvg.
+    """
+    calls = []
+
+    def fake_svg_to_bytes(**kwargs):
+        calls.append(kwargs)
+        return b"\x89PNG\r\n\x1a\n"
+
+    monkeypatch.setattr(
+        "custom_components.eink_dashboard.svg_render.resvg_py.svg_to_bytes",
+        fake_svg_to_bytes,
+    )
+    _svg_to_png("<svg/>", 10, 10)
+    assert calls[0]["skip_system_fonts"] is True
+    assert calls[0]["font_dirs"] == [
+        str(_FONTS_DIR / "TRMNL"),
+        str(_FONTS_DIR / "Roboto"),
+        str(_FONTS_DIR / "Inter"),
+    ]
+
+
+def test_svg_to_png_use_system_fonts_disables_skip(monkeypatch):
+    """Verify use_system_fonts=True requests skip_system_fonts=False
+    from resvg.
+    """
+    calls = []
+
+    def fake_svg_to_bytes(**kwargs):
+        calls.append(kwargs)
+        return b"\x89PNG\r\n\x1a\n"
+
+    monkeypatch.setattr(
+        "custom_components.eink_dashboard.svg_render.resvg_py.svg_to_bytes",
+        fake_svg_to_bytes,
+    )
+    _svg_to_png("<svg/>", 10, 10, use_system_fonts=True)
+    assert calls[0]["skip_system_fonts"] is False
+
+
+def test_jinja_env_loads_template(tmp_path):
+    """Verify _jinja_env loads templates from the templates directory."""
+    # Write a temporary template into the templates directory and clean up
+    # after the test so the working tree stays unmodified.
+    tmp_template = _TEMPLATE_DIR / "_test_step02.svg.j2"
+    tmp_template.write_text("<svg>{{ value }}</svg>")
+    try:
+        tmpl = _jinja_env.get_template("_test_step02.svg.j2")
+        output = tmpl.render(value="hello")
+        assert "hello" in output
+    finally:
+        tmp_template.unlink(missing_ok=True)
+
+
+def test_mdi_svg_filter_returns_svg_with_path():
+    """Verify _mdi_svg_filter emits a sized SVG with the icon path."""
+    result = _mdi_svg_filter("thermometer", 32)
+    assert "<svg" in result
+    assert 'viewBox="0 0 24 24"' in result
+    assert 'width="32"' in result
+    assert "<path" in result
+
+
+def test_weather_svg_filter_returns_svg_with_path():
+    """Verify _weather_svg_filter emits a sized SVG with the icon path."""
+    result = _weather_svg_filter("sunny", 48)
+    assert "<svg" in result
+    assert 'viewBox="0 0 30 30"' in result
+    assert 'width="48"' in result
+    assert "<path" in result
+
+
+def test_unknown_mdi_name_raises():
+    """Verify an unknown MDI icon name raises FileNotFoundError."""
+    with pytest.raises(FileNotFoundError):
+        _mdi_svg_filter("nonexistent_icon_xyz", 32)
+
+
+def test_mdi_path_traversal_raises():
+    """Verify a path traversal icon name raises ValueError."""
+    with pytest.raises(ValueError):
+        _mdi_svg_filter("../../etc/passwd", 32)
+
+
+def test_text_width_filter_grows_with_text_and_weight():
+    """Verify text_width measures longer and bolder text as wider."""
+    short = _text_width_filter("Mon", 20)
+    long = _text_width_filter("Monday 10:00", 20)
+    bold = _text_width_filter("Monday 10:00", 20, "bold")
+    assert 0 < short < long < bold
+    assert _text_width_filter("", 20) == 0
+
+
+def test_fit_width_filter_keeps_text_that_fits():
+    """Verify fit_width returns text unchanged when it fits."""
+    assert _fit_width_filter("Doctor", 500, 20) == "Doctor"
+
+
+def test_fit_width_filter_truncates_with_ellipsis():
+    """Verify fit_width shortens text with an ellipsis to fit."""
+    text = "A very long calendar event summary"
+    result = _fit_width_filter(text, 100, 20, "medium")
+    assert result.endswith("\u2026")
+    assert text.startswith(result[:-1])
+    assert _text_width_filter(result, 20, "medium") <= 100
+
+
+def test_fit_width_filter_empty_when_no_room():
+    """Verify fit_width returns an empty string for zero or negative
+    widths, so a dominant value can claim the whole row."""
+    assert _fit_width_filter("Doctor", 0, 20) == ""
+    assert _fit_width_filter("Doctor", -30, 20) == ""
+
+
+def test_unknown_weather_condition_raises():
+    """Verify an unknown weather condition raises KeyError."""
+    with pytest.raises(KeyError):
+        _weather_svg_filter("nonexistent_condition", 48)
+
+
+def test_inlined_icon_rasterises_with_dark_pixels():
+    """Verify an SVG with an inlined MDI icon has dark pixels in the
+    icon region after rasterisation."""
+    icon_svg = _mdi_svg_filter("thermometer", 40)
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">'
+        '<rect width="100" height="100" fill="white"/>'
+        f'<g transform="translate(30, 30)">{icon_svg}</g>'
+        "</svg>"
+    )
+    png = _svg_to_png(svg, 100, 100)
+    img = Image.open(io.BytesIO(png)).convert("L")
+    # The 40×40 icon is placed at (30, 30); check for non-white pixels.
+    region = img.crop((30, 30, 70, 70))
+    assert any(p < 200 for p in region.get_flattened_data())
+
+
+# ---------------------------------------------------------------------------
+# Step 0.4: _macros.svg.j2 macro tests
+# ---------------------------------------------------------------------------
+# The render_macro fixture (below) renders a Jinja2 template source string
+# via a ChoiceLoader that resolves macro imports from _TEMPLATE_DIR while
+# writing temporary templates to pytest's tmp_path, keeping _TEMPLATE_DIR
+# clean.  _macros.svg.j2 itself is permanent.
+# ---------------------------------------------------------------------------
+
+_SVG_OPEN = (
+    '<svg xmlns="http://www.w3.org/2000/svg"'
+    ' width="400" height="200">'
+    '<rect width="400" height="200" fill="white"/>'
+)
+_SVG_CLOSE = "</svg>"
+
+
+@pytest.fixture
+def render_macro(tmp_path):
+    """Render a Jinja2 macro template source without writing to _TEMPLATE_DIR.
+
+    Returns a callable render(source, width=400, height=200, **ctx) that
+    writes the template source to tmp_path, renders it via a ChoiceLoader
+    that resolves macro imports from _TEMPLATE_DIR, rasterises the SVG, and
+    returns a grayscale PIL Image.
+    """
+
+    def _render(
+        source: str,
+        width: int = 400,
+        height: int = 200,
+        **ctx: object,
+    ) -> Image.Image:
+        (tmp_path / "_test.svg.j2").write_text(source)
+        env = _make_jinja_env(
+            jinja2.ChoiceLoader(
+                [
+                    jinja2.FileSystemLoader(str(tmp_path)),
+                    jinja2.FileSystemLoader(str(_TEMPLATE_DIR)),
+                ]
+            ),
+        )
+        svg = env.get_template("_test.svg.j2").render(**ctx)
+        png = _svg_to_png(svg, width, height)
+        return Image.open(io.BytesIO(png)).convert("L")
+
+    return _render
+
+
+# --- card_container --------------------------------------------------------
+
+
+def test_card_container_border_draws_rounded_rect(render_macro) -> None:
+    """Verify border card_container emits a rounded rectangle whose
+    edges are dark and whose interior is white."""
+    img = render_macro(
+        "{%- from '_macros.svg.j2' import card_container -%}"
+        + _SVG_OPEN
+        + "{% call card_container("
+        "x=10, y=10, w=380, h=180,"
+        " border_color='#000000', bar_color='#787878',"
+        " card_style='border',"
+        " radius=12, border=3) %}"
+        "{% endcall %}" + _SVG_CLOSE
+    )
+    # Top border: dark pixels across the middle of the top edge
+    # (well past the corner radius of 12).
+    assert_has_dark_pixels(img, 50, 10, 350, 14)
+    # Bottom border
+    assert_has_dark_pixels(img, 50, 186, 350, 190)
+    # Left border
+    assert_has_dark_pixels(img, 10, 50, 14, 150)
+    # Right border
+    assert_has_dark_pixels(img, 386, 50, 390, 150)
+    # Interior: well inside the border strokes and corner radii
+    assert_all_white(img, 30, 30, 370, 170)
+
+
+def test_card_container_left_bar_draws_gray(render_macro) -> None:
+    """Verify left_bar card_container emits a gray vertical bar on
+    the left and white space to the right of it."""
+    # bar at x=10, width=6 → bar right edge at x=16
+    img = render_macro(
+        "{%- from '_macros.svg.j2' import card_container -%}"
+        + _SVG_OPEN
+        + "{% call card_container("
+        "x=10, y=10, w=380, h=180,"
+        " border_color='#000000', bar_color='#787878',"
+        " card_style='left_bar',"
+        " bar_width=6) %}"
+        "{% endcall %}" + _SVG_CLOSE
+    )
+    # Gray bar in the left_bar area (x=10..16, middle of height)
+    assert_has_gray_pixels(img, 10, 50, 16, 150)
+    # Area past the bar (x=20) should be white; x=20 gives a 4px
+    # anti-aliasing margin from the bar right edge at x=16.
+    assert_all_white(img, 20, 10, 390, 190)
+
+
+def test_card_container_left_bar_precomputed_width(
+    render_macro,
+) -> None:
+    """Verify left_bar renders at the pre-computed bar_width."""
+    # bar_width=12 (pre-computed by Python, e.g. max(10, 4*3))
+    img = render_macro(
+        "{%- from '_macros.svg.j2' import card_container -%}"
+        + _SVG_OPEN
+        + "{% call card_container("
+        "x=10, y=10, w=380, h=180,"
+        " border_color='#000000', bar_color='#787878',"
+        " card_style='left_bar',"
+        " bar_width=12) %}"
+        "{% endcall %}" + _SVG_CLOSE
+    )
+    # Bar covers x=10..22 (10 + 12); check near the right edge.
+    assert_has_gray_pixels(img, 10, 50, 22, 150)
+    # Area well past the bar should be white
+    assert_all_white(img, 35, 10, 390, 190)
+
+
+def test_card_container_none_caller_invoked(render_macro) -> None:
+    """Verify card_style='none' emits no decoration and invokes the
+    caller body: a sentinel rect drawn inside {% call %} must render."""
+    # The sentinel rect at (150, 90, 180, 110) is drawn by the caller body.
+    # If the macro fails to call caller(), the sentinel is absent and the
+    # first assertion fails.  The second assertion verifies no decoration
+    # was added by the macro itself.
+    img = render_macro(
+        "{%- from '_macros.svg.j2' import card_container -%}"
+        + _SVG_OPEN
+        + "{% call card_container("
+        "x=10, y=10, w=380, h=180,"
+        " border_color='#000000', bar_color='#787878',"
+        " card_style='none') %}"
+        "<rect x='150' y='90' width='30' height='20' fill='black'/>"
+        "{% endcall %}" + _SVG_CLOSE
+    )
+    # Caller body was invoked: sentinel rect is present
+    assert_has_dark_pixels(img, 150, 90, 180, 110)
+    # No card decoration: area well away from the sentinel is white
+    assert_all_white(img, 0, 0, 140, 90)
+
+
+# --- card_row --------------------------------------------------------------
+
+
+def test_card_row_icon_circle_and_primary(render_macro) -> None:
+    """Verify card_row draws a gray icon circle and dark primary text."""
+    # row at (10, 10), row_h=56, padding=12, icon_dia=36, inner_gap=12
+    img = render_macro(
+        "{%- from '_macros.svg.j2' import card_row -%}"
+        + _SVG_OPEN
+        + "{{ card_row("
+        "x=10, y=10, w=380, row_h=56,"
+        " padding=12, icon_dia=36, inner_gap=12, border=2,"
+        " font_primary=18, font_secondary=14,"
+        " icon_fill='#787878', primary_fill='#000000',"
+        " secondary_fill='#787878', value_fill='#787878',"
+        " hex_black='#000000', hex_white='#ffffff',"
+        " icon_inner=21,"
+        " primary='Temperature', letter='T') }}" + _SVG_CLOSE
+    )
+    # Icon circle center: x=10+12+18=40, y=10+28=38; r=18
+    # Check gray pixels in the circle area
+    assert_has_gray_pixels(img, 22, 20, 58, 56)
+    # Text starts after icon+gap: x=10+12+36+12=70
+    assert_has_dark_pixels(img, 70, 14, 300, 62)
+
+
+def test_card_row_secondary_and_value(render_macro) -> None:
+    """Verify card_row renders secondary text (gray) and right-aligned
+    value text."""
+    img = render_macro(
+        "{%- from '_macros.svg.j2' import card_row -%}"
+        + _SVG_OPEN
+        + "{{ card_row("
+        "x=10, y=10, w=380, row_h=80,"
+        " padding=12, icon_dia=36, inner_gap=12, border=2,"
+        " font_primary=20, font_secondary=15,"
+        " icon_fill='#787878', primary_fill='#000000',"
+        " secondary_fill='#787878', value_fill='#787878',"
+        " hex_black='#000000', hex_white='#ffffff',"
+        " icon_inner=21,"
+        " primary='Sensor', secondary='23 °C',"
+        " value='now', letter='S') }}" + _SVG_CLOSE
+    )
+    # Text area has dark pixels (primary)
+    tx = 10 + 12 + 36 + 12  # = 70
+    assert_has_dark_pixels(img, tx, 15, 300, 85)
+    # Secondary text is gray; check a broader region in the lower
+    # half of the row where secondary sits
+    assert_has_gray_pixels(img, tx, 50, 250, 85, low=50, high=200)
+    # Value text near right edge (text-anchor="end" at x=10+380-12=378)
+    assert_has_gray_pixels(img, 280, 15, 390, 85, low=50, high=200)
+
+
+def test_card_row_icon_svg_renders(render_macro) -> None:
+    """Verify card_row places an inlined MDI icon in the circle area."""
+    icon_svg = _mdi_svg_filter("thermometer", 22)
+    img = render_macro(
+        "{%- from '_macros.svg.j2' import card_row -%}"
+        + _SVG_OPEN
+        + "{{ card_row("
+        "x=10, y=10, w=380, row_h=56,"
+        " padding=12, icon_dia=36, inner_gap=12, border=2,"
+        " font_primary=18, font_secondary=14,"
+        " icon_fill='#787878', primary_fill='#000000',"
+        " secondary_fill='#787878', value_fill='#787878',"
+        " hex_black='#000000', hex_white='#ffffff',"
+        " icon_inner=21,"
+        " primary='Temp', icon_svg=icon_svg) }}" + _SVG_CLOSE,
+        icon_svg=icon_svg,
+    )
+    # Icon circle area: center ~(40, 38), check for non-white pixels
+    # (icon on gray circle → mix of colors in the area)
+    assert_has_dark_pixels(img, 22, 20, 58, 56)
+
+
+# --- chip ------------------------------------------------------------------
+
+
+def test_chip_renders_text(render_macro) -> None:
+    """Verify chip emits text without any pill border."""
+    # chip at x=20, y=80, w=100, h=40
+    # h=40: chip_pad=7, chip_font_sz=18
+    img = render_macro(
+        "{%- from '_macros.svg.j2' import chip -%}"
+        + _SVG_OPEN
+        + "{{ chip(x=20, y=80, w=100, h=40,"
+        " text='OK', border=2,"
+        " chip_pad=7, chip_font_sz=18) }}" + _SVG_CLOSE
+    )
+    # No pill border: top-left corner of chip area is white
+    assert pixel(img, 20, 80) == 255
+    # Text area should have dark pixels
+    assert_has_dark_pixels(img, 25, 85, 110, 115)
+
+
+def test_chip_with_icon_draws_circle(render_macro) -> None:
+    """Verify chip with icon draws an outlined state circle."""
+    # h=40: chip_icon_dia=25, chip_pad=7, chip_icon_inner=15
+    icon_dia = 40 * 64 // 100
+    icon_sz = icon_dia * 60 // 100
+    icon_svg = _mdi_svg_filter("thermometer", icon_sz)
+    pad = 40 * 18 // 100
+    img = render_macro(
+        "{%- from '_macros.svg.j2' import chip -%}"
+        + _SVG_OPEN
+        + "{{ chip(x=20, y=80, w=120, h=40,"
+        " text='Warm', border=2, icon_svg=icon_svg,"
+        " chip_pad=7, chip_icon_dia=25, chip_icon_inner=15,"
+        " chip_icon_gap=5, chip_font_sz=18) }}" + _SVG_CLOSE,
+        icon_svg=icon_svg,
+    )
+    # Circle stroke is visible at the icon area edges.
+    assert_has_dark_pixels(
+        img,
+        20 + pad,
+        80,
+        20 + pad + icon_dia,
+        120,
+    )
+
+
+def test_chip_with_active_icon_fills_circle(render_macro) -> None:
+    """Verify chip with active=true draws a filled gray circle."""
+    # h=40: chip_icon_dia=25, chip_pad=7, chip_icon_inner=15.
+    # Probe 2px inside the left arc — inside fill, outside 60% icon
+    # area — must be gray.
+    icon_dia = 40 * 64 // 100
+    icon_sz = icon_dia * 60 // 100
+    icon_svg = _mdi_svg_filter("thermometer", icon_sz)
+    img = render_macro(
+        "{%- from '_macros.svg.j2' import chip -%}"
+        + _SVG_OPEN
+        + "{{ chip(x=20, y=80, w=120, h=40,"
+        " text='Warm', border=2, icon_svg=icon_svg,"
+        " chip_pad=7, chip_icon_dia=25, chip_icon_inner=15,"
+        " chip_icon_gap=5, chip_font_sz=18,"
+        " active=true) }}" + _SVG_CLOSE,
+        icon_svg=icon_svg,
+    )
+    pad = 40 * 18 // 100
+    icon_r = icon_dia // 2
+    icon_cx = 20 + pad + icon_r
+    icon_cy = 80 + 40 // 2
+    # Probe just inside the left arc of the filled circle.
+    probe_x = icon_cx - icon_r + 2
+    assert_has_gray_pixels(
+        img,
+        probe_x,
+        icon_cy - 1,
+        probe_x + 2,
+        icon_cy + 1,
+        low=100,
+        high=160,
+    )
+
+
+def test_macro_imports_pass_render_context():
+    """Verify every template imports _macros.svg.j2 ``with context``.
+
+    The macros read ``font_family_name`` from the caller's context;
+    without ``with context`` it is undefined and text renders in the
+    wrong font family.
+    """
+    import_re = re.compile(
+        r'\{%-?\s*from\s+"_macros\.svg\.j2"\s+import\s+(.*?)-?%\}',
+        re.DOTALL,
+    )
+    checked = 0
+    for path in sorted(_TEMPLATE_DIR.glob("*.svg.j2")):
+        if path.name == "_macros.svg.j2":
+            continue
+        for match in import_re.finditer(path.read_text()):
+            checked += 1
+            assert match.group(1).rstrip().endswith("with context"), (
+                f"{path.name}: _macros.svg.j2 import lacks 'with context'"
+            )
+    assert checked > 0

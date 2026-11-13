@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: lint
+            cmd: uv run --group lint ruff check .
+          - name: format
+            cmd: uv run --group format ruff format --check .
+          - name: typecheck
+            cmd: uv run --group typecheck ty check
+          - name: test
+            cmd: uv run --group test pytest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: pnpm/action-setup@v6
+        if: matrix.name == 'test'
+        with:
+          run_install: false
+          package_json_file: custom_components/eink_dashboard/frontend/package.json
+      - uses: actions/setup-node@v6
+        if: matrix.name == 'test'
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: custom_components/eink_dashboard/frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        if: matrix.name == 'test'
+        working-directory: custom_components/eink_dashboard/frontend
+      - run: ${{ matrix.cmd }}
+
+  validate-frontend:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - pnpm_cmd: typecheck
+          - pnpm_cmd: test
+    defaults:
+      run:
+        working-directory: custom_components/eink_dashboard/frontend
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+          package_json_file: custom_components/eink_dashboard/frontend/package.json
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: custom_components/eink_dashboard/frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm ${{ matrix.pnpm_cmd }}
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [validate, validate-frontend]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+          package_json_file: custom_components/eink_dashboard/frontend/package.json
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: custom_components/eink_dashboard/frontend/pnpm-lock.yaml
+      - name: Stamp version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          jq ".version = \"${VERSION}\"" custom_components/eink_dashboard/manifest.json > manifest.tmp
+          mv manifest.tmp custom_components/eink_dashboard/manifest.json
+      - run: bash scripts/build_dist.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: eink_dashboard-dist
+          path: dist/
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: eink_dashboard-dist
+          path: dist
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/eink_dashboard.zip
+            dist/eink_dashboard-*.tar.gz
+          generate_release_notes: true

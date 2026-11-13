@@ -1,0 +1,1073 @@
+# Copyright 2026 Andreas Schneider
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Meteogram widget context builder.
+
+Renders a temperature curve over an hourly weather forecast, with
+condition icons, day-boundary markers, and an optional cloud-coverage
+band.  Built on the same low-level helpers as the ``GRAPH`` widget
+(see ``widgets/graph/``) rather than duplicating time-axis/path
+logic, per the architecture decided in the meteogram design doc.
+"""
+
+from __future__ import annotations
+
+import datetime
+import math
+from itertools import pairwise
+from typing import TYPE_CHECKING, Any, cast
+
+from ..const import (
+    DEFAULT_CARD_STYLE,
+    DEFAULT_ROW_H,
+    PADDING,
+    DayLabelFormat,
+    DisplayConfig,
+    FontWeight,
+)
+from ..svg_render import _weather_svg_filter
+from ._helpers import (
+    _card_insets,
+    _color_context,
+    _fmt,
+    _missing_entity_context,
+    _resolve_tz,
+    _temp_gradient_stops,
+    _widget_dim,
+)
+from .graph import (
+    _extract_attribute_points,
+    _maybe_grayscale_stops,
+    _parse_attribute_timestamp,
+    _smooth_fill,
+    _smooth_path,
+    _y_bounds,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from ..widget_config import MeteogramWidget
+
+# Hourly forecast window, in hours, clamped to this range regardless
+# of what the widget config requests.
+_MIN_HOURS = 8
+_MAX_HOURS = 120
+_DEFAULT_HOURS = 24
+
+# Condition icons are placed every this many hours -- dense enough to
+# read the weather trend, sparse enough not to clutter a ~300-400px
+# wide e-ink card (WEATHER.md decision: "every 2-3h, not hourly").
+_ICON_STEP_HOURS = 3
+# Hour-axis ticks use the same cadence as icons.
+_HOUR_TICK_STEP_HOURS = 3
+
+# Layout ratios, all relative to the widget's total height "h" so
+# the widget scales proportionally (mirrors _compute_metrics()'s
+# row_h-relative ratios elsewhere in the codebase).
+_DAY_LABEL_H_RATIO = 0.09
+_ROW_GAP_RATIO = 0.025
+_HOUR_ROW_H_RATIO = 0.075
+_ICON_SIZE_RATIO = 0.10
+_ICON_GAP_RATIO = 0.025
+_ICON_LANE_H_RATIO = 0.14
+_DAY_LABEL_FONT_RATIO = 0.065
+_HOUR_FONT_RATIO = 0.05
+_GRID_FONT_RATIO = 0.05
+# Precipitation amount labels use the same visual tier as the
+# Y-axis gridline labels.
+_PRECIP_LABEL_FONT_RATIO = 0.05
+_CLOUD_BAND_FRAC = 0.4
+# Precipitation bars use at most this fraction of the plot height,
+# so they stay subordinate to the temperature curve.
+_PRECIP_BAR_MAX_FRAC = 0.5
+
+
+def _build_meteogram_context(
+    widget: MeteogramWidget,
+    config: DisplayConfig,
+) -> dict[str, object]:
+    """Build Jinja2 template context for the meteogram widget.
+
+    Renders an hourly temperature curve colored by a continuous
+    temperature gradient (matching the weather widget's min/max
+    bar), with condition icons floating above the curve, dashed
+    day-boundary markers, an optional cloud-coverage band, optional
+    precipitation bars, and hour-axis ticks below the plot.
+
+    Args:
+        widget: Widget config dict.  Recognised keys: ``entity``
+            (HA weather entity ID), ``hours`` (forecast window in
+            hours, clamped to 8-120; default 24), ``show_cloud_cover``
+            (bool, default ``True``), ``show_precipitation`` (bool,
+            default ``True``), ``day_label_format``
+            (``"weekday_month_day"`` -- the default, e.g. "Sun Oct
+            18"; ``"weekday_abbrev"`` "Sun"; ``"weekday_wide"``
+            "Sunday"; ``"month_day"`` "Oct 18"),
+            ``line_width`` (curve stroke width in
+            pixels; omitted keeps the height-derived width, an
+            explicit value is absolute), ``smoothing`` (bool,
+            default ``True``; ``False`` draws straight segments),
+            ``show_fill`` (bool, default ``False``; ``True`` fills
+            the area below the curve), ``fonts`` (per-role font
+            overrides — a
+            mapping of role name to ``{"size": int, "weight": str}``;
+            roles are ``"day"``, ``"hour"``, ``"grid"``, and
+            ``"precip"``.  An omitted ``size`` keeps the widget's
+            height-derived size scaled by the display-level
+            ``font_scale``; an explicit ``size`` is absolute.  An
+            omitted ``weight`` keeps the role's default: day, hour,
+            and grid ``"regular"``, precip ``"bold"``),
+            ``card_style``, ``x``, ``w``, ``h``.
+        config: Display config with ``width``, ``states``,
+            ``display_levels``, and ``font_scale``.
+
+    Returns:
+        Template context dict consumed by ``meteogram.svg.j2``.
+        Returns ``_missing_entity_context(w, h)`` when the
+        entity is missing from states or has no usable hourly
+        forecast.
+    """
+    from ..render import (
+        _compute_metrics,
+        _font_weight_svg,
+        resolve_font,
+    )
+
+    x = widget.get("x", PADDING)
+    w = _widget_dim(widget, "w", config["width"] - x)
+    h = _widget_dim(widget, "h", 5 * DEFAULT_ROW_H)
+    card_style = str(widget.get("card_style", DEFAULT_CARD_STYLE))
+    display_levels = config.get("display_levels", 16)
+    show_cloud_cover = bool(widget.get("show_cloud_cover", True))
+    show_precipitation = bool(widget.get("show_precipitation", True))
+    day_label_format = _day_label_format(widget)
+    # Line appearance options.  Defaults preserve the widget's
+    # pre-option rendering: the stroke stays height-derived and no
+    # fill is drawn, so existing configs look unchanged.
+    line_width = _line_width(widget, h)
+    smoothing = bool(widget.get("smoothing", True))
+    show_fill = bool(widget.get("show_fill", False))
+
+    entity: str = widget.get("entity", "")
+    states_dict: dict[str, Any] = config.get("states", {})
+
+    if not entity or entity not in states_dict:
+        return _missing_entity_context(w, h)
+
+    desc: dict[str, object] = {
+        "entity": entity,
+        "attribute": "forecast_hourly",
+        "attribute_timestamp_key": "datetime",
+        "attribute_value_key": "temperature",
+    }
+    points = _extract_attribute_points(desc, states_dict)
+    if not points:
+        return _missing_entity_context(w, h)
+
+    # Recover per-entry condition/cloud_coverage, which
+    # _extract_attribute_points() doesn't carry (it only returns
+    # the (timestamp, value) pairs used for the numeric series).
+    state = states_dict.get(entity, {})
+    attrs = state.get("attributes", {}) if isinstance(state, dict) else {}
+    raw_forecast = attrs.get("forecast_hourly", [])
+    entry_by_ts: dict[float, dict[str, object]] = {}
+    if isinstance(raw_forecast, list):
+        for entry in raw_forecast:
+            if not isinstance(entry, dict):
+                continue
+            ts = _parse_attribute_timestamp(entry.get("datetime"))
+            if ts is not None:
+                entry_by_ts[ts] = entry
+
+    # Clamp the requested window and slice to it from the first
+    # available point -- forecast-relative, not wall-clock-relative.
+    hours = widget.get("hours", _DEFAULT_HOURS)
+    try:
+        hours = int(float(hours))
+    except (ValueError, TypeError):
+        hours = _DEFAULT_HOURS
+    hours = max(_MIN_HOURS, min(_MAX_HOURS, hours))
+    t0 = points[0][0]
+    cutoff = t0 + hours * 3600
+    points = [p for p in points if p[0] <= cutoff]
+
+    # x_off/r_inset reserve space for a card frame; the plot area
+    # fills the remaining width apart from the Y-axis label gutter
+    # reserved below, and has no header row.
+    # Meteogram has no header row to derive a natural row height
+    # from, so card frame metrics (border/radius/left_bar) use the
+    # fixed DEFAULT_ROW_H reference, independent of the chart's own
+    # height -- the same fixed-reference pattern the GRAPH widget
+    # uses for its header row.
+    m = _compute_metrics(DEFAULT_ROW_H)
+    x_off, r_inset, bar_width = _card_insets(m, card_style, display_levels)
+    lpad = m.padding if x_off == 0 else 0
+    rpad = m.padding if r_inset == 0 else 0
+
+    content_left = x_off + lpad
+    content_w = w - x_off - lpad - r_inset - rpad
+    content_right = content_left + content_w
+
+    # Day boundaries and hour-axis labels are shown in HA's
+    # configured time zone (falling back to UTC when unset or
+    # unknown) -- the same _resolve_tz() helper the GRAPH widget
+    # uses for its x-axis/extrema time labels.
+    tz = _resolve_tz(config)
+    times = [datetime.datetime.fromtimestamp(t, tz=tz) for t, _ in points]
+    temps = [v for _, v in points]
+    t_span = max((points[-1][0] - points[0][0]), 1.0)
+
+    day_label_h = round(h * _DAY_LABEL_H_RATIO)
+    row_gap = max(1, round(h * _ROW_GAP_RATIO))
+    hour_row_h = round(h * _HOUR_ROW_H_RATIO)
+    icon_size = round(h * _ICON_SIZE_RATIO)
+    icon_gap = round(h * _ICON_GAP_RATIO)
+    icon_lane_h = round(h * _ICON_LANE_H_RATIO)
+    # Each text role resolves through resolve_font, so the widget's
+    # ``fonts`` overrides and the display-level ``font_scale`` can
+    # adjust size and weight while the ratios below stay the
+    # defaults.  Positions are independent of the font sizes (labels
+    # anchor to derived row heights), so a size override only grows
+    # the glyphs.
+    font_scale = config.get("font_scale", 1.0)
+    day_label_font_sz, day_weight = resolve_font(
+        widget,
+        "day",
+        max(10, round(h * _DAY_LABEL_FONT_RATIO)),
+        FontWeight.REGULAR,
+        scale=font_scale,
+    )
+    hour_font_sz, hour_weight = resolve_font(
+        widget,
+        "hour",
+        max(9, round(h * _HOUR_FONT_RATIO)),
+        FontWeight.REGULAR,
+        scale=font_scale,
+    )
+    grid_font_sz, grid_weight = resolve_font(
+        widget,
+        "grid",
+        max(9, round(h * _GRID_FONT_RATIO)),
+        FontWeight.REGULAR,
+        scale=font_scale,
+    )
+    # Precip labels render bold by default, so the measured advance
+    # widths used for collision pruning match the bold face.
+    precip_font_sz, precip_weight = resolve_font(
+        widget,
+        "precip",
+        max(9, round(h * _PRECIP_LABEL_FONT_RATIO)),
+        FontWeight.BOLD,
+        scale=font_scale,
+    )
+    plot_top = day_label_h + row_gap
+    hour_row_y = h - row_gap - hour_row_h
+    plot_bottom = hour_row_y - row_gap
+
+    y_min_raw, y_max_raw = _y_bounds(temps, None, None, None)
+    y_min = math.floor(y_min_raw / 5) * 5 - 5
+    y_max = math.ceil(y_max_raw / 5) * 5 + 5
+
+    # --- Y-axis label gutter ---
+    # Gridline values and the plot's horizontal anchor are resolved
+    # together: the widest label decides how far right the chart has
+    # to start.
+    grid_values, plot_left, plot_w = _y_axis_layout(
+        y_min,
+        y_max,
+        grid_font_sz,
+        grid_weight,
+        content_left,
+        content_right,
+    )
+
+    def map_x(ts: float) -> int:
+        """Map a Unix timestamp to an X pixel coordinate."""
+        frac = (ts - points[0][0]) / t_span
+        return round(plot_left + frac * plot_w)
+
+    scale_top = plot_top + icon_lane_h
+    scale_h = max(1, plot_bottom - scale_top)
+
+    def map_y(temp: float) -> int:
+        """Map a temperature value to a Y pixel coordinate."""
+        frac = (temp - y_min) / (y_max - y_min)
+        return round(plot_bottom - frac * scale_h)
+
+    # --- Y-axis gridlines/labels ---
+    grid_lines: list[dict[str, object]] = []
+    for grid_val in grid_values:
+        grid_y = map_y(grid_val)
+        grid_lines.append(
+            {
+                "y": grid_y,
+                # A few px above the line itself, so the label sits
+                # just clear of it instead of straddling it.
+                "label_y": grid_y - row_gap,
+                "label": f"{grid_val:g}°",
+            }
+        )
+
+    # --- Cloud-coverage band ---
+    show_band = False
+    cloud_band_path = ""
+    if show_cloud_cover:
+        band_max_h = (plot_bottom - plot_top) * _CLOUD_BAND_FRAC
+        band_pts: list[tuple[int, int]] = []
+        for ts, _v in points:
+            entry = entry_by_ts.get(ts)
+            cc = entry.get("cloud_coverage") if entry else None
+            if cc is None:
+                # Points missing cloud_coverage are skipped;
+                # _smooth_path/_smooth_fill bridge across the gap
+                # by interpolating between the nearest available
+                # points.
+                continue
+            try:
+                cc_val = float(str(cc))
+            except (ValueError, TypeError):
+                continue
+            band_pts.append(
+                (
+                    map_x(ts),
+                    round(plot_top + cc_val / 100 * band_max_h),
+                )
+            )
+        if len(band_pts) >= 2:
+            band_path = _smooth_path(band_pts)
+            if band_path:
+                # Close to plot_top (not a baseline) -- the band
+                # grows down from the plot's top edge.
+                cloud_band_path = _smooth_fill(band_path, band_pts, plot_top)
+                show_band = True
+
+    # --- Precipitation bars ---
+    precip_bars = (
+        _compute_precip_bars(
+            points,
+            entry_by_ts,
+            map_x,
+            plot_top,
+            plot_bottom,
+            plot_left,
+            content_right,
+        )
+        if show_precipitation
+        else []
+    )
+    if precip_bars:
+        precip_bars = _label_precip_bars(
+            precip_bars,
+            config,
+            precip_font_sz,
+            plot_top,
+            row_gap,
+            plot_left,
+            content_right,
+            precip_weight,
+        )
+
+    # --- Day boundary markers ---
+    language = str(config.get("language", "en"))
+    day_markers: list[dict[str, object]] = []
+    first_date = times[0].date()
+    day_markers.append(
+        {
+            "x": plot_left,
+            "show_line": False,
+            "label": _day_label(first_date, language, day_label_format),
+        }
+    )
+    cursor = datetime.datetime.combine(
+        first_date + datetime.timedelta(days=1),
+        datetime.time.min,
+        tzinfo=tz,
+    )
+    t_last = times[-1]
+    while cursor < t_last:
+        cx = map_x(cursor.timestamp())
+        day_markers.append(
+            {
+                "x": cx,
+                "show_line": True,
+                "line_y1": plot_top,
+                "line_y2": plot_bottom,
+                "label": _day_label(cursor.date(), language, day_label_format),
+            }
+        )
+        cursor += datetime.timedelta(days=1)
+    day_markers = _prune_overlapping_day_markers(
+        day_markers, day_label_font_sz, content_right, day_weight
+    )
+
+    # --- Temperature curve, colored by a continuous gradient ---
+    curve_pts = [(map_x(t), map_y(v)) for t, v in points]
+    # No stops on 2-level displays: the template then strokes the
+    # curve with hex_black instead of the gradient URL.
+    curve_stroke_w, curve_stops = _curve_stroke_and_stops(
+        line_width, points, config, display_levels
+    )
+    grid_stroke_w = max(1, line_width // 2)
+    curve_path, curve_points, fill_path, fill_points = _curve_geometry(
+        curve_pts, plot_bottom, smoothing, show_fill
+    )
+
+    # --- Condition icons, floating above the curve ---
+    icons: list[dict[str, object]] = []
+    for i in range(0, len(points), _ICON_STEP_HOURS):
+        ts, temp = points[i]
+        entry = entry_by_ts.get(ts)
+        condition = entry.get("condition") if entry else None
+        if not isinstance(condition, str) or not condition:
+            continue
+        try:
+            icon_svg = _weather_svg_filter(condition, icon_size)
+        except (KeyError, FileNotFoundError):
+            continue
+        # Clamp so the icon stays inside the plot area at both
+        # edges (the first point maps to plot_left, the last
+        # to content_right).
+        cx = map_x(ts)
+        cx = max(
+            plot_left + icon_size // 2,
+            min(cx, content_right - icon_size // 2),
+        )
+        cy = map_y(temp) - icon_gap - icon_size // 2
+        cy = max(cy, plot_top + icon_size // 2)
+        icons.append(
+            {
+                "x": cx - icon_size // 2,
+                "y": cy - icon_size // 2,
+                "svg": icon_svg,
+            }
+        )
+
+    # --- Hour-axis ticks ---
+    # Center-anchoring every tick would let a tick sitting right at
+    # plot_left/content_right (the first tick always does; the
+    # last one does too when the step divides evenly into the
+    # window) spill half its width past the plot edge -- harmless
+    # at small hour_font_sz, but it grows with h and can clip past
+    # the widget's own canvas edge on tall widgets. Anchor those
+    # edge ticks inward instead -- the same idea as the "start"/
+    # "end" anchoring GRAPH uses for its two fixed oldest/newest
+    # X-axis labels, applied here per-tick since hour_ticks is a
+    # full series where only the first/last entry sits at an edge.
+    hour_ticks: list[dict[str, object]] = []
+    for i in range(0, len(points), _HOUR_TICK_STEP_HOURS):
+        tick_x = map_x(points[i][0])
+        if tick_x <= plot_left:
+            anchor = "start"
+        elif tick_x >= content_right:
+            anchor = "end"
+        else:
+            anchor = "middle"
+        hour_ticks.append(
+            {
+                "x": tick_x,
+                "label": times[i].strftime("%H"),
+                "anchor": anchor,
+            }
+        )
+
+    return {
+        "w": w,
+        "h": h,
+        "has_entity": True,
+        "card_style": card_style,
+        "bar_width": bar_width,
+        "m_border": m.border,
+        "m_radius": m.radius,
+        **_color_context(),
+        "curve_path": curve_path,
+        "curve_points": curve_points,
+        "curve_stops": curve_stops,
+        "curve_stroke_w": curve_stroke_w,
+        "fill_path": fill_path,
+        "fill_points": fill_points,
+        "grid_lines": grid_lines,
+        "grid_font_sz": grid_font_sz,
+        "grid_font_weight": _font_weight_svg(grid_weight),
+        "grid_stroke_w": grid_stroke_w,
+        "content_left": content_left,
+        "content_right": content_right,
+        "plot_left": plot_left,
+        "show_cloud_band": show_band,
+        "cloud_band_path": cloud_band_path,
+        "show_precip": bool(precip_bars),
+        "precip_bars": precip_bars,
+        "precip_font_sz": precip_font_sz,
+        "precip_font_weight": _font_weight_svg(precip_weight),
+        "day_markers": day_markers,
+        "day_label_font_sz": day_label_font_sz,
+        "day_label_font_weight": _font_weight_svg(day_weight),
+        "day_label_y": m.border,
+        "icons": icons,
+        "hour_ticks": hour_ticks,
+        "hour_row_y": hour_row_y,
+        "hour_font_sz": hour_font_sz,
+        "hour_font_weight": _font_weight_svg(hour_weight),
+    }
+
+
+def _y_axis_layout(
+    y_min: float,
+    y_max: float,
+    font_sz: int,
+    weight: FontWeight,
+    content_left: int,
+    content_right: int,
+) -> tuple[list[int], int, int]:
+    """Lay out the Y-axis gridlines and reserve the label gutter.
+
+    Gridline values are picked first (a 5-degree step on small
+    ranges, 10 on wide ones), then the widest formatted label sizes
+    the left gutter: labels are left-anchored at ``content_left``,
+    so the gutter is the widest label plus a half-font gap --
+    mirroring the label-width gutter ``_build_graph_context()``
+    reserves for GRAPH's Y-axis labels.  The chart is anchored to
+    the right of that gutter so the labels never render on top of
+    it.
+
+    Args:
+        y_min: Y-axis lower bound.
+        y_max: Y-axis upper bound.
+        font_sz: Resolved grid-label font size in pixels.
+        weight: Resolved grid-label weight, so the measured advance
+            widths match the face the template renders.
+        content_left: X pixel coordinate of the content area's left
+            edge, where the labels are anchored.
+        content_right: X pixel coordinate of the content area's
+            right edge, which is also the plot's right edge.
+
+    Returns:
+        ``(grid_values, plot_left, plot_w)``: the gridline values,
+        the X coordinate the chart is anchored at, and the plot
+        width.
+    """
+    from ..render import _load_role_font
+
+    step = 5 if (y_max - y_min) <= 30 else 10
+    grid_values: list[int] = []
+    grid_val = math.ceil(y_min / step) * step
+    while grid_val <= y_max:
+        grid_values.append(grid_val)
+        grid_val += step
+
+    grid_font = _load_role_font(font_sz, weight)
+    label_w = max(
+        (round(grid_font.getlength(f"{v:g}°")) for v in grid_values),
+        default=0,
+    )
+    label_gap = font_sz // 2
+    plot_left = content_left + label_w + label_gap
+    plot_w = max(1, content_right - plot_left)
+    return grid_values, plot_left, plot_w
+
+
+def _line_width(widget: MeteogramWidget, h: int) -> int:
+    """Resolve the temperature curve's stroke width.
+
+    An explicit ``line_width`` is an absolute pixel value.  When it
+    is omitted (or empty, as an untouched editor number field
+    produces), the width stays proportional to the widget height --
+    the pre-option behaviour -- so existing configs render exactly
+    as they did before the option existed.  A malformed value falls
+    back to that same derived width rather than failing the render.
+
+    Args:
+        widget: Widget config dict, carrying the optional
+            ``line_width`` key.
+        h: Widget height in pixels, used for the derived default.
+
+    Returns:
+        Stroke width in pixels.
+    """
+    default_width = max(2, round(h * 0.012))
+    raw = widget.get("line_width")
+    if raw is None or raw == "":
+        return default_width
+    try:
+        return int(float(raw))
+    except (ValueError, TypeError):
+        return default_width
+
+
+def _curve_stroke_and_stops(
+    line_width: int,
+    points: list[tuple[float, float]],
+    config: DisplayConfig,
+    display_levels: int,
+) -> tuple[int, list[dict[str, str]]]:
+    """Resolve the temperature curve's stroke width and gradient stops.
+
+    The temperature gradient's palette is light at the warm end, so
+    on a 2-level (B&W) display every stop quantizes to white and the
+    curve would disappear.  The curve is drawn as a solid black line
+    instead -- the template strokes with ``hex_black`` when the stop
+    list is empty -- with a doubled stroke, matching how the GRAPH
+    widget draws its lines on 2-level displays.  Every other display
+    keeps the gradient, converted to grayscale stops when no colour
+    scheme is configured.
+
+    Args:
+        line_width: Stroke width in pixels, before the 2-level
+            widening.
+        points: ``(timestamp, temperature)`` pairs, sorted by
+            timestamp, defining the plotted time range.
+        config: Display config, used for the grayscale conversion
+            and for the ``color_scheme`` check.
+        display_levels: Number of distinct gray levels on the
+            display.
+
+    Returns:
+        ``(stroke_w, stops)``.  ``stops`` is empty when no gradient
+        applies, which the template reads as "stroke with black".
+    """
+    if display_levels <= 2:
+        return line_width * 2, []
+    sample_temps = [_sample_by_time(points, i / 16) for i in range(17)]
+    return line_width, _maybe_grayscale_stops(
+        _temp_gradient_stops(sample_temps), config
+    )
+
+
+def _curve_geometry(
+    curve_pts: list[tuple[int, int]],
+    plot_bottom: int,
+    smoothing: bool,
+    show_fill: bool,
+) -> tuple[str, str, str, str]:
+    """Build the curve's line and fill geometry.
+
+    Mirrors ``_line_series()``'s split: a midpoint Q-curve ``path``
+    when ``smoothing`` is on, a straight-segment ``points`` list
+    otherwise, with the fill following the same split (a
+    ``_smooth_fill()`` closure for the smooth path, a baseline
+    polygon for the polyline).  Only one of each pair is non-empty,
+    so the template picks the matching SVG element.
+
+    Args:
+        curve_pts: Ordered ``(x, y)`` pixel coordinates,
+            oldest-to-newest.
+        plot_bottom: Y pixel coordinate of the plot's bottom edge,
+            which the fill drops to.
+        smoothing: When ``True`` use a midpoint Q-curve path; when
+            ``False`` use straight segments.
+        show_fill: When ``True`` close the curve down to the plot
+            baseline to produce a filled area.
+
+    Returns:
+        ``(curve_path, curve_points, fill_path, fill_points)``.
+    """
+    if len(curve_pts) < 2:
+        return "", "", "", ""
+    if not smoothing:
+        points_str = " ".join(f"{px},{py}" for px, py in curve_pts)
+        fill_points = ""
+        if show_fill:
+            fill_poly = [
+                *curve_pts,
+                (curve_pts[-1][0], plot_bottom),
+                (curve_pts[0][0], plot_bottom),
+            ]
+            fill_points = " ".join(f"{px},{py}" for px, py in fill_poly)
+        return "", points_str, "", fill_points
+    path = _smooth_path(curve_pts)
+    fill_path = ""
+    if show_fill and path:
+        fill_path = _smooth_fill(path, curve_pts, plot_bottom)
+    return path, "", fill_path, ""
+
+
+def _prune_overlapping_day_markers(
+    day_markers: list[dict[str, object]],
+    font_sz: int,
+    content_right: int,
+    weight: FontWeight = FontWeight.REGULAR,
+) -> list[dict[str, object]]:
+    """Drop day-boundary labels that would overlap or overflow.
+
+    Labels are left-anchored (``text-anchor="start"``), so a label
+    collides with its neighbour whenever its rendered right edge
+    reaches the neighbour's x position. This does a greedy left-to-
+    right scan, keeping a marker only if it clears the last kept
+    marker's label, so interior collisions are caught as well as the
+    first-vs-second case (common when the forecast starts late in
+    the day, putting midnight -- and the next label -- only a few
+    hours away). The first marker is the "today" label and is
+    preferred to drop over the midnight boundary it collides with,
+    since the boundary line/label is more informative. The last kept
+    label is dropped if it would overflow the plot's right edge,
+    unless it is the only marker left, in which case it is kept
+    (an overflowing label beats no label at all).
+
+    Args:
+        day_markers: Day-boundary marker dicts, in x order, each
+            with ``x`` and ``label`` keys. The first entry is
+            assumed to be the non-boundary "today" label, per how
+            ``_build_meteogram_context()`` constructs this list.
+        font_sz: Day-label font size in pixels, used to measure
+            label width.
+        content_right: X coordinate of the plot's right edge.
+        weight: Resolved weight of the day-label role, so the
+            measured advance widths match the face the template
+            renders.
+
+    Returns:
+        The marker list with overlapping/overflowing labels removed.
+    """
+    from ..render import _load_role_font
+
+    font = _load_role_font(font_sz, weight)
+
+    def label_extent(marker: dict[str, object]) -> int:
+        """Return a marker label's estimated rendered right edge."""
+        x = cast("int", marker["x"])
+        label = str(marker["label"])
+        return x + round(font.getlength(label))
+
+    if len(day_markers) >= 2:
+        first_edge = label_extent(day_markers[0]) + font_sz
+        second_x = cast("int", day_markers[1]["x"])
+        # A full font_sz of gap keeps labels from looking cramped
+        # when they just barely miss.
+        if first_edge >= second_x:
+            day_markers = day_markers[1:]
+
+    kept: list[dict[str, object]] = []
+    prev_edge: int | None = None
+    for marker in day_markers:
+        marker_x = cast("int", marker["x"])
+        if prev_edge is not None and prev_edge >= marker_x:
+            continue
+        kept.append(marker)
+        prev_edge = label_extent(marker) + font_sz
+
+    # No gap here: unlike the collision checks above, touching the
+    # plot's right edge exactly is not treated as overflow. Never
+    # drop the last remaining marker, since a single overflowing
+    # label is preferable to no day label at all.
+    if len(kept) > 1 and label_extent(kept[-1]) > content_right:
+        kept.pop()
+    return kept
+
+
+def _compute_precip_bars(
+    points: list[tuple[float, float]],
+    entry_by_ts: dict[float, dict[str, object]],
+    map_x: Callable[[float], int],
+    plot_top: int,
+    plot_bottom: int,
+    plot_left: int,
+    plot_right: int,
+) -> list[dict[str, object]]:
+    """Compute precipitation bar rects for the meteogram plot.
+
+    Points with no ``precipitation`` entry or a zero/negative value
+    draw no bar -- unlike the cloud-coverage band (a filled area
+    that needs interpolated gap bridging), a missing precipitation
+    reading just means "no bar here".
+
+    Args:
+        points: ``(timestamp, temperature)`` pairs, sorted by
+            timestamp, defining the plotted time range.
+        entry_by_ts: Full forecast entries keyed by timestamp, used
+            to look up each point's ``precipitation`` value.
+        map_x: Maps a Unix timestamp to an X pixel coordinate.
+        plot_top: Y pixel coordinate of the plot's top edge.
+        plot_bottom: Y pixel coordinate of the plot's bottom edge
+            (baseline bars grow up from).
+        plot_left: X pixel coordinate of the plot's left edge,
+            used to clamp bars so they don't overhang the plot.
+        plot_right: X pixel coordinate of the plot's right edge,
+            used to clamp bars so they don't overhang the plot.
+
+    Returns:
+        Bar rects as ``{"x", "y", "w", "h", "value", "value_str"}``
+        dicts, one per point with positive precipitation, where
+        ``value`` is the raw precipitation amount and ``value_str``
+        is its original string representation (preserved so label
+        formatting doesn't inherit spurious decimal places from a
+        ``float`` round-trip). Empty if none have data.
+    """
+    if len(points) < 2:
+        return []
+
+    precip_vals: list[tuple[float, float, str]] = []
+    for ts, _v in points:
+        entry = entry_by_ts.get(ts)
+        precip = entry.get("precipitation") if entry else None
+        if precip is None:
+            continue
+        precip_str = str(precip)
+        try:
+            precip_val = float(precip_str)
+        except (ValueError, TypeError):
+            continue
+        if precip_val > 0:
+            precip_vals.append((ts, precip_val, precip_str))
+
+    if not precip_vals:
+        return []
+
+    # Floor at 2mm and add 1mm headroom so drizzle amounts still
+    # draw a visible bar, mirroring the reference
+    # lovelace-meteogram-card's precipitation Y-scale.
+    precip_max = max(2.0, max(v for _, v, _s in precip_vals) + 1)
+    max_bar_h = (plot_bottom - plot_top) * _PRECIP_BAR_MAX_FRAC
+    slot_w = map_x(points[1][0]) - map_x(points[0][0])
+    bar_w = max(2, round(slot_w * 0.8))
+
+    bars: list[dict[str, object]] = []
+    for ts, precip_val, precip_str in precip_vals:
+        bar_h = max(1, round(precip_val / precip_max * max_bar_h))
+        # Clamp so the bar stays inside the plot at both edges
+        # (the first point maps to plot_left, the last to
+        # plot_right).
+        bar_x = max(
+            plot_left,
+            min(map_x(ts) - bar_w // 2, plot_right - bar_w),
+        )
+        bars.append(
+            {
+                "x": bar_x,
+                "y": plot_bottom - bar_h,
+                "w": bar_w,
+                "h": bar_h,
+                "value": precip_val,
+                "value_str": precip_str,
+            }
+        )
+    return bars
+
+
+def _is_zero_label(label: str) -> bool:
+    """Return whether a formatted numeric label displays as zero.
+
+    Checks the label's own digits rather than re-deriving a display
+    precision independently, so this can never disagree with what
+    ``_fmt()`` (and, underneath it, ``format_number()``) actually
+    renders -- e.g. a 0.01mm reading formatted to "0.0" or "0,0"
+    (decimal-comma locales) both correctly count as zero.
+
+    Args:
+        label: A number formatted via ``_fmt()``.
+
+    Returns:
+        ``True`` if ``label`` contains at least one digit and every
+        digit is "0".
+    """
+    digits = [c for c in label if c.isdigit()]
+    return bool(digits) and all(d == "0" for d in digits)
+
+
+def _label_precip_bars(
+    precip_bars: list[dict[str, object]],
+    config: DisplayConfig,
+    font_sz: int,
+    plot_top: int,
+    row_gap: int,
+    plot_left: int,
+    plot_right: int,
+    weight: FontWeight = FontWeight.BOLD,
+) -> list[dict[str, object]]:
+    """Attach formatted, priority-pruned labels to precipitation bars.
+
+    Labels are centered above their bar (``text-anchor="middle"``),
+    so two labels collide when one's right half-width reaches into
+    the next's left half-width. When labels collide, the bar with
+    the higher precipitation value keeps its label -- a bar whose
+    label loses out, or would overflow the plot, still
+    draws its bar, but gets an empty ``"label"`` so no colliding or
+    overhanging text is rendered. Values that format to all-zero
+    digits at the display precision (e.g. a 0.01mm drizzle reading
+    formatting to "0.0") are also left unlabeled, since a visible
+    bar next to a "0.0" label would be misleading.
+
+    Args:
+        precip_bars: Bar dicts from ``_compute_precip_bars()``, in
+            x order, each with ``x``, ``y``, ``w``, ``value``, and
+            ``value_str`` keys.
+        config: Display config, used for locale-aware number
+            formatting via ``_fmt()``.
+        font_sz: Precipitation label font size in pixels.
+        plot_top: Y pixel coordinate of the plot's top edge, used
+            to keep labels from being clipped above the plot.
+        row_gap: Vertical gap between a bar's top and its label.
+        plot_left: X pixel coordinate of the plot's left edge,
+            used to drop labels that would overhang it.
+        plot_right: X pixel coordinate of the plot's right edge,
+            used to drop labels that would overhang it.
+        weight: Resolved weight of the precipitation-label role, so
+            the measured widths reflect what actually renders.
+
+    Returns:
+        New bar dicts, each with an added ``label`` key (possibly
+        empty). ``label_x`` and ``label_y`` are only present when
+        ``label`` is non-empty.
+    """
+    from ..render import _load_role_font
+
+    font = _load_role_font(font_sz, weight)
+
+    # Candidate labels that could be placed: (index, value, left,
+    # right, label, label_x, label_y). Bars that format to zero or
+    # would overhang the plot are excluded up front, since
+    # they can never win a placement regardless of priority.
+    candidates: list[tuple[int, float, float, float, str, int, int]] = []
+    for i, bar in enumerate(precip_bars):
+        value = cast("float", bar["value"])
+        value_str = cast("str", bar["value_str"])
+        label = _fmt(value_str, config)
+        if _is_zero_label(label):
+            continue
+
+        half_w = font.getlength(label) / 2
+        bar_x = cast("int", bar["x"])
+        bar_w = cast("int", bar["w"])
+        center = bar_x + bar_w / 2
+        left_edge = center - half_w
+        right_edge = center + half_w
+
+        # No gap here: matches _prune_overlapping_day_markers()'s
+        # strict edge check -- touching exactly is not overflow.
+        if left_edge < plot_left or right_edge > plot_right:
+            continue
+
+        # Safeguard: with _PRECIP_BAR_MAX_FRAC = 0.5 a bar's top
+        # can't rise above the plot's midpoint, so this clamp
+        # doesn't trigger today, but it guards against future
+        # changes to that fraction or very short plot heights.
+        label_y = max(cast("int", bar["y"]) - row_gap, plot_top + font_sz)
+        candidates.append(
+            (i, value, left_edge, right_edge, label, round(center), label_y)
+        )
+
+    # Place labels in descending precipitation order, so the most
+    # informative readings win when two labels would collide. Ties
+    # fall back to the original (left-to-right) order.
+    #
+    # A half-font-size margin is added to both sides of the overlap
+    # test, giving a full font_sz of separation between two placed
+    # labels -- the same "full font_sz of gap" margin
+    # _prune_overlapping_day_markers() uses so adjacent labels don't
+    # render touching.
+    gap = font_sz / 2
+    placed: dict[int, tuple[str, int, int]] = {}
+    occupied: list[tuple[float, float]] = []
+    for i, _value, left_edge, right_edge, label, label_x, label_y in sorted(
+        candidates, key=lambda c: (-c[1], c[0])
+    ):
+        overlaps = any(
+            left_edge < right + gap and right_edge > left - gap
+            for left, right in occupied
+        )
+        if not overlaps:
+            placed[i] = (label, label_x, label_y)
+            occupied.append((left_edge, right_edge))
+
+    labeled: list[dict[str, object]] = []
+    for i, bar in enumerate(precip_bars):
+        new_bar = dict(bar)
+        if i in placed:
+            label, label_x, label_y = placed[i]
+            new_bar["label"] = label
+            new_bar["label_x"] = label_x
+            new_bar["label_y"] = label_y
+        else:
+            new_bar["label"] = ""
+        labeled.append(new_bar)
+    return labeled
+
+
+def _sample_by_time(points: list[tuple[float, float]], frac: float) -> float:
+    """Linearly interpolate a temperature at a time fraction.
+
+    Interpolates by timestamp rather than list index, so the
+    result matches the time-linear ``map_x()`` placement of the
+    curve even when forecast points are irregularly spaced.
+
+    Args:
+        points: ``(timestamp, temperature)`` pairs, sorted by
+            timestamp.
+        frac: Position to sample, in ``[0, 1]``, as a fraction of
+            the time span from the first to the last point.
+
+    Returns:
+        Interpolated temperature at ``frac``.
+    """
+    target = points[0][0] + frac * (points[-1][0] - points[0][0])
+    for (t0, v0), (t1, v1) in pairwise(points):
+        if t1 >= target:
+            span = t1 - t0
+            t = (target - t0) / span if span > 0 else 0.0
+            return v0 + (v1 - v0) * t
+    return points[-1][1]
+
+
+def _day_label_format(widget: MeteogramWidget) -> DayLabelFormat:
+    """Resolve the day-boundary label format option.
+
+    Args:
+        widget: Widget config dict, carrying the optional
+            ``day_label_format`` key.
+
+    Returns:
+        The configured format.  An unknown or non-string value
+        (stale or hand-edited configs) falls back to
+        ``DayLabelFormat.WEEKDAY_MONTH_DAY`` rather than failing the
+        render.
+    """
+    raw = widget.get("day_label_format", DayLabelFormat.WEEKDAY_MONTH_DAY)
+    try:
+        return DayLabelFormat(raw)
+    except (ValueError, TypeError):
+        return DayLabelFormat.WEEKDAY_MONTH_DAY
+
+
+def _day_label(
+    d: datetime.date,
+    language: str,
+    fmt: DayLabelFormat = DayLabelFormat.WEEKDAY_MONTH_DAY,
+) -> str:
+    """Return a day-boundary label in the configured format.
+
+    Args:
+        d: Date to format.
+        language: BCP 47 language code.
+        fmt: Label format, e.g. ``DayLabelFormat.WEEKDAY_ABBREV``
+            for "Sun".  The default,
+            ``DayLabelFormat.WEEKDAY_MONTH_DAY``, renders "Sun Oct
+            18".
+
+    Returns:
+        Formatted label string.
+    """
+    from ..render import (
+        _babel_format_date,
+        _month_abbrev,
+        _weekday_abbrev,
+    )
+
+    weekday = _weekday_abbrev(d, language)
+    if fmt is DayLabelFormat.WEEKDAY_ABBREV:
+        return weekday
+    if fmt is DayLabelFormat.WEEKDAY_WIDE:
+        return _babel_format_date(d, "EEEE", language)
+    month = _month_abbrev(d, language)
+    if fmt is DayLabelFormat.MONTH_DAY:
+        return f"{month} {d.day}"
+    return f"{weekday} {month} {d.day}"

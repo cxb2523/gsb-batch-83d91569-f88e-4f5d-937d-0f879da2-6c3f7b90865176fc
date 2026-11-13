@@ -1,0 +1,1300 @@
+// Copyright 2026 Andreas Schneider
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+import { describe, it, expect } from "vitest";
+import type {
+  HaFormSchema,
+  EinkEditorElement,
+  EinkWidgetPicker,
+  Widget,
+  StateCondition,
+} from "../src/types/ha.js";
+import {
+  WIDGET_TYPES,
+  SCHEMAS,
+  LABELS,
+  loadHaComponents,
+  getSummary,
+  normalizeEntitiesRows,
+} from "../src/eink-dashboard-editor.js";
+import "../src/eink-dashboard-editor.js";
+import { ICON_FALLBACK } from "../src/eink-widget-picker.js";
+
+const DISPLAY = { width: 800, height: 480 };
+
+function flattenFields(schema: HaFormSchema[]): string[] {
+  const names: string[] = [];
+  for (const field of schema) {
+    if (field.name) names.push(field.name);
+    if (field.schema) names.push(...flattenFields(field.schema));
+  }
+  return names;
+}
+
+function findField(
+  schema: HaFormSchema[],
+  name: string,
+): HaFormSchema | undefined {
+  for (const field of schema) {
+    if (field.name === name) return field;
+    if (field.schema) {
+      const found = findField(field.schema, name);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+// ── WIDGET_TYPES ─────────────────────────────────────────────────
+
+describe("WIDGET_TYPES", () => {
+  const ALL_TYPES = [
+    "frame",
+    "heading",
+    "separator",
+    "weather",
+    "tile",
+    "entities",
+    "entity",
+    "device_battery",
+    "waste_schedule",
+    "sensor",
+    "calendar",
+    "gauge",
+    "graph",
+    "meteogram",
+    "week_calendar",
+  ];
+
+  it("has all 15 widget types", () => {
+    expect(Object.keys(WIDGET_TYPES).sort()).toEqual(
+      ALL_TYPES.sort()
+    );
+  });
+
+  it("each entry has a label and defaults with matching type field", () => {
+    for (const [key, meta] of Object.entries(WIDGET_TYPES)) {
+      expect(typeof meta.label).toBe("string");
+      expect(meta.label.length).toBeGreaterThan(0);
+      expect(meta.defaults.type).toBe(key);
+    }
+  });
+
+  it("each entry has a non-empty description string", () => {
+    // Picker grid shows descriptions to help users choose the right
+    // widget.
+    for (const meta of Object.values(WIDGET_TYPES)) {
+      expect(typeof meta.description).toBe("string");
+      expect(meta.description.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("each entry has an icon in mdi: format", () => {
+    // Picker grid uses these icons as visual indicators per widget type.
+    for (const meta of Object.values(WIDGET_TYPES)) {
+      expect(typeof meta.icon).toBe("string");
+      expect(meta.icon.startsWith("mdi:")).toBe(true);
+    }
+  });
+
+  it("every widget type icon has an ICON_FALLBACK entry", () => {
+    // Ensures the picker grid shows a glyph, not a bare text
+    // fallback, when the browser can't load the MDI icon font.
+    for (const meta of Object.values(WIDGET_TYPES)) {
+      expect(ICON_FALLBACK).toHaveProperty(meta.icon);
+    }
+  });
+});
+
+// ── SCHEMAS ──────────────────────────────────────────────────────
+
+describe("SCHEMAS", () => {
+  const ALL_TYPES = [
+    "frame",
+    "heading",
+    "separator",
+    "weather",
+    "tile",
+    "entities",
+    "entity",
+    "device_battery",
+    "waste_schedule",
+    "sensor",
+    "calendar",
+    "gauge",
+    "graph",
+    "meteogram",
+    "week_calendar",
+  ];
+
+  it("has a schema builder for all 15 widget types", () => {
+    expect(Object.keys(SCHEMAS).sort()).toEqual(ALL_TYPES.sort());
+  });
+
+  it("row_height placeholder uses the display's scaled default", () => {
+    // Lists show the device's density-scaled row height, else 56.
+    for (const t of ["entities", "calendar", "waste_schedule"]) {
+      const scaled = SCHEMAS[t]({ ...DISPLAY, row_height: 33 });
+      expect(findField(scaled, "row_height")?.default).toBe(33);
+      expect(findField(SCHEMAS[t](DISPLAY), "row_height")?.default).toBe(56);
+    }
+  });
+
+  it("weather entity field uses domain filter 'weather'", () => {
+    const schema = SCHEMAS.weather(DISPLAY);
+    const entityField = findField(schema, "entity");
+    expect(entityField?.selector?.entity).toMatchObject({
+      domain: "weather",
+    });
+  });
+
+  it("position fields respect display dimensions as max", () => {
+    const schema = SCHEMAS.separator(DISPLAY);
+    const xField = findField(schema, "x");
+    const yField = findField(schema, "y");
+    expect(xField?.selector?.number?.max).toBe(DISPLAY.width);
+    expect(yField?.selector?.number?.max).toBe(DISPLAY.height);
+  });
+
+  it("waste_schedule entity field uses domain filter 'sensor'", () => {
+    // Waste schedule uses a single entity selector, not multiple.
+    const entityField = findField(
+      SCHEMAS.waste_schedule(DISPLAY), "entity"
+    );
+    expect(entityField?.selector?.entity).toMatchObject({
+      domain: "sensor",
+    });
+  });
+
+  it("weather temperature_entity field uses domain filter 'sensor'", () => {
+    const schema = SCHEMAS.weather(DISPLAY);
+    const field = findField(schema, "temperature_entity");
+    expect(field?.selector?.entity).toMatchObject({ domain: "sensor" });
+  });
+
+  it("weather humidity_entity field uses domain filter 'sensor'", () => {
+    const schema = SCHEMAS.weather(DISPLAY);
+    const field = findField(schema, "humidity_entity");
+    expect(field?.selector?.entity).toMatchObject({ domain: "sensor" });
+  });
+
+  it("meteogram entity field uses domain filter 'weather'", () => {
+    const schema = SCHEMAS.meteogram(DISPLAY);
+    const entityField = findField(schema, "entity");
+    expect(entityField?.selector?.entity).toMatchObject({
+      domain: "weather",
+    });
+  });
+
+  it("meteogram hours field is clamped to 8-120", () => {
+    const schema = SCHEMAS.meteogram(DISPLAY);
+    const hoursField = findField(schema, "hours");
+    expect(hoursField?.selector?.number).toMatchObject({
+      min: 8,
+      max: 120,
+    });
+  });
+
+  it("meteogram show_precipitation field defaults to true", () => {
+    const schema = SCHEMAS.meteogram(DISPLAY);
+    const field = findField(schema, "show_precipitation");
+    expect(field?.default).toBe(true);
+    expect(field?.selector).toHaveProperty("boolean");
+  });
+
+  it("meteogram line options preserve the existing defaults", () => {
+    const schema = SCHEMAS.meteogram(DISPLAY);
+    const lineWidth = findField(schema, "line_width");
+    // No default: omitting the field keeps the height-derived width.
+    expect(lineWidth?.default).toBeUndefined();
+    expect(lineWidth?.selector?.number).toMatchObject({
+      min: 1,
+      max: 10,
+    });
+    expect(findField(schema, "smoothing")?.default).toBe(true);
+    expect(findField(schema, "show_fill")?.default).toBe(false);
+  });
+
+  it("meteogram day_label_format offers the four formats", () => {
+    const schema = SCHEMAS.meteogram(DISPLAY);
+    const field = findField(schema, "day_label_format");
+    expect(field?.default).toBe("weekday_month_day");
+    expect(field?.selector?.select?.options?.map((o) => o.value)).toEqual([
+      "weekday_month_day",
+      "weekday_abbrev",
+      "weekday_wide",
+      "month_day",
+    ]);
+  });
+
+  it("weather mode field offers full, forecast, and current options", () => {
+    const schema = SCHEMAS.weather(DISPLAY);
+    const field = findField(schema, "mode");
+    expect(field?.selector?.select?.options).toEqual([
+      { value: "full", label: "Full" },
+      { value: "forecast", label: "Forecast only" },
+      { value: "current", label: "Current only" },
+    ]);
+  });
+
+  it("graph tick count fields are clamped to 2-12 and default to 2", () => {
+    // Tick counts below 2 make no sense; 2 keeps min/max labels.
+    const schema = SCHEMAS.graph(DISPLAY);
+    for (const name of ["x_axis_ticks", "y_axis_ticks"]) {
+      const field = findField(schema, name);
+      expect(field?.default).toBe(2);
+      expect(field?.selector?.number).toMatchObject({ min: 2, max: 12 });
+    }
+  });
+
+  it("graph title field is a text field without a default", () => {
+    // An empty title falls back to the first series' name, so the
+    // editor must not seed a value that would override it.
+    const field = findField(SCHEMAS.graph(DISPLAY), "title");
+    expect(field?.selector).toHaveProperty("text");
+    expect(field?.default).toBeUndefined();
+    expect(LABELS).toHaveProperty("title");
+  });
+
+  it("graph axis options are labelled booleans defaulting to false", () => {
+    // Every axis toggle is off by default and has a label.
+    const schema = SCHEMAS.graph(DISPLAY);
+    for (const name of [
+      "x_axis_tick_marks",
+      "y_axis_tick_marks",
+      "x_axis_grid",
+      "y_axis_grid",
+      "y_axis_unit",
+    ]) {
+      const field = findField(schema, name);
+      expect(field?.default).toBe(false);
+      expect(field?.selector).toHaveProperty("boolean");
+      expect(LABELS).toHaveProperty(name);
+    }
+  });
+});
+
+// ── LABELS ───────────────────────────────────────────────────────
+
+describe("LABELS", () => {
+  it("covers common field names", () => {
+    for (const name of [
+      "entity", "entities", "title",
+      "x", "y", "w", "font_size", "color",
+    ]) {
+      expect(LABELS).toHaveProperty(name);
+    }
+  });
+
+  it("covers separator-specific field names", () => {
+    // direction, style, and length must have readable labels so the
+    // editor form does not display raw field names to the user.
+    for (const name of ["direction", "style", "length"]) {
+      expect(LABELS).toHaveProperty(name);
+      expect(typeof LABELS[name]).toBe("string");
+      expect((LABELS[name] as string).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("covers weather mode field name", () => {
+    expect(LABELS).toHaveProperty("mode");
+    expect(typeof LABELS.mode).toBe("string");
+    expect((LABELS.mode as string).length).toBeGreaterThan(0);
+  });
+});
+
+// ── loadHaComponents ─────────────────────────────────────────────
+
+describe("loadHaComponents", () => {
+  it("does not throw when HA elements are absent", async () => {
+    await expect(loadHaComponents()).resolves.toBeUndefined();
+  });
+});
+
+// ── getSummary ───────────────────────────────────────────────────
+
+describe("getSummary", () => {
+  it("returns entity for weather widget", () => {
+    expect(
+      getSummary({ type: "weather", entity: "weather.home" })
+    ).toBe("weather.home");
+  });
+
+  it("returns '(no entity)' for weather widget with no entity", () => {
+    expect(getSummary({ type: "weather" })).toBe("(no entity)");
+  });
+
+  it("returns static text for device_battery widget", () => {
+    expect(getSummary({ type: "device_battery" })).toBe(
+      "Device battery"
+    );
+  });
+
+  it("returns direction+style summary for separator", () => {
+    expect(getSummary({ type: "separator", y: 200 })).toBe(
+      "Horizontal line at Y:200"
+    );
+  });
+
+  it("returns vertical bar summary for separator", () => {
+    expect(
+      getSummary({
+        type: "separator",
+        direction: "vertical",
+        style: "bar",
+        y: 50,
+      })
+    ).toBe("Vertical bar at Y:50");
+  });
+
+  it("defaults to horizontal line at Y:0 for separator with no fields", () => {
+    // direction and style both default to horizontal/line, y defaults to 0
+    expect(getSummary({ type: "separator" })).toBe(
+      "Horizontal line at Y:0"
+    );
+  });
+
+  it("returns entity for entity widget", () => {
+    expect(
+      getSummary({ type: "entity", entity: "sensor.temperature" })
+    ).toBe("sensor.temperature");
+  });
+
+  it("returns '(no entity)' for entity widget with no entity", () => {
+    expect(getSummary({ type: "entity" })).toBe("(no entity)");
+  });
+
+  it("returns entity count for entities widget", () => {
+    // Entity rows (strings) are counted; dividers and sections are not.
+    expect(
+      getSummary({
+        type: "entities",
+        entities: [
+          "sensor.temperature",
+          "sensor.humidity",
+          { type: "divider" },
+        ],
+      })
+    ).toBe("2 entities");
+  });
+
+  it("includes title in entities summary when present", () => {
+    expect(
+      getSummary({
+        type: "entities",
+        title: "Climate",
+        entities: ["sensor.temperature"],
+      })
+    ).toBe("Climate — 1 entity");
+  });
+
+  it("returns entity for sensor widget", () => {
+    expect(
+      getSummary({ type: "sensor", entity: "sensor.temperature" })
+    ).toBe("sensor.temperature");
+  });
+
+  it("returns '(no entity)' for sensor widget with no entity", () => {
+    expect(getSummary({ type: "sensor", entity: "" })).toBe("(no entity)");
+  });
+
+  it("returns entity for single-entity graph", () => {
+    expect(
+      getSummary({ type: "graph", entity: "sensor.temperature" })
+    ).toBe("sensor.temperature");
+  });
+
+  it("returns '(no entity)' for graph with no entity", () => {
+    expect(getSummary({ type: "graph" })).toBe("(no entity)");
+  });
+
+  it("returns primary entity with count suffix for multi-entity graph", () => {
+    // Two entities: shows first + "+1" suffix.
+    expect(
+      getSummary({
+        type: "graph",
+        entity: "sensor.temperature",
+        entity_2: "sensor.humidity",
+      })
+    ).toBe("sensor.temperature +1");
+  });
+
+  it("shows three-entity graph summary with +2 suffix", () => {
+    expect(
+      getSummary({
+        type: "graph",
+        entity: "sensor.temperature",
+        entity_2: "sensor.humidity",
+        entity_3: "sensor.pressure",
+      })
+    ).toBe("sensor.temperature +2");
+  });
+
+  it("returns entity_2 as base when entity is absent in graph", () => {
+    // entity omitted but entity_2 present.
+    expect(
+      getSummary({ type: "graph", entity_2: "sensor.humidity" })
+    ).toBe("sensor.humidity");
+  });
+
+  it("returns entity for meteogram widget", () => {
+    expect(
+      getSummary({ type: "meteogram", entity: "weather.home" })
+    ).toBe("weather.home");
+  });
+
+  it("returns '(no entity)' for meteogram widget with no entity", () => {
+    expect(getSummary({ type: "meteogram" })).toBe("(no entity)");
+  });
+});
+
+// ── SCHEMAS form grouping ────────────────────────────────────────
+
+function getExpandableSections(schema: HaFormSchema[]): HaFormSchema[] {
+  return schema.filter((s) => s.type === "expandable");
+}
+
+describe("SCHEMAS form grouping", () => {
+  const ALL_TYPES = Object.keys(SCHEMAS);
+
+  it("every schema uses expandable sections", () => {
+    // Each widget form must be split into at least one collapsible
+    // group so fields are not dumped in a flat wall of inputs.
+    for (const type of ALL_TYPES) {
+      const schema = SCHEMAS[type](DISPLAY);
+      const sections = getExpandableSections(schema);
+      expect(sections.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("all expandable sections have flatten: true", () => {
+    // flatten keeps child values flat in the widget data object so
+    // existing save/load logic does not need to change.
+    for (const type of ALL_TYPES) {
+      const schema = SCHEMAS[type](DISPLAY);
+      for (const section of getExpandableSections(schema)) {
+        expect(section.flatten).toBe(true);
+      }
+    }
+  });
+
+  it("content section is expanded by default", () => {
+    // The content section must be open by default so users see
+    // meaningful fields immediately when they open a widget form.
+    for (const type of ALL_TYPES) {
+      const schema = SCHEMAS[type](DISPLAY);
+      const sections = getExpandableSections(schema);
+      const content = sections.find((s) => s.name === "content");
+      expect(content?.expanded).toBe(true);
+    }
+  });
+
+  it("identity and secondary sections do not start expanded", () => {
+    // The identity section (label/description) and secondary sections
+    // (layout, appearance) are collapsed by default to reduce visual
+    // clutter — most widgets won't have a label set.
+    for (const type of ALL_TYPES) {
+      const schema = SCHEMAS[type](DISPLAY);
+      const sections = getExpandableSections(schema);
+      for (const section of sections) {
+        if (section.name !== "content") {
+          expect(section.expanded).toBeFalsy();
+        }
+      }
+    }
+  });
+
+  it("every schema has an identity section with label and description", () => {
+    // All widget types expose the editor-only label and description
+    // fields so users can annotate any widget in the list.
+    for (const type of ALL_TYPES) {
+      const schema = SCHEMAS[type](DISPLAY);
+      const identity = getExpandableSections(schema).find(
+        (s) => s.name === "identity"
+      );
+      expect(identity).toBeDefined();
+      const fields = flattenFields(identity!.schema!);
+      expect(fields).toContain("label");
+      expect(fields).toContain("description");
+    }
+  });
+
+  it("all expandable sections have a title and mdi: icon", () => {
+    // Every section must have a readable header label and a visual
+    // icon so users can identify groups without expanding them.
+    for (const type of ALL_TYPES) {
+      const schema = SCHEMAS[type](DISPLAY);
+      for (const section of getExpandableSections(schema)) {
+        expect(typeof section.title).toBe("string");
+        expect((section.title as string).length).toBeGreaterThan(0);
+        expect(typeof section.icon).toBe("string");
+        expect((section.icon as string).startsWith("mdi:")).toBe(true);
+      }
+    }
+  });
+
+  it("heading content section contains heading field", () => {
+    // Content is the primary group for heading widgets: the heading
+    // text belongs in content so it is visible by default.
+    const schema = SCHEMAS.heading(DISPLAY);
+    const content = getExpandableSections(schema).find(
+      (s) => s.name === "content"
+    )!;
+    const fields = flattenFields(content.schema!);
+    expect(fields).toContain("heading");
+  });
+
+  it("heading layout section contains x, y, w", () => {
+    // Layout is the position group: x, y, and optional width override.
+    const schema = SCHEMAS.heading(DISPLAY);
+    const layout = getExpandableSections(schema).find(
+      (s) => s.name === "layout"
+    )!;
+    const fields = flattenFields(layout.schema!);
+    expect(fields).toContain("x");
+    expect(fields).toContain("y");
+    expect(fields).toContain("w");
+  });
+
+  it("weather appearance section contains font_size", () => {
+    // Appearance is the visual styling group: weather uses font_size
+    // to control rendered text size.
+    const schema = SCHEMAS.weather(DISPLAY);
+    const appearance = getExpandableSections(schema).find(
+      (s) => s.name === "appearance"
+    )!;
+    const fields = flattenFields(appearance.schema!);
+    expect(fields).toContain("font_size");
+  });
+
+  it("entity appearance section exposes nested font overrides", () => {
+    // The entity widget exposes per-role font size and weight
+    // overrides under a nested "fonts" section (value/name/unit).
+    // It must not flatten, so ha-form nests the values into a
+    // fonts object matching what resolve_font reads in Python.
+    const schema = SCHEMAS.entity(DISPLAY);
+    const appearance = getExpandableSections(schema).find(
+      (s) => s.name === "appearance"
+    )!;
+    const fonts = findField(appearance.schema!, "fonts");
+    expect(fonts).toBeDefined();
+    expect(fonts!.flatten).toBeFalsy();
+    const roles = getExpandableSections(fonts!.schema!);
+    expect(roles.map((r) => r.name)).toEqual(["value", "name", "unit"]);
+    for (const role of roles) {
+      const fields = flattenFields(role.schema!);
+      expect(fields).toContain("size");
+      expect(fields).toContain("weight");
+    }
+  });
+
+  it("every widget appearance section exposes its font roles", () => {
+    // Each widget exposes per-role font size and weight overrides
+    // under a nested "fonts" section. The role names are fixed by
+    // the Python renderer's resolve_font API.
+    const expected: [string, string[], boolean][] = [
+      ["entity", ["value", "name", "unit"], false],
+      ["tile", ["primary", "secondary"], false],
+      ["calendar", ["title", "primary", "secondary", "value"], false],
+      [
+        "entities",
+        ["title", "row_primary", "row_secondary", "value", "section"],
+        false,
+      ],
+      ["waste_schedule", ["title", "primary", "secondary", "value"], false],
+      ["heading", ["heading", "badge"], false],
+      ["device_battery", ["label"], false],
+      ["gauge", ["value", "unit", "name", "segment"], false],
+      ["meteogram", ["day", "hour", "grid", "precip"], false],
+      ["week_calendar", ["title", "day", "hour", "time", "event"], false],
+      // Weather's geometry is coupled to font_size, so it exposes
+      // weight-only overrides and omits the per-role size selector.
+      ["weather", ["temp", "detail", "precip"], true],
+      ["sensor", ["name", "value", "unit"], false],
+      ["graph", ["name", "value", "unit", "axis"], false],
+    ];
+    for (const [type, roles, weightOnly] of expected) {
+      const schema = SCHEMAS[type](DISPLAY);
+      const appearance = getExpandableSections(schema).find(
+        (s) => s.name === "appearance"
+      );
+      expect(appearance, `${type} has an appearance section`).toBeDefined();
+      const fonts = findField(appearance!.schema!, "fonts");
+      expect(fonts, `${type} has a fonts section`).toBeDefined();
+      expect(fonts!.flatten, `${type} fonts does not flatten`).toBeFalsy();
+      const roleFields = getExpandableSections(fonts!.schema!);
+      expect(roleFields.map((r) => r.name), `${type} font roles`).toEqual(
+        roles
+      );
+      for (const role of roleFields) {
+        const fields = flattenFields(role.schema!);
+        expect(fields, `${type}.${role.name} weight`).toContain("weight");
+        if (weightOnly) {
+          expect(fields, `${type}.${role.name} size`).not.toContain("size");
+        } else {
+          expect(fields, `${type}.${role.name} size`).toContain("size");
+        }
+      }
+    }
+  });
+
+  it("device_battery appearance section contains color", () => {
+    // Appearance is the visual styling group: device_battery uses
+    // color to control the text colour rendered on the dashboard.
+    const schema = SCHEMAS.device_battery(DISPLAY);
+    const appearance = getExpandableSections(schema).find(
+      (s) => s.name === "appearance"
+    )!;
+    const fields = flattenFields(appearance.schema!);
+    expect(fields).toContain("color");
+  });
+
+  it("device_battery content section contains layout selector", () => {
+    // device_battery has a layout selector (icon/chip) in content.
+    const schema = SCHEMAS.device_battery(DISPLAY);
+    const content = getExpandableSections(schema).find(
+      (s) => s.name === "content"
+    );
+    expect(content).toBeDefined();
+    const fields = flattenFields(content!.schema);
+    expect(fields).toContain("layout");
+  });
+
+  it("separator has no appearance section", () => {
+    // separator has no font_size or color fields, so no appearance
+    // group is needed.
+    const schema = SCHEMAS.separator(DISPLAY);
+    const appearance = getExpandableSections(schema).find(
+      (s) => s.name === "appearance"
+    );
+    expect(appearance).toBeUndefined();
+  });
+
+  it("entities schema puts entities field inside content", () => {
+    // Entities are content, not layout or appearance.
+    const schema = SCHEMAS.entities(DISPLAY);
+    const content = getExpandableSections(schema).find(
+      (s) => s.name === "content"
+    )!;
+    expect(content).toBeDefined();
+    const fields = flattenFields(content.schema!);
+    expect(fields).toContain("entities");
+  });
+
+  it("entities schema offers a per-row display name", () => {
+    // Each row can replace the friendly name, as on HA's Entities card.
+    const field = findField(SCHEMAS.entities(DISPLAY), "entities");
+    const objectSel = field?.selector?.object as {
+      multiple?: boolean;
+      label_field?: string;
+      description_field?: string;
+      fields?: Record<string, {
+        label?: string;
+        required?: boolean;
+        selector?: object;
+      }>;
+    };
+    expect(objectSel.multiple).toBe(true);
+    expect(objectSel.label_field).toBe("entity");
+    expect(objectSel.description_field).toBe("name");
+    expect(objectSel.fields?.entity?.required).toBe(true);
+    expect(objectSel.fields?.entity?.selector).toEqual({ entity: {} });
+    expect(objectSel.fields?.name?.label).toBe("Display name");
+    expect(objectSel.fields?.name?.selector).toEqual({ text: {} });
+  });
+
+  it("normalizeEntitiesRows keeps ids editable and drops blank names", () => {
+    // Strings become entity rows; a cleared name must not stick.
+    expect(normalizeEntitiesRows([
+      "sensor.temperature",
+      { entity: "sensor.humidity", name: "  " },
+      { entity: "sensor.pressure", name: "Barometer" },
+      { type: "divider" },
+    ])).toEqual([
+      { entity: "sensor.temperature" },
+      { entity: "sensor.humidity" },
+      { entity: "sensor.pressure", name: "Barometer" },
+      { type: "divider" },
+    ]);
+  });
+
+  it("waste_schedule entity field is inside content section", () => {
+    // The single entity selector for waste_schedule belongs in
+    // content so it is visible by default when the form opens.
+    const schema = SCHEMAS.waste_schedule(DISPLAY);
+    const content = getExpandableSections(schema).find(
+      (s) => s.name === "content"
+    )!;
+    expect(content).toBeDefined();
+    const fields = flattenFields(content.schema!);
+    expect(fields).toContain("entity");
+  });
+
+  it("weather entity field is inside content section", () => {
+    // The primary entity selector for weather belongs in content so
+    // it is visible by default when the form opens.
+    const schema = SCHEMAS.weather(DISPLAY);
+    const content = getExpandableSections(schema).find(
+      (s) => s.name === "content"
+    )!;
+    const fields = flattenFields(content.schema!);
+    expect(fields).toContain("entity");
+  });
+});
+
+// ── add-widget integration ───────────────────────────────────────
+
+describe("add-widget integration", () => {
+  it(
+    "appends a widget when a type is selected from the picker",
+    async () => {
+      // jsdom does not implement scrollIntoView; stub it so the
+      // production call in _onTypeSelected does not throw.
+      HTMLElement.prototype.scrollIntoView = () => {};
+      // Exercises: add-btn click -> picker open ->
+      // type-selected -> widget-change event with new widget.
+      const editor = document.createElement(
+        "eink-dashboard-editor"
+      ) as EinkEditorElement;
+      document.body.appendChild(editor);
+      editor.setDisplay({ width: 800, height: 480 });
+      editor.setWidgets([]);
+
+      // Wait for async _buildShell() to complete.
+      await new Promise((r) => setTimeout(r, 0));
+
+      const addBtn = editor.shadowRoot!
+        .querySelector<HTMLButtonElement>(".add-btn");
+      expect(addBtn).toBeTruthy();
+      addBtn!.click();
+
+      // The picker should be created and appended to the shadow root.
+      const picker = editor.shadowRoot!
+        .querySelector<EinkWidgetPicker>("eink-widget-picker");
+      expect(picker).toBeTruthy();
+
+      // Listen for the widget-change event that fires when a widget
+      // is appended.
+      let received: Widget[] | undefined;
+      editor.addEventListener(
+        "widget-change",
+        ((ev: CustomEvent<{ widgets: Widget[] }>) => {
+          received = ev.detail.widgets;
+        }) as EventListener
+      );
+
+      // Click the "heading" type card in the picker's shadow DOM.
+      const card = picker!.shadowRoot!
+        .querySelector<HTMLElement>(
+          '.type-card[data-type="heading"]'
+        );
+      expect(card).toBeTruthy();
+      card!.click();
+
+      expect(received).toBeDefined();
+      expect(received!.length).toBe(1);
+      expect(received![0].type).toBe("heading");
+    }
+  );
+});
+
+// ── Visibility field types ────────────────────────────────────────
+
+describe("Visibility field", () => {
+  it("Widget type accepts a visibility array of conditions", () => {
+    // Compile-time type check: a widget with a visibility field must
+    // satisfy the Widget union type.
+    const condition: StateCondition = {
+      condition: "state",
+      entity: "sensor.test",
+      state: "on",
+    };
+    const widget: Widget = {
+      type: "separator",
+      visibility: [condition],
+    };
+    expect(widget.visibility).toHaveLength(1);
+    expect(
+      (widget.visibility![0] as StateCondition).entity
+    ).toBe("sensor.test");
+  });
+
+  it("Widget type accepts visibility: undefined", () => {
+    // Verify that omitting visibility is valid.
+    const widget: Widget = { type: "separator" };
+    expect(widget.visibility).toBeUndefined();
+  });
+});
+
+// ── Invert condition panel (tile/entity widgets) ────────────────────
+
+// Stub HA's <ha-card-conditions-editor> Lit component so the editor's
+// conditions panel builder takes its normal path instead of the
+// "component unavailable" fallback. Tests dispatch value-changed
+// events on this stub directly to exercise the write-back logic.
+if (!customElements.get("ha-card-conditions-editor")) {
+  customElements.define(
+    "ha-card-conditions-editor",
+    class extends HTMLElement {},
+  );
+}
+
+/**
+ * Click a widget row's expand button and wait for the resulting
+ * synchronous re-render to settle.
+ *
+ * @param editor - The editor element under test.
+ * @param index  - Widget index to expand.
+ */
+async function expandWidget(
+  editor: EinkEditorElement,
+  index: number,
+): Promise<void> {
+  const btn = editor.shadowRoot!.querySelector<HTMLButtonElement>(
+    `.widget-item[data-index="${index}"] .icon-btn.expand`,
+  );
+  btn!.click();
+  await new Promise((r) => setTimeout(r, 0));
+}
+
+/**
+ * Find a conditions panel's `header` slot element by its title text.
+ *
+ * @param editor - The editor element under test.
+ * @param title  - Panel title to search for (e.g. "Invert").
+ * @returns The matching header div, or null if no panel has it.
+ */
+function findPanelHeader(
+  editor: EinkEditorElement,
+  title: string,
+): HTMLElement | null {
+  const headers = editor.shadowRoot!.querySelectorAll<HTMLElement>(
+    'div[slot="header"]',
+  );
+  for (const header of Array.from(headers)) {
+    if (header.textContent === title) return header;
+  }
+  return null;
+}
+
+/** Create and mount a bare editor element for DOM-level tests. */
+async function mountEditor(
+  widgets: Widget[],
+): Promise<EinkEditorElement> {
+  const editor = document.createElement(
+    "eink-dashboard-editor",
+  ) as EinkEditorElement;
+  document.body.appendChild(editor);
+  editor.setDisplay({ width: 800, height: 480 });
+  editor.setWidgets(widgets);
+  await new Promise((r) => setTimeout(r, 0));
+  return editor;
+}
+
+describe("Invert condition panel", () => {
+  it("appears for tile widgets", async () => {
+    // The Invert panel is tile/entity-specific — it must render
+    // when a tile widget row is expanded.
+    const editor = await mountEditor([
+      { type: "tile", entity: "sensor.x" },
+    ]);
+    await expandWidget(editor, 0);
+    expect(findPanelHeader(editor, "Invert")).toBeTruthy();
+  });
+
+  it("appears for entity widgets", async () => {
+    // The Invert panel is tile/entity-specific — it must render
+    // when an entity widget row is expanded.
+    const editor = await mountEditor([
+      { type: "entity", entity: "sensor.x" },
+    ]);
+    await expandWidget(editor, 0);
+    expect(findPanelHeader(editor, "Invert")).toBeTruthy();
+  });
+
+  it("does not appear for non-tile/entity widgets", async () => {
+    // Other widgets have no invert-on-condition rendering, so the
+    // panel must be absent, while the Visibility panel still shows.
+    const editor = await mountEditor([
+      { type: "separator" },
+    ]);
+    await expandWidget(editor, 0);
+    expect(findPanelHeader(editor, "Invert")).toBeNull();
+    expect(findPanelHeader(editor, "Visibility")).toBeTruthy();
+  });
+
+  it("visibility panel still appears alongside Invert for tiles", async () => {
+    // Widget forms append both panels for tiles: Invert first, then
+    // Visibility (order also matches the source instructions).
+    const editor = await mountEditor([
+      { type: "tile", entity: "sensor.x" },
+    ]);
+    await expandWidget(editor, 0);
+    expect(findPanelHeader(editor, "Invert")).toBeTruthy();
+    expect(findPanelHeader(editor, "Visibility")).toBeTruthy();
+  });
+
+  it(
+    "value-changed on the invert editor writes invert_condition",
+    async () => {
+      // Simulates the user adding a condition in the conditions
+      // editor: the panel must write it to widget.invert_condition.
+      const editor = await mountEditor([
+        { type: "tile", entity: "sensor.x" },
+      ]);
+      await expandWidget(editor, 0);
+
+      const header = findPanelHeader(editor, "Invert")!;
+      const panel = header.parentElement!;
+      const conditionsEditor = panel.querySelector(
+        "ha-card-conditions-editor",
+      )!;
+
+      let received: Widget[] | undefined;
+      editor.addEventListener(
+        "widget-change",
+        ((ev: CustomEvent<{ widgets: Widget[] }>) => {
+          received = ev.detail.widgets;
+        }) as EventListener,
+      );
+
+      const condition: StateCondition = {
+        condition: "state",
+        entity: "sensor.test",
+        state: "on",
+      };
+      conditionsEditor.dispatchEvent(
+        new CustomEvent("value-changed", {
+          detail: { value: [condition] },
+        }),
+      );
+
+      expect(received).toBeDefined();
+      expect(received![0].invert_condition).toEqual([condition]);
+    },
+  );
+
+  it(
+    "value-changed on entity invert editor writes invert_condition",
+    async () => {
+      // Same write-back behaviour as tile, verified for the entity
+      // widget's invert panel.
+      const editor = await mountEditor([
+        { type: "entity", entity: "sensor.x" },
+      ]);
+      await expandWidget(editor, 0);
+
+      const header = findPanelHeader(editor, "Invert")!;
+      const panel = header.parentElement!;
+      const conditionsEditor = panel.querySelector(
+        "ha-card-conditions-editor",
+      )!;
+
+      let received: Widget[] | undefined;
+      editor.addEventListener(
+        "widget-change",
+        ((ev: CustomEvent<{ widgets: Widget[] }>) => {
+          received = ev.detail.widgets;
+        }) as EventListener,
+      );
+
+      const condition: StateCondition = {
+        condition: "state",
+        entity: "sensor.test",
+        state: "on",
+      };
+      conditionsEditor.dispatchEvent(
+        new CustomEvent("value-changed", {
+          detail: { value: [condition] },
+        }),
+      );
+
+      expect(received).toBeDefined();
+      expect(received![0].invert_condition).toEqual([condition]);
+    },
+  );
+
+  it(
+    "clearing invert conditions to an empty array deletes the key",
+    async () => {
+      // An empty conditions array must not be serialised — the key
+      // is removed entirely, mirroring the visibility field.
+      const condition: StateCondition = {
+        condition: "state",
+        entity: "sensor.test",
+        state: "on",
+      };
+      const editor = await mountEditor([
+        {
+          type: "tile",
+          entity: "sensor.x",
+          invert_condition: [condition],
+        },
+      ]);
+      await expandWidget(editor, 0);
+
+      const header = findPanelHeader(editor, "Invert")!;
+      const panel = header.parentElement!;
+      const conditionsEditor = panel.querySelector(
+        "ha-card-conditions-editor",
+      )!;
+
+      let received: Widget[] | undefined;
+      editor.addEventListener(
+        "widget-change",
+        ((ev: CustomEvent<{ widgets: Widget[] }>) => {
+          received = ev.detail.widgets;
+        }) as EventListener,
+      );
+
+      conditionsEditor.dispatchEvent(
+        new CustomEvent("value-changed", {
+          detail: { value: [] },
+        }),
+      );
+
+      expect(received).toBeDefined();
+      expect(received![0].invert_condition).toBeUndefined();
+      expect("invert_condition" in received![0]).toBe(false);
+    },
+  );
+
+  it(
+    "ha-form edit on a tile preserves invert_condition and visibility",
+    async () => {
+      // ha-form only knows about schema fields, so its value-changed
+      // handler must explicitly re-attach invert_condition and
+      // visibility or they would be dropped by the data rebuild.
+      const invertCondition: StateCondition = {
+        condition: "state",
+        entity: "sensor.invert-source",
+        state: "on",
+      };
+      const visibilityCondition: StateCondition = {
+        condition: "state",
+        entity: "sensor.visibility-source",
+        state: "on",
+      };
+      const editor = await mountEditor([
+        {
+          type: "tile",
+          entity: "sensor.x",
+          invert_condition: [invertCondition],
+          visibility: [visibilityCondition],
+        },
+      ]);
+      await expandWidget(editor, 0);
+
+      const form = editor.shadowRoot!.querySelector(
+        '.widget-item[data-index="0"] ha-form',
+      )!;
+
+      let received: Widget[] | undefined;
+      editor.addEventListener(
+        "widget-change",
+        ((ev: CustomEvent<{ widgets: Widget[] }>) => {
+          received = ev.detail.widgets;
+        }) as EventListener,
+      );
+
+      // Simulate ha-form emitting a rebuilt value that only contains
+      // schema-known fields — invert_condition/visibility are absent.
+      form.dispatchEvent(
+        new CustomEvent("value-changed", {
+          detail: { value: { entity: "sensor.y" } },
+        }),
+      );
+
+      expect(received).toBeDefined();
+      const widget = received![0] as Widget & {
+        invert_condition?: unknown;
+      };
+      expect(widget.entity).toBe("sensor.y");
+      expect(widget.invert_condition).toEqual([invertCondition]);
+      expect(widget.visibility).toEqual([visibilityCondition]);
+    },
+  );
+
+  it(
+    "ha-form edit on an entity preserves invert_condition and visibility",
+    async () => {
+      // Same re-attach behaviour as tile, verified for the entity
+      // widget's ha-form.
+      const invertCondition: StateCondition = {
+        condition: "state",
+        entity: "sensor.invert-source",
+        state: "on",
+      };
+      const visibilityCondition: StateCondition = {
+        condition: "state",
+        entity: "sensor.visibility-source",
+        state: "on",
+      };
+      const editor = await mountEditor([
+        {
+          type: "entity",
+          entity: "sensor.x",
+          invert_condition: [invertCondition],
+          visibility: [visibilityCondition],
+        },
+      ]);
+      await expandWidget(editor, 0);
+
+      const form = editor.shadowRoot!.querySelector(
+        '.widget-item[data-index="0"] ha-form',
+      )!;
+
+      let received: Widget[] | undefined;
+      editor.addEventListener(
+        "widget-change",
+        ((ev: CustomEvent<{ widgets: Widget[] }>) => {
+          received = ev.detail.widgets;
+        }) as EventListener,
+      );
+
+      // Simulate ha-form emitting a rebuilt value that only contains
+      // schema-known fields — invert_condition/visibility are absent.
+      form.dispatchEvent(
+        new CustomEvent("value-changed", {
+          detail: { value: { entity: "sensor.y" } },
+        }),
+      );
+
+      expect(received).toBeDefined();
+      const widget = received![0] as Widget & {
+        invert_condition?: unknown;
+      };
+      expect(widget.entity).toBe("sensor.y");
+      expect(widget.invert_condition).toEqual([invertCondition]);
+      expect(widget.visibility).toEqual([visibilityCondition]);
+    },
+  );
+});
+
+// ── Widget reorder event propagation ────────────────────────────
+
+describe("Widget reorder", () => {
+  it(
+    "stops propagation of item-moved so an ancestor sortable " +
+      "cannot misread it",
+    async () => {
+      // Regression test for issue #105: ha-sortable fires
+      // "item-moved" with bubbles/composed true, so without
+      // stopPropagation it escapes the editor's shadow DOM and
+      // reaches any ancestor ha-sortable (e.g. a Home Assistant
+      // Sections dashboard's own card-reorder list), which then
+      // misinterprets our widget indices as its own card indices
+      // and corrupts the dashboard config.
+      const editor = await mountEditor([
+        { type: "separator" },
+        { type: "separator" },
+      ]);
+
+      let escaped = false;
+      const onEscape = () => {
+        escaped = true;
+      };
+      document.addEventListener("item-moved", onEscape);
+
+      const sortable =
+        editor.shadowRoot!.querySelector("ha-sortable")!;
+      sortable.dispatchEvent(
+        new CustomEvent("item-moved", {
+          detail: { oldIndex: 0, newIndex: 1 },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+
+      document.removeEventListener("item-moved", onEscape);
+      expect(escaped).toBe(false);
+    },
+  );
+
+  it("still reorders the widget list itself", async () => {
+    // stopPropagation must not prevent the editor's own
+    // reorder logic from running.
+    const editor = await mountEditor([
+      { type: "heading", heading: "first" },
+      { type: "heading", heading: "second" },
+    ]);
+
+    let received: Widget[] | undefined;
+    editor.addEventListener(
+      "widget-change",
+      ((ev: CustomEvent<{ widgets: Widget[] }>) => {
+        received = ev.detail.widgets;
+      }) as EventListener,
+    );
+
+    const sortable =
+      editor.shadowRoot!.querySelector("ha-sortable")!;
+    sortable.dispatchEvent(
+      new CustomEvent("item-moved", {
+        detail: { oldIndex: 0, newIndex: 1 },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+
+    expect(received).toBeDefined();
+    expect(
+      (received![0] as Widget & { heading?: string }).heading,
+    ).toBe("second");
+    expect(
+      (received![1] as Widget & { heading?: string }).heading,
+    ).toBe("first");
+  });
+});
+
+describe("position fields", () => {
+  // A number input accepts only values in [min, max] that are a
+  // whole number of steps above min; anything else is flagged as
+  // invalid when the form opens.
+  function accepts(schema: HaFormSchema[], name: string, value: number) {
+    const number = findField(schema, name)?.selector?.number as
+      | { min?: number; max?: number; step?: number }
+      | undefined;
+    if (!number) return true;
+    const min = number.min ?? 0;
+    const step = number.step ?? 1;
+    return (
+      value >= min &&
+      value <= (number.max ?? Infinity) &&
+      (value - min) % step === 0
+    );
+  }
+
+  it("every default position and size is accepted", () => {
+    for (const [type, meta] of Object.entries(WIDGET_TYPES)) {
+      const schema = SCHEMAS[type](DISPLAY);
+      const defaults = meta.defaults as Record<string, unknown>;
+      for (const name of ["x", "y", "w", "h"]) {
+        const value = defaults[name];
+        if (typeof value !== "number") continue;
+        expect(accepts(schema, name, value), `${type}.${name}`).toBe(true);
+      }
+    }
+  });
+
+  it("a widget can fill a display whose size is off the grid", () => {
+    // Kindle Paperwhite 1-3: 758 x 1024.
+    const kindle = { width: 758, height: 1024 };
+    for (const type of Object.keys(SCHEMAS)) {
+      const schema = SCHEMAS[type](kindle);
+      expect(accepts(schema, "w", kindle.width), `${type}.w`).toBe(true);
+      expect(accepts(schema, "h", kindle.height), `${type}.h`).toBe(true);
+    }
+  });
+});

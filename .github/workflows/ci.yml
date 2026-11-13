@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv run --group lint ruff check .
+
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv run --group format ruff format --check .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv run --group typecheck ty check
+
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+          package_json_file: custom_components/eink_dashboard/frontend/package.json
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: custom_components/eink_dashboard/frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: custom_components/eink_dashboard/frontend
+      - run: uv run --group test pytest
+      - uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: test-results.xml
+          check_name: Python Test Results
+          comment_title: Python Test Results
+
+  frontend-typecheck:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: custom_components/eink_dashboard/frontend
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+          package_json_file: custom_components/eink_dashboard/frontend/package.json
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: custom_components/eink_dashboard/frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+
+  frontend-test:
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      pull-requests: write
+    defaults:
+      run:
+        working-directory: custom_components/eink_dashboard/frontend
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+          package_json_file: custom_components/eink_dashboard/frontend/package.json
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: custom_components/eink_dashboard/frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: custom_components/eink_dashboard/frontend/test-results.xml
+          check_name: Frontend Test Results
+          comment_title: Frontend Test Results
+
+  hacs-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hacs/action@main
+        with:
+          category: integration
+
+  hassfest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: home-assistant/actions/hassfest@master

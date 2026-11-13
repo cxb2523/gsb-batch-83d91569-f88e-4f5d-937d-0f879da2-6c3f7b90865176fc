@@ -1,0 +1,1250 @@
+# Copyright 2026 Andreas Schneider
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""E-ink dashboard Home Assistant integration setup."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import datetime as dt
+import hashlib
+import json
+import logging
+from datetime import timedelta
+from functools import partial
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
+
+import probatio as vol
+from homeassistant.components import websocket_api
+from homeassistant.components.frontend import add_extra_js_url
+from homeassistant.components.http import StaticPathConfig
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.icon import async_get_icons
+from homeassistant.util import dt as dt_util
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from homeassistant.config_entries import ConfigEntry
+    from homeassistant.core import HomeAssistant
+
+from .battery import resolve_battery_level
+from .const import (
+    DEFAULT_BLACK_DIVIDERS,
+    DEFAULT_BLACK_TEXT,
+    DEFAULT_DISPLAY_LEVELS,
+    DEFAULT_DITHER_ALGORITHM,
+    DEFAULT_EXPOSURE,
+    DEFAULT_HEIGHT,
+    DEFAULT_MEASURED_PALETTE,
+    DEFAULT_OPTIMIZE,
+    DEFAULT_PIXEL_FONTS,
+    DEFAULT_SATURATION,
+    DEFAULT_USE_SYSTEM_FONTS,
+    DEFAULT_WIDTH,
+    DOMAIN,
+    DateFormat,
+    DisplayConfig,
+    NumberFormat,
+    TimeFormat,
+    WidgetType,
+    default_list_row_height,
+    resolve_device_preset,
+    resolve_display,
+    resolve_font_family,
+    resolve_pixel_font_max_scale,
+)
+from .data import (
+    EinkDashboardConfigEntry,
+    EinkDashboardRuntimeData,
+    get_loaded_entry,
+)
+from .http import EinkLayoutView, EinkPublicImageView
+from .store import EinkDashboardStore
+from .svg_render import render_widget_svg
+from .widgets.week_calendar import week_calendar_entity_ids
+
+_LOGGER = logging.getLogger(__name__)
+
+PLATFORMS = ["image", "sensor"]
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+def _area_name(hass: HomeAssistant, area_id: str | None) -> str | None:
+    """Return the area name for the given area_id, or None."""
+    if not area_id:
+        return None
+    area_reg = ar.async_get(hass)
+    area_entry = area_reg.async_get_area(area_id)
+    return area_entry.name if area_entry else None
+
+
+def _register_device(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Create or update the HA device registry entry for this config entry."""
+    preset = resolve_device_preset(entry.options)
+    device_reg = dr.async_get(hass)
+    device_reg.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.entry_id)},
+        name=entry.title,
+        manufacturer=preset.manufacturer or None,
+        model=preset.label,
+        suggested_area=_area_name(hass, entry.options.get("area_id")),
+    )
+
+
+async def _async_update_listener(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Re-register the device when options are updated."""
+    _register_device(hass, entry)
+
+
+async def _async_get_locale(
+    hass: HomeAssistant,
+    options: Mapping[str, Any] | None = None,
+) -> tuple[str, str, str, str, str]:
+    """Return locale settings for server-side rendering.
+
+    Returns a 5-tuple
+    ``(number_format, language, first_weekday, date_format,
+    time_format)``.
+
+    Reads the owner's frontend locale preferences (the ``language``
+    key stored via ``frontend/set_user_data``) and falls back to
+    ``hass.config.language`` when the owner cannot be determined or
+    when the frontend component is not available.  Per-device
+    overrides in ``options`` (``locale_number_format``,
+    ``locale_language``, ``locale_first_weekday``,
+    ``locale_date_format``, ``locale_time_format``) take precedence
+    over the owner's preferences when non-empty.
+
+    Args:
+        hass: Home Assistant instance.
+        options: Config entry options dict, used to apply per-device
+            locale overrides.  ``None`` means no overrides.
+
+    Returns:
+        A 5-tuple suitable for passing into a ``DisplayConfig`` dict:
+        ``number_format`` (a ``NumberFormat`` string value),
+        ``language`` (BCP 47 tag),
+        ``first_weekday`` (e.g. ``"monday"``),
+        ``date_format`` (a ``DateFormat`` string value),
+        ``time_format`` (a ``TimeFormat`` string value).
+    """
+    fallback_language = hass.config.language
+    number_format: str = NumberFormat.LANGUAGE
+    language: str = fallback_language
+    first_weekday: str = "language"
+    date_format: str = DateFormat.LANGUAGE
+    time_format: str = TimeFormat.LANGUAGE
+    try:
+        from homeassistant.components.frontend.storage import (
+            async_user_store,
+        )
+    except ImportError:
+        pass
+    else:
+        try:
+            owner = await hass.auth.async_get_owner()
+            if owner is not None:
+                store = await async_user_store(hass, owner.id)
+                locale_data = store.data.get("language")
+                if isinstance(locale_data, dict):
+                    number_format = str(
+                        locale_data.get("number_format", NumberFormat.LANGUAGE)
+                    )
+                    language = str(
+                        locale_data.get("language", fallback_language)
+                    )
+                    first_weekday = str(
+                        locale_data.get("first_weekday", "language")
+                    )
+                    date_format = str(
+                        locale_data.get("date_format", DateFormat.LANGUAGE)
+                    )
+                    time_format = str(
+                        locale_data.get("time_format", TimeFormat.LANGUAGE)
+                    )
+        except (AttributeError, KeyError, TypeError) as exc:
+            # Owner lookup or store access failed — log and fall back.
+            _LOGGER.debug(
+                "Could not read owner locale from frontend storage: %s",
+                exc,
+            )
+    # Apply per-device overrides from the config entry options.
+    # Reject unrecognised values so stale or hand-edited configs
+    # cannot inject garbage into the renderer.
+    _valid_fw = {
+        "language",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    }
+    if options is not None:
+        override_nf = options.get("locale_number_format", "")
+        if override_nf:
+            if override_nf in NumberFormat._value2member_map_:
+                number_format = override_nf
+            else:
+                _LOGGER.warning(
+                    "Ignoring unrecognised locale_number_format %r",
+                    override_nf,
+                )
+        override_lang = options.get("locale_language", "")
+        if override_lang:
+            language = override_lang
+        override_fw = options.get("locale_first_weekday", "")
+        if override_fw:
+            if override_fw in _valid_fw:
+                first_weekday = override_fw
+            else:
+                _LOGGER.warning(
+                    "Ignoring unrecognised locale_first_weekday %r",
+                    override_fw,
+                )
+        override_df = options.get("locale_date_format", "")
+        if override_df:
+            if override_df in DateFormat._value2member_map_:
+                date_format = override_df
+            else:
+                _LOGGER.warning(
+                    "Ignoring unrecognised locale_date_format %r",
+                    override_df,
+                )
+        override_tf = options.get("locale_time_format", "")
+        if override_tf:
+            if override_tf in TimeFormat._value2member_map_:
+                time_format = override_tf
+            else:
+                _LOGGER.warning(
+                    "Ignoring unrecognised locale_time_format %r",
+                    override_tf,
+                )
+    return number_format, language, first_weekday, date_format, time_format
+
+
+def _ha_time_zone(hass: HomeAssistant) -> str:
+    """Return HA's configured IANA time zone name, or ``""``.
+
+    Renderers show local times in this zone; an empty value makes
+    them fall back to UTC.
+    """
+    tz = getattr(hass.config, "time_zone", "")
+    return tz if isinstance(tz, str) else ""
+
+
+def build_display_config(
+    options: Mapping[str, Any],
+    states: dict[str, Any],
+    *,
+    number_format: str,
+    language: str,
+    first_weekday: str,
+    date_format: str,
+    time_format: str,
+    time_zone: str,
+    battery_entity_id: str | None = None,
+    battery_sensor: Any = None,
+    for_png: bool = False,
+) -> DisplayConfig:
+    """Build a DisplayConfig from resolved options, states and locale.
+
+    Single source of truth for assembling the dict consumed by
+    ``render_widget_svg()`` (SVG widget preview) and, when
+    ``for_png`` is set, by ``render_dashboard()`` (full PNG
+    rasterisation, which additionally needs rotation and e-ink
+    optimisation settings that the SVG preview path never applies).
+
+    Args:
+        options: Config entry options.
+        states: Snapshot of all HA entity states, already enriched
+            with icons, display precision, and any forecast/history/
+            calendar data the configured widgets need.
+        number_format: Resolved locale number format.
+        language: Resolved locale language.
+        first_weekday: Resolved locale first weekday.
+        date_format: Resolved locale date format.
+        time_format: Resolved locale time format.
+        time_zone: HA's configured IANA time zone name.
+        battery_entity_id: Entity ID configured as the device's
+            battery source, or None when not configured.
+        battery_sensor: The internal EinkDashboardBatterySensor, or
+            None when not registered.
+        for_png: Whether to include the rasterisation-only keys
+            (``rotation``, ``optimize``, ``exposure``, ``saturation``,
+            ``dither_algorithm``, ``measured_palette``) needed by
+            ``render_dashboard()``.
+
+    Returns:
+        A DisplayConfig dict.
+    """
+    config: DisplayConfig = {
+        "width": options.get("width", DEFAULT_WIDTH),
+        "height": options.get("height", DEFAULT_HEIGHT),
+        "row_height": default_list_row_height(options),
+        "display_levels": options.get(
+            "display_levels", DEFAULT_DISPLAY_LEVELS
+        ),
+        "color_scheme": options.get("color_scheme"),
+        "font_family": resolve_font_family(options),
+        "black_text": options.get("black_text", DEFAULT_BLACK_TEXT),
+        "black_dividers": options.get(
+            "black_dividers", DEFAULT_BLACK_DIVIDERS
+        ),
+        "pixel_fonts": options.get("pixel_fonts", DEFAULT_PIXEL_FONTS),
+        "pixel_font_max_scale": resolve_pixel_font_max_scale(options),
+        "font_dir": options.get("font_dir", ""),
+        "use_system_fonts": options.get(
+            "use_system_fonts", DEFAULT_USE_SYSTEM_FONTS
+        ),
+        "number_format": number_format,
+        "language": language,
+        "first_weekday": first_weekday,
+        "date_format": date_format,
+        "time_format": time_format,
+        "time_zone": time_zone,
+        "states": states,
+    }
+    if for_png:
+        config["rotation"] = options.get("rotation", 0)
+        config["optimize"] = options.get("optimize", DEFAULT_OPTIMIZE)
+        config["exposure"] = options.get("exposure", DEFAULT_EXPOSURE)
+        config["saturation"] = options.get("saturation", DEFAULT_SATURATION)
+        config["dither_algorithm"] = options.get(
+            "dither_algorithm", DEFAULT_DITHER_ALGORITHM
+        )
+        config["measured_palette"] = options.get(
+            "measured_palette", DEFAULT_MEASURED_PALETTE
+        )
+    level, is_charging = resolve_battery_level(
+        battery_entity_id, states, battery_sensor
+    )
+    if level is not None:
+        config["device_battery_level"] = level
+        config["device_battery_charging"] = is_charging
+    return config
+
+
+async def _build_display_config(
+    hass: HomeAssistant, entry: EinkDashboardConfigEntry
+) -> DisplayConfig:
+    """Build a DisplayConfig for rendering a widget preview.
+
+    Snapshots current HA entity states, enriches them with icons and
+    display precision, reads the owner's locale preferences via
+    :func:`_async_get_locale`, and delegates the rest to
+    :func:`build_display_config`.
+
+    Args:
+        hass: Home Assistant instance.
+        entry: Config entry with its runtime data already set up.
+
+    Returns:
+        A DisplayConfig dict suitable for ``render_widget_svg()``.
+    """
+    data = entry.runtime_data
+    states: dict[str, Any] = {}
+    for state in hass.states.async_all():
+        states[state.entity_id] = {
+            "state": state.state,
+            # Shallow copy: _fetch_forecasts adds "forecast" and
+            # "forecast_hourly" keys to this dict.  A shallow copy
+            # is sufficient because it only assigns new keys, never
+            # mutates existing nested values.
+            "attributes": dict(state.attributes),
+        }
+    await _enrich_entity_icons(hass, states)
+    await _enrich_display_precision(hass, states)
+    (
+        number_format,
+        language,
+        first_weekday,
+        date_format,
+        time_format,
+    ) = await _async_get_locale(hass, entry.options)
+    return build_display_config(
+        entry.options,
+        states,
+        number_format=number_format,
+        language=language,
+        first_weekday=first_weekday,
+        date_format=date_format,
+        time_format=time_format,
+        time_zone=_ha_time_zone(hass),
+        battery_entity_id=entry.options.get("battery_entity_id"),
+        battery_sensor=data.battery_sensor,
+    )
+
+
+async def _enrich_entity_icons(
+    hass: HomeAssistant,
+    states: dict[str, Any],
+) -> None:
+    """Inject icons.json-derived icons into entities lacking one.
+
+    Modern HA integrations (e.g. ``moon``) define state-dependent
+    icons in an ``icons.json`` file rather than setting them on the
+    entity, so ``state.attributes`` never carries an ``icon`` key for
+    them.  The HA frontend resolves these client-side; this dashboard
+    has no equivalent, so such entities would otherwise fall back to
+    a plain letter icon.  This mirrors that resolution server-side by
+    reading each entity's registry entry (for its integration platform
+    and translation key) and looking up the matching icon definition.
+
+    Only entities missing ``attributes["icon"]`` are touched, so user
+    or integration-set icons are never overridden.  Failures to load
+    icon definitions are logged and otherwise ignored so a broken or
+    unloaded integration cannot break rendering.
+
+    Args:
+        hass: Home Assistant instance.
+        states: Mutable states dict built by ``_build_display_config``
+            or ``EinkDashboardImage._build_states``.
+    """
+    registry = er.async_get(hass)
+    candidates: dict[str, er.RegistryEntry] = {}
+    platforms: set[str] = set()
+    for entity_id, data in states.items():
+        if data["attributes"].get("icon"):
+            continue
+        entry = registry.async_get(entity_id)
+        if entry is None or entry.translation_key is None:
+            continue
+        candidates[entity_id] = entry
+        platforms.add(entry.platform)
+
+    if not candidates:
+        return
+
+    icons: dict[str, Any] = {}
+    for platform in platforms:
+        try:
+            icons.update(await async_get_icons(hass, "entity", {platform}))
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Could not load icons.json for %s", platform)
+
+    for entity_id, entry in candidates.items():
+        domain = entity_id.split(".", 1)[0]
+        platform_icons = icons.get(entry.platform)
+        if not isinstance(platform_icons, dict):
+            continue
+        domain_icons = platform_icons.get(domain)
+        if not isinstance(domain_icons, dict):
+            continue
+        definition = domain_icons.get(entry.translation_key)
+        if not isinstance(definition, dict):
+            continue
+        state_icons = definition.get("state")
+        state_icon = (
+            state_icons.get(states[entity_id]["state"])
+            if isinstance(state_icons, dict)
+            else None
+        )
+        icon = (
+            state_icon if state_icon is not None else definition.get("default")
+        )
+        if icon:
+            states[entity_id]["attributes"]["icon"] = icon
+
+
+async def _enrich_display_precision(
+    hass: HomeAssistant,
+    states: dict[str, Any],
+) -> None:
+    """Inject HA's configured display precision into sensor states.
+
+    Reads each sensor entity's registry entry for the ``sensor``
+    options block and copies its decimal-place precision into the
+    state dict as ``display_precision``, so widget renderers can
+    respect the same precision HA's own frontend shows instead of
+    always falling back to a generic cap.  Priority mirrors HA core:
+    the user-set ``display_precision`` wins over the integration's
+    ``suggested_display_precision``.
+
+    Entities with neither option configured, or missing from the
+    registry, are left untouched (no key is added).
+
+    Args:
+        hass: Home Assistant instance.
+        states: Mutable states dict built by ``_build_display_config``
+            or ``EinkDashboardImage._build_states``; ``sensor.*``
+            entries gain a ``display_precision`` key in-place when
+            HA has one configured.
+    """
+    registry = er.async_get(hass)
+    for entity_id, data in states.items():
+        if not entity_id.startswith("sensor."):
+            continue
+        entry = registry.async_get(entity_id)
+        if entry is None:
+            continue
+        sensor_options = entry.options.get("sensor", {})
+        precision = sensor_options.get("display_precision")
+        if precision is None:
+            precision = sensor_options.get("suggested_display_precision")
+        if precision is not None:
+            data["display_precision"] = precision
+
+
+async def _fetch_forecasts(
+    hass: HomeAssistant,
+    widgets: list[dict[str, Any]],
+    states: dict[str, Any],
+) -> None:
+    """Fetch forecasts for weather and meteogram widgets into states.
+
+    Calls the ``weather.get_forecasts`` service for each unique
+    weather entity referenced by ``widgets``: daily forecasts for
+    ``WEATHER`` widgets, written to
+    ``states[entity_id]["attributes"]["forecast"]``, and hourly
+    forecasts for ``METEOGRAM`` widgets, written to
+    ``states[entity_id]["attributes"]["forecast_hourly"]``. This way
+    ``render_widget_svg`` sees the same data as the scheduled image
+    render path.
+
+    Args:
+        hass: Home Assistant instance.
+        widgets: Widget dicts to scan for weather entity IDs.
+        states: Mutable states dict built by ``_build_display_config``.
+    """
+    weather_entities: set[str] = set()
+    meteogram_entities: set[str] = set()
+    for w in widgets:
+        # WidgetType is a StrEnum: wire-format strings compare equal.
+        eid = w.get("entity", "")
+        # Week calendar widgets store a list of IDs, which is unhashable.
+        if not isinstance(eid, str) or not eid or eid not in states:
+            continue
+        if w.get("type") == WidgetType.WEATHER:
+            weather_entities.add(eid)
+        elif w.get("type") == WidgetType.METEOGRAM:
+            meteogram_entities.add(eid)
+
+    for entity_id in weather_entities:
+        try:
+            result = await hass.services.async_call(
+                "weather",
+                "get_forecasts",
+                {"entity_id": entity_id, "type": "daily"},
+                blocking=True,
+                return_response=True,
+            )
+            if result is None:
+                continue
+            entity_data = result.get(entity_id)
+            forecast = (
+                entity_data.get("forecast")
+                if isinstance(entity_data, dict)
+                else None
+            ) or []
+            states[entity_id]["attributes"]["forecast"] = forecast
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Could not fetch forecast for %s", entity_id)
+
+    for entity_id in meteogram_entities:
+        try:
+            result = await hass.services.async_call(
+                "weather",
+                "get_forecasts",
+                {"entity_id": entity_id, "type": "hourly"},
+                blocking=True,
+                return_response=True,
+            )
+            if result is None:
+                continue
+            entity_data = result.get(entity_id)
+            forecast = (
+                entity_data.get("forecast")
+                if isinstance(entity_data, dict)
+                else None
+            ) or []
+            states[entity_id]["attributes"]["forecast_hourly"] = forecast
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Could not fetch hourly forecast for %s", entity_id)
+
+
+async def _fetch_history(
+    hass: HomeAssistant,
+    widgets: list[dict[str, Any]],
+    states: dict[str, Any],
+) -> None:
+    """Fetch state history for sensor and graph widgets.
+
+    Scans ``widgets`` for sensor widgets with ``graph == "line"``
+    and for graph widgets, then fetches compressed state history
+    from the recorder component for each referenced entity and
+    writes it into ``states[entity_id]["history"]`` as a list of
+    ``{"s": state_str, "lu": unix_timestamp_float}`` dicts so the
+    context builders can compute graph coordinates without real-time
+    HA access.
+
+    Silently skips if the recorder is not loaded or if fetching fails
+    for any individual entity.  Tests inject history data directly
+    into the states dict and never call this function.
+
+    Args:
+        hass: Home Assistant instance.
+        widgets: Widget dicts to scan for widgets needing history
+            data.
+        states: Mutable states dict built by ``_build_display_config``.
+    """
+    # Build a map of entity_id → maximum hours_to_show across all
+    # widgets that require history data.
+    sensor_entities: dict[str, int] = {}
+    for w in widgets:
+        needs_history = (
+            w.get("type") == WidgetType.SENSOR and w.get("graph") == "line"
+        ) or w.get("type") == WidgetType.GRAPH
+        if needs_history:
+            # Collect all entity IDs from the entities list,
+            # single entity= key, and flat editor keys entity_2/3.
+            # Entities configured with data_source="attribute" read
+            # a forecast-style attribute instead, so they are
+            # skipped here to avoid an unnecessary recorder query.
+            eids: list[str] = []
+            entities_list = w.get("entities")
+            if isinstance(entities_list, list):
+                for e in entities_list:
+                    if isinstance(e, dict):
+                        eid = str(e.get("entity", ""))
+                        if eid and e.get("data_source") != "attribute":
+                            eids.append(eid)
+            if not eids:
+                if w.get("data_source") != "attribute":
+                    eid = str(w.get("entity", ""))
+                    if eid:
+                        eids.append(eid)
+                for suffix in ("_2", "_3"):
+                    eid2 = str(w.get(f"entity{suffix}", ""))
+                    if eid2:
+                        eids.append(eid2)
+            for eid in eids:
+                if eid in states:
+                    try:
+                        hours = max(1, int(w.get("hours_to_show", 24)))
+                    except (ValueError, TypeError):
+                        hours = 24
+                    if hours > sensor_entities.get(eid, 0):
+                        sensor_entities[eid] = hours
+
+    if not sensor_entities:
+        return
+
+    if "recorder" not in hass.config.components:
+        _LOGGER.debug("_fetch_history: recorder not loaded, skipping history")
+        return
+
+    from homeassistant.components.recorder import get_instance
+    from homeassistant.components.recorder.history import (
+        get_significant_states,
+    )
+
+    now = dt.datetime.now(dt.UTC)
+    for entity_id, hours in sensor_entities.items():
+        start_time = now - timedelta(hours=hours)
+        try:
+            result = await get_instance(hass).async_add_executor_job(
+                partial(
+                    get_significant_states,
+                    hass,
+                    start_time,
+                    end_time=None,
+                    entity_ids=[entity_id],
+                    filters=None,
+                    include_start_time_state=True,
+                    significant_changes_only=True,
+                    minimal_response=False,
+                    no_attributes=True,
+                    compressed_state_format=True,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug(
+                "_fetch_history: could not fetch history for %s",
+                entity_id,
+            )
+            continue
+
+        raw = cast("list[dict[str, Any]]", result.get(entity_id, []))
+        entries: list[dict[str, object]] = [
+            {"s": str(e.get("s", "")), "lu": float(e.get("lu", 0.0))}
+            for e in raw
+        ]
+
+        if entries:
+            states[entity_id]["history"] = entries
+
+
+async def _get_calendar_events(
+    hass: HomeAssistant,
+    entity_id: str,
+    start: dt.datetime,
+    end: dt.datetime,
+    label: str,
+    level: int,
+) -> list[dict[str, Any]] | None:
+    """Return a calendar's events between two times, sorted by start.
+
+    Only the service call is guarded, so a bug in the processing of its
+    result is not swallowed.
+
+    Args:
+        hass: Home Assistant instance.
+        entity_id: Calendar entity ID.
+        start: Start of the window.
+        end: End of the window.
+        label: What is fetched, for the log message.
+        level: Log level used when the call fails.
+
+    Returns:
+        The events, or ``None`` if the call failed or returned nothing.
+    """
+    try:
+        result = await hass.services.async_call(
+            "calendar",
+            "get_events",
+            {
+                "entity_id": entity_id,
+                "start_date_time": start.isoformat(),
+                "end_date_time": end.isoformat(),
+            },
+            blocking=True,
+            return_response=True,
+        )
+    except HomeAssistantError as err:
+        _LOGGER.log(
+            level, "Could not fetch %s for %s: %s", label, entity_id, err
+        )
+        return None
+    except Exception:  # noqa: BLE001
+        # Calendar integrations call third-party libraries that raise
+        # arbitrary errors; one failing calendar must not blank the
+        # others, but keep the traceback for diagnosis.
+        _LOGGER.log(
+            level,
+            "Could not fetch %s for %s",
+            label,
+            entity_id,
+            exc_info=True,
+        )
+        return None
+    if not isinstance(result, dict):
+        return None
+    entity_data = result.get(entity_id)
+    raw = entity_data.get("events") if isinstance(entity_data, dict) else None
+    events: list[dict[str, Any]] = cast(
+        "list[dict[str, Any]]", raw if isinstance(raw, list) else []
+    )
+    # calendar.get_events returns events in backend order (CalDAV puts
+    # recurring occurrences first), so sort by start before a widget
+    # truncates to max_events.  ISO strings sort chronologically; an
+    # all-day "YYYY-MM-DD" sorts before timed events on the same day.
+    events.sort(key=lambda e: str(e.get("start", "")))
+    return events
+
+
+async def _fetch_week_calendar_events(
+    hass: HomeAssistant,
+    widgets: list[dict[str, Any]],
+    states: dict[str, Any],
+) -> None:
+    """Fetch a full week of events for week-calendar widgets.
+
+    The week view needs events from the start of the displayed week,
+    which depends on the first weekday and so can begin up to six
+    days before today.  The fetcher does not know the first weekday,
+    so it requests the widest window any week containing today can
+    span (local midnight six days ago until local midnight seven
+    days ahead) and lets the widget context builder pick the days it
+    shows.  Results go to ``attributes["week_events"]`` so a regular
+    calendar widget on the same entity keeps its own ``events`` list.
+
+    Args:
+        hass: Home Assistant instance.
+        widgets: Widget dicts to scan for week-calendar entity IDs.
+        states: Mutable states dict; events are injected in-place
+            under ``states[entity_id]["attributes"]["week_events"]``.
+    """
+    entity_ids = {
+        eid
+        for w in widgets
+        if w.get("type") == WidgetType.WEEK_CALENDAR
+        for eid in week_calendar_entity_ids(w)
+    }
+    if not entity_ids:
+        return
+
+    tz_name = _ha_time_zone(hass)
+    tz: dt.tzinfo = dt.UTC
+    if tz_name:
+        with contextlib.suppress(ValueError):
+            tz = await dt_util.async_get_time_zone(tz_name) or dt.UTC
+    today = dt.datetime.now(tz).date()
+    start_dt = dt.datetime.combine(
+        today - timedelta(days=6), dt.time.min, tzinfo=tz
+    )
+    end_dt = dt.datetime.combine(
+        today + timedelta(days=7), dt.time.min, tzinfo=tz
+    )
+
+    async def fetch(entity_id: str) -> None:
+        """Fetch one calendar's week into its state."""
+        events = await _get_calendar_events(
+            hass,
+            entity_id,
+            start_dt,
+            end_dt,
+            "week calendar events",
+            logging.WARNING,
+        )
+        if events is not None:
+            states[entity_id]["attributes"]["week_events"] = events
+
+    known: list[str] = []
+    for entity_id in sorted(entity_ids):
+        if entity_id in states:
+            known.append(entity_id)
+        else:
+            _LOGGER.warning(
+                "Calendar entity %r is not in the states snapshot; "
+                "the week calendar will render blank.",
+                entity_id,
+            )
+    await asyncio.gather(*(fetch(entity_id) for entity_id in known))
+
+
+async def _fetch_calendar_events(
+    hass: HomeAssistant,
+    widgets: list[dict[str, Any]],
+    states: dict[str, Any],
+) -> None:
+    """Fetch upcoming events for calendar widgets and inject into states.
+
+    Calls the ``calendar.get_events`` service for each unique calendar
+    entity referenced by ``widgets`` and writes the event list into
+    ``states[entity_id]["attributes"]["events"]`` so the widget
+    context builder can access multiple events without real-time HA
+    access at render time.
+
+    The fetch window starts at the current time and extends to the
+    maximum ``days_ahead`` configured across all calendar widgets that
+    reference the same entity.  Silently skips any entity where the
+    service call fails (entity offline, integration not loaded, etc.).
+
+    Args:
+        hass: Home Assistant instance.
+        widgets: Widget dicts to scan for calendar entity IDs.
+        states: Mutable states dict; events are injected in-place
+            under ``states[entity_id]["attributes"]["events"]``.
+    """
+    calendar_entities: dict[str, int] = {}
+    for w in widgets:
+        if w.get("type") == WidgetType.CALENDAR:
+            eid = w.get("entity", "")
+            if not eid:
+                continue
+            if eid not in states:
+                _LOGGER.warning(
+                    "Calendar entity %r is not in the states snapshot; "
+                    "events will not be fetched and the widget will render "
+                    "blank. Check that the entity exists in Home Assistant.",
+                    eid,
+                )
+                continue
+            try:
+                days = max(1, int(w.get("days_ahead", 7)))
+            except (ValueError, TypeError):
+                days = 7
+            if days > calendar_entities.get(eid, 0):
+                calendar_entities[eid] = days
+
+    if not calendar_entities:
+        return
+
+    now = dt.datetime.now(dt.UTC)
+
+    async def fetch(entity_id: str, days: int) -> None:
+        """Fetch one calendar's upcoming events into its state."""
+        events = await _get_calendar_events(
+            hass,
+            entity_id,
+            now,
+            now + timedelta(days=days),
+            "calendar events",
+            logging.DEBUG,
+        )
+        if events is not None:
+            states[entity_id]["attributes"]["events"] = events
+
+    await asyncio.gather(
+        *(fetch(eid, days) for eid, days in calendar_entities.items())
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "eink_dashboard/render_widget",
+        vol.Required("entry_id"): str,
+        vol.Required("widget_index"): vol.All(int, vol.Range(min=0)),
+        vol.Optional("widget"): dict,
+    }
+)
+@websocket_api.async_response
+async def ws_render_widget(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return the SVG string for a single widget.
+
+    When ``widget`` is provided it is used as-is instead of the
+    stored widget at ``widget_index``.  This allows the frontend
+    editor to preview unsaved local changes.
+
+    Args:
+        hass: Home Assistant instance.
+        connection: Active WebSocket connection.
+        msg: Validated message dict containing ``entry_id`` (str),
+            ``widget_index`` (int), and an optional ``widget``
+            (dict) override.
+    """
+    entry_id = msg["entry_id"]
+    entry = get_loaded_entry(hass, entry_id)
+    if entry is None:
+        connection.send_error(
+            msg["id"],
+            websocket_api.ERR_NOT_FOUND,
+            f"Config entry not found: {entry_id}",
+        )
+        return
+
+    widget = msg.get("widget")
+    if widget is None:
+        widgets = list(entry.runtime_data.widgets)
+        idx = msg["widget_index"]
+        if idx < 0 or idx >= len(widgets):
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_NOT_FOUND,
+                f"Widget index out of range: {idx}",
+            )
+            return
+        widget = widgets[idx]
+    config = await _build_display_config(hass, entry)
+    await _fetch_forecasts(hass, [widget], config["states"])
+    await _fetch_history(hass, [widget], config["states"])
+    await _fetch_calendar_events(hass, [widget], config["states"])
+    await _fetch_week_calendar_events(hass, [widget], config["states"])
+    try:
+        svg = await hass.async_add_executor_job(
+            render_widget_svg, widget, config
+        )
+    except KeyError as exc:
+        connection.send_error(
+            msg["id"],
+            websocket_api.ERR_NOT_FOUND,
+            f"Unknown widget type: {exc}",
+        )
+        return
+    except Exception as exc:  # noqa: BLE001
+        connection.send_error(
+            msg["id"],
+            websocket_api.ERR_UNKNOWN_ERROR,
+            str(exc),
+        )
+        return
+    connection.send_result(msg["id"], {"svg": svg})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "eink_dashboard/render_widgets",
+        vol.Required("entry_id"): str,
+        vol.Optional("widgets"): [dict],
+    }
+)
+@websocket_api.async_response
+async def ws_render_widgets(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return SVG strings for all widgets in one call.
+
+    Renders every widget for the given config entry and returns
+    their SVG strings as a list in widget-list order.  Use this
+    command on initial load or full refresh to avoid N sequential
+    round-trips.
+
+    When ``widgets`` is provided it overrides the stored widget
+    list.  This allows the frontend editor to preview unsaved
+    local changes without saving first.
+
+    Args:
+        hass: Home Assistant instance.
+        connection: Active WebSocket connection.
+        msg: Validated message dict containing ``entry_id`` (str)
+            and an optional ``widgets`` (list) override.
+    """
+    entry_id = msg["entry_id"]
+    entry = get_loaded_entry(hass, entry_id)
+    if entry is None:
+        connection.send_error(
+            msg["id"],
+            websocket_api.ERR_NOT_FOUND,
+            f"Config entry not found: {entry_id}",
+        )
+        return
+
+    widgets = msg.get("widgets") or list(entry.runtime_data.widgets)
+    config = await _build_display_config(hass, entry)
+    await _fetch_forecasts(hass, widgets, config["states"])
+    await _fetch_history(hass, widgets, config["states"])
+    await _fetch_calendar_events(hass, widgets, config["states"])
+    await _fetch_week_calendar_events(hass, widgets, config["states"])
+
+    # Render all widgets in a single executor job: render_widget_svg
+    # is CPU-bound (Jinja2 + resvg), and one thread per widget would
+    # add overhead without parallelism gains under the GIL.  If any
+    # widget fails the entire batch errors out -- partial results are
+    # not returned.
+    def _render_all() -> list[str]:
+        return [render_widget_svg(w, config) for w in widgets]
+
+    try:
+        svgs = await hass.async_add_executor_job(_render_all)
+    except KeyError as exc:
+        connection.send_error(
+            msg["id"],
+            websocket_api.ERR_NOT_FOUND,
+            f"Unknown widget type: {exc}",
+        )
+        return
+    except Exception as exc:  # noqa: BLE001
+        connection.send_error(
+            msg["id"],
+            websocket_api.ERR_UNKNOWN_ERROR,
+            str(exc),
+        )
+        return
+    connection.send_result(msg["id"], {"svgs": svgs})
+
+
+_FRONTEND_DIR = Path(__file__).parent / "frontend"
+_FONTS_DIR = Path(__file__).parent / "fonts"
+_ICONS_DIR = Path(__file__).parent / "icons"
+_MANIFEST = json.loads(
+    (Path(__file__).parent / "manifest.json").read_text(encoding="utf-8")
+)
+_VERSION = _MANIFEST["version"]
+
+
+def _frontend_asset_version() -> str:
+    """Return the cache-busting token for the compiled frontend bundle.
+
+    The card and editor modules are served from fixed URLs and the
+    browser caches them by URL, so a redeployed bundle would otherwise
+    keep serving the previous copy until the user hard-reloads.  The
+    card passes its own ``?v=`` on to the editor it loads, so hashing
+    the compiled assets here makes that token change whenever the
+    bundle changes — which is what actually invalidates the cache.
+    Tying the token to ``manifest.json`` alone is not enough: the
+    version rarely changes between deploys.
+
+    Returns:
+        ``"<manifest version>.<12 hex chars>"``, or just the manifest
+        version when no compiled bundle is present (e.g. in tests).
+    """
+    assets = sorted(_FRONTEND_DIR.glob("*.js"))
+    if not assets:
+        return _VERSION
+    digest = hashlib.sha256()
+    for path in assets:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(path.read_bytes())
+    return f"{_VERSION}.{digest.hexdigest()[:12]}"
+
+
+async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
+    """Register HTTP views and static paths for the integration."""
+    _LOGGER.debug("async_setup: registering HTTP views and static paths")
+
+    hass.http.register_view(EinkPublicImageView())
+    hass.http.register_view(EinkLayoutView())
+    await hass.http.async_register_static_paths(
+        [
+            StaticPathConfig(
+                "/eink_dashboard/frontend",
+                str(_FRONTEND_DIR),
+                False,
+            ),
+            StaticPathConfig(
+                "/eink_dashboard/fonts",
+                str(_FONTS_DIR),
+                True,
+            ),
+            StaticPathConfig(
+                "/eink_dashboard/icons",
+                str(_ICONS_DIR),
+                True,
+            ),
+        ]
+    )
+    asset_version = await hass.async_add_executor_job(_frontend_asset_version)
+    add_extra_js_url(
+        hass,
+        f"/eink_dashboard/frontend/eink-dashboard-card.js?v={asset_version}",
+    )
+    websocket_api.async_register_command(hass, ws_render_widget)
+    websocket_api.async_register_command(hass, ws_render_widgets)
+    _LOGGER.debug("async_setup: complete")
+    return True
+
+
+async def async_migrate_entry(
+    hass: HomeAssistant, config_entry: ConfigEntry
+) -> bool:
+    """Migrate a config entry to the current schema version.
+
+    Version 1.1 → 1.2: replace ``sharpness`` and ``contrast`` with
+    ``exposure`` and ``saturation``.  ``sharpness`` has no equivalent
+    in epaper-dithering; ``contrast`` is superseded by ``exposure``.
+    Both new keys default to 1.0 (no change).
+
+    Version 1.2 → 1.3: rename ``grayscale_levels`` to
+    ``display_levels`` so the option name also fits future color
+    e-ink displays.
+
+    Version 1.3 → 1.4: recompute ``width``, ``height``, and
+    ``rotation`` for ``reterminal_e1003`` entries.  The device's
+    native orientation preset was previously wrong, so entries
+    created before the fix have a stale ``rotation`` baked in that
+    produces a 90°-rotated image.
+
+    Args:
+        hass: Home Assistant instance.
+        config_entry: The config entry to migrate.
+
+    Returns:
+        ``True`` if migration succeeded or was not needed.
+    """
+    if config_entry.minor_version == 1:
+        _LOGGER.debug(
+            "Migrating %s from minor version %d to 2",
+            config_entry.entry_id,
+            config_entry.minor_version,
+        )
+        new_options = dict(config_entry.options)
+        new_options.pop("sharpness", None)
+        new_options.pop("contrast", None)
+        new_options.setdefault("exposure", DEFAULT_EXPOSURE)
+        new_options.setdefault("saturation", DEFAULT_SATURATION)
+        hass.config_entries.async_update_entry(
+            config_entry,
+            options=new_options,
+            minor_version=2,
+        )
+
+    if config_entry.minor_version == 2:
+        _LOGGER.debug(
+            "Migrating %s from minor version %d to 3",
+            config_entry.entry_id,
+            config_entry.minor_version,
+        )
+        new_options = dict(config_entry.options)
+        if "grayscale_levels" in new_options:
+            new_options["display_levels"] = new_options.pop("grayscale_levels")
+        hass.config_entries.async_update_entry(
+            config_entry,
+            options=new_options,
+            minor_version=3,
+        )
+
+    if config_entry.minor_version == 3:
+        _LOGGER.debug(
+            "Migrating %s from minor version %d to 4",
+            config_entry.entry_id,
+            config_entry.minor_version,
+        )
+        new_options = dict(config_entry.options)
+        if new_options.get("device_model") == "reterminal_e1003":
+            orientation = new_options.get("orientation", "landscape")
+            width, height, rotation, _preset = resolve_display(
+                "reterminal_e1003", orientation
+            )
+            new_options["width"] = width
+            new_options["height"] = height
+            new_options["rotation"] = rotation
+        hass.config_entries.async_update_entry(
+            config_entry,
+            options=new_options,
+            minor_version=4,
+        )
+
+    return True
+
+
+async def async_setup_entry(
+    hass: HomeAssistant, entry: EinkDashboardConfigEntry
+) -> bool:
+    """Load persisted widgets and forward setup to the image platform."""
+    _LOGGER.debug(
+        "async_setup_entry: entry_id=%s title=%r", entry.entry_id, entry.title
+    )
+    store = EinkDashboardStore(hass, entry.entry_id)
+    widgets = await store.async_load()
+    _LOGGER.debug(
+        "async_setup_entry: loaded %d widgets for %s",
+        len(widgets),
+        entry.entry_id,
+    )
+    entry.runtime_data = EinkDashboardRuntimeData(
+        store=store,
+        widgets=widgets,
+    )
+
+    _register_device(hass, entry)
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    _LOGGER.debug(
+        "async_setup_entry: platforms forwarded for %s", entry.entry_id
+    )
+    return True
+
+
+async def async_unload_entry(
+    hass: HomeAssistant, entry: EinkDashboardConfigEntry
+) -> bool:
+    """Unload platforms for the entry.
+
+    HA core deletes ``entry.runtime_data`` automatically once this
+    returns successfully.
+    """
+    _LOGGER.debug("async_unload_entry: %s", entry.entry_id)
+    ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    _LOGGER.debug("async_unload_entry: %s ok=%s", entry.entry_id, ok)
+    return ok

@@ -1,0 +1,440 @@
+{#
+  Shared SVG macros for e-ink dashboard widget templates.
+
+  Widget templates import these macros and compose them to build their
+  layout.  The Python context builder pre-computes all positions and
+  sizes; macros receive final coordinates and emit SVG elements only --
+  no layout math happens inside a macro.
+
+  Usage:
+    {%- from "_macros.svg.j2" import widget_title, card_container,
+        card_row, chip with context -%}
+
+  ``with context`` is required: the macros read ``font_family_name``
+  from the caller's render context.  Without it the variable is
+  undefined inside the macros and text silently falls back to the
+  wrong font family.
+#}
+
+{#
+  widget_title -- draw the optional gray title label above a card.
+
+  Emits a single <text> element at (x, 0) with dominant-baseline="hanging"
+  so the title sits flush at the top of the widget viewport.  When title
+  is empty the macro emits nothing.
+
+  Parameters:
+    title     -- title string; empty = no output
+    font_sz   -- font size in pixels
+    x         -- horizontal position (default 0)
+    weight    -- SVG font-weight; "" (default) omits the attribute
+#}
+{%- macro widget_title(title, font_sz, fill, x=0, weight="") -%}
+{%- if title -%}
+<text
+  x="{{ x }}" y="0"
+  font-family="{{ font_sz | font_family(font_family_name) }}"
+{%- if weight %}
+  font-weight="{{ weight }}"
+{%- endif %}
+  font-size="{{ font_sz | font_px }}"
+  dominant-baseline="hanging"
+  fill="{{ fill }}">{{ title }}</text>
+{%- endif -%}
+{%- endmacro -%}
+
+
+{#
+  card_container -- draw card decoration and wrap inner content.
+
+  Purely decorative: emits the border rect or left-bar rect for the
+  chosen card_style, then renders the caller block.  All content
+  positioning is pre-computed in Python via _card_insets(); this
+  macro only draws the chrome.
+
+    {% call card_container(
+        x=0, y=0, w=400, h=200,
+        card_style="border",
+        radius=m_radius, border=m_border,
+        bar_width=bar_width) %}
+      ... widget content at pre-computed positions ...
+    {% endcall %}
+
+  Parameters:
+    x, y         -- top-left of the card area
+    w, h         -- card dimensions
+    border_color -- hex fill for "border" style stroke
+    bar_color    -- hex fill for "left_bar" style rect
+    card_style   -- "border", "left_bar", or "none"; unrecognised
+                    values are treated as "none" (no decoration)
+    radius       -- corner radius for "border" style
+    border       -- stroke width for "border" style
+    bar_width    -- pre-computed bar width for "left_bar" style
+                    (Python is the single source of truth)
+#}
+{%- macro card_container(
+    x, y, w, h,
+    border_color, bar_color,
+    card_style="none",
+    radius=0, border=2,
+    bar_width=0
+) -%}
+{%- if card_style == "border" -%}
+{# SVG strokes are centred on the path (half inside, half outside).
+   Inset the rect by border//2 so the stroke grows fully inward,
+   matching PIL's rounded_rectangle which strokes entirely inside
+   the declared bounding box. #}
+<rect
+  x="{{ x + border // 2 }}" y="{{ y + border // 2 }}"
+  width="{{ w - border }}" height="{{ h - border }}"
+  rx="{{ radius }}" ry="{{ radius }}"
+  fill="none"
+  stroke="{{ border_color }}"
+  stroke-width="{{ border }}"/>
+{{ caller() }}
+{%- elif card_style == "left_bar" -%}
+<rect class="eink-divider"
+  x="{{ x }}" y="{{ y }}"
+  width="{{ bar_width }}" height="{{ h }}"
+  fill="{{ bar_color }}"/>
+{{ caller() }}
+{%- else -%}
+{{ caller() }}
+{%- endif -%}
+{%- endmacro -%}
+
+
+{#
+  icon_circle -- draw a circular icon with glyph or letter fallback.
+
+  Renders the three-layer icon element used by card_row, entity, sensor,
+  and heading: an optional background circle (filled or outlined), an MDI
+  icon glyph, or a single-character letter centered in the circle.
+
+  All positions and colors are pre-computed by the caller; this macro only
+  emits SVG elements.
+
+  Content priority: icon_svg > letter > empty circle (unless icon_no_circle
+  suppresses the circle entirely).
+
+  Parameters:
+    cx, cy     -- circle center
+    r          -- circle radius
+    glyph_x, glyph_y -- top-left of the icon glyph bounding box
+    stroke_w   -- stroke width for outlined circle
+    icon_fill  -- hex fill for solid circle
+    icon_color -- hex color for glyph or letter
+    hex_black  -- hex black for outlined circle stroke
+    hex_white  -- hex white for outlined circle fill
+    icon_svg       -- pre-built MDI SVG string; empty = use letter
+    icon_outline   -- when true, white fill + black stroke circle
+    icon_no_circle -- when true, circle suppressed entirely
+    letter         -- fallback single character when icon_svg is empty
+    letter_font_sz -- font size for the letter fallback
+#}
+{%- macro icon_circle(
+    cx, cy, r,
+    glyph_x, glyph_y,
+    stroke_w, icon_fill, icon_color,
+    hex_black, hex_white,
+    icon_svg="",
+    icon_outline=false, icon_no_circle=false,
+    letter="", letter_font_sz=0
+) -%}
+{%- if not icon_no_circle -%}
+{%- if icon_outline -%}
+<circle
+  cx="{{ cx }}" cy="{{ cy }}" r="{{ r }}"
+  fill="{{ hex_white }}"
+  stroke="{{ hex_black }}"
+  stroke-width="{{ stroke_w }}"/>
+{%- else -%}
+<circle
+  cx="{{ cx }}" cy="{{ cy }}" r="{{ r }}"
+  fill="{{ icon_fill }}"/>
+{%- endif -%}
+{%- endif -%}
+{%- if icon_svg -%}
+<g transform="translate({{ glyph_x }}, {{ glyph_y }})"
+  style="color: {{ icon_color }}">{{ icon_svg }}</g>
+{%- elif letter -%}
+<text
+  x="{{ cx }}" y="{{ cy }}"
+  font-family="{{ letter_font_sz | font_family(font_family_name) }}"
+  font-size="{{ letter_font_sz | font_px }}"
+  text-anchor="middle"
+  dominant-baseline="central"
+  fill="{{ icon_color }}">{{ letter }}</text>
+{%- endif -%}
+{%- endmacro -%}
+
+
+{#
+  card_row -- draw one entity row with icon circle, text, and value.
+
+  Lays out a single row: a circular icon area on the left, a primary
+  label with an optional secondary line in the centre, and an optional
+  right-aligned value string.  Dimensions come from the WidgetMetrics
+  computed by the Python context builder (padding, icon_dia, etc.).
+
+  Icon content priority: icon_svg > letter > empty circle.
+  icon_svg is a string produced by the mdi_svg or weather_svg filter;
+  it is rendered at icon_inner size (defaults to 60 % of icon_dia) so
+  the circle shows a visible ring.  When icon_svg is empty and letter
+  is set, the letter is drawn centred in the circle instead.
+
+  Parameters:
+    x, y      -- top-left of the row content area (after container
+                 x_off has been applied)
+    w, row_h  -- row dimensions
+    padding   -- horizontal inset applied to icon position and value
+    icon_dia  -- circle diameter
+    inner_gap -- gap between circle right edge and text
+    border    -- stroke width for outlined icon circle
+    font_primary   -- font size for the main label
+    font_secondary -- font size for secondary text (sub-label)
+    icon_fill      -- hex fill color for solid icon circle
+    primary_fill   -- hex color for primary text
+    secondary_fill -- hex color for secondary text
+    value_fill     -- hex color for value text
+    hex_black -- hex black for outlined circle stroke and icon color
+    hex_white -- hex white for outlined circle fill
+    icon_inner    -- side length of the icon glyph inside the circle;
+                     none (default) falls back to icon_dia * 60 // 100
+    letter_font_sz -- font size for the letter fallback drawn in the
+                     circle when icon_svg is empty; none (default) falls
+                     back to icon_dia * 5 // 10
+    primary   -- main label text
+    secondary -- sub-label text (empty = single-line row)
+    value     -- right-aligned value string (empty = omitted)
+    icon_svg  -- pre-built icon SVG string (empty = letter fallback)
+    icon_outline   -- when true, circle is white with black stroke
+    icon_no_circle -- when true, circle is hidden; icon is rendered
+                     in hex_black (like outlined mode)
+    letter    -- fallback letter drawn in circle when icon_svg is empty
+    lpad      -- left padding override; -1 (default) uses padding
+    rpad      -- right padding override; -1 (default) uses padding
+    font_value -- font size for the right-aligned value; none
+                 (default) falls back to font_secondary
+    primary_weight  -- SVG font-weight for the primary label; the
+                       default "500" keeps the historical Medium face
+    secondary_weight -- SVG font-weight for the secondary sub-label;
+                       "" (default) omits the attribute (Regular)
+    value_weight    -- SVG font-weight for the right-aligned value;
+                       "" (default) omits the attribute (Regular)
+    hide_icon      -- when true, no icon circle, glyph, or letter is
+                      drawn and the text starts at the left padding
+
+  Primary and secondary text are truncated with an ellipsis so they
+  never run into the right-aligned value.
+#}
+{%- macro card_row(
+    x, y, w, row_h,
+    padding, icon_dia, inner_gap, border,
+    font_primary, font_secondary,
+    icon_fill, primary_fill, secondary_fill, value_fill,
+    hex_black, hex_white,
+    icon_inner=none, letter_font_sz=none,
+    primary="", secondary="", value="",
+    icon_svg="",
+    icon_outline=false,
+    icon_no_circle=false,
+    letter="",
+    lpad=-1, rpad=-1,
+    font_value=none,
+    primary_weight="500",
+    secondary_weight="",
+    value_weight="",
+    hide_icon=false
+) -%}
+{%- set lpad = lpad if lpad >= 0 else padding -%}
+{%- set rpad = rpad if rpad >= 0 else padding -%}
+{%- set font_value = font_value if font_value is not none
+    else font_secondary -%}
+{%- set icon_inner = icon_inner if icon_inner is not none
+    else icon_dia * 60 // 100 -%}
+{%- set letter_font_sz = letter_font_sz if letter_font_sz is not none
+    else icon_dia * 5 // 10 -%}
+{%- set icon_cx = x + lpad + icon_dia // 2 -%}
+{%- set icon_cy = y + row_h // 2 -%}
+{%- set icon_r = icon_dia // 2 -%}
+{# Outlined and no-circle icons use black; solid-fill uses white. #}
+{%- set icon_gx = icon_cx - icon_inner // 2 -%}
+{%- set icon_gy = icon_cy - icon_inner // 2 -%}
+{%- set icon_color = hex_black if (icon_outline or icon_no_circle)
+    else hex_white -%}
+{%- if hide_icon -%}
+{%- set tx = x + lpad -%}
+{%- else -%}
+{{- icon_circle(icon_cx, icon_cy, icon_r,
+    icon_gx, icon_gy,
+    border, icon_fill, icon_color,
+    hex_black, hex_white,
+    icon_svg=icon_svg,
+    icon_outline=icon_outline, icon_no_circle=icon_no_circle,
+    letter=letter, letter_font_sz=letter_font_sz) -}}
+{%- set tx = x + lpad + icon_dia + inner_gap -%}
+{%- endif -%}
+{# The right-aligned value takes precedence: it is never shortened
+   (except to keep it right of the icon), and the left-hand text is
+   truncated with an ellipsis to end one inner_gap before it. #}
+{# Callers pass SVG font-weight literals; map them onto the
+   vocabulary the text_width/fit_width filters expect. #}
+{%- set weight_kw = {"400": "normal", "500": "medium",
+    "bold": "bold"} -%}
+{%- set primary_kw = weight_kw.get(primary_weight, "normal") -%}
+{%- set secondary_kw = weight_kw.get(secondary_weight, "normal") -%}
+{%- set value_kw = weight_kw.get(value_weight, "normal") -%}
+{%- set value_right = x + w - rpad -%}
+{%- set value = value | string | fit_width(value_right - tx, font_value,
+    value_kw) if value else "" -%}
+{%- set value_w = value | text_width(font_value, value_kw)
+    if value else 0 -%}
+{%- set text_max = value_right - tx
+    - ((value_w + inner_gap) if value else 0) -%}
+{%- set primary = primary | string
+    | fit_width(text_max, font_primary, primary_kw) -%}
+{%- set secondary = secondary | string | fit_width(text_max,
+    font_secondary, secondary_kw) if secondary else "" -%}
+{# Text block -- vertically center primary + optional secondary #}
+{%- if secondary -%}
+{# (row_h * 4 + 50) // 100 is integer rounding of row_h * 0.04,
+   matching PIL's round(row_h * 0.04). #}
+{%- set lg = [2, (row_h * 4 + 50) // 100]|max -%}
+{%- set bh = font_primary + lg + font_secondary -%}
+{%- set bt = y + (row_h - bh) // 2 -%}
+{%- set py = bt + font_primary // 2 -%}
+{%- set sy = bt + font_primary + lg + font_secondary // 2 -%}
+<text
+  x="{{ tx }}" y="{{ py }}"
+  font-family="{{ font_primary | font_family(font_family_name) }}" font-weight="{{ primary_weight }}"
+  font-size="{{ font_primary | font_px }}"
+  dominant-baseline="central"
+  fill="{{ primary_fill }}">{{ primary }}</text>
+<text
+  x="{{ tx }}" y="{{ sy }}"
+  font-family="{{ font_secondary | font_family(font_family_name) }}"
+{%- if secondary_weight %}
+  font-weight="{{ secondary_weight }}"
+{%- endif %}
+  font-size="{{ font_secondary | font_px }}"
+  dominant-baseline="central"
+  fill="{{ secondary_fill }}">{{ secondary }}</text>
+{%- else -%}
+{# dominant-baseline="central" centres on the em-square midpoint.
+   PIL centres on visible ink height by subtracting the ascender gap
+   (bb[1]).  The difference is a few pixels and acceptable for e-ink. #}
+<text
+  x="{{ tx }}" y="{{ y + row_h // 2 }}"
+  font-family="{{ font_primary | font_family(font_family_name) }}" font-weight="{{ primary_weight }}"
+  font-size="{{ font_primary | font_px }}"
+  dominant-baseline="central"
+  fill="{{ primary_fill }}">{{ primary }}</text>
+{%- endif -%}
+{# Right-aligned value text #}
+{%- if value -%}
+<text
+  x="{{ x + w - rpad }}" y="{{ y + row_h // 2 }}"
+  font-family="{{ font_value | font_family(font_family_name) }}"
+{%- if value_weight %}
+  font-weight="{{ value_weight }}"
+{%- endif %}
+  font-size="{{ font_value | font_px }}"
+  text-anchor="end"
+  dominant-baseline="central"
+  fill="{{ value_fill }}">{{ value }}</text>
+{%- endif -%}
+{%- endmacro -%}
+
+
+{#
+  chip -- draw an icon-and-text label with state circle.
+
+  When icon_svg is present, a circle is drawn around the icon.
+  active controls the circle style (mirrors card_row):
+    active=true  → filled gray circle, white icon
+    active=false → outlined circle (white fill, black stroke),
+                   black icon
+
+  Proportional sizing defaults (all overridable via parameters):
+    chip_pad      = h * 0.18  (horizontal padding)
+    chip_icon_dia = h * 0.64  (circle diameter)
+    chip_icon_inner = 60 % of chip_icon_dia
+    chip_icon_gap = h * 0.14  (circle-to-text gap)
+    chip_font_sz  = h * 0.46  (font size)
+
+  w must be pre-computed by the Python context builder because it
+  depends on the rendered text width (which requires font metrics
+  unavailable in Jinja2).
+
+  Parameters:
+    x, y   -- top-left of the label
+    w      -- pre-computed label width
+    h      -- label height (controls fallback sizing)
+    text   -- label text
+    border    -- stroke width for outlined circle
+    chip_pad      -- horizontal inset; -1 (default) → h * 18 // 100
+    chip_icon_dia -- circle diameter; -1 (default) → h * 64 // 100
+    chip_icon_inner -- icon glyph side length; -1 (default) →
+                       chip_icon_dia * 60 // 100
+    chip_icon_gap -- circle-to-text gap; -1 (default) →
+                     h * 14 // 100
+    chip_font_sz  -- label font size; -1 (default) →
+                     max(10, h * 46 // 100)
+    icon_fill -- hex fill color for the active (filled) circle
+    text_fill -- hex color for label text
+    hex_black -- hex black for outlined circle stroke and icon color
+    hex_white -- hex white for outlined circle fill
+    icon_svg  -- pre-built icon SVG string (empty = text-only)
+    active    -- when true, circle is filled; when false, outlined
+#}
+{%- macro chip(
+    x, y, w, h, text, border,
+    chip_pad=-1, chip_icon_dia=-1, chip_icon_inner=-1,
+    chip_icon_gap=-1, chip_font_sz=-1,
+    icon_svg="", active=false, icon_fill="#787878",
+    text_fill="#000000",
+    hex_black="#000000", hex_white="#ffffff"
+) -%}
+{%- set chip_pad = chip_pad if chip_pad >= 0
+    else h * 18 // 100 -%}
+{%- set chip_icon_dia = chip_icon_dia if chip_icon_dia >= 0
+    else h * 64 // 100 -%}
+{%- set chip_icon_gap = chip_icon_gap if chip_icon_gap >= 0
+    else h * 14 // 100 -%}
+{%- set chip_font_sz = chip_font_sz if chip_font_sz >= 0
+    else [10, h * 46 // 100]|max -%}
+{%- set chip_icon_inner = chip_icon_inner
+    if chip_icon_inner >= 0
+    else chip_icon_dia * 60 // 100 -%}
+{%- if icon_svg -%}
+{%- set icon_cx = x + chip_pad + chip_icon_dia // 2 -%}
+{%- set icon_cy = y + h // 2 -%}
+{%- set icon_r = chip_icon_dia // 2 -%}
+{# State circle -- filled when active, outlined when inactive #}
+{%- if active -%}
+<circle
+  cx="{{ icon_cx }}" cy="{{ icon_cy }}" r="{{ icon_r }}"
+  fill="{{ icon_fill }}"/>
+{%- else -%}
+<circle
+  cx="{{ icon_cx }}" cy="{{ icon_cy }}" r="{{ icon_r }}"
+  fill="{{ hex_white }}"
+  stroke="{{ hex_black }}"
+  stroke-width="{{ border }}"/>
+{%- endif -%}
+{%- set ix = icon_cx - chip_icon_inner // 2 -%}
+{%- set iy = icon_cy - chip_icon_inner // 2 -%}
+{%- set ic = hex_white if active else hex_black -%}
+<g transform="translate({{ ix }}, {{ iy }})"
+  style="color: {{ ic }}">{{ icon_svg }}</g>
+{%- endif -%}
+{%- set tx = x + chip_pad
+    + (chip_icon_dia + chip_icon_gap if icon_svg else 0) -%}
+<text
+  x="{{ tx }}" y="{{ y + h // 2 }}"
+  font-family="{{ chip_font_sz | font_family(font_family_name) }}"
+  font-size="{{ chip_font_sz | font_px }}"
+  dominant-baseline="central"
+  fill="{{ text_fill }}">{{ text }}</text>
+{%- endmacro -%}

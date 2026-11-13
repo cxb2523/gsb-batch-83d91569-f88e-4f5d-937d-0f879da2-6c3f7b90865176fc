@@ -1,0 +1,229 @@
+# Copyright 2026 Andreas Schneider
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tile widget context builder."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from ..const import (
+    COLOR_GRAY,
+    DEFAULT_CARD_STYLE,
+    DEFAULT_ROW_H,
+    PADDING,
+    DisplayConfig,
+    FontWeight,
+    color_to_hex,
+)
+from ._helpers import (
+    _auto_row_height,
+    _card_insets,
+    _color_context,
+    _fmt,
+    _icon_stroke_width,
+    _metrics_context,
+    _missing_entity_context,
+    _resolve_entity,
+    _resolve_entity_icon,
+    _resolve_invert,
+    _widget_dim,
+)
+
+if TYPE_CHECKING:
+    from ..widget_config import TileWidget
+
+
+def _build_tile_context(
+    widget: TileWidget,
+    config: DisplayConfig,
+) -> dict[str, object]:
+    """Build Jinja2 template context for the tile widget.
+
+    Single-entity card with icon circle on the left, entity name
+    as primary text, and optional state text as secondary.  Mirrors
+    HA's Tile card (``hui-tile-card.ts``).
+
+    Icon circle style is controlled by the ``icon_style`` config
+    field:
+
+    - ``"filled"`` — gray circle background, white icon (default
+      for active entities).
+    - ``"outlined"`` — white fill, black stroke circle, black icon
+      (default for inactive entities).
+    - ``"none"`` — no circle; icon is rendered in black.
+
+    When ``icon_style`` is absent the style is chosen automatically:
+    2-level displays always use ``"outlined"``; multi-level displays
+    use ``"filled"`` for active states (per ``_ACTIVE_STATES``) and
+    ``"outlined"`` otherwise.
+
+    Args:
+        widget: Widget config dict.  Recognised keys:
+            ``entity`` (required entity ID),
+            ``name`` (display name override),
+            ``icon`` (MDI icon override, e.g. ``"mdi:lightbulb"``),
+            ``hide_icon`` (suppress icon and letter entirely),
+            ``hide_state`` (suppress secondary text),
+            ``state_content`` (attribute name or list; first element
+            used when a list is provided),
+            ``icon_style`` (``"filled"`` / ``"outlined"`` /
+            ``"none"``),
+            ``fonts`` (per-role font overrides — a mapping of role
+            name to ``{"size": int, "weight": str}``; roles are
+            ``"primary"`` (the entity name) and ``"secondary"``
+            (the state line).  An omitted ``size`` keeps the
+            widget's derived size scaled by the display-level
+            ``font_scale``; an explicit ``size`` is absolute.  An
+            omitted ``weight`` keeps the role's default: primary
+            ``"medium"``, secondary ``"regular"``),
+            ``decimals`` (exact number of decimal places to show;
+            overrides HA's ``display_precision`` and device-class
+            defaults),
+            ``card_style``,
+            ``invert_condition`` (list of Lovelace condition dicts,
+            same format as ``visibility``; when non-empty and all
+            conditions are met the tile renders inverted — solid
+            black card, white text/icon — as an e-ink "needs
+            attention" signal), ``x``, ``w``, ``h``.
+        config: Display config with ``width``, ``height``,
+            ``states``, and ``display_levels``.
+
+    Returns:
+        Template context dict consumed by ``tile.svg.j2``.
+        Returns ``_missing_entity_context(w, h)`` when the
+        entity is absent from ``states``.  Full context
+        includes: widget dimensions (``w``, ``h``), layout
+        geometry (``row_h``, ``x_off``, ``r_inset``, ``lpad``,
+        ``rpad``), metrics fields (``m_*`` prefix), color hex
+        strings (``hex_*`` prefix), text content (``primary``,
+        ``secondary``), icon data (``icon_svg``, ``letter``),
+        and icon style flags (``icon_fill``, ``icon_outline``,
+        ``icon_no_circle``), plus ``invert`` (whether the
+        ``invert_condition`` conditions were met), and the resolved
+        row text roles (``primary_font_sz``, ``primary_weight``,
+        ``secondary_font_sz``, ``secondary_weight``; the weights are
+        SVG ``font-weight`` strings).  The ``card_row`` ``value`` key
+        is intentionally omitted — tiles have no right-aligned value
+        text; the macro defaults to ``""``.
+    """
+    from ..render import _compute_metrics, _font_weight_svg, resolve_font
+
+    x = widget.get("x", PADDING)
+    svg_w = _widget_dim(widget, "w", config["width"] - x)
+    hide_icon: bool = widget.get("hide_icon", False)
+    hide_state: bool = widget.get("hide_state", False)
+
+    state_content = widget.get("state_content")
+    card_style = widget.get("card_style", DEFAULT_CARD_STYLE)
+    font_scale: float = config.get("font_scale", 1.0)
+    display_levels = config.get("display_levels", 16)
+
+    entity = _resolve_entity(widget, config)
+    if entity is None:
+        return _missing_entity_context(
+            svg_w, _widget_dim(widget, "h", DEFAULT_ROW_H)
+        )
+
+    # Single row: row_h equals svg_h.  Kept as a separate
+    # variable so card_row receives the same parameter name
+    # as in multi-row widgets (e.g. waste_schedule).
+    svg_h = _widget_dim(widget, "h", _auto_row_height("", 1))
+    row_h = svg_h
+    m = _compute_metrics(row_h)
+    x_off, r_inset, bar_width = _card_insets(m, card_style, display_levels)
+    # Zero lpad/rpad when card_container already insets that
+    # side.
+    lpad = m.padding if x_off == 0 else 0
+    rpad = m.padding if r_inset == 0 else 0
+
+    # Row text roles resolve through the shared API so the widget's
+    # ``fonts`` overrides and the display-level ``font_scale`` apply.
+    # The tile renders its state line as card_row's secondary text.
+    primary_font_sz, primary_weight = resolve_font(
+        widget,
+        "primary",
+        m.font_primary,
+        FontWeight.MEDIUM,
+        scale=font_scale,
+    )
+    secondary_font_sz, secondary_weight = resolve_font(
+        widget,
+        "secondary",
+        m.font_secondary,
+        FontWeight.REGULAR,
+        scale=font_scale,
+    )
+
+    # Secondary text: attribute, default state+unit, or hidden.
+    if hide_state:
+        secondary: str = ""
+    elif state_content is not None:
+        sc: str = (
+            state_content[0]
+            if isinstance(state_content, list) and state_content
+            else (state_content if not isinstance(state_content, list) else "")
+        )
+        secondary = (
+            _fmt(str(entity.attrs.get(sc, "")), config, entity.precision)
+            if sc
+            else ""
+        )
+    else:
+        unit = entity.attrs.get("unit_of_measurement", "")
+        fmtd = _fmt(entity.state_val, config, entity.precision)
+        secondary = f"{fmtd}{unit}" if unit else fmtd
+
+    invert = _resolve_invert(widget, config.get("states", {}))
+    icon = _resolve_entity_icon(
+        widget, entity, m.icon_inner, display_levels, invert=invert
+    )
+    # Filled style always uses gray; state is conveyed by
+    # icon_style (filled vs outlined), not fill colour.
+    icon_fill = color_to_hex(COLOR_GRAY)
+    icon_stroke_w = _icon_stroke_width(m.border, display_levels)
+
+    ctx: dict[str, object] = {
+        "w": svg_w,
+        "h": svg_h,
+        "has_entity": True,
+        "card_style": card_style,
+        "bar_width": bar_width,
+        **_metrics_context(m),
+        **_color_context(),
+        "row_h": row_h,
+        "x_off": x_off,
+        "r_inset": r_inset,
+        "lpad": lpad,
+        "rpad": rpad,
+        "primary": entity.name,
+        "secondary": secondary,
+        "primary_font_sz": primary_font_sz,
+        "primary_weight": _font_weight_svg(primary_weight),
+        "secondary_font_sz": secondary_font_sz,
+        "secondary_weight": _font_weight_svg(secondary_weight),
+        "icon_svg": icon.svg,
+        "icon_fill": icon_fill,
+        "icon_outline": icon.outline,
+        "icon_no_circle": icon.no_circle,
+        "icon_stroke_w": icon_stroke_w,
+        "letter": icon.letter,
+        "invert": invert,
+    }
+    # When icon is hidden, collapse the icon column so text starts
+    # at the left edge.
+    if hide_icon:
+        ctx["m_icon_dia"] = 0
+        ctx["m_inner_gap"] = 0
+    return ctx

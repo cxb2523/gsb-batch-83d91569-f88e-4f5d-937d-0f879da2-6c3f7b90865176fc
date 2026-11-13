@@ -1,0 +1,1464 @@
+# Copyright 2026 Andreas Schneider
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Config and options flows for the e-ink dashboard integration."""
+
+from __future__ import annotations
+
+import os
+import statistics
+from copy import deepcopy
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
+
+import probatio as vol
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
+from homeassistant.core import callback
+from homeassistant.data_entry_flow import (
+    section as flow_section,
+)
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.selector import (
+    AreaSelector,
+    EntitySelector,
+    EntitySelectorConfig,
+    LanguageSelector,
+    LanguageSelectorConfig,
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+from .const import (
+    DEFAULT_BLACK_DIVIDERS,
+    DEFAULT_BLACK_TEXT,
+    DEFAULT_DISPLAY_LEVELS,
+    DEFAULT_DITHER_ALGORITHM,
+    DEFAULT_EXPOSURE,
+    DEFAULT_HEIGHT,
+    DEFAULT_MEASURED_PALETTE,
+    DEFAULT_OPTIMIZE,
+    DEFAULT_PIXEL_FONT_LIMIT,
+    DEFAULT_PIXEL_FONTS,
+    DEFAULT_SATURATION,
+    DEFAULT_UPDATE_INTERVAL,
+    DEFAULT_USE_SYSTEM_FONTS,
+    DEFAULT_WIDTH,
+    DEVICE_PRESETS,
+    DOMAIN,
+    PIXEL_FONT_LIMIT_OPTIONS,
+    DateFormat,
+    FontFamily,
+    NumberFormat,
+    TimeFormat,
+    WebhookTarget,
+    apply_screen_portion,
+    resolve_device_preset,
+    resolve_display,
+    resolve_font_family,
+)
+
+_POSITIVE_INT = vol.All(int, vol.Range(min=1))
+
+# Sentinel value used as the first option in each locale selector.
+# HA translation keys must match [a-z0-9-_]+, so an empty string is
+# not valid; "ha_default" is treated as "no override" at submit time.
+_LOCALE_DEFAULT = "ha_default"
+
+# Static option lists for the locale settings form.  Defined at module
+# level so they are not reconstructed on every call to
+# async_step_locale_settings.  Each list starts with _LOCALE_DEFAULT
+# meaning "no override / use the owner's preference".
+_NF_OPTIONS = [
+    _LOCALE_DEFAULT,
+    NumberFormat.LANGUAGE,
+    NumberFormat.COMMA_DECIMAL,
+    NumberFormat.DECIMAL_COMMA,
+    NumberFormat.SPACE_COMMA,
+    NumberFormat.QUOTE_DECIMAL,
+    NumberFormat.NONE,
+]
+_FW_OPTIONS = [
+    _LOCALE_DEFAULT,
+    "language",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+]
+_DF_OPTIONS = [
+    _LOCALE_DEFAULT,
+    DateFormat.LANGUAGE,
+    DateFormat.DMY,
+    DateFormat.MDY,
+    DateFormat.YMD,
+]
+_TF_OPTIONS = [
+    _LOCALE_DEFAULT,
+    TimeFormat.LANGUAGE,
+    TimeFormat.AM_PM,
+    TimeFormat.TWENTY_FOUR,
+]
+
+_DITHER_ALGO_OPTIONS = [
+    "floyd_steinberg",
+    "atkinson",
+    "stucki",
+    "burkes",
+    "none",
+    "threshold",
+]
+
+_MEASURED_PALETTE_OPTIONS = [
+    "auto",
+    "spectra_7_3_6color",
+    "spectra_7_3_6color_v2",
+    "mono_4_26",
+    "bwry_4_2",
+    "bwry_3_97",
+    "solum_bwr",
+    "hanshow_bwr",
+    "hanshow_bwy",
+]
+
+
+def _is_valid_url(value: str) -> bool:
+    """Return True if value is an http or https URL with a netloc."""
+    parsed = urlparse(value)
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
+def _build_user_schema(
+    default_model: str = "kindle_pw",
+    default_orientation: str = "landscape",
+) -> vol.Schema:
+    """Build the voluptuous schema for the initial user setup step.
+
+    Args:
+        default_model: Pre-selected device model value in the form.
+        default_orientation: Pre-selected orientation value in the form.
+
+    Returns:
+        A voluptuous Schema covering name, device_model, orientation,
+        optional area, and update_interval.
+    """
+    return vol.Schema(
+        {
+            vol.Required("name", default="My E-Ink Display"): str,
+            vol.Required(
+                "device_model", default=default_model
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=list(DEVICE_PRESETS.keys()),
+                    translation_key="device_model",
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required(
+                "orientation", default=default_orientation
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=["portrait", "landscape"],
+                    translation_key="orientation",
+                )
+            ),
+            vol.Optional("area"): AreaSelector(),
+            vol.Required(
+                "update_interval", default=DEFAULT_UPDATE_INTERVAL
+            ): _POSITIVE_INT,
+        }
+    )
+
+
+def _build_advanced_section(
+    opts: Mapping[str, Any],
+    display_levels: int,
+    optimize: bool,
+    expanded: bool = False,
+) -> Any:
+    """Build the collapsed Advanced section of the display settings form.
+
+    ``font_dir`` is always present since it is unrelated to e-ink
+    optimization. The remaining fields (dither_algorithm,
+    measured_palette, exposure, saturation) only affect
+    ``optimize_for_eink()``, which early-returns when optimize is off,
+    so they are omitted from the section until optimize is enabled.
+
+    Args:
+        opts: Currently stored config entry options, used as field
+            defaults.
+        display_levels: Currently stored display_levels value. When it
+            equals 256, exposure/saturation are omitted since they are
+            only forwarded to dither_image(), which is never called on
+            the 256-level passthrough path.
+        optimize: Whether e-ink optimization is currently enabled.
+        expanded: Whether the section starts expanded instead of
+            collapsed.
+
+    Returns:
+        A voluptuous section wrapping font_dir and, once optimize is
+        enabled, dither_algorithm, measured_palette, and (unless
+        display_levels == 256) exposure and saturation.
+    """
+    advanced_fields: dict = {
+        vol.Optional(
+            "font_dir",
+            description={"suggested_value": opts.get("font_dir", "")},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+    }
+    if optimize:
+        advanced_fields[
+            vol.Optional(
+                "dither_algorithm",
+                default=opts.get(
+                    "dither_algorithm",
+                    DEFAULT_DITHER_ALGORITHM,
+                ),
+            )
+        ] = SelectSelector(
+            SelectSelectorConfig(
+                options=_DITHER_ALGO_OPTIONS,
+                translation_key="dither_algorithm",
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        )
+        advanced_fields[
+            vol.Optional(
+                "measured_palette",
+                default=opts.get(
+                    "measured_palette",
+                    DEFAULT_MEASURED_PALETTE,
+                ),
+            )
+        ] = SelectSelector(
+            SelectSelectorConfig(
+                options=_MEASURED_PALETTE_OPTIONS,
+                translation_key="measured_palette",
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        )
+        if display_levels != 256:
+            advanced_fields[
+                vol.Optional(
+                    "exposure",
+                    default=opts.get("exposure", DEFAULT_EXPOSURE),
+                )
+            ] = vol.All(
+                vol.Coerce(float),
+                vol.Range(min=0.0, max=10.0),
+            )
+            advanced_fields[
+                vol.Optional(
+                    "saturation",
+                    default=opts.get("saturation", DEFAULT_SATURATION),
+                )
+            ] = vol.All(
+                vol.Coerce(float),
+                vol.Range(min=0.0, max=10.0),
+            )
+    return flow_section(
+        vol.Schema(advanced_fields),
+        {"collapsed": not expanded},
+    )
+
+
+def _advanced_field_names(schema: vol.Schema) -> set[str]:
+    """Return the field names inside a display settings Advanced section."""
+    for key, value in schema.schema.items():
+        if getattr(key, "schema", None) == "advanced_section":
+            return {
+                k.schema for k in value.schema.schema if hasattr(k, "schema")
+            }
+    return set()
+
+
+def _build_display_settings_schema(
+    opts: Mapping[str, Any], expand_advanced: bool = False
+) -> vol.Schema:
+    """Build the display settings options form schema.
+
+    Args:
+        opts: Option values used as field defaults. Either the stored
+            config entry options or those merged with a submission
+            that is being shown again.
+        expand_advanced: Whether the Advanced section starts expanded.
+
+    Returns:
+        The voluptuous schema for the display settings form.
+    """
+    optimize = opts.get("optimize", DEFAULT_OPTIMIZE)
+    preset = resolve_device_preset(opts)
+    display_levels = int(opts.get("display_levels", preset.display_levels))
+    font_family = resolve_font_family(opts)
+    return vol.Schema(
+        {
+            vol.Required(
+                "update_interval",
+                default=opts.get("update_interval", DEFAULT_UPDATE_INTERVAL),
+            ): _POSITIVE_INT,
+            vol.Optional("optimize", default=optimize): bool,
+            vol.Optional(
+                "display_levels",
+                default=str(display_levels),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=["2", "4", "16", "256"],
+                    translation_key="display_levels",
+                    mode=SelectSelectorMode.LIST,
+                )
+            ),
+            vol.Optional(
+                "font_family",
+                default=font_family,
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    # No translation_key: the values are font names,
+                    # which hassfest rejects as translation keys
+                    # (uppercase), and they need no translation.
+                    # INTER is excluded: it is only used internally
+                    # as the TRMNL large-text fallback, not a
+                    # user-selectable primary family.
+                    options=[
+                        FontFamily.TRMNL.value,
+                        FontFamily.ROBOTO.value,
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                "pixel_fonts",
+                default=opts.get("pixel_fonts", DEFAULT_PIXEL_FONTS),
+            ): bool,
+            vol.Optional(
+                "pixel_font_limit",
+                default=opts.get("pixel_font_limit", DEFAULT_PIXEL_FONT_LIMIT),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=list(PIXEL_FONT_LIMIT_OPTIONS),
+                    translation_key="pixel_font_limit",
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                "black_text",
+                default=opts.get("black_text", DEFAULT_BLACK_TEXT),
+            ): bool,
+            vol.Optional(
+                "black_dividers",
+                default=opts.get("black_dividers", DEFAULT_BLACK_DIVIDERS),
+            ): bool,
+            vol.Optional(
+                "use_system_fonts",
+                default=opts.get("use_system_fonts", DEFAULT_USE_SYSTEM_FONTS),
+            ): bool,
+            # font_dir lives in the Advanced section (built below) since
+            # it is a power-user field; the section itself is always
+            # present so font support does not depend on optimize.
+            vol.Optional("advanced_section"): _build_advanced_section(
+                opts, display_levels, optimize, expand_advanced
+            ),
+        }
+    )
+
+
+_STEP_CUSTOM_RESOLUTION_SCHEMA = vol.Schema(
+    {
+        vol.Required("width", default=DEFAULT_WIDTH): _POSITIVE_INT,
+        vol.Required("height", default=DEFAULT_HEIGHT): _POSITIVE_INT,
+    }
+)
+
+# Pixel density of a custom display; scales the default list row height.
+_PPI = vol.All(vol.Coerce(int), vol.Range(min=20, max=1000))
+
+
+def _ppi_field(suggested: int | None) -> dict[Any, Any]:
+    """Return the optional ``ppi`` schema entry for custom displays.
+
+    Args:
+        suggested: Currently stored density, pre-filled in the form.
+
+    Returns:
+        A one-item schema dict to merge into a form schema.
+    """
+    return {
+        vol.Optional("ppi", description={"suggested_value": suggested}): _PPI
+    }
+
+
+def _custom_resolution_schema(device_model: str) -> vol.Schema:
+    """Return the custom resolution schema for a device model.
+
+    Custom displays additionally ask for their pixel density; preset
+    devices using a custom screen portion take it from the preset.
+
+    Args:
+        device_model: Selected device model key.
+
+    Returns:
+        Voluptuous schema for the ``custom_resolution`` step.
+    """
+    if device_model != "custom":
+        return _STEP_CUSTOM_RESOLUTION_SCHEMA
+    return _STEP_CUSTOM_RESOLUTION_SCHEMA.extend(_ppi_field(None))
+
+
+_STEP_WEBHOOK_SCHEMA = vol.Schema(
+    {
+        vol.Required("webhook_url"): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.URL)
+        ),
+        vol.Optional("label", default=""): str,
+    }
+)
+
+
+def _screen_portion_options(
+    width: int,
+    height: int,
+) -> list[SelectOptionDict]:
+    """Build screen-portion selector options for given dimensions.
+
+    Args:
+        width: Display width in pixels.
+        height: Display height in pixels.
+
+    Returns:
+        Option dicts for full, half, quarter, and custom.
+    """
+    return [
+        SelectOptionDict(
+            value="full",
+            label=f"Full screen ({width}x{height})",
+        ),
+        SelectOptionDict(
+            value="half",
+            label=f"Half screen ({width // 2}x{height})",
+        ),
+        SelectOptionDict(
+            value="quarter",
+            label=f"Quarter screen ({width // 2}x{height // 2})",
+        ),
+        SelectOptionDict(value="custom", label="Custom"),
+    ]
+
+
+# An entry's width or height exceeding this ratio versus the baseline
+# marks it as "large" for _split_large_entries. Chosen so a landscape
+# reTerminal E1003 (1872x1404) next to a portrait Kindle Paperwhite
+# (758x1024) is isolated, while a Kindle Paperwhite 4 (1072x1448)
+# stays grouped with a Kindle Paperwhite.
+_LARGE_SIZE_RATIO = 1.5
+
+
+def _entry_dimensions(entry: ConfigEntry) -> tuple[int, int]:
+    """Return an entry's stored card dimensions.
+
+    Args:
+        entry: A config entry for the ``eink_dashboard`` domain.
+
+    Returns:
+        A (width, height) tuple, falling back to the default canvas
+        size if the entry has not stored dimensions yet. Each value
+        is clamped to a minimum of 1 to guard against hand-edited
+        storage containing zero, which would otherwise cause a
+        division by zero in ``_split_large_entries``.
+    """
+    return (
+        max(entry.options.get("width", DEFAULT_WIDTH), 1),
+        max(entry.options.get("height", DEFAULT_HEIGHT), 1),
+    )
+
+
+def _split_large_entries(
+    entries: list[ConfigEntry],
+) -> tuple[list[ConfigEntry], list[ConfigEntry]]:
+    """Split entries into normal-sized and oversized groups.
+
+    An entry is "large" when its width or height exceeds
+    ``_LARGE_SIZE_RATIO`` times the baseline for that dimension, so
+    generated dashboard YAML can give it its own full-width section
+    instead of squeezing it into a shared row. The baseline is the
+    median width/height across all entries, or the minimum when
+    there are fewer than three entries (a median is meaningless
+    with so few samples and would flag the larger of just two
+    entries as an outlier).
+
+    Args:
+        entries: Config entries for the ``eink_dashboard`` domain.
+
+    Returns:
+        A tuple of (normal-sized entries, large entries), each
+        preserving the input order.
+    """
+    dims = [_entry_dimensions(e) for e in entries]
+    if len(entries) >= 3:
+        baseline_w = statistics.median(w for w, _ in dims)
+        baseline_h = statistics.median(h for _, h in dims)
+    else:
+        baseline_w = min((w for w, _ in dims), default=DEFAULT_WIDTH)
+        baseline_h = min((h for _, h in dims), default=DEFAULT_HEIGHT)
+
+    normal: list[ConfigEntry] = []
+    large: list[ConfigEntry] = []
+    for entry, (width, height) in zip(entries, dims, strict=True):
+        ratio = max(width / baseline_w, height / baseline_h)
+        (large if ratio > _LARGE_SIZE_RATIO else normal).append(entry)
+    return normal, large
+
+
+def _grid_section(
+    entries: list[ConfigEntry],
+    full_width: bool = False,
+) -> str:
+    """Build one ``type: grid`` section block for the dashboard YAML.
+
+    Args:
+        entries: Config entries whose cards appear in this section.
+        full_width: When ``True``, each card gets
+            ``grid_options: columns: full`` so it spans the entire
+            view width instead of sharing the row.
+
+    Returns:
+        A YAML string fragment for a single sections-view grid.
+    """
+    # entry_id is always an HA-generated hex/ULID string, so it
+    # never needs YAML escaping here.
+    suffix = (
+        "\n            grid_options:\n              columns: full"
+        if full_width
+        else ""
+    )
+    cards = "\n".join(
+        "          - type: custom:eink-dashboard-card\n"
+        f"            config_entry: {e.entry_id}{suffix}"
+        for e in entries
+    )
+    return (
+        f"      - type: grid\n        cards:\n{cards}\n        column_span: 10"
+    )
+
+
+def _build_dashboard_yaml(entries: list[ConfigEntry]) -> str:
+    """Build a Lovelace ``sections`` view YAML for all given entries.
+
+    Normal-sized entries share one grid section so they lay out side
+    by side; entries much larger than the rest (see
+    ``_split_large_entries``) each get their own full-width section.
+
+    Args:
+        entries: Config entries for the ``eink_dashboard`` domain.
+            The caller (``async_step_copy_dashboard_yaml``) always
+            passes at least one entry, since the options flow's own
+            config entry is always part of the domain's entries.
+
+    Returns:
+        A YAML string for a full Lovelace dashboard view.
+    """
+    normal, large = _split_large_entries(entries)
+
+    sections = []
+    if normal:
+        sections.append(_grid_section(normal))
+    sections.extend(_grid_section([e], full_width=True) for e in large)
+
+    sections_yaml = "\n".join(sections)
+    return (
+        "views:\n"
+        "  - type: sections\n"
+        "    max_columns: 10\n"
+        "    sections:\n"
+        f"{sections_yaml}\n"
+        "    title: E-Ink Dashboards\n"
+        "    cards: []"
+    )
+
+
+class EinkDashboardConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Multi-step config flow for creating a new dashboard entry."""
+
+    VERSION = 1
+    MINOR_VERSION = 4
+
+    def __init__(self) -> None:
+        """Initialise flow state."""
+        super().__init__()
+        self._data: dict[str, Any] = {}
+        self._name: str = ""
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: ConfigEntry,
+    ) -> EinkDashboardOptionsFlow:
+        """Return the options flow handler."""
+        return EinkDashboardOptionsFlow()
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle the initial setup step: name, model, and orientation."""
+        existing = self.hass.config_entries.async_entries(DOMAIN)
+        if existing:
+            last_opts = existing[-1].options
+            default_model = last_opts.get("device_model", "kindle_pw")
+            default_orientation = last_opts.get("orientation", "landscape")
+        else:
+            default_model = "kindle_pw"
+            default_orientation = "landscape"
+
+        schema = _build_user_schema(default_model, default_orientation)
+
+        if user_input is not None:
+            validated = schema(user_input)
+            self._name = validated["name"]
+            device_model = validated["device_model"]
+            orientation = validated["orientation"]
+
+            self._data = {
+                "device_model": device_model,
+                "orientation": orientation,
+                "update_interval": validated["update_interval"],
+            }
+            area_id = validated.get("area")
+            if area_id:
+                self._data["area_id"] = area_id
+
+            if device_model == "custom":
+                return await self.async_step_custom_resolution()
+
+            width, height, rotation, preset = resolve_display(
+                device_model,
+                orientation,
+            )
+
+            if device_model.startswith("trmnl_"):
+                return await self.async_step_screen_portion()
+
+            self._data.update(
+                {
+                    "width": width,
+                    "height": height,
+                    "rotation": rotation,
+                    "optimize": preset.optimize,
+                    "display_levels": preset.display_levels,
+                    "dither_algorithm": preset.dither_algorithm,
+                    "color_scheme": preset.color_scheme,
+                    "measured_palette": preset.measured_palette,
+                }
+            )
+            return self._create_pull_entry()
+
+        return self.async_show_form(
+            step_id="user",
+            data_schema=schema,
+        )
+
+    async def async_step_screen_portion(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Select how much of the screen this dashboard occupies."""
+        device_model = self._data["device_model"]
+        orientation = self._data["orientation"]
+        width, height, rotation, preset = resolve_display(
+            device_model, orientation
+        )
+
+        orientation_indicator = "Landscape" if width > height else "Portrait"
+
+        options = _screen_portion_options(width, height)
+        schema = vol.Schema(
+            {
+                vol.Required("screen_portion", default="full"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=options,
+                        mode=SelectSelectorMode.LIST,
+                    )
+                ),
+            }
+        )
+
+        if user_input is not None:
+            portion = user_input["screen_portion"]
+            if portion == "custom":
+                self._data.update(
+                    {
+                        "rotation": rotation,
+                        "optimize": preset.optimize,
+                        "display_levels": preset.display_levels,
+                        "dither_algorithm": preset.dither_algorithm,
+                        "color_scheme": preset.color_scheme,
+                        "measured_palette": preset.measured_palette,
+                        "screen_portion": "custom",
+                    }
+                )
+                return await self.async_step_custom_resolution()
+            final_width, final_height = apply_screen_portion(
+                width, height, portion
+            )
+            self._data.update(
+                {
+                    "width": final_width,
+                    "height": final_height,
+                    "rotation": rotation,
+                    "optimize": preset.optimize,
+                    "display_levels": preset.display_levels,
+                    "dither_algorithm": preset.dither_algorithm,
+                    "color_scheme": preset.color_scheme,
+                    "measured_palette": preset.measured_palette,
+                    "screen_portion": portion,
+                }
+            )
+            if device_model.startswith("trmnl_"):
+                return await self.async_step_trmnl_setup()
+            return self._create_pull_entry()
+
+        return self.async_show_form(
+            step_id="screen_portion",
+            data_schema=schema,
+            description_placeholders={
+                "orientation_info": orientation_indicator
+            },
+        )
+
+    async def async_step_custom_resolution(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Collect width and height for a custom or custom-portion device."""
+        schema = _custom_resolution_schema(self._data.get("device_model", ""))
+        if user_input is not None:
+            validated = schema(user_input)
+            self._data.update(
+                {
+                    "width": validated["width"],
+                    "height": validated["height"],
+                }
+            )
+            if "ppi" in validated:
+                self._data["ppi"] = validated["ppi"]
+            if "rotation" not in self._data:
+                self._data.update(
+                    {
+                        "rotation": 0,
+                        "optimize": DEFAULT_OPTIMIZE,
+                        "display_levels": DEFAULT_DISPLAY_LEVELS,
+                        "dither_algorithm": DEFAULT_DITHER_ALGORITHM,
+                        "color_scheme": None,
+                        "measured_palette": DEFAULT_MEASURED_PALETTE,
+                    }
+                )
+            device_model = self._data.get("device_model", "")
+            if device_model.startswith("trmnl_"):
+                return await self.async_step_trmnl_setup()
+            if device_model == "custom":
+                return await self.async_step_push_target()
+            return self._create_pull_entry()
+        return self.async_show_form(
+            step_id="custom_resolution",
+            data_schema=schema,
+        )
+
+    async def async_step_push_target(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show a menu to choose pull-only or TRMNL webhook delivery."""
+        return self.async_show_menu(
+            step_id="push_target",
+            menu_options=["pull_only", "trmnl_setup"],
+        )
+
+    def _create_pull_entry(self) -> ConfigFlowResult:
+        """Create a config entry with no webhook URLs (pull-only mode)."""
+        return self.async_create_entry(
+            title=self._name,
+            data={},
+            options={
+                **self._data,
+                "exposure": DEFAULT_EXPOSURE,
+                "saturation": DEFAULT_SATURATION,
+                "webhook_urls": [],
+            },
+        )
+
+    async def async_step_pull_only(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Finish setup without adding a webhook target."""
+        return self._create_pull_entry()
+
+    async def async_step_trmnl_setup(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the TRMNL intro screen before collecting the webhook URL."""
+        if user_input is not None:
+            return await self.async_step_trmnl_webhook()
+        return self.async_show_form(
+            step_id="trmnl_setup",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "trmnl_plugin_url": (
+                    "https://trmnl.com/plugin_settings?keyname=webhook_image"
+                ),
+                "trmnl_integration_url": (
+                    "https://www.home-assistant.io/integrations/trmnl"
+                ),
+                "trmnl_docs_url": (
+                    "https://github.com/cryptomilk/hass-eink-dashboard"
+                    "/blob/main/docs/trmnl.md"
+                ),
+            },
+        )
+
+    async def async_step_trmnl_webhook(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Collect and validate the TRMNL webhook URL, then create the
+        entry.
+        """
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            validated = _STEP_WEBHOOK_SCHEMA(user_input)
+            if not _is_valid_url(validated["webhook_url"]):
+                errors["webhook_url"] = "invalid_url"
+            else:
+                name = validated["label"] or self._name
+                target: WebhookTarget = {
+                    "name": name,
+                    "url": validated["webhook_url"],
+                }
+                return self.async_create_entry(
+                    title=self._name,
+                    data={},
+                    options={
+                        **self._data,
+                        "exposure": DEFAULT_EXPOSURE,
+                        "saturation": DEFAULT_SATURATION,
+                        "webhook_urls": [target],
+                    },
+                )
+        return self.async_show_form(
+            step_id="trmnl_webhook",
+            data_schema=_STEP_WEBHOOK_SCHEMA,
+            errors=errors or None,
+        )
+
+
+class EinkDashboardOptionsFlow(OptionsFlow):
+    """Options flow for modifying an existing dashboard config entry."""
+
+    def __init__(self) -> None:
+        """Initialise options flow state."""
+        super().__init__()
+        self._data: dict[str, Any] = {}
+        # Options merged from a display_settings submission that revealed
+        # new Advanced fields; the form is re-shown with these values.
+        self._display_settings_opts: dict[str, Any] | None = None
+
+    def _save_display_entry(
+        self,
+        extra: dict[str, Any],
+    ) -> ConfigFlowResult:
+        """Merge display keys into stored opts and create entry.
+
+        Combines the stored options with ``self._data`` and any
+        display-specific overrides in *extra*, then strips
+        optional fields that were cleared.
+
+        Args:
+            extra: Display-specific keys (width, height,
+                rotation, optimize, display_levels, and
+                optionally screen_portion) merged after
+                ``self._data``.
+
+        Returns:
+            A create_entry ConfigFlowResult.
+        """
+        opts = deepcopy(dict(self.config_entry.options))
+        # A font chosen for the old device model may not suit the new
+        # one; drop it so the new model's default font applies.
+        if self._data.get("device_model") != opts.get("device_model"):
+            opts.pop("font_family", None)
+        opts.update({**self._data, **extra})
+        # ppi only applies to custom displays and is cleared when the
+        # form field is left empty.
+        if "ppi" not in extra:
+            opts.pop("ppi", None)
+        if "area_id" not in self._data:
+            opts.pop("area_id", None)
+        if "battery_entity_id" not in self._data:
+            opts.pop("battery_entity_id", None)
+        return self.async_create_entry(data=opts)
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the options menu, adding remove_webhook if webhooks exist."""
+        webhooks: list[WebhookTarget] = self.config_entry.options.get(
+            "webhook_urls", []
+        )
+        menu_options: list[str] = [
+            "device_settings",
+            "display_settings",
+            "locale_settings",
+            "add_webhook",
+            "copy_card_yaml",
+            "copy_dashboard_yaml",
+        ]
+        if webhooks:
+            menu_options = [
+                "device_settings",
+                "display_settings",
+                "locale_settings",
+                "add_webhook",
+                "remove_webhook",
+                "copy_card_yaml",
+                "copy_dashboard_yaml",
+            ]
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=menu_options,
+        )
+
+    async def async_step_copy_card_yaml(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Display the Lovelace card YAML snippet for this entry."""
+        if user_input is not None:
+            return await self.async_step_init()
+        yaml = (
+            f"type: custom:eink-dashboard-card\n"
+            f"config_entry: {self.config_entry.entry_id}"
+        )
+        return self.async_show_form(
+            step_id="copy_card_yaml",
+            data_schema=vol.Schema({}),
+            description_placeholders={"yaml": yaml},
+        )
+
+    async def async_step_copy_dashboard_yaml(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Display a full dashboard YAML view containing all e-ink cards."""
+        if user_input is not None:
+            return await self.async_step_init()
+        entries = self.hass.config_entries.async_entries(DOMAIN)
+        yaml = _build_dashboard_yaml(entries)
+        return self.async_show_form(
+            step_id="copy_dashboard_yaml",
+            data_schema=vol.Schema({}),
+            description_placeholders={"yaml": yaml},
+        )
+
+    async def async_step_add_webhook(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Validate and append a new webhook URL to the options."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            validated = _STEP_WEBHOOK_SCHEMA(user_input)
+            if not _is_valid_url(validated["webhook_url"]):
+                errors["webhook_url"] = "invalid_url"
+            else:
+                existing: list[WebhookTarget] = self.config_entry.options.get(
+                    "webhook_urls", []
+                )
+                url = validated["webhook_url"]
+                if any(wh["url"] == url for wh in existing):
+                    errors["webhook_url"] = "already_configured"
+                else:
+                    opts = deepcopy(dict(self.config_entry.options))
+                    name = validated["label"] or self.config_entry.title
+                    target: WebhookTarget = {"name": name, "url": url}
+                    opts.setdefault("webhook_urls", []).append(target)
+                    return self.async_create_entry(data=opts)
+        return self.async_show_form(
+            step_id="add_webhook",
+            data_schema=_STEP_WEBHOOK_SCHEMA,
+            errors=errors or None,
+        )
+
+    async def async_step_remove_webhook(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Remove a selected webhook URL from the options."""
+        if user_input is not None:
+            url_to_remove = user_input["webhook_url"]
+            opts = deepcopy(dict(self.config_entry.options))
+            opts["webhook_urls"] = [
+                wh for wh in opts["webhook_urls"] if wh["url"] != url_to_remove
+            ]
+            return self.async_create_entry(data=opts)
+        webhooks: list[WebhookTarget] = self.config_entry.options.get(
+            "webhook_urls", []
+        )
+        options: list[SelectOptionDict] = [
+            SelectOptionDict(value=wh["url"], label=wh["name"])
+            for wh in webhooks
+        ]
+        schema = vol.Schema(
+            {
+                vol.Required("webhook_url"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=options,
+                        mode=SelectSelectorMode.LIST,
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="remove_webhook", data_schema=schema
+        )
+
+    async def async_step_device_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Update device model, orientation, and area assignment."""
+        opts = self.config_entry.options
+        # Kindle devices push battery via HTTP query params; all other
+        # devices need an explicit HA entity configured.
+        has_push_battery = opts.get("device_model", "").startswith("kindle_")
+        schema_dict: dict[Any, Any] = {
+            vol.Required(
+                "device_model",
+                default=opts.get("device_model", "kindle_pw"),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=list(DEVICE_PRESETS.keys()),
+                    translation_key="device_model",
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required(
+                "orientation",
+                default=opts.get("orientation", "portrait"),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=["portrait", "landscape"],
+                    translation_key="orientation",
+                )
+            ),
+            vol.Optional(
+                "area",
+                description={"suggested_value": opts.get("area_id")},
+            ): AreaSelector(),
+        }
+        if not has_push_battery:
+            ent_reg = er.async_get(self.hass)
+            own_id = ent_reg.async_get_entity_id(
+                "sensor",
+                DOMAIN,
+                f"{self.config_entry.entry_id}_battery",
+            )
+            exclude = [own_id] if own_id else []
+            schema_dict[
+                vol.Optional(
+                    "battery_entity_id",
+                    description={
+                        "suggested_value": opts.get("battery_entity_id")
+                    },
+                )
+            ] = EntitySelector(
+                EntitySelectorConfig(
+                    domain="sensor",
+                    device_class="battery",
+                    exclude_entities=exclude,
+                )
+            )
+        # When the stored device is already TRMNL, include screen_portion
+        # as a collapsed section so the user can update it in one step.
+        # Labels are computed from the current stored model/orientation;
+        # when the user changes either, we fall back to the separate step
+        # so they see correct dimension labels for the new config.
+        # A stored custom display edits its resolution and density
+        # inline; switching to custom still opens custom_resolution.
+        is_custom = opts.get("device_model") == "custom"
+        if is_custom:
+            schema_dict.update(
+                {
+                    vol.Required(
+                        "width", default=opts.get("width", DEFAULT_WIDTH)
+                    ): _POSITIVE_INT,
+                    vol.Required(
+                        "height", default=opts.get("height", DEFAULT_HEIGHT)
+                    ): _POSITIVE_INT,
+                    **_ppi_field(opts.get("ppi")),
+                }
+            )
+        is_trmnl = opts.get("device_model", "").startswith("trmnl_")
+        if is_trmnl:
+            sp_w, sp_h, _, _ = resolve_display(
+                opts["device_model"],
+                opts.get("orientation", "landscape"),
+            )
+            stored_portion = opts.get("screen_portion", "full")
+            schema_dict[vol.Required("screen_portion_section")] = flow_section(
+                vol.Schema(
+                    {
+                        vol.Required(
+                            "screen_portion",
+                            default=stored_portion,
+                        ): SelectSelector(
+                            SelectSelectorConfig(
+                                options=_screen_portion_options(sp_w, sp_h),
+                                mode=SelectSelectorMode.LIST,
+                            )
+                        ),
+                    }
+                ),
+                {"collapsed": True},
+            )
+        schema = vol.Schema(schema_dict)
+        if user_input is not None:
+            validated = schema(user_input)
+            device_model = validated["device_model"]
+            orientation = validated["orientation"]
+            area_id = validated.get("area")
+            battery_entity_id = validated.get("battery_entity_id")
+
+            self._data = {
+                "device_model": device_model,
+                "orientation": orientation,
+            }
+            if area_id:
+                self._data["area_id"] = area_id
+            if battery_entity_id:
+                self._data["battery_entity_id"] = battery_entity_id
+
+            if device_model == "custom":
+                if is_custom:
+                    extra: dict[str, Any] = {
+                        "width": validated["width"],
+                        "height": validated["height"],
+                    }
+                    if validated.get("ppi"):
+                        extra["ppi"] = validated["ppi"]
+                    return self._save_display_entry(extra)
+                return await self.async_step_custom_resolution()
+
+            if device_model.startswith("trmnl_"):
+                section_data = validated.get("screen_portion_section")
+                model_same = device_model == opts.get("device_model")
+                orient_same = orientation == opts.get("orientation")
+                if section_data and model_same and orient_same:
+                    portion = section_data["screen_portion"]
+                    if portion == "custom":
+                        return await self.async_step_custom_resolution()
+                    w, h, rot, preset = resolve_display(
+                        device_model, orientation
+                    )
+                    fw, fh = apply_screen_portion(w, h, portion)
+                    return self._save_display_entry(
+                        {
+                            "width": fw,
+                            "height": fh,
+                            "rotation": rot,
+                            "optimize": preset.optimize,
+                            "display_levels": preset.display_levels,
+                            "dither_algorithm": preset.dither_algorithm,
+                            "color_scheme": preset.color_scheme,
+                            "measured_palette": preset.measured_palette,
+                            "screen_portion": portion,
+                        }
+                    )
+                return await self.async_step_screen_portion_options()
+
+            width, height, rotation, preset = resolve_display(
+                device_model, orientation
+            )
+            return self._save_display_entry(
+                {
+                    "width": width,
+                    "height": height,
+                    "rotation": rotation,
+                    "optimize": preset.optimize,
+                    "display_levels": preset.display_levels,
+                    "dither_algorithm": preset.dither_algorithm,
+                    "color_scheme": preset.color_scheme,
+                    "measured_palette": preset.measured_palette,
+                }
+            )
+
+        return self.async_show_form(
+            step_id="device_settings",
+            data_schema=schema,
+            description_placeholders={
+                "trmnl_docs_url": (
+                    "https://github.com/cryptomilk/hass-eink-dashboard"
+                    "/blob/main/docs/trmnl.md"
+                ),
+            },
+        )
+
+    async def async_step_screen_portion_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Update screen portion for a non-custom device model."""
+        if not self._data:
+            return await self.async_step_device_settings()
+
+        device_model = self._data["device_model"]
+        orientation = self._data["orientation"]
+        width, height, rotation, preset = resolve_display(
+            device_model, orientation
+        )
+        opts = self.config_entry.options
+
+        orientation_indicator = "Landscape" if width > height else "Portrait"
+
+        options = _screen_portion_options(width, height)
+        stored_portion = opts.get("screen_portion", "full")
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    "screen_portion",
+                    default=stored_portion,
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=options,
+                        mode=SelectSelectorMode.LIST,
+                    )
+                ),
+            }
+        )
+
+        if user_input is not None:
+            portion = user_input["screen_portion"]
+            if portion == "custom":
+                return await self.async_step_custom_resolution()
+            final_width, final_height = apply_screen_portion(
+                width, height, portion
+            )
+            return self._save_display_entry(
+                {
+                    "width": final_width,
+                    "height": final_height,
+                    "rotation": rotation,
+                    "optimize": preset.optimize,
+                    "display_levels": preset.display_levels,
+                    "dither_algorithm": preset.dither_algorithm,
+                    "color_scheme": preset.color_scheme,
+                    "measured_palette": preset.measured_palette,
+                    "screen_portion": portion,
+                }
+            )
+
+        return self.async_show_form(
+            step_id="screen_portion_options",
+            data_schema=schema,
+            description_placeholders={
+                "orientation_info": orientation_indicator
+            },
+        )
+
+    async def async_step_custom_resolution(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Update canvas dimensions for the custom device model."""
+        if not self._data:
+            return await self.async_step_device_settings()
+        schema = _custom_resolution_schema(self._data["device_model"])
+        if user_input is not None:
+            validated = schema(user_input)
+            extra: dict[str, Any] = {
+                "width": validated["width"],
+                "height": validated["height"],
+                "rotation": 0,
+                "optimize": DEFAULT_OPTIMIZE,
+                "display_levels": DEFAULT_DISPLAY_LEVELS,
+                "dither_algorithm": DEFAULT_DITHER_ALGORITHM,
+                "color_scheme": None,
+                "measured_palette": DEFAULT_MEASURED_PALETTE,
+            }
+            if "ppi" in validated:
+                extra["ppi"] = validated["ppi"]
+            return self._save_display_entry(extra)
+        return self.async_show_form(
+            step_id="custom_resolution",
+            data_schema=schema,
+        )
+
+    async def async_step_locale_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Override locale settings for this display.
+
+        All fields are optional.  An empty value means "use the Home
+        Assistant owner's preference" (i.e. no per-device override).
+        Non-empty values are stored in ``entry.options`` under the
+        ``locale_language``, ``locale_number_format``,
+        ``locale_first_weekday``, ``locale_date_format``, and
+        ``locale_time_format`` keys and applied at render time
+        before the owner's preferences.
+        """
+        opts = self.config_entry.options
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    "locale_language",
+                    description={
+                        "suggested_value": opts.get("locale_language", "")
+                    },
+                ): LanguageSelector(LanguageSelectorConfig(native_name=True)),
+                vol.Optional(
+                    "locale_number_format",
+                    default=opts.get("locale_number_format", _LOCALE_DEFAULT),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=_NF_OPTIONS,
+                        translation_key="locale_number_format",
+                    )
+                ),
+                vol.Optional(
+                    "locale_first_weekday",
+                    default=opts.get("locale_first_weekday", _LOCALE_DEFAULT),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=_FW_OPTIONS,
+                        translation_key="locale_first_weekday",
+                    )
+                ),
+                vol.Optional(
+                    "locale_date_format",
+                    default=opts.get("locale_date_format", _LOCALE_DEFAULT),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=_DF_OPTIONS,
+                        translation_key="locale_date_format",
+                    )
+                ),
+                vol.Optional(
+                    "locale_time_format",
+                    default=opts.get("locale_time_format", _LOCALE_DEFAULT),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=_TF_OPTIONS,
+                        translation_key="locale_time_format",
+                    )
+                ),
+            }
+        )
+        if user_input is not None:
+            validated = schema(user_input)
+            new_opts = deepcopy(dict(opts))
+            # Store non-empty overrides; remove the key entirely when
+            # cleared so absent keys are treated as "no override".
+            for key in (
+                "locale_language",
+                "locale_number_format",
+                "locale_first_weekday",
+                "locale_date_format",
+                "locale_time_format",
+            ):
+                value = validated.get(key, _LOCALE_DEFAULT)
+                if value and value != _LOCALE_DEFAULT:
+                    new_opts[key] = value
+                else:
+                    new_opts.pop(key, None)
+            return self.async_create_entry(data=new_opts)
+        return self.async_show_form(
+            step_id="locale_settings",
+            data_schema=schema,
+        )
+
+    async def async_step_display_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Update refresh interval, optimize, and image quality settings.
+
+        Also collects ``font_family``, ``pixel_fonts`` (top-level, on
+        by default), ``pixel_font_limit`` (top-level, ``"auto"`` by
+        default), ``black_text`` (top-level, off by default),
+        ``black_dividers`` (top-level, off by default),
+        ``use_system_fonts`` (top-level, off by default),
+        and, via the Advanced section, ``font_dir``.
+        See docs/fonts.md for font and glyph fallback details.
+
+        HA forms are static, so fields that depend on ``optimize`` or
+        ``display_levels`` cannot appear while the user edits the form.
+        When a submission would reveal new Advanced fields (e.g.
+        optimize was just enabled), the form is shown again with the
+        submitted values pre-filled and the Advanced section expanded
+        instead of saving, so those fields can be reviewed first.
+        """
+        # After a re-show, validate against the schema that was actually
+        # displayed (built from the earlier submission), not the stale
+        # stored options, or the newly revealed fields would be rejected.
+        opts = self._display_settings_opts or self.config_entry.options
+        expand_advanced = self._display_settings_opts is not None
+        preset = resolve_device_preset(opts)
+        schema = _build_display_settings_schema(opts, expand_advanced)
+        if preset.integration_dithers:
+            optimize_note = (
+                "This device's Home Assistant integration handles image"
+                " optimization. Leave e-ink optimization disabled to"
+                " avoid double processing."
+            )
+        else:
+            optimize_note = ""
+        if user_input is not None:
+            validated = schema(user_input)
+            validated["display_levels"] = int(validated["display_levels"])
+            section = validated.pop("advanced_section", {})
+            font_dir = section.get("font_dir", "")
+            if font_dir and not await self.hass.async_add_executor_job(
+                os.path.isdir, font_dir
+            ):
+                return self.async_show_form(
+                    step_id="display_settings",
+                    data_schema=schema,
+                    errors={"base": "font_dir_not_found"},
+                    description_placeholders={"optimize_note": optimize_note},
+                )
+            new_opts = {**opts, **validated, **section}
+            new_schema = _build_display_settings_schema(
+                new_opts, expand_advanced=True
+            )
+            if _advanced_field_names(new_schema) - _advanced_field_names(
+                schema
+            ):
+                note = (
+                    "More e-ink settings are now available in the"
+                    " Advanced section. Review them and submit again"
+                    " to save."
+                )
+                self._display_settings_opts = new_opts
+                return self.async_show_form(
+                    step_id="display_settings",
+                    data_schema=new_schema,
+                    description_placeholders={
+                        "optimize_note": f"{optimize_note} {note}".strip()
+                    },
+                )
+            self._display_settings_opts = None
+            return self.async_create_entry(data=new_opts)
+        return self.async_show_form(
+            step_id="display_settings",
+            data_schema=schema,
+            description_placeholders={"optimize_note": optimize_note},
+        )

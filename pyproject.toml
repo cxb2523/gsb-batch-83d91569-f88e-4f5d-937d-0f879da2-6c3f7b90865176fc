@@ -1,0 +1,87 @@
+[project]
+name = "hass-eink-dashboard"
+version = "0.9.0"
+description = "Home Assistant custom component that renders e-ink dashboard images from entity state"
+requires-python = ">=3.14.2"
+license = "Apache-2.0"
+dependencies = [
+    "Babel>=2.14",
+    "defusedxml>=0.7.1",
+    "epaper-dithering>=5.0.7",
+    "Pillow>=12.3",
+    "resvg-py>=0.3.2",
+]
+
+[dependency-groups]
+lint = ["ruff>=0.15"]
+format = ["ruff>=0.15"]
+typecheck = ["defusedxml>=0.7", "Pillow>=12.3.0", "aiohttp>=3.0", "Jinja2>=3.1", "ty", "homeassistant>=2026.6.0"]
+test = [
+    "pytest-homeassistant-custom-component>=0.13.340",
+    "defusedxml>=0.7.1",
+    "Pillow>=12.3.0",
+    "Jinja2>=3.1",
+    # pytest, pytest-asyncio, voluptuous, aiohttp pulled in by phacc
+]
+interrogate = ["interrogate"]
+dev = [
+    {include-group = "lint"},
+    {include-group = "typecheck"},
+    {include-group = "test"},
+    {include-group = "interrogate"},
+    "watchdog>=6.0",
+]
+
+[tool.ruff]
+line-length = 79
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "BLE",   # flake8-blind-except
+    "SIM",   # flake8-simplify
+    "C90",   # mccabe complexity
+    "RUF",   # ruff-specific rules
+    "ASYNC", # flake8-async
+    "PERF",  # perflint
+    "PGH",   # pygrep-hooks
+    "G",     # flake8-logging
+    "T20",   # flake8-print
+    "TC",    # flake8-type-checking
+]
+ignore = [
+    "RUF001", # ambiguous Unicode in strings (intentional: –, ×, etc.)
+    "RUF002", # ambiguous Unicode in docstrings
+    "RUF003", # ambiguous Unicode in comments
+]
+
+[tool.ruff.lint.per-file-ignores]
+# print(), broad exception catches, and post-bootstrap imports are
+# expected in CLI scripts
+"scripts/*.py" = ["T201", "BLE001", "E402"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 25
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "--junit-xml=test-results.xml"
+
+[tool.interrogate]
+fail-under = 80
+ignore-init-method = true
+ignore-magic = true
+
+[tool.ty.src]
+exclude = [
+    "tests/",
+    ".tmp/",
+    "scripts/",
+]

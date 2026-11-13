@@ -1,0 +1,3671 @@
+# Copyright 2026 Andreas Schneider
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import itertools
+import re
+from typing import Any, ClassVar
+
+import pytest
+
+from custom_components.eink_dashboard.const import (
+    COLOR_GRAY,
+    DEFAULT_ROW_H,
+    PADDING,
+)
+from custom_components.eink_dashboard.render import (
+    _compute_metrics,
+    render_dashboard,
+)
+from custom_components.eink_dashboard.svg_render import render_widget_svg
+from tests.helpers import (
+    assert_all_white,
+    assert_card_border,
+    assert_has_dark_pixels,
+    assert_has_gray_pixels,
+    assert_scales_proportionally,
+    content_bbox,
+    make_config,
+    render_to_image,
+)
+
+# History data: 9 numeric points spanning ~22 hours so no point sits
+# exactly on the 24-hour hours_to_show boundary.
+_GRAPH_HISTORY = [
+    {"s": "20.0", "lu": 1747620000.0},
+    {"s": "21.0", "lu": 1747623600.0},
+    {"s": "22.5", "lu": 1747634400.0},
+    {"s": "23.0", "lu": 1747645200.0},
+    {"s": "22.5", "lu": 1747656000.0},
+    {"s": "21.5", "lu": 1747666800.0},
+    {"s": "20.0", "lu": 1747677600.0},
+    {"s": "21.0", "lu": 1747688400.0},
+    {"s": "22.5", "lu": 1747699200.0},
+]
+
+# History designed so avg and last produce distinct polylines.
+# bucket_size = 3600 / points_per_hour=2 = 1800s; t_max is the
+# largest lu value (1747697400), NOT the final clock time.
+# First two entries (10.0, 30.0) are 600s apart, both in bucket
+# 1; third entry (20.0) is in bucket 0.  avg([10.0, 30.0]) = 20.0,
+# matching bucket 0's 20.0, so avg yields a flat line and the
+# flat-line guard fires (y_max += 1.0).  last picks the later of
+# the two (30.0), giving a non-flat line with different coordinates.
+_AGGREGATE_HISTORY = [
+    {"s": "10.0", "lu": 1747699200.0 - 4800},
+    {"s": "30.0", "lu": 1747699200.0 - 4200},
+    {"s": "20.0", "lu": 1747699200.0 - 1800},
+]
+
+# History spanning multiple days for group_by testing.
+# 6 points in 3 day-pairs: days at ~0h, ~24h, and ~48h from the
+# oldest entry.  group_by="date" collapses to 3 buckets (avg per
+# day); group_by="hour" produces 6 separate buckets.
+_MULTIDAY_HISTORY = [
+    {"s": "20.0", "lu": 1747620000.0},
+    {"s": "21.0", "lu": 1747630000.0},
+    {"s": "22.0", "lu": 1747706400.0},
+    {"s": "23.0", "lu": 1747716400.0},
+    {"s": "24.0", "lu": 1747792800.0},
+    {"s": "25.0", "lu": 1747802800.0},
+]
+
+# History with a narrow value range (0.5) to test min_bound_range.
+_NARROW_HISTORY = [
+    {"s": "20.0", "lu": 1747620000.0},
+    {"s": "20.3", "lu": 1747634400.0},
+    {"s": "20.5", "lu": 1747648800.0},
+    {"s": "20.2", "lu": 1747663200.0},
+    {"s": "20.1", "lu": 1747677600.0},
+    {"s": "20.4", "lu": 1747692000.0},
+    {"s": "20.5", "lu": 1747699200.0},
+]
+
+# Attribute-based forecast data: a solar production forecast stored
+# as a list under the "timeseries" attribute, ISO 8601 timestamps
+# with UTC offset, "w" holding the numeric wattage value.
+_FORECAST_TIMESERIES = [
+    {"timestamp": "2026-07-01T04:00:00+00:00", "w": 100.0},
+    {"timestamp": "2026-07-01T04:15:00+00:00", "w": 250.0},
+    {"timestamp": "2026-07-01T04:30:00+00:00", "w": 400.0},
+    {"timestamp": "2026-07-01T04:45:00+00:00", "w": 600.0},
+    {"timestamp": "2026-07-01T05:00:00+00:00", "w": 800.0},
+]
+
+MOCK_GRAPH_STATES: dict[str, dict[str, object]] = {
+    "sensor.temperature": {
+        "state": "22.5",
+        "attributes": {
+            "friendly_name": "Living Room",
+            "device_class": "temperature",
+            "unit_of_measurement": "°C",
+        },
+        "history": _GRAPH_HISTORY,
+    },
+    "sensor.humidity": {
+        "state": "8.41",
+        "attributes": {
+            "friendly_name": "Humidity",
+            "device_class": "humidity",
+            "unit_of_measurement": "%",
+        },
+        "history": [
+            {"s": "65.0", "lu": 1747620000.0},
+            {"s": "67.5", "lu": 1747645200.0},
+            {"s": "70.0", "lu": 1747699200.0},
+        ],
+    },
+    "sensor.pressure": {
+        "state": "1013.0",
+        "attributes": {
+            "friendly_name": "Pressure",
+            "device_class": "pressure",
+            "unit_of_measurement": "hPa",
+        },
+        "history": [
+            {"s": "1013.0", "lu": 1747620000.0},
+            {"s": "1014.5", "lu": 1747645200.0},
+            {"s": "1015.0", "lu": 1747699200.0},
+        ],
+    },
+    "sensor.solar_forecast": {
+        "state": "800.0",
+        "attributes": {
+            "friendly_name": "Solar Forecast",
+            "unit_of_measurement": "W",
+            "timeseries": _FORECAST_TIMESERIES,
+        },
+    },
+}
+
+
+class TestRenderGraph:
+    """Verify rendering of graph widgets.
+
+    Phase 1 covers single-entity line graphs with header, polyline,
+    optional fill, Y-axis auto-scaling, hours_to_show, aggregate
+    functions, and card styles.
+
+    Phase 2 adds path smoothing, axis labels, grid lines, group_by,
+    extrema display, and min_bound_range.
+
+    Phase 3 adds multi-entity overlay with distinct dash patterns,
+    secondary Y-axis, and legend.
+
+    Phase 4 adds bar chart mode (graph="bar") with grouped multi-entity
+    bars, distinct fill shades, and <rect> legend swatches.
+
+    Phase 5 adds color thresholds for line and bar modes.
+
+    Phase 6 adds an attribute-based data source, letting entities
+    read a time-series list from a named attribute (e.g. a solar or
+    price forecast) instead of the recorder's state history.
+    """
+
+    _DEFAULTS: ClassVar[dict[str, object]] = {
+        "width": 400,
+        "height": 400,
+        "states": MOCK_GRAPH_STATES,
+    }
+
+    def _config(self, **overrides: object) -> dict[str, object]:
+        """Return display config merged with overrides."""
+        return make_config(self._DEFAULTS, **overrides)
+
+    def _base_widget(self, **overrides: object) -> dict[str, object]:
+        """Return a 400×280 graph widget dict merged with overrides."""
+        w: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entity": "sensor.temperature",
+        }
+        w.update(overrides)
+        return w
+
+    # ── Structural tests ──────────────────────────────────────────────
+
+    def test_graph_card_border(self) -> None:
+        # Border style draws dark pixels on all four edges.
+        h = 280
+        m = _compute_metrics(DEFAULT_ROW_H)
+        widget = self._base_widget(h=h, card_style="border")
+        img = render_to_image([widget], self._config())
+        assert_card_border(img, 400, h, m)
+
+    def test_graph_card_left_bar(self) -> None:
+        # Left_bar style draws gray pixels on the left edge; right
+        # edge is white.
+        h = 280
+        m = _compute_metrics(DEFAULT_ROW_H)
+        widget = self._base_widget(h=h, card_style="left_bar")
+        img = render_to_image([widget], self._config())
+        assert_has_gray_pixels(
+            img,
+            0,
+            2,
+            m.left_bar,
+            h - 2,
+            low=COLOR_GRAY - 20,
+            high=COLOR_GRAY + 20,
+        )
+        assert_all_white(img, 395, 0, 400, 1)
+
+    def test_graph_card_none(self) -> None:
+        # No-decoration style has white corners — only inner content
+        # draws pixels.
+        widget = self._base_widget(card_style="none")
+        img = render_to_image([widget], self._config())
+        assert_all_white(img, 0, 0, 3, 3)
+        assert_all_white(img, 397, 0, 400, 3)
+
+    def test_graph_card_style_none_is_default(self) -> None:
+        # Omitting card_style must produce byte-identical output to
+        # card_style="none".
+        base: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entity": "sensor.temperature",
+        }
+        with_none = render_dashboard(
+            [{**base, "card_style": "none"}], self._config()
+        )
+        without = render_dashboard([base], self._config())
+        assert with_none == without
+
+    # ── SVG content tests (Phase 1 — explicit smoothing=False) ────────
+
+    def test_graph_has_polyline(self) -> None:
+        # With smoothing disabled, history data produces a <polyline>.
+        svg = render_widget_svg(
+            self._base_widget(smoothing=False), self._config()
+        )
+        assert "<polyline" in svg
+
+    def test_graph_default_value_not_bold(self) -> None:
+        # By default, the header value text has no bold
+        # font-weight attribute.
+        svg = render_widget_svg(self._base_widget(), self._config())
+        assert 'font-weight="bold"' not in svg
+
+    def test_graph_state_font_size_override(self) -> None:
+        # state_font_size overrides the auto-derived value/unit font
+        # size in the context passed to the template. Asserted
+        # directly on the context dict rather than string-scanning
+        # the SVG, since font-size="N" also appears on unrelated
+        # elements (name, axis labels, extrema, legend).
+        from custom_components.eink_dashboard.widgets.graph import (
+            _build_graph_context,
+        )
+
+        ctx = _build_graph_context(
+            self._base_widget(state_font_size=24), self._config()
+        )
+        assert ctx["value_font_sz"] == 24
+        assert ctx["unit_font_sz"] == 24
+
+    def test_graph_state_font_size_default_uses_auto_metrics(self) -> None:
+        # Without state_font_size, value/unit font size falls back to
+        # the auto-derived _compute_metrics(header_h).font_secondary.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _build_graph_context,
+        )
+
+        ctx = _build_graph_context(self._base_widget(), self._config())
+        expected = _compute_metrics(DEFAULT_ROW_H).font_secondary
+        assert ctx["value_font_sz"] == expected
+        assert ctx["unit_font_sz"] == expected
+
+    def test_graph_state_font_size_recomputes_unit_x(self) -> None:
+        # unit_x must shift with the overridden font size so the unit
+        # text stays glued to the resized value text instead of
+        # overlapping or leaving a stale gap sized for the default
+        # font.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _build_graph_context,
+        )
+
+        ctx_default = _build_graph_context(self._base_widget(), self._config())
+        ctx_large = _build_graph_context(
+            self._base_widget(state_font_size=48), self._config()
+        )
+        assert ctx_large["unit_x"] > ctx_default["unit_x"]
+
+    # ── Font customization tests ──────────────────────────────────────
+
+    def test_graph_fonts_value_size_enlarges_header_value(self) -> None:
+        # fonts.value.size enlarges the header state text relative to
+        # the widget's derived default.  Name and icon are hidden so
+        # the measured header region holds the value (and its unit)
+        # alone.
+        base = self._base_widget(show_name=False, show_icon=False)
+        default = render_to_image([base], self._config())
+        bigger = render_to_image(
+            [{**base, "fonts": {"value": {"size": 30}}}],
+            self._config(),
+        )
+        bbox_default = content_bbox(default, 0, 0, 400, DEFAULT_ROW_H)
+        bbox_bigger = content_bbox(bigger, 0, 0, 400, DEFAULT_ROW_H)
+        assert bbox_default is not None
+        assert bbox_bigger is not None
+        assert (bbox_bigger[3] - bbox_bigger[1]) > (
+            bbox_default[3] - bbox_default[1]
+        )
+
+    def test_graph_fonts_name_size_enlarges_header_name(self) -> None:
+        # fonts.name.size enlarges the header name text.  The state
+        # text and icon are hidden so the measured region holds the
+        # name alone.
+        base = self._base_widget(show_state=False, show_icon=False)
+        default = render_to_image([base], self._config())
+        bigger = render_to_image(
+            [{**base, "fonts": {"name": {"size": 30}}}],
+            self._config(),
+        )
+        bbox_default = content_bbox(default, 0, 0, 400, DEFAULT_ROW_H)
+        bbox_bigger = content_bbox(bigger, 0, 0, 400, DEFAULT_ROW_H)
+        assert bbox_default is not None
+        assert bbox_bigger is not None
+        assert (bbox_bigger[3] - bbox_bigger[1]) > (
+            bbox_default[3] - bbox_default[1]
+        )
+
+    def test_graph_fonts_axis_size_enlarges_axis_labels(self) -> None:
+        # fonts.axis.size enlarges the Y-axis labels, which are the
+        # only content drawn left of the graph area's left edge.
+        base = self._base_widget(show_state=False, show_name=False)
+        default = render_to_image([base], self._config())
+        bigger = render_to_image(
+            [{**base, "fonts": {"axis": {"size": 30}}}],
+            self._config(),
+        )
+        # Left of the graph area only the axis labels draw.  The
+        # Y-axis max label hangs from the graph area's top edge
+        # (header row + 2× stroke inset), so a band 48 px below the
+        # header row holds it and is clear of the min label at the
+        # bottom of the graph.
+        top = DEFAULT_ROW_H
+        bbox_default = content_bbox(default, 0, top, 40, top + 48)
+        bbox_bigger = content_bbox(bigger, 0, top, 40, top + 48)
+        assert bbox_default is not None
+        assert bbox_bigger is not None
+        assert (bbox_bigger[3] - bbox_bigger[1]) > (
+            bbox_default[3] - bbox_default[1]
+        )
+
+    def test_graph_fonts_value_size_beats_state_font_size(self) -> None:
+        # state_font_size is only the fallback for the value/unit size:
+        # an explicit fonts.value.size wins over it.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _build_graph_context,
+        )
+
+        ctx = _build_graph_context(
+            self._base_widget(
+                state_font_size=24, fonts={"value": {"size": 32}}
+            ),
+            self._config(),
+        )
+        assert ctx["value_font_sz"] == 32
+
+    def test_graph_fonts_unit_size_beats_state_font_size(self) -> None:
+        # Same fallback rule for the unit role, which shares
+        # state_font_size with the value role by default.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _build_graph_context,
+        )
+
+        ctx = _build_graph_context(
+            self._base_widget(
+                state_font_size=24, fonts={"unit": {"size": 20}}
+            ),
+            self._config(),
+        )
+        assert ctx["value_font_sz"] == 24
+        assert ctx["unit_font_sz"] == 20
+
+    def test_graph_fonts_value_weight_bold(self) -> None:
+        # fonts.value.weight="bold" renders the header value in bold.
+        widget = self._base_widget(fonts={"value": {"weight": "bold"}})
+        svg = render_widget_svg(widget, self._config())
+        assert 'font-weight="bold"' in svg
+
+    def test_graph_fonts_axis_weight_bold(self) -> None:
+        # fonts.axis.weight="bold" renders the axis, extrema, and
+        # legend labels in bold; nothing else in the widget is bold.
+        widget = self._base_widget(fonts={"axis": {"weight": "bold"}})
+        svg = render_widget_svg(widget, self._config())
+        assert 'font-weight="bold"' in svg
+
+    def test_graph_default_weights_are_unchanged(self) -> None:
+        # Without overrides the header name keeps the medium (500)
+        # weight it has always used, and value, unit, and axis labels
+        # render regular (400) rather than omitting the attribute.
+        svg = render_widget_svg(self._base_widget(), self._config())
+        assert 'font-weight="500"' in svg
+        assert 'font-weight="400"' in svg
+        assert 'font-weight="bold"' not in svg
+
+    def test_graph_fonts_axis_weight_applies_to_legend(self) -> None:
+        # The legend text is measured with the axis role's face, so
+        # the rendered legend must carry that same weight.  The header
+        # name is hidden so the entity name appears only in the legend.
+        widget = self._multi_widget(
+            show_name=False, fonts={"axis": {"weight": "bold"}}
+        )
+        svg = render_widget_svg(widget, self._config())
+        legend = re.search(r"<text[^>]*>Living Room</text>", svg)
+        assert legend is not None
+        assert 'font-weight="bold"' in legend.group(0)
+
+    def test_graph_fill_shown_by_default(self) -> None:
+        # With show_fill not set (default true) and smoothing off,
+        # SVG contains a <polygon> fill area below the line.
+        svg = render_widget_svg(
+            self._base_widget(smoothing=False), self._config()
+        )
+        assert "<polygon" in svg
+
+    def test_graph_fill_hidden_when_show_fill_false(self) -> None:
+        # With show_fill=False and smoothing=False, no fill element
+        # (polygon or filled path) appears below the graph line.
+        widget = self._base_widget(show_fill=False, smoothing=False)
+        svg = render_widget_svg(widget, self._config())
+        assert "<polygon" not in svg
+
+    def test_graph_no_history_no_polyline(self) -> None:
+        # When no history key is present in the state, no <polyline>
+        # or graph <path> is rendered; the widget still produces valid
+        # SVG.
+        states_no_hist: dict[str, dict[str, object]] = {
+            "sensor.temperature": {
+                "state": "22.5",
+                "attributes": {
+                    "friendly_name": "Living Room",
+                    "device_class": "temperature",
+                    "unit_of_measurement": "°C",
+                },
+            }
+        }
+        svg = render_widget_svg(
+            self._base_widget(smoothing=False),
+            self._config(states=states_no_hist),
+        )
+        assert "<svg" in svg
+        assert "<polyline" not in svg
+
+    def test_graph_non_numeric_history_filtered(self) -> None:
+        # Non-numeric history entries (unavailable, unknown, on/off)
+        # are filtered; widget does not crash, and a graph element is
+        # rendered when at least 2 numeric entries survive.
+        history_mixed: list[dict[str, object]] = [
+            {"s": "unavailable", "lu": 1747612800.0},
+            {"s": "unknown", "lu": 1747623600.0},
+            {"s": "22.5", "lu": 1747634400.0},
+            {"s": "on", "lu": 1747645200.0},
+            {"s": "23.0", "lu": 1747656000.0},
+        ]
+        states: dict[str, dict[str, object]] = {
+            "sensor.temperature": {
+                "state": "22.5",
+                "attributes": {
+                    "friendly_name": "Living Room",
+                    "device_class": "temperature",
+                    "unit_of_measurement": "°C",
+                },
+                "history": history_mixed,
+            }
+        }
+        svg = render_widget_svg(
+            self._base_widget(smoothing=False),
+            self._config(states=states),
+        )
+        assert "<svg" in svg
+        # Two numeric entries survive → polyline is rendered.
+        assert "<polyline" in svg
+
+    def test_graph_all_non_numeric_no_crash(self) -> None:
+        # When every history entry is non-numeric, the renderer must
+        # not crash and must not produce a graph element.
+        states: dict[str, dict[str, object]] = {
+            "sensor.temperature": {
+                "state": "unavailable",
+                "attributes": {
+                    "friendly_name": "Living Room",
+                    "device_class": "temperature",
+                    "unit_of_measurement": "°C",
+                },
+                "history": [
+                    {"s": "unavailable", "lu": 1747612800.0},
+                    {"s": "unknown", "lu": 1747623600.0},
+                ],
+            }
+        }
+        svg = render_widget_svg(
+            self._base_widget(smoothing=False),
+            self._config(states=states),
+        )
+        assert "<svg" in svg
+        assert "<polyline" not in svg
+
+    def test_graph_missing_entity_renders(self) -> None:
+        # A missing entity does not crash; widget produces valid SVG.
+        widget = self._base_widget(entity="sensor.nonexistent")
+        svg = render_widget_svg(widget, self._config())
+        assert "<svg" in svg
+
+    def test_graph_2level_fill_still_renders(self) -> None:
+        # On 2-level displays (display_levels=2), the fill element
+        # is still included in the SVG; dithering happens at the
+        # optimize stage, not the render stage.
+        svg = render_widget_svg(
+            self._base_widget(smoothing=False),
+            self._config(display_levels=2),
+        )
+        assert "<polygon" in svg
+
+    # ── Pixel region tests ────────────────────────────────────────────
+
+    def test_graph_header_has_dark_pixels(self) -> None:
+        # Top header row (name + value text) has dark pixels within
+        # the header height.
+        h = 280
+        header_h = DEFAULT_ROW_H
+        widget = self._base_widget(h=h)
+        img = render_to_image([widget], self._config())
+        assert_has_dark_pixels(img, PADDING, 0, 350, header_h)
+
+    def test_graph_area_has_dark_pixels(self) -> None:
+        # Graph area (everything below the header) has dark pixels
+        # from the rendered graph line.
+        h = 280
+        header_h = DEFAULT_ROW_H
+        widget = self._base_widget(h=h)
+        img = render_to_image([widget], self._config())
+        assert_has_dark_pixels(img, 0, header_h, 400, h)
+
+    # ── Scaling tests ─────────────────────────────────────────────────
+
+    def test_graph_scales_proportionally(self) -> None:
+        # Content bbox height scales proportionally with widget height
+        # (2× height → ~2× content height).
+        widgets_small = [self._base_widget(h=140)]
+        widgets_large = [self._base_widget(h=280)]
+        img_small = render_to_image(widgets_small, self._config())
+        img_large = render_to_image(widgets_large, self._config())
+        assert_scales_proportionally(
+            img_small,
+            img_large,
+            region_small=(0, 0, 400, 140),
+            region_large=(0, 0, 400, 280),
+            expected_ratio=2.0,
+            tolerance=0.5,
+        )
+
+    # ── Override / option tests ───────────────────────────────────────
+
+    def test_graph_name_override(self) -> None:
+        # name= overrides the entity friendly_name and changes the
+        # rendered output.
+        base = self._base_widget()
+        default_render = render_dashboard([base], self._config())
+        named_render = render_dashboard(
+            [{**base, "name": "Custom Name"}], self._config()
+        )
+        assert default_render != named_render
+
+    def test_graph_single_entity_title(self) -> None:
+        # title= replaces the header name in single-entity mode, so
+        # the graph can be titled independently of the series.
+        svg = render_widget_svg(
+            self._base_widget(title="Climate"), self._config()
+        )
+        assert "Climate" in svg
+        assert "Living Room" not in svg
+
+    def test_graph_title_overrides_first_series_name(self) -> None:
+        # title= supplies the header text while each series keeps its
+        # own label, so the first series' name appears only in the
+        # legend.
+        widget = self._multi_widget(
+            title="Climate",
+            entities=[
+                {"entity": "sensor.temperature", "name": "Temp Override"},
+                {"entity": "sensor.humidity"},
+            ],
+        )
+        svg = render_widget_svg(widget, self._config())
+        assert svg.count("Climate") == 1
+        assert svg.count("Temp Override") == 1
+
+    def test_graph_blank_title_falls_back_to_first_series_name(
+        self,
+    ) -> None:
+        # An empty title keeps the backwards-compatible behaviour:
+        # the header shows the first series' name.
+        widget = self._multi_widget(
+            title="",
+            entities=[
+                {"entity": "sensor.temperature", "name": "Temp Override"},
+                {"entity": "sensor.humidity"},
+            ],
+        )
+        svg = render_widget_svg(widget, self._config())
+        assert svg.count("Temp Override") == 2
+
+    def test_graph_unit_override(self) -> None:
+        # unit= overrides the auto-detected unit_of_measurement and
+        # changes the rendered output.
+        base = self._base_widget()
+        default_render = render_dashboard([base], self._config())
+        unit_render = render_dashboard([{**base, "unit": "F"}], self._config())
+        assert default_render != unit_render
+
+    def test_graph_upper_lower_bound_affects_rendering(self) -> None:
+        # Explicit upper_bound/lower_bound change the Y scale,
+        # altering the polyline coordinates and thus the output.
+        base = self._base_widget()
+        default_render = render_dashboard([base], self._config())
+        bounded_render = render_dashboard(
+            [{**base, "upper_bound": 30.0, "lower_bound": 0.0}],
+            self._config(),
+        )
+        assert default_render != bounded_render
+
+    def test_graph_line_width_affects_rendering(self) -> None:
+        # Non-default line_width changes the stroke-width attribute in
+        # the SVG, altering the rendered output.
+        svg_default = render_widget_svg(self._base_widget(), self._config())
+        svg_wide = render_widget_svg(
+            self._base_widget(line_width=6), self._config()
+        )
+        assert svg_default != svg_wide
+
+    def test_graph_hours_to_show_affects_data(self) -> None:
+        # Shorter hours_to_show window reduces visible history, which
+        # changes the graph coordinates and thus the output.
+        svg_full = render_widget_svg(
+            self._base_widget(hours_to_show=24), self._config()
+        )
+        svg_short = render_widget_svg(
+            self._base_widget(hours_to_show=3), self._config()
+        )
+        assert svg_full != svg_short
+
+    def test_graph_start_time_filters_out_earlier_points(self) -> None:
+        # start_time anchors the window to a fixed time today,
+        # overriding hours_to_show entirely: points before the fixed
+        # start time are excluded, raising the auto-computed Y-axis
+        # minimum from 10.0 (all points) to 20.0 (only points at/after
+        # the start time).  History timestamps are built relative to
+        # datetime.now() so the test is deterministic regardless of
+        # when it runs.
+        import datetime as dt
+
+        now = dt.datetime.now()
+        midday = now.replace(hour=12, minute=0, second=0, microsecond=0)
+        history = [
+            {
+                "s": "10.0",
+                "lu": (midday - dt.timedelta(hours=2)).timestamp(),
+            },
+            {
+                "s": "15.0",
+                "lu": (midday - dt.timedelta(hours=1)).timestamp(),
+            },
+            {
+                "s": "20.0",
+                "lu": (midday + dt.timedelta(hours=1)).timestamp(),
+            },
+            {
+                "s": "25.0",
+                "lu": (midday + dt.timedelta(hours=2)).timestamp(),
+            },
+        ]
+        states: dict[str, dict[str, object]] = {
+            "sensor.temperature": {
+                **MOCK_GRAPH_STATES["sensor.temperature"],
+                "history": history,
+            }
+        }
+        common = {
+            "hours_to_show": 48,
+            "points_per_hour": 2,
+            "smoothing": False,
+            "show_labels": True,
+        }
+        svg_no_start = render_widget_svg(
+            self._base_widget(**common), self._config(states=states)
+        )
+        svg_with_start = render_widget_svg(
+            self._base_widget(**common, start_time="12:00"),
+            self._config(states=states),
+        )
+        assert "10.0" in svg_no_start
+        assert "10.0" not in svg_with_start
+        assert "20.0" in svg_with_start
+
+    def test_graph_aggregate_avg_accepted(self) -> None:
+        # aggregate_func="avg" is accepted without error and produces a
+        # graph element.
+        widget = self._base_widget(aggregate_func="avg", smoothing=False)
+        svg = render_widget_svg(widget, self._config())
+        assert "<polyline" in svg
+
+    def test_graph_aggregate_last_accepted(self) -> None:
+        # aggregate_func="last" is accepted without error and produces a
+        # graph element.
+        widget = self._base_widget(aggregate_func="last", smoothing=False)
+        svg = render_widget_svg(widget, self._config())
+        assert "<polyline" in svg
+
+    def test_graph_aggregate_avg_vs_last_differ(self) -> None:
+        # avg and last aggregation produce distinct polyline coordinates
+        # when a bucket contains multiple values (10.0 and 30.0 in the
+        # same bucket → avg=20.0, last=30.0 → different Y positions).
+        states: dict[str, dict[str, object]] = {
+            "sensor.temperature": {
+                "state": "20.0",
+                "attributes": {
+                    "friendly_name": "Living Room",
+                    "device_class": "temperature",
+                    "unit_of_measurement": "°C",
+                },
+                "history": _AGGREGATE_HISTORY,
+            }
+        }
+        widget = self._base_widget(
+            hours_to_show=2,
+            points_per_hour=2,
+        )
+        svg_avg = render_widget_svg(
+            {**widget, "aggregate_func": "avg"},
+            self._config(states=states),
+        )
+        svg_last = render_widget_svg(
+            {**widget, "aggregate_func": "last"},
+            self._config(states=states),
+        )
+        assert svg_avg != svg_last
+
+    def test_graph_show_state_false(self) -> None:
+        # show_state=False suppresses the current value in the header;
+        # output differs from the default.
+        base = self._base_widget()
+        default_svg = render_widget_svg(base, self._config())
+        no_state_svg = render_widget_svg(
+            {**base, "show_state": False}, self._config()
+        )
+        assert default_svg != no_state_svg
+
+    def test_graph_multi_entity_header_shows_all_states(self) -> None:
+        # With show_state (default True) and more than one entity
+        # configured, the header shows every entity's current state
+        # concatenated with " / ", not just the first entity's.
+        # (Humidity's raw "8.41" is rounded to 0 decimals by the
+        # device-class default, matching HA's own whole-percent
+        # display for humidity sensors.)
+        svg = render_widget_svg(self._multi_widget(), self._config())
+        assert "22.5°C / 8%" in svg
+
+    def test_graph_multi_entity_show_state_false_hides_all_states(
+        self,
+    ) -> None:
+        # show_state=False still suppresses every entity's state in
+        # multi-entity mode, not just the first.
+        svg = render_widget_svg(
+            self._multi_widget(show_state=False), self._config()
+        )
+        assert "22.5" not in svg
+        assert "8%" not in svg
+
+    def test_graph_multi_entity_combined_state_truncates_before_icon(
+        self,
+    ) -> None:
+        # With three entities on a moderately narrow widget, the
+        # combined state string is longer than the space available
+        # before the header icon and must be truncated with an
+        # ellipsis rather than overflowing past the icon.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _build_graph_context,
+        )
+
+        widget = self._multi_widget(
+            w=300,
+            entities=[
+                {"entity": "sensor.temperature"},
+                {"entity": "sensor.humidity"},
+                {"entity": "sensor.pressure"},
+            ],
+        )
+        ctx = _build_graph_context(widget, self._config(width=300))
+        value_text = str(ctx["value_text"])
+        assert value_text.endswith("…")
+        assert "1,013.0hPa" not in value_text
+        # Truncated text must still end before the icon's left edge
+        # when measured with the face the template renders.
+        from custom_components.eink_dashboard.const import FontWeight
+        from custom_components.eink_dashboard.render import (
+            _load_role_font,
+        )
+
+        weight = {
+            "400": FontWeight.REGULAR,
+            "500": FontWeight.MEDIUM,
+            "bold": FontWeight.BOLD,
+        }[str(ctx["value_weight"])]
+        font = _load_role_font(int(ctx["value_font_sz"]), weight)
+        text_end = int(ctx["value_x"]) + round(font.getlength(value_text))
+        assert text_end <= int(ctx["icon_cx"]) - int(ctx["icon_r"])
+
+    def test_graph_multi_entity_unit_override_applies_to_all_entities(
+        self,
+    ) -> None:
+        # widget-level unit= overrides every entity's auto-detected
+        # unit in the combined header text, matching the
+        # single-entity override behaviour.
+        svg = render_widget_svg(self._multi_widget(unit="X"), self._config())
+        assert "22.5X / 8X" in svg
+
+    def test_graph_multi_entity_single_usable_state_shown(self) -> None:
+        # When only one of several configured entities has a usable
+        # state, the header must show that entity's real value
+        # instead of falling back to a differently-selected entity's
+        # raw "unknown"/"unavailable" state string.
+        states = {
+            **MOCK_GRAPH_STATES,
+            "sensor.offline": {
+                "state": "unknown",
+                "attributes": {"friendly_name": "Offline Sensor"},
+            },
+        }
+        widget = self._multi_widget(
+            entities=[
+                {"entity": "sensor.offline"},
+                {"entity": "sensor.temperature"},
+            ]
+        )
+        svg = render_widget_svg(widget, self._config(states=states))
+        assert "22.5°C" in svg
+        assert "unknown" not in svg
+
+    def test_graph_show_name_false(self) -> None:
+        # show_name=False suppresses the entity name in the header;
+        # output differs from the default.
+        base = self._base_widget()
+        default_svg = render_widget_svg(base, self._config())
+        no_name_svg = render_widget_svg(
+            {**base, "show_name": False}, self._config()
+        )
+        assert default_svg != no_name_svg
+
+    def test_graph_show_icon_false(self) -> None:
+        # show_icon=False suppresses the icon in the header; output
+        # differs from the default.
+        base = self._base_widget()
+        default_svg = render_widget_svg(base, self._config())
+        no_icon_svg = render_widget_svg(
+            {**base, "show_icon": False}, self._config()
+        )
+        assert default_svg != no_icon_svg
+
+    def test_graph_auto_height(self) -> None:
+        # Without an explicit h, the widget falls back to a sensible
+        # default height (at least DEFAULT_ROW_H).
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "entity": "sensor.temperature",
+        }
+        svg = render_widget_svg(widget, self._config())
+        m = re.search(r'height="(\d+)"', svg)
+        assert m is not None
+        assert int(m.group(1)) >= DEFAULT_ROW_H
+
+    def test_graph_explicit_h_preserved(self) -> None:
+        # An explicit h is reflected in the SVG height attribute.
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 200,
+            "entity": "sensor.temperature",
+        }
+        svg = render_widget_svg(widget, self._config())
+        m = re.search(r'height="(\d+)"', svg)
+        assert m is not None
+        assert int(m.group(1)) == 200
+
+    def test_graph_history_nan_inf_filtered(self) -> None:
+        # History entries with NaN or Infinity state values are
+        # silently dropped; valid entries still render a polyline.
+        history = [
+            {"s": "nan", "lu": 1747620000.0},
+            {"s": "inf", "lu": 1747623600.0},
+            {"s": "-inf", "lu": 1747627200.0},
+            {"s": "20.0", "lu": 1747634400.0},
+            {"s": "22.5", "lu": 1747656000.0},
+            {"s": "21.0", "lu": 1747699200.0},
+        ]
+        states: dict[str, dict[str, object]] = {
+            "sensor.temperature": {
+                "state": "21.0",
+                "attributes": {
+                    "friendly_name": "Living Room",
+                    "device_class": "temperature",
+                    "unit_of_measurement": "°C",
+                },
+                "history": history,
+            }
+        }
+        svg = render_widget_svg(
+            self._base_widget(smoothing=False),
+            self._config(states=states),
+        )
+        assert "<polyline" in svg
+
+    def test_graph_history_nan_timestamp_filtered(self) -> None:
+        # History entries with NaN/inf in the lu (timestamp) field are
+        # dropped without corrupting the time-window computation.
+        history = [
+            {"s": "20.0", "lu": "nan"},
+            {"s": "21.0", "lu": float("inf")},
+            {"s": "22.5", "lu": 1747620000.0},
+            {"s": "23.0", "lu": 1747645200.0},
+            {"s": "22.0", "lu": 1747699200.0},
+        ]
+        states: dict[str, dict[str, object]] = {
+            "sensor.temperature": {
+                "state": "22.0",
+                "attributes": {
+                    "friendly_name": "Living Room",
+                    "device_class": "temperature",
+                    "unit_of_measurement": "°C",
+                },
+                "history": history,
+            }
+        }
+        svg = render_widget_svg(
+            self._base_widget(smoothing=False),
+            self._config(states=states),
+        )
+        assert "<polyline" in svg
+
+    # ── Phase 2: Smoothing tests ───────────────────────────────────────
+
+    def test_graph_smoothing_default_uses_path(self) -> None:
+        # Default config (smoothing=True) renders a <path> element,
+        # not a <polyline>.
+        svg = render_widget_svg(self._base_widget(), self._config())
+        assert "<path" in svg
+        assert "<polyline" not in svg
+
+    def test_graph_smoothing_false_uses_polyline(self) -> None:
+        # smoothing=False renders a <polyline> and no graph <path>.
+        svg = render_widget_svg(
+            self._base_widget(smoothing=False), self._config()
+        )
+        assert "<polyline" in svg
+        # Ensure no smoothed path is present (d="M...Q..." pattern).
+        assert " Q " not in svg
+
+    def test_graph_smoothing_path_has_q_command(self) -> None:
+        # The smoothed <path> d attribute contains at least one
+        # quadratic Bezier "Q" command.
+        svg = render_widget_svg(self._base_widget(), self._config())
+        assert " Q " in svg
+
+    def test_graph_smoothing_fill_uses_path(self) -> None:
+        # With smoothing=True and show_fill=True (default), the fill
+        # is a <path> element (not a <polygon>).
+        svg = render_widget_svg(self._base_widget(), self._config())
+        assert "<polygon" not in svg
+        # At least one <path> with a non-"none" fill color exists.
+        assert 'fill="' in svg
+        # The fill path should close with Z.
+        assert " Z" in svg or 'Z"' in svg
+
+    def test_graph_smoothing_false_fill_uses_polygon(self) -> None:
+        # With smoothing=False and show_fill=True, fill uses a
+        # <polygon> element (backward compat).
+        svg = render_widget_svg(
+            self._base_widget(smoothing=False, show_fill=True),
+            self._config(),
+        )
+        assert "<polygon" in svg
+
+    def test_graph_smoothing_differs_from_unsmoothed(self) -> None:
+        # Smoothed and unsmoothed renders produce different SVG output
+        # because coordinates are shifted to midpoints.
+        svg_smooth = render_widget_svg(
+            self._base_widget(smoothing=True), self._config()
+        )
+        svg_raw = render_widget_svg(
+            self._base_widget(smoothing=False), self._config()
+        )
+        assert svg_smooth != svg_raw
+
+    # ── Phase 2: Y-axis label tests ───────────────────────────────────
+
+    def test_graph_labels_shown_by_default(self) -> None:
+        # Default config (show_labels=True) renders y_min and y_max
+        # formatted values as <text> elements in the SVG.
+        svg = render_widget_svg(self._base_widget(), self._config())
+        # Data range is 20.0–23.0; expect these values to appear.
+        assert "20.0" in svg or "20" in svg
+        assert "23.0" in svg or "23" in svg
+
+    def test_graph_labels_false_no_y_text(self) -> None:
+        # show_labels=False removes y-axis label text from the SVG;
+        # the axis text elements are absent.
+        svg_with = render_widget_svg(self._base_widget(), self._config())
+        svg_without = render_widget_svg(
+            self._base_widget(show_labels=False), self._config()
+        )
+        assert svg_with != svg_without
+
+    def test_graph_labels_shift_graph_right(self) -> None:
+        # When show_labels=True, the graph area starts further right
+        # than with show_labels=False to make room for y-axis labels.
+        # The rendered outputs differ.
+        svg_labeled = render_widget_svg(self._base_widget(), self._config())
+        svg_unlabeled = render_widget_svg(
+            self._base_widget(show_labels=False), self._config()
+        )
+        assert svg_labeled != svg_unlabeled
+
+    def test_graph_labels_pixel_region(self) -> None:
+        # With show_labels=True, there are dark pixels in the left
+        # margin area (where y-axis labels render).
+        h = 280
+        widget = self._base_widget(h=h, show_labels=True)
+        img = render_to_image([widget], self._config())
+        # y-axis labels appear in the left portion below the header.
+        assert_has_dark_pixels(img, 0, DEFAULT_ROW_H, PADDING * 2, h)
+
+    # ── Phase 2: X-axis label tests ───────────────────────────────────
+
+    def test_graph_x_labels_shown(self) -> None:
+        # With show_labels=True, the SVG contains HH:MM time strings
+        # (formatted timestamps for oldest and newest data points).
+        svg = render_widget_svg(self._base_widget(), self._config())
+        # Look for HH:MM pattern (24-hour format).
+        assert re.search(r"\d{2}:\d{2}", svg) is not None
+
+    def test_graph_x_labels_reduce_graph_height(self) -> None:
+        # With show_labels=True, the graph area is shorter than with
+        # show_labels=False because x-axis labels reserve bottom space.
+        svg_labeled = render_widget_svg(self._base_widget(), self._config())
+        svg_unlabeled = render_widget_svg(
+            self._base_widget(show_labels=False), self._config()
+        )
+        # The outputs must differ (labeled graph has less vertical
+        # space for the graph line, changing its coordinates).
+        assert svg_labeled != svg_unlabeled
+
+    # ── Phase 2: Grid line tests ──────────────────────────────────────
+
+    def test_graph_grid_lines_present_multigrayscale(self) -> None:
+        # With show_labels=True and a multi-level display, the SVG
+        # contains <line> elements for horizontal grid lines.
+        svg = render_widget_svg(
+            self._base_widget(show_labels=True),
+            self._config(display_levels=16),
+        )
+        assert "<line" in svg
+
+    def test_graph_grid_lines_absent_2level(self) -> None:
+        # On 2-level displays (display_levels=2), grid lines are
+        # suppressed (fine gray lines cannot be rendered on B&W).
+        svg = render_widget_svg(
+            self._base_widget(show_labels=True),
+            self._config(display_levels=2),
+        )
+        assert "<line" not in svg
+
+    def test_graph_grid_lines_use_light_gray(self) -> None:
+        # Grid <line> elements use the light-gray color constant.
+        from custom_components.eink_dashboard.const import (
+            COLOR_LIGHT_GRAY,
+            color_to_hex,
+        )
+
+        expected_color = color_to_hex(COLOR_LIGHT_GRAY)
+        svg = render_widget_svg(
+            self._base_widget(show_labels=True),
+            self._config(display_levels=16),
+        )
+        assert expected_color in svg
+
+    # ── Phase 2: group_by tests ───────────────────────────────────────
+
+    def test_graph_group_by_hour_differs_from_default(self) -> None:
+        # group_by="hour" forces 1 point per hour, changing bucket
+        # size and thus the rendered coordinates.
+        svg_default = render_widget_svg(self._base_widget(), self._config())
+        svg_hour = render_widget_svg(
+            self._base_widget(group_by="hour"), self._config()
+        )
+        assert svg_default != svg_hour
+
+    def test_graph_group_by_date_differs_from_hour(self) -> None:
+        # group_by="date" collapses multi-day data to one point per
+        # day (3 buckets), while group_by="hour" keeps each data point
+        # in its own bucket (6 buckets), producing different outputs.
+        states: dict[str, dict[str, object]] = {
+            "sensor.temperature": {
+                "state": "25.0",
+                "attributes": {
+                    "friendly_name": "Living Room",
+                    "device_class": "temperature",
+                    "unit_of_measurement": "°C",
+                },
+                "history": _MULTIDAY_HISTORY,
+            }
+        }
+        widget = self._base_widget(hours_to_show=72)
+        svg_hour = render_widget_svg(
+            {**widget, "group_by": "hour"},
+            self._config(states=states),
+        )
+        svg_date = render_widget_svg(
+            {**widget, "group_by": "date"},
+            self._config(states=states),
+        )
+        assert svg_hour != svg_date
+
+    def test_graph_group_by_interval_same_as_default(self) -> None:
+        # Explicit group_by="interval" is identical to omitting
+        # group_by (both use the configured points_per_hour).
+        svg_explicit = render_widget_svg(
+            self._base_widget(group_by="interval"), self._config()
+        )
+        svg_default = render_widget_svg(self._base_widget(), self._config())
+        assert svg_explicit == svg_default
+
+    # ── Phase 2: Extrema tests ────────────────────────────────────────
+
+    def test_graph_extrema_shown_when_enabled(self) -> None:
+        # With show_extrema=True, the SVG contains "Min:" and "Max:"
+        # text labels showing minimum and maximum values.
+        svg = render_widget_svg(
+            self._base_widget(show_extrema=True), self._config()
+        )
+        assert "Min:" in svg
+        assert "Max:" in svg
+
+    def test_graph_extrema_hidden_by_default(self) -> None:
+        # Default config (show_extrema=False) produces no "Min:" or
+        # "Max:" text in the SVG.
+        svg = render_widget_svg(self._base_widget(), self._config())
+        assert "Min:" not in svg
+        assert "Max:" not in svg
+
+    def test_graph_extrema_has_pixels_below_graph(self) -> None:
+        # With show_extrema=True, dark pixels appear in the bottom
+        # portion of the widget (where extrema text renders).
+        h = 280
+        widget = self._base_widget(h=h, show_extrema=True)
+        img = render_to_image([widget], self._config())
+        # Bottom 20% of the widget should have extrema text pixels.
+        bottom_y = int(h * 0.8)
+        assert_has_dark_pixels(img, 0, bottom_y, 400, h)
+
+    def test_graph_extrema_changes_output(self) -> None:
+        # Enabling show_extrema changes the rendered output.
+        svg_default = render_widget_svg(self._base_widget(), self._config())
+        svg_extrema = render_widget_svg(
+            self._base_widget(show_extrema=True), self._config()
+        )
+        assert svg_default != svg_extrema
+
+    # ── Phase 2: min_bound_range tests ───────────────────────────────
+
+    def test_graph_min_bound_range_expands_scale(self) -> None:
+        # With narrow-range data (0.5 range) and min_bound_range=10,
+        # the Y-axis is expanded, changing the graph coordinates.
+        states: dict[str, dict[str, object]] = {
+            "sensor.temperature": {
+                "state": "20.5",
+                "attributes": {
+                    "friendly_name": "Living Room",
+                    "device_class": "temperature",
+                    "unit_of_measurement": "°C",
+                },
+                "history": _NARROW_HISTORY,
+            }
+        }
+        svg_no_mbr = render_widget_svg(
+            self._base_widget(smoothing=False),
+            self._config(states=states),
+        )
+        svg_with_mbr = render_widget_svg(
+            self._base_widget(smoothing=False, min_bound_range=10),
+            self._config(states=states),
+        )
+        # Expanded range changes Y coordinate mapping.
+        assert svg_no_mbr != svg_with_mbr
+
+    def test_graph_min_bound_range_no_effect_when_sufficient(self) -> None:
+        # When the data range (3.0) already exceeds min_bound_range
+        # (1.0), the output is identical to no min_bound_range.
+        svg_no_mbr = render_widget_svg(
+            self._base_widget(smoothing=False), self._config()
+        )
+        svg_with_mbr = render_widget_svg(
+            self._base_widget(smoothing=False, min_bound_range=1.0),
+            self._config(),
+        )
+        # Data range is ~3.0 (20.0-23.0), which exceeds 1.0, so
+        # min_bound_range has no effect.
+        assert svg_no_mbr == svg_with_mbr
+
+    # ── Phase 3: Multi-entity tests ───────────────────────────────────
+
+    def _multi_widget(self, **overrides: object) -> dict[str, object]:
+        """Return a 400×280 graph widget with two entities."""
+        w: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [
+                {"entity": "sensor.temperature"},
+                {"entity": "sensor.humidity"},
+            ],
+        }
+        w.update(overrides)
+        return w
+
+    # ── Phase 3: Backward compatibility tests ────────────────────────
+
+    def test_graph_single_entity_key_still_works(self) -> None:
+        # Single entity= key (no entities list) still renders a graph
+        # line when Phase 3 normalization is in place.
+        svg = render_widget_svg(
+            self._base_widget(smoothing=False), self._config()
+        )
+        assert "<polyline" in svg
+
+    def test_graph_entities_single_item_matches_entity_key(
+        self,
+    ) -> None:
+        # entities=[{entity: ...}] produces identical SVG to entity=...
+        # for a single entity, confirming the normalization path.
+        svg_key = render_widget_svg(
+            self._base_widget(smoothing=False), self._config()
+        )
+        svg_list = render_widget_svg(
+            {
+                "type": "graph",
+                "x": 0,
+                "y": 0,
+                "w": 400,
+                "h": 280,
+                "entities": [{"entity": "sensor.temperature"}],
+                "smoothing": False,
+            },
+            self._config(),
+        )
+        assert svg_key == svg_list
+
+    # ── Phase 3: Multi-entity line rendering tests ────────────────────
+
+    def test_graph_multi_entity_two_polylines(self) -> None:
+        # With two entities and smoothing=False, the SVG contains
+        # exactly two <polyline elements — one per series.
+        svg = render_widget_svg(
+            self._multi_widget(smoothing=False), self._config()
+        )
+        assert svg.count("<polyline") == 2
+
+    def test_graph_multi_entity_two_paths_smoothed(self) -> None:
+        # With two entities and default smoothing, the SVG contains
+        # multiple Q commands (at least two series worth of curves).
+        svg = render_widget_svg(self._multi_widget(), self._config())
+        assert svg.count(" Q ") >= 2
+
+    def test_graph_multi_entity_distinct_dash_patterns(self) -> None:
+        # Two entities produce one solid line (no stroke-dasharray)
+        # and one dashed line (stroke-dasharray="8,4").
+        svg = render_widget_svg(
+            self._multi_widget(smoothing=False), self._config()
+        )
+        assert 'stroke-dasharray="8,4"' in svg
+
+    def test_graph_three_entities_three_dash_patterns(self) -> None:
+        # Three entities produce solid, dashed, and dotted lines;
+        # all three dash patterns appear in the SVG.
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [
+                {"entity": "sensor.temperature"},
+                {"entity": "sensor.humidity"},
+                {"entity": "sensor.pressure"},
+            ],
+            "smoothing": False,
+        }
+        svg = render_widget_svg(widget, self._config())
+        assert 'stroke-dasharray="8,4"' in svg
+        assert 'stroke-dasharray="2,4"' in svg
+
+    # ── Phase 3: Multi-entity fill tests ─────────────────────────────
+
+    def test_graph_multi_entity_only_first_entity_gets_fill(
+        self,
+    ) -> None:
+        # With two entities and show_fill=True (default), only the
+        # first entity gets a fill area — overlapping fills produce
+        # visual noise on e-ink.
+        svg = render_widget_svg(
+            self._multi_widget(smoothing=False), self._config()
+        )
+        assert svg.count("<polygon") == 1
+
+    def test_graph_multi_entity_no_fill_when_disabled(self) -> None:
+        # With show_fill=False and two entities, no fill element
+        # appears in the SVG.
+        svg = render_widget_svg(
+            self._multi_widget(smoothing=False, show_fill=False),
+            self._config(),
+        )
+        assert "<polygon" not in svg
+
+    # ── Phase 3: Secondary Y-axis tests ──────────────────────────────
+
+    def test_graph_secondary_y_axis_labels_both_sides(self) -> None:
+        # With one primary and one secondary entity, Y-axis labels
+        # appear for both scales: temperature (20.0–23.0) on the
+        # left and humidity (65.0–70.0) on the right.
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [
+                {"entity": "sensor.temperature"},
+                {
+                    "entity": "sensor.humidity",
+                    "y_axis": "secondary",
+                },
+            ],
+            "show_labels": True,
+        }
+        svg = render_widget_svg(widget, self._config())
+        # Primary axis: temperature range.
+        assert "20.0" in svg
+        # Secondary axis: humidity range.
+        assert "65.0" in svg
+
+    def test_graph_secondary_y_axis_explicit_bounds(self) -> None:
+        # secondary_lower_bound/secondary_upper_bound override the
+        # auto-computed secondary axis range (65.0-70.0 for humidity)
+        # with fixed values, changing the rendered axis labels.
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [
+                {"entity": "sensor.temperature"},
+                {
+                    "entity": "sensor.humidity",
+                    "y_axis": "secondary",
+                },
+            ],
+            "show_labels": True,
+            "secondary_lower_bound": 0,
+            "secondary_upper_bound": 100,
+        }
+        svg = render_widget_svg(widget, self._config())
+        # Check the rendered label text elements directly, not just
+        # substring presence, so a coincidental numeric match
+        # elsewhere in the SVG can't produce a false pass.
+        assert ">0.0</text>" in svg
+        assert ">100.0</text>" in svg
+        assert ">65.0</text>" not in svg
+
+    def test_graph_secondary_y_axis_single_bound_override(self) -> None:
+        # Setting only secondary_lower_bound leaves the upper bound
+        # auto-computed from the humidity data (max 70.0), so the
+        # two bounds are resolved independently.
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [
+                {"entity": "sensor.temperature"},
+                {
+                    "entity": "sensor.humidity",
+                    "y_axis": "secondary",
+                },
+            ],
+            "show_labels": True,
+            "secondary_lower_bound": 0,
+        }
+        svg = render_widget_svg(widget, self._config())
+        assert ">0.0</text>" in svg
+        assert ">70.0</text>" in svg
+        assert ">65.0</text>" not in svg
+
+    def test_graph_secondary_y_axis_changes_output(self) -> None:
+        # A secondary-axis entity shifts gx2 inward to make room for
+        # right-side labels, producing different SVG output.
+        svg_primary = render_widget_svg(self._multi_widget(), self._config())
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [
+                {"entity": "sensor.temperature"},
+                {
+                    "entity": "sensor.humidity",
+                    "y_axis": "secondary",
+                },
+            ],
+        }
+        svg_secondary = render_widget_svg(widget, self._config())
+        assert svg_primary != svg_secondary
+
+    def test_graph_all_primary_no_right_secondary_labels(
+        self,
+    ) -> None:
+        # When both entities use primary Y-axis (default), no secondary
+        # Y-axis labels appear on the right.  Verify by comparing against
+        # a configuration where one entity is on the secondary axis: the
+        # secondary version must have more right-aligned text elements.
+        svg_all_primary = render_widget_svg(
+            self._multi_widget(show_labels=True), self._config()
+        )
+        widget_secondary: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [
+                {"entity": "sensor.temperature"},
+                {"entity": "sensor.humidity", "y_axis": "secondary"},
+            ],
+            "show_labels": True,
+        }
+        svg_with_secondary = render_widget_svg(
+            widget_secondary, self._config()
+        )
+        count_primary = svg_all_primary.count('text-anchor="end"')
+        count_secondary = svg_with_secondary.count('text-anchor="end"')
+        assert count_primary < count_secondary
+
+    # ── Phase 3: Legend tests ─────────────────────────────────────────
+
+    def test_graph_legend_shown_for_multi_entity(self) -> None:
+        # With two entities, the SVG contains both entity names in the
+        # legend area below the graph.
+        svg = render_widget_svg(self._multi_widget(), self._config())
+        assert "Living Room" in svg
+        assert "Humidity" in svg
+
+    def test_graph_legend_hidden_for_single_entity(self) -> None:
+        # A single-entity widget does not render a legend; the second
+        # entity's name does not appear.
+        svg = render_widget_svg(self._base_widget(), self._config())
+        assert "Humidity" not in svg
+
+    def test_graph_legend_hidden_when_show_legend_false(self) -> None:
+        # show_legend=False suppresses the legend for a multi-entity
+        # widget even though axis labels remain visible.
+        svg = render_widget_svg(
+            self._multi_widget(show_legend=False, show_labels=True),
+            self._config(),
+        )
+        assert "Humidity" not in svg
+        # Axis labels (from the temperature history range) still
+        # appear since show_labels is independent of show_legend.
+        assert "20.0" in svg
+
+    def test_graph_legend_shown_when_show_legend_true(self) -> None:
+        # Same widget as test_graph_legend_shown_for_multi_entity but
+        # with show_legend passed explicitly rather than relying on
+        # the default, confirming the explicit-True branch of
+        # bool(widget.get("show_legend", True)) behaves like the
+        # default.
+        svg = render_widget_svg(
+            self._multi_widget(show_legend=True), self._config()
+        )
+        assert "Humidity" in svg
+
+    def test_graph_legend_false_reclaims_vertical_space(self) -> None:
+        # Hiding the legend must not just omit its text — the graph
+        # area itself should grow to reclaim the freed vertical space
+        # rather than leaving it as unused whitespace.  Verified
+        # directly against the context builder's gy2 (graph area
+        # bottom edge) rather than via SVG string comparison, since
+        # the latter would trivially differ due to the missing legend
+        # text alone.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _build_graph_context,
+        )
+
+        ctx_with_legend = _build_graph_context(
+            self._multi_widget(show_legend=True), self._config()
+        )
+        ctx_without_legend = _build_graph_context(
+            self._multi_widget(show_legend=False), self._config()
+        )
+        assert ctx_without_legend["gy2"] > ctx_with_legend["gy2"]
+
+    def test_graph_legend_has_line_sample_elements(self) -> None:
+        # Legend entries include <line> elements as dash-pattern
+        # samples (at least one per legend entry).
+        svg = render_widget_svg(
+            self._multi_widget(smoothing=False),
+            self._config(display_levels=2),
+        )
+        # On 2-level display, grid lines are absent so any <line>
+        # must come from legend samples.
+        assert "<line" in svg
+
+    def test_graph_legend_reserves_vertical_space(self) -> None:
+        # Multi-entity render (with legend) differs from single-entity
+        # at same dimensions because the legend shifts the graph up.
+        svg_single = render_widget_svg(self._base_widget(), self._config())
+        svg_multi = render_widget_svg(self._multi_widget(), self._config())
+        assert svg_single != svg_multi
+
+    def test_graph_legend_pixel_region(self) -> None:
+        # With two entities, dark pixels appear in the bottom 20% of
+        # the widget height where legend text renders.
+        h = 280
+        widget = self._multi_widget(h=h)
+        img = render_to_image([widget], self._config())
+        bottom_y = int(h * 0.8)
+        assert_has_dark_pixels(img, 0, bottom_y, 400, h)
+
+    def test_graph_legend_name_override(self) -> None:
+        # A name override in the entities list appears in the legend
+        # instead of the entity friendly_name.
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [
+                {
+                    "entity": "sensor.temperature",
+                    "name": "Temp Override",
+                },
+                {"entity": "sensor.humidity"},
+            ],
+        }
+        svg = render_widget_svg(widget, self._config())
+        assert "Temp Override" in svg
+
+    def test_graph_legend_flat_key_first_entity_name_override(
+        self,
+    ) -> None:
+        # A name= override on the flat-key primary entity (entity=,
+        # not entities=[...]) must also appear in the legend, not
+        # just the header.
+        widget = self._base_widget(
+            name="Flat Key Override", entity_2="sensor.humidity"
+        )
+        svg = render_widget_svg(widget, self._config())
+        assert svg.count("Flat Key Override") == 2
+
+    def test_graph_legend_long_names_do_not_overlap(self) -> None:
+        # Entity names too long to fit side by side within the graph
+        # width are truncated with an ellipsis instead of overflowing
+        # and overlapping each other.
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [
+                {
+                    "entity": "sensor.temperature",
+                    "name": "A Very Long Entity Name That Overflows",
+                },
+                {
+                    "entity": "sensor.humidity",
+                    "name": "Another Very Long Entity Name Overflowing",
+                },
+            ],
+        }
+        svg = render_widget_svg(widget, self._config())
+        # The header always shows the first entity's full name
+        # untruncated, so it appears exactly once there; the legend
+        # copy must be truncated rather than duplicating it in full.
+        assert svg.count("A Very Long Entity Name That Overflows") == 1
+        assert "…" in svg
+
+    def test_legend_geometry_truncates_names_to_fit_available_width(
+        self,
+    ) -> None:
+        # Direct unit test of _legend_geometry: with a narrow graph
+        # area and long names, each entry is truncated so that no
+        # entry's rendered text extends past the next entry's start
+        # (or, for the last entry, past the right edge).
+        from custom_components.eink_dashboard.render import _load_font
+        from custom_components.eink_dashboard.widgets.graph import (
+            _legend_geometry,
+        )
+
+        entity_descs: list[dict[str, object]] = [
+            {
+                "entity": "sensor.a",
+                "name": "A Very Long Entity Name That Overflows",
+                "dash": "",
+            },
+            {
+                "entity": "sensor.b",
+                "name": "Another Very Long Entity Name Overflowing",
+                "dash": "4,2",
+            },
+        ]
+        gx1, gx2 = 24, 376
+        _, _, entries = _legend_geometry(
+            entity_descs,
+            {},
+            gx1,
+            gx2,
+            gy2=280,
+            label_font_sz=13,
+            graph_h=200,
+        )
+        assert len(entries) == 2
+        for entry in entries:
+            assert str(entry["name"]).endswith("…")
+        font = _load_font(int(entries[0]["font_sz"]))
+        for i, entry in enumerate(entries):
+            text_end = entry["text_x"] + font.getlength(str(entry["name"]))
+            boundary = (
+                entries[i + 1]["line_x1"] if i + 1 < len(entries) else gx2
+            )
+            assert text_end <= boundary
+
+    def test_legend_geometry_uneven_names_keep_short_one_full(self) -> None:
+        # When only one entity's name is long, the fair-share
+        # redistribution should let the short name through untruncated
+        # instead of shrinking both entries by an equal amount.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _legend_geometry,
+        )
+
+        entity_descs: list[dict[str, object]] = [
+            {"entity": "sensor.a", "name": "A", "dash": ""},
+            {
+                "entity": "sensor.b",
+                "name": "A Very Long Entity Name That Overflows Badly",
+                "dash": "4,2",
+            },
+        ]
+        gx1, gx2 = 24, 300
+        _, _, entries = _legend_geometry(
+            entity_descs,
+            {},
+            gx1,
+            gx2,
+            gy2=280,
+            label_font_sz=13,
+            graph_h=200,
+        )
+        assert entries[0]["name"] == "A"
+        assert str(entries[1]["name"]).endswith("…")
+
+    def test_truncate_to_width_returns_empty_when_ellipsis_does_not_fit(
+        self,
+    ) -> None:
+        # If the available width is narrower than even a bare
+        # ellipsis, truncation must not return text that still
+        # overflows; it should give up and return an empty string.
+        from custom_components.eink_dashboard.render import _load_font
+        from custom_components.eink_dashboard.widgets.graph import (
+            _truncate_to_width,
+        )
+
+        font = _load_font(13)
+        assert _truncate_to_width("Some Long Name", font, 0) == ""
+
+    def test_legend_geometry_narrow_width_ellipsis_does_not_fit(
+        self,
+    ) -> None:
+        # Regression guard for a per-entry text budget narrower than
+        # the ellipsis glyph itself: names must fall back to an empty
+        # string rather than an ellipsis wider than its budget, so
+        # entries still stay within the graph's right edge.
+        from custom_components.eink_dashboard.render import _load_font
+        from custom_components.eink_dashboard.widgets.graph import (
+            _legend_geometry,
+        )
+
+        entity_descs: list[dict[str, object]] = [
+            {
+                "entity": "sensor.a",
+                "name": "A Very Long Entity Name That Overflows",
+                "dash": "",
+            },
+            {
+                "entity": "sensor.b",
+                "name": "Another Very Long Entity Name Overflowing",
+                "dash": "4,2",
+            },
+        ]
+        gx1, gx2 = 24, 120
+        _, _, entries = _legend_geometry(
+            entity_descs,
+            {},
+            gx1,
+            gx2,
+            gy2=280,
+            label_font_sz=13,
+            graph_h=200,
+        )
+        assert len(entries) == 2
+        assert all(entry["name"] == "" for entry in entries)
+        font = _load_font(int(entries[0]["font_sz"]))
+        for i, entry in enumerate(entries):
+            text_end = entry["text_x"] + font.getlength(str(entry["name"]))
+            boundary = (
+                entries[i + 1]["line_x1"] if i + 1 < len(entries) else gx2
+            )
+            assert text_end <= boundary
+
+    # ── Phase 3: Header test ──────────────────────────────────────────
+
+    def test_graph_multi_entity_header_shows_first_entity(
+        self,
+    ) -> None:
+        # The header still shows the first entity's friendly name even
+        # in multi-entity mode.
+        svg = render_widget_svg(self._multi_widget(), self._config())
+        assert "Living Room" in svg
+
+    # ── Phase 3: Edge case tests ──────────────────────────────────────
+
+    def test_graph_multi_entity_one_missing_still_renders(
+        self,
+    ) -> None:
+        # When the first entity is missing, the widget still renders
+        # the second entity's graph line without crashing.
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [
+                {"entity": "sensor.nonexistent"},
+                {"entity": "sensor.temperature"},
+            ],
+            "smoothing": False,
+        }
+        svg = render_widget_svg(widget, self._config())
+        assert "<svg" in svg
+        assert "<polyline" in svg
+
+    def test_graph_multi_entity_all_missing_renders_blank(
+        self,
+    ) -> None:
+        # When all entities are missing from states, the widget
+        # renders valid SVG but no graph line.
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [
+                {"entity": "sensor.nonexistent1"},
+                {"entity": "sensor.nonexistent2"},
+            ],
+            "smoothing": False,
+        }
+        svg = render_widget_svg(widget, self._config())
+        assert "<svg" in svg
+        assert "<polyline" not in svg
+
+    def test_graph_primary_missing_secondary_has_data_shows_labels(
+        self,
+    ) -> None:
+        # When the primary-axis entity has no data but a secondary-
+        # axis entity does, labels must still render from the
+        # secondary entity's points rather than silently disappearing
+        # because the primary-axis fallback picked an empty list.
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [
+                {"entity": "sensor.nonexistent"},
+                {
+                    "entity": "sensor.humidity",
+                    "y_axis": "secondary",
+                },
+            ],
+            "show_labels": True,
+            "smoothing": False,
+        }
+        svg = render_widget_svg(widget, self._config())
+        assert "<polyline" in svg
+        # Secondary axis label (humidity range 65.0-70.0).
+        assert "65.0" in svg
+
+    def test_graph_entities_empty_list_renders_blank(self) -> None:
+        # An empty entities list renders valid SVG with no graph line.
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [],
+            "smoothing": False,
+        }
+        svg = render_widget_svg(widget, self._config())
+        assert "<svg" in svg
+        assert "<polyline" not in svg
+
+    def test_graph_entities_all_invalid_logs_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # A non-empty entities list where all items lack the 'entity'
+        # key should log a warning before falling through to single-
+        # entity mode.
+        import logging
+
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [{"bad": "data"}, {"also": "bad"}],
+        }
+        with caplog.at_level(logging.WARNING):
+            render_widget_svg(widget, self._config())
+        assert "no valid items" in caplog.text
+
+    def test_graph_12h_time_format(self) -> None:
+        # time_format="12" renders AM/PM labels on the x-axis.
+        svg = render_widget_svg(
+            self._base_widget(show_labels=True),
+            self._config(time_format="12"),
+        )
+        assert "AM" in svg or "PM" in svg
+
+    def test_format_timestamp_12h_no_leading_zero(self) -> None:
+        # _format_timestamp with time_fmt="12" must not produce a
+        # leading zero (e.g. "9:30 AM" not "09:30 AM").
+        from custom_components.eink_dashboard.widgets.graph import (
+            _format_timestamp,
+        )
+
+        # 2025-05-19 09:30 UTC
+        ts = 1747647000.0
+        result = _format_timestamp(ts, "12")
+        assert result[0] != "0"
+        assert "AM" in result or "PM" in result
+
+    # ── Phase 4: Bar graph tests ──────────────────────────────────────
+
+    def test_graph_bar_renders_rects(self) -> None:
+        # graph="bar" produces <rect> elements for the bar columns.
+        svg = render_widget_svg(self._base_widget(graph="bar"), self._config())
+        assert "<rect" in svg
+
+    def test_graph_bar_no_polyline_or_bezier(self) -> None:
+        # Bar mode must not produce <polyline> or Bezier Q-curve graph
+        # paths — those are line-graph elements, not bar elements.
+        svg = render_widget_svg(self._base_widget(graph="bar"), self._config())
+        assert "<polyline" not in svg
+        assert " Q " not in svg
+
+    def test_graph_bar_default_is_line(self) -> None:
+        # Omitting the graph key defaults to line mode; bar mode must
+        # produce different SVG (confirms the key is recognized).
+        svg_default = render_widget_svg(self._base_widget(), self._config())
+        svg_bar = render_widget_svg(
+            self._base_widget(graph="bar"), self._config()
+        )
+        assert svg_default != svg_bar
+
+    def test_graph_bar_differs_from_explicit_line(self) -> None:
+        # Explicit graph="line" and graph="bar" produce different SVG
+        # for the same entity and config.
+        svg_line = render_widget_svg(
+            self._base_widget(graph="line"), self._config()
+        )
+        svg_bar = render_widget_svg(
+            self._base_widget(graph="bar"), self._config()
+        )
+        assert svg_line != svg_bar
+
+    def test_graph_bar_no_data_no_rects(self) -> None:
+        # When the entity has no history, bar mode renders valid SVG
+        # but produces no <rect> graph elements.
+        states: dict[str, dict[str, object]] = {
+            "sensor.temperature": {
+                "state": "22.5",
+                "attributes": {
+                    "friendly_name": "Living Room",
+                    "device_class": "temperature",
+                    "unit_of_measurement": "°C",
+                },
+            }
+        }
+        svg = render_widget_svg(
+            self._base_widget(graph="bar"),
+            self._config(states=states),
+        )
+        assert "<svg" in svg
+        # No bars without history data.  The full-SVG substring check
+        # is safe here because _base_widget() uses card_style="none"
+        # (no card-border rect) and single-entity mode (no legend
+        # swatches) — both are the only other sources of <rect> in
+        # the graph template.
+        assert "<rect" not in svg
+
+    def test_graph_bar_ignores_smoothing(self) -> None:
+        # smoothing=True with graph="bar" still renders <rect> bar
+        # elements — smoothing is not applicable to bar charts.
+        svg = render_widget_svg(
+            self._base_widget(graph="bar", smoothing=True),
+            self._config(),
+        )
+        assert "<rect" in svg
+        assert " Q " not in svg
+
+    def test_graph_bar_show_fill_ignored(self) -> None:
+        # In bar mode, show_fill has no effect — bars are filled shapes
+        # by definition.  Both renders must produce identical SVG.
+        svg_fill_on = render_widget_svg(
+            self._base_widget(graph="bar", show_fill=True),
+            self._config(),
+        )
+        svg_fill_off = render_widget_svg(
+            self._base_widget(graph="bar", show_fill=False),
+            self._config(),
+        )
+        assert svg_fill_on == svg_fill_off
+
+    def test_graph_bar_labels_still_shown(self) -> None:
+        # Y-axis and X-axis labels render in bar mode just as they do
+        # in line mode.
+        svg = render_widget_svg(
+            self._base_widget(graph="bar", show_labels=True),
+            self._config(),
+        )
+        # Data range 20.0–23.0 must appear as Y-axis labels.
+        assert "20.0" in svg or "20" in svg
+        assert "23.0" in svg or "23" in svg
+        # X-axis labels must contain HH:MM time strings.
+        assert re.search(r"\d{2}:\d{2}", svg) is not None
+
+    def test_graph_bar_extrema_works(self) -> None:
+        # show_extrema=True produces "Min:" and "Max:" text in bar
+        # mode, just as in line mode.
+        svg = render_widget_svg(
+            self._base_widget(graph="bar", show_extrema=True),
+            self._config(),
+        )
+        assert "Min:" in svg
+        assert "Max:" in svg
+
+    def test_graph_bar_has_dark_pixels(self) -> None:
+        # The graph area (below the header) contains dark pixels from
+        # the bar rectangles.
+        h = 280
+        header_h = DEFAULT_ROW_H
+        widget = self._base_widget(h=h, graph="bar")
+        img = render_to_image([widget], self._config())
+        assert_has_dark_pixels(img, 0, header_h, 400, h)
+
+    def test_graph_bar_upper_lower_bound_affects_rendering(
+        self,
+    ) -> None:
+        # Explicit Y-axis bounds change the bar heights, altering the
+        # SVG coordinates.
+        svg_auto = render_widget_svg(
+            self._base_widget(graph="bar"), self._config()
+        )
+        svg_bounded = render_widget_svg(
+            self._base_widget(graph="bar", upper_bound=30.0, lower_bound=0.0),
+            self._config(),
+        )
+        assert svg_auto != svg_bounded
+
+    def test_graph_bar_secondary_bound_override_affects_rendering(
+        self,
+    ) -> None:
+        # secondary_lower_bound/secondary_upper_bound also apply in
+        # bar mode, changing the secondary-axis entity's bar heights.
+        widget_base: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "graph": "bar",
+            "entities": [
+                {"entity": "sensor.temperature"},
+                {
+                    "entity": "sensor.humidity",
+                    "y_axis": "secondary",
+                },
+            ],
+        }
+        svg_auto = render_widget_svg(widget_base, self._config())
+        svg_bounded = render_widget_svg(
+            {
+                **widget_base,
+                "secondary_lower_bound": 0,
+                "secondary_upper_bound": 100,
+            },
+            self._config(),
+        )
+        assert svg_auto != svg_bounded
+
+    def test_graph_bar_group_by_date_fewer_bars_than_hour(
+        self,
+    ) -> None:
+        # group_by="date" collapses multi-day data to one bucket per
+        # day (3 buckets for _MULTIDAY_HISTORY), while group_by="hour"
+        # produces one bucket per entry (6 buckets).  Fewer buckets
+        # means fewer <rect> elements.
+        states: dict[str, dict[str, object]] = {
+            "sensor.temperature": {
+                "state": "25.0",
+                "attributes": {
+                    "friendly_name": "Living Room",
+                    "device_class": "temperature",
+                    "unit_of_measurement": "°C",
+                },
+                "history": _MULTIDAY_HISTORY,
+            }
+        }
+        widget_base = self._base_widget(graph="bar", hours_to_show=72)
+        svg_hour = render_widget_svg(
+            {**widget_base, "group_by": "hour"},
+            self._config(states=states),
+        )
+        svg_date = render_widget_svg(
+            {**widget_base, "group_by": "date"},
+            self._config(states=states),
+        )
+        count_hour = svg_hour.count("<rect")
+        count_date = svg_date.count("<rect")
+        assert count_date < count_hour
+
+    # ── Phase 4: Multi-entity bar tests ──────────────────────────────
+
+    def _bar_multi_widget(self, **overrides: object) -> dict[str, object]:
+        """Return a 400×280 bar graph widget with two entities."""
+        w: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "graph": "bar",
+            "entities": [
+                {"entity": "sensor.temperature"},
+                {"entity": "sensor.humidity"},
+            ],
+        }
+        w.update(overrides)
+        return w
+
+    def test_graph_bar_multi_entity_more_rects_than_single(
+        self,
+    ) -> None:
+        # Multi-entity bar mode renders more <rect> elements than
+        # single-entity mode: two full series of bars instead of one.
+        svg_single = render_widget_svg(
+            self._base_widget(graph="bar"), self._config()
+        )
+        svg_multi = render_widget_svg(self._bar_multi_widget(), self._config())
+        assert svg_multi.count("<rect") > svg_single.count("<rect")
+
+    def test_graph_bar_multi_entity_distinct_fill_colors(
+        self,
+    ) -> None:
+        # With two entities in bar mode (no card decoration to add
+        # extra grays), the second entity's bars use hex_gray as fill,
+        # which does not appear in the single-entity bar render.
+        from custom_components.eink_dashboard.const import (
+            COLOR_GRAY,
+            color_to_hex,
+        )
+
+        gray_hex = color_to_hex(COLOR_GRAY)
+        svg_single = render_widget_svg(
+            self._base_widget(graph="bar", card_style="none"),
+            self._config(),
+        )
+        svg_multi = render_widget_svg(
+            self._bar_multi_widget(card_style="none"), self._config()
+        )
+        # Second-entity bars use gray fill; single-entity does not.
+        assert svg_multi.count(gray_hex) > svg_single.count(gray_hex)
+
+    def test_graph_bar_legend_shows_entity_names(self) -> None:
+        # Multi-entity bar mode includes a legend with each entity's
+        # friendly name, just as in line mode.
+        svg = render_widget_svg(self._bar_multi_widget(), self._config())
+        assert "Living Room" in svg
+        assert "Humidity" in svg
+
+    def test_graph_bar_single_entity_no_legend(self) -> None:
+        # Single-entity bar mode does not show a legend; the second
+        # entity's name must not appear.
+        svg = render_widget_svg(self._base_widget(graph="bar"), self._config())
+        assert "Humidity" not in svg
+
+    def test_graph_bar_legend_hidden_when_show_legend_false(self) -> None:
+        # show_legend=False suppresses the legend in bar mode too,
+        # not just line mode.
+        svg = render_widget_svg(
+            self._bar_multi_widget(show_legend=False), self._config()
+        )
+        assert "Humidity" not in svg
+
+    def test_graph_bar_legend_uses_rect_swatches(self) -> None:
+        # Bar-mode legend uses <rect> swatches rather than <line>
+        # samples (lines show dash patterns; bars show fill shades).
+        # On 2-level displays, grid lines are suppressed, so any
+        # remaining <line> elements would be line-graph legend
+        # samples.  With bar mode, no <line> elements should appear.
+        svg = render_widget_svg(
+            self._bar_multi_widget(),
+            self._config(display_levels=2),
+        )
+        # Legend entity names appear.
+        assert "Living Room" in svg
+        assert "Humidity" in svg
+        # No <line> elements: grid is suppressed on 2-level and
+        # legend uses <rect> swatches instead.
+        assert "<line" not in svg
+
+    # ── Phase 5: Color thresholds ─────────────────────────────────────
+
+    # History that crosses multiple threshold boundaries so every
+    # threshold band is exercised.  Values range from 5 to 35,
+    # crossing boundaries at 10, 20, and 30.
+    _THRESHOLD_HISTORY: ClassVar[list[dict[str, object]]] = [
+        {"s": "5.0", "lu": 1747620000.0},
+        {"s": "15.0", "lu": 1747634400.0},
+        {"s": "25.0", "lu": 1747648800.0},
+        {"s": "35.0", "lu": 1747663200.0},
+        {"s": "25.0", "lu": 1747677600.0},
+        {"s": "10.0", "lu": 1747692000.0},
+        {"s": "20.0", "lu": 1747699200.0},
+    ]
+
+    def _threshold_config(self, **overrides: object) -> dict[str, object]:
+        """Return config with threshold history for sensor.temperature."""
+        states: dict[str, dict[str, object]] = {
+            "sensor.temperature": {
+                "state": "20.0",
+                "attributes": {
+                    "friendly_name": "Living Room",
+                    "device_class": "temperature",
+                    "unit_of_measurement": "°C",
+                },
+                "history": self._THRESHOLD_HISTORY,
+            },
+            "sensor.humidity": {
+                "state": "65.0",
+                "attributes": {
+                    "friendly_name": "Humidity",
+                    "device_class": "humidity",
+                    "unit_of_measurement": "%",
+                },
+                "history": [
+                    {"s": "65.0", "lu": 1747620000.0},
+                    {"s": "67.5", "lu": 1747645200.0},
+                    {"s": "70.0", "lu": 1747699200.0},
+                ],
+            },
+        }
+        return make_config(self._DEFAULTS, states=states, **overrides)
+
+    def _threshold_widget(self, **overrides: object) -> dict[str, object]:
+        """Return a 400×280 line graph widget with three color thresholds."""
+        w: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entity": "sensor.temperature",
+            "color_thresholds": [
+                {"value": 10, "color": "#0000ff"},
+                {"value": 20, "color": "#00ff00"},
+                {"value": 30, "color": "#ff0000"},
+            ],
+        }
+        w.update(overrides)
+        return w
+
+    def test_graph_thresholds_line_has_gradient_def(self) -> None:
+        # With thresholds on a line graph, the SVG output contains a
+        # <linearGradient> element inside <defs>.
+        svg = render_widget_svg(
+            self._threshold_widget(), self._threshold_config()
+        )
+        assert "<linearGradient" in svg
+        assert "<defs>" in svg
+
+    def test_graph_thresholds_line_uses_gradient_stroke(self) -> None:
+        # The line <path> uses a gradient URL for stroke color instead
+        # of the default hex_black when thresholds are active.
+        svg = render_widget_svg(
+            self._threshold_widget(), self._threshold_config()
+        )
+        assert 'stroke="url(#thresh-stroke-0)"' in svg
+
+    def test_graph_thresholds_smooth_single_stop_per_threshold(
+        self,
+    ) -> None:
+        # With color_thresholds_transition="smooth" (default), each
+        # threshold produces exactly one <stop> element in the gradient
+        # (no duplicate stops at boundaries).
+        svg = render_widget_svg(
+            self._threshold_widget(color_thresholds_transition="smooth"),
+            self._threshold_config(),
+        )
+        # 3 thresholds → 3 stops for stroke gradient + 3 for fill
+        # gradient = 6 total.  Count via the stop tag.
+        stop_count = svg.count("<stop ")
+        # Expect 2 gradients × 3 thresholds = 6 stops.
+        assert stop_count == 6
+
+    def test_graph_thresholds_hard_double_stops_at_boundaries(
+        self,
+    ) -> None:
+        # With color_thresholds_transition="hard", each threshold
+        # boundary gets two adjacent <stop> elements so colors snap
+        # rather than blend.
+        svg_smooth = render_widget_svg(
+            self._threshold_widget(color_thresholds_transition="smooth"),
+            self._threshold_config(),
+        )
+        svg_hard = render_widget_svg(
+            self._threshold_widget(color_thresholds_transition="hard"),
+            self._threshold_config(),
+        )
+        # Hard mode has strictly more stop elements than smooth mode.
+        assert svg_hard.count("<stop ") > svg_smooth.count("<stop ")
+
+    def test_graph_thresholds_changes_output(self) -> None:
+        # SVG with thresholds configured differs from SVG without any
+        # threshold configuration.
+        svg_no_thresh = render_widget_svg(
+            self._base_widget(), self._threshold_config()
+        )
+        svg_thresh = render_widget_svg(
+            self._threshold_widget(), self._threshold_config()
+        )
+        assert svg_no_thresh != svg_thresh
+
+    def test_graph_thresholds_bar_per_bar_fill(self) -> None:
+        # In bar mode with thresholds, bars at different value levels
+        # must get different fill colors because each bar's fill is
+        # determined by the threshold band containing its value.
+        # Resolved grayscale for blue (#0000ff): luminance ≈ 0.
+        # Resolved grayscale for red (#ff0000): luminance ≈ 76.
+        # They should map to different grayscale hex values.
+        svg = render_widget_svg(
+            self._threshold_widget(graph="bar"),
+            self._threshold_config(),
+        )
+        # Multiple distinct fill= values appear since bars span
+        # different threshold bands.
+        fill_hits = re.findall(r'fill="(#[0-9a-fA-F]{6})"', svg)
+        unique_fills = set(fill_hits)
+        # At least two distinct grayscale fill colors from thresholds.
+        assert len(unique_fills) >= 2
+
+    def test_graph_thresholds_bar_no_gradient(self) -> None:
+        # Bar mode with thresholds uses per-bar fill colors rather than
+        # SVG linearGradient — no <linearGradient> element is expected.
+        svg = render_widget_svg(
+            self._threshold_widget(graph="bar"),
+            self._threshold_config(),
+        )
+        assert "<linearGradient" not in svg
+
+    def test_graph_thresholds_rgb_mapped_to_grayscale(self) -> None:
+        # Threshold colors are auto-mapped to grayscale on e-ink
+        # displays.  The original RGB values (pure blue, green, red)
+        # must not appear as-is in the stop-color attributes; grayscale
+        # equivalents are expected instead.
+        svg = render_widget_svg(
+            self._threshold_widget(), self._threshold_config()
+        )
+        # Original saturated colors must not appear verbatim.
+        assert "#0000ff" not in svg
+        assert "#00ff00" not in svg
+        assert "#ff0000" not in svg
+
+    def test_graph_thresholds_shade_dark_maps_to_gray(self) -> None:
+        # A threshold entry with shade="dark" must resolve to the
+        # COLOR_GRAY hex value regardless of any color key.
+        from custom_components.eink_dashboard.const import (
+            COLOR_GRAY,
+            color_to_hex,
+        )
+
+        gray_hex = color_to_hex(COLOR_GRAY)
+        svg = render_widget_svg(
+            self._threshold_widget(
+                color_thresholds=[
+                    {"value": 10, "shade": "dark", "color": "#ff0000"},
+                    {"value": 20, "shade": "medium"},
+                ]
+            ),
+            self._threshold_config(),
+        )
+        # COLOR_GRAY hex must appear as a stop-color (shade overrides).
+        assert f'stop-color="{gray_hex}"' in svg
+
+    def test_graph_thresholds_shade_only_no_color_key(self) -> None:
+        # A threshold entry with only shade (no color key) resolves to
+        # the appropriate constant without crashing.
+        from custom_components.eink_dashboard.const import (
+            COLOR_LIGHT_GRAY,
+            color_to_hex,
+        )
+
+        light_gray_hex = color_to_hex(COLOR_LIGHT_GRAY)
+        svg = render_widget_svg(
+            self._threshold_widget(
+                color_thresholds=[
+                    {"value": 10, "shade": "light"},
+                    {"value": 25, "shade": "dark"},
+                ]
+            ),
+            self._threshold_config(),
+        )
+        assert f'stop-color="{light_gray_hex}"' in svg
+
+    def test_graph_thresholds_suppressed_on_2level(self) -> None:
+        # On 2-level (B&W) displays, color thresholds are suppressed
+        # entirely: no <linearGradient> appears even when configured.
+        svg = render_widget_svg(
+            self._threshold_widget(),
+            self._threshold_config(display_levels=2),
+        )
+        assert "<linearGradient" not in svg
+
+    def test_graph_thresholds_line_stroke_black_on_2level(self) -> None:
+        # On 2-level displays with thresholds suppressed, the line
+        # uses the default hex_black stroke, not a gradient URL.
+        from custom_components.eink_dashboard.const import (
+            COLOR_BLACK,
+            color_to_hex,
+        )
+
+        black_hex = color_to_hex(COLOR_BLACK)
+        svg = render_widget_svg(
+            self._threshold_widget(),
+            self._threshold_config(display_levels=2),
+        )
+        # Gradient URL must not appear for stroke; black must be present.
+        assert "thresh-stroke" not in svg
+        assert black_hex in svg
+
+    def test_graph_thresholds_bar_suppressed_on_2level(self) -> None:
+        # On 2-level displays with bar mode, per-bar threshold fills
+        # are suppressed and entity-level _BAR_FILL_COLORS are used.
+        # _BAR_FILL_COLORS[0] = black (#000000) for entity 0.
+        from custom_components.eink_dashboard.const import (
+            COLOR_BLACK,
+            color_to_hex,
+        )
+
+        black_hex = color_to_hex(COLOR_BLACK)
+        svg = render_widget_svg(
+            self._threshold_widget(graph="bar"),
+            self._threshold_config(display_levels=2),
+        )
+        # All bar fills should be black (entity-level), not per-bar.
+        assert black_hex in svg
+        # Verify no threshold-derived non-black fills appear.  With
+        # thresholds suppressed, only black should appear in fill=
+        # attributes on rects (the entity-level color for entity 0).
+        fill_hits = re.findall(r'<rect[^>]*fill="(#[0-9a-fA-F]{6})"', svg)
+        # Should only contain the entity-level black fill.
+        assert all(f == black_hex for f in fill_hits)
+
+    def test_graph_thresholds_empty_list_no_effect(self) -> None:
+        # An empty color_thresholds list produces the same output as
+        # no threshold configuration at all.
+        svg_no_thresh = render_widget_svg(
+            self._base_widget(), self._threshold_config()
+        )
+        svg_empty_thresh = render_widget_svg(
+            self._base_widget(color_thresholds=[]),
+            self._threshold_config(),
+        )
+        assert svg_no_thresh == svg_empty_thresh
+
+    def test_graph_thresholds_single_entry_no_effect(self) -> None:
+        # A single threshold entry (fewer than 2) is not enough to
+        # activate the feature; output equals no-threshold baseline.
+        svg_no_thresh = render_widget_svg(
+            self._base_widget(), self._threshold_config()
+        )
+        svg_one_thresh = render_widget_svg(
+            self._base_widget(
+                color_thresholds=[{"value": 20, "color": "#ff0000"}]
+            ),
+            self._threshold_config(),
+        )
+        assert svg_no_thresh == svg_one_thresh
+
+    def test_graph_thresholds_default_transition_is_smooth(self) -> None:
+        # Omitting color_thresholds_transition defaults to "smooth"
+        # behavior, producing the same output as explicit "smooth".
+        svg_default = render_widget_svg(
+            self._threshold_widget(), self._threshold_config()
+        )
+        svg_smooth = render_widget_svg(
+            self._threshold_widget(color_thresholds_transition="smooth"),
+            self._threshold_config(),
+        )
+        assert svg_default == svg_smooth
+
+    def test_graph_thresholds_multi_entity_line_each_series_gets_gradient(
+        self,
+    ) -> None:
+        # With two entities and thresholds, both series get their own
+        # gradient definition (thresh-stroke-0 and thresh-stroke-1).
+        svg = render_widget_svg(
+            self._threshold_widget(
+                entities=[
+                    {"entity": "sensor.temperature"},
+                    {"entity": "sensor.humidity"},
+                ]
+            ),
+            self._threshold_config(),
+        )
+        assert "thresh-stroke-0" in svg
+        assert "thresh-stroke-1" in svg
+
+    def test_graph_thresholds_works_with_labels_and_extrema(self) -> None:
+        # Color thresholds render without conflict when axis labels and
+        # extrema text are also enabled.
+        svg = render_widget_svg(
+            self._threshold_widget(show_labels=True, show_extrema=True),
+            self._threshold_config(),
+        )
+        # Gradient still present alongside labels.
+        assert "<linearGradient" in svg
+        # Extrema strings also present.
+        assert "Min:" in svg
+
+    def test_graph_thresholds_has_gray_pixels_in_graph_area(
+        self,
+    ) -> None:
+        # When thresholds map to gray shades on a multi-grayscale
+        # display, the rendered graph area contains gray (non-black)
+        # pixels from the gradient.
+        h = 280
+        widget = self._threshold_widget(
+            h=h,
+            color_thresholds=[
+                {"value": 10, "shade": "medium"},
+                {"value": 25, "shade": "dark"},
+            ],
+        )
+        img = render_to_image([widget], self._threshold_config())
+        header_h = DEFAULT_ROW_H
+        # Check the graph region (below header) for gray pixels.
+        assert_has_gray_pixels(img, 0, header_h, 400, h)
+
+    def test_graph_thresholds_flat_keys_accepted(self) -> None:
+        # Flat editor keys (threshold_1_value, threshold_1_color, etc.)
+        # produce the same gradient output as the canonical
+        # color_thresholds list format.
+        svg_canonical = render_widget_svg(
+            self._threshold_widget(
+                color_thresholds=[
+                    {"value": 10, "color": "#0000ff"},
+                    {"value": 20, "color": "#ff0000"},
+                ]
+            ),
+            self._threshold_config(),
+        )
+        svg_flat = render_widget_svg(
+            self._base_widget(
+                threshold_1_value=10,
+                threshold_1_color="#0000ff",
+                threshold_2_value=20,
+                threshold_2_color="#ff0000",
+            ),
+            self._threshold_config(),
+        )
+        assert svg_canonical == svg_flat
+
+    def test_graph_thresholds_canonical_list_overrides_flat_keys(
+        self,
+    ) -> None:
+        # When both color_thresholds list and flat keys are present,
+        # the canonical list takes precedence and the flat keys are
+        # ignored.
+        svg_list_only = render_widget_svg(
+            self._threshold_widget(
+                color_thresholds=[
+                    {"value": 10, "color": "#0000ff"},
+                    {"value": 20, "color": "#ff0000"},
+                ]
+            ),
+            self._threshold_config(),
+        )
+        svg_both = render_widget_svg(
+            self._threshold_widget(
+                color_thresholds=[
+                    {"value": 10, "color": "#0000ff"},
+                    {"value": 20, "color": "#ff0000"},
+                ],
+                # Flat keys present but should be ignored.
+                threshold_1_value=5,
+                threshold_1_color="#00ff00",
+                threshold_2_value=15,
+                threshold_2_color="#ff00ff",
+            ),
+            self._threshold_config(),
+        )
+        assert svg_list_only == svg_both
+
+    # ── Phase 6: Attribute data source ────────────────────────────────
+
+    def _attribute_widget(self, **overrides: object) -> dict[str, object]:
+        """Return a graph widget reading sensor.solar_forecast."""
+        w: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entity": "sensor.solar_forecast",
+            "data_source": "attribute",
+            "attribute": "timeseries",
+            "attribute_value_key": "w",
+            "smoothing": False,
+        }
+        w.update(overrides)
+        return w
+
+    def test_graph_attribute_source_renders_polyline(self) -> None:
+        # data_source="attribute" reads the named attribute list and
+        # renders a polyline from its (timestamp, value) entries.
+        svg = render_widget_svg(self._attribute_widget(), self._config())
+        assert "<polyline" in svg
+
+    def test_graph_attribute_source_missing_attribute_no_polyline(
+        self,
+    ) -> None:
+        # When the configured attribute is absent from entity state,
+        # no polyline is rendered and the SVG remains valid.
+        states: dict[str, dict[str, object]] = {
+            "sensor.solar_forecast": {
+                "state": "0.0",
+                "attributes": {"friendly_name": "Solar Forecast"},
+            }
+        }
+        svg = render_widget_svg(
+            self._attribute_widget(), self._config(states=states)
+        )
+        assert "<svg" in svg
+        assert "<polyline" not in svg
+
+    def test_graph_attribute_source_non_numeric_filtered(self) -> None:
+        # Non-numeric values in the attribute list are skipped; a
+        # graph still renders when at least 2 numeric entries survive.
+        mixed = [
+            {"timestamp": "2026-07-01T04:00:00+00:00", "w": "unknown"},
+            {"timestamp": "2026-07-01T04:15:00+00:00", "w": 250.0},
+            {"timestamp": "2026-07-01T04:30:00+00:00", "w": None},
+            {"timestamp": "2026-07-01T04:45:00+00:00", "w": 600.0},
+        ]
+        states: dict[str, dict[str, object]] = {
+            "sensor.solar_forecast": {
+                "state": "600.0",
+                "attributes": {
+                    "friendly_name": "Solar Forecast",
+                    "timeseries": mixed,
+                },
+            }
+        }
+        svg = render_widget_svg(
+            self._attribute_widget(), self._config(states=states)
+        )
+        assert "<polyline" in svg
+
+    def test_graph_attribute_source_fewer_than_two_points_no_graph(
+        self,
+    ) -> None:
+        # A single valid data point is insufficient to draw a line;
+        # no polyline is rendered.
+        states: dict[str, dict[str, object]] = {
+            "sensor.solar_forecast": {
+                "state": "100.0",
+                "attributes": {
+                    "friendly_name": "Solar Forecast",
+                    "timeseries": [
+                        {
+                            "timestamp": "2026-07-01T04:00:00+00:00",
+                            "w": 100.0,
+                        },
+                    ],
+                },
+            }
+        }
+        svg = render_widget_svg(
+            self._attribute_widget(), self._config(states=states)
+        )
+        assert "<polyline" not in svg
+
+    def test_graph_attribute_source_unix_timestamps(self) -> None:
+        # Unix timestamp floats (instead of ISO 8601 strings) are
+        # parsed correctly and produce a polyline.
+        states: dict[str, dict[str, object]] = {
+            "sensor.solar_forecast": {
+                "state": "800.0",
+                "attributes": {
+                    "friendly_name": "Solar Forecast",
+                    "timeseries": [
+                        {"timestamp": 1747620000.0, "w": 100.0},
+                        {"timestamp": 1747623600.0, "w": 400.0},
+                        {"timestamp": 1747627200.0, "w": 800.0},
+                    ],
+                },
+            }
+        }
+        svg = render_widget_svg(
+            self._attribute_widget(), self._config(states=states)
+        )
+        assert "<polyline" in svg
+
+    def test_graph_attribute_source_custom_keys(self) -> None:
+        # Custom attribute_timestamp_key and attribute_value_key
+        # read from differently-named fields in the attribute list.
+        states: dict[str, dict[str, object]] = {
+            "sensor.price_forecast": {
+                "state": "0.30",
+                "attributes": {
+                    "friendly_name": "Price Forecast",
+                    "prices": [
+                        {"time": "2026-07-01T04:00:00+00:00", "p": 0.10},
+                        {"time": "2026-07-01T05:00:00+00:00", "p": 0.30},
+                    ],
+                },
+            }
+        }
+        widget = self._attribute_widget(
+            entity="sensor.price_forecast",
+            attribute="prices",
+            attribute_timestamp_key="time",
+            attribute_value_key="p",
+        )
+        svg = render_widget_svg(widget, self._config(states=states))
+        assert "<polyline" in svg
+
+    def test_graph_attribute_default_data_source_is_history(self) -> None:
+        # Omitting data_source defaults to "history" — an entity
+        # exposing only an attribute-based timeseries (no recorder
+        # history) produces no polyline under the default source.
+        states: dict[str, dict[str, object]] = {
+            "sensor.solar_forecast": {
+                "state": "800.0",
+                "attributes": {
+                    "friendly_name": "Solar Forecast",
+                    "timeseries": _FORECAST_TIMESERIES,
+                },
+            }
+        }
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entity": "sensor.solar_forecast",
+            "attribute": "timeseries",
+            "attribute_value_key": "w",
+            "smoothing": False,
+        }
+        svg = render_widget_svg(widget, self._config(states=states))
+        assert "<polyline" not in svg
+
+    def test_graph_attribute_source_mixed_with_history(self) -> None:
+        # One entity reads recorder history, the other reads an
+        # attribute-based forecast; both series render as separate
+        # polylines on the same graph.
+        widget: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [
+                {"entity": "sensor.temperature"},
+                {
+                    "entity": "sensor.solar_forecast",
+                    "data_source": "attribute",
+                    "attribute": "timeseries",
+                    "attribute_value_key": "w",
+                },
+            ],
+            "smoothing": False,
+        }
+        svg = render_widget_svg(widget, self._config())
+        assert svg.count("<polyline") == 2
+
+    def test_graph_attribute_source_bar_mode(self) -> None:
+        # Attribute-sourced data also works in bar chart mode.
+        widget = self._attribute_widget(graph="bar")
+        svg = render_widget_svg(widget, self._config())
+        assert "<rect" in svg
+
+    def test_graph_attribute_source_extrema(self) -> None:
+        # show_extrema works with attribute-sourced data, displaying
+        # min/max value labels below the graph.
+        widget = self._attribute_widget(show_extrema=True)
+        svg = render_widget_svg(widget, self._config())
+        assert "Min:" in svg
+        assert "Max:" in svg
+
+    def test_graph_attribute_source_nan_inf_filtered(self) -> None:
+        # Entries with NaN/Infinity in timestamp or value are
+        # silently dropped; a graph still renders from the remaining
+        # valid points.
+        mixed = [
+            {"timestamp": "2026-07-01T04:00:00+00:00", "w": float("nan")},
+            {"timestamp": "nan", "w": 250.0},
+            {"timestamp": "2026-07-01T04:15:00+00:00", "w": float("inf")},
+            {"timestamp": "inf", "w": 300.0},
+            {"timestamp": "2026-07-01T04:30:00+00:00", "w": 400.0},
+            {"timestamp": "2026-07-01T04:45:00+00:00", "w": 600.0},
+            {"timestamp": "2026-07-01T05:00:00+00:00", "w": float("-inf")},
+        ]
+        states: dict[str, dict[str, object]] = {
+            "sensor.solar_forecast": {
+                "state": "600.0",
+                "attributes": {
+                    "friendly_name": "Solar Forecast",
+                    "timeseries": mixed,
+                },
+            }
+        }
+        svg = render_widget_svg(
+            self._attribute_widget(), self._config(states=states)
+        )
+        assert "<polyline" in svg
+
+    def test_graph_attribute_source_non_list_attribute_no_graph(
+        self,
+    ) -> None:
+        # When the attribute value is not a list (e.g. an int, dict,
+        # or string), no polyline is rendered.
+        for bad_value in (42, {"nested": "dict"}, "just a string"):
+            states: dict[str, dict[str, object]] = {
+                "sensor.solar_forecast": {
+                    "state": "0.0",
+                    "attributes": {
+                        "friendly_name": "Solar Forecast",
+                        "timeseries": bad_value,
+                    },
+                }
+            }
+            svg = render_widget_svg(
+                self._attribute_widget(), self._config(states=states)
+            )
+            assert "<svg" in svg
+            assert "<polyline" not in svg
+
+    def test_graph_attribute_source_non_dict_entries_filtered(
+        self,
+    ) -> None:
+        # List entries that are not dicts (plain strings, ints, None)
+        # are skipped; valid dicts still render.
+        mixed = [
+            "just a string",
+            42,
+            None,
+            {"timestamp": "2026-07-01T04:00:00+00:00", "w": 400.0},
+            {"timestamp": "2026-07-01T04:15:00+00:00", "w": 600.0},
+        ]
+        states: dict[str, dict[str, object]] = {
+            "sensor.solar_forecast": {
+                "state": "600.0",
+                "attributes": {
+                    "friendly_name": "Solar Forecast",
+                    "timeseries": mixed,
+                },
+            }
+        }
+        svg = render_widget_svg(
+            self._attribute_widget(), self._config(states=states)
+        )
+        assert "<polyline" in svg
+
+    # ── Unit tests for threshold helper functions ──────────────────────
+
+    def test_rgb_hex_to_grayscale_pure_red(self) -> None:
+        # Pure red (#ff0000): BT.601 luminance = 0.299*255 ≈ 76 → gray.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _rgb_hex_to_grayscale,
+        )
+
+        result = _rgb_hex_to_grayscale("#ff0000", 16)
+        # Luminance of pure red is 76; quantized on 16 levels.
+        assert result.startswith("#")
+        assert len(result) == 7
+
+    def test_rgb_hex_to_grayscale_pure_white(self) -> None:
+        # Pure white (#ffffff) must map to white on any display depth.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _rgb_hex_to_grayscale,
+        )
+
+        assert _rgb_hex_to_grayscale("#ffffff", 16) == "#ffffff"
+
+    def test_rgb_hex_to_grayscale_pure_black(self) -> None:
+        # Pure black (#000000) must remain black on any display depth.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _rgb_hex_to_grayscale,
+        )
+
+        assert _rgb_hex_to_grayscale("#000000", 16) == "#000000"
+
+    def test_rgb_hex_to_grayscale_2level_threshold(self) -> None:
+        # On a 2-level display, mid-gray (127) maps to black and
+        # near-white (200) maps to white.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _rgb_hex_to_grayscale,
+        )
+
+        # Gray 127 → below 128 threshold → black.
+        dark = _rgb_hex_to_grayscale("#7f7f7f", 2)
+        assert dark == "#000000"
+        # Gray 200 → at or above 128 threshold → white.
+        light = _rgb_hex_to_grayscale("#c8c8c8", 2)
+        assert light == "#ffffff"
+
+    def test_rgb_hex_to_grayscale_bad_input(self) -> None:
+        # Inputs that cannot be parsed fall back to black.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _rgb_hex_to_grayscale,
+        )
+
+        assert _rgb_hex_to_grayscale("notacolor", 16) == "#000000"
+        assert _rgb_hex_to_grayscale("#gg0000", 16) == "#000000"
+
+    def test_lighter_hex_black_gives_mid_gray(self) -> None:
+        # _lighter_hex shifts 50% toward white: black (#000000) → 127.
+        from custom_components.eink_dashboard.const import color_to_hex
+        from custom_components.eink_dashboard.widgets.graph import _lighter_hex
+
+        result = _lighter_hex("#000000")
+        # (0 + 255) // 2 = 127.
+        assert result == color_to_hex(127)
+
+    def test_lighter_hex_white_stays_white(self) -> None:
+        # Shifting white 50% toward white produces white.
+        from custom_components.eink_dashboard.widgets.graph import _lighter_hex
+
+        assert _lighter_hex("#ffffff") == "#ffffff"
+
+    def test_lighter_hex_bad_input(self) -> None:
+        # A non-hex input falls back to COLOR_LIGHT_GRAY.
+        # "#gg0000" → slice [1:3] = "gg" → int("gg", 16) raises ValueError.
+        from custom_components.eink_dashboard.const import (
+            COLOR_LIGHT_GRAY,
+            color_to_hex,
+        )
+        from custom_components.eink_dashboard.widgets.graph import _lighter_hex
+
+        assert _lighter_hex("#gg0000") == color_to_hex(COLOR_LIGHT_GRAY)
+
+    def test_shade_to_hex_known_shades(self) -> None:
+        # Each named shade must map to the expected constant.
+        from custom_components.eink_dashboard.const import (
+            COLOR_BLACK,
+            COLOR_GRAY,
+            COLOR_LIGHT_GRAY,
+            COLOR_MEDIUM_GRAY,
+            color_to_hex,
+        )
+        from custom_components.eink_dashboard.widgets.graph import (
+            _shade_to_hex,
+        )
+
+        assert _shade_to_hex("black") == color_to_hex(COLOR_BLACK)
+        assert _shade_to_hex("dark") == color_to_hex(COLOR_GRAY)
+        assert _shade_to_hex("medium") == color_to_hex(COLOR_MEDIUM_GRAY)
+        assert _shade_to_hex("light") == color_to_hex(COLOR_LIGHT_GRAY)
+
+    def test_shade_to_hex_unknown_falls_back_to_black(self) -> None:
+        # An unrecognised shade string falls back to black.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _shade_to_hex,
+        )
+
+        assert _shade_to_hex("neon") == "#000000"
+
+    def test_resolve_threshold_color_shade_overrides_color(self) -> None:
+        # shade takes precedence over color in the same entry.
+        from custom_components.eink_dashboard.const import (
+            COLOR_GRAY,
+            color_to_hex,
+        )
+        from custom_components.eink_dashboard.widgets.graph import (
+            _resolve_threshold_color,
+        )
+
+        entry = {"shade": "dark", "color": "#ff0000"}
+        assert _resolve_threshold_color(entry, 16) == color_to_hex(COLOR_GRAY)
+
+    def test_resolve_threshold_color_no_keys_gives_black(self) -> None:
+        # An entry with neither shade nor color resolves to black.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _resolve_threshold_color,
+        )
+
+        assert _resolve_threshold_color({"value": 10}, 16) == "#000000"
+
+    def test_bar_threshold_fill_below_first_threshold(self) -> None:
+        # A value below all thresholds uses the lowest threshold's color.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _bar_threshold_fill,
+        )
+
+        thresholds = [
+            {"value": 10, "shade": "light"},
+            {"value": 20, "shade": "dark"},
+        ]
+        result = _bar_threshold_fill(5.0, thresholds, 16)
+        from custom_components.eink_dashboard.const import (
+            COLOR_LIGHT_GRAY,
+            color_to_hex,
+        )
+
+        assert result == color_to_hex(COLOR_LIGHT_GRAY)
+
+    def test_bar_threshold_fill_above_all_thresholds(self) -> None:
+        # A value at or above the highest threshold uses the top band.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _bar_threshold_fill,
+        )
+
+        thresholds = [
+            {"value": 10, "shade": "light"},
+            {"value": 20, "shade": "dark"},
+        ]
+        result = _bar_threshold_fill(25.0, thresholds, 16)
+        from custom_components.eink_dashboard.const import (
+            COLOR_GRAY,
+            color_to_hex,
+        )
+
+        assert result == color_to_hex(COLOR_GRAY)
+
+    def test_bar_threshold_fill_at_boundary(self) -> None:
+        # A value exactly equal to a threshold boundary uses that band.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _bar_threshold_fill,
+        )
+
+        thresholds = [
+            {"value": 10, "shade": "light"},
+            {"value": 20, "shade": "dark"},
+        ]
+        result = _bar_threshold_fill(20.0, thresholds, 16)
+        from custom_components.eink_dashboard.const import (
+            COLOR_GRAY,
+            color_to_hex,
+        )
+
+        assert result == color_to_hex(COLOR_GRAY)
+
+    def test_normalize_thresholds_duplicate_values_sorted(self) -> None:
+        # Duplicate threshold values are accepted and the result is
+        # sorted ascending by value.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _normalize_thresholds,
+        )
+
+        widget: dict[str, object] = {
+            "color_thresholds": [
+                {"value": 20, "color": "#ff0000"},
+                {"value": 10, "color": "#0000ff"},
+                {"value": 20, "color": "#00ff00"},
+            ]
+        }
+        result = _normalize_thresholds(widget)
+        values = [float(str(t["value"])) for t in result]
+        assert values == sorted(values)
+
+    def test_normalize_thresholds_skips_non_numeric_values(self) -> None:
+        # Entries with non-numeric value strings are silently skipped.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _normalize_thresholds,
+        )
+
+        widget: dict[str, object] = {
+            "color_thresholds": [
+                {"value": "bad", "color": "#ff0000"},
+                {"value": 15, "color": "#00ff00"},
+            ]
+        }
+        result = _normalize_thresholds(widget)
+        assert len(result) == 1
+        assert float(str(result[0]["value"])) == 15.0
+
+    def test_threshold_gradient_stops_out_of_range(self) -> None:
+        # Threshold values outside [y_min, y_max] are clamped to the
+        # 0% or 100% offset boundaries, not dropped.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _threshold_gradient_stops,
+        )
+
+        thresholds = [
+            {"value": -100, "shade": "light"},
+            {"value": 200, "shade": "dark"},
+        ]
+        stops = _threshold_gradient_stops(
+            thresholds, "smooth", y_min=0.0, y_max=100.0, display_levels=16
+        )
+        # Both stops must still be present; offsets are clamped.
+        assert len(stops) == 2
+        offsets = [s["offset"] for s in stops]
+        # High value (200) → offset at 0% (top); low (-100) → 100% (bot).
+        assert "0.00%" in offsets
+        assert "100.00%" in offsets
+
+    # ── R7: Fill gradient presence test ───────────────────────────────
+
+    def test_graph_thresholds_fill_gradient_present(self) -> None:
+        # When thresholds are active, the SVG must contain both a
+        # stroke gradient (thresh-stroke-0) and a fill gradient
+        # (thresh-fill-0) for the first series.
+        svg = render_widget_svg(
+            self._threshold_widget(), self._threshold_config()
+        )
+        assert "thresh-stroke-0" in svg
+        assert "thresh-fill-0" in svg
+
+    def test_graph_thresholds_fill_gradient_uses_lighter_colors(
+        self,
+    ) -> None:
+        # The fill gradient stops must use lighter colors than the
+        # stroke gradient stops (each fill stop is 50% shifted toward
+        # white relative to the corresponding stroke stop).
+        import re as _re
+
+        svg = render_widget_svg(
+            self._threshold_widget(
+                color_thresholds=[
+                    {"value": 10, "shade": "black"},
+                    {"value": 25, "shade": "dark"},
+                ]
+            ),
+            self._threshold_config(),
+        )
+        # Extract all stop-color values in document order.
+        stop_colors = _re.findall(r'stop-color="(#[0-9a-fA-F]{6})"', svg)
+        # First half = stroke stops, second half = fill stops.
+        # (2 thresholds × 2 gradients = 4 stops total)
+        assert len(stop_colors) == 4
+        stroke_stops = stop_colors[:2]
+        fill_stops = stop_colors[2:]
+        for stroke_hex, fill_hex in zip(stroke_stops, fill_stops, strict=True):
+            stroke_val = int(stroke_hex[1:3], 16)
+            fill_val = int(fill_hex[1:3], 16)
+            # Fill is lighter (higher value) than stroke.
+            assert fill_val >= stroke_val
+
+    # ── _resolve_start_cutoff unit tests ───────────────────────────────
+
+    def test_resolve_start_cutoff_empty_string_is_none(self) -> None:
+        # An empty start_time string disables the fixed start time.
+        import datetime as dt
+
+        from custom_components.eink_dashboard.widgets.graph import (
+            _resolve_start_cutoff,
+        )
+
+        now = dt.datetime(2026, 6, 11, 15, 0)
+        assert _resolve_start_cutoff("", now) is None
+
+    def test_resolve_start_cutoff_invalid_string_is_none(self) -> None:
+        # An unparsable start_time string is ignored rather than
+        # raising, degrading gracefully to "no fixed start time".
+        import datetime as dt
+
+        from custom_components.eink_dashboard.widgets.graph import (
+            _resolve_start_cutoff,
+        )
+
+        result = _resolve_start_cutoff(
+            "not-a-time", dt.datetime(2026, 6, 11, 15, 0)
+        )
+        assert result is None
+
+    def test_resolve_start_cutoff_combines_today_with_time(self) -> None:
+        # A valid "HH:MM" string is combined with now's date to
+        # produce today's timestamp at that time.
+        import datetime as dt
+
+        from custom_components.eink_dashboard.widgets.graph import (
+            _resolve_start_cutoff,
+        )
+
+        now = dt.datetime(2026, 6, 11, 15, 0)
+        result = _resolve_start_cutoff("06:30", now)
+        expected = dt.datetime(2026, 6, 11, 6, 30).timestamp()
+        assert result == expected
+
+    def test_resolve_start_cutoff_invalid_string_logs_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # An unparsable start_time string logs a warning so a typo in
+        # the widget config isn't silently invisible.
+        import datetime as dt
+        import logging
+
+        from custom_components.eink_dashboard.widgets.graph import (
+            _resolve_start_cutoff,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            _resolve_start_cutoff(
+                "not-a-time", dt.datetime(2026, 6, 11, 15, 0)
+            )
+        assert "not a valid" in caplog.text
+
+    def test_resolve_start_cutoff_future_time_logs_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # When start_time has not occurred yet today, the timestamp
+        # is still returned as-is (the graph anchors to today's date
+        # only; it does not roll back to yesterday), but a warning is
+        # logged since the graph will show no data until then.
+        import datetime as dt
+        import logging
+
+        from custom_components.eink_dashboard.widgets.graph import (
+            _resolve_start_cutoff,
+        )
+
+        now = dt.datetime(2026, 6, 11, 8, 0)
+        with caplog.at_level(logging.WARNING):
+            result = _resolve_start_cutoff("18:00", now)
+        expected = dt.datetime(2026, 6, 11, 18, 0).timestamp()
+        assert result == expected
+        assert "has not occurred yet today" in caplog.text
+
+    def test_extract_entity_points_start_cutoff_is_inclusive(self) -> None:
+        # A history entry exactly at start_cutoff is kept, matching
+        # the widget docstring's "from this time today onward"
+        # (inclusive) wording.  Points are spaced an hour apart with
+        # points_per_hour=1 so each lands in its own bucket and the
+        # aggregated value is unchanged, making it safe to assert on
+        # the returned values directly.
+        from custom_components.eink_dashboard.widgets.graph import (
+            _extract_entity_points,
+        )
+
+        cutoff = 0.0
+        desc = {"entity": "sensor.temperature"}
+        states_dict = {
+            "sensor.temperature": {
+                "history": [
+                    {"s": "1.0", "lu": cutoff - 3600},
+                    {"s": "2.0", "lu": cutoff},
+                    {"s": "3.0", "lu": cutoff + 3600},
+                ]
+            }
+        }
+        points = _extract_entity_points(
+            desc,
+            states_dict,
+            hours_to_show=24,
+            points_per_hour=1,
+            aggregate_func="avg",
+            start_cutoff=cutoff,
+        )
+        values = [v for _, v in points]
+        assert 1.0 not in values
+        assert 2.0 in values
+        assert 3.0 in values
+
+
+class TestRenderGraphAxes:
+    """Verify graph axis layout, ticks, units, and tick lines.
+
+    Covers the bottom band layout (x-axis labels, extrema, legend must
+    not overlap), configurable tick counts on both axes, optional
+    tick marks and grid lines, y-axis units, and local-time labels.
+    """
+
+    _DEFAULTS: ClassVar[dict[str, object]] = {
+        "width": 400,
+        "height": 400,
+        "states": MOCK_GRAPH_STATES,
+    }
+
+    def _config(self, **overrides: object) -> dict[str, object]:
+        """Return display config merged with overrides."""
+        return make_config(self._DEFAULTS, **overrides)
+
+    def _widget(self, **overrides: object) -> dict[str, object]:
+        """Return a 400×280 two-entity graph widget with overrides."""
+        w: dict[str, object] = {
+            "type": "graph",
+            "x": 0,
+            "y": 0,
+            "w": 400,
+            "h": 280,
+            "entities": [
+                {"entity": "sensor.temperature"},
+                {"entity": "sensor.humidity"},
+            ],
+        }
+        w.update(overrides)
+        return w
+
+    def _single(self, **overrides: object) -> dict[str, object]:
+        """Return a 400×280 single-entity graph widget with overrides."""
+        w = self._widget(**overrides)
+        w.pop("entities")
+        w.setdefault("entity", "sensor.temperature")
+        return w
+
+    @staticmethod
+    def _ctx(
+        widget: dict[str, object], config: dict[str, object]
+    ) -> dict[str, Any]:
+        """Return the graph template context for ``widget``."""
+        from custom_components.eink_dashboard.widgets.graph import (
+            _build_graph_context,
+        )
+
+        return _build_graph_context(widget, config)  # type: ignore[arg-type]
+
+    # ── Bottom band layout ────────────────────────────────────────────
+
+    def test_legend_below_x_axis_labels(self) -> None:
+        # The legend band starts below the x-axis label text, so the
+        # two never overlap (regression: the legend was drawn on top
+        # of the time labels).
+        ctx = self._ctx(self._widget(), self._config())
+        assert ctx["show_legend"]
+        assert ctx["show_labels"]
+        x_label_bottom = ctx["x_label_y"] + ctx["label_font_sz"]
+        legend_top = ctx["legend_y"]
+        assert legend_top >= x_label_bottom, (legend_top, x_label_bottom)
+
+    def test_extrema_between_x_labels_and_legend(self) -> None:
+        # With labels, extrema and legend all enabled the bands stack
+        # top to bottom without overlapping: plot, x-axis labels,
+        # extrema, legend.
+        ctx = self._ctx(self._widget(show_extrema=True), self._config())
+        x_label_bottom = ctx["x_label_y"] + ctx["label_font_sz"]
+        assert ctx["extrema_y"] >= x_label_bottom
+        extrema_bottom = ctx["extrema_y"] + ctx["extrema_font_sz"]
+        assert ctx["legend_y"] >= extrema_bottom
+        legend_bottom = ctx["legend_y"] + ctx["label_font_sz"]
+        assert legend_bottom <= ctx["h"]
+
+    def test_x_axis_labels_directly_below_plot(self) -> None:
+        # The x-axis labels sit right under the plot area, not under
+        # the legend.
+        ctx = self._ctx(self._widget(), self._config())
+        assert ctx["gy2"] <= ctx["x_label_y"]
+        assert ctx["x_label_y"] - ctx["gy2"] <= ctx["label_font_sz"]
+
+    # ── X-axis ticks ──────────────────────────────────────────────────
+
+    def test_default_x_ticks_are_oldest_and_newest(self) -> None:
+        # Without x_axis_ticks the axis keeps its two labels at the
+        # left and right edge of the plot.
+        ctx = self._ctx(self._single(), self._config())
+        ticks = ctx["x_ticks"]
+        assert len(ticks) == 2
+        assert ticks[0]["x"] == ctx["x_label_left"]
+        assert ticks[-1]["x"] == ctx["x_label_right"]
+
+    def test_x_axis_ticks_adds_round_time_labels(self) -> None:
+        # x_axis_ticks=5 places up to five labels at round times
+        # (full hours for a ~22 h window) inside the plot.
+        ctx = self._ctx(self._single(x_axis_ticks=5), self._config())
+        ticks = ctx["x_ticks"]
+        assert 3 <= len(ticks) <= 5, ticks
+        for tick in ticks:
+            assert re.fullmatch(r"\d{2}:00", str(tick["label"])), tick
+            assert ctx["x_label_left"] <= tick["x"] <= ctx["x_label_right"]
+        xs = [t["x"] for t in ticks]
+        assert xs == sorted(xs)
+
+    def test_x_axis_ticks_thinned_to_fit(self) -> None:
+        # On a narrow graph a large tick count is reduced so the
+        # labels never overlap.
+        from custom_components.eink_dashboard.render import _load_font
+
+        ctx = self._ctx(self._single(w=160, x_axis_ticks=12), self._config())
+        ticks = ctx["x_ticks"]
+        font = _load_font(ctx["label_font_sz"])
+        widths = [font.getlength(str(t["label"])) for t in ticks]
+        for i in range(len(ticks) - 1):
+            gap = ticks[i + 1]["x"] - ticks[i]["x"]
+            assert gap >= (widths[i] + widths[i + 1]) / 2, ticks
+
+    def test_x_axis_ticks_rendered_in_svg(self) -> None:
+        # Every tick label appears as text in the rendered SVG.
+        widget = self._single(x_axis_ticks=5)
+        ctx = self._ctx(widget, self._config())
+        svg = render_widget_svg(widget, self._config())
+        for tick in ctx["x_ticks"]:
+            assert f">{tick['label']}</text>" in svg
+
+    def test_bar_x_ticks_on_bar_centres(self) -> None:
+        # In bar mode x ticks label individual bars at their centres.
+        widget = self._single(graph="bar", x_axis_ticks=4)
+        ctx = self._ctx(widget, self._config())
+        centres = {b["x"] + b["w"] / 2 for b in ctx["series"][0]["bars"]}
+        assert len(ctx["x_ticks"]) >= 2
+        for tick in ctx["x_ticks"]:
+            assert any(abs(tick["x"] - c) <= 1 for c in centres), tick
+
+    # ── Y-axis ticks ──────────────────────────────────────────────────
+
+    def test_default_y_ticks_are_min_and_max(self) -> None:
+        # Without y_axis_ticks the axis shows only its min and max.
+        ctx = self._ctx(self._single(), self._config())
+        labels = [t["label"] for t in ctx["y_ticks"]]
+        assert labels == ["20.0", "23.0"]
+
+    def test_y_axis_ticks_use_round_values(self) -> None:
+        # y_axis_ticks=5 on a 20–23 range gives labels at whole
+        # numbers, positioned on the plot's value scale.
+        ctx = self._ctx(self._single(y_axis_ticks=5), self._config())
+        labels = [t["label"] for t in ctx["y_ticks"]]
+        assert labels == ["20", "21", "22", "23"]
+        gy1, gy2 = ctx["gy1"], ctx["gy2"]
+        for tick in ctx["y_ticks"]:
+            v = float(str(tick["label"]))
+            expected = gy2 - (v - 20.0) / 3.0 * (gy2 - gy1)
+            assert abs(tick["y"] - expected) <= 1, tick
+
+    def test_y_axis_ticks_locale_formatted(self) -> None:
+        # Fractional tick values use the locale decimal separator.
+        ctx = self._ctx(
+            self._single(y_axis_ticks=8),
+            self._config(number_format="decimal_comma", language="de"),
+        )
+        labels = [str(t["label"]) for t in ctx["y_ticks"]]
+        assert "20,5" in labels, labels
+
+    def test_y_axis_unit_appended(self) -> None:
+        # y_axis_unit=True appends the entity unit to every y label.
+        ctx = self._ctx(self._single(y_axis_unit=True), self._config())
+        assert [t["label"] for t in ctx["y_ticks"]] == [
+            "20.0 °C",
+            "23.0 °C",
+        ]
+
+    def test_y_axis_unit_uses_unit_override(self) -> None:
+        # A widget-level unit override is used on the axis too.
+        ctx = self._ctx(
+            self._single(y_axis_unit=True, unit="K"), self._config()
+        )
+        assert all(str(t["label"]).endswith(" K") for t in ctx["y_ticks"])
+
+    def test_y_axis_unit_off_by_default(self) -> None:
+        # Without y_axis_unit the labels are plain numbers.
+        ctx = self._ctx(self._single(), self._config())
+        assert all("°C" not in str(t["label"]) for t in ctx["y_ticks"])
+
+    @staticmethod
+    def _y_label_boxes(
+        ticks: list[dict[str, Any]], font_sz: int
+    ) -> list[tuple[float, float]]:
+        """Return the (top, bottom) em box of every y label."""
+        boxes = []
+        for t in ticks:
+            ly = float(t["label_y"])
+            if t["baseline"] == "auto":
+                boxes.append((ly - font_sz, ly))
+            elif t["baseline"] == "hanging":
+                boxes.append((ly, ly + font_sz))
+            else:
+                boxes.append((ly - font_sz / 2, ly + font_sz / 2))
+        return boxes
+
+    def test_y_axis_ticks_thinned_to_fit(self) -> None:
+        # On a short graph a large tick count is reduced so the
+        # value labels never overlap vertically.
+        ctx = self._ctx(
+            self._single(h=110, y_axis_ticks=12, show_name=False),
+            self._config(),
+        )
+        ticks = ctx["y_ticks"]
+        assert len(ticks) < 12
+        boxes = self._y_label_boxes(ticks, ctx["label_font_sz"])
+        for lower, upper in itertools.pairwise(boxes):
+            assert lower[0] >= upper[1], ticks
+
+    def test_y_axis_ticks_keep_count_on_tall_graph(self) -> None:
+        # A tall graph keeps the requested number of value labels.
+        ctx = self._ctx(
+            self._single(h=400, y_axis_ticks=4), self._config(height=600)
+        )
+        assert [t["label"] for t in ctx["y_ticks"]] == ["20", "21", "22", "23"]
+
+    @pytest.mark.parametrize("value", ["abc", None, "nan", "inf", [3], ""])
+    def test_malformed_tick_count_falls_back(self, value: object) -> None:
+        # A malformed stored tick count does not crash rendering and
+        # falls back to the default min/max labels.
+        ctx = self._ctx(
+            self._single(x_axis_ticks=value, y_axis_ticks=value),
+            self._config(),
+        )
+        assert len(ctx["x_ticks"]) == 2
+        assert len(ctx["y_ticks"]) == 2
+
+    def test_out_of_range_tick_count_clamped(self) -> None:
+        # Tick counts outside 2-12 are clamped instead of misbehaving.
+        from custom_components.eink_dashboard.widgets.graph.context import (
+            _tick_count,
+        )
+
+        assert _tick_count({"y_axis_ticks": -5}, "y_axis_ticks") == 2
+        assert _tick_count({"y_axis_ticks": 100}, "y_axis_ticks") == 12
+        assert _tick_count({"y_axis_ticks": "7"}, "y_axis_ticks") == 7
+        assert _tick_count({}, "y_axis_ticks") == 2
+
+    def test_secondary_axis_ticks_and_unit(self) -> None:
+        # The secondary axis follows y_axis_ticks and shows its own
+        # entity's unit.
+        widget = self._widget(
+            entities=[
+                {"entity": "sensor.temperature"},
+                {"entity": "sensor.humidity", "y_axis": "secondary"},
+            ],
+            y_axis_ticks=4,
+            y_axis_unit=True,
+        )
+        ctx = self._ctx(widget, self._config())
+        labels = [str(t["label"]) for t in ctx["y2_ticks"]]
+        assert len(labels) >= 3
+        assert all(lbl.endswith(" %") for lbl in labels), labels
+
+    # ── Tick marks and grid lines ─────────────────────────────────────
+
+    @staticmethod
+    def _lines(svg: str) -> list[dict[str, float]]:
+        """Return the coordinates of every <line> element in ``svg``."""
+        out = []
+        for tag in re.findall(r"<line\b[^>]*>", svg):
+            coords = dict(re.findall(r'\b(x1|y1|x2|y2)="([-\d.]+)"', tag))
+            out.append({k: float(v) for k, v in coords.items()})
+        return out
+
+    def test_tick_marks_off_by_default(self) -> None:
+        # On a 2-level display (no grid) the default graph draws no
+        # lines at all.
+        svg = render_widget_svg(self._single(), self._config(display_levels=2))
+        assert self._lines(svg) == []
+
+    def test_x_axis_tick_marks(self) -> None:
+        # x_axis_tick_marks draws one short vertical mark below the
+        # plot for every x tick.
+        widget = self._single(x_axis_ticks=5, x_axis_tick_marks=True)
+        config = self._config(display_levels=2)
+        ctx = self._ctx(widget, config)
+        lines = self._lines(render_widget_svg(widget, config))
+        marks = [ln for ln in lines if ln["x1"] == ln["x2"]]
+        assert len(marks) == len(ctx["x_ticks"])
+        for mark in marks:
+            assert mark["y1"] >= ctx["gy2"] - 1
+            assert mark["y2"] <= ctx["x_label_y"]
+
+    def test_y_axis_tick_marks(self) -> None:
+        # y_axis_tick_marks draws one short horizontal mark left of the
+        # plot for every y tick.
+        widget = self._single(y_axis_ticks=5, y_axis_tick_marks=True)
+        config = self._config(display_levels=2)
+        ctx = self._ctx(widget, config)
+        lines = self._lines(render_widget_svg(widget, config))
+        marks = [ln for ln in lines if ln["y1"] == ln["y2"]]
+        assert len(marks) == len(ctx["y_ticks"])
+        for mark in marks:
+            assert mark["x2"] <= ctx["x_label_left"] + 1
+
+    def test_y_axis_grid_lines_span_plot(self) -> None:
+        # y_axis_grid draws a horizontal line across the full plot
+        # width at every y tick.
+        widget = self._single(y_axis_ticks=5, y_axis_grid=True)
+        config = self._config(display_levels=2)
+        ctx = self._ctx(widget, config)
+        lines = self._lines(render_widget_svg(widget, config))
+        grid = [
+            ln
+            for ln in lines
+            if ln["y1"] == ln["y2"]
+            and ln["x1"] == ctx["x_label_left"]
+            and ln["x2"] == ctx["x_label_right"]
+        ]
+        assert len(grid) == len(ctx["y_ticks"])
+
+    def test_x_axis_grid_lines_span_plot(self) -> None:
+        # x_axis_grid draws a vertical line across the full plot
+        # height at every x tick.
+        widget = self._single(x_axis_ticks=5, x_axis_grid=True)
+        config = self._config(display_levels=2)
+        ctx = self._ctx(widget, config)
+        lines = self._lines(render_widget_svg(widget, config))
+        grid = [
+            ln
+            for ln in lines
+            if ln["x1"] == ln["x2"]
+            and ln["y1"] == ctx["gy1"]
+            and ln["y2"] == ctx["gy2"]
+        ]
+        assert len(grid) == len(ctx["x_ticks"])
+
+    def test_grid_lines_dotted_on_two_level_display(self) -> None:
+        # On 2-level displays grid lines are drawn dotted in black so
+        # they stay faint instead of turning into solid black lines.
+        svg = render_widget_svg(
+            self._single(y_axis_ticks=5, y_axis_grid=True),
+            self._config(display_levels=2),
+        )
+        grid_tags = [
+            t for t in re.findall(r"<line\b[^>]*>", svg) if "dasharray" in t
+        ]
+        assert grid_tags
+        assert all('stroke="#000000"' in t for t in grid_tags)
+
+    def test_grid_lines_light_gray_on_grayscale(self) -> None:
+        # On grayscale displays grid lines are solid light gray.
+        svg = render_widget_svg(
+            self._single(y_axis_ticks=5, y_axis_grid=True),
+            self._config(display_levels=16),
+        )
+        tags = re.findall(r"<line\b[^>]*>", svg)
+        assert tags
+        assert all("dasharray" not in t for t in tags)
+
+    def test_y_axis_grid_keeps_edge_borders(self) -> None:
+        # Enabling y_axis_grid keeps the plot's top and bottom border
+        # lines on grayscale displays, without duplicating them.
+        widget = self._single(y_axis_ticks=5, y_axis_grid=True)
+        config = self._config(display_levels=16)
+        ctx = self._ctx(widget, config)
+        assert ctx["show_grid"]
+        lines = self._lines(render_widget_svg(widget, config))
+        full_width = [
+            ln["y1"]
+            for ln in lines
+            if ln["y1"] == ln["y2"]
+            and ln["x1"] == ctx["x_label_left"]
+            and ln["x2"] == ctx["x_label_right"]
+        ]
+        assert full_width.count(ctx["gy1"]) == 1
+        assert full_width.count(ctx["gy2"]) == 1
+
+    def test_x_edge_labels_clamped_without_overlap(self) -> None:
+        # Edge labels pushed inward to stay inside the plot keep a
+        # gap to their neighbour instead of crowding it.
+        from custom_components.eink_dashboard.widgets.graph.axes import (
+            _fit_centred_labels,
+        )
+
+        # Ticks 40 px apart with 30 px labels fit unclamped, but the
+        # first label clamped to x=15 would leave only a 0 px gap.
+        assert _fit_centred_labels([0, 40], [30, 30], 0, 200, 5) is None
+        assert _fit_centred_labels([20, 70], [30, 30], 0, 200, 5) == [20, 70]
+
+    def test_x_tick_labels_never_overlap_after_clamping(self) -> None:
+        # For many widths and tick counts the final label boxes of
+        # neighbouring x ticks never overlap.
+        from custom_components.eink_dashboard.render import _load_font
+
+        for w in range(120, 400, 20):
+            for count in (3, 6, 12):
+                for graph in ("line", "bar"):
+                    ctx = self._ctx(
+                        self._single(w=w, x_axis_ticks=count, graph=graph),
+                        self._config(),
+                    )
+                    ticks = ctx["x_ticks"]
+                    if len(ticks) <= 2 and ticks[0]["anchor"] == "start":
+                        continue
+                    font = _load_font(ctx["label_font_sz"])
+                    for a, b in itertools.pairwise(ticks):
+                        a_r = a["label_x"] + font.getlength(a["label"]) / 2
+                        b_l = b["label_x"] - font.getlength(b["label"]) / 2
+                        assert b_l - a_r >= font.size / 2, (w, count, ticks)
+
+    # ── Time zone ─────────────────────────────────────────────────────
+
+    def test_time_labels_use_configured_time_zone(self) -> None:
+        # Time labels are shown in HA's configured time zone instead
+        # of UTC (Berlin is UTC+2 in May).
+        utc = self._ctx(self._single(), self._config())
+        berlin = self._ctx(
+            self._single(), self._config(time_zone="Europe/Berlin")
+        )
+
+        def minutes(label: object) -> int:
+            hh, mm = str(label).split(":")
+            return int(hh) * 60 + int(mm)
+
+        for u, b in zip(utc["x_ticks"], berlin["x_ticks"], strict=True):
+            assert (minutes(b["label"]) - minutes(u["label"])) % 1440 == 120
+
+    def test_invalid_time_zone_falls_back_to_utc(self) -> None:
+        # An unknown time zone name does not crash rendering.
+        ctx = self._ctx(self._single(), self._config(time_zone="Nowhere/X"))
+        assert len(ctx["x_ticks"]) == 2

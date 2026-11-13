@@ -1,0 +1,46 @@
+{%- from "_macros.svg.j2" import card_container, card_row with context -%}
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="{{ w }}" height="{{ h }}">
+{%- if has_entity -%}
+{%- if invert -%}
+<rect x="0" y="0" width="{{ w }}" height="{{ h }}"
+  rx="{{ m_radius }}" ry="{{ m_radius }}"
+  fill="{{ hex_black }}"/>
+{%- endif -%}
+{%- call card_container(
+    x=0, y=0, w=w, h=h,
+    card_style=card_style,
+    radius=m_radius, border=m_border,
+    bar_width=bar_width,
+    border_color=hex_white if invert else hex_black,
+    bar_color=hex_gray) -%}
+{#- tile has no right-aligned value slot; the state line is
+    rendered as the macro's secondary text, so the secondary
+    role's weight (secondary_weight) applies to it. #}
+{{ card_row(
+    x=x_off, y=0,
+    w=w - x_off - r_inset, row_h=row_h,
+    padding=m_padding, icon_dia=m_icon_dia,
+    inner_gap=m_inner_gap, border=icon_stroke_w,
+    font_primary=primary_font_sz,
+    font_secondary=secondary_font_sz,
+    icon_inner=m_icon_inner,
+    letter_font_sz=m_font_letter,
+    primary=primary,
+    secondary=secondary,
+    icon_svg=icon_svg,
+    icon_fill=icon_fill,
+    icon_outline=icon_outline,
+    icon_no_circle=icon_no_circle,
+    primary_fill=hex_white if invert else hex_gray,
+    secondary_fill=hex_white if invert else hex_black,
+    value_fill=hex_white if invert else hex_black,
+    primary_weight=primary_weight,
+    secondary_weight=secondary_weight,
+    letter=letter,
+    lpad=lpad, rpad=rpad,
+    hex_black=hex_white if invert else hex_black,
+    hex_white=hex_black if invert else hex_white) }}
+{%- endcall -%}
+{%- endif -%}
+</svg>
