@@ -25,7 +25,13 @@ Upstream surfaces (mercado_libre/refs.py builds the URLs):
   * PRODUCT   GET <domain>/p/<id> | articulo.<domain>/<ID>-_JM | /up/<id>
         -> initialState.components (VPP / VIP). Unknown ids answer HTTP 404.
         A bare MLA… id is a catalog product OR an item: the product URL is
-        tried first, the item URL on its 404.
+        tried first, the item URL only when that request answers
+        MercadoLibreNotFound (a block or upstream error is retried and then
+        surfaced as-is, never retried against the item URL).
+        fetch_product_result reports a verifiable conclusion for every
+        outcome: the final shape (product / item / user_product), whether the
+        catalog->item fallback happened, and on failure a reason category
+        (not_found / blocked / upstream / bad_request).
   * REVIEWS   GET <domain>/noindex/catalog/reviews/<id>/search?... JSON
         (offset / limit / rating; an item id resolves to its catalog
         product) and the summary page …/reviews/<id>?…&modal=true
@@ -52,6 +58,7 @@ import re
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -242,26 +249,115 @@ def fetch_listing(url, label):
 
 # ---- products ---------------------------------------------------------------
 
-def fetch_product(ref):
+# Verifiable failure reasons for fetch_product_result, one per base class of
+# the shared failure taxonomy (scraper_errors).
+REASON_NOT_FOUND = "not_found"      # MercadoLibreNotFound — the entity does not exist
+REASON_BLOCKED = "blocked"          # MercadoLibreBlocked — challenge wall / 403 / 429
+REASON_UPSTREAM = "upstream"        # MercadoLibreUpstreamError — transport / 5xx / shell
+REASON_BAD_REQUEST = "bad_request"  # MercadoLibreBadRequest — upstream 400
+
+PRODUCT_KINDS = ("product", "item", "user_product")
+FAILURE_REASONS = (REASON_NOT_FOUND, REASON_BLOCKED, REASON_UPSTREAM, REASON_BAD_REQUEST)
+
+
+def _failure_reason(error):
+    """Map a transport exception to one of the four reason categories.
+    Blocked subclasses UpstreamError, so it must be checked first."""
+    if isinstance(error, MercadoLibreBlocked):
+        return REASON_BLOCKED
+    if isinstance(error, MercadoLibreNotFound):
+        return REASON_NOT_FOUND
+    if isinstance(error, MercadoLibreBadRequest):
+        return REASON_BAD_REQUEST
+    if isinstance(error, MercadoLibreUpstreamError):
+        return REASON_UPSTREAM
+    raise error
+
+
+@dataclass
+class ProductFetchResult:
+    """The verifiable conclusion of fetch_product_result.
+
+    kind          final page shape: "product", "item" or "user_product";
+                  None when no page could be fetched
+    fell_back     True when a bare id missed the catalog product URL
+                  (MercadoLibreNotFound) and was re-requested as an item
+    reason        None on success; otherwise one of FAILURE_REASONS
+    html/final_url  the fetched page, present only on success
+    error         the original transport exception, present only on failure
+    """
+    kind: str = None
+    fell_back: bool = False
+    reason: str = None
+    html: str = None
+    final_url: str = None
+    error: Exception = None
+
+    @property
+    def ok(self):
+        return self.error is None
+
+    def raise_on_error(self):
+        """Re-raise the underlying transport exception so callers that want
+        the old raising behaviour keep getting the exact original error."""
+        if self.error is not None:
+            raise self.error
+        return self
+
+
+def fetch_product_result(ref, page_getter=None):
+    """Fetch the product / item / user-product page and ALWAYS return a
+    verifiable ProductFetchResult (never raises a transport error).
+
+    A bare id (ref kind "unknown") is tried as a catalog product first; the
+    item URL is requested only when that call raises MercadoLibreNotFound.
+    A block, an upstream error or a bad-request response on the product URL
+    ends the attempt immediately — the item URL is never tried. NotFound and
+    BadRequest do not retry; Blocked and UpstreamError still go through
+    get_page's MAX_RETRIES policy.
+
+    page_getter injects a fake get_page(url, label) -> (html, final_url)
+    for tests; production callers leave it at the real get_page.
+    """
+    get = page_getter or get_page
+    site, ident, kind = ref["site"], ref["id"], ref["kind"]
+
+    if kind in ("item", "user_product"):
+        url = refs.item_link(site, ident) if kind == "item" else refs.user_product_link(site, ident)
+        try:
+            html, final = get(url, f"{kind} {ident}")
+        except Exception as e:
+            return ProductFetchResult(kind=None, fell_back=False, reason=_failure_reason(e), error=e)
+        return ProductFetchResult(kind=kind, fell_back=False, html=html, final_url=final)
+
+    # "product" (an explicit /p/ link) or "unknown" (a bare id: catalog page
+    # first, item page only on the catalog page's NotFound).
+    try:
+        html, final = get(refs.product_link(site, ident), f"product {ident}")
+    except MercadoLibreNotFound as e:
+        if kind == "product":
+            return ProductFetchResult(kind=None, fell_back=False, reason=REASON_NOT_FOUND, error=e)
+        try:
+            html, final = get(refs.item_link(site, ident), f"item {ident}")
+        except Exception as e2:
+            return ProductFetchResult(kind=None, fell_back=True, reason=_failure_reason(e2), error=e2)
+        return ProductFetchResult(kind="item", fell_back=True, html=html, final_url=final)
+    except Exception as e:
+        return ProductFetchResult(kind=None, fell_back=False, reason=_failure_reason(e), error=e)
+    return ProductFetchResult(kind="product", fell_back=False, html=html, final_url=final)
+
+
+def fetch_product(ref, page_getter=None):
     """The product / item / user-product page for a resolved reference
     (refs.resolve_product). A bare id is tried as a catalog product first,
     then as an item (each shape 404s for the other kind). Returns
-    (html, final_url, kind)."""
-    site, ident, kind = ref["site"], ref["id"], ref["kind"]
-    if kind == "user_product":
-        html, final = get_page(refs.user_product_link(site, ident), f"product {ident}")
-        return html, final, kind
-    if kind == "item":
-        html, final = get_page(refs.item_link(site, ident), f"item {ident}")
-        return html, final, kind
-    try:
-        html, final = get_page(refs.product_link(site, ident), f"product {ident}")
-        return html, final, "product"
-    except MercadoLibreNotFound:
-        if kind == "product":
-            raise
-    html, final = get_page(refs.item_link(site, ident), f"item {ident}")
-    return html, final, "item"
+    (html, final_url, kind); raises the transport error on failure, matching
+    the get_page failure taxonomy. For a conclusion object that never raises
+    (final shape, fallback flag, failure reason) use fetch_product_result."""
+    result = fetch_product_result(ref, page_getter=page_getter)
+    if not result.ok:
+        raise result.error
+    return result.html, result.final_url, result.kind
 
 
 # ---- reviews ----------------------------------------------------------------
