@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RefreshCw, ShieldCheck, AlertCircle, LoaderCircle, X, ChevronLeft, ChevronRight } from '@lucide/vue'
 import { credentialFields, credentialSources, cookieForms } from './credentialGuides'
+import { createRedditRuntime, failureText, formatDuration } from './redditRuntime'
 
 const props = defineProps<{ request: (path: string, options?: RequestInit) => Promise<any> }>()
 const state = ref<any>(null)
@@ -34,8 +35,19 @@ const redditBusy = ref(false)
 const redditError = ref('')
 const redditNotice = ref('')
 const redditBackendChoice = ref('http')
-const redditRuntime = computed(() => state.value?.reddit_runtime ?? { backend: 'http', available: false })
-const browserFailure: Record<string, string> = { forbidden: '平台拒绝访问（403）', auth: '需要更新登录会话', risk: '需要人工处理平台验证', rate_limit: '平台限流，等待冷却', network: '请求超时', browser: '浏览器尚未就绪', interface: '响应结构异常', missing: '缺少登录凭证' }
+const nowTs = ref(Date.now() / 1000)
+let clockTimer: ReturnType<typeof setInterval> | undefined
+const redditModel = createRedditRuntime(
+  () => state.value?.reddit_runtime,
+  () => nowTs.value,
+  { redditBusy: () => redditBusy.value, checking: () => checking.value },
+)
+const redditRuntime = computed(redditModel.runtime)
+const cooldownRemaining = computed(redditModel.cooldownRemaining)
+const inCooldown = computed(redditModel.inCooldown)
+const sessionMismatch = computed(redditModel.sessionMismatch)
+const startBlockedReason = computed(redditModel.startBlockedReason)
+const startDisabled = computed(redditModel.startDisabled)
 let timer: ReturnType<typeof setInterval>
 const platforms = computed<any[]>(() => state.value?.platforms ?? [])
 const current = computed(() => platforms.value.find(p => p.id === selected.value))
@@ -141,8 +153,8 @@ async function save() {
   } catch (e) { saveError.value = e instanceof Error ? e.message : '更新未确认，请刷新状态后核对' }
   finally { saving.value = false }
 }
-onMounted(async () => { await refresh(); timer = setInterval(() => { if (!document.hidden) void refresh() }, 5000) })
-onUnmounted(() => { clearInterval(timer); values.value = {} })
+onMounted(async () => { await refresh(); timer = setInterval(() => { if (!document.hidden) void refresh() }, 5000); clockTimer = setInterval(() => { nowTs.value = Date.now() / 1000 }, 1000) })
+onUnmounted(() => { clearInterval(timer); clearInterval(clockTimer); values.value = {} })
 defineExpose({ refresh })
 </script>
 
@@ -207,17 +219,18 @@ defineExpose({ refresh })
           <select id="reddit-backend" v-model="redditBackendChoice" :disabled="redditBusy || checking || redditRuntime.backend_locked" @change="redditAction(redditBackendChoice as 'http' | 'opencli')"><option value="http">HTTP · 现有方式</option><option value="opencli">OpenCLI · 浏览器试点</option></select>
           <span :class="['badge', redditRuntime.available ? 'green' : 'amber']">{{ redditRuntime.available ? '工作进程已连接' : '工作进程未连接' }}</span>
           <span class="badge neutral">{{ redditRuntime.running ? '浏览器运行中' : '浏览器已停止' }}</span>
-          <span class="badge neutral">{{ redditRuntime.session_imported ? (redditRuntime.session_current ? '会话已导入' : '凭证已变更 · 待更新会话') : '尚未导入会话' }}</span>
+          <span :class="['badge', redditRuntime.session_imported ? (redditRuntime.session_current ? 'green' : 'amber') : 'neutral']">{{ redditRuntime.session_imported ? (redditRuntime.session_current ? '会话与当前配置一致' : '会话与当前配置不一致 · 需重新导入') : '尚未导入会话' }}</span>
         </div>
         <div class="node-toolbar platform-toolbar">
-          <button class="button secondary" :disabled="redditBusy || checking || !redditRuntime.available || redditRuntime.busy" @click="redditAction('start')">启动 / 更新会话</button>
+          <button class="button secondary" :disabled="startDisabled" :title="startBlockedReason" @click="redditAction('start')">启动 / 更新会话</button>
           <button class="button secondary" :disabled="redditBusy || checking || !redditRuntime.running || redditRuntime.busy" @click="redditAction('stop')">停止浏览器</button>
           <button class="button primary" :disabled="blocked || redditBusy" @click="check('reddit')">检测两个代表接口</button>
         </div>
         <p>浏览器按需启动，空闲 {{ Math.round((redditRuntime.idle_seconds ?? 600) / 60) }} 分钟自动关闭；刷新页面仅读取本地状态。</p>
         <p v-if="redditRuntime.version">OpenCLI {{ redditRuntime.version }} · 最近活动 {{ date(redditRuntime.last_activity) }}</p>
-        <p v-if="redditRuntime.last_failure" class="platform-finding">最近浏览器结果：{{ browserFailure[redditRuntime.last_failure] ?? '请求未完成' }}。当前接口状态以下方统一检测记录为准。</p>
-        <p v-if="redditRuntime.cooldown_until > Date.now() / 1000">限流冷却至 {{ date(redditRuntime.cooldown_until) }}</p>
+        <p v-if="redditRuntime.last_failure" class="platform-finding" role="status">最近浏览器结果：{{ failureText(redditRuntime.last_failure) }}。当前接口状态以下方统一检测记录为准。</p>
+        <p v-if="inCooldown" class="platform-finding reddit-cooldown" role="status">限流冷却中 · 剩余 {{ formatDuration(cooldownRemaining) }} · 冷却至 {{ date(redditRuntime.cooldown_until) }}；期间启动按钮已禁用。</p>
+        <p v-if="sessionMismatch" class="monitoring-error" role="alert">配置中的 Reddit Cookie 已变更，与浏览器已导入会话不一致，请点击“启动 / 更新会话”重新导入。</p>
         <p v-if="redditNotice" role="status">{{ redditNotice }}</p><p v-if="redditError" class="monitoring-error" role="alert">{{ redditError }}</p>
       </section>
 

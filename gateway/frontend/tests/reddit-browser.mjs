@@ -13,10 +13,11 @@ try {
   const initial = await (await context.request.get(`${base}/api/platforms?platform=reddit`)).json()
   expect(initial.mcp_connected).toBeTruthy()
   expect(initial.reddit_runtime.backend).toBe('http')
+  const runtimeFixture = { backend: 'http', available: true, running: true, session_imported: true, session_current: true, busy: false, version: '2.0.2', idle_seconds: 600, last_failure: null, cooldown_until: 0 }
   await page.route('**/api/platforms?*', async route => {
     const response = await route.fetch()
     const data = await response.json()
-    data.reddit_runtime = { backend: 'http', available: true, running: true, session_imported: true, session_current: true, busy: false, version: '2.0.2', idle_seconds: 600 }
+    data.reddit_runtime = { ...runtimeFixture }
     data.job = { status: 'idle', cooldown_seconds: 0 }
     await route.fulfill({ response, json: data })
   })
@@ -47,6 +48,28 @@ try {
   await page.getByRole('button', { name: '检测两个代表接口', exact: true }).click()
   await expect.poll(() => writes.length).toBe(4)
   expect(writes[3].body).toEqual({ platform: 'reddit' })
+
+  // Cooldown after a 429: start is disabled pre-emptively with a reason, no 409 round trip.
+  Object.assign(runtimeFixture, { running: false, last_failure: 'rate_limit', cooldown_until: Date.now() / 1000 + 1800 })
+  const startButton = page.getByRole('button', { name: '启动 / 更新会话', exact: true })
+  await expect.poll(async () => (await startButton.isDisabled()) ? 'disabled' : 'enabled', { timeout: 10000 }).toBe('disabled')
+  await expect(page.getByText(/限流冷却中/)).toBeVisible()
+  await expect(page.getByText(/429/).first()).toBeVisible()
+  expect((await startButton.getAttribute('title'))).toContain('冷却')
+  await startButton.click({ force: false }).catch(() => {})
+  expect(writes.length).toBe(4)
+
+  // Config cookie changed while an old session stays imported: mismatch prompt, no raw failure text.
+  Object.assign(runtimeFixture, { running: true, last_failure: null, cooldown_until: 0, session_current: false })
+  await expect(page.getByText(/会话与当前配置不一致/)).toBeVisible({ timeout: 10000 })
+  await expect(page.getByText(/重新导入/)).toBeVisible()
+  await expect.poll(async () => (await startButton.isDisabled()) ? 'disabled' : 'enabled', { timeout: 10000 }).toBe('enabled')
+
+  // An unknown failure category is normalised to the generic copy rather than echoed.
+  Object.assign(runtimeFixture, { last_failure: 'mystery_blob_9f3a', session_current: true })
+  await expect(page.getByText(/未知失败/)).toBeVisible({ timeout: 10000 })
+  expect(await page.locator('.reddit-runtime').innerText()).not.toContain('mystery_blob_9f3a')
+
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 1100 })
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy()

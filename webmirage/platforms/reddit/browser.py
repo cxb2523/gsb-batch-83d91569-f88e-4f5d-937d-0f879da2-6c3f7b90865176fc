@@ -1,9 +1,9 @@
 """Private local browser worker client. Cookies travel in a Unix socket body."""
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
-import hashlib
 import os
 import socket
 from pathlib import Path
@@ -11,6 +11,15 @@ from pathlib import Path
 from .client import RedditError
 
 SUPPORTED_TOOLS = ('reddit_search', 'reddit_subreddit_posts')
+# Only failure categories emitted by the reviewed worker contract are surfaced;
+# anything else (tampered worker-state, older/newer worker) becomes 'unknown'.
+KNOWN_FAILURES = frozenset(('browser', 'missing', 'busy', 'unsupported', 'bad_input',
+                            'network', 'forbidden', 'rate_limit', 'risk', 'auth', 'interface'))
+# Whitelist of status keys allowed to leave the private socket boundary. Cookie
+# text, cookie digests and raw exception strings are never part of this list.
+STATUS_FIELDS = ('available', 'version', 'running', 'session_imported', 'busy',
+                 'last_activity', 'last_failure', 'cooldown_until', 'idle_seconds',
+                 'session_current')
 ERRORS = {
     'browser': 'browser_unavailable 浏览器工作进程未就绪，请在平台管理页启动浏览器。',
     'missing': 'login_required 缺少 reddit_session，请先更新 Reddit 登录凭证。',
@@ -57,7 +66,9 @@ def worker_call(payload, *, timeout=36, path=None):
         raise
     except (TimeoutError, socket.timeout):
         raise RedditError(ERRORS['network']) from None
-    except (OSError, ValueError, http.client.HTTPException):
+    except (OSError, ValueError, http.client.HTTPException, AttributeError):
+        # AttributeError covers runtimes without AF_UNIX (e.g. some Windows
+        # builds): a missing worker is reported as unavailable, never raised.
         raise RedditError(ERRORS['browser']) from None
     finally:
         connection.close()
@@ -66,8 +77,11 @@ def worker_call(payload, *, timeout=36, path=None):
 def runtime_status(config):
     try:
         raw = worker_call({'action': 'status', 'revision': hashlib.sha256(config.get('reddit_cookie', '').encode()).hexdigest()}, timeout=2)['status']
-        status = {k: raw[k] for k in ('available', 'version', 'running', 'session_imported', 'busy',
-                                     'last_activity', 'last_failure', 'cooldown_until', 'idle_seconds', 'session_current') if k in raw}
+        status = {k: raw[k] for k in STATUS_FIELDS if k in raw}
+        failure = status.get('last_failure')
+        if failure is not None and failure not in KNOWN_FAILURES:
+            # Never pass an unknown failure string through to the page or logs.
+            status['last_failure'] = 'unknown'
     except (RedditError, KeyError, TypeError):
         status = {'available': False, 'running': False, 'session_imported': False}
     return {'backend': config.get('reddit_backend', 'http'), 'backend_locked': bool(os.environ.get('REDDIT_BACKEND')),

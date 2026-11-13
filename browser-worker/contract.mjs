@@ -1,6 +1,17 @@
 // Only the two reviewed read actions are executable. Never return upstream errors.
 export const VERSION = '2.0.2'
 export const TOOLS = ['reddit_search', 'reddit_subreddit_posts']
+// Failure categories that may be persisted in worker-state.json. Anything else
+// written to the file is discarded on restart instead of being surfaced.
+const STATE_FAILURES = ['rate_limit', 'forbidden', 'risk', 'auth', 'network', 'interface', 'browser', 'missing']
+export function restoreState(saved) {
+  const state = { cooldownUntil: 0, lastFailure: null }
+  if (saved && typeof saved === 'object') {
+    if (Number.isFinite(saved.cooldown_until)) state.cooldownUntil = saved.cooldown_until
+    if (STATE_FAILURES.includes(saved.last_failure)) state.lastFailure = saved.last_failure
+  }
+  return state
+}
 export function input(body) {
   if (!body || !['status', 'start', 'stop', 'query'].includes(body.action)) throw new Error('bad_input')
   if (body.action === 'status' || body.action === 'stop') return { action: body.action,

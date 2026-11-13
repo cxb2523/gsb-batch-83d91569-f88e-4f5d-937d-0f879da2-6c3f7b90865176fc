@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { argv, input, rows, failure } from './contract.mjs'
+import { argv, input, rows, failure, restoreState } from './contract.mjs'
 
 test('read allowlist excludes writes, arbitrary commands and invalid arguments', () => {
   for (const tool of ['reddit_comment', 'reddit_upvote', 'browser', 'reddit_post']) {
@@ -32,4 +32,19 @@ test('listing fields preserve the existing MCP post contract', () => {
   assert.equal(result[0].num_comments, 2)
   assert.equal(result[0].subreddit, 'python')
   assert.equal(result[0].permalink, '/r/python/comments/abc/title/')
+})
+test('restored cooldown and rate-limit failure survive a restart', () => {
+  const until = Date.now() / 1000 + 900
+  const state = restoreState({ cooldown_until: until, last_failure: 'rate_limit' })
+  assert.equal(state.cooldownUntil, until)
+  assert.equal(state.lastFailure, 'rate_limit')
+})
+test('unknown persisted failure and malformed state fall back to safe defaults', () => {
+  assert.deepEqual(restoreState({ cooldown_until: 100, last_failure: 'mystery_blob' }),
+    { cooldownUntil: 100, lastFailure: null })
+  for (const saved of [null, {}, { cooldown_until: 'soon' }, { last_failure: 42 }, 'garbage', 42]) {
+    const state = restoreState(saved)
+    assert.equal(state.cooldownUntil, 0)
+    assert.equal(state.lastFailure, null)
+  }
 })

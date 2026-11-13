@@ -6,7 +6,7 @@ import { readFile, writeFile, mkdir, chmod, unlink, stat } from 'node:fs/promise
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
-import { VERSION, TOOLS, input, argv, rows } from './contract.mjs'
+import { VERSION, TOOLS, input, argv, rows, restoreState } from './contract.mjs'
 
 process.umask(0o077)
 const root = dirname(fileURLToPath(import.meta.url))
@@ -27,9 +27,13 @@ const operationMs = Math.max(1000, Math.min(32000, Number(process.env.REDDIT_BRO
 let context, page, endpoint, cookieRevision, activeChild, busy = false, lastActivity = 0, lastFailure = null, cooldownUntil = 0
 const stateFile = resolve(dirname(profile), 'worker-state.json')
 await mkdir(dirname(stateFile), { recursive: true, mode: 0o700 })
-const savedState = JSON.parse(await readFile(stateFile, 'utf8').catch(() => '{}'))
-if (Number.isFinite(savedState.cooldown_until)) cooldownUntil = savedState.cooldown_until
-if (['rate_limit','forbidden','risk','auth','network','interface','browser','missing'].includes(savedState.last_failure)) lastFailure = savedState.last_failure
+// Corrupt or tampered state must never take the worker down or surface raw text.
+let savedState = {}
+try { savedState = JSON.parse(await readFile(stateFile, 'utf8')) }
+catch (error) { if (error.code !== 'ENOENT') savedState = {} }
+const restored = restoreState(savedState)
+cooldownUntil = restored.cooldownUntil
+lastFailure = restored.lastFailure
 const digest = s => createHash('sha256').update(s).digest('hex')
 function status() {
   return { available: true, version: VERSION, running: !!context, session_imported: !!cookieRevision,
