@@ -1190,6 +1190,36 @@ def test_page_flow():
     ok &= check("a spent round budget is neither settled nor on target",
                 res["settled"] is False and res["reached_target"] is False)
 
+    # THE PER-ROUND SCROLL RECORD. The old sidecar kept only the end state;
+    # whether a run scrolled cleanly or stalled round by round was left in
+    # the log. scroll_progress rebuilds the history from the scroll's own
+    # boundaries, so it can never disagree with the scroll block.
+    progress = page_flow.scroll_progress([22, 42, 82])
+    ok &= check("scroll_progress carries one row per round",
+                progress == [{"round": 0, "cards": 22, "added": 22},
+                             {"round": 1, "cards": 42, "added": 20},
+                             {"round": 2, "cards": 82, "added": 40}])
+    ok &= check("the first round counts its whole grid as new",
+                progress[0]["added"] == 22 and progress[0]["cards"] == 22)
+    # The measured zero-growth round 7 (182 -> 182) followed by a growing
+    # round 8. The zero must stay in the record rather than be treated as the
+    # end or merged away — losing it would fabricate a history without the
+    # stall this record exists to document.
+    with_zero = page_flow.scroll_progress(
+        [22, 42, 182, 182, 222, 242])
+    ok &= check("a zero-growth round is kept as a real zero, not as the end",
+                with_zero[3] == {"round": 3, "cards": 182, "added": 0}
+                and with_zero[4] == {"round": 4, "cards": 222, "added": 40}
+                and len(with_zero) == 6)
+    ok &= check("round numbers are the scroll's own 0-based indices",
+                [r["round"] for r in with_zero] == [0, 1, 2, 3, 4, 5])
+    ok &= check("no boundaries means no per-round record",
+                page_flow.scroll_progress([]) == []
+                and page_flow.scroll_progress(None) == [])
+    ok &= check("the record is derived from boundaries, not re-measured",
+                page_flow.scroll_progress(res["boundaries"])[-1]["cards"]
+                == res["boundaries"][-1])
+
     # pages_completed counts BATCHES the RUN HOLDS — from the rows in the
     # file, not from the scroll's own last count. The two differ: the scroll
     # stops the moment its target is reached and the page keeps hydrating
@@ -1239,10 +1269,23 @@ def test_page_flow():
                 == "scroll_stalled")
     ok &= check("...and scroll_stalled is NOT a complete stop reason",
                 "scroll_stalled" not in COMPLETE_STOP_REASONS)
-    ok &= check("where the site advertises no total, a settled scroll still "
-                "reads as exhausted — there is nothing better to judge by",
+    # The missing/zero-total boundary. No heading, or a heading that reads 0
+    # beside a non-empty grid, can never prove exhaustion — only a POSITIVE
+    # advertised total that the rows have actually taken can. Both must stay
+    # scroll_stalled rather than being reported as a clean no_new_products.
+    ok &= check("where the site advertises no total, a settled grid is a "
+                "STALL — nothing exists that could prove it ran out",
                 page_flow.listing_stop_reason(settled, {"total_available": None},
-                                              22) == "no_new_products")
+                                              22) == "scroll_stalled")
+    ok &= check("a zero advertised total beside real rows is a stall, not an "
+                "exhausted empty catalogue",
+                page_flow.listing_stop_reason(settled, {"total_available": 0},
+                                              22) == "scroll_stalled")
+    ok &= check("a zero advertised total with zero rows still reads as the "
+                "exhausted branch only through the positive-total rule — it "
+                "does not crash",
+                page_flow.listing_stop_reason(settled, {"total_available": 0},
+                                              0) == "scroll_stalled")
     ok &= check("reaching the batches that were asked for is complete",
                 page_flow.listing_stop_reason(
                     {"settled": False, "reached_target": True},
@@ -1254,6 +1297,93 @@ def test_page_flow():
                 == "scroll_budget_exhausted")
     ok &= check("no scroll at all is not silently complete",
                 page_flow.listing_stop_reason(None, None, 0)
+                == "scroll_budget_exhausted")
+
+    # THE THREE-WAY STOP SUMMARY, pure over the two sidecar blocks. This is
+    # the word the Playwright sidecar's scroll_progress.stop_summary carries,
+    # and it must draw the same evidence lines a human would.
+    target_scroll = {"settled": False, "reached_target": True,
+                     "boundaries": [22, 62]}
+    settled_scroll = {"settled": True, "reached_target": False,
+                      "boundaries": [22, 40]}
+    growing_scroll = {"settled": False, "reached_target": False,
+                      "boundaries": [22, 182]}
+    ok &= check("summary: hitting the --pages target is target_reached even "
+                "with more advertised",
+                page_flow.scroll_stop_summary(
+                    target_scroll, {"total_available": 1546,
+                                    "rows_collected": 62})
+                == page_flow.SCROLL_SUMMARY_TARGET)
+    ok &= check("summary: a settled grid that has taken the advertised total "
+                "is listing_exhausted",
+                page_flow.scroll_stop_summary(
+                    settled_scroll, {"total_available": 40,
+                                     "rows_collected": 40})
+                == page_flow.SCROLL_SUMMARY_EXHAUSTED)
+    ok &= check("summary: a settled grid below the advertised total is a "
+                "stall",
+                page_flow.scroll_stop_summary(
+                    settled_scroll, {"total_available": 1546,
+                                     "rows_collected": 40})
+                == page_flow.SCROLL_SUMMARY_STALLED)
+    ok &= check("summary: no advertised total means the stall cannot be "
+                "upgraded to exhaustion",
+                page_flow.scroll_stop_summary(
+                    settled_scroll, {"total_available": None,
+                                     "rows_collected": 40})
+                == page_flow.SCROLL_SUMMARY_STALLED)
+    ok &= check("summary: a zero advertised total is treated like a missing "
+                "one",
+                page_flow.scroll_stop_summary(
+                    settled_scroll, {"total_available": 0,
+                                     "rows_collected": 40})
+                == page_flow.SCROLL_SUMMARY_STALLED)
+    ok &= check("summary: a still-growing grid that spent its budget is the "
+                "budget outcome",
+                page_flow.scroll_stop_summary(
+                    growing_scroll, {"total_available": 1546,
+                                     "rows_collected": 182})
+                == page_flow.SCROLL_SUMMARY_BUDGET)
+    ok &= check("summary: no scroll at all is the budget outcome, never a "
+                "silent completion",
+                page_flow.scroll_stop_summary(None, None)
+                == page_flow.SCROLL_SUMMARY_BUDGET)
+
+    # PLAYWRIGHT'S TOP-LEVEL MAPPING. Stricter than the shared helper used by
+    # the other two engines: a settled grid is never itself completion, so a
+    # genuine exhaustion is ALSO partial/exit 6, while still being named
+    # distinctly from a stall.
+    ok &= check("playwright: reaching the target stays 'completed'",
+                page_flow.playwright_listing_stop_reason(
+                    target_scroll, {"total_available": 1546,
+                                    "rows_collected": 62}, 62)
+                == "completed")
+    ok &= check("playwright: genuine exhaustion is named listing_exhausted",
+                page_flow.playwright_listing_stop_reason(
+                    settled_scroll, {"total_available": 40,
+                                     "rows_collected": 40}, 40)
+                == page_flow.STOP_REASON_EXHAUSTED)
+    ok &= check("playwright: ...and listing_exhausted is NOT a complete stop "
+                "reason",
+                page_flow.STOP_REASON_EXHAUSTED not in COMPLETE_STOP_REASONS)
+    ok &= check("playwright: a stall stays scroll_stalled",
+                page_flow.playwright_listing_stop_reason(
+                    settled_scroll, {"total_available": 1546,
+                                     "rows_collected": 40}, 40)
+                == "scroll_stalled")
+    ok &= check("playwright: missing/zero totals can never be exhausted",
+                page_flow.playwright_listing_stop_reason(
+                    settled_scroll, {"total_available": None,
+                                     "rows_collected": 40}, 40)
+                == "scroll_stalled"
+                and page_flow.playwright_listing_stop_reason(
+                    settled_scroll, {"total_available": 0,
+                                     "rows_collected": 40}, 40)
+                == "scroll_stalled")
+    ok &= check("playwright: a spent budget stays scroll_budget_exhausted",
+                page_flow.playwright_listing_stop_reason(
+                    growing_scroll, {"total_available": 1546,
+                                     "rows_collected": 182}, 182)
                 == "scroll_budget_exhausted")
 
     # The retry budget, computed in ONE place so the engines cannot disagree
@@ -1706,13 +1836,40 @@ def test_canary_separates_access_from_defect():
                      url=r["url"].rsplit("/", 2)[0] + "/%d/" % (33112227 + i))
             rows.append(r)
         meta = {"pages_completed": 3, "status": "complete", "mode": "listing",
-                "scroll": {"reached_target": True},
-                "completeness": {"total_available": 1782}}
+                "scroll": {"reached_target": True, "cards": 60},
+                "completeness": {"total_available": 1782},
+                "scroll_progress": {
+                    "rounds": [{"round": 0, "cards": 22, "added": 22},
+                               {"round": 1, "cards": 42, "added": 20},
+                               {"round": 2, "cards": 60, "added": 18}],
+                    "stop_summary": "target_reached"}}
         fail, _ = cc.check(rows, meta)
         ok &= check("canary_check passes a healthy run of the newer cards",
                     fail == [])
         if fail:
             print("        " + "; ".join(fail)[:400])
+        # The new per-round record is itself a canary assertion: a sidecar
+        # that lost it, or whose rounds do not reconstruct the final count,
+        # must fail rather than quietly lose the stall/exhaustion evidence.
+        missing_progress = {k: v for k, v in meta.items()
+                            if k != "scroll_progress"}
+        fail, _ = cc.check(rows, missing_progress)
+        ok &= check("...and fails when scroll_progress is missing",
+                    any("scroll_progress" in f for f in fail))
+        broken = dict(meta, scroll_progress={
+            "rounds": [{"round": 0, "cards": 22, "added": 22},
+                       {"round": 1, "cards": 42, "added": 20}],
+            "stop_summary": "target_reached"})
+        broken["scroll"] = {"reached_target": True, "cards": 99}
+        fail, _ = cc.check(rows, broken)
+        ok &= check("...and fails when the rounds disagree with the scroll "
+                    "block's card count",
+                    any("disagree" in f for f in fail))
+        bad_summary = dict(meta, scroll_progress=dict(
+            meta["scroll_progress"], stop_summary="made-up"))
+        fail, _ = cc.check(rows, bad_summary)
+        ok &= check("...and fails on an unrecognised stop_summary",
+                    any("stop_summary" in f for f in fail))
         leaked = [dict(r, hub="EMI 15,916", emi_monthly=None) for r in rows]
         fail, _ = cc.check(leaked, meta)
         ok &= check("...and fails when the EMI line lands in the hub",
@@ -2180,8 +2337,19 @@ def test_single_fetch_run(skips):
             outcome.scroll = scroll
             outcome.completeness = {"total_available": advertised,
                                     "rows_collected": rows,
-                                    "short_by": max(0, advertised - rows)}
-            outcome.header = "%d Used cars in Delhi NCR" % advertised
+                                    "short_by": (max(0, advertised - rows)
+                                                 if advertised else None)}
+            # Mirror the real engine: the per-round record is derived from
+            # the scroll's own boundaries plus the completeness block, so the
+            # stubbed run exercises the same sidecar shape as a live one.
+            if args.mode == "listing":
+                outcome.scroll_progress = {
+                    "rounds": page_flow.scroll_progress(
+                        (scroll or {}).get("boundaries")),
+                    "stop_summary": page_flow.scroll_stop_summary(
+                        scroll, outcome.completeness)}
+            outcome.header = ("%s Used cars in Delhi NCR" % advertised
+                              if advertised is not None else None)
             if not ok_page:
                 outcome.blocked_by = "not-served"
                 return outcome
@@ -2229,13 +2397,17 @@ def test_single_fetch_run(skips):
                 all(s.closed for s in sessions))
 
     # 2. THE STATUS MAPPING. A grid that stopped growing WITH THE SITE'S OWN
-    #    COUNT AGREEING is the listing running out — the DATA-based
-    #    terminating condition — and that is a COMPLETE run. The run stubbed
-    #    here advertises 1559 and holds 1559.
-    ok &= check("a settled scroll reports no_new_products",
-                meta and meta["stop_reason"] == "no_new_products")
-    ok &= check("...and the run is complete", meta and meta["status"] == "complete")
-    ok &= check("...and exits 0", code == 0)
+    #    COUNT AGREEING is the listing genuinely running out — but on the
+    #    Playwright engine a settled grid is still a statement about THIS
+    #    session, so it is named listing_exhausted and reported PARTIAL
+    #    (exit 6), never as a complete run. Only hitting the explicit
+    #    --pages target completes. The stub here advertises 3 and holds 3.
+    ok &= check("a settled, fully-taken grid reports listing_exhausted",
+                meta and meta["stop_reason"]
+                == page_flow.STOP_REASON_EXHAUSTED)
+    ok &= check("...and the run is PARTIAL rather than complete",
+                meta and meta["status"] == "partial")
+    ok &= check("...and exits 6", code == EXIT_PARTIAL)
     # pages_completed counts BATCHES delivered, not URLs fetched.
     ok &= check("pages_completed counts the batches the run holds",
                 meta and meta["pages_completed"] == 1)
@@ -2243,6 +2415,22 @@ def test_single_fetch_run(skips):
                 meta and meta["completeness"]["short_by"] == 0)
     ok &= check("...and the listing's own heading",
                 meta and meta["listing_heading"].endswith("Used cars in Delhi NCR"))
+    # The new block sits BESIDE scroll and completeness without replacing
+    # either — the older keys keep their exact shape and are still present.
+    ok &= check("the sidecar keeps its scroll block",
+                meta and meta["scroll"] == settled)
+    ok &= check("...and keeps its completeness block",
+                meta and meta["completeness"]["total_available"] == 3)
+    ok &= check("...and adds scroll_progress beside them",
+                meta and "scroll_progress" in meta)
+    ok &= check("scroll_progress carries the per-round history from the "
+                "scroll's own boundaries",
+                meta and meta["scroll_progress"]["rounds"]
+                == [{"round": 0, "cards": 22, "added": 22},
+                    {"round": 1, "cards": 302, "added": 280}])
+    ok &= check("...and names the listing_exhausted stop summary",
+                meta and meta["scroll_progress"]["stop_summary"]
+                == page_flow.SCROLL_SUMMARY_EXHAUSTED)
 
     # THE STALL, which a live run through a rotating residential gateway
     # produced: the grid stops growing because the hydration XHR never lands,
@@ -2255,6 +2443,25 @@ def test_single_fetch_run(skips):
     ok &= check("...and exits 6", code == EXIT_PARTIAL)
     ok &= check("...with the contradiction visible in the sidecar",
                 meta and meta["completeness"]["short_by"] == 1543)
+    ok &= check("...and the summary word is scroll_stalled",
+                meta and meta["scroll_progress"]["stop_summary"]
+                == page_flow.SCROLL_SUMMARY_STALLED)
+
+    # The missing/zero advertised-total boundary at run level: neither can be
+    # evidence that the listing ran out, so a settled grid must stay a stall
+    # even when no usable total is published.
+    fetched, code, meta, _ = run(settled, rows=3, advertised=None)
+    ok &= check("no advertised total: a settled grid is still a stall",
+                meta and meta["stop_reason"] == "scroll_stalled"
+                and meta["status"] == "partial" and code == EXIT_PARTIAL)
+    ok &= check("...and the summary refuses to call it exhausted",
+                meta and meta["scroll_progress"]["stop_summary"]
+                == page_flow.SCROLL_SUMMARY_STALLED)
+    fetched, code, meta, _ = run(settled, rows=3, advertised=0)
+    ok &= check("a zero advertised total is treated like a missing one",
+                meta and meta["stop_reason"] == "scroll_stalled"
+                and meta["scroll_progress"]["stop_summary"]
+                == page_flow.SCROLL_SUMMARY_STALLED)
 
     # 3. Reaching the target the caller asked for is ALSO complete: the
     #    request was satisfied, and `short_by` is what says there is more.
@@ -2264,6 +2471,10 @@ def test_single_fetch_run(skips):
     ok &= check("reaching --pages worth of cars reports completed",
                 meta and meta["stop_reason"] == "completed")
     ok &= check("...and is a complete run", meta and meta["status"] == "complete")
+    ok &= check("...and exits 0", code == 0)
+    ok &= check("...and the summary word is target_reached",
+                meta and meta["scroll_progress"]["stop_summary"]
+                == page_flow.SCROLL_SUMMARY_TARGET)
 
     # 4. A spent round budget with the page still growing is PARTIAL, and has
     #    to say so — the missing tail would otherwise read as delisted cars
@@ -2278,13 +2489,41 @@ def test_single_fetch_run(skips):
     ok &= check("...and exits 6", code == EXIT_PARTIAL)
     ok &= check("scroll_budget_exhausted is not a complete stop reason",
                 "scroll_budget_exhausted" not in COMPLETE_STOP_REASONS)
+    ok &= check("...and the summary word is scroll_budget_exhausted",
+                meta and meta["scroll_progress"]["stop_summary"]
+                == page_flow.SCROLL_SUMMARY_BUDGET)
 
-    # 5. --mode detail is complete by construction: there is no page 2.
+    # A zero-growth round followed by a growing one — the measured round-7
+    # shape. The zero must survive in the sidecar history rather than being
+    # treated as the end of the scroll.
+    zero_then_grow = {"settled": False, "reached_target": True, "rounds": 5,
+                      "cards": 222, "height": 24427,
+                      "boundaries": [22, 42, 182, 182, 222]}
+    fetched, code, meta, _ = run(zero_then_grow, advertised=1546)
+    rounds = meta and meta["scroll_progress"]["rounds"]
+    ok &= check("a zero-growth round is recorded as added 0, not dropped",
+                rounds and rounds[3] == {"round": 3, "cards": 182,
+                                         "added": 0})
+    ok &= check("...and the next round's growth is still recorded",
+                rounds and rounds[4] == {"round": 4, "cards": 222,
+                                         "added": 40})
+    ok &= check("...and the scroll was not ended by the zero round",
+                meta and meta["stop_reason"] == "completed")
+
+    # 5. --mode detail is complete by construction: there is no page 2. It
+    #    never scrolls, so it must carry NO per-round record, and its
+    #    single_page_mode status must be unchanged.
     fetched, code, meta, _ = run(None, rows=1, mode="detail")
     ok &= check("a detail run reports single_page_mode",
                 meta and meta["stop_reason"] == "single_page_mode")
     ok &= check("...with one page completed",
                 meta and meta["pages_completed"] == 1)
+    ok &= check("...and stays complete / exit 0",
+                meta and meta["status"] == "complete" and code == 0)
+    ok &= check("...and produces no scroll_progress record",
+                meta and "scroll_progress" not in meta)
+    ok &= check("...and no scroll block either, since detail never scrolls",
+                meta and "scroll" not in meta)
 
     # 6. A blocked page writes NO output and NO sidecar — `save` leaves the
     #    previous good run in place, and a "failed" sidecar beside good data
@@ -2299,7 +2538,8 @@ def test_single_fetch_run(skips):
     ok &= check("--concurrency 8 still fetches exactly one URL",
                 len(fetched) == 1)
     ok &= check("...and the run is otherwise identical",
-                meta and meta["stop_reason"] == "no_new_products")
+                meta and meta["stop_reason"]
+                == page_flow.STOP_REASON_EXHAUSTED)
     return ok
 
 

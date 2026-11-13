@@ -216,6 +216,45 @@ def check(rows, meta):
         fail.append("the scroll neither settled nor reached its target, so "
                     "this run is a floor rather than the listing")
 
+    # The per-round record must reconstruct the run: it is the only place a
+    # stall can be distinguished from a clean exhaustion AFTER the run, so a
+    # listing sidecar without a well-formed one has lost that evidence. The
+    # checks are structural rather than value-pinned — the real card counts
+    # move with inventory — but the internal arithmetic cannot.
+    progress = meta.get("scroll_progress")
+    known_summaries = {"target_reached", "listing_exhausted",
+                       "scroll_stalled", "scroll_budget_exhausted"}
+    if not isinstance(progress, dict):
+        fail.append("the sidecar has no scroll_progress block: the per-round "
+                    "scroll history that distinguishes a stall from an "
+                    "exhaustion is missing")
+    else:
+        rounds = progress.get("rounds")
+        if not isinstance(rounds, list) or not rounds:
+            fail.append("scroll_progress.rounds is empty or not a list")
+        else:
+            well_formed = all(
+                isinstance(r, dict)
+                and isinstance(r.get("round"), int)
+                and isinstance(r.get("cards"), int)
+                and isinstance(r.get("added"), int)
+                and r["round"] == i and r["cards"] >= 0 and r["added"] >= 0
+                for i, r in enumerate(rounds))
+            if not well_formed:
+                fail.append("scroll_progress.rounds are not contiguous, "
+                            "non-negative round/cards/added records")
+            elif sum(r["added"] for r in rounds) != rounds[-1]["cards"]:
+                fail.append("the scroll rounds' increments do not sum to the "
+                            "final card total: the history is internally "
+                            "inconsistent")
+            elif scroll and rounds[-1]["cards"] != scroll.get("cards"):
+                fail.append("scroll_progress ends on a different card count "
+                            "than the scroll block: the two records disagree")
+        if progress.get("stop_summary") not in known_summaries:
+            fail.append("scroll_progress.stop_summary %r is not one of %s"
+                        % (progress.get("stop_summary"),
+                           sorted(known_summaries)))
+
     # The advertised total moves between runs, so what is asserted is that
     # it EXISTS and is sane, not its value.
     comp = meta.get("completeness") or {}

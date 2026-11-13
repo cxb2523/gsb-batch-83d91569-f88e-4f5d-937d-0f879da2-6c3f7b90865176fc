@@ -156,6 +156,135 @@ CARDS_PER_PAGE = 20
 # that many rounds.
 SCROLL_ROUNDS_CAP = 240
 
+# ---------------------------------------------------------------------------
+# The per-round scroll record and its three-way stop summary
+# ---------------------------------------------------------------------------
+# The sidecar's `scroll` block says only how the loop ENDED. A run that
+# ended short cannot afterwards answer the question "did it settle normally
+# or did the lazy load stall in round 3?" — the per-round history was only
+# ever in the log. `scroll_progress` keeps that history in the sidecar: one
+# row per round with the card total the round ended on and what it added.
+#
+# The `stop_summary` values are the three shapes a listing run can end in,
+# as a consumer of the sidecar reads them:
+#
+#   target_reached     the run got the --pages batches it asked for
+#   listing_exhausted  the grid stopped growing AND the site's own
+#                      advertised total has actually been taken
+#   scroll_stalled     the grid stopped growing while the site still
+#                      advertises more — or advertises no usable total, so
+#                      exhaustion can never be established
+#
+# A fourth outcome exists at the run level — `scroll_budget_exhausted`, the
+# round budget running out while the grid was still growing — and it rides
+# the same field when that happens; it is a partial outcome like the two
+# settled ones above rather than a completion.
+SCROLL_SUMMARY_TARGET = "target_reached"
+SCROLL_SUMMARY_EXHAUSTED = "listing_exhausted"
+SCROLL_SUMMARY_STALLED = "scroll_stalled"
+SCROLL_SUMMARY_BUDGET = "scroll_budget_exhausted"
+
+# The top-level stop_reason Playwright writes for a grid that settled with
+# the catalogue genuinely exhausted. It is deliberately NOT one of
+# output_writer.COMPLETE_STOP_REASONS: on this site a settled grid is a
+# statement about our session, so a run is only "complete" when it reached
+# the explicit --pages target, and both settled outcomes report partial /
+# exit 6. Distinct from scroll_stalled so the sidecar still names WHICH
+# settled outcome it was.
+STOP_REASON_EXHAUSTED = "listing_exhausted"
+
+
+def scroll_progress(boundaries: Optional[List[int]]) -> List[dict]:
+    """The per-round card history behind a scroll, for the sidecar.
+
+    Built from the scroll's own `boundaries` — the card count observed after
+    every round — rather than from a second measurement, so this record can
+    never disagree with the `scroll` block beside it.
+
+    Each entry names the round (0-based, exactly the scroll's own round
+    numbering), the total cards in the DOM at the END of that round, and how
+    many the round added over the round before it. The first round's `added`
+    is its whole count: the grid starts empty before round 0, so its 22
+    initial cars are genuinely new rather than a difference against nothing.
+
+    A round that adds ZERO is kept as a real record with `added: 0` — never
+    collapsed, never treated as the end. Round 7 of the measured Delhi scroll
+    added nothing and round 8 added forty, so dropping or merging the zero
+    would fabricate a history in which the stall never happened, which is
+    precisely the ambiguity this record exists to settle.
+    """
+    if not boundaries:
+        return []
+    rounds = []
+    previous = 0
+    for index, total in enumerate(boundaries):
+        rounds.append({
+            "round": index,
+            "cards": total,
+            "added": total - previous,
+        })
+        previous = total
+    return rounds
+
+
+def scroll_stop_summary(scroll: Optional[dict],
+                        completeness: Optional[dict]) -> str:
+    """Why a listing scroll stopped, as the sidecar's machine-readable word.
+
+    Pure policy over the two blocks the run already builds, so it is testable
+    with stubbed counts and local HTML and never reaches for a browser. The
+    ordering mirrors the live loop:
+
+    * reaching the --pages target wins over everything else, because the
+      request was satisfied even though more listing remains;
+    * a grid that kept growing until the round budget ran out is a floor,
+      not an exhaustion;
+    * a SETTLED grid is exhaustion only when the site publishes a positive
+      total and that total has actually been taken. Where the total is
+      missing or 0 there is nothing that could prove exhaustion, so the same
+      settled grid must read as a STALL — a zero advertised total beside a
+      non-empty grid is a parsing/environment failure, not an empty
+      catalogue.
+    """
+    scroll = scroll or {}
+    advertised = (completeness or {}).get("total_available")
+    rows_collected = (completeness or {}).get("rows_collected", 0)
+    if scroll.get("reached_target"):
+        return SCROLL_SUMMARY_TARGET
+    if not scroll.get("settled"):
+        return SCROLL_SUMMARY_BUDGET
+    if advertised and rows_collected >= advertised:
+        return SCROLL_SUMMARY_EXHAUSTED
+    return SCROLL_SUMMARY_STALLED
+
+
+def playwright_listing_stop_reason(scroll: Optional[dict],
+                                   completeness: Optional[dict],
+                                   rows_collected: int) -> str:
+    """The Playwright engine's top-level `stop_reason` for a listing run.
+
+    Shares its inputs with `scroll_stop_summary` and follows the same
+    evidence order, but maps the two SETTLED outcomes onto stop reasons that
+    are both outside output_writer.COMPLETE_STOP_REASONS: a settled grid is a
+    statement about this browser session, and only reaching the explicit
+    --pages target completes a run. So both `listing_exhausted` and
+    `scroll_stalled` come back status=partial with exit 6, while the reason
+    string still distinguishes "the catalogue really ran out" from "the lazy
+    load stopped while more was advertised".
+
+    The missing/zero-advertised-total boundary lives in
+    `scroll_stop_summary`; this function delegates rather than re-deriving it
+    so the sidecar summary and the run status cannot disagree.
+    """
+    summary = scroll_stop_summary(scroll, completeness)
+    if summary == SCROLL_SUMMARY_TARGET:
+        return "completed"
+    if summary == SCROLL_SUMMARY_EXHAUSTED:
+        return STOP_REASON_EXHAUSTED
+    if summary == SCROLL_SUMMARY_BUDGET:
+        return "scroll_budget_exhausted"
+    return "scroll_stalled"
+
 
 def scroll_rounds_for(pages: int) -> int:
     """How many scroll rounds a `--pages N` request is worth.
@@ -659,9 +788,19 @@ def listing_stop_reason(scroll: Optional[dict], completeness: Optional[dict],
     rather than an exhausted listing, and `scroll_stalled` keeps it out of
     `output_writer.COMPLETE_STOP_REASONS` — exit 6, not exit 0.
 
-    Where the site advertises no total the old reading stands: there is
-    nothing better to judge against, and calling every settled scroll partial
-    would make the status meaningless.
+    A missing or ZERO advertised total can never justify an exhaustion
+    verdict. Earlier this helper treated a missing total as
+    `no_new_products` ("nothing better to judge by"), but that let a settled
+    grid of 22 cars under no readable heading report COMPLETE while the same
+    sidecar's completeness block had no evidence the catalogue was taken. A
+    zero heading beside a non-empty grid is the same shape — the zero-result
+    page genuinely reads 0 but then holds zero rows, so 22 rows under a 0 is
+    a contradiction, not an empty catalogue. Both now return `scroll_stalled`;
+    only a POSITIVE advertised total that the rows have actually taken can
+    reach `no_new_products`. The Playwright engine goes one step stricter via
+    `playwright_listing_stop_reason`, under which even a proven exhaustion is
+    partial because a settled grid is still only a statement about the
+    session.
     """
     scroll = scroll or {}
     advertised = (completeness or {}).get("total_available")
@@ -671,7 +810,16 @@ def listing_stop_reason(scroll: Optional[dict], completeness: Optional[dict],
         # but the request was satisfied, so this is complete.
         return "completed"
     if scroll.get("settled"):
-        if advertised is not None and rows_collected < advertised:
+        # A POSITIVE advertised total is the only thing that can turn "our
+        # grid stopped growing" into "the listing ran out". A missing total
+        # (None — no heading on the page) or a zero total beside a non-empty
+        # grid proves nothing: the zero-result page genuinely reads 0 but
+        # then holds zero rows, while a settled grid of 22 under a heading
+        # that says 0 means the heading read or the session is wrong, not
+        # that 22 cars exhausted an empty catalogue. Both must stay
+        # scroll_stalled; `advertised` is truthy only for a positive count,
+        # which is what rejects None and 0 here.
+        if not advertised or rows_collected < advertised:
             return "scroll_stalled"
         # The grid stopped growing and the site's own count agrees there was
         # no more to get. That is a DATA-based terminating condition

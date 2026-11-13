@@ -1,0 +1,7 @@
+# Generated local fixtures and their run output. Reproduce both with:
+#   python -I scripts/make_fixture.py generated
+#   python -I scripts/run_local.py generated work
+# Only the scripts and README belong in git; the HTML/JSON here are derived.
+generated/
+work/
+__pycache__/

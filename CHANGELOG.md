@@ -15,6 +15,11 @@ with it, so nobody discovers it from a bill or from a diff.
 
 ### Changed
 
+- **Playwright engine, behaviour change:** a listing whose lazy-load grid settles because the advertised catalogue has genuinely run out is no longer reported as `complete` / exit 0. A settled grid is a statement about this browser session, so it is now stop reason `listing_exhausted` with status `partial` and exit 6, distinct from `scroll_stalled` (which keeps the same partial/6 result). Reaching the explicit `--pages` target (`completed`) is now the only complete listing outcome. The Selenium and pyppeteer engines keep their previous four-reason mapping; the shared `page_flow.listing_stop_reason()` they call now also treats a missing or zero advertised total beside a non-empty settled grid as `scroll_stalled` instead of `no_new_products`, since neither can prove exhaustion.
+
+### Added
+
+- **Per-round scroll record in the Playwright sidecar.** `<out>.meta.json` now carries a `scroll_progress` block beside the existing `scroll` and `completeness` blocks (neither is replaced). `rounds` lists every scroll round with its round number, the card total at the end of the round and the increment over the previous round; zero-growth rounds are kept as real `"added": 0` records rather than treated as an ending. `stop_summary` names one of `target_reached`, `listing_exhausted`, `scroll_stalled` or `scroll_budget_exhausted`. A missing or zero advertised total can only ever yield `scroll_stalled`. `--mode detail` writes no such record and keeps `single_page_mode`. The record is built purely from the scroll's own boundary counts and is verified end to end against generated local HTML with no network (`local_verify/`).
 - CI only: the scheduled canary now starts at 07:27 UTC (Mondays) instead of 06:23, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.
 - CI only: the canary now runs weekly (Mondays 06:23 UTC) and on a manual dispatch, with its optional secrets `SPINNY_CDP_ENDPOINT`, `TWOCAPTCHA_KEY` passed on every run; the daily schedule is removed.
 

@@ -112,6 +112,43 @@ test to it.
 
 ---
 
+## A listing run came back `partial` (exit 6) — did the lazy load stall?
+
+The sidecar answers this after the fact. A listing's `<out>.meta.json` keeps
+its `scroll` and `completeness` blocks and, beside them, a
+`scroll_progress` block holding the whole per-round history and a summary:
+
+```json
+"scroll_progress": {
+  "rounds": [
+    {"round": 0, "cards": 42, "added": 42},
+    {"round": 1, "cards": 62, "added": 20},
+    {"round": 2, "cards": 62, "added": 0},
+    {"round": 3, "cards": 62, "added": 0},
+    {"round": 4, "cards": 62, "added": 0}
+  ],
+  "stop_summary": "scroll_stalled"
+}
+```
+
+`stop_summary` is one of `target_reached` (the `--pages` batches were
+gathered; the run is complete), `listing_exhausted` (the grid stopped
+growing and a positive advertised total was actually taken),
+`scroll_stalled` (the grid stopped while the site still advertises more, or
+publishes no usable total), or `scroll_budget_exhausted` (still growing when
+the round budget ran out). On the Playwright engine the last three are all
+`partial` / exit 6; only `target_reached` is complete.
+
+A `"added": 0` round is evidence, not an ending: the measured grid has
+produced a zero-growth round and then grown again on the next one, so the
+zeros are retained rather than collapsed. If the history shows growth every
+round up to the last few and then a run of zeros under a heading that still
+promises more, the hydration XHR stopped landing — use a sticky session or
+re-run. Every increment sums to the final card total, which is how a
+corrupted record would show itself.
+
+---
+
 ## `hub` is null on a few rows
 
 **Correct.** 10 of 705 measured cards print no hub. This matters more than it

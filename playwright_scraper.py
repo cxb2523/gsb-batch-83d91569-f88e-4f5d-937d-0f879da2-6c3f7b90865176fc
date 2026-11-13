@@ -182,6 +182,15 @@ class PageOutcome:
     # still growing when the round budget ran out is partial, and a run that
     # reported it as complete would read as a shrinking catalogue.
     scroll: Optional[dict] = None
+    # The per-round history of that scroll, for the sidecar: one row per
+    # round with the card total the round ended on, what it added over the
+    # round before it (zero-growth rounds kept as real zeros), and a
+    # machine-readable stop summary naming whether the run reached its
+    # --pages target, genuinely exhausted the advertised catalogue, or
+    # stalled while the site still advertised more. Built from the scroll's
+    # own boundaries by page_flow, so it can never disagree with `scroll`.
+    # Listing mode only — --mode detail has one page and never scrolls.
+    scroll_progress: Optional[dict] = None
     # The advertised total against what this run holds, from
     # page_flow.completeness. Kept whole rather than reduced to a boolean:
     # "482 of 1559" is actionable and "incomplete" is not.
@@ -422,8 +431,17 @@ class _BrowserSession:
     to the thread that created them, so each worker builds its own.
     """
 
-    def __init__(self, pw, args, pool, remote: bool = False):
+    def __init__(self, pw, args, pool, remote: bool = False,
+                 route_handler=None):
         self.pw, self.args, self.pool, self.remote = pw, args, pool, remote
+        # Optional Playwright `(route, request)` callable registered on the
+        # context via page.route(). None in every real run; the offline
+        # verification harness passes one so it can drive the real Spinny
+        # URLs — and therefore the real host checks and argument parser —
+        # while fulfilling every browser request from generated local HTML,
+        # with no network. Keeping the seam on the session rather than
+        # monkeypatching a parser keeps the production path unmodified.
+        self.route_handler = route_handler
         self.browser = self.context = self.page = None
 
     def open(self):
@@ -432,6 +450,8 @@ class _BrowserSession:
         else:
             self.browser, self.context, self.page = _launch_local(
                 self.pw, self.args, self.pool)
+        if self.route_handler is not None:
+            self.page.route("**/*", self.route_handler)
         return self
 
     def relaunch(self):
@@ -1109,6 +1129,34 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         outcome.header = listing_heading(html)
         if outcome.header:
             logger.info("The listing's own heading says: %s", outcome.header)
+        # The per-round scroll record. Beside `scroll` rather than replacing
+        # it: `scroll` keeps the machine's own end-state flags
+        # (settled/reached_target) that the run status is built from, while
+        # this block keeps the HISTORY the old sidecar left only in the log —
+        # the card total after every round, each round's increment, and a
+        # three-word summary of why the loop stopped. Built purely from the
+        # scroll's own boundaries plus the completeness block, so it carries
+        # no second measurement that could disagree with them.
+        summary = page_flow.scroll_stop_summary(
+            outcome.scroll, outcome.completeness)
+        outcome.scroll_progress = {
+            "rounds": page_flow.scroll_progress(
+                (outcome.scroll or {}).get("boundaries")),
+            "stop_summary": summary,
+        }
+        if summary == page_flow.SCROLL_SUMMARY_STALLED:
+            logger.warning(
+                "The lazy-load grid stopped growing at %s card(s) while the "
+                "site still advertises more (or advertises no usable total): "
+                "stop_summary=scroll_stalled. The per-round history is in "
+                "%s.meta.json so this can be told apart from a clean "
+                "exhaustion after the run.",
+                (outcome.scroll or {}).get("cards"), args.out)
+        elif summary == page_flow.SCROLL_SUMMARY_EXHAUSTED:
+            logger.info(
+                "The grid stopped growing and the advertised total is taken: "
+                "stop_summary=listing_exhausted (%d card(s)).",
+                len(products))
 
     if products and args.mode == "listing":
         priced = sum(1 for p in products if p.price is not None)
@@ -1264,7 +1312,9 @@ def scrape(args) -> int:
 
     with sync_playwright() as pw:
         session = _BrowserSession(pw, args, pool,
-                                  remote=bool(args.cdp_endpoint)).open()
+                                  remote=bool(args.cdp_endpoint),
+                                  route_handler=getattr(
+                                      args, "route_handler", None)).open()
         try:
             outcome = _fetch_one_page(session, args, pool, 1, args.url)
             outcomes.append(outcome)
@@ -1312,7 +1362,14 @@ def scrape(args) -> int:
         # A detail page has no page 2, so this is complete by construction.
         stop_reason = "single_page_mode"
     else:
-        stop_reason = page_flow.listing_stop_reason(
+        # Playwright's stricter reading: only reaching the explicit --pages
+        # target completes. A grid that SETTLED — whether because the
+        # advertised catalogue was genuinely taken or because the lazy load
+        # stalled — is a statement about this browser session, so both map
+        # to non-complete stop reasons and come back status=partial, exit 6.
+        # The three-way distinction itself is recorded beside it in the
+        # sidecar's scroll_progress.stop_summary.
+        stop_reason = page_flow.playwright_listing_stop_reason(
             outcome.scroll, outcome.completeness, len(all_rows))
 
     ok_pages = [o for o in outcomes if o.ok]
@@ -1333,7 +1390,14 @@ def scrape(args) -> int:
                             "inspector(s).", facts["parts_evaluated"],
                             facts.get("inspectors") or "?")
     else:
+        # scroll_progress sits BESIDE scroll and completeness rather than
+        # replacing either: the two older blocks keep their exact shape for
+        # the consumers (canary_check, diff_runs, the family's sidecar
+        # contract) that already read them, while the new block adds the
+        # per-round history and the three-way stop summary that used to live
+        # only in the log.
         extra = {"scroll": outcome.scroll,
+                 "scroll_progress": outcome.scroll_progress,
                  "listing_heading": outcome.header,
                  "completeness": outcome.completeness}
         short_by = (outcome.completeness or {}).get("short_by")

@@ -291,14 +291,37 @@ Every run writes `<out>.meta.json` beside the data: `status`, `stop_reason`,
 heading and the completeness arithmetic. A **failed** run writes no sidecar —
 it would contradict the previous good data still sitting there.
 
-`stop_reason` on a listing run is one of four, and the last two are `partial`:
+A listing run's sidecar also carries a `scroll_progress` block **beside**
+`scroll` and `completeness` (neither of which it replaces). It holds
+`rounds`, one record per scroll round with the round number, the card total
+the round ended on and that round's increment over the round before it — a
+round that adds zero is kept as a real `"added": 0`, because the measured
+grid has produced a zero-growth round and then grown again on the next one,
+so the zero is evidence rather than an ending — plus `stop_summary`, one of:
 
-| `stop_reason` | Means |
+| `scroll_progress.stop_summary` | Means |
 |---|---|
-| `completed` | the batches `--pages` asked for were gathered |
-| `no_new_products` | the grid stopped growing **and the site's own count agrees** the listing ran out |
-| `scroll_stalled` | the grid stopped growing while the site still advertises far more — the lazy load stalled, it did not finish |
-| `scroll_budget_exhausted` | the round budget ran out with the grid still growing |
+| `target_reached` | the run gathered the batches `--pages` asked for |
+| `listing_exhausted` | the grid stopped growing **and** the site's positive advertised total has actually been taken |
+| `scroll_stalled` | the grid stopped growing while the site still advertises more, or advertises no usable total (missing or 0), so exhaustion cannot be established |
+| `scroll_budget_exhausted` | the round budget ran out while the grid was still growing |
+
+`stop_reason` on a listing run is one of four. On the Playwright engine only
+`completed` is a complete run: a settled grid is a statement about *this
+browser session*, so both settled outcomes are `partial` (exit 6) and the
+summary field above distinguishes them.
+
+| `stop_reason` | Means | Status |
+|---|---|---|
+| `completed` | the batches `--pages` asked for were gathered | complete (0) |
+| `listing_exhausted` | the grid stopped growing **and the site's positive count agrees** the listing ran out | partial (6) |
+| `scroll_stalled` | the grid stopped growing while the site still advertises more, or advertises no usable total — the lazy load stalled, it did not finish | partial (6) |
+| `scroll_budget_exhausted` | the round budget ran out with the grid still growing | partial (6) |
+
+If the advertised total is missing or reads 0, a settled grid can never be
+upgraded past `scroll_stalled`: there is no positive count that could prove
+the catalogue was taken. `--mode detail` never scrolls, so it writes no
+`scroll_progress` block and keeps its `single_page_mode` status.
 
 ---
 
