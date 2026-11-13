@@ -1,0 +1,54 @@
+# BuildSite Customization
+# Place this file in the root of your profile repository as buildsite.yml
+
+version: 1
+
+github:
+  # Your GitHub login handle (or omit to auto-detect from repository owner)
+  username: "octocat"
+  visibility: "public"
+
+property:
+  # Architectural style:
+  #   - modern: Contemporary luxury villa with white plaster and glass
+  #   - timber: Warm cedar louvers and Japanese zen garden
+  #   - slate: Cantilevered dark slate stone feature wall and deep azure pool
+  #   - coastal: Crisp white trims with Caribbean cyan pool
+  #   - auto: Deterministically selected from your GitHub ID
+  style: "modern"
+
+  # Unique seed for deterministic variations (defaults to "auto" -> "<id>:<login>")
+  seed: "auto"
+
+  # Material and color palette
+  palette: "natural"
+
+  # Feature toggles
+  pool: true
+  garden: true
+  garage: true
+
+  # Lighting atmosphere:
+  #   - dusk: Twilight with glowing warm interior windows, underwater pool LEDs & uplights
+  #   - daytime: Bright Mediterranean sunlight and crisp architectural shadows
+  #   - night: Deep night ambient with high-contrast architectural lighting
+  lighting: "dusk"
+
+render:
+  width: 1280
+  height: 640
+  format: "svg"
+  quality: "high"
+  # Declarative pure-CSS animation (respects prefers-reduced-motion):
+  #   - subtle: Gentle water caustics shimmer, breathing status indicator, warm window glow
+  #   - none: Completely static SVG
+  animation: "subtle"
+
+progression:
+  # Continuous progression ensures unlocked features are never lost
+  mode: "continuous"
+  preserve_unlocks: true
+
+output:
+  directory: "assets/buildsite"
+  png_fallback: true

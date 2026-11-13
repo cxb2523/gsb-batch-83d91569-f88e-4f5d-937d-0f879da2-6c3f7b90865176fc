@@ -1,0 +1,14 @@
+{
+  "user_id": 42109876,
+  "login": "octocat-architect",
+  "total_contributions": 327,
+  "active_days": 185,
+  "years": [2024, 2025, 2026],
+  "collected_at": "2026-11-06T12:00:00Z",
+  "source": "fixture",
+  "calendar_days": [
+    {"date": "2026-01-01", "count": 5},
+    {"date": "2026-01-02", "count": 8},
+    {"date": "2026-01-03", "count": 14}
+  ]
+}

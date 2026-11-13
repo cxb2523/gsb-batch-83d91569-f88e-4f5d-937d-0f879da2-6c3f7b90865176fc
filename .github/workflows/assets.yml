@@ -1,0 +1,50 @@
+name: Blender Asset Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      resolution:
+        description: "Output resolution (e.g. 1280x640)"
+        default: "1280x640"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  render-blender-assets:
+    name: Headless Blender Render
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pillow pyyaml
+
+      - name: Install Headless Blender
+        run: |
+          sudo snap install blender --classic
+
+      - name: Render 3D Architectural Layers
+        run: |
+          blender -b -P blender/scripts/render_layers.py || python assets/builder.py
+
+      - name: Commit Updated Architectural Assets
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add assets/
+          if git diff --cached --quiet; then
+            echo "No asset changes to commit."
+          else
+            git commit -m "build(assets): regenerate architectural render layers [skip ci]"
+            git push
+          fi

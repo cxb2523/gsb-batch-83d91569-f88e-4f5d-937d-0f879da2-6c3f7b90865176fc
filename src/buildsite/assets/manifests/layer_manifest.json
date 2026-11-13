@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "resolution": {
+    "width": 1280,
+    "height": 640
+  },
+  "layers": {
+    "plot_base": {
+      "file": "environment/plot_base.png",
+      "order": 1,
+      "width": 1280,
+      "height": 640
+    },
+    "foundations": {
+      "file": "architecture/foundations.png",
+      "order": 2,
+      "width": 1280,
+      "height": 640
+    },
+    "columns_beams": {
+      "file": "architecture/columns_beams.png",
+      "order": 3,
+      "width": 1280,
+      "height": 640
+    },
+    "building_frame": {
+      "file": "architecture/building_frame.png",
+      "order": 4,
+      "width": 1280,
+      "height": 640
+    },
+    "roof_enclosure": {
+      "file": "architecture/roof_enclosure.png",
+      "order": 5,
+      "width": 1280,
+      "height": 640
+    },
+    "villa_finished": {
+      "file": "architecture/villa_finished.png",
+      "order": 6,
+      "width": 1280,
+      "height": 640
+    },
+    "driveway_garage": {
+      "file": "architecture/driveway_garage.png",
+      "order": 7,
+      "width": 1280,
+      "height": 640
+    },
+    "swimming_pool": {
+      "file": "pool/swimming_pool.png",
+      "order": 8,
+      "width": 1280,
+      "height": 640
+    },
+    "gardens": {
+      "file": "landscaping/gardens.png",
+      "order": 9,
+      "width": 1280,
+      "height": 640
+    },
+    "patio_pergola": {
+      "file": "landscaping/patio_pergola.png",
+      "order": 10,
+      "width": 1280,
+      "height": 640
+    },
+    "upgrades": {
+      "file": "architecture/upgrades.png",
+      "order": 11,
+      "width": 1280,
+      "height": 640
+    },
+    "estate_guesthouse": {
+      "file": "architecture/estate_guesthouse.png",
+      "order": 12,
+      "width": 1280,
+      "height": 640
+    },
+    "master_expansion": {
+      "file": "architecture/master_expansion.png",
+      "order": 13,
+      "width": 1280,
+      "height": 640
+    },
+    "dusk_emissive": {
+      "file": "environment/dusk_emissive.png",
+      "order": 14,
+      "width": 1280,
+      "height": 640
+    }
+  }
+}

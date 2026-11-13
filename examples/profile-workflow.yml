@@ -1,0 +1,33 @@
+# .github/workflows/buildsite.yml
+# In your GitHub profile repository (https://github.com/<username>/<username>)
+
+name: BuildSite
+
+on:
+  schedule:
+    # Runs daily at 06:00 UTC
+    - cron: "0 6 * * *"
+  workflow_dispatch: # Allows manual trigger from Actions tab
+  push:
+    paths:
+      - "buildsite.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Evolve Property
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run BuildSite Action
+        uses: buildsite/buildsite@v1
+        with:
+          username: ${{ github.repository_owner }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          output_dir: "assets/buildsite"
+          commit_message: "chore(buildsite): update property evolution [skip ci]"

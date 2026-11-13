@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "buildsite"
+version = "1.0.0"
+description = "Your GitHub Builds Your Home. Transform verified GitHub contributions into an evolving, photorealistic residential property for your profile README."
+readme = "README.md"
+authors = [
+    { name = "BuildSite Open Source Contributors", email = "maintainers@buildsite.dev" }
+]
+license = { text = "MIT" }
+keywords = ["github", "github-profile", "svg", "architecture", "visualization", "blender", "photorealistic", "contributions", "github-actions"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Software Development :: Version Control :: Git"
+]
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+    "pillow>=10.0.0",
+    "pyyaml>=6.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0"
+]
+
+[project.scripts]
+buildsite = "buildsite.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+buildsite = [
+    "assets/*",
+    "assets/*/*",
+    "assets/*/*/*"
+]

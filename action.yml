@@ -1,0 +1,111 @@
+name: "BuildSite: Your GitHub Builds Your Home"
+description: "Transform verified GitHub contributions into an evolving, photorealistic residential property for your profile README."
+author: "BuildSite Maintainers"
+
+branding:
+  icon: "home"
+  color: "blue"
+
+inputs:
+  username:
+    description: "GitHub username to query contributions for. Defaults to repository owner."
+    required: false
+    default: "${{ github.repository_owner }}"
+  token:
+    description: "GitHub token for authenticating API requests. Defaults to github.token."
+    required: false
+    default: "${{ github.token }}"
+  config:
+    description: "Path to buildsite.yml configuration file."
+    required: false
+    default: "buildsite.yml"
+  output_dir:
+    description: "Directory where generated assets will be stored."
+    required: false
+    default: "assets/buildsite"
+  commit_message:
+    description: "Commit message when property evolutions are recorded."
+    required: false
+    default: "chore(buildsite): update property architectural evolution [skip ci]"
+  skip_commit:
+    description: "Set to 'true' to generate assets without auto-committing."
+    required: false
+    default: "false"
+
+outputs:
+  svg_path:
+    description: "Relative path to the generated SVG image."
+    value: "${{ steps.generate.outputs.svg_path }}"
+  png_path:
+    description: "Relative path to the fallback PNG image."
+    value: "${{ steps.generate.outputs.png_path }}"
+  milestone:
+    description: "Current architectural milestone."
+    value: "${{ steps.generate.outputs.milestone }}"
+  contributions:
+    description: "Total verified contributions."
+    value: "${{ steps.generate.outputs.contributions }}"
+  changed:
+    description: "Whether the property state changed and was committed."
+    value: "${{ steps.commit.outputs.changed }}"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+        cache: "pip"
+
+    - name: Install BuildSite
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install "buildsite>=1.0.0" || python -m pip install .
+
+    - name: Generate Evolved Property
+      id: generate
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: |
+        CFG_ARG=""
+        if [ -f "${{ inputs.config }}" ]; then
+          CFG_ARG="--config ${{ inputs.config }}"
+        fi
+
+        python -m buildsite.cli generate \
+          --user "${{ inputs.username }}" \
+          --output-dir "${{ inputs.output_dir }}" \
+          $CFG_ARG
+
+        STATE_FILE="${{ inputs.output_dir }}/buildsite_state.json"
+        if [ -f "$STATE_FILE" ]; then
+          MILESTONE=$(python -c "import json; data=json.load(open('$STATE_FILE')); print(data.get('milestone', 'plot'))")
+          CONTRIBS=$(python -c "import json; data=json.load(open('$STATE_FILE')); print(data.get('total_contributions', 0))")
+          echo "milestone=$MILESTONE" >> $GITHUB_OUTPUT
+          echo "contributions=$CONTRIBS" >> $GITHUB_OUTPUT
+        fi
+        echo "svg_path=${{ inputs.output_dir }}/buildsite.svg" >> $GITHUB_OUTPUT
+        echo "png_path=${{ inputs.output_dir }}/buildsite.png" >> $GITHUB_OUTPUT
+
+    - name: Commit and Push Updates
+      id: commit
+      if: inputs.skip_commit != 'true'
+      shell: bash
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+        git add "${{ inputs.output_dir }}"
+
+        if git diff --cached --quiet; then
+          echo "No property visual changes detected. Working tree clean."
+          echo "changed=false" >> $GITHUB_OUTPUT
+        else
+          echo "Property evolved! Committing updates..."
+          git commit -m "${{ inputs.commit_message }}"
+          git push
+          echo "changed=true" >> $GITHUB_OUTPUT
+        fi
