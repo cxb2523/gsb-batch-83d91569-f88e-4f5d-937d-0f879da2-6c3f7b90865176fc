@@ -1,0 +1,122 @@
+name: Update Cloudflare test data
+on:
+  workflow_dispatch:
+    inputs:
+      archive_id:
+        description: 'Optional existing archive ID for publication/recovery verification; blank collects new data'
+        required: false
+        type: string
+  schedule:
+    # UTC -> Beijing 08:00, 12:30, 18:00. Intraday collection runs in a separate cloud scheduler.
+    - cron: '0 0,10 * * *'
+    - cron: '30 4 * * *'
+permissions:
+  contents: write
+concurrency:
+  group: ftshare-cloud-test-update
+  cancel-in-progress: false
+jobs:
+  collect-archive-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      FTSHARE_API_KEY: ${{ secrets.FTSHARE_API_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TEST_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_TEST_ACCOUNT_ID }}
+      CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_TEST_PROJECT }}
+      ENABLE_RADAR: "1"
+      DATA_MODE: live
+      FTSHARE_SEED_FILE: .local/cloud-update/seed.json
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - uses: actions/cache/restore@v5
+        with:
+          path: .local/ftshare-cache
+          key: ftshare-raw-v2-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ftshare-raw-v2-
+      - name: Check configuration
+        run: |
+          node -e "for (const k of ['FTSHARE_API_KEY','CLOUDFLARE_API_TOKEN','CLOUDFLARE_ACCOUNT_ID','CLOUDFLARE_PAGES_PROJECT']) if (!process.env[k]) throw new Error('Missing cloud test setting: '+k)"
+      - name: Collect, archive and verify restoration
+        if: inputs.archive_id == ''
+        run: node scripts/cloud-update.mjs update
+      - name: Restore an existing archive for publication verification
+        if: inputs.archive_id != ''
+        env:
+          CLOUD_ARCHIVE_ID: ${{ inputs.archive_id }}
+        run: node scripts/cloud-update.mjs restore
+      - run: npm run build:pages
+      - run: npm run validate
+      - name: Verify preview and publish test site
+        run: node scripts/cloud-publish.mjs
+      - name: Write run summary
+        if: always()
+        run: node scripts/cloud-summary.mjs
+      - uses: actions/cache/save@v5
+        if: always()
+        with:
+          path: .local/ftshare-cache
+          key: ftshare-raw-v2-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save verified test publication
+        uses: actions/upload-artifact@v6
+        with:
+          name: verified-test-publication
+          path: .local/cloud-update/publish-result.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+  publish-formal:
+    needs: collect-archive-publish
+    if: github.ref == 'refs/heads/main' && vars.CLOUDFLARE_FORMAL_AUTO_PUBLISH == 'true' && vars.CLOUDFLARE_FORMAL_PROJECT != '' && vars.CLOUDFLARE_FORMAL_SOURCE_REF != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TEST_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_TEST_ACCOUNT_ID }}
+      CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_FORMAL_PROJECT }}
+      CLOUDFLARE_FORMAL_PROJECT: ${{ vars.CLOUDFLARE_FORMAL_PROJECT }}
+      CLOUDFLARE_TEST_PROJECT: ${{ vars.CLOUDFLARE_TEST_PROJECT }}
+      CLOUDFLARE_FORMAL_SOURCE_REF: ${{ vars.CLOUDFLARE_FORMAL_SOURCE_REF }}
+      CLOUD_PUBLISH_TARGET: formal
+      ENABLE_RADAR: "1"
+      DATA_MODE: live
+      FTSHARE_SEED_FILE: .local/cloud-update/seed.json
+    steps:
+      # Pin formal code independently: test frontend edits do not flow into the formal site.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ vars.CLOUDFLARE_FORMAL_SOURCE_REF }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v7
+        with:
+          name: verified-test-publication
+          path: .local/cloud-update/test-proof
+      - name: Restore exact tested archive
+        run: |
+          cp .local/cloud-update/test-proof/publish-result.json .local/cloud-update/test-publish-result.json
+          node --input-type=module -e 'import {readFile} from "node:fs/promises"; import {spawnSync} from "node:child_process"; const proof=JSON.parse(await readFile(".local/cloud-update/test-publish-result.json")); const r=spawnSync(process.execPath,["scripts/cloud-update.mjs","restore"],{stdio:"inherit",env:{...process.env,CLOUD_ARCHIVE_ID:proof.archive_id}}); process.exit(r.status??1);'
+      - run: npm run build:pages
+      - run: npm run validate
+      - name: Verify test evidence and publish formal site
+        run: node scripts/cloud-publish.mjs
+      - name: Save formal publication result
+        uses: actions/upload-artifact@v6
+        with:
+          name: verified-formal-publication
+          path: .local/cloud-update/publish-result.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30

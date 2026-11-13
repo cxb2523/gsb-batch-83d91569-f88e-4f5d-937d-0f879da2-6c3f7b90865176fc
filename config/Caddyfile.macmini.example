@@ -1,0 +1,14 @@
+# Run the HTTPS proxy on the Mac mini. Provision a valid certificate using DNS
+# verification before applying this example. Do not commit the private key.
+etf.example.com {
+    tls /absolute/path/to/fullchain.pem /absolute/path/to/privkey.pem
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy same-origin
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+    reverse_proxy 127.0.0.1:8080
+}
+# If this proxy runs on a separate company gateway, replace 127.0.0.1 with the
+# Mac mini's fixed LAN address. Public DNS remains unchanged during LAN testing.

@@ -1,0 +1,3626 @@
+{
+  "as_of": "2026-11-05",
+  "policy": "Current reviewed broad-index membership, backfilled from max(inception_date, listed_date). Historical membership is not reconstructed.",
+  "funds": [
+    {
+      "symbol": "159205.SZ",
+      "name": "创业板ETF东财",
+      "bucket": "创业板指",
+      "is_core_basket": false,
+      "inception_date": "2025-06-04",
+      "listed_date": "2025-06-12",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159247.SZ",
+      "name": "创业板ETF汇添富",
+      "bucket": "创业板指",
+      "is_core_basket": false,
+      "inception_date": "2026-01-22",
+      "listed_date": "2026-02-02",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159675.SZ",
+      "name": "创业板增强ETF嘉实",
+      "bucket": "创业板指",
+      "is_core_basket": false,
+      "inception_date": "2022-11-24",
+      "listed_date": "2022-12-02",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159676.SZ",
+      "name": "创业板增强ETF富国",
+      "bucket": "创业板指",
+      "is_core_basket": false,
+      "inception_date": "2023-03-23",
+      "listed_date": "2023-04-12",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159808.SZ",
+      "name": "创100RT",
+      "bucket": "创业板指",
+      "is_core_basket": false,
+      "inception_date": "2020-08-05",
+      "listed_date": "2020-09-04",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159810.SZ",
+      "name": "创业板ETF浦银",
+      "bucket": "创业板指",
+      "is_core_basket": false,
+      "inception_date": "2020-06-12",
+      "listed_date": "2020-07-10",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159821.SZ",
+      "name": "创业板ETF中银证券",
+      "bucket": "创业板指",
+      "is_core_basket": false,
+      "inception_date": "2020-09-29",
+      "listed_date": "2020-10-29",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159908.SZ",
+      "name": "创业板ETF博时",
+      "bucket": "创业板指",
+      "is_core_basket": false,
+      "inception_date": "2018-12-10",
+      "listed_date": "2018-12-10",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159915.SZ",
+      "name": "创业板ETF易方达",
+      "bucket": "创业板指",
+      "is_core_basket": true,
+      "inception_date": "2011-09-20",
+      "listed_date": "2011-12-09",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159948.SZ",
+      "name": "创业板ETF南方",
+      "bucket": "创业板指",
+      "is_core_basket": false,
+      "inception_date": "2016-05-13",
+      "listed_date": "2016-05-31",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159952.SZ",
+      "name": "创业板ETF广发",
+      "bucket": "创业板指",
+      "is_core_basket": true,
+      "inception_date": "2017-04-25",
+      "listed_date": "2017-05-19",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159956.SZ",
+      "name": "创业板ETF建信",
+      "bucket": "创业板指",
+      "is_core_basket": false,
+      "inception_date": "2018-02-06",
+      "listed_date": "2018-03-07",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159957.SZ",
+      "name": "创业板ETF华夏",
+      "bucket": "创业板指",
+      "is_core_basket": false,
+      "inception_date": "2017-12-08",
+      "listed_date": "2018-01-04",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159958.SZ",
+      "name": "创业板ETF工银",
+      "bucket": "创业板指",
+      "is_core_basket": false,
+      "inception_date": "2017-12-25",
+      "listed_date": "2018-01-19",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159964.SZ",
+      "name": "创业板ETF平安",
+      "bucket": "创业板指",
+      "is_core_basket": false,
+      "inception_date": "2019-03-15",
+      "listed_date": "2019-04-19",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159971.SZ",
+      "name": "创业板ETF富国",
+      "bucket": "创业板指",
+      "is_core_basket": false,
+      "inception_date": "2019-06-11",
+      "listed_date": "2019-07-02",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159977.SZ",
+      "name": "创业板ETF天弘",
+      "bucket": "创业板指",
+      "is_core_basket": false,
+      "inception_date": "2019-09-12",
+      "listed_date": "2019-09-27",
+      "tracking_index_name": "创业板指数",
+      "tracking_index_symbol": "399006.SZ"
+    },
+    {
+      "symbol": "159298.SZ",
+      "name": "创业板50ETF大成",
+      "bucket": "创业板50",
+      "is_core_basket": false,
+      "inception_date": "2025-08-29",
+      "listed_date": "2025-09-08",
+      "tracking_index_name": "创业板50指数",
+      "tracking_index_symbol": "399673.SZ"
+    },
+    {
+      "symbol": "159367.SZ",
+      "name": "创业板50ETF华夏",
+      "bucket": "创业板50",
+      "is_core_basket": false,
+      "inception_date": "2025-01-24",
+      "listed_date": "2025-02-14",
+      "tracking_index_name": "创业板50指数",
+      "tracking_index_symbol": "399673.SZ"
+    },
+    {
+      "symbol": "159369.SZ",
+      "name": "创业板50ETF易方达",
+      "bucket": "创业板50",
+      "is_core_basket": false,
+      "inception_date": "2025-08-13",
+      "listed_date": "2025-08-21",
+      "tracking_index_name": "创业板50指数",
+      "tracking_index_symbol": "399673.SZ"
+    },
+    {
+      "symbol": "159370.SZ",
+      "name": "创50ETF工银",
+      "bucket": "创业板50",
+      "is_core_basket": false,
+      "inception_date": "2025-01-10",
+      "listed_date": "2025-01-20",
+      "tracking_index_name": "创业板50指数",
+      "tracking_index_symbol": "399673.SZ"
+    },
+    {
+      "symbol": "159371.SZ",
+      "name": "创业板50ETF富国",
+      "bucket": "创业板50",
+      "is_core_basket": false,
+      "inception_date": "2025-01-24",
+      "listed_date": "2025-02-12",
+      "tracking_index_name": "创业板50指数",
+      "tracking_index_symbol": "399673.SZ"
+    },
+    {
+      "symbol": "159372.SZ",
+      "name": "创业板50ETF万家",
+      "bucket": "创业板50",
+      "is_core_basket": false,
+      "inception_date": "2025-05-26",
+      "listed_date": "2025-06-09",
+      "tracking_index_name": "创业板50指数",
+      "tracking_index_symbol": "399673.SZ"
+    },
+    {
+      "symbol": "159373.SZ",
+      "name": "创业板50ETF嘉实",
+      "bucket": "创业板50",
+      "is_core_basket": false,
+      "inception_date": "2025-01-23",
+      "listed_date": "2025-02-10",
+      "tracking_index_name": "创业板50指数",
+      "tracking_index_symbol": "399673.SZ"
+    },
+    {
+      "symbol": "159375.SZ",
+      "name": "创业板50ETF国泰",
+      "bucket": "创业板50",
+      "is_core_basket": false,
+      "inception_date": "2024-12-30",
+      "listed_date": "2025-01-10",
+      "tracking_index_name": "创业板50指数",
+      "tracking_index_symbol": "399673.SZ"
+    },
+    {
+      "symbol": "159383.SZ",
+      "name": "创业板50ETF华泰柏瑞",
+      "bucket": "创业板50",
+      "is_core_basket": false,
+      "inception_date": "2025-02-05",
+      "listed_date": "2025-02-14",
+      "tracking_index_name": "创业板50指数",
+      "tracking_index_symbol": "399673.SZ"
+    },
+    {
+      "symbol": "159681.SZ",
+      "name": "创业板50ETF鹏华",
+      "bucket": "创业板50",
+      "is_core_basket": false,
+      "inception_date": "2022-12-21",
+      "listed_date": "2023-01-03",
+      "tracking_index_name": "创业板50指数",
+      "tracking_index_symbol": "399673.SZ"
+    },
+    {
+      "symbol": "159682.SZ",
+      "name": "创业板50ETF景顺",
+      "bucket": "创业板50",
+      "is_core_basket": false,
+      "inception_date": "2022-12-23",
+      "listed_date": "2023-01-03",
+      "tracking_index_name": "创业板50指数",
+      "tracking_index_symbol": "399673.SZ"
+    },
+    {
+      "symbol": "159949.SZ",
+      "name": "创业板50ETF华安",
+      "bucket": "创业板50",
+      "is_core_basket": true,
+      "inception_date": "2016-06-30",
+      "listed_date": "2016-07-22",
+      "tracking_index_name": "创业板50指数",
+      "tracking_index_symbol": "399673.SZ"
+    },
+    {
+      "symbol": "159505.SZ",
+      "name": "国证2000ETF博时",
+      "bucket": "国证2000",
+      "is_core_basket": false,
+      "inception_date": "2023-11-23",
+      "listed_date": "2023-12-04",
+      "tracking_index_name": "国证2000指数",
+      "tracking_index_symbol": "399303.SZ"
+    },
+    {
+      "symbol": "159521.SZ",
+      "name": "国证2000ETF平安",
+      "bucket": "国证2000",
+      "is_core_basket": false,
+      "inception_date": "2023-08-25",
+      "listed_date": "2023-09-07",
+      "tracking_index_name": "国证2000指数",
+      "tracking_index_symbol": "399303.SZ"
+    },
+    {
+      "symbol": "159543.SZ",
+      "name": "国证2000ETF工银",
+      "bucket": "国证2000",
+      "is_core_basket": false,
+      "inception_date": "2023-11-09",
+      "listed_date": "2023-11-20",
+      "tracking_index_name": "国证2000指数",
+      "tracking_index_symbol": "399303.SZ"
+    },
+    {
+      "symbol": "159628.SZ",
+      "name": "国证2000ETF万家",
+      "bucket": "国证2000",
+      "is_core_basket": false,
+      "inception_date": "2022-06-29",
+      "listed_date": "2022-07-18",
+      "tracking_index_name": "国证2000指数",
+      "tracking_index_symbol": "399303.SZ"
+    },
+    {
+      "symbol": "159907.SZ",
+      "name": "国证2000ETF广发",
+      "bucket": "国证2000",
+      "is_core_basket": false,
+      "inception_date": "2011-06-03",
+      "listed_date": "2011-08-10",
+      "tracking_index_name": "国证2000指数",
+      "tracking_index_symbol": "399303.SZ"
+    },
+    {
+      "symbol": "159629.SZ",
+      "name": "中证1000ETF富国",
+      "bucket": "中证1000",
+      "is_core_basket": false,
+      "inception_date": "2022-07-27",
+      "listed_date": "2022-08-03",
+      "tracking_index_name": "中证1000指数",
+      "tracking_index_symbol": "000852.SH"
+    },
+    {
+      "symbol": "159633.SZ",
+      "name": "中证1000ETF易方达",
+      "bucket": "中证1000",
+      "is_core_basket": true,
+      "inception_date": "2022-07-28",
+      "listed_date": "2022-08-04",
+      "tracking_index_name": "中证1000指数",
+      "tracking_index_symbol": "000852.SH"
+    },
+    {
+      "symbol": "159677.SZ",
+      "name": "中证1000增强ETF银华",
+      "bucket": "中证1000",
+      "is_core_basket": false,
+      "inception_date": "2022-11-24",
+      "listed_date": "2022-12-05",
+      "tracking_index_name": "中证1000指数",
+      "tracking_index_symbol": "000852.SH"
+    },
+    {
+      "symbol": "159679.SZ",
+      "name": "中证1000增强ETF国泰",
+      "bucket": "中证1000",
+      "is_core_basket": false,
+      "inception_date": "2023-02-09",
+      "listed_date": "2023-02-22",
+      "tracking_index_name": "中证1000指数",
+      "tracking_index_symbol": "000852.SH"
+    },
+    {
+      "symbol": "159680.SZ",
+      "name": "中证1000增强ETF招商",
+      "bucket": "中证1000",
+      "is_core_basket": false,
+      "inception_date": "2022-11-18",
+      "listed_date": "2022-11-30",
+      "tracking_index_name": "中证1000指数",
+      "tracking_index_symbol": "000852.SH"
+    },
+    {
+      "symbol": "159685.SZ",
+      "name": "1000增强ETF天弘",
+      "bucket": "中证1000",
+      "is_core_basket": false,
+      "inception_date": "2023-03-15",
+      "listed_date": "2023-04-03",
+      "tracking_index_name": "中证1000指数",
+      "tracking_index_symbol": "000852.SH"
+    },
+    {
+      "symbol": "159845.SZ",
+      "name": "中证1000ETF华夏",
+      "bucket": "中证1000",
+      "is_core_basket": true,
+      "inception_date": "2021-03-18",
+      "listed_date": "2021-03-31",
+      "tracking_index_name": "中证1000指数",
+      "tracking_index_symbol": "000852.SH"
+    },
+    {
+      "symbol": "512100.SH",
+      "name": "1000ETF",
+      "bucket": "中证1000",
+      "is_core_basket": true,
+      "inception_date": "2016-09-29",
+      "listed_date": "2016-11-04",
+      "tracking_index_name": "中证1000指数",
+      "tracking_index_symbol": "000852.SH"
+    },
+    {
+      "symbol": "516300.SH",
+      "name": "中证1000",
+      "bucket": "中证1000",
+      "is_core_basket": false,
+      "inception_date": "2021-03-15",
+      "listed_date": "2021-03-24",
+      "tracking_index_name": "中证1000指数",
+      "tracking_index_symbol": "000852.SH"
+    },
+    {
+      "symbol": "560010.SH",
+      "name": "1000基金",
+      "bucket": "中证1000",
+      "is_core_basket": true,
+      "inception_date": "2022-07-28",
+      "listed_date": "2022-08-04",
+      "tracking_index_name": "中证1000指数",
+      "tracking_index_symbol": "000852.SH"
+    },
+    {
+      "symbol": "560110.SH",
+      "name": "ZZ1000",
+      "bucket": "中证1000",
+      "is_core_basket": false,
+      "inception_date": "2022-07-29",
+      "listed_date": "2022-08-08",
+      "tracking_index_name": "中证1000指数",
+      "tracking_index_symbol": "000852.SH"
+    },
+    {
+      "symbol": "560590.SH",
+      "name": "1000鹏华",
+      "bucket": "中证1000",
+      "is_core_basket": false,
+      "inception_date": "2023-09-01",
+      "listed_date": "2023-09-25",
+      "tracking_index_name": "中证1000指数",
+      "tracking_index_symbol": "000852.SH"
+    },
+    {
+      "symbol": "561280.SH",
+      "name": "增强1000",
+      "bucket": "中证1000",
+      "is_core_basket": false,
+      "inception_date": "2023-08-31",
+      "listed_date": "2023-09-22",
+      "tracking_index_name": "中证1000指数",
+      "tracking_index_symbol": "000852.SH"
+    },
+    {
+      "symbol": "561590.SH",
+      "name": "1000增强",
+      "bucket": "中证1000",
+      "is_core_basket": false,
+      "inception_date": "2022-11-23",
+      "listed_date": "2022-12-12",
+      "tracking_index_name": "中证1000指数",
+      "tracking_index_symbol": "000852.SH"
+    },
+    {
+      "symbol": "561780.SH",
+      "name": "1000指增",
+      "bucket": "中证1000",
+      "is_core_basket": false,
+      "inception_date": "2023-11-02",
+      "listed_date": "2023-11-10",
+      "tracking_index_name": "中证1000指数",
+      "tracking_index_symbol": "000852.SH"
+    },
+    {
+      "symbol": "159531.SZ",
+      "name": "中证2000ETF南方",
+      "bucket": "中证2000",
+      "is_core_basket": false,
+      "inception_date": "2023-09-07",
+      "listed_date": "2023-09-18",
+      "tracking_index_name": "中证2000指数",
+      "tracking_index_symbol": "932000.CSI"
+    },
+    {
+      "symbol": "159532.SZ",
+      "name": "中证2000ETF易方达",
+      "bucket": "中证2000",
+      "is_core_basket": false,
+      "inception_date": "2023-09-13",
+      "listed_date": "2023-09-21",
+      "tracking_index_name": "中证2000指数",
+      "tracking_index_symbol": "932000.CSI"
+    },
+    {
+      "symbol": "159533.SZ",
+      "name": "中证2000ETF博时",
+      "bucket": "中证2000",
+      "is_core_basket": false,
+      "inception_date": "2024-05-28",
+      "listed_date": "2024-06-07",
+      "tracking_index_name": "中证2000指数",
+      "tracking_index_symbol": "932000.CSI"
+    },
+    {
+      "symbol": "159535.SZ",
+      "name": "中证2000ETF嘉实",
+      "bucket": "中证2000",
+      "is_core_basket": false,
+      "inception_date": "2023-09-14",
+      "listed_date": "2023-09-22",
+      "tracking_index_name": "中证2000指数",
+      "tracking_index_symbol": "932000.CSI"
+    },
+    {
+      "symbol": "159536.SZ",
+      "name": "中证2000ETF汇添富",
+      "bucket": "中证2000",
+      "is_core_basket": false,
+      "inception_date": "2023-09-13",
+      "listed_date": "2023-09-21",
+      "tracking_index_name": "中证2000指数",
+      "tracking_index_symbol": "932000.CSI"
+    },
+    {
+      "symbol": "159552.SZ",
+      "name": "中证2000增强ETF招商",
+      "bucket": "中证2000",
+      "is_core_basket": false,
+      "inception_date": "2024-06-19",
+      "listed_date": "2024-06-28",
+      "tracking_index_name": "中证2000指数",
+      "tracking_index_symbol": "932000.CSI"
+    },
+    {
+      "symbol": "159553.SZ",
+      "name": "中证2000增强ETF海富通",
+      "bucket": "中证2000",
+      "is_core_basket": false,
+      "inception_date": "2024-03-27",
+      "listed_date": "2024-04-15",
+      "tracking_index_name": "中证2000指数",
+      "tracking_index_symbol": "932000.CSI"
+    },
+    {
+      "symbol": "159555.SZ",
+      "name": "中证2000增强ETF银华",
+      "bucket": "中证2000",
+      "is_core_basket": false,
+      "inception_date": "2023-12-01",
+      "listed_date": "2023-12-12",
+      "tracking_index_name": "中证2000指数",
+      "tracking_index_symbol": "932000.CSI"
+    },
+    {
+      "symbol": "159556.SZ",
+      "name": "中证2000增强ETF平安",
+      "bucket": "中证2000",
+      "is_core_basket": false,
+      "inception_date": "2023-12-27",
+      "listed_date": "2024-01-10",
+      "tracking_index_name": "中证2000指数",
+      "tracking_index_symbol": "932000.CSI"
+    },
+    {
+      "symbol": "560220.SH",
+      "name": "2000基金",
+      "bucket": "中证2000",
+      "is_core_basket": false,
+      "inception_date": "2023-09-08",
+      "listed_date": "2023-09-18",
+      "tracking_index_name": "中证2000指数",
+      "tracking_index_symbol": "932000.CSI"
+    },
+    {
+      "symbol": "561370.SH",
+      "name": "2000ETF",
+      "bucket": "中证2000",
+      "is_core_basket": false,
+      "inception_date": "2023-09-13",
+      "listed_date": "2023-09-21",
+      "tracking_index_name": "中证2000指数",
+      "tracking_index_symbol": "932000.CSI"
+    },
+    {
+      "symbol": "562660.SH",
+      "name": "ZZ2000",
+      "bucket": "中证2000",
+      "is_core_basket": false,
+      "inception_date": "2023-09-06",
+      "listed_date": "2023-09-14",
+      "tracking_index_name": "中证2000指数",
+      "tracking_index_symbol": "932000.CSI"
+    },
+    {
+      "symbol": "563200.SH",
+      "name": "2000指数",
+      "bucket": "中证2000",
+      "is_core_basket": false,
+      "inception_date": "2023-09-28",
+      "listed_date": "2023-10-18",
+      "tracking_index_name": "中证2000指数",
+      "tracking_index_symbol": "932000.CSI"
+    },
+    {
+      "symbol": "563300.SH",
+      "name": "中证2000",
+      "bucket": "中证2000",
+      "is_core_basket": false,
+      "inception_date": "2023-09-06",
+      "listed_date": "2023-09-14",
+      "tracking_index_name": "中证2000指数",
+      "tracking_index_symbol": "932000.CSI"
+    },
+    {
+      "symbol": "159238.SZ",
+      "name": "沪深300增强ETF景顺",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2025-05-28",
+      "listed_date": "2025-06-09",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "159300.SZ",
+      "name": "沪深300ETF富国",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2024-05-23",
+      "listed_date": "2024-06-05",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "159330.SZ",
+      "name": "沪深300ETF东财",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2024-08-01",
+      "listed_date": "2024-08-19",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "159393.SZ",
+      "name": "沪深300ETF万家",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2025-02-25",
+      "listed_date": "2025-03-10",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "159673.SZ",
+      "name": "沪深300ETF鹏华",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2023-06-21",
+      "listed_date": "2023-07-17",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "399300.SZ"
+    },
+    {
+      "symbol": "159919.SZ",
+      "name": "沪深300ETF嘉实",
+      "bucket": "沪深300",
+      "is_core_basket": true,
+      "inception_date": "2012-05-07",
+      "listed_date": "2012-05-28",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "399300.SZ"
+    },
+    {
+      "symbol": "159925.SZ",
+      "name": "南方300",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2013-02-18",
+      "listed_date": "2013-04-11",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "399300.SZ"
+    },
+    {
+      "symbol": "510300.SH",
+      "name": "300ETF",
+      "bucket": "沪深300",
+      "is_core_basket": true,
+      "inception_date": "2012-05-04",
+      "listed_date": "2012-05-28",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "510310.SH",
+      "name": "HS300ETF",
+      "bucket": "沪深300",
+      "is_core_basket": true,
+      "inception_date": "2013-03-06",
+      "listed_date": "2013-03-25",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "510320.SH",
+      "name": "300中金",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2025-04-16",
+      "listed_date": "2025-04-25",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "510330.SH",
+      "name": "华夏300",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2012-12-25",
+      "listed_date": "2013-01-16",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "510350.SH",
+      "name": "工银300",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2019-05-20",
+      "listed_date": "2019-08-16",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "510360.SH",
+      "name": "广发300",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2015-08-20",
+      "listed_date": "2015-09-09",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "510370.SH",
+      "name": "兴业300",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2020-09-11",
+      "listed_date": "2020-10-27",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "510380.SH",
+      "name": "国寿300",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2018-01-19",
+      "listed_date": "2018-02-07",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "510390.SH",
+      "name": "平安300",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2017-12-25",
+      "listed_date": "2018-01-26",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "515130.SH",
+      "name": "HS300E",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2020-04-03",
+      "listed_date": "2020-05-11",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "515310.SH",
+      "name": "添富300",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2019-12-04",
+      "listed_date": "2019-12-25",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "515330.SH",
+      "name": "沪深300ETF天弘",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2019-12-05",
+      "listed_date": "2019-12-26",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "515350.SH",
+      "name": "民生300",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2019-12-24",
+      "listed_date": "2020-02-07",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "515360.SH",
+      "name": "方正300",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2019-09-24",
+      "listed_date": "2019-11-01",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "515380.SH",
+      "name": "泰康300",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2019-12-27",
+      "listed_date": "2020-03-23",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "515390.SH",
+      "name": "HS300",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2019-12-13",
+      "listed_date": "2020-01-10",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "515660.SH",
+      "name": "沪深300E",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2019-11-25",
+      "listed_date": "2019-12-24",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "561000.SH",
+      "name": "300指增",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2022-12-21",
+      "listed_date": "2023-01-11",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "561300.SH",
+      "name": "300增ETF",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2021-12-01",
+      "listed_date": "2021-12-10",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "561930.SH",
+      "name": "招商300",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2024-09-06",
+      "listed_date": "2024-09-20",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "561990.SH",
+      "name": "300增强",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2021-12-02",
+      "listed_date": "2021-12-10",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "562070.SH",
+      "name": "300ETF增",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2025-12-17",
+      "listed_date": "2025-12-25",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "563520.SH",
+      "name": "300永赢",
+      "bucket": "沪深300",
+      "is_core_basket": false,
+      "inception_date": "2024-11-08",
+      "listed_date": "2024-11-18",
+      "tracking_index_name": "沪深300指数",
+      "tracking_index_symbol": "000300.SH"
+    },
+    {
+      "symbol": "159337.SZ",
+      "name": "中证500ETF东财",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2024-09-02",
+      "listed_date": "2024-09-20",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "159500.SZ",
+      "name": "中证500ETF富国",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2025-08-20",
+      "listed_date": "2025-08-29",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "159610.SZ",
+      "name": "中证500增强ETF景顺",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2021-12-13",
+      "listed_date": "2022-01-10",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "159678.SZ",
+      "name": "500增强ETF博时",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2023-02-13",
+      "listed_date": "2023-02-27",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "159820.SZ",
+      "name": "中证500ETF天弘",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2020-08-07",
+      "listed_date": "2020-08-24",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "399905.SZ"
+    },
+    {
+      "symbol": "159922.SZ",
+      "name": "中证500ETF嘉实",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2013-02-06",
+      "listed_date": "2013-03-15",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "399905.SZ"
+    },
+    {
+      "symbol": "159935.SZ",
+      "name": "中证500ETF景顺",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2013-12-26",
+      "listed_date": "2014-01-21",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "159968.SZ",
+      "name": "中证500ETF博时",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2019-08-01",
+      "listed_date": "2019-10-31",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "399905.SZ"
+    },
+    {
+      "symbol": "159982.SZ",
+      "name": "中证500ETF鹏华",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2019-11-21",
+      "listed_date": "2020-02-20",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "399905.SZ"
+    },
+    {
+      "symbol": "510500.SH",
+      "name": "500ETF",
+      "bucket": "中证500",
+      "is_core_basket": true,
+      "inception_date": "2013-02-06",
+      "listed_date": "2013-03-15",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "510510.SH",
+      "name": "广发500",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2013-04-11",
+      "listed_date": "2013-05-24",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "510530.SH",
+      "name": "工银500",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2019-10-17",
+      "listed_date": "2020-01-03",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "510550.SH",
+      "name": "方正500",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2018-11-30",
+      "listed_date": "2019-01-16",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "510560.SH",
+      "name": "国寿500",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2015-05-29",
+      "listed_date": "2015-07-03",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "510570.SH",
+      "name": "兴业500",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2020-06-30",
+      "listed_date": "2020-08-12",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "510580.SH",
+      "name": "ZZ500ETF",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2015-08-27",
+      "listed_date": "2015-09-14",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "510590.SH",
+      "name": "平安500",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2018-03-23",
+      "listed_date": "2018-05-04",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "512500.SH",
+      "name": "中证500",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2015-05-05",
+      "listed_date": "2015-05-29",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "512510.SH",
+      "name": "ETF500",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2015-05-13",
+      "listed_date": "2015-06-12",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "515190.SH",
+      "name": "BOCI500",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2020-04-30",
+      "listed_date": "2020-05-27",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "515530.SH",
+      "name": "泰康500",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2020-09-18",
+      "listed_date": "2020-11-09",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "515550.SH",
+      "name": "国联500",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2019-11-15",
+      "listed_date": "2019-12-25",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "560100.SH",
+      "name": "增强ETF",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2022-01-26",
+      "listed_date": "2022-02-16",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "560950.SH",
+      "name": "500增",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2023-07-19",
+      "listed_date": "2023-07-31",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "561350.SH",
+      "name": "国泰500",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2021-08-18",
+      "listed_date": "2021-09-01",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "561550.SH",
+      "name": "500指增",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2021-12-02",
+      "listed_date": "2021-12-10",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "561950.SH",
+      "name": "500增强A",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2023-03-29",
+      "listed_date": "2023-04-24",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "563030.SH",
+      "name": "增强500",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2023-02-17",
+      "listed_date": "2023-03-13",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "563750.SH",
+      "name": "500添富",
+      "bucket": "中证500",
+      "is_core_basket": false,
+      "inception_date": "2025-10-22",
+      "listed_date": "2025-10-30",
+      "tracking_index_name": "中证小盘500指数",
+      "tracking_index_symbol": "000905.SH"
+    },
+    {
+      "symbol": "159215.SZ",
+      "name": "A500ETF平安",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-03-26",
+      "listed_date": "2025-04-07",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159226.SZ",
+      "name": "中证A500增强ETF国泰",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-05-20",
+      "listed_date": "2025-05-29",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159240.SZ",
+      "name": "A500增强ETF天弘",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-06-05",
+      "listed_date": "2025-06-17",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159249.SZ",
+      "name": "A500增强ETF工银",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-06-20",
+      "listed_date": "2025-07-02",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159338.SZ",
+      "name": "中证A500ETF国泰",
+      "bucket": "中证A500",
+      "is_core_basket": true,
+      "inception_date": "2024-09-26",
+      "listed_date": "2024-10-15",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159339.SZ",
+      "name": "A500ETF银华",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-09-26",
+      "listed_date": "2024-10-15",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159351.SZ",
+      "name": "A500ETF嘉实",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-09-20",
+      "listed_date": "2024-10-15",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159352.SZ",
+      "name": "A500ETF南方",
+      "bucket": "中证A500",
+      "is_core_basket": true,
+      "inception_date": "2024-09-25",
+      "listed_date": "2024-10-15",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159353.SZ",
+      "name": "中证A500ETF景顺",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-09-24",
+      "listed_date": "2024-10-15",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159356.SZ",
+      "name": "A500ETF万家",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-11-22",
+      "listed_date": "2024-12-06",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159357.SZ",
+      "name": "A500ETF博时",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-11-21",
+      "listed_date": "2024-11-28",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159358.SZ",
+      "name": "中证A500ETF大成",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-11-22",
+      "listed_date": "2024-11-29",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159359.SZ",
+      "name": "A500ETF华安",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-11-19",
+      "listed_date": "2024-12-02",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159360.SZ",
+      "name": "A500ETF天弘",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-11-20",
+      "listed_date": "2024-11-28",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159361.SZ",
+      "name": "A500ETF易方达",
+      "bucket": "中证A500",
+      "is_core_basket": true,
+      "inception_date": "2024-11-12",
+      "listed_date": "2024-11-19",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159362.SZ",
+      "name": "A500ETF工银",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-11-19",
+      "listed_date": "2024-12-02",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159376.SZ",
+      "name": "A500ETF浦银",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-12-30",
+      "listed_date": "2025-01-13",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159379.SZ",
+      "name": "A500ETF融通",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-01-09",
+      "listed_date": "2025-01-23",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159380.SZ",
+      "name": "A500ETF东财",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-12-30",
+      "listed_date": "2025-01-08",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "159386.SZ",
+      "name": "A500ETF永赢",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-01-24",
+      "listed_date": "2025-02-11",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "512020.SH",
+      "name": "A500",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-11-21",
+      "listed_date": "2024-12-02",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "512050.SH",
+      "name": "A500E",
+      "bucket": "中证A500",
+      "is_core_basket": true,
+      "inception_date": "2024-11-08",
+      "listed_date": "2024-11-15",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "512080.SH",
+      "name": "A500中金",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-01-14",
+      "listed_date": "2025-01-21",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "512370.SH",
+      "name": "A500增指",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-08-06",
+      "listed_date": "2025-08-18",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "560510.SH",
+      "name": "中证A500",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-09-27",
+      "listed_date": "2024-10-15",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "560530.SH",
+      "name": "A500ETF",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-09-24",
+      "listed_date": "2024-10-15",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "560610.SH",
+      "name": "A500指数",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-09-26",
+      "listed_date": "2024-10-15",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "560750.SH",
+      "name": "A500申万",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-01-22",
+      "listed_date": "2025-02-07",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "561090.SH",
+      "name": "A500增",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-06-18",
+      "listed_date": "2025-07-02",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "563220.SH",
+      "name": "A500富国",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-09-25",
+      "listed_date": "2024-10-15",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "563360.SH",
+      "name": "A500基金",
+      "bucket": "中证A500",
+      "is_core_basket": true,
+      "inception_date": "2024-09-25",
+      "listed_date": "2024-10-15",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "563500.SH",
+      "name": "A500ETF华宝",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-11-22",
+      "listed_date": "2024-12-02",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "563550.SH",
+      "name": "增强A500",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-05-08",
+      "listed_date": "2025-05-16",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "563600.SH",
+      "name": "A500增强",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-09-10",
+      "listed_date": "2025-09-26",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "563630.SH",
+      "name": "A500指增",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-06-19",
+      "listed_date": "2025-07-01",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "563650.SH",
+      "name": "A500中证",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-03-25",
+      "listed_date": "2025-04-03",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "563660.SH",
+      "name": "A500银河",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-03-20",
+      "listed_date": "2025-04-02",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "563800.SH",
+      "name": "A500龙头",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-11-11",
+      "listed_date": "2024-11-18",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "563860.SH",
+      "name": "A500海富",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2025-01-22",
+      "listed_date": "2025-02-12",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "563880.SH",
+      "name": "A500添富",
+      "bucket": "中证A500",
+      "is_core_basket": false,
+      "inception_date": "2024-11-18",
+      "listed_date": "2024-11-25",
+      "tracking_index_name": "中证A500指数",
+      "tracking_index_symbol": "000510.SH"
+    },
+    {
+      "symbol": "158022.SZ",
+      "name": "创业板综增强ETF国联",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2026-09-09",
+      "listed_date": "2026-09-18",
+      "tracking_index_name": "创业板综合指数",
+      "tracking_index_symbol": "399102.SZ"
+    },
+    {
+      "symbol": "159066.SZ",
+      "name": "A股ETF建信",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2026-06-24",
+      "listed_date": "2026-07-06",
+      "tracking_index_name": "中证A股指数",
+      "tracking_index_symbol": "930903.CSI"
+    },
+    {
+      "symbol": "159078.SZ",
+      "name": "A股ETF富国",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2026-06-30",
+      "listed_date": "2026-07-08",
+      "tracking_index_name": "中证A股指数",
+      "tracking_index_symbol": "930903.CSI"
+    },
+    {
+      "symbol": "159136.SZ",
+      "name": "A50ETF广发",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-12-16",
+      "listed_date": "2025-12-25",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "159150.SZ",
+      "name": "深证50ETF易方达",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-11-29",
+      "listed_date": "2023-12-11",
+      "tracking_index_name": "深证50指数",
+      "tracking_index_symbol": "399850.SZ"
+    },
+    {
+      "symbol": "159211.SZ",
+      "name": "深证100ETF富国",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-04-02",
+      "listed_date": "2025-04-14",
+      "tracking_index_name": "深证100指数",
+      "tracking_index_symbol": "399330.SZ"
+    },
+    {
+      "symbol": "159212.SZ",
+      "name": "深100ETF南方",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-03-27",
+      "listed_date": "2025-04-09",
+      "tracking_index_name": "深证100指数",
+      "tracking_index_symbol": "399330.SZ"
+    },
+    {
+      "symbol": "159216.SZ",
+      "name": "深证100ETF大成",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-04-02",
+      "listed_date": "2025-04-11",
+      "tracking_index_name": "深证100指数",
+      "tracking_index_symbol": "399330.SZ"
+    },
+    {
+      "symbol": "159219.SZ",
+      "name": "深证100ETF融通",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-04-24",
+      "listed_date": "2025-05-13",
+      "tracking_index_name": "深证100指数",
+      "tracking_index_symbol": "399330.SZ"
+    },
+    {
+      "symbol": "159270.SZ",
+      "name": "创业板200ETF南方",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-07-16",
+      "listed_date": "2025-07-24",
+      "tracking_index_name": "创业板200指数",
+      "tracking_index_symbol": "399019.SZ"
+    },
+    {
+      "symbol": "159287.SZ",
+      "name": "创业板综ETF博时",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-08-15",
+      "listed_date": "2025-08-27",
+      "tracking_index_name": "创业板综合指数",
+      "tracking_index_symbol": "399102.SZ"
+    },
+    {
+      "symbol": "159288.SZ",
+      "name": "创业板综ETF银华",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-09-17",
+      "listed_date": "2025-09-26",
+      "tracking_index_name": "创业板综合指数",
+      "tracking_index_symbol": "399102.SZ"
+    },
+    {
+      "symbol": "159289.SZ",
+      "name": "创业板综指ETF鹏华",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-09-03",
+      "listed_date": "2025-09-15",
+      "tracking_index_name": "创业板综合指数",
+      "tracking_index_symbol": "399102.SZ"
+    },
+    {
+      "symbol": "159290.SZ",
+      "name": "创业板综指增强ETF东财",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-09-09",
+      "listed_date": "2025-09-17",
+      "tracking_index_name": "创业板综合指数",
+      "tracking_index_symbol": "399102.SZ"
+    },
+    {
+      "symbol": "159291.SZ",
+      "name": "创业板综增强ETF招商",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-08-20",
+      "listed_date": "2025-09-01",
+      "tracking_index_name": "创业板综合指数",
+      "tracking_index_symbol": "399102.SZ"
+    },
+    {
+      "symbol": "159292.SZ",
+      "name": "创业板综增强ETF华宝",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-08-20",
+      "listed_date": "2025-09-02",
+      "tracking_index_name": "创业板综合指数",
+      "tracking_index_symbol": "399102.SZ"
+    },
+    {
+      "symbol": "159293.SZ",
+      "name": "创业板综增强ETF建信",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-12-30",
+      "listed_date": "2026-01-13",
+      "tracking_index_name": "创业板综合指数",
+      "tracking_index_symbol": "399102.SZ"
+    },
+    {
+      "symbol": "159295.SZ",
+      "name": "创业综指ETF西部利得",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-10-23",
+      "listed_date": "2025-11-04",
+      "tracking_index_name": "创业板综合指数",
+      "tracking_index_symbol": "399102.SZ"
+    },
+    {
+      "symbol": "159350.SZ",
+      "name": "深证50ETF富国",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-11-30",
+      "listed_date": "2023-12-11",
+      "tracking_index_name": "深证50指数",
+      "tracking_index_symbol": "399850.SZ"
+    },
+    {
+      "symbol": "159390.SZ",
+      "name": "中证A50ETF国联",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-03-26",
+      "listed_date": "2025-04-09",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "159517.SZ",
+      "name": "中证800增强ETF银华",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-08-23",
+      "listed_date": "2023-09-05",
+      "tracking_index_name": "中证800指数",
+      "tracking_index_symbol": "000906.SH"
+    },
+    {
+      "symbol": "159541.SZ",
+      "name": "创业板综ETF万家",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-10-18",
+      "listed_date": "2023-10-31",
+      "tracking_index_name": "创业板综合指数",
+      "tracking_index_symbol": "399102.SZ"
+    },
+    {
+      "symbol": "159563.SZ",
+      "name": "创业板综ETF华夏",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-02-01",
+      "listed_date": "2024-02-23",
+      "tracking_index_name": "创业板综合指数",
+      "tracking_index_symbol": "399102.SZ"
+    },
+    {
+      "symbol": "159571.SZ",
+      "name": "创业板200ETF富国",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-12-20",
+      "listed_date": "2024-01-02",
+      "tracking_index_name": "创业板200指数",
+      "tracking_index_symbol": "399019.SZ"
+    },
+    {
+      "symbol": "159572.SZ",
+      "name": "创业板200ETF易方达",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-12-15",
+      "listed_date": "2023-12-25",
+      "tracking_index_name": "创业板200指数",
+      "tracking_index_symbol": "399019.SZ"
+    },
+    {
+      "symbol": "159573.SZ",
+      "name": "创业板200ETF华夏",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-12-15",
+      "listed_date": "2023-12-25",
+      "tracking_index_name": "创业板200指数",
+      "tracking_index_symbol": "399019.SZ"
+    },
+    {
+      "symbol": "159575.SZ",
+      "name": "创业板200ETF银华",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-12-20",
+      "listed_date": "2024-01-02",
+      "tracking_index_name": "创业板200指数",
+      "tracking_index_symbol": "399019.SZ"
+    },
+    {
+      "symbol": "159576.SZ",
+      "name": "深证100ETF广发",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-12-21",
+      "listed_date": "2024-01-03",
+      "tracking_index_name": "深证100指数",
+      "tracking_index_symbol": "399330.SZ"
+    },
+    {
+      "symbol": "159578.SZ",
+      "name": "深证主板50ETF南方",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-05-30",
+      "listed_date": "2024-06-07",
+      "tracking_index_name": "深证主板50指数",
+      "tracking_index_symbol": "399750.SZ"
+    },
+    {
+      "symbol": "159591.SZ",
+      "name": "A50ETF富国",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-03-07",
+      "listed_date": "2024-03-18",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "159592.SZ",
+      "name": "A50ETF银华",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-03-06",
+      "listed_date": "2024-03-18",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "159593.SZ",
+      "name": "A50ETF平安",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-03-04",
+      "listed_date": "2024-03-12",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "159595.SZ",
+      "name": "中证A50ETF大成",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-03-06",
+      "listed_date": "2024-03-18",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "159596.SZ",
+      "name": "A50ETF华宝",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-03-07",
+      "listed_date": "2024-03-18",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "159627.SZ",
+      "name": "A100ETF华夏",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2022-11-08",
+      "listed_date": "2022-11-30",
+      "tracking_index_name": "中证A100指数",
+      "tracking_index_symbol": "000903.SH"
+    },
+    {
+      "symbol": "159630.SZ",
+      "name": "A100ETF汇添富",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2022-10-20",
+      "listed_date": "2022-11-01",
+      "tracking_index_name": "中证A100指数",
+      "tracking_index_symbol": "000903.SH"
+    },
+    {
+      "symbol": "159631.SZ",
+      "name": "A100ETF招商",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2022-08-18",
+      "listed_date": "2022-08-26",
+      "tracking_index_name": "中证A100指数",
+      "tracking_index_symbol": "000903.SH"
+    },
+    {
+      "symbol": "159661.SZ",
+      "name": "A100ETF嘉实",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-11-23",
+      "listed_date": "2023-12-01",
+      "tracking_index_name": "中证A100指数",
+      "tracking_index_symbol": "000903.SH"
+    },
+    {
+      "symbol": "159686.SZ",
+      "name": "A100ETF易方达",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-07-11",
+      "listed_date": "2023-07-19",
+      "tracking_index_name": "中证A100指数",
+      "tracking_index_symbol": "000903.SH"
+    },
+    {
+      "symbol": "159706.SZ",
+      "name": "深证100ETF华安",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2021-12-09",
+      "listed_date": "2021-12-20",
+      "tracking_index_name": "深证100指数",
+      "tracking_index_symbol": "399330.SZ"
+    },
+    {
+      "symbol": "159721.SZ",
+      "name": "深证100ETF永赢",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2021-06-17",
+      "listed_date": "2021-06-25",
+      "tracking_index_name": "深证100指数",
+      "tracking_index_symbol": "399330.SZ"
+    },
+    {
+      "symbol": "159800.SZ",
+      "name": "中证800ETF鹏华",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-06-27",
+      "listed_date": "2024-07-12",
+      "tracking_index_name": "中证800指数",
+      "tracking_index_symbol": "000906.SH"
+    },
+    {
+      "symbol": "159814.SZ",
+      "name": "创业大盘ETF西部利得",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2020-06-19",
+      "listed_date": "2020-07-17",
+      "tracking_index_name": "创业板大盘指数",
+      "tracking_index_symbol": "399293.SZ"
+    },
+    {
+      "symbol": "159836.SZ",
+      "name": "创业板300ETF天弘",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2021-05-11",
+      "listed_date": "2021-05-25",
+      "tracking_index_name": "创业板300指数",
+      "tracking_index_symbol": "399012.SZ"
+    },
+    {
+      "symbol": "159901.SZ",
+      "name": "深证100ETF易方达",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2006-03-24",
+      "listed_date": "2006-04-24",
+      "tracking_index_name": "深证100指数",
+      "tracking_index_symbol": "399330.SZ"
+    },
+    {
+      "symbol": "159902.SZ",
+      "name": "中小100ETF华夏",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2006-06-08",
+      "listed_date": "2006-09-05",
+      "tracking_index_name": "中小企业100指数",
+      "tracking_index_symbol": "399005.SZ"
+    },
+    {
+      "symbol": "159903.SZ",
+      "name": "深成ETF南方",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2009-12-04",
+      "listed_date": "2010-02-02",
+      "tracking_index_name": "深证成份指数",
+      "tracking_index_symbol": "399001.SZ"
+    },
+    {
+      "symbol": "159912.SZ",
+      "name": "深300ETF汇添富",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2011-09-16",
+      "listed_date": "2011-11-24",
+      "tracking_index_name": "深证300指数",
+      "tracking_index_symbol": "399007.SZ"
+    },
+    {
+      "symbol": "159918.SZ",
+      "name": "中创400ETF嘉实",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2012-03-22",
+      "listed_date": "2012-05-11",
+      "tracking_index_name": "中小创业企业400指数",
+      "tracking_index_symbol": "399624.SZ"
+    },
+    {
+      "symbol": "159923.SZ",
+      "name": "中证A100ETF大成",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2013-02-07",
+      "listed_date": "2013-03-05",
+      "tracking_index_name": "中证A100指数",
+      "tracking_index_symbol": "399903.SZ"
+    },
+    {
+      "symbol": "159943.SZ",
+      "name": "深证成指ETF大成",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2015-06-05",
+      "listed_date": "2015-07-08",
+      "tracking_index_name": "深证成份指数",
+      "tracking_index_symbol": "399001.SZ"
+    },
+    {
+      "symbol": "159961.SZ",
+      "name": "深100",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2018-11-02",
+      "listed_date": "2018-12-19",
+      "tracking_index_name": "深证100指数",
+      "tracking_index_symbol": "399330.SZ"
+    },
+    {
+      "symbol": "159970.SZ",
+      "name": "深100ETF工银",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2019-12-19",
+      "listed_date": "2020-01-10",
+      "tracking_index_name": "深证100指数",
+      "tracking_index_symbol": "399330.SZ"
+    },
+    {
+      "symbol": "159975.SZ",
+      "name": "深100ETF招商",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2019-11-07",
+      "listed_date": "2020-01-02",
+      "tracking_index_name": "深证100指数",
+      "tracking_index_symbol": "399330.SZ"
+    },
+    {
+      "symbol": "159991.SZ",
+      "name": "创业板大盘ETF招商",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2020-03-20",
+      "listed_date": "2020-04-24",
+      "tracking_index_name": "创业板大盘指数",
+      "tracking_index_symbol": "399293.SZ"
+    },
+    {
+      "symbol": "510020.SH",
+      "name": "超大ETF",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2009-12-29",
+      "listed_date": "2010-03-19",
+      "tracking_index_name": "上证超级大盘指数",
+      "tracking_index_symbol": "000043.SH"
+    },
+    {
+      "symbol": "510040.SH",
+      "name": "上证180E",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-12-25",
+      "listed_date": "2025-01-06",
+      "tracking_index_name": "上证180指数",
+      "tracking_index_symbol": "000010.SH"
+    },
+    {
+      "symbol": "510130.SH",
+      "name": "中盘ETF",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2010-03-29",
+      "listed_date": "2010-06-23",
+      "tracking_index_name": "上证中盘指数",
+      "tracking_index_symbol": "000044.SH"
+    },
+    {
+      "symbol": "510140.SH",
+      "name": "上证指",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2026-06-24",
+      "listed_date": "2026-07-03",
+      "tracking_index_name": "上证综合指数",
+      "tracking_index_symbol": "000001.SH"
+    },
+    {
+      "symbol": "510180.SH",
+      "name": "180ETF",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2006-04-13",
+      "listed_date": "2006-05-18",
+      "tracking_index_name": "上证180指数",
+      "tracking_index_symbol": "000010.SH"
+    },
+    {
+      "symbol": "510210.SH",
+      "name": "综指ETF",
+      "bucket": "其他宽基",
+      "is_core_basket": true,
+      "inception_date": "2011-01-30",
+      "listed_date": "2011-03-25",
+      "tracking_index_name": "上证综合指数",
+      "tracking_index_symbol": "000001.SH"
+    },
+    {
+      "symbol": "510290.SH",
+      "name": "380ETF",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2011-09-16",
+      "listed_date": "2011-11-08",
+      "tracking_index_name": "上证380指数",
+      "tracking_index_symbol": "000009.SH"
+    },
+    {
+      "symbol": "510670.SH",
+      "name": "180指",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-10-20",
+      "listed_date": "2025-10-29",
+      "tracking_index_name": "上证180指数",
+      "tracking_index_symbol": "000010.SH"
+    },
+    {
+      "symbol": "510760.SH",
+      "name": "上证ETF",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2020-08-21",
+      "listed_date": "2020-09-09",
+      "tracking_index_name": "上证综合指数",
+      "tracking_index_symbol": "000001.SH"
+    },
+    {
+      "symbol": "510910.SH",
+      "name": "上证指CS",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2026-05-21",
+      "listed_date": "2026-06-03",
+      "tracking_index_name": "上证综合指数",
+      "tracking_index_symbol": "000001.SH"
+    },
+    {
+      "symbol": "510980.SH",
+      "name": "上证综合",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-11-22",
+      "listed_date": "2023-12-01",
+      "tracking_index_name": "上证综合指数",
+      "tracking_index_symbol": "000001.SH"
+    },
+    {
+      "symbol": "512030.SH",
+      "name": "A50增",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-07-28",
+      "listed_date": "2025-08-13",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "512060.SH",
+      "name": "A100指基",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-07-09",
+      "listed_date": "2025-07-18",
+      "tracking_index_name": "中证A100指数",
+      "tracking_index_symbol": "000903.SH"
+    },
+    {
+      "symbol": "512240.SH",
+      "name": "A50龙头",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-03-26",
+      "listed_date": "2025-04-07",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "512250.SH",
+      "name": "A50指数E",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-04-03",
+      "listed_date": "2025-04-14",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "512910.SH",
+      "name": "100ETF",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2019-05-27",
+      "listed_date": "2019-07-01",
+      "tracking_index_name": "中证A100指数",
+      "tracking_index_symbol": "000903.SH"
+    },
+    {
+      "symbol": "515440.SH",
+      "name": "A股南方",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2026-09-02",
+      "listed_date": "2026-09-10",
+      "tracking_index_name": "中证A股指数",
+      "tracking_index_symbol": "930903.CSI"
+    },
+    {
+      "symbol": "515800.SH",
+      "name": "800ETF",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2019-10-08",
+      "listed_date": "2019-12-16",
+      "tracking_index_name": "中证800指数",
+      "tracking_index_symbol": "000906.SH"
+    },
+    {
+      "symbol": "515810.SH",
+      "name": "ZZ800ETF",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2019-10-08",
+      "listed_date": "2019-10-25",
+      "tracking_index_name": "中证800指数",
+      "tracking_index_symbol": "000906.SH"
+    },
+    {
+      "symbol": "530060.SH",
+      "name": "上证综E",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2026-01-30",
+      "listed_date": "2026-02-10",
+      "tracking_index_name": "上证综合指数",
+      "tracking_index_symbol": "000001.SH"
+    },
+    {
+      "symbol": "530080.SH",
+      "name": "180指基",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-01-08",
+      "listed_date": "2025-01-23",
+      "tracking_index_name": "上证180指数",
+      "tracking_index_symbol": "000010.SH"
+    },
+    {
+      "symbol": "530100.SH",
+      "name": "上证580",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-10-10",
+      "listed_date": "2025-10-22",
+      "tracking_index_name": "上证580指数",
+      "tracking_index_symbol": "950580.CSI"
+    },
+    {
+      "symbol": "530180.SH",
+      "name": "上证180",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-12-18",
+      "listed_date": "2024-12-26",
+      "tracking_index_name": "上证180指数",
+      "tracking_index_symbol": "000010.SH"
+    },
+    {
+      "symbol": "530280.SH",
+      "name": "180ETF指",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-01-15",
+      "listed_date": "2025-01-24",
+      "tracking_index_name": "上证180指数",
+      "tracking_index_symbol": "000010.SH"
+    },
+    {
+      "symbol": "530300.SH",
+      "name": "180指数",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-12-30",
+      "listed_date": "2025-01-10",
+      "tracking_index_name": "上证180指数",
+      "tracking_index_symbol": "000010.SH"
+    },
+    {
+      "symbol": "530380.SH",
+      "name": "上证380",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-09-22",
+      "listed_date": "2025-09-30",
+      "tracking_index_name": "上证380指数",
+      "tracking_index_symbol": "000009.SH"
+    },
+    {
+      "symbol": "530530.SH",
+      "name": "580ETF",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-08-20",
+      "listed_date": "2025-08-29",
+      "tracking_index_name": "上证580指数",
+      "tracking_index_symbol": "950580.CSI"
+    },
+    {
+      "symbol": "530580.SH",
+      "name": "180基金",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-12-30",
+      "listed_date": "2025-01-08",
+      "tracking_index_name": "上证180指数",
+      "tracking_index_symbol": "000010.SH"
+    },
+    {
+      "symbol": "530680.SH",
+      "name": "180E",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-12-25",
+      "listed_date": "2025-01-08",
+      "tracking_index_name": "上证180指数",
+      "tracking_index_symbol": "000010.SH"
+    },
+    {
+      "symbol": "530800.SH",
+      "name": "上180ETF",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-01-17",
+      "listed_date": "2025-01-27",
+      "tracking_index_name": "上证180指数",
+      "tracking_index_symbol": "000010.SH"
+    },
+    {
+      "symbol": "560350.SH",
+      "name": "A50指数",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-03-05",
+      "listed_date": "2024-03-12",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "560380.SH",
+      "name": "A100",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-12-19",
+      "listed_date": "2024-12-27",
+      "tracking_index_name": "中证A100指数",
+      "tracking_index_symbol": "000903.SH"
+    },
+    {
+      "symbol": "560820.SH",
+      "name": "A50新华",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-03-28",
+      "listed_date": "2025-04-18",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "561180.SH",
+      "name": "A100ETF",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2022-11-03",
+      "listed_date": "2022-11-21",
+      "tracking_index_name": "中证A100指数",
+      "tracking_index_symbol": "000903.SH"
+    },
+    {
+      "symbol": "561200.SH",
+      "name": "中证A100ETF工银",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-12-22",
+      "listed_date": "2024-01-05",
+      "tracking_index_name": "中证A100指数",
+      "tracking_index_symbol": "000903.SH"
+    },
+    {
+      "symbol": "561230.SH",
+      "name": "A50",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-03-06",
+      "listed_date": "2024-03-18",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "561730.SH",
+      "name": "中证A股",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2026-08-19",
+      "listed_date": "2026-08-28",
+      "tracking_index_name": "中证A股指数",
+      "tracking_index_symbol": "930903.CSI"
+    },
+    {
+      "symbol": "561750.SH",
+      "name": "A50博时",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-05-22",
+      "listed_date": "2025-05-30",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "561770.SH",
+      "name": "指基A100",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-06-16",
+      "listed_date": "2025-06-24",
+      "tracking_index_name": "中证A100指数",
+      "tracking_index_symbol": "000903.SH"
+    },
+    {
+      "symbol": "561880.SH",
+      "name": "A100指数",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-01-15",
+      "listed_date": "2025-01-24",
+      "tracking_index_name": "中证A100指数",
+      "tracking_index_symbol": "000903.SH"
+    },
+    {
+      "symbol": "561890.SH",
+      "name": "A股E",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2026-07-30",
+      "listed_date": "2026-08-07",
+      "tracking_index_name": "中证A股指数",
+      "tracking_index_symbol": "930903.CSI"
+    },
+    {
+      "symbol": "562000.SH",
+      "name": "100ETF基",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2022-07-21",
+      "listed_date": "2022-08-01",
+      "tracking_index_name": "中证A100指数",
+      "tracking_index_symbol": "000903.SH"
+    },
+    {
+      "symbol": "562810.SH",
+      "name": "上证增强",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-03-05",
+      "listed_date": "2025-03-13",
+      "tracking_index_name": "上证综合指数",
+      "tracking_index_symbol": "000001.SH"
+    },
+    {
+      "symbol": "562890.SH",
+      "name": "A50中证",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-03-07",
+      "listed_date": "2024-03-18",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "563080.SH",
+      "name": "中证A50E",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-03-06",
+      "listed_date": "2024-03-18",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "563330.SH",
+      "name": "A股ETF",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-10-30",
+      "listed_date": "2023-11-07",
+      "tracking_index_name": "中证A股指数",
+      "tracking_index_symbol": "930903.CSI"
+    },
+    {
+      "symbol": "563350.SH",
+      "name": "中证A50",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-03-06",
+      "listed_date": "2024-03-18",
+      "tracking_index_name": "中证A50指数",
+      "tracking_index_symbol": "930050.CSI"
+    },
+    {
+      "symbol": "563930.SH",
+      "name": "上指增强",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-12-25",
+      "listed_date": "2026-01-06",
+      "tracking_index_name": "上证综合指数",
+      "tracking_index_symbol": "000001.SH"
+    },
+    {
+      "symbol": "588030.SH",
+      "name": "科创指基",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-09-06",
+      "listed_date": "2023-09-15",
+      "tracking_index_name": "上证科创板100指数",
+      "tracking_index_symbol": "000698.SH"
+    },
+    {
+      "symbol": "588120.SH",
+      "name": "科100ETF",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-09-06",
+      "listed_date": "2023-09-15",
+      "tracking_index_name": "上证科创板100指数",
+      "tracking_index_symbol": "000698.SH"
+    },
+    {
+      "symbol": "588140.SH",
+      "name": "科200GF",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-09-26",
+      "listed_date": "2025-10-15",
+      "tracking_index_name": "上证科创板200指数",
+      "tracking_index_symbol": "000699.SH"
+    },
+    {
+      "symbol": "588190.SH",
+      "name": "科创100",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-09-06",
+      "listed_date": "2023-09-15",
+      "tracking_index_name": "上证科创板100指数",
+      "tracking_index_symbol": "000698.SH"
+    },
+    {
+      "symbol": "588210.SH",
+      "name": "科创100E",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-11-08",
+      "listed_date": "2023-11-16",
+      "tracking_index_name": "上证科创板100指数",
+      "tracking_index_symbol": "000698.SH"
+    },
+    {
+      "symbol": "588220.SH",
+      "name": "科创100F",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-09-06",
+      "listed_date": "2023-09-15",
+      "tracking_index_name": "上证科创板100指数",
+      "tracking_index_symbol": "000698.SH"
+    },
+    {
+      "symbol": "588230.SH",
+      "name": "科创200",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-12-16",
+      "listed_date": "2024-12-24",
+      "tracking_index_name": "上证科创板200指数",
+      "tracking_index_symbol": "000699.SH"
+    },
+    {
+      "symbol": "588240.SH",
+      "name": "科200",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-02-13",
+      "listed_date": "2025-02-25",
+      "tracking_index_name": "上证科创板200指数",
+      "tracking_index_symbol": "000699.SH"
+    },
+    {
+      "symbol": "588270.SH",
+      "name": "科创200F",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-06-05",
+      "listed_date": "2025-06-16",
+      "tracking_index_name": "上证科创板200指数",
+      "tracking_index_symbol": "000699.SH"
+    },
+    {
+      "symbol": "588500.SH",
+      "name": "科创100Z",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-06-27",
+      "listed_date": "2024-07-19",
+      "tracking_index_name": "上证科创板100指数",
+      "tracking_index_symbol": "000698.SH"
+    },
+    {
+      "symbol": "588520.SH",
+      "name": "科创增",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-06-27",
+      "listed_date": "2025-07-08",
+      "tracking_index_name": "上证科创板综合价格指数",
+      "tracking_index_symbol": "000681.SH"
+    },
+    {
+      "symbol": "588550.SH",
+      "name": "科创增指",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-08-27",
+      "listed_date": "2025-09-12",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "588670.SH",
+      "name": "科综增强",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-06-05",
+      "listed_date": "2025-06-13",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "588680.SH",
+      "name": "科100增",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-06-27",
+      "listed_date": "2024-07-05",
+      "tracking_index_name": "上证科创板100指数",
+      "tracking_index_symbol": "000698.SH"
+    },
+    {
+      "symbol": "588690.SH",
+      "name": "科综指增",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-08-20",
+      "listed_date": "2025-08-29",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "588800.SH",
+      "name": "科创100C",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-11-08",
+      "listed_date": "2023-11-16",
+      "tracking_index_name": "上证科创板100指数",
+      "tracking_index_symbol": "000698.SH"
+    },
+    {
+      "symbol": "588820.SH",
+      "name": "科创200E",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2024-12-23",
+      "listed_date": "2025-01-06",
+      "tracking_index_name": "上证科创板200指数",
+      "tracking_index_symbol": "000699.SH"
+    },
+    {
+      "symbol": "588880.SH",
+      "name": "科创指数",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-11-08",
+      "listed_date": "2023-11-16",
+      "tracking_index_name": "上证科创板100指数",
+      "tracking_index_symbol": "000698.SH"
+    },
+    {
+      "symbol": "588900.SH",
+      "name": "科创100S",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2023-12-08",
+      "listed_date": "2023-12-18",
+      "tracking_index_name": "上证科创板100指数",
+      "tracking_index_symbol": "000698.SH"
+    },
+    {
+      "symbol": "588980.SH",
+      "name": "科创广发",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-07-23",
+      "listed_date": "2025-08-01",
+      "tracking_index_name": "上证科创板100指数",
+      "tracking_index_symbol": "000698.SH"
+    },
+    {
+      "symbol": "589000.SH",
+      "name": "科创综指",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-02-26",
+      "listed_date": "2025-03-05",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "589050.SH",
+      "name": "科创E",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-07-30",
+      "listed_date": "2025-08-18",
+      "tracking_index_name": "上证科创板综合价格指数",
+      "tracking_index_symbol": "000681.SH"
+    },
+    {
+      "symbol": "589060.SH",
+      "name": "科综东财",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-03-19",
+      "listed_date": "2025-03-27",
+      "tracking_index_name": "上证科创板综合价格指数",
+      "tracking_index_symbol": "000681.SH"
+    },
+    {
+      "symbol": "589080.SH",
+      "name": "科创综E",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-02-26",
+      "listed_date": "2025-03-05",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "589200.SH",
+      "name": "科200E",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-07-23",
+      "listed_date": "2025-08-08",
+      "tracking_index_name": "上证科创板200指数",
+      "tracking_index_symbol": "000699.SH"
+    },
+    {
+      "symbol": "589220.SH",
+      "name": "科200GT",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2026-01-16",
+      "listed_date": "2026-01-26",
+      "tracking_index_name": "上证科创板200指数",
+      "tracking_index_symbol": "000699.SH"
+    },
+    {
+      "symbol": "589270.SH",
+      "name": "科创100Q",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2026-04-09",
+      "listed_date": "2026-04-28",
+      "tracking_index_name": "上证科创板100指数",
+      "tracking_index_symbol": "000698.SH"
+    },
+    {
+      "symbol": "589280.SH",
+      "name": "科综增指",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2026-05-08",
+      "listed_date": "2026-05-20",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "589300.SH",
+      "name": "科综嘉实",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-04-09",
+      "listed_date": "2025-04-17",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "589320.SH",
+      "name": "科200JS",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2026-05-20",
+      "listed_date": "2026-05-28",
+      "tracking_index_name": "上证科创板200指数",
+      "tracking_index_symbol": "000699.SH"
+    },
+    {
+      "symbol": "589330.SH",
+      "name": "科200DC",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2026-05-21",
+      "listed_date": "2026-05-29",
+      "tracking_index_name": "上证科创板200指数",
+      "tracking_index_symbol": "000699.SH"
+    },
+    {
+      "symbol": "589460.SH",
+      "name": "科200HB",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2026-08-13",
+      "listed_date": "2026-08-21",
+      "tracking_index_name": "上证科创板200指数",
+      "tracking_index_symbol": "000699.SH"
+    },
+    {
+      "symbol": "589500.SH",
+      "name": "科综工银",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-02-24",
+      "listed_date": "2025-03-03",
+      "tracking_index_name": "上证科创板综合价格指数",
+      "tracking_index_symbol": "000681.SH"
+    },
+    {
+      "symbol": "589580.SH",
+      "name": "科综价格",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-05-27",
+      "listed_date": "2025-06-11",
+      "tracking_index_name": "上证科创板综合价格指数",
+      "tracking_index_symbol": "000681.SH"
+    },
+    {
+      "symbol": "589600.SH",
+      "name": "富国科综",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-02-28",
+      "listed_date": "2025-03-07",
+      "tracking_index_name": "上证科创板综合价格指数",
+      "tracking_index_symbol": "000681.SH"
+    },
+    {
+      "symbol": "589630.SH",
+      "name": "科综国泰",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-03-04",
+      "listed_date": "2025-03-12",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "589660.SH",
+      "name": "综指科创",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-02-26",
+      "listed_date": "2025-03-05",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "589680.SH",
+      "name": "科创综Z",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-02-26",
+      "listed_date": "2025-03-05",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "589770.SH",
+      "name": "科创全指",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-02-26",
+      "listed_date": "2025-03-05",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "589780.SH",
+      "name": "科200FG",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-09-17",
+      "listed_date": "2025-09-26",
+      "tracking_index_name": "上证科创板200指数",
+      "tracking_index_symbol": "000699.SH"
+    },
+    {
+      "symbol": "589800.SH",
+      "name": "科创综合",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-02-25",
+      "listed_date": "2025-03-04",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "589820.SH",
+      "name": "科200F",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-08-27",
+      "listed_date": "2025-09-15",
+      "tracking_index_name": "上证科创板200指数",
+      "tracking_index_symbol": "000699.SH"
+    },
+    {
+      "symbol": "589860.SH",
+      "name": "科创综指ETF天弘",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-02-26",
+      "listed_date": "2025-03-05",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "589880.SH",
+      "name": "科创综",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-02-20",
+      "listed_date": "2025-02-28",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "589890.SH",
+      "name": "景顺科综",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-02-26",
+      "listed_date": "2025-03-05",
+      "tracking_index_name": "上证科创板综合价格指数",
+      "tracking_index_symbol": "000681.SH"
+    },
+    {
+      "symbol": "589900.SH",
+      "name": "博时科综",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-02-26",
+      "listed_date": "2025-03-05",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "589950.SH",
+      "name": "科100FG",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-09-29",
+      "listed_date": "2025-10-17",
+      "tracking_index_name": "上证科创板100指数",
+      "tracking_index_symbol": "000698.SH"
+    },
+    {
+      "symbol": "589980.SH",
+      "name": "科基100",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-04-25",
+      "listed_date": "2025-05-12",
+      "tracking_index_name": "上证科创板100指数",
+      "tracking_index_symbol": "000698.SH"
+    },
+    {
+      "symbol": "589990.SH",
+      "name": "科创板综",
+      "bucket": "其他宽基",
+      "is_core_basket": false,
+      "inception_date": "2025-02-26",
+      "listed_date": "2025-03-05",
+      "tracking_index_name": "上证科创板综合指数",
+      "tracking_index_symbol": "000680.SH"
+    },
+    {
+      "symbol": "510050.SH",
+      "name": "50ETF",
+      "bucket": "上证50",
+      "is_core_basket": true,
+      "inception_date": "2004-12-30",
+      "listed_date": "2005-02-23",
+      "tracking_index_name": "上证50指数",
+      "tracking_index_symbol": "000016.SH"
+    },
+    {
+      "symbol": "510100.SH",
+      "name": "SZ50ETF",
+      "bucket": "上证50",
+      "is_core_basket": false,
+      "inception_date": "2019-09-06",
+      "listed_date": "2019-10-09",
+      "tracking_index_name": "上证50指数",
+      "tracking_index_symbol": "000016.SH"
+    },
+    {
+      "symbol": "510190.SH",
+      "name": "上证50基",
+      "bucket": "上证50",
+      "is_core_basket": false,
+      "inception_date": "2010-11-18",
+      "listed_date": "2011-01-10",
+      "tracking_index_name": "上证50指数",
+      "tracking_index_symbol": "000016.SH"
+    },
+    {
+      "symbol": "510600.SH",
+      "name": "沪50ETF",
+      "bucket": "上证50",
+      "is_core_basket": false,
+      "inception_date": "2018-09-03",
+      "listed_date": "2018-09-20",
+      "tracking_index_name": "上证50指数",
+      "tracking_index_symbol": "000016.SH"
+    },
+    {
+      "symbol": "510680.SH",
+      "name": "万家50",
+      "bucket": "上证50",
+      "is_core_basket": false,
+      "inception_date": "2015-12-15",
+      "listed_date": "2015-12-15",
+      "tracking_index_name": "上证50指数",
+      "tracking_index_symbol": "000016.SH"
+    },
+    {
+      "symbol": "510710.SH",
+      "name": "上50ETF",
+      "bucket": "上证50",
+      "is_core_basket": false,
+      "inception_date": "2015-05-27",
+      "listed_date": "2015-06-15",
+      "tracking_index_name": "上证50指数",
+      "tracking_index_symbol": "000016.SH"
+    },
+    {
+      "symbol": "510800.SH",
+      "name": "上证50",
+      "bucket": "上证50",
+      "is_core_basket": false,
+      "inception_date": "2017-12-22",
+      "listed_date": "2018-01-15",
+      "tracking_index_name": "上证50指数",
+      "tracking_index_symbol": "000016.SH"
+    },
+    {
+      "symbol": "510850.SH",
+      "name": "工银上50",
+      "bucket": "上证50",
+      "is_core_basket": false,
+      "inception_date": "2018-12-07",
+      "listed_date": "2019-03-06",
+      "tracking_index_name": "上证50指数",
+      "tracking_index_symbol": "000016.SH"
+    },
+    {
+      "symbol": "510950.SH",
+      "name": "上证广发",
+      "bucket": "上证50",
+      "is_core_basket": false,
+      "inception_date": "2024-04-24",
+      "listed_date": "2024-05-10",
+      "tracking_index_name": "上证50指数",
+      "tracking_index_symbol": "000016.SH"
+    },
+    {
+      "symbol": "530000.SH",
+      "name": "上证50ETF天弘",
+      "bucket": "上证50",
+      "is_core_basket": false,
+      "inception_date": "2024-09-04",
+      "listed_date": "2024-09-13",
+      "tracking_index_name": "上证50指数",
+      "tracking_index_symbol": "000016.SH"
+    },
+    {
+      "symbol": "530050.SH",
+      "name": "SH50ETF",
+      "bucket": "上证50",
+      "is_core_basket": false,
+      "inception_date": "2024-11-18",
+      "listed_date": "2024-12-04",
+      "tracking_index_name": "上证50指数",
+      "tracking_index_symbol": "000016.SH"
+    },
+    {
+      "symbol": "563090.SH",
+      "name": "上50增强",
+      "bucket": "上证50",
+      "is_core_basket": false,
+      "inception_date": "2024-05-27",
+      "listed_date": "2024-06-06",
+      "tracking_index_name": "上证50指数",
+      "tracking_index_symbol": "000016.SH"
+    },
+    {
+      "symbol": "588000.SH",
+      "name": "科创50",
+      "bucket": "科创50",
+      "is_core_basket": true,
+      "inception_date": "2020-09-28",
+      "listed_date": "2020-11-16",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588040.SH",
+      "name": "科创板指",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2025-04-03",
+      "listed_date": "2025-04-14",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588050.SH",
+      "name": "科创ETF",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2020-09-28",
+      "listed_date": "2020-11-16",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588060.SH",
+      "name": "上证科创",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2021-07-15",
+      "listed_date": "2021-07-29",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588080.SH",
+      "name": "科创板50",
+      "bucket": "科创50",
+      "is_core_basket": true,
+      "inception_date": "2020-09-28",
+      "listed_date": "2020-11-16",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588090.SH",
+      "name": "科创板",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2020-09-28",
+      "listed_date": "2020-11-16",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588150.SH",
+      "name": "科创龙头",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2021-12-10",
+      "listed_date": "2021-12-20",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588180.SH",
+      "name": "科创50基",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2021-06-24",
+      "listed_date": "2021-07-01",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588280.SH",
+      "name": "科创五零",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2021-10-12",
+      "listed_date": "2021-10-29",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588370.SH",
+      "name": "科创策略",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2022-12-01",
+      "listed_date": "2022-12-13",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588450.SH",
+      "name": "科创50增",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2024-05-06",
+      "listed_date": "2024-05-22",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588460.SH",
+      "name": "科创增强",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2022-12-01",
+      "listed_date": "2023-01-05",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588720.SH",
+      "name": "中银科创",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2025-03-27",
+      "listed_date": "2025-04-15",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588840.SH",
+      "name": "50科创",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2025-02-26",
+      "listed_date": "2025-03-10",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588870.SH",
+      "name": "科创50指",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2025-01-20",
+      "listed_date": "2025-01-27",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588940.SH",
+      "name": "科创富国",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2025-05-21",
+      "listed_date": "2025-06-03",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "588950.SH",
+      "name": "景顺科创",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2025-01-15",
+      "listed_date": "2025-01-24",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "589150.SH",
+      "name": "科创平安",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2025-12-17",
+      "listed_date": "2026-01-06",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "589360.SH",
+      "name": "科创50GT",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2026-06-17",
+      "listed_date": "2026-06-26",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "589850.SH",
+      "name": "科创东财",
+      "bucket": "科创50",
+      "is_core_basket": false,
+      "inception_date": "2025-08-01",
+      "listed_date": "2025-08-11",
+      "tracking_index_name": "上证科创板50成份指数",
+      "tracking_index_symbol": "000688.SH"
+    },
+    {
+      "symbol": "159012.SZ",
+      "name": "科创创业50ETF鹏华",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2026-05-11",
+      "listed_date": "2026-05-20",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    },
+    {
+      "symbol": "159603.SZ",
+      "name": "科创创业ETF天弘",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2022-05-26",
+      "listed_date": "2022-06-08",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    },
+    {
+      "symbol": "159780.SZ",
+      "name": "科创创业50ETF南方",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2021-06-24",
+      "listed_date": "2021-07-05",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    },
+    {
+      "symbol": "159781.SZ",
+      "name": "科创创业ETF易方达",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2021-06-28",
+      "listed_date": "2021-07-05",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    },
+    {
+      "symbol": "159782.SZ",
+      "name": "双创50ETF银华",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2021-06-29",
+      "listed_date": "2021-07-07",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    },
+    {
+      "symbol": "159783.SZ",
+      "name": "科创创业50ETF华夏",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2021-06-24",
+      "listed_date": "2021-07-05",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    },
+    {
+      "symbol": "588300.SH",
+      "name": "双创ETF",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2021-06-25",
+      "listed_date": "2021-07-05",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    },
+    {
+      "symbol": "588310.SH",
+      "name": "双创基金",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2021-11-22",
+      "listed_date": "2021-12-02",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    },
+    {
+      "symbol": "588320.SH",
+      "name": "双创增强",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2022-12-28",
+      "listed_date": "2023-01-06",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    },
+    {
+      "symbol": "588330.SH",
+      "name": "双创龙头",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2021-06-29",
+      "listed_date": "2021-07-06",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    },
+    {
+      "symbol": "588350.SH",
+      "name": "双创",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2022-10-26",
+      "listed_date": "2022-11-10",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    },
+    {
+      "symbol": "588360.SH",
+      "name": "创创ETF",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2021-06-29",
+      "listed_date": "2021-07-06",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    },
+    {
+      "symbol": "588380.SH",
+      "name": "创50ETF",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2021-06-29",
+      "listed_date": "2021-07-06",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    },
+    {
+      "symbol": "588390.SH",
+      "name": "科创创业",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2021-08-19",
+      "listed_date": "2021-08-30",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    },
+    {
+      "symbol": "588400.SH",
+      "name": "双创50",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2021-06-25",
+      "listed_date": "2021-07-05",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    },
+    {
+      "symbol": "588660.SH",
+      "name": "双创五零",
+      "bucket": "双创50",
+      "is_core_basket": false,
+      "inception_date": "2025-02-28",
+      "listed_date": "2025-03-17",
+      "tracking_index_name": "中证科创创业50指数",
+      "tracking_index_symbol": "931643.CSI"
+    }
+  ]
+}

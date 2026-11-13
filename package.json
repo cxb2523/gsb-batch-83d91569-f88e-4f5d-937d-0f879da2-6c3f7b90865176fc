@@ -1,0 +1,38 @@
+{
+  "name": "ftshare-etf-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ETF market observatory with activity radar, 20/60-day baselines and shared market-data cache",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "npm run build && npm start",
+    "start": "node --env-file-if-exists=.env scripts/serve.mjs",
+    "build": "node --env-file-if-exists=.env scripts/build.mjs",
+    "demo:generate": "node scripts/generate-demo.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "validate": "node scripts/validate-artifact.mjs",
+    "check:release": "node scripts/check-release.mjs",
+    "release:archive": "node scripts/release-archive.mjs",
+    "data:import": "node scripts/import-data.mjs",
+    "collect": "node --env-file-if-exists=.env scripts/collect.mjs",
+    "cf:dev": "npm run build && wrangler dev",
+    "deploy:check": "npm run build && wrangler deploy --dry-run --outdir .local/cloudflare-dry-run",
+    "deploy": "npm run build && wrangler deploy",
+    "mac:install": "node --env-file-if-exists=.env scripts/macos.mjs install",
+    "mac:status": "node --env-file-if-exists=.env scripts/macos.mjs status",
+    "mac:uninstall": "node --env-file-if-exists=.env scripts/macos.mjs uninstall",
+    "data:refresh": "node --env-file-if-exists=.env scripts/refresh.mjs",
+    "data:bootstrap": "node scripts/download-seed.mjs",
+    "mac:check": "node --env-file-if-exists=.env scripts/mac-check.mjs",
+    "build:pages": "npm run build && node scripts/build-pages.mjs",
+    "cloud:update": "node scripts/cloud-update.mjs update",
+    "cloud:restore": "node scripts/cloud-update.mjs restore"
+  },
+  "devDependencies": {
+    "wrangler": "4.160.0"
+  }
+}

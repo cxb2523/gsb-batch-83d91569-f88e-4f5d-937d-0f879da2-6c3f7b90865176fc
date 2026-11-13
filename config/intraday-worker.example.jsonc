@@ -1,0 +1,10 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "your-intraday-collector",
+  "main": "../src/background/collector.js",
+  "compatibility_date": "2026-11-12",
+  "workers_dev": false,
+  "observability": { "enabled": true },
+  "triggers": { "crons": ["* 1-3,5-7 * * MON-FRI"] },
+  "kv_namespaces": [{ "binding": "FTSHARE_CACHE", "id": "YOUR_SHARED_CACHE_NAMESPACE_ID" }]
+}

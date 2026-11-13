@@ -1,0 +1,12 @@
+{
+  "version": "0.1.0",
+  "documentation_updated_on": "2026-11-12",
+  "features": [
+    "20/60-day activity radar",
+    "background collection and shared cache",
+    "automatic cache polling",
+    "text-only chart navigation"
+  ],
+  "radar_build_flag": "ENABLE_RADAR=1",
+  "data_policy": "Application source, general documentation, configuration templates and synthetic samples. Runtime data is managed in the deployment environment."
+}
