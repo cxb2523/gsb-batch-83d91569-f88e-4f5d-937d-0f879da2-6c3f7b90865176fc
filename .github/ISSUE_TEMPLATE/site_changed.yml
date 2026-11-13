@@ -1,0 +1,78 @@
+name: Site changed / parser broke
+description: Google Play changed something and the parser no longer matches.
+labels: ["site-change"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most common way a scraper stops working, and it is worth
+        its own report because the fix is different from a code bug:
+        something on play.google.com moved.
+
+        Useful to know before filing, because it narrows the fix a lot — this
+        parser reads the store's own JSON, not its markup:
+
+        - **Grid and app rows** come from the `AF_initDataCallback(...)`
+          blocks in the first response. Records are recognised by SHAPE (a
+          list whose first element is `[<package id>, 7]`), never by block
+          key, because the `ds:N` key differs between page kinds. If a run
+          returns no rows on a page that visibly has apps, that shape moved.
+        - **App-only columns** (histogram, exact installs, version, contact
+          details) come from the app page's detail body. If those are empty
+          while the title and price are fine, a slot in that body moved.
+        - **Reviews** come from the app page (page 1) and from
+          `/_/PlayStoreUi/data/batchexecute`, RPC `UsvDTd` (every page after
+          it). If page 1 works and page 2 does not, it is the RPC.
+
+        `price_source` on the rows tells you which route a row came from:
+        `listing`, `detail`, or `detail+jsonld`.
+
+  - type: dropdown
+    id: what_broke
+    attributes:
+      label: What stopped matching
+      options:
+        - No rows at all on a page that visibly has apps (the record shape moved)
+        - App-only columns empty on --mode app (a detail slot moved)
+        - Reviews stop after page 1 (the batchexecute RPC moved)
+        - Pagination stops early or repeats a shelf
+        - One route returns nothing while the others are fine (listing vs search vs app vs developer)
+        - A second locale (--hl / --gl) loses columns the first has
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: URL
+      description: >-
+        The exact URL, its `hl` and `gl`, the --mode, and how the browser was
+        reached (local headless, headful, or --cdp-endpoint).
+      placeholder: "https://play.google.com/store/apps/category/GAME?hl=en&gl=US (--mode listing, headless Chromium, no proxy)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence from the page
+      description: |
+        Whichever of these you can get. A capture beats a description, and
+        `--dump-html` writes one on success as well as on failure.
+
+        - Which `AF_initDataCallback` keys the page carries:
+          `python3 -c "import re;h=open('dump.html').read();print(sorted(set(re.findall(r\"key: '(ds:\\d+)'\",h))))"`
+        - For a missing-column problem: the package id, the route and
+          --mode, and the value the store page shows for it.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it reproduces on a second engine, whether it reproduces in a
+        second locale, and when it last worked.

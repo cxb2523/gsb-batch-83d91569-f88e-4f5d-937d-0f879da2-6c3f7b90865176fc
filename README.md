@@ -1,0 +1,339 @@
+# Google Play Scraper — Apps, Ratings and Reviews in Python
+
+[![release](https://img.shields.io/github/v/release/2scraper/googleplay-scraper?sort=semver)](https://github.com/2scraper/googleplay-scraper/releases)
+[![tests](https://github.com/2scraper/googleplay-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/googleplay-scraper/actions/workflows/tests.yml)
+[![canary](https://github.com/2scraper/googleplay-scraper/actions/workflows/canary.yml/badge.svg)](https://github.com/2scraper/googleplay-scraper/actions/workflows/canary.yml)
+[![python](https://img.shields.io/badge/python-3.9%20%7C%203.13-blue)](pyproject.toml)
+[![licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+[![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20pyppeteer%20%7C%20CDP-informational)](#engines)
+[![runs without an account](https://img.shields.io/badge/runs%20without-an%20account-brightgreen)](#do-you-need-any-of-the-paid-products)
+
+**Google Play scraper** — an open-source (MIT) Python tool that reads Google Play app listings, keyword search, full app pages, developer catalogues and review histories, and writes installs, rating histograms, in-app-purchase ranges and per-market pricing to JSON or CSV. It needs no key, no proxy and no account: measured on 2026-09-22 from a datacentre address with plain `curl`, every route it reads answered in full. Use it for app-market research and review analysis — the rating is computed per country, so pick the market with `--gl`.
+
+Scrapes [Google Play](https://play.google.com) to JSON or CSV: app listings,
+keyword search, full app pages, a developer's catalogue and unbounded review
+histories — with install counts, rating histograms, in-app-purchase ranges,
+content ratings and per-market pricing, four interchangeable browser back
+ends and one row schema shared with the rest of the
+[2scraper](https://github.com/2scraper) family.
+
+```bash
+pip install -r requirements.txt -r requirements-playwright.txt
+playwright install chromium
+
+python3 playwright_scraper.py --mode listing --category GAME --pages 3
+```
+
+That is the whole setup. No key, no proxy, no account — see below.
+
+## The one thing to know first
+
+**Google Play computes a rating per COUNTRY, and almost nothing that scrapes
+it says so.**
+
+Measured 2026-09-22 on `com.rovio.baba` from ONE datacentre address in
+Nuremberg, with nothing changed between the rows but `gl`:
+
+| `--gl` | rating | currency | ratings counted |
+|---|---|---|---|
+| US | **4.08** | USD | 6,312,298 |
+| DE | **3.90** | EUR | 6,312,298 |
+| JP | **3.96** | JPY | 6,312,298 |
+| IN | **4.13** | INR | 6,312,298 |
+| BR | **4.49** | BRL | 6,312,298 |
+
+Read it by column. The *rating* moves by more than half a star; the *count*
+is identical in all five, because the count is global and the score is not.
+So "the rating of this app" is not a number — it is a number per market, and
+a row that does not record which market it describes is not interpretable.
+
+This scraper puts `gl` and `hl` in **every row**, joins across markets on the
+package id, and never averages one market's rating into another's. And you do
+not need an exit in each country to read them: all five rows above came from
+one address.
+
+## Do you need any of the paid products?
+
+**No, and this is measured rather than asserted.** From one datacentre
+address (netcup, Nuremberg, 2026-09-22), with plain `curl`, no cookies and no
+key, every route this repo reads answered in full:
+
+| route | status | size | content |
+|---|---|---|---|
+| `/store/apps/category/GAME` | 200 | 2.6 MB | 64 apps, 7 shelves |
+| `/store/apps/details?id=com.whatsapp` | 200 | 1.2 MB | the full app record |
+| `/store/search?q=vpn&c=apps` | 200 | 1.3 MB | 30 apps |
+| `/store/apps/dev?id=…` | 200 | 1.0 MB | the developer's grid |
+| `/_/PlayStoreUi/data/batchexecute` | 200 | 43 KB | 40 reviews + a token |
+| a package id that does not exist | **404** | 1.6 KB | a clean refusal |
+
+Both under `curl`'s own User-Agent and under a Chrome one. No captcha was met
+on any of them: counted across all twelve captures in `captures/`,
+`recaptcha/api.js`, `g-recaptcha`, `grecaptcha`, `data-sitekey`,
+`cf-turnstile` and `challenges.cloudflare.com` each appear **zero** times.
+
+So the honest positioning is: **the paid products buy volume and geography
+here, not access.** Many addresses if you are reading the store at scale, a
+specific country if you want a market whose language you cannot get from
+`gl` alone, and no browser infrastructure of your own if you use the
+Scraping Browser API. No captcha has been needed from this address. If
+Google does put a reCAPTCHA on a refused page, a run with a 2Captcha key
+detects it, solves it (`RecaptchaV2TaskProxyless` /
+`RecaptchaV3TaskProxyless`), injects the token and judges the page that
+follows — at most **one paid solve per page**, however many retries or fresh
+exits that page takes. `--solve-captcha never` turns it off. This path has
+been exercised offline against a stubbed solver only; no live solve has been
+run on this site.
+
+The canary is the standing test of that claim: it runs a real three-page
+scrape **weekly (Mondays) from a bare GitHub runner with no secrets** and is expected to
+be green. If Play ever puts these routes behind a key or a challenge, the
+badge goes red on the next weekly run and the sentence above gets retested without
+anyone remembering to.
+
+## The five modes
+
+```bash
+# a genre grid, following the page's own shelves
+python3 playwright_scraper.py --mode listing --category GAME --pages 3
+
+# a keyword search
+python3 playwright_scraper.py --mode search --query "password manager"
+
+# one app, with everything the store page publishes
+python3 playwright_scraper.py --mode app --app-id com.whatsapp
+
+# a developer's catalogue
+python3 playwright_scraper.py --mode developer --developer 5700313618786177705
+
+# reviews, as many as you ask for
+python3 playwright_scraper.py --mode reviews --app-id com.whatsapp --pages 10
+```
+
+`--mode listing`, `search`, `app` and `developer` all produce the **same row
+class**, keyed on the package id, so a search run and an app run of the same
+app join on `sku`. `--mode reviews` produces a different one and dedupes on
+`review_id`.
+
+### What each route actually publishes
+
+This matters more than it sounds, because it decides which mode you need.
+
+**A grid tile already carries most of an app record** — measured across 330
+distinct tiles from six captures: title, developer, genre, price and
+currency, description, install bucket, content rating, the in-app-purchase
+range, the icon, the screenshot count, and the rating both as the string the
+store displays and as the float beside it. On a US grid that is 100%
+populated; on a German one the rating is on 92 of 128 tiles and the install
+bucket on 108 of 128, because unrated and newly published apps genuinely lack
+them.
+
+**Only the app page carries** the rating histogram, the split between ratings
+and written reviews, the version, the update date, the developer's email and
+website, the privacy policy, Play's own chart standing — and the **exact
+install count**. Play prints "10,000,000,000+" and publishes 12,322,703,000
+beside it. Measured: **0 of those 330 listing tiles carry the exact figure**,
+so `installs_exact` is null on every listing row by the store's design rather
+than by a missing read.
+
+**Ratings and written reviews are different numbers.** For one app on one
+day: 244,140,056 ratings against 1,952,258 written reviews — two orders of
+magnitude apart. They are `review_count` and `review_text_count`, and
+conflating them is the easiest mistake to make here.
+
+### Pagination, honestly
+
+There is no `?page=N` anywhere on this site, so there is none in this
+scraper either.
+
+* **Grids** publish their shelves as addressable URLs
+  (`/store/apps/collection/cluster?gsr=…`), all of them present on page 1.
+  `--pages N` follows them, and the run stops on DATA — a fetch that added no
+  new package id — never on a selector. Pages are fetched one at a time:
+  `--concurrency` above 1 is not implemented in this repo and is refused
+  (exit 2) rather than silently ignored.
+* **Search does not paginate at all.** Measured in a real browser, scrolling
+  to the bottom four times per query and re-counting: `game` 22 results,
+  `vpn` 30, `a` 50, with the page height unchanged across every round and
+  zero shelf links on the page. `--pages` above 1 on that mode prints a
+  warning saying exactly that, rather than quietly stopping at page 1 and
+  reporting success.
+* **Reviews** paginate by a continuation token that only exists inside the
+  previous response, so that mode is strictly sequential and refuses
+  `--concurrency` above 1 with that reason.
+
+### Reviews: how many, and whose
+
+The store's own front end asks for 40 reviews at a time. The endpoint is not
+capped there. Measured 2026-09-22 on one app: **100 → 100, 200 → 200,
+500 → 500, 1000 → 1000, 2000 → 2000** (2.07 MB), every one of them with a
+continuation token. No ceiling was found. The default here is 200;
+`--reviews-per-call` raises it.
+
+Every page comes from that endpoint, page 2 onward asked for with the
+previous page's continuation token. The app page is still fetched first —
+to confirm the app exists in that market, which Play answers with a clean
+404 when it does not — but its own embedded handful of reviews is not used
+as page 1: those come in relevance order whatever `--sort` says and carry no
+token to continue from.
+
+`--sort` takes the store's three orderings:
+
+| `--sort` | what comes back |
+|---|---|
+| `newest` (default) | posted date descending, kept across pages |
+| `relevant` | the store's own ranking |
+| `rating` | grouped by score |
+
+Measured 2026-10-22 on `com.whatsapp`: `newest` returned two pages of 40
+with no review shared between them and `posted_at` non-increasing across the
+page boundary; `relevant` and `rating` each returned their own ordering.
+
+This repository does not implement a score filter. The store's front end has
+one; the request forms tried so far either changed nothing or returned no
+rows, so no flag is offered until one is measured to filter.
+
+**Reviews are about identifiable people.** Play publishes a reviewer's
+display name, avatar and a stable 21-digit profile id beside their words.
+`--no-authors` drops all three and keeps everything the mode is for. The
+committed fixtures are scrubbed — see [`captures/README.md`](captures/README.md).
+
+## Engines
+
+All four back ends produce **identical rows**. Verified live on 2026-09-22,
+the same category run through three of them: 52 rows, and the three sets of
+package ids were identical.
+
+| engine | install | notes |
+|---|---|---|
+| **Playwright** (primary) | `requirements-playwright.txt` | the one to use |
+| Selenium | `requirements-selenium.txt` | no authenticated remote CDP endpoint (`--cdp-endpoint` is refused, exit 2); `--proxy-server` cannot authenticate at all, so credentials are stripped and a warning printed; exposes no HTTP status, so classification leans on the structural signals (Play's own 404 template is recognised from its body); `--fingerprint` is refused |
+| pyppeteer | `requirements-puppeteer.txt` | effectively unmaintained upstream; here for parity; `--fingerprint` is refused. On Apple Silicon Macs, use it through `--cdp-endpoint` or use Playwright: the Chromium pyppeteer downloads comes from its `Mac` (x86_64) snapshot channel — it has no Apple Silicon entry — and was reported to crash on macOS arm64 |
+| Scraper API | `scraper_api_client.py --url …` | no local browser: the 2Captcha Scraper API fetches one page per request (measured 2026-10-22 at $0.0003 or less each). Same rows, `.meta.json` and exit codes as the browser engines; a grid's further shelves and later review pages are the browser engines' job. Which apps fill a category's shelves depends on the requesting address, so a grid can differ from a local run (82 of 96 apps shared in one comparison) while a search came back identical |
+| Scraping Browser API | `--cdp-endpoint` | a managed browser; never stack `--proxy` or `--fingerprint` on it. Playwright and pyppeteer open their own page on it and leave the browser running when the run ends; a handshake refused with HTTP 500/502/503 is retried twice (3 s, 6 s), anything else fails at once with exit 5 |
+
+**Install exactly one per virtualenv.** Playwright and pyppeteer declare
+mutually unsatisfiable pins (`pyee` <12 vs ≥13) and pyppeteer and selenium
+collide on `urllib3` (<2.0 vs ≥2.6).
+
+The CLI, the mode loops and `main()` live in **`engine_core.py`**, and the
+engines hold only their driver plumbing. That is deliberate: every repo in
+this family compares three hand-maintained CLIs with a test, and every one of
+them has at some point found the copies disagreeing. Here a flag cannot exist
+on one engine and not its twins.
+
+## Output
+
+One JSON or CSV file plus a `<out>.meta.json` sidecar per run. The first
+eighteen columns are the family prefix, byte-identical and in order across
+every repo in this family; Play's own follow. See
+[`sample_output.json`](sample_output.json).
+
+Exit codes: `0` ok · `1` crash · `2` bad usage · `3` blocked · `4` zero
+apps · `5` **the content was never obtained** · `6` partial.
+
+`original_price` and `discount_pct` are part of the family prefix and are
+null on every row: 0 of 411 rows parsed from the captures and 0 of 877 rows
+from live runs on 2026-10-22. Play does show a struck-through price on some
+discounted paid apps; this repository has no capture of one and does not read
+a was-price, so the columns stay empty rather than guess.
+
+`5` and `4` are the distinction worth knowing: a run that never got its page
+must not report "the catalogue is empty", or a dead proxy and an empty
+category look the same to whatever reads the file. A run that gathered
+nothing and did not finish reports `5` and **writes no file at all**, so last
+night's good output is still there. A run that gathered rows and THEN failed
+(a timeout on page 2, a refused reviews call) reports `6` and writes what it
+has, with the failed pages named in the sidecar.
+
+Retries, per page: `--retries N` is EXTRA attempts after the first on a
+transport failure or a page nothing recognises (`0` means one attempt); a
+refused page gets `--proxy-block-retries` fresh browsers — the next exit when
+there is a `--proxy-file` pool — without spending `--retries`; a bare HTTP 429
+waits at the same exit instead. Counts that cannot run (`--pages 0`, a
+negative `--retries`) are a usage error, exit 2.
+
+Output files are written to a temporary file beside the target and renamed
+into place, so an interrupted write leaves the previous file whole. In the
+CSV only, a text cell beginning with `=`, `+`, `-`, `@`, a tab or a line break
+is prefixed with `'` so a spreadsheet does not run it as a formula; the JSON
+keeps the store's text exactly, and the sidecar's `csv_cells_escaped` says how
+many cells differ.
+
+## Traps that look like bugs
+
+* **Two runs of a popular app differ on every counter.** WhatsApp gained 10
+  ratings in the 4.5 minutes between two engine runs here. `diff_runs.py` will
+  show it. It is the store moving, not the scraper.
+* **A package id that does not exist gives exit 4, not exit 3.** Play answers
+  it with a clean HTTP 404, and this scraper calls that `not_found` — an
+  answer, not a refusal, on all three engines. Check the id before you check
+  your proxy.
+* **A `--gl` Play does not serve is exit 2, not exit 3.** `--gl` must be two
+  letters; a well-formed code the store does not serve (`xx`, measured
+  2026-10-22) gets Play's own HTTP 400 page, which this scraper reports as a
+  usage error naming the flag — with no retries and no proxy advice. `ZZ`, by
+  contrast, is answered with a full page.
+* **A market in `--url` is kept.** `--url "…/search?q=vpn&hl=ja&gl=JP"`
+  fetches Japan; `--gl`/`--hl` replace it only when typed, and say so. Up to
+  0.2.0 the defaults (`US`, `en`) silently replaced it.
+* **`--out` is a prefix.** `--out data/run.json` writes `data/run.json`,
+  `data/run.csv` and `data/run.meta.json`, creating `data/` if needed.
+* **`genre_id` is null on every listing row, and that is the store.** A grid
+  tile publishes the genre only as display text ("Casual", "Arcade") — it
+  carries no locale-independent key at all, measured across the capture set.
+  The key arrives on `--mode app`. So a cross-market join is on `sku`, which
+  is stable everywhere; `genre_id` is for comparing app rows, and `category`
+  is display text that changes with `--hl` ("Kommunikation" for
+  "Communication") and must not be joined on.
+* **`brand` is the developer, not the seller.** The store's own payload holds
+  a seller-of-record beside the developer, and in the EU it says "Google
+  Commerce Ltd". This reads the developer on every market. If you see
+  Google's name in that column, something has changed.
+* **`rating` is the figure the store displays, not the float beside it.** The
+  same app page states 4.616471 in its payload and 4.616447925567627 in its
+  own JSON-LD, in one fetch. `rating` is 4.6, and `rating_raw` keeps the
+  payload's number so the rounding stays auditable.
+* **`/store/books` and `/store/movies` are refused, with the reason.** They
+  are real Play storefronts; this repo has never captured or parsed them, and
+  reading them with the apps parser would report an empty catalogue.
+
+## Configuration
+
+Credentials live in `.env` beside the scripts, never on a command line.
+`python3 env_config.py` prints what was picked up without printing secrets —
+run it first when a key "isn't working". See [`.env.example`](.env.example).
+
+## Tests
+
+```bash
+python3 smoke_test.py          # no engine library needed
+pytest                          # the same checks, wrapped
+```
+
+The fixtures are cut from the real captures in `captures/`, and the checks
+pin **values** rather than coverage: a column can be 100% populated and
+entirely wrong.
+
+## Guides
+
+- [How to scrape Google Play: step-by-step guide](https://2captcha.com/h/how-to-scrape-google-play)
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [Better Business Bureau scraper](https://github.com/2scraper/bbb-scraper) — BBB search and category listings with no key or proxy, plus…
+- [Flippa scraper](https://github.com/2scraper/flippa-scraper) — Online businesses for sale on Flippa
+- [G2 scraper](https://github.com/2scraper/g2-scraper) — Categories, product pages and pricing pages
+- [Just Join IT scraper](https://github.com/2scraper/justjoin-scraper) — Polish IT job offers with real salaries, seniority, skill…
+- [Mercor scraper](https://github.com/2scraper/mercor-scraper) — AI-talent marketplace: contract roles, rates, eligibility…
+- [Wellfound scraper](https://github.com/2scraper/wellfound-scraper) — Startup jobs from Wellfound with salary and equity ranges…
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
+
+## Licence
+
+MIT. Scraping may be restricted by the target site's terms; you are
+responsible for how you use this.

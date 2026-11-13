@@ -1,0 +1,134 @@
+name: Bug report
+description: The scraper ran but the result was wrong, empty, or it crashed.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before anything else: never paste an API key, a proxy password or a
+        full `ws://user:pass@...` endpoint into a public issue.** The scrapers
+        mask credentials in their own logs, but raw HTML dumps and the Scraper
+        API's `x-debug` header do not. Replace them with `***`.
+
+        A few things answer most reports faster than we can:
+
+        - **Everything exit 3?** Measured 2026-09-22, every route this repo
+          reads answered a plain HTTP client in full from a datacentre
+          address, with no key and no proxy. So check the boring causes
+          first: a wrong `--gl` for the market you meant, and your own
+          request rate. See the README's "Do you need any of the paid
+          products?".
+        - **Exit 4 for one app?** A package id that does not exist gets a
+          clean HTTP 404 from Play, which this scraper reports as
+          `not_found` — an answer, not a refusal. Check the id before you
+          check your proxy.
+        - **A different rating from the one you see?** Play computes a
+          rating per COUNTRY. Every row carries `gl` and `hl`; compare rows
+          of the same market.
+        - **`installs_exact` null on every listing row?** Expected: no
+          listing tile carries it (0 of 330 measured). Use `--mode app`.
+        - **`genre_id` null on every listing row?** Expected: a tile
+          publishes the genre only as display text. The key arrives on
+          `--mode app`.
+        - **`--pages` above 1 on `--mode search` gave one page?** Expected:
+          Play answers a query once, and the run warns about it.
+        - **A page collected twice, or `position` values that are not
+          1..N?** Worth this issue.
+        - **Google's name in the `brand` column?** Worth this issue: `brand`
+          is the developer, and the seller of record (in the EU "Google
+          Commerce Ltd") must not reach it.
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Which engine
+      options:
+        - playwright_scraper.py
+        - puppeteer_scraper.py
+        - selenium_scraper.py
+        - scraper_api_client.py
+        - fingerprint_client.py
+        - other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: browser_route
+    attributes:
+      label: How was the browser reached
+      options:
+        - A browser the script launched itself
+        - A remote browser over --cdp-endpoint
+        - No browser (scraper_api_client.py over plain HTTP)
+        - Not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: exit_code
+    attributes:
+      label: Exit code
+      description: >-
+        `echo $?` straight after the run. These mean specific things — 3 is a
+        challenge page, 4 is "ran fine, found nothing", 124 is a self-imposed
+        timeout. The table is in the README.
+      placeholder: "4"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command
+      description: With credentials replaced by `***`.
+      render: shell
+      placeholder: |
+        python3 playwright_scraper.py \
+          --mode listing --category GAME --pages 3 --out games
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: >-
+        The whole run, not just the last line — the useful detail is usually
+        upstream of the error. Credentials replaced by `***`.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      placeholder: >-
+        64 apps, as the README says the GAME category page yields.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Please run and paste:
+        ```
+        python3 -c "import sys, platform; print(sys.version, platform.platform())"
+        pip list 2>/dev/null | grep -Ei "playwright|pyppeteer|selenium|beautifulsoup4|requests|webdriver"
+        python3 smoke_test.py | tail -3
+        ```
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: The offline suite passes on my machine (`python3 smoke_test.py`)
+          required: true
+        - label: I removed every API key, password and credentialled URL from this report
+          required: true
