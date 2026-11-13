@@ -69,6 +69,20 @@ class SpiderCrawler:
         '默认': [""]
     }
 
+    # 采集停止原因（五类）
+    STOP_REASON_LAST_PAGE = "正常到达最后一页"
+    STOP_REASON_EMPTY_LIST = "接口返回空列表"
+    STOP_REASON_NEXT_ID_DUPLICATED = "检测到nextId重复（翻页停滞）"
+    STOP_REASON_LIMIT_REACHED = "达到数量上限"
+    STOP_REASON_MANUAL_STOP = "用户手动停止"
+
+    # 翻页请求之间的固定间隔（秒）
+    REQUEST_INTERVAL = 3
+    # 默认采集数量上限
+    DEFAULT_MAX_OFFSET = 20000
+    # 关键词场景下的采集数量上限
+    KEYWORD_MAX_OFFSET = 200
+
     def __init__(self, cookie_str, gui_callback=None):
         self.cookie_str = cookie_str
         self.cookie_dict = parse_cookie_string(cookie_str)
@@ -76,6 +90,9 @@ class SpiderCrawler:
         self.offset = 0
         self.data = {}
         self.is_running = True
+        # 逐页采集记录与停止原因，每次调用 spider 都会重新初始化
+        self.page_records = []
+        self.stop_reason = None
 
     def spider(self, category, sort_order, price_range, keyword=None):
         self.data = {
@@ -107,84 +124,154 @@ class SpiderCrawler:
         print(f"发送数据: {self.data}")
         if not requet1(self.cookie_dict):
             raise Exception("登录失败，请检查Cookie是否有效")
-        max_offset = 200 if keyword else 20000
+        max_offset = self.KEYWORD_MAX_OFFSET if keyword else self.DEFAULT_MAX_OFFSET
         crawl_count = 0
-        while self.offset < max_offset and self.is_running:
-            interval = 3
-            time.sleep(interval)
-            try:
-                start_time = time.time()
-                response = session.post(
-                    'https://mall.bilibili.com/mall-magic-c/internet/c2c/v2/list',
-                    headers=headers,
-                    cookies=self.cookie_dict,
-                    json=self.data,
-                    timeout=15
-                )
-                if response.status_code != 200:
-                    print(f"请求失败，状态码: {response.status_code}")
-                    continue
-                response_dict = response.json()
-                if response_dict.get('code') != 0:
-                    error_code = response_dict.get('code')
-                    error_msg = response_dict.get('message', '未知错误')
-                    if error_code == 429:
-                        print("触发频率限制，重新登录...")
-                        requet1(self.cookie_dict)
+        # 重新开始一次采集，清空上一次的逐页记录与停止原因
+        self.page_records = []
+        self.stop_reason = None
+        self.offset = 0
+        previous_next_id = None
+        try:
+            while self.offset < max_offset and self.is_running:
+                interval = self.REQUEST_INTERVAL
+                time.sleep(interval)
+                try:
+                    start_time = time.time()
+                    response = session.post(
+                        'https://mall.bilibili.com/mall-magic-c/internet/c2c/v2/list',
+                        headers=headers,
+                        cookies=self.cookie_dict,
+                        json=self.data,
+                        timeout=15
+                    )
+                    if response.status_code != 200:
+                        print(f"请求失败，状态码: {response.status_code}")
                         continue
-                    else:
-                        print(f"API错误: {error_code} - {error_msg}")
-                        continue
-                data_obj = response_dict.get('data', {})
-                items = data_obj.get('data', [])
-                next_id = data_obj.get('nextId')
-                if not items:
-                    print("没有更多数据")
-                    break
-                self.data["nextId"] = next_id
-                self.offset += len(items)
-                elapsed_time = time.time() - start_time
-                for item in items:
-                    if not self.is_running:
+                    response_dict = response.json()
+                    if response_dict.get('code') != 0:
+                        error_code = response_dict.get('code')
+                        error_msg = response_dict.get('message', '未知错误')
+                        if error_code == 429:
+                            print("触发频率限制，重新登录...")
+                            requet1(self.cookie_dict)
+                            continue
+                        else:
+                            print(f"API错误: {error_code} - {error_msg}")
+                            continue
+                    data_obj = response_dict.get('data', {})
+                    items = data_obj.get('data', [])
+                    next_id = data_obj.get('nextId')
+
+                    # 该请求成功返回一页数据，页码从 1 开始计数
+                    page_number = len(self.page_records) + 1
+
+                    # 停止原因二：接口返回空列表
+                    if not items:
+                        print("没有更多数据")
+                        self.page_records.append({
+                            'page': page_number,
+                            'returned_count': 0,
+                            'produced_count': 0,
+                            'next_id_empty': next_id is None
+                        })
+                        self.stop_reason = self.STOP_REASON_EMPTY_LIST
                         break
-                    item_name = item.get('c2cItemsName', '')
-                    if keyword and keyword not in item_name:
-                        continue
-                    try:
-                        price = float(item.get('showPrice', '0'))
-                    except (ValueError, TypeError):
-                        price = 0.0
-                    item_id = item.get('c2cItemsId', '')
-                    link = f"https://mall.bilibili.com/neul-next/index.html?page=magic-market_detail&noTitleBar=1&itemsId={item_id}&from=market_index"
-                    product = {
-                        'name': item_name,
-                        'price': price,
-                        'link': link
+
+                    self.offset += len(items)
+                    elapsed_time = time.time() - start_time
+                    page_produced = 0
+                    # 请求成功即落一条逐页记录，产出条数随迭代实时更新；
+                    # 这样即使生成器在本页产出途中被关闭，记录也不会丢失
+                    page_record = {
+                        'page': page_number,
+                        'returned_count': len(items),
+                        'produced_count': 0,
+                        'next_id_empty': next_id is None
                     }
-                    crawl_count += 1
-                    if self.gui_callback:
-                        self.gui_callback(product, self.offset, elapsed_time, interval)
-                    yield product
-                print(f"已爬取 {crawl_count} 条，offset: {self.offset}")
-                if next_id is None:
-                    print("已到达最后一页")
-                    break
-            except json.JSONDecodeError as e:
-                error = str(e)
-                print(f"JSON解析错误: {error}")
-                continue
-            except requests.exceptions.Timeout as e:
-                error = str(e)
-                print(f"请求超时: {error}")
-                continue
-            except requests.exceptions.RequestException as e:
-                error = str(e)
-                print(f"网络请求错误: {error}")
-                continue
-            except Exception as e:
-                error = str(e)
-                print(f"爬取错误: {error}")
-                continue
+                    self.page_records.append(page_record)
+                    for item in items:
+                        if not self.is_running:
+                            break
+                        item_name = item.get('c2cItemsName', '')
+                        # 关键词过滤只影响本页实际产出条数，不影响页码计数与停止判定
+                        if keyword and keyword not in item_name:
+                            continue
+                        try:
+                            price = float(item.get('showPrice', '0'))
+                        except (ValueError, TypeError):
+                            price = 0.0
+                        item_id = item.get('c2cItemsId', '')
+                        link = f"https://mall.bilibili.com/neul-next/index.html?page=magic-market_detail&noTitleBar=1&itemsId={item_id}&from=market_index"
+                        product = {
+                            'name': item_name,
+                            'price': price,
+                            'link': link
+                        }
+                        crawl_count += 1
+                        page_produced += 1
+                        page_record['produced_count'] = page_produced
+                        if self.gui_callback:
+                            self.gui_callback(product, self.offset, elapsed_time, interval)
+                        yield product
+
+                    print(
+                        f"第{page_number}页 - 接口返回{len(items)}条，"
+                        f"实际产出{page_produced}条，nextId为空:{next_id is None}"
+                    )
+                    print(f"已爬取 {crawl_count} 条，offset: {self.offset}")
+
+                    # 停止原因五：用户手动停止（可能在本页产出过程中触发）
+                    if not self.is_running:
+                        self.stop_reason = self.STOP_REASON_MANUAL_STOP
+                        break
+
+                    # 停止原因三：本页 nextId 与上一页相同，立即终止且不再发送请求
+                    if next_id is not None and next_id == previous_next_id:
+                        print(f"检测到 nextId 重复（第{page_number}页停滞），停止翻页")
+                        self.stop_reason = self.STOP_REASON_NEXT_ID_DUPLICATED
+                        break
+
+                    # 停止原因四：达到数量上限
+                    if self.offset >= max_offset:
+                        print(f"已达到数量上限 {max_offset} 条")
+                        self.stop_reason = self.STOP_REASON_LIMIT_REACHED
+                        break
+
+                    # 停止原因一：正常到达最后一页（nextId 为空）
+                    if next_id is None:
+                        print("已到达最后一页")
+                        self.stop_reason = self.STOP_REASON_LAST_PAGE
+                        break
+
+                    self.data["nextId"] = next_id
+                    previous_next_id = next_id
+                except json.JSONDecodeError as e:
+                    error = str(e)
+                    print(f"JSON解析错误: {error}")
+                    continue
+                except requests.exceptions.Timeout as e:
+                    error = str(e)
+                    print(f"请求超时: {error}")
+                    continue
+                except requests.exceptions.RequestException as e:
+                    error = str(e)
+                    print(f"网络请求错误: {error}")
+                    continue
+                except Exception as e:
+                    error = str(e)
+                    print(f"爬取错误: {error}")
+                    continue
+        finally:
+            # 生成器被提前关闭（例如界面停止后不再迭代）时，也能留下结论
+            if self.stop_reason is None:
+                if not self.is_running:
+                    self.stop_reason = self.STOP_REASON_MANUAL_STOP
+                elif self.offset >= max_offset:
+                    self.stop_reason = self.STOP_REASON_LIMIT_REACHED
+            print(
+                f"采集结束 - 停止原因:{self.stop_reason}，"
+                f"共{len(self.page_records)}页，累计产出{crawl_count}条"
+            )
 
     def stop(self):
         self.is_running = False
