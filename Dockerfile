@@ -6,5 +6,5 @@ FROM node:20-alpine
 WORKDIR /app
 COPY mcp/package.json mcp/package-lock.json ./
 RUN npm ci --omit=dev
-COPY mcp/index.js mcp/actors.js mcp/README.md ./
+COPY mcp/index.js mcp/lib.js mcp/actors.js mcp/README.md ./
 ENTRYPOINT ["node", "index.js"]

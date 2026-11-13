@@ -10,6 +10,7 @@
   "main": "index.js",
   "files": [
     "index.js",
+    "lib.js",
     "actors.js",
     "README.md"
   ],
@@ -18,7 +19,8 @@
   },
   "scripts": {
     "start": "node index.js",
-    "smoke": "node smoke-test.js"
+    "smoke": "node smoke-test.js",
+    "test": "node --test test/run-chain.test.js"
   },
   "keywords": [
     "mcp",

@@ -81,7 +81,7 @@ yourself editing a sentence to change a number, stop: delete the number instead.
 
 1. Regenerate `mcp/actors.js` from the live Apify account
    (`APIFY_TOKEN=... node scripts/gen-manifest.mjs`).
-2. Bump `JURISDICTIONS` in `mcp/index.js` if the actor opens a new country. This is
+2. Bump `JURISDICTIONS` in `mcp/lib.js` if the actor opens a new country. This is
    the one hardcoded number left, deliberately: it is read at runtime by the catalog
    tool description, so it lives in exactly one place.
 3. Add the actor to the per-country tables in `README.md` and

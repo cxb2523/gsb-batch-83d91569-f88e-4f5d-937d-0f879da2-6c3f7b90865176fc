@@ -48,6 +48,9 @@ jobs:
 
       - run: npm install --no-package-lock
 
+      # Offline: pending/resume chain against a fake Apify. No token, no network.
+      - run: npm test
+
       - run: node smoke-test.js
 
       # Idempotent, so a re-run after a failed registry step does not fail here.

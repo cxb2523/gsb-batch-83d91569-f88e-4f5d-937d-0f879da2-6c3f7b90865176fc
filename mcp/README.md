@@ -30,9 +30,19 @@ the tool returns `{status, runId, datasetId, note}` instead. That run is still g
 and is **already billed**, so call `regdata_run_result` with the `runId` to collect it -
 re-running the check to "retry" charges the user twice.
 
+`regdata_run_result` returns the same `{status, runId, datasetId, note}` handle - not
+an error - when the run is still going after its wait. Keep calling it with the **same
+runId** until it returns the dataset items; each call only polls the existing run and
+never starts a new one. `waitSecs` is clamped to 0-60 (above 60 waits 60, negatives
+wait 0). A missing or malformed `runId` returns a readable error naming the problem,
+and no request is sent to Apify - so a bad handle can never trigger billable work.
+
 This matters most for the Poland KYB composite: 20-30 seconds typically, up to ~2.5
 minutes for a company with many beneficial owners. Set `"timeout": 600000` on the
 server in your MCP config so the common case still returns inline.
+
+Terminal failures (`FAILED`, `ABORTED`, `TIMED-OUT`) are reported as errors naming the
+runId; those runs are finished and cannot be resumed, and a new run is a new charge.
 
 Treat a `runId` as a secret: Apify resolves run and dataset IDs without checking
 ownership, so anyone holding the ID can read that check's result.
@@ -100,17 +110,23 @@ actor's current price is on its Store page at [apify.com/regdata](https://getreg
 
 ## How it works
 
-The server calls Apify's `run-sync-get-dataset-items` endpoint for each actor and
-returns the dataset items as JSON. No data passes through any third party - it is
+The server starts each actor's run **asynchronously** on Apify (`POST /acts/.../runs`
+with `waitForFinish`), so a `runId` exists from the first response even if the client
+disconnects. It returns the dataset items when the run finishes within the wait window,
+or a `{status, runId, note}` handle otherwise - and `regdata_run_result` polls that same
+run by id instead of starting another. No data passes through any third party - it is
 your token, the Apify platform, and the official registry source.
 
 ## Local development
 
 ```bash
 npm install
+npm test               # offline tests: pending/resume chain against a fake Apify
 npm run smoke          # verify all tools load with real input schemas
 APIFY_TOKEN=xxx npm start
 ```
+
+`npm test` needs no `APIFY_TOKEN` and makes no network calls.
 
 ## License
 

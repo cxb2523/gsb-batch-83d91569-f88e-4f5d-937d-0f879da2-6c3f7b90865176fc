@@ -5,5 +5,5 @@ FROM node:20-alpine
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
-COPY index.js actors.js README.md ./
+COPY index.js lib.js actors.js README.md ./
 ENTRYPOINT ["node", "index.js"]
