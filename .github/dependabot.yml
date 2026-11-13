@@ -1,0 +1,49 @@
+version: 2
+updates:
+- package-ecosystem: pip
+  directory: /
+  schedule:
+    interval: weekly
+    day: monday
+  open-pull-requests-limit: 10
+  commit-message:
+    prefix: deps
+  labels:
+  - dependencies
+  - automated
+  groups:
+    minor-and-patch:
+      patterns:
+      - '*'
+      update-types:
+      - minor
+      - patch
+    pip_security:
+      applies-to: security-updates
+      patterns:
+      - '*'
+  ignore:
+  - dependency-name: '*'
+    update-types:
+    - version-update:semver-major
+# The docs toolchain is a separate install: docs.yml pip-installs
+# docs/requirements-docs.txt to run Zensical, and the pip entry for / does
+# not see a file under /docs. Monthly: Zensical releases every week or two,
+# and the strict build plus site-check proves each bump.
+- package-ecosystem: pip
+  directory: /docs
+  schedule:
+    interval: monthly
+  commit-message:
+    prefix: docs
+  labels:
+  - documentation
+  - automated
+  groups:
+    docs_toolchain:
+      patterns:
+      - '*'
+    docs_security:
+      applies-to: security-updates
+      patterns:
+      - '*'

@@ -1,0 +1,21 @@
+services:
+  media-download-epubs:
+    build:
+      context: .
+      dockerfile: Dockerfile-epubs
+    volumes:
+      - ./epubs:/epubs:rw
+      - ./db:/app/db:ro   # the catalog's unit.db
+    environment:
+      - LANG=S
+      - OUTPUT_PATH=/epubs
+
+  media-download-media:
+    build:
+      context: .
+      dockerfile: Dockerfile-media
+    volumes:
+      - ./vtts:/vtts:rw
+    environment:
+      - LANG=S
+      - OUTPUT_PATH=/vtts
