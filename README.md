@@ -45,7 +45,7 @@ The browser listens on a local remote-debugging port (default `18791`, bound to 
 | `stop` | Close the browser. |
 | `navigate <url>` | Open a URL and wait for the network to go idle. |
 | `screenshot [path]` | Full-page screenshot (default `/tmp/screenshot.png`). |
-| `snapshot` | URL, title, page text, first links, and visible buttons/inputs. |
+| `snapshot` | URL, title, page text (first 5000 chars), all links, and all visible buttons/inputs. Each interactive element also gets a `stableSelector` candidate (from `name`/`aria-label`/`placeholder`/text) with a `unique` flag; ambiguous ones are flagged with a `conflict` marker instead of a silently wrong selector. |
 | `status` | Whether the browser is running, current URL and title. |
 | `analyze "<prompt>"` | Screenshot the page and ask Gemini about it (needs `GEMINI_API_KEY`; otherwise returns the screenshot path only). |
 | `eval <script>` | Evaluate a JavaScript expression in the page. |

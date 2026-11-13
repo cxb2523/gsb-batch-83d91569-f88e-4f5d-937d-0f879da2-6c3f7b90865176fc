@@ -23,6 +23,7 @@ const fs = require('fs');
 const os = require('os');
 const http = require('http');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { collectSnapshot } = require('./snapshot-extract');
 
 // Configuration
 const HOME_DIR = path.join(os.homedir(), '.lobster-browser');
@@ -388,54 +389,19 @@ class BrowserControl {
 
     try {
       // Get AI-readable snapshot
-      const content = await this.page.content();
       const title = await this.page.title();
       const url = this.page.url();
-      
-      // Extract main text content
-      const bodyText = await this.page.evaluate(() => {
-        return document.body.innerText.substring(0, 5000);
-      });
 
-      // Extract links
-      const links = await this.page.evaluate(() => {
-        return Array.from(document.querySelectorAll('a[href]'))
-          .slice(0, 20)
-          .map(a => ({ text: a.innerText.substring(0, 100), href: a.href }));
-      });
-
-      // Extract interactive elements
-      const interactiveElements = await this.page.evaluate(() => {
-        const elements = [];
-        // Buttons
-        document.querySelectorAll('button').forEach(el => {
-          if (el.offsetParent !== null) {  // Only visible elements
-            elements.push({ type: 'button', text: el.innerText.substring(0, 50), selector: getSelector(el) });
-          }
-        });
-        // Inputs
-        document.querySelectorAll('input').forEach(el => {
-          if (el.offsetParent !== null) {
-            elements.push({ type: 'input', placeholder: el.placeholder || '', selector: getSelector(el) });
-          }
-        });
-        return elements.slice(0, 10);
-      });
-
-      function getSelector(el) {
-        if (el.id) return `#${el.id}`;
-        if (el.className && typeof el.className === 'string') {
-          return `${el.tagName.toLowerCase()}.${el.className.split(' ')[0]}`;
-        }
-        return el.tagName.toLowerCase();
-      }
+      // Extraction logic lives in snapshot-extract.js (shared with offline tests);
+      // collectSnapshot is self-contained so Playwright can serialize it into the page.
+      const { content, links, interactiveElements } = await this.page.evaluate(collectSnapshot);
 
       console.log('Snapshot generated');
       return {
         success: true,
         url,
         title,
-        content: bodyText,
+        content,
         links,
         interactiveElements,
       };
