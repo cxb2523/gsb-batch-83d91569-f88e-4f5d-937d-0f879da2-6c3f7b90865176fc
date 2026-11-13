@@ -12,7 +12,7 @@ from html import unescape
 import feedparser
 import httpx
 
-from flanews.collectors.base import create_http_client
+from flanews.collectors.base import CollectorError, create_http_client
 from flanews.collectors.google_news import GoogleNewsCollector, google_news_url
 from flanews.models import Article
 
@@ -58,9 +58,14 @@ class ExtrasCollector:
     def collect(self, start: datetime, end: datetime) -> list[Article]:
         articles: list[Article] = []
         for category, query in self.extras.items():
-            found = GoogleNewsCollector(
-                rss_url=google_news_url(query), client=self._client
-            ).collect(start, end)
+            try:
+                found = GoogleNewsCollector(
+                    rss_url=google_news_url(query), client=self._client
+                ).collect(start, end)
+            except CollectorError as e:
+                # One failing sport must not take the other extras down with it.
+                logger.warning("Extra search %r failed: %s", query, e)
+                continue
             found = [a for a in found if a.source.split(":", 1)[-1].lower() not in SOCIAL_SOURCES]
             found.sort(key=lambda a: a.published_at, reverse=True)
             articles.extend(
@@ -100,9 +105,13 @@ class BrazilCollector:
                 continue
             for article in self._parse(response.text, start, end):
                 articles.setdefault(article.url, article)
-        searched = GoogleNewsCollector(
-            rss_url=google_news_url(BRAZIL_GOOGLE_NEWS_QUERY), client=self._client
-        ).collect(start, end)
+        try:
+            searched = GoogleNewsCollector(
+                rss_url=google_news_url(BRAZIL_GOOGLE_NEWS_QUERY), client=self._client
+            ).collect(start, end)
+        except CollectorError as e:
+            logger.warning("Brazil Google News search failed: %s", e)
+            searched = []
         for article in searched:
             if not FLAMENGO_PATTERN.search(article.title):
                 articles.setdefault(

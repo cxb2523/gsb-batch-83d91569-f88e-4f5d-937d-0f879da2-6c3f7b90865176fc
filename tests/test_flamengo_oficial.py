@@ -6,7 +6,7 @@ import httpx
 import pytest
 import respx
 
-from flanews.collectors.base import get_collectors
+from flanews.collectors.base import CollectorError, get_collectors
 from flanews.collectors.flamengo_oficial import (
     FLAMENGO_OFICIAL_URL,
     FlamengoOficialCollector,
@@ -54,7 +54,7 @@ def test_flamengo_oficial_network_success(oficial_html_fixture: str) -> None:
 
 
 @respx.mock
-def test_flamengo_oficial_network_error() -> None:
+def test_flamengo_oficial_network_error_raises() -> None:
     respx.get(FLAMENGO_OFICIAL_URL).mock(return_value=httpx.Response(500))
 
     collector = FlamengoOficialCollector()
@@ -62,8 +62,25 @@ def test_flamengo_oficial_network_error() -> None:
     start = datetime(2026, 10, 1, 0, 0, 0, tzinfo=tz)
     end = datetime(2026, 10, 15, 0, 0, 0, tzinfo=tz)
 
-    articles = collector.collect(start, end)
-    assert articles == []
+    with pytest.raises(CollectorError, match="request failed"):
+        collector.collect(start, end)
+
+
+@respx.mock
+def test_flamengo_oficial_empty_window_returns_list_without_error(
+    oficial_html_fixture: str,
+) -> None:
+    respx.get(FLAMENGO_OFICIAL_URL).mock(
+        return_value=httpx.Response(200, text=oficial_html_fixture)
+    )
+
+    collector = FlamengoOficialCollector()
+    tz = ZoneInfo("America/Sao_Paulo")
+    # Fixture articles are dated 2026; a 2025 window means "responded, nothing in window".
+    start = datetime(2025, 10, 1, 0, 0, 0, tzinfo=tz)
+    end = datetime(2025, 10, 15, 0, 0, 0, tzinfo=tz)
+
+    assert collector.collect(start, end) == []
 
 
 def test_flamengo_oficial_registry() -> None:

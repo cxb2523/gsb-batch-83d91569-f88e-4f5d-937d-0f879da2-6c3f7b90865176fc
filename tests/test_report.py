@@ -1,5 +1,6 @@
 import logging
 
+from flanews.collectors.base import SourceStatus
 from flanews.report import ProblemCollector, RunReport
 
 
@@ -42,6 +43,36 @@ def test_report_without_problems_says_so() -> None:
 
     assert "Nenhuma falha parcial." in md
     assert "Última partida: —" in md
+
+
+def test_report_markdown_lists_per_source_status() -> None:
+    report = RunReport(
+        edition="E",
+        outcome="enviada",
+        source_statuses=[
+            SourceStatus(name="google_news", status="success", articles=9),
+            SourceStatus(name="ge", status="empty", articles=0),
+            SourceStatus(
+                name="flamengo_oficial",
+                status="failed",
+                reason="CollectorError: HTTPStatusError: Server error '500'",
+            ),
+        ],
+    )
+
+    md = report.to_markdown()
+
+    assert "### Fontes" in md
+    assert "google_news" in md and "sucesso" in md
+    assert "| ge |" in md and "vazia" in md
+    assert "flamengo_oficial" in md and "falha" in md
+    assert "HTTPStatusError: Server error '500'" in md
+
+
+def test_report_without_source_statuses_skips_the_sources_section() -> None:
+    md = RunReport(edition="E", outcome="enviada").to_markdown()
+
+    assert "### Fontes" not in md
 
 
 def test_problem_collector_captures_warnings_and_errors_only() -> None:

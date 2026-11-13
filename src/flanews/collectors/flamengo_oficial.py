@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from selectolax.lexbor import LexborHTMLParser
 
-from flanews.collectors.base import create_http_client
+from flanews.collectors.base import CollectorError, create_http_client
 from flanews.models import Article
 
 logger = logging.getLogger(__name__)
@@ -43,9 +43,13 @@ class FlamengoOficialCollector:
             html = response.text
         except Exception as e:
             logger.error("Failed to fetch official Flamengo site: %s", e)
-            return []
+            raise CollectorError(f"request failed: {e}") from e
 
-        return self.parse_html(html, start, end)
+        try:
+            return self.parse_html(html, start, end)
+        except Exception as e:
+            logger.error("Failed to parse official Flamengo site: %s", e)
+            raise CollectorError(f"parse failed: {e}") from e
 
     def parse_html(self, html: str, start: datetime, end: datetime) -> list[Article]:
         """Parse HTML string and extract Article models within [start, end]."""

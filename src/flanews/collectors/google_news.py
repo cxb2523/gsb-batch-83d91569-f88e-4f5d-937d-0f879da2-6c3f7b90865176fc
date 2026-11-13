@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import feedparser
 import httpx
 
-from flanews.collectors.base import create_http_client
+from flanews.collectors.base import CollectorError, create_http_client
 from flanews.models import Article
 
 logger = logging.getLogger(__name__)
@@ -49,9 +49,19 @@ class GoogleNewsCollector:
             content = response.text
         except Exception as e:
             logger.error("Failed to fetch Google News RSS feed: %s", e)
-            return []
+            raise CollectorError(f"request failed: {e}") from e
 
-        feed = feedparser.parse(content)
+        try:
+            feed = feedparser.parse(content)
+            return self._parse_feed(feed, start, end)
+        except Exception as e:
+            logger.error("Failed to parse Google News RSS feed: %s", e)
+            raise CollectorError(f"parse failed: {e}") from e
+
+    def _parse_feed(
+        self, feed: feedparser.FeedParserDict, start: datetime, end: datetime
+    ) -> list[Article]:
+        """Turn feed entries into in-window Article models."""
         articles: list[Article] = []
 
         # Ensure start and end have matching timezone

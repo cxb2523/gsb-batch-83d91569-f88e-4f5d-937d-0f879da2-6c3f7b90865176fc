@@ -4,8 +4,13 @@ import logging
 
 from pydantic import BaseModel, Field
 
+from flanews.collectors.base import SourceStatus
+
 MAX_PROBLEMS = 20
 MAX_PROBLEM_CHARS = 200
+
+# Internal status values -> labels shown to editors in the pt-BR summary.
+SOURCE_STATUS_LABELS = {"success": "✅ sucesso", "empty": "∅ vazia", "failed": "✗ falha"}
 
 
 class RunReport(BaseModel):
@@ -13,6 +18,7 @@ class RunReport(BaseModel):
 
     edition: str
     articles_by_source: dict[str, int] = Field(default_factory=dict)
+    source_statuses: list[SourceStatus] = Field(default_factory=list)
     candidates: dict[str, int] = Field(default_factory=dict)
     topics: list[str] = Field(default_factory=list)
     learn_more: int = 0
@@ -39,6 +45,19 @@ class RunReport(BaseModel):
         lines += ["### Notícias coletadas", "", "| Fonte | Artigos |", "|---|---|"]
         lines += [f"| {source} | {count} |" for source, count in self.articles_by_source.items()]
         lines += [f"| **total** | {sum(self.articles_by_source.values())} |", ""]
+
+        if self.source_statuses:
+            lines += [
+                "### Fontes",
+                "",
+                "| Fonte | Status | Itens na janela | Motivo |",
+                "|---|---|---|---|",
+            ]
+            for status in self.source_statuses:
+                label = SOURCE_STATUS_LABELS.get(status.status, status.status)
+                reason = status.reason or ""
+                lines.append(f"| {status.name} | {label} | {status.articles} | {reason} |")
+            lines.append("")
 
         lines += ["### Conteúdo", ""]
         lines += [f"Tópicos ({len(self.topics)}):"] + [f"- {t}" for t in self.topics] + [""]

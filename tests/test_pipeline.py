@@ -133,11 +133,11 @@ def test_collect_articles_sorts_newest_first() -> None:
 def test_collect_command_prints_table(monkeypatch) -> None:
     captured = {}
 
-    def fake_collect(edition: Edition) -> list[Article]:
+    def fake_collect(edition: Edition):
         captured["edition"] = edition
-        return [make_article("https://ge.globo.com/1", "Flamengo vence o Palmeiras", "ge")]
+        return [make_article("https://ge.globo.com/1", "Flamengo vence o Palmeiras", "ge")], []
 
-    monkeypatch.setattr(pipeline, "collect_articles", fake_collect)
+    monkeypatch.setattr(pipeline, "collect_with_sources", fake_collect)
     result = CliRunner().invoke(app, ["collect", "--edition", "news", "--date", "2026-10-12"])
 
     assert result.exit_code == 0, result.output
@@ -145,3 +145,23 @@ def test_collect_command_prints_table(monkeypatch) -> None:
     assert "Flamengo vence o Palmeiras" in result.output
     assert "ge" in result.output
     assert "10/10" in result.output
+
+
+def test_collect_command_prints_source_status_table(monkeypatch) -> None:
+    from flanews.collectors.base import SourceStatus
+
+    statuses = [
+        SourceStatus(name="google_news", status="success", articles=4),
+        SourceStatus(name="ge", status="failed", reason="HTTPStatusError: Server error 500"),
+        SourceStatus(name="flamengo_oficial", status="empty", articles=0),
+    ]
+
+    monkeypatch.setattr(pipeline, "collect_with_sources", lambda edition: ([], statuses))
+    result = CliRunner().invoke(app, ["collect", "--edition", "news", "--date", "2026-10-12"])
+
+    assert result.exit_code == 0, result.output
+    assert "Fontes" in result.output
+    assert "google_news" in result.output
+    assert "falha" in result.output
+    assert "HTTPStatusError: Server error 500" in result.output
+    assert "vazia" in result.output

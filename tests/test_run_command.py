@@ -87,7 +87,11 @@ def sent(ids: list[str]) -> httpx.Response:
 
 
 def use(monkeypatch, articles: list[Article], match: MatchStats | None) -> None:
-    monkeypatch.setattr(pipeline, "collect_articles", lambda edition, settings: articles)
+    def fake_collect(edition, settings):
+        return articles
+
+    monkeypatch.setattr(pipeline, "collect_articles", fake_collect)
+    monkeypatch.setattr(pipeline, "collect_with_sources", fake_collect)
     monkeypatch.setattr(pipeline, "collect_candidates", lambda edition, settings: ([], []))
     monkeypatch.setattr(pipeline, "ESPNStatsClient", lambda **kwargs: FakeStats(match))
 
@@ -179,6 +183,37 @@ def test_run_dry_run_saves_but_does_not_send(env, tmp_path) -> None:
 
 
 @respx.mock
+def test_run_summary_includes_per_source_statuses(env, tmp_path) -> None:
+    from flanews.collectors.base import SourceStatus
+
+    summary = tmp_path / "summary.md"
+    env.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    statuses = [
+        SourceStatus(name="google_news", status="success", articles=4),
+        SourceStatus(
+            name="ge", status="failed", reason="CollectorError: HTTPStatusError: Server error '500'"
+        ),
+        SourceStatus(name="flamengo_oficial", status="empty", articles=0),
+    ]
+    env.setattr(pipeline, "collect_with_sources", lambda edition, settings: ([ARTICLE], statuses))
+    env.setattr(pipeline, "collect_candidates", lambda edition, settings: ([], []))
+    env.setattr(pipeline, "ESPNStatsClient", lambda **kwargs: FakeStats(MATCH))
+    respx.post(RESEND_URL).mock(return_value=sent(["email_9"]))
+
+    result = CliRunner().invoke(cli.app, ["run", "--edition", "news", "--date", "2026-10-12"])
+
+    assert result.exit_code == 0, result.output
+    report = summary.read_text(encoding="utf-8")
+    assert "### Fontes" in report
+    assert "google_news" in report and "sucesso" in report
+    assert "ge" in report and "falha" in report
+    assert "HTTPStatusError: Server error '500'" in report
+    assert "flamengo_oficial" in report and "vazia" in report
+    # The same summary is also printed to stdout at the end of the run.
+    assert "### Fontes" in result.output
+
+
+@respx.mock
 def test_run_writes_report_to_github_step_summary(env, tmp_path) -> None:
     summary = tmp_path / "summary.md"
     env.setenv("GITHUB_STEP_SUMMARY", str(summary))
@@ -190,6 +225,7 @@ def test_run_writes_report_to_github_step_summary(env, tmp_path) -> None:
         return [ARTICLE]
 
     env.setattr(pipeline, "collect_articles", collect)
+    env.setattr(pipeline, "collect_with_sources", collect)
     env.setattr(pipeline, "collect_candidates", lambda edition, settings: ([], []))
     env.setattr(pipeline, "ESPNStatsClient", lambda **kwargs: FakeStats(MATCH))
     respx.post(RESEND_URL).mock(return_value=sent(["email_9"]))

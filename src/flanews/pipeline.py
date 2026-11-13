@@ -6,7 +6,14 @@ from typing import Protocol
 
 import httpx
 
-from flanews.collectors.base import Collector, create_http_client, get_collectors
+from flanews.collectors.base import (
+    Collector,
+    CollectorError,
+    SourceStatus,
+    create_http_client,
+    describe_error,
+    get_collectors,
+)
 from flanews.collectors.candidates import BrazilCollector, ExtrasCollector
 from flanews.config import Settings, get_settings
 from flanews.models import (
@@ -39,31 +46,65 @@ logger = logging.getLogger(__name__)
 PRE_GAME_TOPICS = 4  # the pre-game is about the match: fewer news topics
 
 
-def collect_articles(
+def run_collectors(
+    edition: Edition, collectors: list[Collector] | None = None
+) -> tuple[list[Article], list[SourceStatus]]:
+    """Run every collector, keeping the articles and one status record per source.
+
+    A collector raises CollectorError on request/parse failure instead of hiding
+    it behind an empty list; the failure is recorded and the other collectors
+    still run. An empty result from a working collector is recorded as "empty".
+    """
+    if collectors is None:
+        collectors = get_collectors()
+
+    collected: list[Article] = []
+    statuses: list[SourceStatus] = []
+    for collector in collectors:
+        try:
+            articles = collector.collect(edition.start, edition.end)
+        except CollectorError as e:
+            logger.error("Collector %s failed: %s", collector.name, e)
+            statuses.append(
+                SourceStatus(name=collector.name, status="failed", reason=describe_error(e))
+            )
+            continue
+        except Exception as e:  # defensive: unexpected errors are still per-source failures
+            logger.exception("Collector %s failed", collector.name)
+            statuses.append(
+                SourceStatus(name=collector.name, status="failed", reason=describe_error(e))
+            )
+            continue
+        logger.info("Collector %s returned %d articles", collector.name, len(articles))
+        statuses.append(
+            SourceStatus(
+                name=collector.name,
+                status="success" if articles else "empty",
+                articles=len(articles),
+            )
+        )
+        collected.extend(articles)
+
+    return collected, statuses
+
+
+def collect_with_sources(
     edition: Edition,
     settings: Settings | None = None,
     collectors: list[Collector] | None = None,
     client: httpx.Client | None = None,
     limiter: DomainRateLimiter | None = None,
-) -> list[Article]:
-    """Collect, dedupe, extract and filter the articles of an edition, newest first.
+) -> tuple[list[Article], list[SourceStatus]]:
+    """Collect, dedupe, extract and filter the articles, newest first, with source statuses.
 
-    A failing collector is logged and skipped. Dedupe runs again after extraction
-    because Google News links only become publisher URLs at that point, and the
-    window is re-checked because extraction may refine `published_at`.
+    Dedupe runs again after extraction because Google News links only become
+    publisher URLs at that point, and the window is re-checked because extraction
+    may refine `published_at`. A single failing source never stops the others.
     """
     if collectors is None:
         collectors = get_collectors(settings)
 
-    collected: list[Article] = []
-    for collector in collectors:
-        try:
-            articles = collector.collect(edition.start, edition.end)
-        except Exception:
-            logger.exception("Collector %s failed", collector.name)
-            continue
-        logger.info("Collector %s returned %d articles", collector.name, len(articles))
-        collected.extend(articles)
+    collected, statuses = run_collectors(edition, collectors)
 
     unique = dedupe(collected)
     if client is None:
@@ -78,7 +119,25 @@ def collect_articles(
         if edition.start <= article.published_at <= edition.end and is_relevant(article)
     ]
     logger.info("Collected %d articles (%d before filtering)", len(result), len(collected))
-    return sorted(result, key=lambda a: a.published_at, reverse=True)
+    return sorted(result, key=lambda a: a.published_at, reverse=True), statuses
+
+
+def collect_articles(
+    edition: Edition,
+    settings: Settings | None = None,
+    collectors: list[Collector] | None = None,
+    client: httpx.Client | None = None,
+    limiter: DomainRateLimiter | None = None,
+) -> list[Article]:
+    """Collect, dedupe, extract and filter the articles of an edition, newest first.
+
+    See `collect_with_sources` for the variant that also reports each source's
+    success/empty/failed status.
+    """
+    articles, _ = collect_with_sources(
+        edition, settings, collectors=collectors, client=client, limiter=limiter
+    )
+    return articles
 
 
 MATCH_SEARCH_DAYS = 3  # pre-game pieces (tips, line-ups) appear up to two days ahead
@@ -140,7 +199,8 @@ class StatsClient(Protocol):
 def build_newsletter(
     edition: Edition,
     settings: Settings | None = None,
-    collect: Callable[[Edition, Settings], list[Article]] | None = None,
+    collect: Callable[[Edition, Settings], list[Article] | tuple[list[Article], list[SourceStatus]]]
+    | None = None,
     stats_client: StatsClient | None = None,
     llm: LLMClient | None = None,
     candidates: Callable[[Edition, Settings], tuple[list[Article], list[Article]]] | None = None,
@@ -164,7 +224,11 @@ def build_newsletter(
     # The short sections ("Saiba mais", "Brasil afora") belong to the news editions only.
     with_extras = edition.kind not in ("pre", "post")
 
-    articles = collect(edition, settings)
+    collected = collect(edition, settings)
+    if isinstance(collected, tuple):
+        articles, source_statuses = collected
+    else:  # custom collect callables may still return just the article list
+        articles, source_statuses = collected, []
     learn_more, brazil = (
         (candidates or collect_candidates)(edition, settings) if with_extras else ([], [])
     )
@@ -172,6 +236,7 @@ def build_newsletter(
         report.articles_by_source = dict(
             Counter(a.source.split(":", 1)[0] for a in articles).most_common()
         )
+        report.source_statuses = source_statuses
         report.candidates = {"saiba_mais": len(learn_more), "brasil": len(brazil)}
     last_match = None if pre_game else stats_client.get_last_match(edition.start, edition.end)
     next_match = stats_client.get_next_match(edition.end)

@@ -6,7 +6,7 @@ import httpx
 import pytest
 import respx
 
-from flanews.collectors.base import get_collectors
+from flanews.collectors.base import CollectorError, get_collectors
 from flanews.collectors.google_news import GOOGLE_NEWS_RSS_URL, GoogleNewsCollector
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "google_news.xml"
@@ -55,7 +55,7 @@ def test_google_news_collector_date_filtering(rss_fixture: str) -> None:
 
 
 @respx.mock
-def test_google_news_collector_error_resilience() -> None:
+def test_google_news_collector_raises_on_http_error() -> None:
     respx.get(GOOGLE_NEWS_RSS_URL).mock(return_value=httpx.Response(500))
 
     collector = GoogleNewsCollector()
@@ -63,8 +63,21 @@ def test_google_news_collector_error_resilience() -> None:
     start = datetime(2026, 10, 10, 0, 0, 0, tzinfo=tz)
     end = datetime(2026, 10, 15, 0, 0, 0, tzinfo=tz)
 
-    articles = collector.collect(start, end)
-    assert articles == []
+    with pytest.raises(CollectorError, match="request failed"):
+        collector.collect(start, end)
+
+
+@respx.mock
+def test_google_news_collector_empty_window_is_not_a_failure(rss_fixture: str) -> None:
+    respx.get(GOOGLE_NEWS_RSS_URL).mock(return_value=httpx.Response(200, text=rss_fixture))
+
+    collector = GoogleNewsCollector()
+    tz = ZoneInfo("America/Sao_Paulo")
+    # The fixture's items are from October 2026; a 2025 window must yield an empty list.
+    start = datetime(2025, 10, 10, 0, 0, 0, tzinfo=tz)
+    end = datetime(2025, 10, 15, 0, 0, 0, tzinfo=tz)
+
+    assert collector.collect(start, end) == []
 
 
 def test_get_collectors_registry() -> None:

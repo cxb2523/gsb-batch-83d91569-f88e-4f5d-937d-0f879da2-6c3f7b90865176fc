@@ -16,7 +16,7 @@ from flanews.edition import edition_from_slot, resolve_match_edition
 from flanews.models import Edition, Newsletter
 from flanews.render.announcement import parse_announcement, render_announcement
 from flanews.render.renderer import render
-from flanews.report import ProblemCollector, RunReport
+from flanews.report import SOURCE_STATUS_LABELS, ProblemCollector, RunReport
 from flanews.schedule import LABELS, TZ, Fixture, Slot, label_of, plan
 from flanews.schedule import due as due_slot
 from flanews.send.recipients import (
@@ -74,7 +74,22 @@ def collect(
     """Collect the edition's articles and print them as a table."""
     _setup_logging()
     resolved = _resolve(edition, date)
-    articles = pipeline.collect_articles(resolved)
+    articles, source_statuses = pipeline.collect_with_sources(resolved)
+
+    console = Console(width=160)
+    source_table = Table(title="Fontes")
+    source_table.add_column("Fonte")
+    source_table.add_column("Status")
+    source_table.add_column("Itens na janela")
+    source_table.add_column("Motivo")
+    for status in source_statuses:
+        source_table.add_row(
+            status.name,
+            SOURCE_STATUS_LABELS.get(status.status, status.status),
+            str(status.articles),
+            status.reason or "",
+        )
+    console.print(source_table)
 
     table = Table(title=f"{resolved.label} ({len(articles)} artigos)")
     table.add_column("Fonte")
@@ -82,7 +97,7 @@ def collect(
     table.add_column("Título")
     for article in articles:
         table.add_row(article.source, article.published_at.strftime("%d/%m %H:%M"), article.title)
-    Console(width=160).print(table)
+    console.print(table)
 
 
 @app.command()
@@ -233,6 +248,7 @@ def run(
                 resolved,
                 settings,
                 llm=llm,
+                collect=pipeline.collect_with_sources,
                 report=report,
                 published_topics=_published_topics(settings),
             )
