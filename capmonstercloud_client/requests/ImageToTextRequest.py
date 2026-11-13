@@ -1,0 +1,93 @@
+import base64
+
+from pydantic import field_validator, Field
+from typing import Optional, Dict, Union
+from .baseRequest import BaseRequest
+from .enums import TextModules
+
+class ImageToTextRequest(BaseRequest):
+    """
+    Represents a payload structure for solving image-based text recognition
+    (ImageToText) captchas.
+
+    Attributes:
+        image_bytes: The raw bytes of the image containing the text to be
+            recognized. It is base64-encoded before being sent to the API.
+        type: The constant string value identifying the task type as "ImageToTextTask".
+        module_name: The name of a specific CapMonster recognition module
+            to use for this image, tailored to a particular captcha service's format.
+        threshold: The minimum acceptable recognition confidence, expressed
+            as an integer between 0 and 100.
+        case: When set to True, specifies that the recognized text is
+            case-sensitive.
+        numeric: Restricts recognition to numeric characters only. Must be
+            either 0 (disabled) or 1 (enabled).
+        math: When set to True, specifies that the image contains a
+            mathematical expression that must be calculated rather than
+            transcribed.
+    """
+
+    image_bytes: bytes = Field(..., description='Raw bytes of the image containing the text to recognize.')
+    type: str = Field(default="ImageToTextTask", description='The constant string value identifying the task type as "ImageToTextTask".')
+    module_name: Optional[str] = Field(default=None, description='Name of a specific CapMonster recognition module to use for this image.')
+    threshold: Optional[int] = Field(default=None, description='Minimum acceptable recognition confidence, between 0 and 100.')
+    case: Optional[bool] = Field(default=None, description='When True, indicates that the recognized text is case-sensitive.')
+    numeric: Optional[int] = Field(default=None, description='Restricts recognition to numeric characters only; must be 0 or 1.')
+    math: Optional[bool] = Field(default=None, description='When True, indicates that the image contains a mathematical expression to calculate.')
+
+    @field_validator('threshold')
+    @classmethod
+    def validate_threshold(cls, value):
+        if value is not None:
+            if value not in range(0, 101):
+                raise ValueError(f"threshold must be between 0 and 100, got {value}")
+        return value
+
+    @field_validator('module_name')
+    @classmethod
+    def validate_module_name(cls, value):
+        if value is not None:
+            if value not in TextModules.list_values():
+                raise ValueError(f"expected that module name must be in list {TextModules.list_values()}, " \
+                                 f"got '{value}'")
+        return value
+    
+    @field_validator('case')
+    @classmethod
+    def validate_case_type(cls, value):
+        if value is not None:
+            if not isinstance(value, bool):
+                raise TypeError(f'Case value must be type as boolean, not {type(value)}')
+        return value
+    
+    @field_validator('numeric')
+    @classmethod
+    def validate_numeric_range(cls, value):
+        if value is not None:
+            if not value in range(0, 2):
+                raise ValueError(f'numeric must be between [0, 1], got {value}')
+        return value
+
+    @field_validator('math')
+    @classmethod
+    def validate_math_type(cls, value):
+        if value is not None:
+            if not isinstance(value, bool):
+                raise TypeError(f'Math value must be type as boolean, not {type(value)}')
+        return value
+
+    def getTaskDict(self) -> Dict[str, Union[str, int, bool]]:
+        task = {}
+        task['type'] = self.type
+        task['body'] = base64.b64encode(self.image_bytes).decode('utf-8')
+        if self.threshold is not None:
+            task['recognizingThreshold'] = int(self.threshold)
+        if self.module_name is not None:
+            task['CapMonsterModule'] = self.module_name
+        if self.case is not None:
+            task['Case'] = self.case
+        if self.numeric is not None:
+            task['numeric'] = int(self.numeric)
+        if self.math is not None:
+            task['math'] = self.math
+        return task

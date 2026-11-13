@@ -1,0 +1,392 @@
+import unittest
+
+from capmonstercloudclient import requests
+
+
+PROXY_LIST = ["proxyType", "proxyAddress", "proxyPort", "proxyLogin", "proxyPassword"]
+
+
+class RequestGenerationTests(unittest.TestCase):
+    def test_rcv2(self):
+        default_keys = [
+            "type",
+            "websiteURL",
+            "websiteKey",
+            "recaptchaDataSValue",
+            "userAgent",
+            "cookies",
+            "isInvisible",
+        ]
+        rc2_no_proxy_type = "RecaptchaV2Task"
+        request = requests.RecaptchaV2Request(
+            websiteUrl="some_url",
+            websiteKey="sime_key",
+            dataSValue="sdfa",
+            userAgent="fasdf",
+            cookies="asdfsdf",
+            isInvisible=True,
+        )
+        task = request.getTaskDict()
+        for key in default_keys:
+            self.assertIsNotNone(
+                task.get(key), msg=f"Missing {key} for ReCaptchaV2 request."
+            )
+        self.assertTrue(
+            rc2_no_proxy_type == task.get("type"),
+            msg=f"Task type of ReCaptchaV2 not equal to {rc2_no_proxy_type}",
+        )
+
+        rc2_proxy_type = "RecaptchaV2Task"
+        default_proxy_keys = default_keys + PROXY_LIST
+        proxy = requests.ProxyInfo(
+            proxyType="http",
+            proxyAddress="address",
+            proxyPort=8001,
+            proxyLogin="login",
+            proxyPassword="password",
+        )
+        proxy_request = requests.RecaptchaV2Request(
+            websiteUrl="some_url",
+            websiteKey="some_key",
+            dataSValue="data s value",
+            userAgent="user agent",
+            cookies="cookies",
+            isInvisible=True,
+            proxy=proxy,
+        )
+        proxy_task = proxy_request.getTaskDict()
+        for key in default_proxy_keys:
+            self.assertIsNotNone(
+                proxy_task.get(key), msg=f"Missing {key} for ReCaptchaV2 request."
+            )
+        self.assertTrue(
+            rc2_proxy_type == proxy_task.get("type"),
+            msg=f"Task type of ReCaptchaV2 not equal to {rc2_proxy_type}",
+        )
+
+    def test_rcv3(self):
+        default_keys = ["type", "websiteURL", "websiteKey", "minScore", "pageAction"]
+        rc3_type = "RecaptchaV3TaskProxyless"
+        request = requests.RecaptchaV3ProxylessRequest(
+            websiteUrl="some_url",
+            websiteKey="some_key",
+            minScore=0.2,
+            pageAction="asdfsfd",
+        )
+        task = request.getTaskDict()
+
+        for key in default_keys:
+            self.assertIsNotNone(
+                task.get(key), msg=f"Missing {key} for ReCaptchaV3 request."
+            )
+
+        self.assertEqual(
+            rc3_type,
+            task.get("type"),
+            msg=f"Task type of ReCaptchaV3 not equal to {rc3_type}",
+        )
+
+        self.assertNotIn(
+            "isEnterprise", task,
+            msg="isEnterprise should not be sent when not explicitly set.",
+        )
+
+        enterprise_request = requests.RecaptchaV3ProxylessRequest(
+            websiteUrl="some_url",
+            websiteKey="some_key",
+            isEnterprise=True,
+        )
+        enterprise_task = enterprise_request.getTaskDict()
+        self.assertTrue(
+            enterprise_task.get("isEnterprise") is True,
+            msg="isEnterprise=True should be included in the task dict.",
+        )
+
+        # validate_min_score: valid boundary values
+        for valid_score in [0.1, 0.5, 0.9]:
+            req = requests.RecaptchaV3ProxylessRequest(
+                websiteUrl="some_url",
+                websiteKey="some_key",
+                minScore=valid_score,
+            )
+            self.assertEqual(req.minScore, valid_score)
+
+        # validate_min_score: invalid values should raise ValueError
+        for invalid_score in [0.0, 0.09, 0.91, 1.0, -0.1, 2.0]:
+            with self.assertRaises(
+                ValueError,
+                msg=f"minScore={invalid_score} should raise ValueError",
+            ):
+                requests.RecaptchaV3ProxylessRequest(
+                    websiteUrl="some_url",
+                    websiteKey="some_key",
+                    minScore=invalid_score,
+                )
+
+        # validate_min_score: None should be accepted
+        req_none = requests.RecaptchaV3ProxylessRequest(
+            websiteUrl="some_url",
+            websiteKey="some_key",
+        )
+        self.assertIsNone(req_none.minScore)
+
+    def test_rcv2_enterprise(self):
+        rcv2e_type = "RecaptchaV2EnterpriseTask"
+        default_keys = [
+            "type",
+            "websiteURL",
+            "websiteKey",
+            "enterprisePayload",
+            "apiDomain",
+            "userAgent",
+            "cookies",
+        ]
+        request = requests.RecaptchaV2EnterpriseRequest(
+            websiteUrl="some_url",
+            websiteKey="some_key",
+            enterprisePayload="payload",
+            apiDomain="asdfasdf",
+            userAgent="user agent",
+            cookies="cookies",
+        )
+        task = request.getTaskDict()
+        for key in default_keys:
+            self.assertIsNotNone(
+                task.get(key),
+                msg=f"Missing {key} for RecaptchaV2EnterpriseTask request.",
+            )
+        self.assertEqual(
+            rcv2e_type,
+            task.get("type"),
+            msg=f"Task type of RecaptchaV2EnterpriseTask not equal to {rcv2e_type}",
+        )
+
+        proxy = requests.ProxyInfo(
+            proxyType="http",
+            proxyAddress="address",
+            proxyPort=8001,
+            proxyLogin="login",
+            proxyPassword="password",
+        )
+        proxy_request = requests.RecaptchaV2EnterpriseRequest(
+            websiteUrl="some_url",
+            websiteKey="some_key",
+            enterprisePayload="payload",
+            apiDomain="asdfasdf",
+            userAgent="user agent",
+            cookies="cookies",
+            proxy=proxy,
+        )
+
+        proxy_keys = default_keys + PROXY_LIST
+        proxy_type = "RecaptchaV2EnterpriseTask"
+        proxy_task = proxy_request.getTaskDict()
+        for key in proxy_keys:
+            self.assertIsNotNone(
+                proxy_task.get(key),
+                msg=f"Missing {key} for RecaptchaV2EnterpriseTask request.",
+            )
+        self.assertEqual(
+            proxy_type,
+            proxy_task.get("type"),
+            msg=f"Task type of RecaptchaV2EnterpriseTask not equal to {proxy_type}",
+        )
+
+    def test_fc(self):
+        # FunCaptcha now requires the caller's own proxy; no-proxy requests must fail.
+        default_keys = [
+            "type",
+            "websiteURL",
+            "funcaptchaApiJSSubdomain",
+            "websitePublicKey",
+            "data",
+        ]
+        self.assertRaises(
+            RuntimeError,
+            requests.FuncaptchaRequest,
+            websiteUrl="some_url",
+            websitePublicKey="some_key",
+            funcaptchaApiJSSubdomain="domain",
+            data="asdfasdf",
+        )
+
+        proxy_type = "FunCaptchaTask"
+        proxy_keys = default_keys + PROXY_LIST
+        proxy = requests.ProxyInfo(
+            proxyType="http",
+            proxyAddress="address",
+            proxyPort=8001,
+            proxyLogin="login",
+            proxyPassword="password",
+        )
+        proxy_request = requests.FuncaptchaRequest(
+            websiteUrl="some_url",
+            websitePublicKey="some_key",
+            funcaptchaApiJSSubdomain="domain",
+            data="asdfasdf",
+            proxy=proxy,
+        )
+
+        proxy_task = proxy_request.getTaskDict()
+        for key in proxy_keys:
+            self.assertIsNotNone(
+                proxy_task.get(key), msg=f"Missing {key} for FunCaptchaTask request."
+            )
+        self.assertEqual(
+            proxy_type,
+            proxy_task.get("type"),
+            msg=f"Task type of FunCaptchaTask not equal to {proxy_type}",
+        )
+
+    def test_hc(self):
+        noproxy_type = "HCaptchaTask"
+        default_keys = [
+            "type",
+            "websiteURL",
+            "websiteKey",
+            "isInvisible",
+            "data",
+            "userAgent",
+            "cookies",
+        ]
+        request = requests.HcaptchaRequest(
+            websiteUrl="some_url",
+            websiteKey="some_key",
+            is_invisible=False,
+            data="data",
+            user_agent="agent",
+            cookies="cookies",
+        )
+        task = request.getTaskDict()
+        for key in default_keys:
+            self.assertIsNotNone(
+                task.get(key), msg=f"Missing {key} for HCaptchaTask request."
+            )
+        self.assertEqual(
+            noproxy_type,
+            task.get("type"),
+            msg=f"Task type of HCaptchaTask not equal to {noproxy_type}",
+        )
+
+        proxy = requests.ProxyInfo(
+            proxyType="http",
+            proxyAddress="address",
+            proxyPort=8001,
+            proxyLogin="login",
+            proxyPassword="password",
+        )
+        proxy_request = requests.HcaptchaRequest(
+            websiteUrl="some_url",
+            websiteKey="some_key",
+            is_invisible=False,
+            data="data",
+            user_agent="agent",
+            cookies="cookies",
+            proxy=proxy,
+        )
+
+        proxy_type = "HCaptchaTask"
+        proxy_keys = default_keys + PROXY_LIST
+        proxy_task = proxy_request.getTaskDict()
+        for key in proxy_keys:
+            self.assertIsNotNone(
+                proxy_task.get(key), msg=f"Missing {key} for HCaptchaTask request."
+            )
+        self.assertEqual(
+            proxy_type,
+            proxy_task.get("type"),
+            msg=f"Task type of HCaptchaTask not equal to {proxy_type}",
+        )
+
+    def test_image2text(self):
+        noproxy_type = "ImageToTextTask"
+        default_keys = [
+            "type",
+            "body",
+            "CapMonsterModule",
+            "recognizingThreshold",
+            "Case",
+            "numeric",
+            "math",
+        ]
+        request = requests.ImageToTextRequest(
+            image_bytes=b"123321",
+            module_name="amazon",
+            threshold=80,
+            case=False,
+            numeric=1,
+            math=True,
+        )
+        task = request.getTaskDict()
+        for key in default_keys:
+            self.assertIsNotNone(
+                task.get(key), msg=f"Missing {key} for ImageToTextTask request."
+            )
+        self.assertEqual(
+            noproxy_type,
+            task.get("type"),
+            msg=f"Task type of ImageToTextTask not equal to {noproxy_type}",
+        )
+
+    def test_gt(self):
+        noproxy_type = "GeeTestTask"
+        default_keys = [
+            "type",
+            "websiteURL",
+            "gt",
+            "challenge",
+            "geetestApiServerSubdomain",
+            "geetestGetLib",
+            "userAgent",
+        ]
+        request = requests.GeetestRequest(
+            websiteUrl="some_url",
+            gt="some_key",
+            challenge="challenge",
+            geetestApiServerSubdomain="api.domain",
+            geetestGetLib="lib",
+            user_agent="agent",
+        )
+        task = request.getTaskDict()
+        for key in default_keys:
+            self.assertIsNotNone(
+                task.get(key), msg=f"Missing {key} for GeeTestTask request."
+            )
+        self.assertEqual(
+            noproxy_type,
+            task.get("type"),
+            msg=f"Task type of GeeTestTask not equal to {noproxy_type}",
+        )
+
+        proxy = requests.ProxyInfo(
+            proxyType="http",
+            proxyAddress="address",
+            proxyPort=8001,
+            proxyLogin="login",
+            proxyPassword="password",
+        )
+        proxy_request = requests.GeetestRequest(
+            websiteUrl="some_url",
+            gt="some_key",
+            challenge="challenge",
+            geetestApiServerSubdomain="api.domain",
+            geetestGetLib="lib",
+            user_agent="agent",
+            proxy=proxy,
+        )
+        proxy_task = proxy_request.getTaskDict()
+        proxy_type = "GeeTestTask"
+        proxy_keys = default_keys + PROXY_LIST
+        for key in proxy_keys:
+            self.assertIsNotNone(
+                proxy_task.get(key), msg=f"Missing {key} for GeeTestTask request."
+            )
+        self.assertEqual(
+            proxy_type,
+            proxy_task.get("type"),
+            msg=f"Task type of GeeTestTask not equal to {proxy_type}",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

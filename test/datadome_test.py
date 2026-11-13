@@ -1,0 +1,89 @@
+import unittest
+
+from pydantic import ValidationError
+from capmonstercloudclient.requests import DataDomeCustomTaskRequest, ProxyInfo
+
+
+class DataDomeCustomTaskRequestTest(unittest.TestCase):
+    websiteUrlExample = "https://antoinevastel.com/bots/datadome"
+    metadataExample = {
+        "captchaUrl": "https://geo.captcha-delivery.com/captcha/?initialCid=AHrlqAAAAAMAJxx4dfgwjzwAQW0ctQ%3D%3D&hash=D66B23AC3F48A302A7654416846381&cid=d3k5rbDsu8cq0kmPHISS3hsC3f4qeL_K12~G33PrE4fbkmDYSul6l0Ze_aG5sUHLKG0676UpTv6GFvUgIActglZF33GTodOoRhEDkMMsuWTodlYa3YYQ9xKy9J89PAWh&t=fe&referer=https%3A%2F%2Fantoinevastel.com%2Fbots%2Fdatadome&s=21705&e=04fc682817ba89bf8fa4b18031fa53294fa0fb7449d95c036a1986413e6dfc7d",
+        "datadomeCookie": "datadome=d3k5rbDsu8cq0kmPHISS3hsC3f4qeL_K12~G33PrE4fbkmDYSul6l0Ze_aG5sUHLKG0676UpTv6GFvUgIActglZF33GTodOoRhEDkMMsuWTodlYa3YYQ9xKy9J89PAWh",
+    }
+
+    def setUp(self):
+        self.proxy = ProxyInfo(
+            proxyType="http",
+            proxyAddress="8.8.8.8",
+            proxyPort=8080,
+            proxyLogin="proxyLoginHere",
+            proxyPassword="proxyPasswordHere"
+        )
+
+    def testRequiresProxy(self):
+        self.assertRaises(
+            RuntimeError,
+            DataDomeCustomTaskRequest,
+            websiteUrl=DataDomeCustomTaskRequestTest.websiteUrlExample,
+            metadata=DataDomeCustomTaskRequestTest.metadataExample,
+        )
+
+    def testCaptchaInputTypes(self):
+        metadataListUrl = DataDomeCustomTaskRequestTest.metadataExample.copy()
+        metadataListUrl["captchaUrl"] = list(metadataListUrl["captchaUrl"])
+
+        metadataMissingUrl = DataDomeCustomTaskRequestTest.metadataExample.copy()
+        metadataMissingUrl.pop("captchaUrl")
+
+        with self.assertRaises(ValidationError):
+            request = DataDomeCustomTaskRequest(
+                websiteUrl=DataDomeCustomTaskRequestTest.websiteUrlExample,
+                metadata=metadataListUrl,
+                proxy=self.proxy,
+            )
+
+        with self.assertRaises(TypeError):
+            request = DataDomeCustomTaskRequest(
+                websiteUrl=DataDomeCustomTaskRequestTest.websiteUrlExample,
+                metadata=metadataMissingUrl,
+                proxy=self.proxy,
+            )
+
+    def testAllRequiredFieldsFilling(self):
+        required_fields = ["class", "type", "websiteURL", "metadata",
+                           "proxyType", "proxyAddress", "proxyPort", "proxyLogin", "proxyPassword"]
+        metadata_fields = ["datadomeCookie", "captchaUrl"]
+        request = DataDomeCustomTaskRequest(
+            websiteUrl=DataDomeCustomTaskRequestTest.websiteUrlExample,
+            metadata=DataDomeCustomTaskRequestTest.metadataExample,
+            proxy=self.proxy,
+        )
+        request_dict = request.getTaskDict()
+        for i in required_fields:
+            self.assertTrue(
+                i in list(request_dict.keys()),
+                msg=f"Required field {i} not in {request_dict}",
+            )
+
+        metadata_dict = request_dict["metadata"]
+        for i in metadata_fields:
+            self.assertTrue(
+                i in list(metadata_dict.keys()),
+                msg=f"Required field {i} not in {request_dict}",
+            )
+
+        self.assertEqual(request_dict["class"], "DataDome")
+        self.assertEqual(request_dict["type"], "CustomTask")
+
+    def testDomainsNotSentWhenNone(self):
+        request = DataDomeCustomTaskRequest(
+            websiteUrl=DataDomeCustomTaskRequestTest.websiteUrlExample,
+            metadata=DataDomeCustomTaskRequestTest.metadataExample,
+            proxy=self.proxy,
+        )
+        request_dict = request.getTaskDict()
+        self.assertNotIn("domains", request_dict)
+
+
+if __name__ == "__main__":
+    unittest.main()
