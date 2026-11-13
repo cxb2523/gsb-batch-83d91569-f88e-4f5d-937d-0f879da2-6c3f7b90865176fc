@@ -166,8 +166,16 @@ def sort_result_rows(apps: list[dict], sort_by: str) -> list[dict]:
     return sorted(apps, key=sort_keys[sort_by], reverse=True)
 
 
-def render_results(found_apps: list[dict], selected_queries: list[str], results_limit: int) -> None:
-    """Render summary metrics, a sortable application grid and CSV export."""
+def render_results(
+    found_apps: list[dict],
+    selected_queries: list[str],
+    results_limit: int,
+    run_summary=None,
+) -> None:
+    """Render the run summary, a sortable application grid and CSV export."""
+    if run_summary is not None:
+        _render_run_summary(run_summary)
+
     if not found_apps:
         st.warning(
             "Ничего не найдено. Измените диапазон скачиваний или повторите запуск — "
@@ -228,6 +236,63 @@ def render_results(found_apps: list[dict], selected_queries: list[str], results_
         "text/csv",
         width="stretch",
     )
+
+
+def _render_run_summary(summary) -> None:
+    """Render the auditable counters of the last discovery run.
+
+    The summary object lives in the Streamlit session next to the results, so
+    it survives the reruns triggered by widgets such as the download button.
+    """
+    st.subheader("Сводка запуска")
+    if not summary.history_saved:
+        st.warning(
+            "Историю просмотренных приложений не удалось сохранить — "
+            "в следующих запусках возможны повторы."
+        )
+
+    combos_ok = summary.combinations_succeeded
+    combos_failed = len(summary.failed_combinations)
+    first = st.columns(4)
+    first[0].metric("Комбинаций запрос × регион", summary.combinations_total)
+    first[1].metric("Успешных / неудачных", f"{combos_ok} / {combos_failed}")
+    first[2].metric("Кандидатов после дедупликации", summary.candidates)
+    first[3].metric(
+        "Детали: кэш / сеть",
+        f"{summary.details_cache_hits} / {summary.details_network}",
+    )
+
+    second = st.columns(4)
+    second[0].metric("Пропущено без деталей", summary.details_missing)
+    second[1].metric("Отсеяно ниже минимума", summary.excluded_below_min)
+    second[2].metric("Отсеяно выше максимума", summary.excluded_above_max)
+    second[3].metric("Итоговых результатов", summary.results)
+
+    with st.expander("Подробности запуска"):
+        st.write(
+            "Запросы ({count}): {items}".format(
+                count=len(summary.keywords),
+                items=", ".join(summary.keywords) or "—",
+            )
+        )
+        st.write(
+            "Регионы ({count}): {items}".format(
+                count=len(summary.locales),
+                items=", ".join(summary.locales) or "—",
+            )
+        )
+        if summary.failed_combinations:
+            st.write(f"Неудачные комбинации ({len(summary.failed_combinations)}):")
+            for combo in summary.failed_combinations:
+                st.write(
+                    "- {query} [{lang}/{country}]".format(
+                        query=combo.get("query", "?"),
+                        lang=combo.get("lang", "?"),
+                        country=combo.get("country", "?"),
+                    )
+                )
+        else:
+            st.write("Неудачных комбинаций нет.")
 
 
 def _render_summary(apps: list[dict], selected_queries: list[str]) -> None:

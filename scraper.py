@@ -8,8 +8,8 @@ Two network stages dominate a run:
    persistent cache is read once for the whole sample, so only genuine misses
    reach the network.
 
-Failures are logged and treated as empty results: a single rejected request
-must never abort a run that already paid for dozens of others.
+Failures are logged and recorded in the run summary: a single rejected
+request must never abort a run that already paid for dozens of others.
 """
 
 import logging
@@ -18,6 +18,7 @@ import random
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from urllib.parse import quote, urlsplit
 
 import streamlit as st
@@ -55,6 +56,56 @@ logger = logging.getLogger(__name__)
 _INSTALLS_SEPARATORS = re.compile(r"[\s,._+\u00a0\u202f\u2009]+")
 
 _PLAY_STORE_URL = "https://play.google.com/store/apps/details?id={app_id}"
+
+
+@dataclass
+class RunSummary:
+    """Auditable counters and context for a single discovery run.
+
+    The pipeline stages fill this in as they go so a failed search or a
+    filtered-out candidate is visible afterwards instead of vanishing. The
+    object is stored in the Streamlit session next to the results, so it
+    survives the reruns triggered by widgets such as the download button.
+
+    Attributes:
+        keywords (list[str]): Keywords actually sampled for the run.
+        locales (list[str]): Locales actually sampled, formatted as
+            ``"lang/country"``.
+        combinations_total (int): Number of keyword × locale combinations
+            issued.
+        combinations_succeeded (int): Combinations whose search request
+            completed without raising.
+        failed_combinations (list[dict]): Combinations whose search request
+            raised, each as ``{"query", "lang", "country"}``.
+        candidates (int): Unique candidate IDs after de-duplication and
+            history filtering.
+        details_cache_hits (int): Sampled candidates served from the details
+            cache.
+        details_network (int): Sampled candidates resolved over the network.
+        details_missing (int): Sampled candidates skipped because no details
+            could be obtained.
+        excluded_below_min (int): Candidates dropped for falling under the
+            minimum installs bound.
+        excluded_above_max (int): Candidates dropped for exceeding the maximum
+            installs bound. Stays ``0`` when the bound is disabled (``0``).
+        results (int): Rows in the final result set.
+        history_saved (bool): ``False`` when the seen-apps history could not
+            be persisted after the run.
+    """
+
+    keywords: list[str] = field(default_factory=list)
+    locales: list[str] = field(default_factory=list)
+    combinations_total: int = 0
+    combinations_succeeded: int = 0
+    failed_combinations: list[dict] = field(default_factory=list)
+    candidates: int = 0
+    details_cache_hits: int = 0
+    details_network: int = 0
+    details_missing: int = 0
+    excluded_below_min: int = 0
+    excluded_above_max: int = 0
+    results: int = 0
+    history_saved: bool = True
 
 
 def _thread_pool(max_workers: int) -> ThreadPoolExecutor:
@@ -130,20 +181,18 @@ def _fetch_search(query: str, lang: str, country: str, limit: int) -> list:
         limit (int): The maximum number of hits to request.
 
     Returns:
-        list: A list of raw search result dictionaries. Returns an empty list
-        when the scraper request fails.
+        list: A list of raw search result dictionaries.
+
+    Raises:
+        Exception: Scraper errors propagate so the caller can record the
+            failed combination in the run summary. Failed calls are not
+            cached, so the next run retries them.
 
     Examples:
         >>> isinstance(_fetch_search("puzzle", "en", "us", 10), list)
         True
     """
-    try:
-        return search(query, lang=lang, country=country, n_hits=limit)
-    except Exception as exc:
-        # Rate limiting and transient network errors are expected here; the run
-        # continues with the remaining queries.
-        logger.warning("Search failed for %r [%s/%s]: %s", query, lang, country, exc)
-        return []
+    return search(query, lang=lang, country=country, n_hits=limit)
 
 
 def _fetch_details(app_id: str) -> dict | None:
@@ -178,6 +227,7 @@ def collect_candidates(
     search_limit: int,
     seen_apps: set[str],
     custom_queries: list[str] | None = None,
+    summary: RunSummary | None = None,
 ) -> tuple[list[str], list[str]]:
     """Collect unique unseen application IDs from randomized search queries.
 
@@ -190,6 +240,9 @@ def collect_candidates(
             candidate list.
         custom_queries (list[str] | None): Optional user-provided phrases that
             take priority over random keyword sampling.
+        summary (RunSummary | None): Optional run summary to fill with the
+            sampled keywords and locales, per-combination success/failure
+            counts and the de-duplicated candidate count.
 
     Returns:
         tuple[list[str], list[str]]: A pair of the de-duplicated unseen
@@ -220,27 +273,48 @@ def collect_candidates(
         SEARCH_LOCALES, k=min(MAX_LOCALES_PER_RUN, len(SEARCH_LOCALES))
     )
 
+    if summary is not None:
+        summary.keywords = list(selected_queries)
+        summary.locales = [f"{lang}/{country}" for lang, country in selected_locales]
+
     if not selected_queries or not selected_locales:
         return [], selected_queries
 
     combinations = [
         (query, lang, country) for query in selected_queries for lang, country in selected_locales
     ]
+    if summary is not None:
+        summary.combinations_total = len(combinations)
 
     candidate_ids: list[str] = []
     workers = min(len(combinations), DEFAULT_SEARCH_WORKERS)
 
     with _thread_pool(workers) as executor:
         futures = {
-            executor.submit(_fetch_search, query, lang, country, search_limit): query
+            executor.submit(_fetch_search, query, lang, country, search_limit): (
+                query,
+                lang,
+                country,
+            )
             for query, lang, country in combinations
         }
         for future in as_completed(futures):
+            query, lang, country = futures[future]
             try:
                 results = future.result()
-            except Exception as exc:  # pragma: no cover - _fetch_search guards
-                logger.warning("Search task for %r failed: %s", futures[future], exc)
+            except Exception as exc:
+                # Rate limiting and transient network errors are expected here;
+                # the run continues with the remaining combinations and the
+                # failure is only recorded in the summary.
+                logger.warning("Search failed for %r [%s/%s]: %s", query, lang, country, exc)
+                if summary is not None:
+                    summary.failed_combinations.append(
+                        {"query": query, "lang": lang, "country": country}
+                    )
                 continue
+
+            if summary is not None:
+                summary.combinations_succeeded += 1
 
             # sample() returns a new list, so shuffling never touches the
             # object handed back by the Streamlit cache.
@@ -249,7 +323,10 @@ def collect_candidates(
                 if app_id and app_id not in seen_apps:
                     candidate_ids.append(app_id)
 
-    return list(dict.fromkeys(candidate_ids)), selected_queries
+    candidates = list(dict.fromkeys(candidate_ids))
+    if summary is not None:
+        summary.candidates = len(candidates)
+    return candidates, selected_queries
 
 
 def fetch_details_batch(
@@ -257,16 +334,21 @@ def fetch_details_batch(
     min_installs: int,
     max_installs: int,
     results_limit: int,
+    summary: RunSummary | None = None,
 ) -> list[dict]:
     """Fetch, filter, and normalize metadata for a sampled batch of apps.
 
     Args:
-        app_ids (list[str]): Candidate application IDs to inspect.
+        app_ids (list[str]): Candidate application IDs to inspect. Duplicates
+            are collapsed so a repeated ID is only counted and fetched once.
         min_installs (int): The minimum install count allowed in the output.
         max_installs (int): The maximum install count allowed in the output. A
             value of ``0`` disables the upper bound.
         results_limit (int): The target number of results shown to the user and
             the basis for the sampling size.
+        summary (RunSummary | None): Optional run summary to fill with cache
+            hit/network counts, the number of candidates skipped for missing
+            details and the per-bound exclusion counts.
 
     Returns:
         list[dict]: A list of normalized application rows ready for display in
@@ -276,14 +358,17 @@ def fetch_details_batch(
         >>> isinstance(fetch_details_batch([], 0, 0, 10), list)
         True
     """
-    if not app_ids or results_limit <= 0:
+    unique_ids = list(dict.fromkeys(app_ids))
+    if not unique_ids or results_limit <= 0:
         return []
 
-    sample_size = min(len(app_ids), max(results_limit, results_limit * DETAILS_OVERSAMPLE))
-    sampled = random.sample(app_ids, sample_size)
+    sample_size = min(len(unique_ids), max(results_limit, results_limit * DETAILS_OVERSAMPLE))
+    sampled = random.sample(unique_ids, sample_size)
 
     # One batched query for the whole sample; only the misses hit the network.
     details_by_id = get_cached_details_many(sampled)
+    if summary is not None:
+        summary.details_cache_hits = len(details_by_id)
     missing = [app_id for app_id in sampled if app_id not in details_by_id]
 
     if missing:
@@ -302,6 +387,9 @@ def fetch_details_batch(
                     details_by_id[app_id] = details
                     fetched_details[app_id] = details
 
+        if summary is not None:
+            summary.details_network = len(fetched_details)
+
         # A single transaction is substantially cheaper than one connection per
         # network response and still cannot invalidate an otherwise valid run.
         set_cached_details_many(fetched_details)
@@ -312,12 +400,18 @@ def fetch_details_batch(
     for app_id in sampled:
         details = details_by_id.get(app_id)
         if not details:
+            if summary is not None:
+                summary.details_missing += 1
             continue
 
         installs_count = _resolve_installs(details)
         if installs_count < min_installs:
+            if summary is not None:
+                summary.excluded_below_min += 1
             continue
         if max_installs and installs_count > max_installs:
+            if summary is not None:
+                summary.excluded_above_max += 1
             continue
 
         found.append(_normalize_row(app_id, details, installs_count))
