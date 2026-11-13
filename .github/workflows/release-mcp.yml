@@ -1,0 +1,79 @@
+# Publishes getregdata-mcp to npm and the official MCP Registry when a tag
+# like mcp-v1.2.1 is pushed. No secrets: npm trusted publishing and the
+# registry's github-oidc login both use the workflow's OIDC token.
+#
+# Release: bump the version in mcp/package.json and both fields in
+# mcp/server.json, commit, then `git tag mcp-vX.Y.Z && git push origin mcp-vX.Y.Z`.
+name: Release MCP
+
+on:
+  push:
+    tags: ['mcp-v*']
+  # Manual re-run from master, e.g. when only the registry step failed.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@latest
+
+      - name: Tag matches package.json and server.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF_NAME#mcp-v}"
+          node -e '
+            const tag = process.argv[1];
+            const pkg = require("./package.json").version;
+            const srv = require("./server.json");
+            const all = [pkg, srv.version, ...(srv.packages || []).map((p) => p.version)];
+            if (all.some((v) => v !== tag)) { console.error(`tag ${tag} != versions ${all.join(", ")}`); process.exit(1); }
+            console.log(`version ${tag} OK`);
+          ' "$TAG"
+
+      - run: npm install --no-package-lock
+
+      - run: node smoke-test.js
+
+      # Idempotent, so a re-run after a failed registry step does not fail here.
+      - name: Publish to npm
+        run: |
+          NAME=$(node -p 'require("./package.json").name')
+          VER=$(node -p 'require("./package.json").version')
+          if npm view "$NAME@$VER" version >/dev/null 2>&1; then
+            echo "$NAME@$VER is already on npm, skipping"
+          else
+            npm publish --provenance --access public
+          fi
+
+      # The registry checks the npm package, which can take a minute to be visible.
+      - name: Wait for npm
+        run: |
+          NAME=$(node -p 'require("./package.json").name')
+          VER=$(node -p 'require("./package.json").version')
+          for i in $(seq 1 30); do
+            npm view "$NAME@$VER" version >/dev/null 2>&1 && exit 0
+            sleep 10
+          done
+          echo "$NAME@$VER not visible on npm after 5 minutes"; exit 1
+
+      - name: Publish to the MCP Registry
+        run: |
+          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

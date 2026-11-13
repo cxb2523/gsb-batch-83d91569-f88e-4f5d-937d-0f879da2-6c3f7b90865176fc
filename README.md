@@ -1,0 +1,336 @@
+# getregdata - Business Registry Research Skills for AI Agents
+
+[![Skills](https://img.shields.io/badge/agent%20skills-free-blue)](#claude-code-skills)
+[![Actors](https://img.shields.io/badge/registry%20actors-pay%20per%20result-green)](#actor-catalog)
+[![Coverage](https://img.shields.io/badge/coverage-EU%20%7C%20US%20%7C%20UAE%20%7C%20Africa%20%7C%20LatAm-orange)](#actor-catalog)
+[![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+[![Install](https://img.shields.io/badge/install-npx%20skills%20add-black)](#install)
+
+Installable agent skills - packaged, repeatable **workflows** - for KYC/AML, credit-risk, due-diligence and B2B research over public business registry data. Official registries across Europe, the United States, the UAE, Africa and Latin America, plus cross-border adverse-media screening. Each skill turns official public registries into a process your agent can run on demand. Built on [Apify](https://getregdata.com/go/catalog/github/) actors for reliable, scalable access.
+
+**Where it is strongest:** insolvency and restructuring proceedings from official gazettes in Poland, Germany, Austria, France, Spain and Czechia, and Central and Eastern European registers that global databases carry thinly - KRS financial statements, CRBR beneficial owners, Polish land and mortgage registers, Czech annual accounts and the Slovak UBO register.
+
+**Checking a Polish company? Start with [Poland KYB Risk Check](https://getregdata.com/go/poland-kyb-check/github/).** One NIP or KRS in, one verdict out - identity, beneficial owners and insolvency screened against the company *and* every beneficial owner. Everything below is the depth behind that answer, and the way to run the same jobs elsewhere.
+
+## Install
+
+**As Claude Code / agent skills:**
+```bash
+npx skills add Nolpak14/getregdata -g -y
+```
+
+**As a local MCP server** (Claude Desktop, Claude Code, Cursor, Cline, Windsurf - every registry as a tool, with full input schemas):
+```json
+{ "mcpServers": { "getregdata": { "command": "npx", "args": ["-y", "getregdata-mcp"], "env": { "APIFY_TOKEN": "apify_api_xxxxx" }, "timeout": 600000 } } }
+```
+
+**As a hosted MCP server - no install** (claude.ai web, ChatGPT developer mode, Gemini, any remote MCP client): connect Apify's hosted MCP endpoint with OAuth, preloaded with regdata registry tools:
+```
+https://mcp.apify.com/?actors=regdata/crbr-beneficial-owners-scraper,regdata/krz-debtor-scraper,regdata/germany-handelsregister-scraper,regdata/poland-krs-financial-scraper,regdata/adverse-media-screener
+```
+Swap in any [regdata actor](https://getregdata.com/go/catalog/github/) - or use plain `https://mcp.apify.com` and let the agent discover them with `search-actors`. Billing goes to your own Apify account either way.
+
+See [`mcp/`](mcp/) for the server, tool list, and per-client config.
+
+---
+
+## Why this exists
+
+European business registries are public, but they are fragmented and rarely offer a clean API: data is spread across separate portals and formats, returned as PDFs or partial fields, and often has to be joined by hand across several official sources. These skills - and the actors behind them - give you consistent, structured access, and package the common jobs (KYC checks, insolvency monitoring, due diligence, lead generation) into workflows your agent can run end to end.
+
+---
+
+## Workflows you can build
+
+These skills are designed to be wired into recurring processes, not one-off lookups:
+
+- **KYC / onboarding check** (`regdata-kyc-aml`) - resolve a company's beneficial
+  owners and verify licensing as a repeatable onboarding step.
+- **Insolvency & credit-risk watchlist** (`regdata-credit-risk`) - monitor counterparties
+  for bankruptcy, restructuring and enforcement proceedings on a schedule (add Austria
+  for cross-border coverage).
+- **New-incorporation lead feed** (`regdata-lead-gen`) - a daily feed of newly
+  registered companies and officer changes for B2B prospecting.
+- **Property due-diligence check** (`regdata-property`) - verify ownership and mortgages
+  as a standard pre-deal check.
+- **Contract / ESG compliance audit** (`regdata-compliance`) - screen terms against
+  prohibited clauses and verify environmental registrations.
+
+Each skill ships the analysis framework and checklists; you supply the trigger
+(a cron, an inbound lead, an onboarding event) and the agent runs the workflow.
+
+Prefer n8n? Four importable workflows - an insolvency watchlist, a daily new-companies
+sheet, a supplier check form and a KYB research agent - are in [`n8n-templates/`](n8n-templates/).
+
+Rather not run it yourself? Some of these - new companies, insolvency notices, liens and
+auctions - are also available as a [managed feed](https://getregdata.com/managed-feeds/):
+we run it every night and send you the new records as a file each morning.
+A one-day sample of the Spanish new-companies file is in [`samples/`](samples/spain-new-companies/).
+
+## Quick Start
+
+**Python**
+```python
+from apify_client import ApifyClient
+
+client = ApifyClient("YOUR_APIFY_TOKEN")
+
+# Check beneficial owners for a Polish company (CRBR)
+run = client.actor("regdata/crbr-beneficial-owners-scraper").call(
+    run_input={"nip": "6770065406"}   # Comarch S.A.; batch via "queries": [{"nip": ...}]
+)
+items = client.dataset(run["defaultDatasetId"]).list_items().items
+for item in items:
+    for owner in item.get("beneficialOwners", []):
+        name = f"{owner.get('firstName','')} {owner.get('lastName','')}".strip()
+        control = (owner.get("entitlements") or [{}])[0].get("natureOfControl", "")
+        print(f"{item.get('name')}: {name} - {control}")
+```
+
+**JavaScript**
+```javascript
+import { ApifyClient } from 'apify-client';
+
+const client = new ApifyClient({ token: 'YOUR_APIFY_TOKEN' });
+
+// Check if an Austrian company is insolvent (Ediktsdatei)
+const run = await client.actor('regdata/austria-ediktsdatei-scraper').call({
+    searchQuery: 'Alpenbau GmbH',
+    maxResults: 10
+});
+const { items } = await client.dataset(run.defaultDatasetId).listItems();
+console.log(`Found ${items.length} insolvency records`);
+items.forEach(item => console.log(`${item.debtorName} - ${item.proceedingType}`));
+```
+
+Get your API token: [Apify Console](https://getregdata.com/go/signup/github/) - new accounts include $5 free credits.
+
+One prompt in your agent - *"Run a KYC check on NIP 6770065406"* - and the `regdata-kyc-aml` skill resolves the company's beneficial owners, scores the ownership, and flags anything for enhanced due diligence.
+
+More examples: [examples/python/](examples/python/) | [examples/javascript/](examples/javascript/)
+
+---
+
+## Claude Code Skills
+
+Skills that let Claude Code (and Copilot, Cline, Cursor, Codex) interact with every actor - plus free public-API lookups that need no Apify token.
+
+**Workflow skills** (the compliance/research frameworks, backed by the paid actors):
+
+| Skill | Use Case |
+|---|---|
+| `regdata` | Router - identifies your need and recommends the right skill |
+| `regdata-kyc-aml` | KYC/AML/KYB compliance, entity verification, beneficial owners |
+| `regdata-credit-risk` | Insolvency monitoring, credit risk, financial analysis |
+| `regdata-property` | Property due diligence, ownership verification, mortgages |
+| `regdata-compliance` | Consumer protection audits, ESG/environmental compliance |
+| `regdata-lead-gen` | B2B prospecting, decision-maker discovery, market research |
+| `ksiegi-wieczyste` | Polish land registry: validate a KW number for free, then read owners, encumbrances and mortgages |
+
+**Free registry skills** (query official public APIs directly - no Apify token, no per-result cost):
+
+| Skill | Source | What You Get (free) |
+|---|---|---|
+| `poland-company-registry` | KRS open API + MF VAT white list | Polish companies by KRS/NIP: court-register extract, board (masked), filed statements, VAT status, bank accounts |
+| `czech-company-registry` | ARES (Ministry of Finance) | Czech companies by IČO/name/NACE/city: identity, statutory body by name, shareholders, capital |
+| `companies-house-uk` | UK Companies House API | Company profile, officers, PSC (beneficial owners), filings |
+| `sec-edgar-us` | US SEC EDGAR | Filings, submissions, XBRL financials for SEC-registered issuers |
+| `norway-company-registry` | Brønnøysundregistrene (data.brreg.no) | Norwegian companies, roles/board, bankruptcy flag |
+| `france-company-lookup` | api.gouv.fr (INSEE/INPI) | French companies by name/SIREN/director, identity + dirigeants |
+| `switzerland-zefix` | Zefix (Swiss federal index) | Swiss companies, UID/CHE number, status, SHAB publications |
+| `denmark-cvr` | CVR (Erhvervsstyrelsen) | Danish companies, CVR number, industry, management |
+| `finland-company-registry` | PRH open data (YTJ + XBRL + notices) | Finnish companies by name/Y-tunnus, forms, NACE, addresses, liquidation flag, digital financial statements, registered notifications |
+| `australia-abn-lookup` | ABN Lookup (ABR) | Australian entities by ABN/ACN/name, status, GST |
+| `japan-company-registry` | gBizINFO | Japanese companies by name/corporate number, plus subsidies/procurement |
+| `new-zealand-nzbn` | NZBN API | New Zealand entities by NZBN/name, roles, industry |
+| `ireland-cro` | CRO Open Services | Irish companies, status, filings (free key + CC-BY bulk) |
+| `greece-gemi` | GEMI OpenData API | Greek companies by name/GEMI number/AFM |
+| `croatia-sudreg` | Sudski registar OPEN API | Croatian companies by OIB/MBS (OAuth, free registration) |
+| `latvia-company-registry` | data.gov.lv | Latvian companies, officers, and open beneficial owners (UBO) |
+| `lithuania-company-registry` | Registru centras (Spinta) | Lithuanian companies by name/code, mgmt, financials |
+| `israel-companies-registry` | data.gov.il | Israeli companies by name/number, status, purpose |
+| `brazil-cnpj` | BrasilAPI (Receita Federal) | Brazilian companies by CNPJ, incl. QSA partner list |
+| `south-korea-dart` | DART (FSS) | Korean listed-company profiles and financial statements |
+| `singapore-acra` | data.gov.sg | Singapore entities by name/UEN (identity) |
+| `gleif-lei-lookup` | GLEIF API | Global LEI, local registry ID, parent/child corporate structure |
+| `vies-vat-validation` | EU VIES + EOS | Validate any EU VAT (and EORI) number + consultation number |
+| `sanctions-pep-screening` | OFAC / EU / UK / UN lists | Sanctions and PEP screening for a name or entity |
+| `sam-gov-exclusions` | SAM.gov | US federal debarment / exclusions screening |
+| `us-court-records` | CourtListener | US litigation / court-record search (adverse-history DD) |
+| `mexico-denue` | INEGI DENUE | Mexican businesses by name/activity/location (directory) |
+| `vietnam-business` | VietQR (GDT data) | Vietnamese companies by tax code (MST) |
+| `romania-company-registry` | ANAF + ONRC | Romanian companies by CUI (identity, reg number, CAEN, VAT) |
+| `thailand-dbd` | DBD OpenAPI | Thai companies by 13-digit juristic ID |
+| `hong-kong-companies` | data.gov.hk | Hong Kong live local companies by name/BRN (name, address, type) |
+| `eu-ted-procurement` | EU TED | EU public tenders + contract awards (who won EU contracts) |
+| `us-federal-awards` | USAspending | US federal contracts/grants a company has received |
+| `peru-ruc` | apis.net.pe (SUNAT data) | Peruvian companies by RUC (name, status, address) |
+| `icij-offshore-leaks` | ICIJ | Offshore Leaks / Panama-Pandora Papers red-flag check (not proof) |
+| `eu-transparency-register` | EU Transparency Register | Does a company lobby the EU (influence/ESG DD) |
+| `eu-financial-transparency` | EU FTS | Which EU grants/direct funding an org has received |
+| `world-bank-contracts` | World Bank | World Bank-financed contract awards + projects a company won |
+| `costa-rica-hacienda` | CR Hacienda | Costa Rican companies by cedula juridica (name, tax status, activity) |
+| `dominican-republic-rnc` | DGII | Dominican companies by RNC/name (national taxpayer registry) |
+
+The free skills are the front door - they answer the easy lookups for free and drive adoption; the paid actors are the upsell for jurisdictions with no free API (Poland, Germany, Spain, Italy, ...) and for depth the free sources do not provide (beneficial owners, financials, insolvency, court filings).
+
+Then in Claude Code: *"Run a KYC check on Polish company NIP 6770065406"* or *"Look up UK company 00445790"* - the skill handles the rest.
+
+---
+
+## Actor Catalog
+
+Per-result pricing is shown on each actor's Apify Store page - see [Pricing](#pricing) below.
+
+### Poland
+
+| Actor | Registry | What You Get |
+|---|---|---|
+| **[Poland KYB Risk Check](https://getregdata.com/go/poland-kyb-check/github/)** | REGON + CRBR + KRZ | **Start here.** One NIP or KRS returns identity, beneficial owners and insolvency screened against the company *and* every owner, as a single verdict. Incomplete checks are not billed. |
+| [KRS Financial Statements Scraper](https://getregdata.com/go/poland-krs-financial-scraper/github/) | eKRS | Financial statements - balance sheets, P&L, assets |
+| [EKW Land Registry Scraper](https://getregdata.com/go/ekw-ksiegi-wieczyste-scraper/github/) | EKW | Property ownership, mortgages and easements |
+| [CRBR Beneficial Owners Scraper](https://getregdata.com/go/crbr-beneficial-owners-scraper/github/) | CRBR | Beneficial owners (UBO) for KYC/AML |
+| [KRZ Debtor Registry Scraper](https://getregdata.com/go/krz-debtor-scraper/github/) | KRZ | Bankruptcy, restructuring, enforcement proceedings |
+| [KRS Board Members Scraper](https://getregdata.com/go/krs-fullnames-scraper/github/) | KRS | Board members and shareholders (structured, GDPR-compliant) |
+| [KNF Registry Scraper](https://getregdata.com/go/knf-registry-scraper/github/) | KNF | Licensed payment, e-money and lending institutions |
+| [MSiG Court Gazette Scraper](https://getregdata.com/go/msig-scraper/github/) | MSiG | Bankruptcy, restructuring and liquidation notices |
+| [UOKiK Decisions Scraper](https://getregdata.com/go/uokik-decisions-scraper/github/) | UOKiK | Competition and consumer-protection decisions - named parties, fine flag, appeal status |
+| [BDO Waste Registry Scraper](https://getregdata.com/go/bdo-waste-registry-scraper/github/) | BDO | Waste-management entity registration verification |
+| [REGON Company Scraper](https://getregdata.com/go/polish-regon-scraper/github/) | GUS REGON | Official company master data - no API key needed |
+| [Premises Prospector](https://getregdata.com/go/polish-premises-prospector/github/) | GUS REGON | Site-level / local-unit (jednostki lokalne) records for prospecting |
+| [Parliamentary PEP Scraper](https://getregdata.com/go/poland-parliamentary-pep-scraper/github/) | Sejm | Politically-exposed persons (PEP) for KYC/AML screening |
+| [Tax Office Auctions Scraper](https://getregdata.com/go/poland-elicytacje-auction-scraper/github/) | eLicytacje KAS | Tax-office sales - cars, real estate, shares; starting price, valuation, land-registry number |
+
+### Spain
+| Actor | Registry | What You Get |
+|---|---|---|
+| [BORME Corporate Acts Scraper](https://getregdata.com/go/borme-corporate-acts-scraper/github/) | BORME | Incorporations, officer appointments, capital changes, dissolutions |
+| [Spain Company Directory Scraper](https://getregdata.com/go/spain-company-directory-scraper/github/) | Registro Mercantil | NIF, officers, CNAE codes, legal form, IRUS, EUID |
+| [Registro Publico Concursal Scraper](https://getregdata.com/go/spain-concursal-scraper/github/) | Registro Publico Concursal | Insolvency parties and their roles (debtor, administrator, disqualified) |
+
+### Austria
+| Actor | Registry | What You Get |
+|---|---|---|
+| [Ediktsdatei Insolvency Scraper](https://getregdata.com/go/austria-ediktsdatei-scraper/github/) | Ediktsdatei | Austrian insolvency and court publications |
+| [WKO Business Directory Scraper](https://getregdata.com/go/wko-business-directory-scraper/github/) | WKO | Austrian businesses with contact details and trade licenses |
+
+### Germany
+| Actor | Registry | What You Get |
+|---|---|---|
+| [Handelsregister Scraper](https://getregdata.com/go/germany-handelsregister-scraper/github/) | Handelsregister | Company KYB - registered details, officers, capital |
+| [Insolvency Register Search](https://getregdata.com/go/germany-insolvency-scraper/github/) | Insolvenzbekanntmachungen | German insolvency announcements by company and date |
+
+### France
+| Actor | Registry | What You Get |
+|---|---|---|
+| [Societe.com Company Scraper](https://getregdata.com/go/societe-com-scraper/github/) | Societe.com | SIREN, directors, financials, shareholders, subsidiaries, director networks |
+| [France Insolvency Search](https://getregdata.com/go/france-insolvency-scraper/github/) | BODACC | Collective proceedings (sauvegarde, redressement, liquidation) by SIREN, SIRET or name |
+
+### Italy
+| Actor | Registry | What You Get |
+|---|---|---|
+| [Registro Imprese Scraper](https://getregdata.com/go/italy-registro-imprese-scraper/github/) | Registro Imprese | Full company profile by name or P.IVA (VAT), incl. PEC |
+| [PEC Lookup](https://getregdata.com/go/italy-pec-lookup/github/) | INI-PEC | Certified email (PEC) and SDI code by VAT - bulk lookup |
+
+### Belgium
+| Actor | Registry | What You Get |
+|---|---|---|
+| [KBO/BCE Company Scraper](https://getregdata.com/go/belgium-kbo-company-scraper/github/) | KBO/BCE | Company data, directors and VAT |
+
+### Czechia
+| Actor | Registry | What You Get |
+|---|---|---|
+| [ISIR Insolvency Register Search](https://getregdata.com/go/czech-isir-insolvency-scraper/github/) | ISIR | Czech insolvency register - debtor, case, court |
+| [Czech Annual Accounts](https://getregdata.com/go/czech-annual-accounts/github/) | Sbírka listin | Filed annual accounts by IČO - revenue, profit, assets, equity, liabilities |
+| [Czech Public Auctions Scraper](https://getregdata.com/go/czech-drazby-auction-scraper/github/) | Portál dražeb | Judicial-executor auctions - appraised value, reserve price, address, appraisal PDF |
+
+### Norway, Denmark, Estonia
+| Actor | Registry | What You Get |
+|---|---|---|
+| [Norway Annual Accounts](https://getregdata.com/go/norway-annual-accounts/github/) | Brønnøysund | Filed annual accounts by organisation number |
+| [Denmark Annual Accounts](https://getregdata.com/go/denmark-annual-accounts/github/) | CVR / Erhvervsstyrelsen | Filed annual reports (årsrapport) by CVR number |
+| [Estonia Annual Accounts](https://getregdata.com/go/estonia-annual-accounts/github/) | e-Business Register | Filed annual accounts by registry code |
+
+### Slovakia
+| Actor | Registry | What You Get |
+|---|---|---|
+| [RPVS Beneficial Owners Scraper](https://getregdata.com/go/slovakia-rpvs-ubo-scraper/github/) | RPVS | Beneficial owners (UBO) with PEP flag - "the CRBR of Slovakia" |
+
+### United States
+| Actor | Registry | What You Get |
+|---|---|---|
+| [California SoS Business Scraper](https://getregdata.com/go/california-sos-business-scraper/github/) | California SoS | Business entity status and registered agent |
+| [California UCC Lien Search](https://getregdata.com/go/california-ucc-lien-scraper/github/) | California UCC | UCC liens - debtors and secured parties |
+| [Illinois SOS Business Search](https://getregdata.com/go/illinois-sos-business-search/github/) | Illinois SoS | LLCs and corporations by name or file number, plus new filings by date |
+| [County Clerk Records](https://getregdata.com/go/us-county-recorded-documents/github/) | County clerks | Lis pendens, liens, deeds and sheriff's deeds recorded in selected TX, OH, MI and other counties |
+
+### UAE
+| Actor | Registry | What You Get |
+|---|---|---|
+| [ADGM Public Register Scraper](https://getregdata.com/go/uae-adgm-public-register-scraper/github/) | ADGM | Abu Dhabi Global Market company data |
+
+### Cyprus
+| Actor | Registry | What You Get |
+|---|---|---|
+| [Cyprus DRCOR Company Scraper](https://getregdata.com/go/cyprus-drcor-company-scraper/github/) | DRCOR | Company identity and status, directors & secretary, registered office |
+
+### Ireland
+| Actor | Registry | What You Get |
+|---|---|---|
+| [Ireland CRO Company Scraper](https://getregdata.com/go/ireland-cro-company-scraper/github/) | CRO (CORE) | Company identity, status, incorporation date, registered address and email |
+
+### Portugal
+| Actor | Registry | What You Get |
+|---|---|---|
+| [Portugal Corporate Acts Scraper](https://getregdata.com/go/portugal-corporate-acts-scraper/github/) | Publicações MJ | Published corporate acts - incorporations, changes, appointments, dissolutions |
+
+### Nigeria
+| Actor | Registry | What You Get |
+|---|---|---|
+| [Nigeria CAC Company Scraper](https://getregdata.com/go/nigeria-cac-company-scraper/github/) | CAC | Company / business-name / trustees identity, classification, status |
+
+### Colombia
+| Actor | Registry | What You Get |
+|---|---|---|
+| [Colombia RUES Company Scraper](https://getregdata.com/go/colombia-rues-company-scraper/github/) | RUES | Company & non-profit identity, chamber of commerce, legal form, status |
+
+### Cross-border
+| Actor | Source | What You Get |
+|---|---|---|
+| [Adverse Media Screener](https://getregdata.com/go/adverse-media-screener/github/) | News / web | KYC/AML adverse-media (negative news) check for a name or company |
+
+---
+
+## Pricing
+
+| Plan | Credits included | Typical coverage |
+|---|---|---|
+| Free | $5/month | 600-1,600 checks depending on actor |
+| Starter ($49/mo) | $49 platform credits | ~6,000-16,000 checks |
+| Scale ($499/mo) | $499 platform credits | ~60,000+ checks |
+
+All actors are pay-per-result (from ~$0.003/result depending on actor and tier). No per-actor subscription. Unused credits roll over. Each actor's Apify Store page shows its current per-result price.
+
+---
+
+## Authentication
+
+```bash
+# Set token in environment
+export APIFY_TOKEN=apify_api_xxxxx
+
+# Or pass directly
+client = ApifyClient("apify_api_xxxxx")
+```
+
+Get your token: [Apify Console > Settings > Integrations](https://getregdata.com/go/signup/github/)
+
+---
+
+## All actors
+
+[apify.com/regdata](https://getregdata.com/go/catalog/github/)
+
+## License
+
+MIT

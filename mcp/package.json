@@ -1,0 +1,57 @@
+{
+  "name": "getregdata-mcp",
+  "version": "1.5.1",
+  "mcpName": "io.github.Nolpak14/getregdata",
+  "description": "MCP server for official registry data - insolvency and restructuring proceedings across Europe (Poland, Germany, Austria, France, Spain, Czechia) and Central and Eastern European depth: Polish KRS financial statements, CRBR beneficial owners, land and mortgage registers, Czech annual accounts, Slovak UBO register. One-call Poland KYB verdict, plus company registers elsewhere in Europe, the US and the UAE.",
+  "type": "module",
+  "bin": {
+    "getregdata-mcp": "index.js"
+  },
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "actors.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "smoke": "node smoke-test.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "kyc",
+    "aml",
+    "kyb",
+    "adverse-media",
+    "beneficial-owners",
+    "business-registry",
+    "credit-risk",
+    "due-diligence",
+    "compliance",
+    "regtech",
+    "apify",
+    "handelsregister",
+    "crbr",
+    "registro-imprese",
+    "insolvency",
+    "bankruptcy",
+    "central-eastern-europe",
+    "poland",
+    "krs"
+  ],
+  "homepage": "https://github.com/Nolpak14/getregdata",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Nolpak14/getregdata.git",
+    "directory": "mcp"
+  },
+  "license": "MIT",
+  "author": "regdata",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

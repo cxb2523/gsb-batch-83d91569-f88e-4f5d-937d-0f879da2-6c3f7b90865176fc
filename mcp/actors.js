@@ -1,0 +1,2623 @@
+// Auto-generated from the live Apify fleet (deployed builds). 45 regdata actors.
+// Regenerate with: APIFY_TOKEN=... node scripts/gen-manifest.mjs
+// Generated 2026-11-11. Do not edit inputSchema by hand.
+export const ACTORS = [
+  {
+    "slug": "poland-kyb-check",
+    "tool": "regdata_poland_kyb_check",
+    "title": "Poland KYB Risk Check - one call, one verdict",
+    "description": "Run a COMPLETE Polish KYB check from a single NIP or KRS - start here for Poland instead of chaining the individual registry tools. Resolves official company identity, pulls beneficial owners from the national UBO register, and screens the national debtor register for insolvency, restructuring and enforcement proceedings against the company AND every beneficial owner by exact identifier. Returns one normalized verdict - clear, findings, not_found or partial - plus machine-readable risk flags and the underlying registry entries (case signature, classification, court, dates, source). A \"partial\" verdict means a source could not be reached, not that the company is clean, and is not billed. Poland only; use the per-registry tools for other jurisdictions or for deeper single-source detail. TIMING: this check typically takes 20-30 seconds, but scales with the number of beneficial owners and has been measured up to ~2.5 minutes. If it has not finished in time, the tool returns {status, runId, note} instead of results - the check is running and already billed, so call regdata_run_result with that runId to collect it. Never re-run the check to 'retry': that bills twice.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "identifiers": {
+          "type": "array",
+          "title": "Company identifiers (NIP or KRS)",
+          "description": "The Polish companies to check, by NIP (10 digits) or KRS (10 digits, leading zeros). Each identifier returns one complete KYB check: identity, beneficial owners, and insolvency proceedings against the company and every beneficial owner."
+        },
+        "includeManagement": {
+          "type": "boolean",
+          "title": "Include management board (KRS)",
+          "description": "Also read the current KRS extract and return the sitting management board (or representing partners), representation rule, prokurenci (proxies), supervisory board, shareholders/partners and share capital. Companies without a KRS number are reported as not applicable. The board is billed by the board-members actor it runs, on top of the check.",
+          "default": false
+        },
+        "krzConcurrency": {
+          "type": "integer",
+          "title": "Beneficial-owner screening concurrency",
+          "description": "How many beneficial owners to screen against the insolvency register in parallel. Higher is faster; lower is gentler on the registry. Leave at the default unless a check is timing out.",
+          "default": 4
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "identifiers"
+      ]
+    }
+  },
+  {
+    "slug": "adverse-media-screener",
+    "tool": "regdata_adverse_media",
+    "title": "Adverse Media Screener - KYC/AML Negative News Check",
+    "description": "Screen a person or company for adverse media (negative news) for KYC/AML and due diligence. Returns categorized, LLM-classified hits - fraud, corruption, sanctions, money laundering and more - with the entity's role, a severity score and source provenance. False positives filtered out.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "entityNames": {
+          "type": "array",
+          "title": "Entities to screen",
+          "description": "One or more person or company names to screen, e.g. [\"Wirecard AG\", \"Jan Marsalek\"]. Each entity is billed and returned as its own result."
+        },
+        "entityType": {
+          "type": "string",
+          "title": "Entity type",
+          "description": "Whether the entities are people or companies (improves disambiguation). Leave on \"auto\" if mixed.",
+          "enum": [
+            "auto",
+            "person",
+            "company"
+          ],
+          "default": "auto"
+        },
+        "aliases": {
+          "type": "array",
+          "title": "Aliases (optional)",
+          "description": "Alternative names / transliterations for the entity (only meaningful when screening a single entity)."
+        },
+        "country": {
+          "type": "string",
+          "title": "Country (optional)",
+          "description": "ISO country code or name to bias the search and aid disambiguation, e.g. \"de\", \"Germany\"."
+        },
+        "categories": {
+          "type": "array",
+          "title": "Risk categories filter (optional)",
+          "description": "If set, only return hits in these risk categories. Leave empty to return all.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "minSeverity": {
+          "type": "string",
+          "title": "Minimum severity",
+          "description": "Only return hits at or above this severity.",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": "low"
+        },
+        "maxHits": {
+          "type": "integer",
+          "title": "Max hits per entity",
+          "description": "Maximum number of adverse hits to return per entity. 1-50.",
+          "default": 25
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "austria-ediktsdatei-scraper",
+    "tool": "regdata_austria_ediktsdatei",
+    "title": "Austria Insolvency & Court Publications Scraper",
+    "description": "Scrape Austrian insolvency data from the Ediktsdatei - bankruptcies, reorganizations, debt settlements, court auctions, and Firmenbuch announcements. Official court publications with no API alternative.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchQuery": {
+          "type": "string",
+          "title": "Debtor / Company Name",
+          "description": "Name of the debtor or company to search for (minimum 3 characters). Partial match supported. | Name des Schuldners oder Unternehmens (mindestens 3 Zeichen)."
+        },
+        "proceedingType": {
+          "type": "string",
+          "title": "Proceeding Type",
+          "description": "Type of insolvency proceeding to filter. 'all' returns all types. | Art des Insolvenzverfahrens. 'all' gibt alle Verfahrensarten zuruck.",
+          "enum": [
+            "all",
+            "Konkursverfahren",
+            "Sanierungsverfahren",
+            "Schuldenregulierungsverfahren"
+          ],
+          "default": "all"
+        },
+        "court": {
+          "type": "string",
+          "title": "Court",
+          "description": "Filter by court name (e.g. 'Handelsgericht Wien', 'Landesgericht Linz'). Leave empty for all courts. | Nach Gericht filtern. Leer lassen fur alle Gerichte."
+        },
+        "state": {
+          "type": "string",
+          "title": "Federal State (Bundesland)",
+          "description": "Filter by Austrian federal state. | Nach Bundesland filtern.",
+          "enum": [
+            "all",
+            "Burgenland",
+            "Kaernten",
+            "Niederoesterreich",
+            "Oberoesterreich",
+            "Salzburg",
+            "Steiermark",
+            "Tirol",
+            "Vorarlberg",
+            "Wien"
+          ],
+          "default": "all"
+        },
+        "dateFrom": {
+          "type": "string",
+          "title": "Published Since (Date From)",
+          "description": "Only return edicts published on or after this date (YYYY-MM-DD). Setting it is strongly recommended: it is the only filter the register applies server-side, so it is what keeps a browse-style run short, and it removes the need for the GmbH fallback query - without it a run with no searchQuery returns ONLY debtors whose name contains 'GmbH'. | Nur Veroeffentlichungen ab diesem Datum."
+        },
+        "dateTo": {
+          "type": "string",
+          "title": "Published Until (Date To)",
+          "description": "Only return edicts published up to this date (YYYY-MM-DD). Applied per edict, not by the register, so a narrow window costs one page fetch per candidate. | Nur Veroeffentlichungen bis zu diesem Datum."
+        },
+        "entryType": {
+          "type": "string",
+          "title": "Entry Type",
+          "description": "Filter by entry type: 'initial' for new proceedings, 'changes' for updates, 'all' for both. | Ersteintrage, Anderungen, oder beides.",
+          "enum": [
+            "all",
+            "initial",
+            "changes"
+          ],
+          "default": "all"
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max Results",
+          "description": "Maximum number of matching records to return. Default: 100. Set to 0 for unlimited. This caps matches, not work: dateTo and proceedingType are checked per edict, so reaching the cap can require many more page fetches than the cap itself. | Maximale Anzahl der Ergebnisse.",
+          "default": 100
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "bdo-waste-registry-scraper",
+    "tool": "regdata_bdo_waste_registry",
+    "title": "Poland BDO Waste Registry Scraper",
+    "description": "Rejestr BDO - baza danych o odpadach. Search 674,000+ waste management entities by name or NIP. Returns BDO registry number, company name, NIP, and address (province, district, commune, city, street, postcode). Answers \"is this company in the BDO register, and what is its BDO number?\" - registration status, waste codes and permits are behind a BDO login and are not part of the public register. No API exists. ESG compliance, environmental due diligence. Gospodarka odpadami.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "title": "Search Query",
+          "description": "Search by company name, NIP, NIP EU, or BDO registry number."
+        },
+        "province": {
+          "type": "string",
+          "title": "Province (Województwo)",
+          "description": "Filter by province.",
+          "enum": [
+            "",
+            "Dolnośląskie",
+            "Kujawsko-pomorskie",
+            "Lubelskie",
+            "Lubuskie",
+            "Łódzkie",
+            "Małopolskie",
+            "Mazowieckie",
+            "Opolskie",
+            "Podkarpackie",
+            "Podlaskie",
+            "Pomorskie",
+            "Śląskie",
+            "Świętokrzyskie",
+            "Warmińsko-mazurskie",
+            "Wielkopolskie",
+            "Zachodniopomorskie"
+          ],
+          "default": ""
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max Results",
+          "description": "Maximum entities to return. The registry serves 50 per page and the actor pages through until it reaches this limit or runs out of matches. Default: 100. Set to 0 to return every match.",
+          "default": 100
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "query"
+      ]
+    }
+  },
+  {
+    "slug": "belgium-kbo-company-scraper",
+    "tool": "regdata_belgium_kbo_company",
+    "title": "Belgium KBO/BCE Company Scraper - Directors & VAT",
+    "description": "Scrape Belgium's KBO/BCE registry from the official public search: company identity, status, legal form, address, NACEBEL activity codes and NAMED directors/managers. Lookup by enterprise/VAT number or company name. No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchMode": {
+          "type": "string",
+          "title": "Search mode",
+          "description": "How to look up companies. \"byNumber\" fetches exact companies by enterprise/VAT number (most precise, ideal for KYC/KYB enrichment). \"byName\" runs the official phonetic name search and then fetches each match.",
+          "enum": [
+            "byNumber",
+            "byName"
+          ],
+          "default": "byNumber"
+        },
+        "enterpriseNumbers": {
+          "type": "array",
+          "title": "Enterprise / VAT numbers",
+          "description": "Belgian enterprise numbers or VAT numbers to look up (used when searchMode = byNumber). Any common format works: \"0417.497.106\", \"0417497106\" or \"BE0417497106\"."
+        },
+        "searchQuery": {
+          "type": "string",
+          "title": "Company name",
+          "description": "Company name to search for (used when searchMode = byName). Uses the registry's phonetic search, so minor spelling differences still match. Add a place or legal form to narrow very common names."
+        },
+        "language": {
+          "type": "string",
+          "title": "Output language",
+          "description": "Language of the registry labels/descriptions (NACEBEL activity descriptions, status text). The data itself is identical across languages.",
+          "enum": [
+            "en",
+            "nl",
+            "fr",
+            "de"
+          ],
+          "default": "en"
+        },
+        "activeOnly": {
+          "type": "boolean",
+          "title": "Active entities only (name search)",
+          "description": "When searching by name, return only active (non-ceased) entities. Ignored in byNumber mode.",
+          "default": true
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max results",
+          "description": "Maximum number of company records to extract. 0 means no limit. Useful to cap broad name searches.",
+          "default": 0
+        },
+        "minIntervalMs": {
+          "type": "integer",
+          "title": "Min interval between requests (ms)",
+          "description": "Polite delay between requests to the registry. Lower is faster but less courteous; 400ms is a safe default.",
+          "default": 400
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "borme-corporate-acts-scraper",
+    "tool": "regdata_borme_corporate_acts",
+    "title": "Spain BORME Corporate Acts Parser",
+    "description": "Parse daily BORME (Boletin Oficial del Registro Mercantil) Section A PDFs into structured corporate acts - company incorporations, officer appointments, capital changes, dissolutions, and more.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "date": {
+          "type": "string",
+          "title": "Date",
+          "description": "Specific date to fetch in YYYY-MM-DD format. Defaults to yesterday if no date or date range is provided. BORME publishes on business days only."
+        },
+        "dateFrom": {
+          "type": "string",
+          "title": "Date From",
+          "description": "Start of date range (YYYY-MM-DD). Use with dateTo for multi-day extraction. Maximum recommended range: 5 days per run."
+        },
+        "dateTo": {
+          "type": "string",
+          "title": "Date To",
+          "description": "End of date range (YYYY-MM-DD, inclusive). Use with dateFrom for multi-day extraction."
+        },
+        "provinces": {
+          "type": "array",
+          "title": "Province Filter",
+          "description": "Filter by province names (e.g. [\"MADRID\", \"BARCELONA\"]). Leave empty for all provinces. Case-insensitive matching.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "actTypes": {
+          "type": "array",
+          "title": "Act Type Filter",
+          "description": "Filter by act types (e.g. [\"Nombramientos\", \"Constitucion\"]). Leave empty for all act types. Common types: Nombramientos, Ceses/Dimisiones, Constitucion, Disolucion, Ampliacion de capital, Cambio de domicilio social, Modificaciones estatutarias, Reelecciones, Revocaciones.",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "california-sos-business-scraper",
+    "tool": "regdata_california_sos_business",
+    "title": "California SoS Business Scraper - Agent & Status",
+    "description": "Scrape the California Secretary of State business registry (bizfileOnline): entity name, number, status, standing, type, formation date and registered agent. Search by name or entity number. The registry returns at most 500 matches for a term - a list that hits that ceiling is reported as INCOMPLETE, so a missing entity is not proof it is unregistered; narrow the term and re-run. No API key needed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "title": "What to do",
+          "description": "<b>Search</b> looks up the names or entity numbers you list below. <b>New filings</b> delivers every newly approved California entity since the last run - schedule it daily and each run picks up where the previous one stopped. <b>Add addresses</b> takes the results of an earlier run and completes each record with its principal address, mailing address and the registered agent's address.",
+          "enum": [
+            "search",
+            "newFilings",
+            "addresses"
+          ],
+          "default": "search"
+        },
+        "searchQueries": {
+          "type": "array",
+          "title": "Search queries",
+          "description": "Company names or entity/file numbers to look up in the California Secretary of State business registry. Each query returns all matching entities."
+        },
+        "maxResultsPerQuery": {
+          "type": "integer",
+          "title": "Max results per query",
+          "description": "Maximum number of entities to keep per query (default 50 to avoid surprise charges on broad searches). Set 0 for no limit (all matches, typically up to ~500 per search).",
+          "default": 50
+        },
+        "startEntityNumber": {
+          "type": "string",
+          "title": "Start from entity number",
+          "description": "New filings only, first run only: the California entity number to start from, e.g. <code>B20260403469</code>. Later runs continue automatically from the saved position."
+        },
+        "maxNumbersPerRun": {
+          "type": "integer",
+          "title": "Entity numbers to check per run",
+          "description": "Upper bound on how many entity numbers one run checks. California issues roughly 1,500-2,000 per business day; a daily schedule at the default keeps up, and whatever is not reached is picked up next run.",
+          "default": 2500
+        },
+        "includeNameReservations": {
+          "type": "boolean",
+          "title": "Include name reservations",
+          "description": "Name reservations share the number sequence but are not formed businesses. Off by default: they are skipped and not billed.",
+          "default": false
+        },
+        "restartFromStartNumber": {
+          "type": "boolean",
+          "title": "Restart from the start number",
+          "description": "Discard the saved position and start again from \"Start from entity number\". Use it to re-run a range; every record in it is delivered (and billed) again.",
+          "default": false
+        },
+        "stateStoreName": {
+          "type": "string",
+          "title": "Progress store name",
+          "description": "Name of the key-value store in your Apify account that keeps the scan position between runs. Use a different name to run several independent feeds.",
+          "default": "california-new-filings"
+        },
+        "stopAfterConsecutiveMisses": {
+          "type": "integer",
+          "title": "Stop after consecutive unanswered numbers",
+          "description": "How many consecutive entity numbers with no approved filing yet mark the end of what the registry has processed so far. Leave at the default unless a run stops too early.",
+          "default": 300
+        },
+        "reserveForNewNumbers": {
+          "type": "integer",
+          "title": "Look-ups reserved for new entity numbers",
+          "description": "Every run re-checks numbers that had no record yet before it moves on to new ones. This reserves part of the run's budget for new numbers so the scan always moves forward, even when the re-check queue is long. Leave at the default unless a run reports a growing backlog.",
+          "default": 1800
+        },
+        "sourceDatasetId": {
+          "type": "string",
+          "title": "Results to complete (dataset ID)",
+          "description": "The dataset ID of an earlier run of this actor. Every record in it is looked up once and returned with <code>principalAddress</code>, <code>mailingAddress</code>, <code>agentType</code>, <code>agentName</code> and <code>agentAddress</code> added. Commercial registered agents have no address of their own on the entity's record, so <code>agentAddress</code> is empty for those."
+        },
+        "sourceRunId": {
+          "type": "string",
+          "title": "...or the run ID",
+          "description": "Alternative to the dataset ID: the ID of the earlier run whose results should be completed."
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "california-ucc-lien-scraper",
+    "tool": "regdata_california_ucc_lien",
+    "title": "California UCC Lien Search - Debtors & Secured Parties",
+    "description": "Search the California Secretary of State UCC filing index (bizfileOnline) by debtor or secured-party name. Get filing number, UCC type, status, filing & lapse dates, debtors and secured parties. The registry rejects a term matching more than 1,000 filings as \"too broad\" - that refusal is reported as such and is NOT \"no liens\"; narrow the debtor name and re-run. No API key needed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchQueries": {
+          "type": "array",
+          "title": "Search queries",
+          "description": "Debtor or secured-party names to look up in the California SoS UCC filing index. The search is a contains-match across both debtor and secured-party names. Use a full, specific name - a term matching more than 1,000 filings is rejected by the registry."
+        },
+        "activeOnly": {
+          "type": "boolean",
+          "title": "Active filings only",
+          "description": "Keep only filings whose status is Active (drop Lapsed / terminated filings).",
+          "default": false
+        },
+        "filedFrom": {
+          "type": "string",
+          "title": "Filed on or after",
+          "description": "Keep only filings on or after this date (YYYY-MM-DD)."
+        },
+        "filedTo": {
+          "type": "string",
+          "title": "Filed on or before",
+          "description": "Keep only filings on or before this date (YYYY-MM-DD)."
+        },
+        "maxResultsPerQuery": {
+          "type": "integer",
+          "title": "Max results per query",
+          "description": "Maximum number of filings to keep per query after filtering (default 50 to avoid surprise charges on broad searches). Set 0 for no limit (all matches, up to the registry's 1,000 cap).",
+          "default": 50
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "searchQueries"
+      ]
+    }
+  },
+  {
+    "slug": "illinois-sos-business-search",
+    "tool": "regdata_illinois_sos_business",
+    "title": "Illinois Secretary of State - Business Search and New Filings",
+    "description": "Search the Illinois Secretary of State business register by company name or 8-digit file number, or (mode=newFilings) list LLCs and corporations newly organized in Illinois between two dates within the last 13 months. Returns entity name, file number, type, status, formation and other dates, registered agent, and managers or officers. Name search matches entities whose name contains all the words; onlyActive keeps entities in good standing. For a daily new-business feed, schedule newFilings with onlyNewSinceLastRun so late-indexed filings arrive exactly once. No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "title": "What to do",
+          "description": "<b>Search</b> looks up the company names or Illinois file numbers you list. <b>New filings</b> lists the LLCs and corporations organized in Illinois between two dates (the last 13 months) - schedule it daily with \"Only entities not delivered before\" for a feed.",
+          "enum": [
+            "search",
+            "newFilings"
+          ],
+          "default": "search"
+        },
+        "searchQueries": {
+          "type": "array",
+          "title": "Search queries",
+          "description": "Company names or 8-digit Illinois file numbers, one per line. A name matches every entity whose name contains all its words (\"LLC\", \"Inc\" and similar endings are ignored, except that an exact full name is listed first)."
+        },
+        "maxResultsPerQuery": {
+          "type": "integer",
+          "title": "Max results per query",
+          "description": "Most entities kept per query (default 50, so a broad word does not bring thousands of records). 0 = up to 1,000.",
+          "default": 50
+        },
+        "entityFamilies": {
+          "type": "array",
+          "title": "Entity types",
+          "description": "Leave empty for both.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "onlyActive": {
+          "type": "boolean",
+          "title": "Only active entities",
+          "description": "Keep only entities in good standing or reinstated.",
+          "default": false
+        },
+        "dateFrom": {
+          "type": "string",
+          "title": "Organized from",
+          "description": "New filings only. YYYY-MM-DD. Default: 7 days ago. The last 13 months are available."
+        },
+        "dateTo": {
+          "type": "string",
+          "title": "Organized to",
+          "description": "New filings only. YYYY-MM-DD, inclusive. Default: today."
+        },
+        "onlyNewSinceLastRun": {
+          "type": "boolean",
+          "title": "Only entities not delivered before",
+          "description": "New filings only. Skips entities this feed already delivered, so a daily schedule with a 7-day window catches late-registered filings exactly once.",
+          "default": false
+        },
+        "stateStoreName": {
+          "type": "string",
+          "title": "Feed memory store name",
+          "description": "New filings only. Key-value store in your Apify account that remembers what was delivered. Use a different name for each independent feed.",
+          "default": "illinois-sos-search-state"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "us-county-recorded-documents",
+    "tool": "regdata_us_county_recorded_documents",
+    "title": "US County Clerk Records - lis pendens, liens and deeds (Texas, Ohio, Michigan and more)",
+    "description": "Daily index of documents recorded with US county clerks in selected counties across Texas, Ohio, Michigan, Pennsylvania, Colorado and other states (counties enum in the input): lis pendens, liens, deeds, deeds of trust, releases, affidavits of heirship and sheriff's deeds, with recorded date, document category and grantor and grantee names. Use for pre-foreclosure and probate lead lists, lien monitoring on a named party, and title research. Pick counties and a recorded-date window (at most 31 days per run; the newest day can still be incomplete while the county finishes indexing), optionally document categories or a party name (counties index people as LAST FIRST). onlyNewSinceLastRun makes a scheduled run deliver each document once. No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "counties": {
+          "type": "array",
+          "title": "Counties",
+          "description": "The counties to read, from the county clerk's official public records search. Counties are read one after another.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "dateFrom": {
+          "type": "string",
+          "title": "Recorded from",
+          "description": "First recorded date, YYYY-MM-DD. Default: yesterday. At most 31 days per run."
+        },
+        "dateTo": {
+          "type": "string",
+          "title": "Recorded to",
+          "description": "Last recorded date, YYYY-MM-DD, inclusive. Default: yesterday. Counties publish each day once their indexing is done, so the most recent day can still be incomplete."
+        },
+        "documentCategories": {
+          "type": "array",
+          "title": "Document categories",
+          "description": "Keep only these kinds of documents. Leave empty for every document recorded in the window. Each document gets one category, matched on the county's document type wording.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "partyName": {
+          "type": "string",
+          "title": "Party name (optional)",
+          "description": "Only documents where this name appears as a grantor or grantee, e.g. \"SMITH JOHN\" or a company name. Counties index people as LAST FIRST. Leave empty for every document in the window."
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max results",
+          "description": "Most documents delivered in this run, across all counties. 0 = no limit.",
+          "default": 1000
+        },
+        "onlyNewSinceLastRun": {
+          "type": "boolean",
+          "title": "Only documents not delivered before",
+          "description": "For a scheduled daily feed: skips documents this feed already delivered (remembered for 60 days), so a window that overlaps the previous run still delivers each document once.",
+          "default": false
+        },
+        "stateStoreName": {
+          "type": "string",
+          "title": "Feed memory store name",
+          "description": "Key-value store in your Apify account that remembers delivered documents. Use a different name for each independent feed.",
+          "default": "county-records-feed-state"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "counties"
+      ]
+    }
+  },
+  {
+    "slug": "crbr-beneficial-owners-scraper",
+    "tool": "regdata_crbr_beneficial_owners",
+    "title": "Poland CRBR Beneficial Owners Scraper",
+    "description": "Automate Polish beneficial owner verification for KYC/AML onboarding. Search the official public registry by NIP or KRS to return structured UBO data: names, citizenship, control nature, ownership %. Pay-per-result, no subscription. Pairs with debtor and KNF checks.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nip": {
+          "type": "string",
+          "title": "NIP (single query)",
+          "description": "Polish Tax ID (NIP) of the company to search. For batch queries, use the 'queries' field instead."
+        },
+        "krs": {
+          "type": "string",
+          "title": "KRS (single query)",
+          "description": "KRS number of the company to search."
+        },
+        "companyName": {
+          "type": "string",
+          "title": "Company Name (single query)",
+          "description": "Company name to search (partial match)."
+        },
+        "queries": {
+          "type": "array",
+          "title": "Batch Queries",
+          "description": "List of queries for batch processing. Each query is an object with 'nip', 'krs', 'name', or 'pesel' field. Example: [{\"nip\": \"6770065406\"}, {\"krs\": \"0000057567\"}]"
+        },
+        "dateFrom": {
+          "type": "string",
+          "title": "Date From",
+          "description": "Start date for historical data (YYYY-MM-DD). Default: 2019-10-13 (CRBR start date). Leave empty for full history."
+        },
+        "dateTo": {
+          "type": "string",
+          "title": "Date To",
+          "description": "End date (YYYY-MM-DD). Default: today."
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "czech-isir-insolvency-scraper",
+    "tool": "regdata_czech_isir_insolvency",
+    "title": "Czech ISIR Insolvency Register Search",
+    "description": "Search the Czech insolvency register (ISIR) by company or debtor name, IČO or city. Get debtor name, IČO, case reference, court, proceeding status and the commercial-register cross-link. The register serves at most 400 rows per search and REFUSES a broader query outright - a refusal is reported as such and is NOT \"no records\". includeEnded defaults to true, which pulls in closed proceedings and makes a common surname more likely to be refused; set it false or add the IČO/city and re-run. No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "title": "Company name or surname",
+          "description": "The debtor to look up: a company name or a person's surname. Matched against the ISIR debtor index. Leave empty when using a watchlist."
+        },
+        "watchlist": {
+          "type": "array",
+          "title": "Watchlist (bulk / monitoring)",
+          "description": "A list of company names or surnames to check in one run - ideal on a schedule to monitor your counterparties for new Czech insolvencies. Overrides \"name\"."
+        },
+        "ico": {
+          "type": "array",
+          "title": "IČO number(s)",
+          "description": "One or more Czech IČO registration numbers to look up (e.g. \"41035623\")."
+        },
+        "firstName": {
+          "type": "string",
+          "title": "First name (individuals)",
+          "description": "Optional first name to narrow an individual-debtor search."
+        },
+        "city": {
+          "type": "string",
+          "title": "City",
+          "description": "Optional city (obec) to narrow the search."
+        },
+        "includeEnded": {
+          "type": "boolean",
+          "title": "Include ended proceedings",
+          "description": "On (default): include closed/ended insolvency proceedings as well as active ones. Off: only currently-active proceedings.",
+          "default": true
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max results",
+          "description": "Maximum debtor records to export across all queries (the register returns up to 400 per query).",
+          "default": 100
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "czech-drazby-auction-scraper",
+    "tool": "regdata_czech_auctions",
+    "title": "Czech Public Auctions - Portál dražeb (judicial executors)",
+    "description": "List auctions run by Czech judicial executors from the official Portál dražeb: foreclosed flats, houses, land, vehicles, machinery and whole companies, with appraised value, reserve price and the discount between them, the deposit, auction dates, property address with coordinates and the published appraisal PDF. Filter by list (upcoming, ongoing, finished, pre-emption), start-date window, category, real vs movable property, region and price range; optional detail mode adds bid history, result and objections. mode=auctioneers instead exports the directory of executor offices. An empty 'ongoing' list is normal (auctions run in short windows), not an error. No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "title": "What to export",
+          "description": "'Auctions' enumerates auction listings. 'Executor offices' instead exports the directory of all Czech judicial executor offices with their addresses and contact details, and ignores every filter below.",
+          "enum": [
+            "auctions",
+            "auctioneers"
+          ],
+          "default": "auctions"
+        },
+        "listings": {
+          "type": "array",
+          "title": "Auction lists",
+          "description": "Which of the register's lists to read. 'Upcoming' is the main one. 'Ongoing' is empty most of the time because auctions run in short windows - that is a normal result, not an error. 'Finished' and 'Pre-emption' are small rolling windows: the register does NOT keep a historical archive, so they cannot be used to research past sale prices.",
+          "default": [
+            "upcoming"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "startFrom": {
+          "type": "string",
+          "title": "Auction date from",
+          "description": "Earliest auction start date, YYYY-MM-DD. Defaults to today for forward-looking lists. This also drives how the run splits its queries, so a narrower window costs fewer calls."
+        },
+        "startTo": {
+          "type": "string",
+          "title": "Auction date to",
+          "description": "Latest auction start date, YYYY-MM-DD. Defaults to one year ahead. The register typically holds about four months of scheduled auctions."
+        },
+        "categories": {
+          "type": "array",
+          "title": "Categories",
+          "description": "Restrict to these property categories. The register's own category filter is hierarchical and over-broad - asking for 'Byt' also returns its parent 'Nemovitosti' and its sibling 'Nebytový prostor' - so results are filtered again locally to exactly what you picked. Turn off 'Exact category match' below if you want the register's broader interpretation.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "itemType": {
+          "type": "string",
+          "title": "Property type",
+          "description": "Keep only real estate, only movable property, or both. Movable lots (vehicles, machinery, goods) usually have no address, so they cannot be placed on a map.",
+          "enum": [
+            "any",
+            "real",
+            "movable"
+          ],
+          "default": "any"
+        },
+        "counties": {
+          "type": "array",
+          "title": "Regions (kraje)",
+          "description": "Keep only auctions whose property lies in these regions, matched on the region name as the register spells it, e.g. 'Praha', 'Jihočeský kraj', 'Moravskoslezský kraj'. Partial matches count. Lots with no published location are excluded when this is set.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "minPrice": {
+          "type": "integer",
+          "title": "Minimum reserve price (CZK)",
+          "description": "Lowest reserve (starting) price to include, in CZK. Applied by the register itself."
+        },
+        "maxPrice": {
+          "type": "integer",
+          "title": "Maximum reserve price (CZK)",
+          "description": "Highest reserve (starting) price to include, in CZK. Applied by the register itself."
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max results",
+          "description": "Maximum auction records to export. A lot appearing in more than one selected list is exported once, so you are never charged twice for the same auction.",
+          "default": 1000
+        },
+        "includeDetails": {
+          "type": "boolean",
+          "title": "Include bid history and outcome",
+          "description": "Fetch each auction's detail record to add bid history, result and objections. Costs one extra request per auction, so it roughly doubles a run's duration. Upcoming auctions have no bids yet, so leave this off unless you are reading finished lots.",
+          "default": false
+        },
+        "exactCategories": {
+          "type": "boolean",
+          "title": "Exact category match",
+          "description": "On by default. Keeps only the categories you selected, discarding the parent and sibling categories the register adds on its own. Turn off to receive the register's broader match.",
+          "default": true
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "czech-annual-accounts",
+    "tool": "regdata_czech_annual_accounts",
+    "title": "Czech Annual Accounts - IČO Financial Statements",
+    "description": "Get the filed annual accounts (účetní závěrka) of Czech companies by IČO from the Sbírka listin of the public register: revenue, operating profit, profit before tax, net profit, total/fixed/current assets, cash, equity, share capital, long- and short-term liabilities, with the prior year from the same filing. One row per company, fiscal year and statement type (up to 5 years; group accounts on request). Figures are in whole currency units (CZK, some large companies EUR). _parseQuality: verified = balance sheet adds up; partial = adds up but revenue/profit not filed (common for small companies, which may file the balance sheet only). A row with success:false is NOT a clean bill of health: \"scan - figures not read\" and \"figures not read from this filing\" mean the filing exists but its figures were not read (sourceUrl links the document); not_found = no such company; no_filings = no annual accounts filed. Those rows are not charged. The latest year appears only once the company has filed it, often a year or two late. TIMING: about 5-10 s per company; scanned filings take longer (up to a few minutes). If the run is not finished in time, the tool returns {status, runId, note} - call regdata_run_result with that runId instead of re-running (re-running bills twice). No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "companyIds": {
+          "type": "array",
+          "title": "IČO numbers",
+          "description": "Czech company identification numbers (IČO, 8 digits), up to 1,000 per run. Example: 06401643. Each company takes a few seconds; very large lists are best split into runs of up to 300 companies."
+        },
+        "years": {
+          "type": "integer",
+          "title": "Fiscal years per company",
+          "description": "How many of the most recent fiscal years to return for each company (1 to 5). Each year read is one row and one charge.",
+          "default": 1
+        },
+        "includeConsolidated": {
+          "type": "boolean",
+          "title": "Include group (consolidated) accounts",
+          "description": "Also look for the consolidated group accounts next to the company's own accounts. Each group statement read is an extra row and an extra charge. Companies that file group accounts only get them either way. Off by default.",
+          "default": false
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "companyIds"
+      ]
+    }
+  },
+  {
+    "slug": "norway-annual-accounts",
+    "tool": "regdata_norway_annual_accounts",
+    "title": "Norway Annual Accounts - Brønnøysund Financial Statements",
+    "description": "Get the filed annual accounts (årsregnskap) of Norwegian companies by organisation number (organisasjonsnummer, 9 digits) from the Brønnøysund Register of Company Accounts: revenue, operating profit, net profit, total assets, equity and liabilities, checked against the balance sheet. One row per company, fiscal year and statement type (up to 3 years; consolidated group accounts optional, each an extra row and charge). Use it after a free Brreg (Enhetsregisteret) lookup when you need the numbers, not just the identity. If the run is not finished in time, the tool returns {status, runId, note} - call regdata_run_result with that runId instead of re-running (re-running bills twice). No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "companyIds": {
+          "type": "array",
+          "title": "Organisation numbers",
+          "description": "Norwegian organisation numbers (organisasjonsnummer), 9 digits, up to 1,000 per run. Example: 923609016."
+        },
+        "years": {
+          "type": "integer",
+          "title": "Fiscal years per company",
+          "description": "How many of the most recent fiscal years to return for each company (1 to 3). Each year is one row and one charge.",
+          "default": 1
+        },
+        "includeConsolidated": {
+          "type": "boolean",
+          "title": "Include group (consolidated) accounts",
+          "description": "Also return the consolidated group accounts when the company files them. Each group statement is an extra row and an extra charge. Off by default.",
+          "default": false
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "companyIds"
+      ]
+    }
+  },
+  {
+    "slug": "denmark-annual-accounts",
+    "tool": "regdata_denmark_annual_accounts",
+    "title": "Denmark Annual Accounts - CVR Financial Statements (Årsrapport)",
+    "description": "Get the filed annual reports (årsrapport) of Danish companies by CVR number (8 digits): revenue, gross profit, net profit, total assets, equity, liabilities and employees, with the prior year included, balance-checked. One row per company, fiscal year and statement type (up to 5 years; group accounts optional - companies that file group accounts only, such as listed IFRS groups, return those). Use it after a free CVR identity lookup when you need the financials. If the run is not finished in time, the tool returns {status, runId, note} - call regdata_run_result with that runId instead of re-running (re-running bills twice). No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "companyIds": {
+          "type": "array",
+          "title": "CVR numbers",
+          "description": "Danish CVR numbers, 8 digits, up to 1,000 per run. Example: 21766909."
+        },
+        "years": {
+          "type": "integer",
+          "title": "Fiscal years per company",
+          "description": "How many of the most recent fiscal years to return for each company (1 to 5). Each year is one row and one charge.",
+          "default": 1
+        },
+        "includeConsolidated": {
+          "type": "boolean",
+          "title": "Include group (consolidated) accounts",
+          "description": "Also return the consolidated group accounts next to the company's own accounts. Each group statement is an extra row and an extra charge. Companies that file group accounts only (for example listed IFRS companies) get them either way. Off by default.",
+          "default": false
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "companyIds"
+      ]
+    }
+  },
+  {
+    "slug": "estonia-annual-accounts",
+    "tool": "regdata_estonia_annual_accounts",
+    "title": "Estonia Annual Accounts - e-Business Register Financials",
+    "description": "Get the filed annual accounts (majandusaasta aruanne) of Estonian companies by registry code (registrikood, 8 digits) from the e-Business Register: revenue, operating profit, net profit, total assets, equity and liabilities, checked against the balance sheet. One row per company and fiscal year (up to 3 years). Use it for Estonian KYB, credit checks and supplier vetting when you need the numbers. If the run is not finished in time, the tool returns {status, runId, note} - call regdata_run_result with that runId instead of re-running (re-running bills twice). No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "companyIds": {
+          "type": "array",
+          "title": "Registry codes",
+          "description": "Estonian company registry codes (registrikood), 8 digits, up to 1,000 per run. Example: 10000018."
+        },
+        "years": {
+          "type": "integer",
+          "title": "Fiscal years per company",
+          "description": "How many of the most recent fiscal years to return for each company (1 to 3). Each year is one row and one charge.",
+          "default": 1
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "companyIds"
+      ]
+    }
+  },
+  {
+    "slug": "ekw-ksiegi-wieczyste-scraper",
+    "tool": "regdata_ekw_ksiegi_wieczyste",
+    "title": "Poland EKW Land Registry Scraper Ksiegi Wieczyste",
+    "description": "Extract property data from Poland's Electronic Land Registry (Elektroniczne Ksiegi Wieczyste): ownership, mortgages, restrictions, property details. Keyless - no proxy or API key needed. For property due diligence and credit-risk checks. Pay per result.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "kwNumbers": {
+          "type": "array",
+          "title": "KW Numbers",
+          "description": "List of KW numbers to look up. Format: 'CODE/NUMBER/DIGIT' (e.g., 'WA4M/00160286/2'). The check digit (last part) is optional - it will be auto-calculated if omitted. You can also provide just 'CODE/NUMBER'. Note: users on the Apify Free plan get a preview allowance of 25 KW numbers per 30 days; upgrade to any paid Apify plan to run unlimited batches."
+        },
+        "viewType": {
+          "type": "string",
+          "title": "View Type",
+          "description": "'aktualna' = Current content (default, most common). 'zupelna' = Complete content with full history of all entries. 'dotychczasowa' = Current content in legacy format.",
+          "enum": [
+            "aktualna",
+            "zupelna",
+            "dotychczasowa"
+          ],
+          "default": "aktualna"
+        },
+        "sections": {
+          "type": "array",
+          "title": "Sections to Extract",
+          "description": "Which sections (działy) to extract. Default: all. Options: 'IO' (property designation), 'ISp' (associated rights), 'II' (ownership), 'III' (restrictions/claims), 'IV' (mortgages).",
+          "default": [
+            "IO",
+            "ISp",
+            "II",
+            "III",
+            "IV"
+          ]
+        },
+        "includeRawHtml": {
+          "type": "boolean",
+          "title": "Include Raw HTML",
+          "description": "Include the raw HTML of each section in the output (useful for custom parsing).",
+          "default": false
+        },
+        "maxConcurrency": {
+          "type": "integer",
+          "title": "Max parallel lookups",
+          "description": "How many KW numbers to process in parallel. Default 4; values above 4 are accepted but run at 4, so one access slot always stays free for other runs.",
+          "default": 4
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "kwNumbers"
+      ]
+    }
+  },
+  {
+    "slug": "poland-elicytacje-auction-scraper",
+    "tool": "regdata_poland_tax_auctions",
+    "title": "Poland Tax Office Auctions - eLicytacje KAS",
+    "description": "List sales published by Polish tax offices (KAS) on eLicytacje: cars, flats, houses, land, machinery and company shares, with starting price (cena wywołania), valuation (wartość szacunkowa) and the discount between them, deposit (wadium), location, tax office, and for vehicles make, model, year and VIN; real estate carries the land-registry (księga wieczysta) number, which chains into regdata_ekw_ksiegi_wieczyste. Filter by section, category, title keywords, city or voivodeship, status (upcoming, live, sold - sold rows carry the final price), sale kind and price or valuation range. onlyNewOrChanged=true turns a scheduled run into a monitoring feed of new or changed sales. No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sections": {
+          "type": "array",
+          "title": "Sections",
+          "description": "Movables (vehicles, machinery, goods), real estate, or property rights (company shares, receivables, securities). Leave empty for all three.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "categories": {
+          "type": "array",
+          "title": "Categories",
+          "description": "Narrow to these categories. Each category belongs to one section, so there is no need to pick the section as well. Leave empty for everything in the chosen sections.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "keywords": {
+          "type": "string",
+          "title": "Keywords",
+          "description": "Search the announcement titles, e.g. 'Toyota', 'ciągnik', 'działka budowlana'. At least 3 letters or digits; other characters are treated as spaces."
+        },
+        "locations": {
+          "type": "array",
+          "title": "Locations",
+          "description": "City or voivodeship as the portal writes it, e.g. 'Warszawa', 'Kraków', 'mazowieckie', 'lubelskie'. Each entry is searched separately and the results merged. Leave empty for the whole country.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "statuses": {
+          "type": "array",
+          "title": "Sale status",
+          "description": "Which sales to include. 'Upcoming' and 'Live' are the ones you can still bid on. 'Sold' carries the final price, which makes it the realised-price history the portal has kept since it opened on 1 July 2026.",
+          "default": [
+            "upcoming",
+            "live"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "saleKinds": {
+          "type": "array",
+          "title": "Sale type",
+          "description": "Auctions, free-hand sales at a fixed price, tenders, or real-estate valuation notices - the notice a tax office publishes before a property auction, so the earliest signal that one is coming. Leave empty for all.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "minStartingPrice": {
+          "type": "integer",
+          "title": "Minimum starting price (PLN)",
+          "description": "Lowest starting price (cena wywołania) to include. Applied by the portal itself."
+        },
+        "maxStartingPrice": {
+          "type": "integer",
+          "title": "Maximum starting price (PLN)",
+          "description": "Highest starting price to include. Applied by the portal itself."
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max results",
+          "description": "Maximum announcements to export. An announcement matched by more than one location or category is exported once, so you are never charged twice for it.",
+          "default": 1000
+        },
+        "includeDetails": {
+          "type": "boolean",
+          "title": "Include full details",
+          "description": "Adds the valuation and the discount to it, the deposit and its bank account, the item's address, the category, the tax office and its contact, the item description, vehicle data (make, model, year, VIN, registration, mileage), the land-registry (KW) number and plot data for real estate, photos and the notice PDFs. Two extra requests per announcement, so a run takes longer; the price per record is the same.",
+          "default": false
+        },
+        "onlyNewOrChanged": {
+          "type": "boolean",
+          "title": "Only new or changed since the last run",
+          "description": "Monitoring mode. Exports only announcements that are new, or whose status changed (for example upcoming to sold), since the last run with the same filter. The first run exports everything and sets the baseline. Schedule it daily for an alert feed.",
+          "default": false
+        },
+        "monitorId": {
+          "type": "string",
+          "title": "Monitor name",
+          "description": "Optional. Runs with the same filter share one memory automatically; give a name to keep several independent feeds for the same filter. Letters, digits, '-' and '_'."
+        },
+        "minEstimatedValue": {
+          "type": "integer",
+          "title": "Minimum estimated value (PLN)",
+          "description": "Lowest valuation (wartość szacunkowa) to include. Applied by the portal itself."
+        },
+        "maxEstimatedValue": {
+          "type": "integer",
+          "title": "Maximum estimated value (PLN)",
+          "description": "Highest valuation to include. Applied by the portal itself."
+        },
+        "onlyWithDeposit": {
+          "type": "boolean",
+          "title": "Only sales that require a deposit",
+          "description": "Keep only sales that require a deposit (wadium) before bidding - mostly real estate and higher-value lots.",
+          "default": false
+        },
+        "publishedFrom": {
+          "type": "string",
+          "title": "Published from",
+          "description": "Keep only announcements published on or after this date, YYYY-MM-DD."
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "france-insolvency-scraper",
+    "tool": "regdata_france_insolvency",
+    "title": "France Insolvency Check (BODACC Procédures collectives)",
+    "description": "Check French companies and sole traders for collective proceedings (liquidation judiciaire, redressement judiciaire, sauvegarde) in BODACC, the official bulletin where French courts publish every insolvency judgment, by SIREN, SIRET or name. One row per judgment, newest first: eventType (bankruptcy_opened = liquidation opened or converted, restructuring_opened = redressement/sauvegarde, plan_confirmed, proceeding_closed, other), the French judgment name, judgment and publication dates, court, SIREN, legal form, seat and the link to the official notice. Coverage from January 2008. Zero rows for a SIREN means BODACC holds no insolvency judgment for it in the searched window - read the run status message: a query BODACC did not answer is reported as NOT checked (unknown, not clear) and is not charged. Name search matches words, so prefer the SIREN; a name query returns the 20 newest judgments by default. No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "siren": {
+          "type": "array",
+          "title": "SIREN or SIRET numbers",
+          "description": "French company identifiers to check: SIREN (9 digits) or SIRET (14 digits, reduced to its SIREN). Spaces are fine. The most precise check - use it whenever you have the number."
+        },
+        "name": {
+          "type": "string",
+          "title": "Company or trader name",
+          "description": "A company name or a sole trader's name, matched as a word search on the debtor name in BODACC. Ignored when a watchlist is set."
+        },
+        "watchlist": {
+          "type": "array",
+          "title": "Watchlist (bulk / monitoring)",
+          "description": "Up to 100 entries to check in one run - names, SIRENs and SIRETs can be mixed (a 9- or 14-digit entry is treated as an identifier). Overrides the single name field. Schedule it to re-check your counterparties."
+        },
+        "exactMatch": {
+          "type": "boolean",
+          "title": "Exact name match",
+          "description": "Off (default): every debtor whose name contains the words. On: only debtors whose name equals the query, ignoring case, accents and punctuation. No effect on SIREN checks.",
+          "default": false
+        },
+        "dateFrom": {
+          "type": "string",
+          "title": "Published from",
+          "description": "Optional start of the publication-date window (YYYY-MM-DD). Leave empty to search the full BODACC history (online from 2008)."
+        },
+        "dateTo": {
+          "type": "string",
+          "title": "Published to",
+          "description": "Optional end of the publication-date window (YYYY-MM-DD)."
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max judgments per SIREN or name",
+          "description": "The most judgments returned for one SIREN or name, newest first. Leave empty for the defaults: 100 per SIREN, 20 per name (a broad name such as \"Martin\" matches thousands of unrelated debtors)."
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "uk-insolvency-scraper",
+    "tool": "regdata_uk_insolvency",
+    "title": "UK Insolvency Check (Companies House + The Gazette)",
+    "description": "Check UK companies for insolvency by company number (e.g. 00445790, SC210223) or exact company name, up to 200 per run: Companies House insolvency cases and company status plus The Gazette notices (winding-up petitions, liquidation, administration). One row per company with a verdict - in_liquidation, in_administration, in_receivership, voluntary_arrangement, moratorium, insolvency_proceedings, winding_up_petition (a petition published in the last 12 months before any appointment, which Companies House does not show), dissolved_after_insolvency, past_insolvency or no_insolvency_found - with case dates, petitioner company, petition and hearing dates, court, case reference and links to the official notices. Practitioner names are not returned. no_insolvency_found means neither register holds an insolvency record for the company; a name matching several companies is returned as ambiguous with the candidates, a number not in the register as not_found, and a register that did not answer as NOT checked (unknown, not clear) - none of these is charged. checkComplete=false lists why a row may be partial. Prefer the company number. No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "companies": {
+          "type": "array",
+          "title": "Companies to check",
+          "description": "UK company numbers (e.g. 00445790, SC210223) or exact company names, one per line, up to 200 per run. Numbers and names can be mixed. A company number is the most precise check; a name is used only when exactly one company in Companies House matches it, otherwise the candidates are listed."
+        },
+        "includeGazette": {
+          "type": "boolean",
+          "title": "Search The Gazette",
+          "description": "On (default): also search The Gazette for winding-up petitions and corporate insolvency notices about each company. Off: Companies House only (faster, but a winding-up petition before any appointment is not visible there).",
+          "default": true
+        },
+        "maxNoticesPerCompany": {
+          "type": "integer",
+          "title": "Max Gazette notices per company",
+          "description": "The most Gazette notices returned for one company, newest first. A long liquidation can have dozens of meeting and dividend notices.",
+          "default": 100
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "companies"
+      ]
+    }
+  },
+  {
+    "slug": "germany-handelsregister-scraper",
+    "tool": "regdata_germany_handelsregister",
+    "title": "Germany Handelsregister Scraper",
+    "description": "Search the German Commercial Register (Handelsregister) by company name or register number. Extract company data, officers / managing directors (Geschäftsführer) with dates of birth, capital, legal form, seat, business purpose. No official API - structured JSON for KYC, KYB & due diligence.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchQuery": {
+          "type": "string",
+          "title": "Company name / keyword",
+          "description": "Company name or keyword(s) to search for (Schlagwörter). E.g. \"Zalando SE\" or \"BioNTech\". The register accepts at most 5 keywords - send the company name only, not a website title or description. Legal forms (GmbH, AG, KG, e.V., ...), \"und\", \"mit\" and repeated words do not count; \"der\", \"für\", \"von\" do. Single letters and legal forms alone are ignored: \"K&F\" searches for nothing - add a word from the name (\"K & F Kältetechnik\") or write the letters together (\"KF\")."
+        },
+        "exactMatch": {
+          "type": "boolean",
+          "title": "Exact company name",
+          "description": "Match the exact company name (genaue Firmenbezeichnung) instead of keyword containment. Reduces noise for precise lookups.",
+          "default": false
+        },
+        "registerNumber": {
+          "type": "string",
+          "title": "Register number (optional)",
+          "description": "Optional register number to narrow the search. The number on its own (\"215511\") or with its register type (\"HRB 6684\", \"HRB 215511 B\") - both work, and the type is selected for you. Must be combined with a company name/keyword: the portal does not allow number-only searches."
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max results",
+          "description": "Maximum number of matching companies to return structured data for (from the first results page). 1-30.",
+          "default": 10
+        },
+        "onlyNew": {
+          "type": "boolean",
+          "title": "Monitor mode - only new or changed companies",
+          "description": "For scheduled checks of the same company or search. The first run returns every company found and remembers it; every later run of the SAME search returns only companies that are new to it, or whose status, name, seat, share capital or officers changed - each with changeType, changedFields and previousValues. When the register cannot serve a company's structured document on a run, its capital and officers are not compared that time (they are never reported as changed on missing data). A run with nothing new succeeds with an empty dataset and a status message, and is billed like any run. The memory is kept in your own Apify account (a key-value store named regdata-handelsregister-monitor); delete it to start again.",
+          "default": false
+        },
+        "monitorKey": {
+          "type": "string",
+          "title": "Monitor name (optional)",
+          "description": "Just a label for your watchlist history, not a password or API key - it is shown masked. Optional name for this monitor's memory, e.g. 'supplier-acme'. Leave empty and the search itself is the name."
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "germany-insolvency-scraper",
+    "tool": "regdata_germany_insolvency",
+    "title": "Germany Insolvency Register Search (Insolvenzbekanntmachungen)",
+    "description": "Search Germany's official insolvency register (Insolvenzbekanntmachungen) by company or debtor name. Get court, case number, publication date, seat and the Handelsregister reference. When a term matches too many announcements the register declines to enumerate them - that \"too many matches\" state is reported as such and is NOT \"no insolvencies\"; narrow the query and re-run. No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "title": "Company name or surname",
+          "description": "The debtor to look up: a company name (e.g. \"Wirecard\") or a person's surname. Matched as a contains-search across the official insolvency register. Leave empty when using a watchlist."
+        },
+        "watchlist": {
+          "type": "array",
+          "title": "Watchlist (bulk / monitoring)",
+          "description": "A list of company names or surnames to check in one run (up to 100). Ideal for scheduled monitoring - run this Actor daily against your counterparties and get any new insolvency publications. Overrides the single \"name\" field when set. For more than 100 names, split them across several runs or scheduled tasks."
+        },
+        "firstName": {
+          "type": "string",
+          "title": "First name (individuals)",
+          "description": "Optional first name, to narrow an individual-debtor search."
+        },
+        "city": {
+          "type": "string",
+          "title": "Seat / place of residence",
+          "description": "Optional city to narrow the search (matches the debtor's registered seat or place of residence)."
+        },
+        "exactMatch": {
+          "type": "boolean",
+          "title": "Exact match",
+          "description": "Off (default): contains-search - the term is matched anywhere in the name. On: match the term exactly as typed (you may include the portal wildcard * yourself).",
+          "default": false
+        },
+        "state": {
+          "type": "string",
+          "title": "Federal state (Bundesland)",
+          "description": "Optional filter by German state - narrows the search and helps a broad term stay under the register's 1,000-match cap. Use a name (\"Bayern\", \"Nordrhein-Westfalen\") or a code (\"BY\", \"NW\").",
+          "enum": [
+            "NO_CODE",
+            "BW",
+            "BY",
+            "BE",
+            "BB",
+            "HB",
+            "HH",
+            "HE",
+            "MV",
+            "NI",
+            "NW",
+            "RP",
+            "SL",
+            "SN",
+            "ST",
+            "SH",
+            "TH"
+          ],
+          "default": "NO_CODE"
+        },
+        "dateFrom": {
+          "type": "string",
+          "title": "Published from",
+          "description": "Start of the publication-date window (YYYY-MM-DD). Defaults to two weeks ago. For a one-off historical check, widen this - a targeted name search returns matches from any date. Broad terms over long windows may hit the 1,000-match cap."
+        },
+        "dateTo": {
+          "type": "string",
+          "title": "Published to",
+          "description": "End of the publication-date window (YYYY-MM-DD). Defaults to today."
+        },
+        "subject": {
+          "type": "string",
+          "title": "Type of publication (Gegenstand)",
+          "description": "Optional filter by the type of decision within the proceeding.",
+          "enum": [
+            "NO_CODE",
+            "ABWMASS",
+            "ENT_RSB",
+            "ENT_VERF",
+            "ENT_AUF_VERF",
+            "EROEFF",
+            "SICHMASS",
+            "SONST",
+            "VERTVERZ",
+            "INSO_PLAN"
+          ],
+          "default": "NO_CODE"
+        },
+        "includeNoticeDetails": {
+          "type": "boolean",
+          "title": "Include administrator and claims deadline",
+          "description": "Opens each publication and adds the appointed insolvency administrator (or Sachwalter/Treuhänder) with address, phone and email, the claims-filing deadline, the opening date and the report/review date. For company debtors the full notice text is added too. Takes about a second per publication; billed the same per publication.",
+          "default": false
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max results",
+          "description": "Maximum publications to export across all queries in this run. Each publication returned is billed, so this also caps the per-publication cost.",
+          "default": 200
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "italy-pec-lookup",
+    "tool": "regdata_italy_pec",
+    "title": "Italy PEC Lookup - Certified Email & SDI Code by VAT",
+    "description": "Resolve an Italian company's certified PEC email (domicilio digitale) and SDI e-invoicing code from a Partita IVA, Codice Fiscale or company name. For fatturazione elettronica, KYC and bulk enrichment. No official API.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "identifiers": {
+          "type": "array",
+          "title": "Identifiers (P.IVA / CF / name)",
+          "description": "One or more Italian VAT numbers (Partita IVA), Codici Fiscali, or company names. One result row per identifier."
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "identifiers"
+      ]
+    }
+  },
+  {
+    "slug": "italy-registro-imprese-scraper",
+    "tool": "regdata_italy_registro_imprese",
+    "title": "Italy Registro Imprese Scraper - Company Data & PEC",
+    "description": "Search Italy's official Registro Imprese (InfoCamere) by company name and extract free-tier company data: name, registered office, PEC (certified email), legal form, ATECO activity and business description. No official API - structured JSON.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "title": "Company name or VAT (P.IVA)",
+          "description": "Company name (denominazione) or Italian VAT number (Partita IVA) to look up, e.g. \"Ferrari S.p.A.\" or \"00159560366\"."
+        },
+        "startUrls": {
+          "type": "array",
+          "title": "Direct company URLs (optional)",
+          "description": "Optional. Direct ufficiocamerale.it company-page URLs to scrape, skipping the name lookup. Use when you already have the page URLs."
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max results",
+          "description": "Maximum number of matching companies to return for a name search (1-30).",
+          "default": 5
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "knf-registry-scraper",
+    "tool": "regdata_knf_registry",
+    "title": "Poland KNF Financial Registry Scraper",
+    "description": "Extract payment institutions, e-money issuers, credit intermediaries, lending companies & pawnbroking operators from 3 Polish KNF registries. Search by name, NIP, entity type. Bulk export 75,000+ entities. Structured JSON. No auth needed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "registry": {
+          "type": "string",
+          "title": "Registry",
+          "description": "Which KNF registry to search. e-rup = payment/e-money institutions (~17k entities), rpkip = credit intermediaries & lending institutions (~58k entities), rdl = pawnbroking activities (~250 entities), all = search all three.",
+          "enum": [
+            "e-rup",
+            "rpkip",
+            "rdl",
+            "all"
+          ],
+          "default": "all"
+        },
+        "name": {
+          "type": "string",
+          "title": "Entity Name",
+          "description": "Search by entity/company name (partial match, case-insensitive)"
+        },
+        "nip": {
+          "type": "string",
+          "title": "NIP Number",
+          "description": "Search by Polish Tax Identification Number (NIP) — exact match"
+        },
+        "entityType": {
+          "type": "string",
+          "title": "Entity Type Code",
+          "description": "Filter by entity type code. e-rup: PSD_PI, PSD_EMI, PSD_ENL, PSD_EPI@BP, PSD_EPI@MIP, PSD_AISP, PSD_AG, PSD_BR. rpkip: RPH, RPK, RHA, RIP. Leave empty for all types."
+        },
+        "exportAll": {
+          "type": "boolean",
+          "title": "Export All Records",
+          "description": "Export all records from the selected registry. Ignores name/NIP/entityType filters. Use for bulk data extraction.",
+          "default": false
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max Results",
+          "description": "Maximum number of results to return. Default: 100. Set to 0 for unlimited (use with Export All for full registry dump).",
+          "default": 100
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "krs-fullnames-scraper",
+    "tool": "regdata_krs_fullnames",
+    "title": "Poland KRS Board Members & Shareholders Scraper",
+    "description": "Extract full non-anonymized board member & shareholder names from Polish KRS (National Court Register). The official API censors names to \"L******\" - this actor downloads the public PDF extract with complete names, roles, and company metadata.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "krsNumbers": {
+          "type": "array",
+          "title": "KRS Numbers",
+          "description": "List of KRS numbers to look up. Each number will be padded to 10 digits automatically.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extractType": {
+          "type": "string",
+          "title": "Extract Type",
+          "description": "Type of KRS record to return. 'aktualny' = current state only (faster, smaller). 'pelny' = full history including former board members.",
+          "enum": [
+            "aktualny",
+            "pelny"
+          ],
+          "default": "aktualny"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "krsNumbers"
+      ]
+    }
+  },
+  {
+    "slug": "krz-debtor-scraper",
+    "tool": "regdata_krz_debtor",
+    "title": "Poland KRZ National Debtor Registry Scraper",
+    "description": "Automate bankruptcy and restructuring checks against the official public debtor registry. Nine search modes cover companies, persons, sole traders, case signatures, proceedings, shareholders, and assets. The bankruptcyEstate mode returns the trustee's filed estate inventory (spis masy upadlosci) for a company's proceedings - real estate, movables, cash, property rights and receivables, each with the trustee's own valuation, quantity and status. Pass entityName and/or identifier (proceedings are resolved for you) or a proceedingId; estateInventoryPublished:false means the register reports zero assets for that proceeding - a verified zero, not a failed lookup. For distressed-asset sourcing and creditor recovery-prospect assessment. Build a credit-risk watchlist or insolvency workflow. Pay-per-result.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchMode": {
+          "type": "string",
+          "title": "Search Mode",
+          "description": "What to search for. 'entity' = companies by name/KRS/NIP. 'person' = natural persons by PESEL/NIP. 'soleTrader' = sole traders by name/identifier. 'signature' = by court case signature. 'announcements' = court announcements. 'shareholders' = partners in personal companies. 'bankruptcyEstate' = assets for sale from bankruptcy estates. 'advisors' = licensed restructuring advisors. 'proceedingDetails' = deep-dive into a specific proceeding.",
+          "enum": [
+            "entity",
+            "person",
+            "soleTrader",
+            "signature",
+            "announcements",
+            "shareholders",
+            "bankruptcyEstate",
+            "advisors",
+            "proceedingDetails"
+          ],
+          "default": "entity"
+        },
+        "entityName": {
+          "type": "string",
+          "title": "Entity/Company Name",
+          "description": "Company name, business name, or advisor surname (partial match). Used for entity, soleTrader, announcements, shareholders, bankruptcyEstate, and advisors modes."
+        },
+        "identifier": {
+          "type": "string",
+          "title": "Identifier (KRS/NIP/REGON/PESEL)",
+          "description": "Entity identifier: KRS (10 digits), NIP, REGON. For persons: PESEL or NIP. For advisors: license number."
+        },
+        "caseSignature": {
+          "type": "string",
+          "title": "Case Signature (Sygnatura)",
+          "description": "Court case signature in format: CODE/REPERTORY/NUMBER/YEAR (e.g., WA1M/GU/223/2021). Used for signature and announcements modes."
+        },
+        "proceedingId": {
+          "type": "string",
+          "title": "Proceeding ID",
+          "description": "Proceeding UUID (postepowanieId), as returned in the `proceedingId` field of an entity/person search. Used by searchMode 'proceedingDetails', and optionally by 'bankruptcyEstate' to read one specific estate."
+        },
+        "advisorCity": {
+          "type": "string",
+          "title": "Advisor City",
+          "description": "Filter restructuring advisors by city. Only used in advisors mode."
+        },
+        "dateFrom": {
+          "type": "string",
+          "title": "Date From",
+          "description": "Start date for announcement search (YYYY-MM-DD). Only used in announcements mode. A date range of up to 366 days is returned in full, even when it holds more than 1000 announcements; the run says so if a single day exceeds what the register will return."
+        },
+        "dateTo": {
+          "type": "string",
+          "title": "Date To",
+          "description": "End date for announcement search (YYYY-MM-DD), inclusive. Only used in announcements mode. A malformed date, or a dateFrom after dateTo, stops the run before any search and nothing is charged."
+        },
+        "proceedingType": {
+          "type": "array",
+          "title": "Proceeding type filter (announcements)",
+          "description": "Optional, announcements mode only. Keep only announcements of these proceeding types; leave empty for all. 'appeal' = second-instance rulings on a bankruptcy or restructuring case (e.g. on an arrangement or a repayment plan) - choosing 'restructuring' alone does NOT include appeal rulings on restructuring cases, so add 'appeal' too if you need them. Left-out rows are not exported and not charged.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "proceedingKinds": {
+          "type": "array",
+          "title": "Proceeding kind filter (entity search)",
+          "description": "Optional, entity mode only. A company search returns one row per proceeding the register holds for it. Keep only these kinds; leave empty for all. Left-out rows are not exported and not charged.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max Results",
+          "description": "Maximum number of results to return. Default: 100. Set to 0 for unlimited.",
+          "default": 100
+        },
+        "onlyNew": {
+          "type": "boolean",
+          "title": "Monitor mode - only new or changed",
+          "description": "For scheduled checks of the same company or search. The first run returns everything and remembers it; every later run of the SAME search returns only proceedings that are new to it. Case-signature searches, where the register returns status and type, also report a status or type change (changeType, changedFields, previousValues); company-name searches carry no status, so they report new proceedings only. A run with nothing new succeeds with an empty dataset and a status message, and is billed like any search - 'nothing new' is the answer. The memory is kept in your own Apify account (a key-value store named regdata-krz-monitor); delete it to start again. Not available for proceedingDetails. Dates are not part of the memory, so a rolling announcements window keeps one history.",
+          "default": false
+        },
+        "monitorKey": {
+          "type": "string",
+          "title": "Monitor name (optional)",
+          "description": "Just a label for your watchlist history, not a password or API key - it is shown masked. Optional name for this monitor's memory, e.g. 'client-acme'. Leave empty and the search itself is the name. Use it to keep two separate histories of the same search."
+        },
+        "disableSessionCache": {
+          "type": "boolean",
+          "title": "Disable session cache (advanced)",
+          "description": "Advanced. By default the actor caches the KRZ guest token between your own runs (the token lives ~10h) so repeated/monitoring runs skip the slow browser bootstrap and run faster. The cache is private to your account and self-healing (a stale token is detected and refreshed automatically). Turn this on only to force a fresh session every run for debugging.",
+          "default": false
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "msig-scraper",
+    "tool": "regdata_msig",
+    "title": "Poland MSiG Court Gazette Scraper",
+    "description": "Search Polish Court & Economic Gazette (Monitor Sądowy i Gospodarczy) for bankruptcy declarations, liquidation notices, restructuring proceedings, creditor calls. Full-text search across archive from 2001. Structured JSON output.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchType": {
+          "type": "string",
+          "title": "Search Type",
+          "description": "A = Announcements database (bankruptcy, liquidation, restructuring, court notices). B = KRS entries database (company registrations, changes — being phased out since Nov 2025).",
+          "enum": [
+            "A",
+            "B"
+          ],
+          "default": "A"
+        },
+        "entityName": {
+          "type": "string",
+          "title": "Entity Name",
+          "description": "Search by entity/company name (partial match)"
+        },
+        "krs": {
+          "type": "string",
+          "title": "KRS Number",
+          "description": "Search by KRS number (10 digits)"
+        },
+        "nip": {
+          "type": "string",
+          "title": "NIP Number",
+          "description": "Search by NIP (Tax ID)"
+        },
+        "textInBody": {
+          "type": "string",
+          "title": "Text in Body",
+          "description": "Full-text search inside the announcement body (max 1000 chars). MATCHES LITERALLY, SO POLISH DIACRITICS ARE REQUIRED: \"upadłości\" returns hundreds of notices a month, \"upadlosci\" returns none. Case does not matter and phrases work. Try: upadłości, likwidacji, wierzycieli, syndyk, restrukturyzacji."
+        },
+        "textInPosition": {
+          "type": "string",
+          "title": "Text in Position",
+          "description": "Search the announcement header line - the \"Poz. NNNNN. NAME. KRS ... COURT ...\" summary (max 1000 chars). Same literal matching as Text in Body, so Polish diacritics are required. Try: LIKWIDACJI, REJONOWY, GOSPODARCZY."
+        },
+        "signatureOfCase": {
+          "type": "string",
+          "title": "Case Signature",
+          "description": "Search by court case signature (sygnatura)"
+        },
+        "dateFrom": {
+          "type": "string",
+          "title": "Published from",
+          "description": "Start of the publication date range. Required by the gazette - a search without both dates is rejected. Pick a date, or type a relative one such as \"3 months\"."
+        },
+        "dateTo": {
+          "type": "string",
+          "title": "Published to",
+          "description": "End of the publication date range. Required by the gazette - a search without both dates is rejected. Pick a date, or type a relative one such as \"1 week\"."
+        },
+        "fetchDetails": {
+          "type": "boolean",
+          "title": "Fetch Full Details",
+          "description": "Fetch full announcement details (body text) for each result. Slower but returns complete content. If false, returns only list data (no body text).",
+          "default": true
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max Results",
+          "description": "Maximum number of announcements to return. Set to 0 for every match. Starts at 10 so a first run is cheap to try - raise it once the search looks right.",
+          "default": 10
+        },
+        "onlyNew": {
+          "type": "boolean",
+          "title": "Monitor mode - only new notices",
+          "description": "For scheduled checks of the same company or search. The first run returns every matching notice and remembers it; every later run of the SAME search returns only notices published since, each with changeType 'new'. Gazette notices never change once published, so nothing is reported as changed. A run with nothing new succeeds with an empty dataset and a status message. Use a rolling window such as Published from '1 month' and Published to '0 days' - the dates are not part of the memory. Set Max results to 0 so the first run records every match. The memory is kept in your own Apify account (a key-value store named regdata-msig-monitor); delete it to start again.",
+          "default": false
+        },
+        "monitorKey": {
+          "type": "string",
+          "title": "Monitor name (optional)",
+          "description": "Just a label for your watchlist history, not a password or API key - it is shown masked. Optional name for this monitor's memory, e.g. 'client-acme'. Leave empty and the search itself is the name."
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "dateFrom",
+        "dateTo"
+      ]
+    }
+  },
+  {
+    "slug": "poland-krs-financial-scraper",
+    "tool": "regdata_poland_krs_financial",
+    "title": "Poland KRS Financial Statements Scraper",
+    "description": "Extract structured financial statements - balance sheets, income statements, assets, equity, revenue, net profit - from official public company filings. Parses XML, XHTML, and iXBRL into JSON. Use in credit-risk or M&A due-diligence workflows. Pay-per-result.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "krs": {
+          "type": "string",
+          "title": "KRS Number",
+          "description": "Polish National Court Register (KRS) number. Padded to 10 digits if shorter. If omitted, it is looked up from the NIP."
+        },
+        "nip": {
+          "type": "string",
+          "title": "NIP Number",
+          "description": "Polish Tax Identification Number (NIP). Used to look up the KRS when no KRS is provided."
+        },
+        "maxStatementSizeMB": {
+          "type": "integer",
+          "title": "Max statement size (MB) (free plan capped at 5 MB)",
+          "description": "Safety cap on the financial statement file size. Statements larger than this are skipped (with no charge) to avoid unexpected cost - a few of the very largest public companies file 15-25 MB statements. Raise this to fetch them. Note: on the Apify Free plan this is capped at 5 MB regardless of the value set here; upgrade to a paid plan for the full range.",
+          "default": 25
+        },
+        "includeRawXml": {
+          "type": "boolean",
+          "title": "Include raw statement file",
+          "description": "Include the raw XML/XHTML (iXBRL) statement in the output. Files over 5 MB are linked via the key-value store (rawXmlUrl) instead of inlined.",
+          "default": true
+        },
+        "onlyNew": {
+          "type": "boolean",
+          "title": "Monitor mode - only new statements",
+          "description": "For scheduled checks of the same company. The first run returns the latest filed statement and remembers it; every later run returns a row only when a NEWER statement has been filed (changeType 'new'). When nothing new has been filed, nothing is downloaded, the dataset stays empty and the status message says which statement is still the latest - you pay only the run start. The memory is kept in your own Apify account (a key-value store named regdata-krs-financial-monitor); delete it to start again.",
+          "default": false
+        },
+        "monitorKey": {
+          "type": "string",
+          "title": "Monitor name (optional)",
+          "description": "Just a label for your watchlist history, not a password or API key - it is shown masked. Optional name for this monitor's memory. Leave empty and the KRS / NIP number is the name."
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "poland-parliamentary-pep-scraper",
+    "tool": "regdata_poland_parliamentary_pep",
+    "title": "Poland Parliamentary PEP Scraper - Sejm Members for KYC/AML",
+    "description": "Structured PEP dataset of Polish Sejm members across terms - names, dates of birth, party, district, profession - for KYC/AML screening. Official Sejm API source",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "term": {
+          "type": "string",
+          "title": "Term of office",
+          "description": "Which Sejm term to fetch: \"current\" (default), a specific term number (e.g. \"9\"), or \"all\" for every term since 1991 (historical PEPs).",
+          "default": "current"
+        },
+        "nameFilter": {
+          "type": "string",
+          "title": "Name filter (optional)",
+          "description": "Case-insensitive substring match on the full name. Use to screen a specific person (e.g. \"Tusk\")."
+        },
+        "activeOnly": {
+          "type": "boolean",
+          "title": "Active members only",
+          "description": "Return only currently-active members. Leave off to include those who left mid-term (still PEP-relevant).",
+          "default": false
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max results",
+          "description": "Optional cap on the number of records returned."
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "polish-premises-prospector",
+    "tool": "regdata_polish_premises",
+    "title": "Polish Premises Prospector - REGON jednostki lokalne",
+    "description": "Build prospect lists at the physical-site level from the Polish REGON registry. One row per premise (jednostka lokalna) with industry (PKD), address, company age, and ownership, filterable by region (TERYT).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "seedIdentifiers": {
+          "type": "array",
+          "title": "Seed identifiers (NIP / REGON / KRS)",
+          "description": "List of company identifiers to expand. Auto-detected by shape: 9 or 14 digits = REGON, 10 digits = NIP (override with Seed identifier type). This actor expands companies you already know into their local units (jednostki lokalne) - it does not discover companies by area, so seed them here (or via Seed dataset)."
+        },
+        "seedDatasetId": {
+          "type": "string",
+          "title": "Seed dataset ID",
+          "description": "Optional Apify dataset ID to read identifiers from (fields: nip / regon / regon14 / krs). Use this to chain in a regional REGON web search or a KRS export as the discovery source."
+        },
+        "seedIdType": {
+          "type": "string",
+          "title": "Seed identifier type",
+          "description": "How to interpret 10-digit identifiers (NIP and KRS are both 10 digits).",
+          "enum": [
+            "auto",
+            "nip",
+            "regon",
+            "krs"
+          ],
+          "default": "auto"
+        },
+        "regions": {
+          "type": "array",
+          "title": "Regions",
+          "description": "Filter premises to these regions. Use presets (warszawa, lodz, kutno) or objects like {\"woj\":\"10\",\"powiat\":\"03\"} (TERYT symbols). Empty = all of Poland."
+        },
+        "siteTypes": {
+          "type": "array",
+          "title": "Site types",
+          "description": "Filter premises by industry preset: factory, warehouse, clinic, school, coliving. Empty = all industries. (Large offices are not cleanly identifiable by PKD - leave empty or use PKD codes.)"
+        },
+        "pkdCodes": {
+          "type": "array",
+          "title": "PKD codes (advanced)",
+          "description": "Explicit PKD code prefixes to match (e.g. \"86\", \"8610\", \"5210B\"). Combined with Site types."
+        },
+        "fetchSitePkd": {
+          "type": "boolean",
+          "title": "Fetch per-site PKD",
+          "description": "Fetch each premise's own PKD activity (one extra API call per premise). When off, premises inherit the parent company's main PKD.",
+          "default": true
+        },
+        "includeHeadcount": {
+          "type": "boolean",
+          "title": "Include headcount enrichment",
+          "description": "Attach a per-site headcount signal. Each row is labelled with headcountBasis: 'reported-proxy' (LinkedIn employees-by-city, a real sourced count) or 'modeled-estimate' (building footprint ÷ density for industrial sites - computed, ±50-100%). No source publishes a verified per-site count; see README.",
+          "default": false
+        },
+        "headcountMethod": {
+          "type": "string",
+          "title": "Headcount method",
+          "description": "auto = LinkedIn city-count for office/clinic/school sites and a building-footprint estimate for industrial sites (factory/warehouse/DC). Force a single method if desired.",
+          "enum": [
+            "auto",
+            "linkedin",
+            "footprint",
+            "none"
+          ],
+          "default": "auto"
+        },
+        "linkedinActorId": {
+          "type": "string",
+          "title": "LinkedIn employees actor ID",
+          "description": "Apify actor used for LinkedIn employees-by-city counts.",
+          "default": "harvestapi/linkedin-company-employees"
+        },
+        "linkedinResolverActorId": {
+          "type": "string",
+          "title": "LinkedIn company resolver actor ID",
+          "description": "Actor that resolves a company name to its canonical LinkedIn page (URL + company-wide employee count). The match is validated (website domain / name overlap) and rejected if low-confidence, so wrong matches become 'unknown' rather than false counts. Leave default.",
+          "default": "harvestapi/linkedin-company"
+        },
+        "linkedinDomainResolverActorId": {
+          "type": "string",
+          "title": "LinkedIn domain resolver actor ID",
+          "description": "Fallback resolver: maps a company's website domain (from REGON) to its LinkedIn page when name resolution fails - fixes companies whose brand differs from their legal name (e.g. pkobp.pl -> /company/pko-bp). Pay-per-success. Leave default; clear to disable.",
+          "default": "s-r/free-linkedin-company-finder---linkedin-address-from-any-site"
+        },
+        "linkedinMode": {
+          "type": "string",
+          "title": "LinkedIn scrape mode",
+          "description": "Profile detail level (cost): short is cheapest and enough for a headcount count.",
+          "enum": [
+            "short",
+            "full"
+          ],
+          "default": "short"
+        },
+        "linkedinMaxItems": {
+          "type": "integer",
+          "title": "LinkedIn max profiles per company-city",
+          "description": "Profiles actually scraped per company+city. The headcount COUNT is read from the run log ('Found N profiles total'), so 1 is enough and cheapest (~$0.02/company-city). Raise only if you also want the profile list.",
+          "default": 1
+        },
+        "maxEnrich": {
+          "type": "integer",
+          "title": "Max enrichment calls (shared budget)",
+          "description": "Hard cap on paid LinkedIn calls per run (~$0.02/company-city; 0 = unlimited). The footprint estimator uses free OSM APIs and is NOT counted against this budget. Bounds cost.",
+          "default": 0
+        },
+        "footprintUserAgent": {
+          "type": "string",
+          "title": "Footprint contact User-Agent",
+          "description": "Contact User-Agent sent to the free OSM Nominatim/Overpass APIs used by the building-footprint headcount estimator. Their usage policy requires a descriptive identifier with a contact. Leave default unless you want your own contact string.",
+          "default": "polish-premises-prospector/1.0 (Apify actor; contact via Apify Store)"
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max results",
+          "description": "Maximum premise rows to output (0 = unlimited).",
+          "default": 0
+        },
+        "minIntervalMs": {
+          "type": "integer",
+          "title": "Min interval between requests (ms)",
+          "description": "Politeness delay between REGON requests. Keep >= 300ms to avoid the public site's conditional rate limit.",
+          "default": 350
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "polish-regon-scraper",
+    "tool": "regdata_polish_regon",
+    "title": "Polish REGON Scraper - GUS Business Registry (no API key)",
+    "description": "Scrape Poland's REGON (GUS) registry anonymously: look up by NIP/REGON/KRS, discover companies by address + PKD, and get local units (jednostki lokalne) as separate rows. No API key required.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchMode": {
+          "type": "string",
+          "title": "Search mode",
+          "description": "How to look up companies: by NIP, REGON, or KRS number.",
+          "enum": [
+            "nip",
+            "regon",
+            "krs"
+          ],
+          "default": "nip"
+        },
+        "identifiers": {
+          "type": "array",
+          "title": "Identifiers (NIP / REGON / KRS)",
+          "description": "The NIP, REGON, or KRS numbers to look up (one search mode at a time)."
+        },
+        "pkdSections": {
+          "type": "array",
+          "title": "Filter - PKD sections (A-U)",
+          "description": "Keep only records with a PKD code in these PKD 2007 sections. C=Manufacturing, G=Trade, H=Transport, etc. Requires fetchPkd."
+        },
+        "pkdCodes": {
+          "type": "array",
+          "title": "Filter - PKD code prefixes",
+          "description": "Keep only records whose PKD code starts with one of these (e.g. \"10\", \"62.01\"). Requires fetchPkd."
+        },
+        "pkdMatch": {
+          "type": "string",
+          "title": "PKD match mode",
+          "description": "'main' = only the main (przeważająca) PKD must match; 'any' = any reported PKD may match.",
+          "enum": [
+            "any",
+            "main"
+          ],
+          "default": "any"
+        },
+        "legalForms": {
+          "type": "array",
+          "title": "Filter - legal form",
+          "description": "Keep only entities whose legal form contains one of these phrases (e.g. \"spółka z ograniczoną\", \"spółka akcyjna\")."
+        },
+        "fetchFullReport": {
+          "type": "boolean",
+          "title": "Fetch full report",
+          "description": "Fetch each entity's full REGON report (legal form, ownership, dates, contact, full address). Adds one request per record.",
+          "default": true
+        },
+        "fetchPkd": {
+          "type": "boolean",
+          "title": "Fetch PKD codes",
+          "description": "Additionally fetch each entity's PKD activity codes (main + secondary).",
+          "default": true
+        },
+        "includeLocalUnits": {
+          "type": "boolean",
+          "title": "Include local units (jednostki lokalne)",
+          "description": "Include each entity's local units (jednostki lokalne) as separate rows (recordType=LOCAL_UNIT, with parentRegon).",
+          "default": true
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max results",
+          "description": "Maximum records to emit (0 = unlimited). Bounds cost on large regions.",
+          "default": 0
+        },
+        "minIntervalMs": {
+          "type": "integer",
+          "title": "Min interval between requests (ms)",
+          "description": "Delay between requests in milliseconds. Keep the default for reliable runs.",
+          "default": 350
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "slovakia-rpvs-ubo-scraper",
+    "tool": "regdata_slovakia_rpvs_ubo",
+    "title": "Slovakia RPVS Beneficial Owners (UBO) Scraper",
+    "description": "Search Slovakia's public beneficial-ownership register (RPVS) by IČO or company name. Returns beneficial owners with a public-official (PEP) flag, plus the authorised person. No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchMode": {
+          "type": "string",
+          "title": "Search mode",
+          "description": "Look up by Slovak company registration number (IČO), or search by company name.",
+          "enum": [
+            "byIco",
+            "byName"
+          ],
+          "default": "byIco"
+        },
+        "icoNumbers": {
+          "type": "array",
+          "title": "IČO numbers",
+          "description": "One or more Slovak IČO registration numbers (e.g. \"35763469\"). Used when search mode is \"By IČO\"."
+        },
+        "searchQuery": {
+          "type": "string",
+          "title": "Company name",
+          "description": "Company name to search (contains-match on the partner's registered name). Used when search mode is \"By company name\"."
+        },
+        "exactMatch": {
+          "type": "boolean",
+          "title": "Exact name match",
+          "description": "Off (default): contains-search. On: match the company name exactly.",
+          "default": false
+        },
+        "currentOnly": {
+          "type": "boolean",
+          "title": "Current entries only",
+          "description": "Off (default): include historical beneficial owners and identities. On: keep only currently-valid entries.",
+          "default": false
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max results",
+          "description": "Maximum partner records to export across all queries.",
+          "default": 50
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "societe-com-scraper",
+    "tool": "regdata_societe_com",
+    "title": "France Societe.com Company Scraper",
+    "description": "Scrape French company data from Societe.com - directors, simplified financials, shareholders, subsidiaries, and corporate relationships. The richest free French company data source with no API.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchQuery": {
+          "type": "string",
+          "title": "Company Name",
+          "description": "Search by company name (partial match). Example: 'Total Energies', 'Carrefour', 'BNP Paribas'"
+        },
+        "sirenNumbers": {
+          "type": "array",
+          "title": "SIREN Numbers",
+          "description": "List of 9-digit SIREN numbers to look up directly. Each SIREN resolves to an exact-match company record.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "managerName": {
+          "type": "string",
+          "title": "Manager / Director Name",
+          "description": "Search by manager or director name. Example: 'Dupont Jean', 'Martin Pierre'. Returns companies where this person holds a role."
+        },
+        "includeFinancials": {
+          "type": "boolean",
+          "title": "Include Financial Data",
+          "description": "Include simplified financial figures (revenue, net result) when Societe.com exposes them on the company page.",
+          "default": true
+        },
+        "includeDirectors": {
+          "type": "boolean",
+          "title": "Include Directors",
+          "description": "Include the company's board - director names, roles, and appointment dates.",
+          "default": true
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max Results",
+          "description": "Maximum number of company records to return from a name/manager search. Default: 50.",
+          "default": 50
+        },
+        "maxConcurrency": {
+          "type": "integer",
+          "title": "Max Concurrency",
+          "description": "How many companies to scrape in parallel (1-5). Higher finishes faster. Default: 5.",
+          "default": 5
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "spain-company-directory-scraper",
+    "tool": "regdata_spain_company_directory",
+    "title": "Spain Company Directory Scraper - Registro Mercantil",
+    "description": "Scrape company data from Spain's official OpenData Registradores directory. Get NIF, officers, CNAE codes, legal form, address, and status from the Registro Mercantil - no API exists for this data.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchQuery": {
+          "type": "string",
+          "title": "Company Name",
+          "description": "Search by company name (partial match). Example: 'Telefonica', 'Inditex', 'Banco Santander'"
+        },
+        "nifNumbers": {
+          "type": "array",
+          "title": "NIF/CIF Numbers",
+          "description": "List of NIF/CIF tax identification numbers to look up. Each NIF is looked up individually for exact-match results.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "irusNumbers": {
+          "type": "array",
+          "title": "IRUS Numbers (Direct Lookup)",
+          "description": "List of IRUS numbers for direct company lookup. Skips search and goes straight to detail pages. Find IRUS in company URLs like /directorio/-/sociedad/{irus}/{company-name}. Example: '1000239977797'",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cnaeCode": {
+          "type": "string",
+          "title": "CNAE Activity Code",
+          "description": "Filter results by CNAE economic activity code. Example: '6201' (computer programming), '4711' (retail sale in non-specialized stores)"
+        },
+        "province": {
+          "type": "string",
+          "title": "Province or region",
+          "description": "Limit results to one Spanish province or one autonomous community (region). A province: its name in Spanish or the local language, common older spellings, or the INE code (1-52) - 'Madrid', 'Navarra', 'Bizkaia' or 'Vizcaya', 'A Coruña' or 'La Coruña', 'Illes Balears' or 'Baleares', '31'. A region: its Spanish, local or English name - 'Catalonia' or 'Cataluña', 'Andalucía', 'Basque Country' or 'Euskadi', 'Comunitat Valenciana', 'Galicia'. A region runs one search per province in it, one after another, and returns companies from all of them (pricing is unchanged: as listed in Pricing). A one-province region such as 'Comunidad de Madrid' is the same as that province. For A Coruña and Araba/Álava, combine the filter with a specific company name or activity code - on a very broad search the filter cannot be applied to those two provinces."
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max Results",
+          "description": "Maximum number of company records to return. Default: 100. Set higher for broader searches.",
+          "default": 100
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "spain-concursal-scraper",
+    "tool": "regdata_spain_concursal",
+    "title": "Spain Registro Público Concursal Search",
+    "description": "Search Spain's official public insolvency register (Registro Público Concursal) by debtor name or NIF. Returns each matching party with its role - debtor, disqualified, or insolvency administrator. No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchMode": {
+          "type": "string",
+          "title": "Search mode",
+          "description": "Search by debtor/affected-party name, or by identifier (NIF/CIF/DNI/NIE).",
+          "enum": [
+            "byName",
+            "byNif"
+          ],
+          "default": "byName"
+        },
+        "name": {
+          "type": "string",
+          "title": "Debtor / party name",
+          "description": "Company name or person name to look up in the insolvency-publicity register (afectado). Leave empty when using a watchlist."
+        },
+        "watchlist": {
+          "type": "array",
+          "title": "Watchlist (bulk / monitoring)",
+          "description": "A list of names to check in one run - the monitoring use case. Overrides \"name\". Each name costs one search."
+        },
+        "nif": {
+          "type": "array",
+          "title": "Identifier(s) (NIF/CIF/DNI/NIE)",
+          "description": "One or more Spanish identifiers to look up. Used when search mode is \"By identifier\"."
+        },
+        "identifierType": {
+          "type": "string",
+          "title": "Identifier type",
+          "description": "Type of identifier when searching by NIF.",
+          "enum": [
+            "NIF",
+            "CIF",
+            "DNI",
+            "NIE"
+          ],
+          "default": "NIF"
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max results",
+          "description": "Maximum party records to export across all queries. The register serves results in pages, and the Actor pages through until it reaches this limit or runs out of matches. Set to 0 to export every match. The register returns debtor entries first, so a search truncated by maxResults can contain no disqualified-person or insolvency-administrator rows even when the full result set does. Raise maxResults (or set 0) for broad name searches.",
+          "default": 100
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "uae-adgm-public-register-scraper",
+    "tool": "regdata_uae_adgm_public_register",
+    "title": "UAE ADGM Public Register Scraper - Company Data",
+    "description": "Scrape the Abu Dhabi Global Market (ADGM) public register: company name, registration number, status, type, classification, incorporation date, address and trade names. Search by name, identifier or trade name. No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchQueries": {
+          "type": "array",
+          "title": "Search queries",
+          "description": "Entity names, registration numbers or trade names to search the ADGM public register for. Each query returns all matching entities (paginated up to the limit below)."
+        },
+        "maxResultsPerQuery": {
+          "type": "integer",
+          "title": "Max results per query",
+          "description": "Maximum number of entities to extract per search query. 0 means no limit (fetch all matches).",
+          "default": 100
+        },
+        "pageSize": {
+          "type": "integer",
+          "title": "Page size",
+          "description": "How many results to fetch per request (1-100). Larger pages are faster; the default is fine for most runs.",
+          "default": 50
+        },
+        "minIntervalMs": {
+          "type": "integer",
+          "title": "Min interval between requests (ms)",
+          "description": "Polite delay between requests to the register. 350ms is a safe default.",
+          "default": 350
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "searchQueries"
+      ]
+    }
+  },
+  {
+    "slug": "wko-business-directory-scraper",
+    "tool": "regdata_wko_business_directory",
+    "title": "Austria WKO Business Directory Scraper",
+    "description": "Scrape 620,000+ Austrian businesses from WKO Firmen A-Z - the official Chamber of Commerce directory. Get company names, addresses, phone numbers, emails, websites, industry codes, and trade licenses. No API exists for this data.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchQuery": {
+          "type": "string",
+          "title": "Search Query",
+          "description": "Keyword search for company name or service (e.g., 'Software', 'Gastronomie', 'Steuerberater'). Supply this OR bundesland at minimum - 'branche' is an accepted synonym, so filling either one is enough."
+        },
+        "branche": {
+          "type": "string",
+          "title": "Industry / Branche",
+          "description": "Industry or trade classification to search for (e.g., 'IT-Dienstleistung', 'Gastronomie', 'Tischlerei', 'Elektrotechnik'). Synonym of searchQuery and used as the primary search term on firmen.wko.at - set either one, not both."
+        },
+        "bundesland": {
+          "type": "string",
+          "title": "Bundesland (State)",
+          "description": "Austrian federal state to filter results. Leave empty for all of Austria.",
+          "enum": [
+            "",
+            "Wien",
+            "Niederösterreich",
+            "Oberösterreich",
+            "Steiermark",
+            "Tirol",
+            "Salzburg",
+            "Kärnten",
+            "Burgenland",
+            "Vorarlberg"
+          ],
+          "default": ""
+        },
+        "bezirk": {
+          "type": "string",
+          "title": "Bezirk (District)",
+          "description": "Optional district filter, e.g. 'Linz-Land', 'Hallein', 'Moedling'. For Vienna use a district name or its number ('Innere Stadt', 'Landstrasse', or '3'). Needs a searchQuery alongside it - a district on its own returns nothing. Replaces the Bundesland filter rather than adding to it."
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max Results",
+          "description": "Maximum number of company records to return. The actor pages through the directory until it reaches this limit or runs out of matches. Default: 100.",
+          "default": 100
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "cyprus-drcor-company-scraper",
+    "tool": "regdata_cyprus_drcor",
+    "title": "Cyprus DRCOR Company Registry Scraper",
+    "description": "Look up Cyprus companies in the official DRCOR register by name or HE number. Returns company identity and status, directors and secretary, and registered office. A verified \"not found in the register\" is a real answer, not an error.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "companyName": {
+          "type": "string",
+          "title": "Company name",
+          "description": "Company or organisation name to search for. Matching is controlled by the Search type below. Example: 'HELLENIC BANK', 'EUROBANK'. | Όνομα εταιρείας ή οργανισμού."
+        },
+        "registrationNumbers": {
+          "type": "array",
+          "title": "Registration numbers",
+          "description": "One or more Cyprus registration numbers, each looked up separately. Accepts any format: 'HE 6771', 'HE6771' or just '6771'. A bare number matches that number across EVERY organisation type (a limited company HE, a business name EE, an overseas company AE...), so include the letter prefix when you want just one type. | Αριθμοί εγγραφής, π.χ. 'ΗΕ 6771'.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "searchType": {
+          "type": "string",
+          "title": "Search type",
+          "description": "How the company name is matched. The register matches WHOLE WORDS, not the start of a name: 'INVESTMENT' finds every name containing that word, but 'INVEST' finds only names with the word 'INVEST'. 'All these words' (default) needs every word you type; 'Any of these words' needs one of them; 'Sounds like' uses the register's phonetic index. A very common word on its own (INVESTMENT, HOLDINGS, SHIPPING) is refused by the register as too many matches - add a second distinctive word.",
+          "enum": [
+            "startsWith",
+            "endsWith",
+            "soundsLike"
+          ],
+          "default": "startsWith"
+        },
+        "maxResults": {
+          "type": "integer",
+          "title": "Max results",
+          "description": "Maximum organisation records to export. A company that has traded under several names is listed once per former name in the register; those are merged into a single record here, with the former names kept on it, so you are never charged twice for the same company.",
+          "default": 100
+        },
+        "language": {
+          "type": "string",
+          "title": "Result language",
+          "description": "Language for labels and values the register translates - organisation type, status and officer positions. Company names and addresses are returned exactly as the register holds them, which for older Cypriot files is Greek regardless of this setting.",
+          "enum": [
+            "en",
+            "el",
+            "tr"
+          ],
+          "default": "en"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "ireland-cro-company-scraper",
+    "tool": "regdata_ireland_cro",
+    "title": "Ireland CRO Company Registry Scraper",
+    "description": "Look up Irish companies in the official CRO register by name or CRO number. Returns identity, type, status, incorporation date, registered address and email. Directors/shareholders are paid CRO documents and not included. A verified \"not found\" is a real answer.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "companyNames": {
+          "type": "array",
+          "title": "Company names",
+          "description": "One or more company names to search, each looked up separately (min 2 characters). Partial names work: every word must appear in the company name, in any order (legal-form words such as 'Ltd' or 'DAC' are optional). Exact and starts-with matches come first, live companies before dissolved ones.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "companyNumbers": {
+          "type": "array",
+          "title": "Company numbers",
+          "description": "One or more Irish CRO registration numbers, each looked up separately. Each must contain digits, e.g. '104547' (a prefix such as 'IE' is ignored). Company numbers only - limited partnership (LP...), reserved name (RN...), society (...R) and trade union (...T) numbers are skipped and not charged.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maxResultsPerQuery": {
+          "type": "integer",
+          "title": "Max results per query",
+          "description": "Maximum company records to export per query (up to 50). When a name matches more companies, the run says so - narrow the name or search by number.",
+          "default": 50
+        },
+        "statusFilter": {
+          "type": "array",
+          "title": "Status filter",
+          "description": "Keep only companies whose status contains one of these words, e.g. 'Normal', 'Dissolved', 'Strike Off Listed', 'Liquidation'. Leave empty to export every match - a Dissolved or Liquidation counterparty is usually the finding you most want to see.",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "portugal-corporate-acts-scraper",
+    "tool": "regdata_portugal_corporate_acts",
+    "title": "Portugal Corporate Acts Scraper",
+    "description": "Search the official Portuguese Ministry of Justice register of published corporate acts by NIF or entity name. Returns each published act (incorporation, changes, appointments, dissolution) with date, entity, municipality and type. This is an act/event register, not a company profile. \"No acts found\" is a real answer.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nifs": {
+          "type": "array",
+          "title": "NIFs / NIPCs",
+          "description": "One or more Portuguese tax numbers (NIF/NIPC, 9 digits), each looked up separately. The NIF is the preferred, most precise criterion. Example: '500123456'.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "entityNames": {
+          "type": "array",
+          "title": "Entity names",
+          "description": "One or more entity names to search, each looked up separately (minimum 2 characters). Name search is broader than a NIF and more likely to hit the register's 200-result ceiling.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "publicationType": {
+          "type": "string",
+          "title": "Publication type",
+          "description": "Which class of publication to search. 'All' covers everything. 'Commercial' is company (Registo Comercial) and foundation acts. 'Associations' and 'Solidarity' cover the non-profit registers.",
+          "enum": [
+            "all",
+            "commercial",
+            "other",
+            "associations",
+            "solidarity"
+          ],
+          "default": "all"
+        },
+        "district": {
+          "type": "string",
+          "title": "District (optional)",
+          "description": "Restrict to a Portuguese district by name, e.g. 'Lisboa', 'Porto', 'Faro'. Leave empty for all districts. A district narrows a broad name search below the 200-result ceiling."
+        },
+        "dateFrom": {
+          "type": "string",
+          "title": "Date from (optional)",
+          "description": "Only acts published on or after this date. Accepts YYYY-MM-DD. Use a date range to narrow a broad search or to monitor recent activity."
+        },
+        "dateTo": {
+          "type": "string",
+          "title": "Date to (optional)",
+          "description": "Only acts published on or before this date. Accepts YYYY-MM-DD."
+        },
+        "maxResultsPerQuery": {
+          "type": "integer",
+          "title": "Max results per query",
+          "description": "Maximum acts to export per query. The register returns at most 200 per search (20 per page, paged automatically), so 200 is the ceiling. To reach acts beyond it, narrow by date range, district or publication type.",
+          "default": 200
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "nigeria-cac-company-scraper",
+    "tool": "regdata_nigeria_cac",
+    "title": "Nigeria CAC Company Registry Scraper",
+    "description": "Search the official Nigerian CAC register by entity name or RC/BN/IT number. Returns registered name, registration number, classification, nature of business and status for companies, business names and incorporated trustees. A verified \"not found in the register\" is a real answer.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "companyNames": {
+          "type": "array",
+          "title": "Entity names",
+          "description": "One or more entity names to search, each looked up separately. Matching is the register's own name-similarity search, so partial names work: 'DANGOTE' returns every entity whose name contains it. Broad terms hit the register's 50-result ceiling - see Max results per query.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "registrationNumbers": {
+          "type": "array",
+          "title": "Registration numbers",
+          "description": "One or more registration numbers, each looked up separately. Accepts any format: 'RC 71242', 'RC-71242' or just '71242'. Include the prefix to restrict the classification - RC = company, BN = business name, IT = incorporated trustees. A bare number matches those digits across ALL THREE classifications, which is deliberate: the same digits genuinely exist as different entities (RC 71242 and IT 71242 are unrelated organisations).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maxResultsPerQuery": {
+          "type": "integer",
+          "title": "Max results per query",
+          "description": "Maximum records to export per query. The register itself returns at most 50 matches and provides no pagination, so 50 is the ceiling here too - a broader term cannot be paged through. To reach matches beyond the ceiling, narrow the name or search by registration number.",
+          "default": 50
+        },
+        "nameMatchMode": {
+          "type": "string",
+          "title": "Name match strictness",
+          "description": "How closely an entity name must answer a name query. The register's search matches on single common words, so a search for a company that does NOT exist still returns a full page of unrelated entities - 'NOTAREALFIRM LIMITED' returns 49 results purely because they contain 'LIMITED'. 'Relevant' (default) drops rows that share nothing but boilerplate with your query. 'Strict' keeps only rows containing every identifying word. 'All' returns the register's raw output, including the noise. Registration-number lookups are exact and are never affected by this.",
+          "enum": [
+            "relevant",
+            "strict",
+            "all"
+          ],
+          "default": "relevant"
+        },
+        "statusFilter": {
+          "type": "array",
+          "title": "Status filter",
+          "description": "Keep only entities in these registry statuses. Leave empty to export every match, which is the safer default for screening - an INACTIVE or DISSOLVED counterparty is usually the finding you most want to see, not one to filter away.",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "colombia-rues-company-scraper",
+    "tool": "regdata_colombia_rues",
+    "title": "Colombia RUES Company Registry Scraper",
+    "description": "Search the official Colombian RUES register by company name, NIT or matricula. Returns company and non-profit (RM and ESAL) identity, chamber of commerce, legal form and registration status. A verified \"not found in the register\" is a real answer.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "companyNames": {
+          "type": "array",
+          "title": "Company / entity names",
+          "description": "One or more names to search, each looked up separately. Matching is the register's own name search (minimum 2 characters). Broad terms hit the register's 500-result ceiling - see Max results per query.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "nits": {
+          "type": "array",
+          "title": "NITs",
+          "description": "One or more Colombian NITs, each looked up separately. Accepts any format: '890.903.938-8', '890903938-8' or '890903938'. The verification (check) digit is optional and is not used for matching. A NIT lookup returns the entity and its registered branches across chambers of commerce.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "matriculas": {
+          "type": "array",
+          "title": "Matrículas",
+          "description": "One or more matrícula (mercantile registration) numbers, each looked up separately.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "register": {
+          "type": "string",
+          "title": "Register",
+          "description": "Which register to search. 'Registro Mercantil' covers companies and business establishments. 'ESAL' covers non-profit entities - foundations, associations and NGOs. A single run searches one register; run twice to cover both.",
+          "enum": [
+            "RM",
+            "ESAL"
+          ],
+          "default": "RM"
+        },
+        "maxResultsPerQuery": {
+          "type": "integer",
+          "title": "Max results per query",
+          "description": "Maximum records to export per query. The register itself returns at most 500 matches and provides no pagination, so 500 is the ceiling here too. To reach matches beyond it, narrow the name or search by NIT or matrícula.",
+          "default": 500
+        },
+        "statusFilter": {
+          "type": "array",
+          "title": "Status filter",
+          "description": "Keep only entities in these registry statuses. Leave empty to export every match, which is the safer default for screening - a CANCELADA (cancelled) counterparty is usually the finding you most want to see, not one to filter away.",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  {
+    "slug": "uokik-decisions-scraper",
+    "tool": "regdata_uokik_decisions",
+    "title": "Poland UOKiK Decisions - competition and consumer protection",
+    "description": "Search decisions of UOKiK, Poland's competition and consumer protection authority (about 22,000 decisions): merger clearances, abuse of dominant position, collective consumer interests, prohibited clauses, product safety and fuel quality, with decision number, date, named parties and practice type; includeDetails adds case signature, whether a fine was imposed, appeal status, industry (PKD) and region. Filter by party name (literal - Polish diacritics matter), practice type, decision number, case signature, industry, region, fine/appeal flags, date range or full text. The register records THAT a fine was imposed, never the amount - do not report one. Use for counterparty due diligence and regulatory-history checks on Polish companies. No API key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "participant": {
+          "type": "string",
+          "title": "Company or person",
+          "description": "Name of a party to the proceedings, e.g. \"Orange\". Matches whole words in the party field, case-insensitive. Polish diacritics matter - the register's search is literal."
+        },
+        "practiceType": {
+          "type": "string",
+          "title": "Type of practice",
+          "description": "The category of proceedings. Roughly: merger control 5,800 decisions, product-safety conformity 4,000, collective consumer interests 4,000, dominant position 1,900.",
+          "enum": [
+            "",
+            "Jakość paliw",
+            "Klauzule niedozwolone",
+            "Kontrola koncentracji",
+            "Nadużywanie pozycji dominującej",
+            "Ochrona zbiorowych interesów konsumentów",
+            "Ogólne bezpieczeństwo produktów",
+            "Porozumienia ograniczające konkurencję",
+            "Pozostałe",
+            "Przewaga kontraktowa",
+            "System oceny zgodności",
+            "Zatory Płatnicze"
+          ],
+          "default": ""
+        },
+        "decisionNumber": {
+          "type": "string",
+          "title": "Decision number",
+          "description": "The decision's own number, e.g. \"DKK-171/2024\"."
+        },
+        "caseSignature": {
+          "type": "string",
+          "title": "Case signature",
+          "description": "The case file signature, e.g. \"DKK-2.430\". Matches a prefix as well as a whole signature."
+        },
+        "industry": {
+          "type": "string",
+          "title": "Industry (PKD)",
+          "description": "Matches the whole PKD path, so \"SEKCJA K\" selects the entire financial sector while \"TELEKOMUNIKACJA\" selects one class. Because the register stores the path but each decision page shows only the leaf class, a match can look unrelated and still be correct - \"BUDOWNICTWO\" returns electrical-installation firms, which sit under Section F."
+        },
+        "region": {
+          "type": "string",
+          "title": "Voivodeship",
+          "description": "Region the decision applies to. A decision can list several.",
+          "enum": [
+            "",
+            "Dolnośląskie",
+            "Kujawsko-Pomorskie",
+            "Łódzkie",
+            "Lubelskie",
+            "Lubuskie",
+            "Małopolskie",
+            "Mazowieckie",
+            "Opolskie",
+            "Podkarpackie",
+            "Podlaskie",
+            "Pomorskie",
+            "Śląskie",
+            "Świętokrzyskie",
+            "Warmińsko-Mazurskie",
+            "Wielkopolskie",
+            "Zachodniopomorskie"
+          ],
+          "default": ""
+        },
+        "fineImposed": {
+          "type": "string",
+          "title": "Fine imposed",
+          "description": "Whether the decision imposed a fine. The register records only THAT a fine was imposed - it never publishes the amount.",
+          "enum": [
+            "",
+            "yes",
+            "no"
+          ],
+          "default": ""
+        },
+        "appealed": {
+          "type": "string",
+          "title": "Appealed",
+          "description": "Whether the decision was appealed.",
+          "enum": [
+            "",
+            "yes",
+            "no"
+          ],
+          "default": ""
+        },
+        "dateFrom": {
+          "type": "string",
+          "title": "Decided on or after",
+          "description": "ISO date, YYYY-MM-DD. Note that six records in the register carry no decision date at all and are excluded by any date filter."
+        },
+        "dateTo": {
+          "type": "string",
+          "title": "Decided on or before",
+          "description": "ISO date, YYYY-MM-DD."
+        },
+        "fullText": {
+          "type": "string",
+          "title": "Full-text term",
+          "description": "Free text searched across the whole document index. Broader than it looks - it matches text the decision page does not display, so use the specific fields above when you can."
+        },
+        "maxItems": {
+          "type": "integer",
+          "title": "Maximum decisions",
+          "description": "Stop after this many. Set 0 for every match - the whole register is about 22,000 decisions.",
+          "default": 100
+        },
+        "includeDetails": {
+          "type": "boolean",
+          "title": "Fetch full decision details",
+          "description": "Open each decision to read its case signature, fine flag, appeal status, industry and region. Off returns only what the result list shows: number, date, party and practice type.",
+          "default": true
+        },
+        "includeIncompleteRecords": {
+          "type": "boolean",
+          "title": "Include records that identify nothing",
+          "description": "The register holds six documents with no number, date or party. They are skipped by default and always counted in the run summary.",
+          "default": false
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+];
