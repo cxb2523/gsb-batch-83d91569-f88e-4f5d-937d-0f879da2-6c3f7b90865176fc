@@ -6,7 +6,8 @@ from collections.abc import Callable
 
 from ..domain import RawItem, Source, SourceType, compute_content_hash
 from ..domain.website import STRUCTURED_FIELDS, is_source_slice
-from .base import (CollectionResult, ItemFailure, SourceAccessRestrictedError, SourceDisabledError, safe_failure,
+from .base import (CollectionResult, ItemFailure, PageOutcome, SourceAccessRestrictedError, SourceDisabledError,
+                   safe_failure, failure_category, PAGE_FAILED, PAGE_NOT_ATTEMPTED, PAGE_SUCCESS,
                    SourceTypeMismatchError, SourceUnavailableError)
 from .websites.adapters import WebsiteAdapter, build_adapter
 from .websites.transport import HttpTransport, Page, PageTransport
@@ -57,8 +58,16 @@ class WebsiteCollector:
                  linked_from: dict[str, tuple[str, ...]] | None = None) -> CollectionResult:
         items: list[RawItem] = []
         failures: list[ItemFailure] = []
+        outcomes: list[PageOutcome] = []
         seen: set[str] = set()
+        interrupted = False
         for index, url in enumerate(urls, 1):
+            if interrupted:
+                # Access refusal stopped this source: mark the remaining bounded
+                # candidates without probing them, keeping earlier successes.
+                outcomes.append(PageOutcome(index, url, PAGE_NOT_ATTEMPTED))
+                continue
+            final_url: str | None = None
             try:
                 canonical_url(url, source.url)
                 if not adapter.accepts(url, source.url):
@@ -68,66 +77,74 @@ class WebsiteCollector:
                 # Enforce final origin/layout even with a replacement transport.
                 if not adapter.accepts(canonical, source.url):
                     raise SourceUnavailableError('final URL is not a supported detail')
+                final_url = canonical
                 detail = adapter.extract(Page(canonical, page.html, page.transport), source.url)
                 identity = f'website:{source.id}:{detail.external_id}'
-                if identity in seen:
-                    continue
-                card = cards.get(url)
-                fields = [{'name': name, 'value': value, 'origin': origin}
-                          for origin, pairs, text in (('detail', detail.fields, detail.text),
-                                                      ('listing', card.fields if card else (), card.text if card else ''))
-                          for name, value in pairs if name in STRUCTURED_FIELDS and is_source_slice(name, value, text)]
-                sessions = [session.to_dict() for session in detail.sessions]
-                # A verified heading, the item's own listing card and structural
-                # fields are material extraction evidence. They join observation
-                # identity so a changed card (e.g. now sold out) is a new revision.
-                material = (detail.text + ('\x1fheading:' + detail.title if detail.title_is_heading else '')
-                            + ('\x1flisting:' + card.text if card else '')
-                            + ('\x1ffields:' + json.dumps(fields, ensure_ascii=False, sort_keys=True) if fields else '')
-                            + ('\x1fsessions:' + json.dumps(sessions, ensure_ascii=False, sort_keys=True) if sessions else '')
-                            + ('\x1fsession_diagnostics:' + json.dumps(detail.session_diagnostics)
-                               if detail.session_diagnostics else '')
-                            + ('\x1fsession_drift_keys:' + json.dumps(detail.session_drift_keys)
-                               if detail.session_drift_keys else '')
-                            + ('\x1fsession_drift_shapes:' + json.dumps(detail.session_drift_shapes, sort_keys=True)
-                               if detail.session_drift_shapes else ''))
-                item = RawItem(
-                    id=identity, source_id=source.id, source_type=SourceType.WEBSITE,
-                    external_id=detail.external_id, content_type='webpage',
-                    content_url=canonical, raw_text=detail.text, captured_at=self._now(),
-                    published_at=None,
-                    content_hash=compute_content_hash(raw_text=material, published_at=None, content_url=canonical),
-                    raw_metadata={
-                        'adapter': adapter.name, 'list_url': list_url, 'detail_url': canonical,
-                        'page_title': detail.title, 'native_id': detail.native_id,
-                        'title_origin': 'heading' if detail.title_is_heading else 'fallback',
-                        'structured_data_present': detail.structured_data_present,
-                        'content_links': list(detail.links), 'transport': page.transport,
-                        'listing_card_text': card.text if card else None,
-                        'source_fields': fields,
-                        **({'source_sessions': sessions,
-                            'source_session_diagnostics': list(detail.session_diagnostics),
-                            'source_session_schema': 'jabama-react-router/1',
-                            **({'source_session_drift_keys': list(detail.session_drift_keys)}
-                               if detail.session_drift_keys else {}),
-                            **({'source_session_drift_shapes': list(detail.session_drift_shapes)}
-                               if detail.session_drift_shapes else {})}
-                           if detail.sessions or detail.session_diagnostics else {}),
-                        **({'acquisition_strategy': 'linked_page', 'linked_from': list(linked_from.get(url, ()))}
-                           if linked_from is not None else {}),
-                    },
-                )
-                items.append(item)
-                seen.add(identity)
+                if identity not in seen:
+                    card = cards.get(url)
+                    fields = [{'name': name, 'value': value, 'origin': origin}
+                              for origin, pairs, text in (('detail', detail.fields, detail.text),
+                                                          ('listing', card.fields if card else (), card.text if card else ''))
+                              for name, value in pairs if name in STRUCTURED_FIELDS and is_source_slice(name, value, text)]
+                    sessions = [session.to_dict() for session in detail.sessions]
+                    # A verified heading, the item's own listing card and structural
+                    # fields are material extraction evidence. They join observation
+                    # identity so a changed card (e.g. now sold out) is a new revision.
+                    material = (detail.text + ('\x1fheading:' + detail.title if detail.title_is_heading else '')
+                                + ('\x1flisting:' + card.text if card else '')
+                                + ('\x1ffields:' + json.dumps(fields, ensure_ascii=False, sort_keys=True) if fields else '')
+                                + ('\x1fsessions:' + json.dumps(sessions, ensure_ascii=False, sort_keys=True) if sessions else '')
+                                + ('\x1fsession_diagnostics:' + json.dumps(detail.session_diagnostics)
+                                   if detail.session_diagnostics else '')
+                                + ('\x1fsession_drift_keys:' + json.dumps(detail.session_drift_keys)
+                                   if detail.session_drift_keys else '')
+                                + ('\x1fsession_drift_shapes:' + json.dumps(detail.session_drift_shapes, sort_keys=True)
+                                   if detail.session_drift_shapes else ''))
+                    item = RawItem(
+                        id=identity, source_id=source.id, source_type=SourceType.WEBSITE,
+                        external_id=detail.external_id, content_type='webpage',
+                        content_url=canonical, raw_text=detail.text, captured_at=self._now(),
+                        published_at=None,
+                        content_hash=compute_content_hash(raw_text=material, published_at=None, content_url=canonical),
+                        raw_metadata={
+                            'adapter': adapter.name, 'list_url': list_url, 'detail_url': canonical,
+                            'page_title': detail.title, 'native_id': detail.native_id,
+                            'title_origin': 'heading' if detail.title_is_heading else 'fallback',
+                            'structured_data_present': detail.structured_data_present,
+                            'content_links': list(detail.links), 'transport': page.transport,
+                            'listing_card_text': card.text if card else None,
+                            'source_fields': fields,
+                            **({'source_sessions': sessions,
+                                'source_session_diagnostics': list(detail.session_diagnostics),
+                                'source_session_schema': 'jabama-react-router/1',
+                                **({'source_session_drift_keys': list(detail.session_drift_keys)}
+                                   if detail.session_drift_keys else {}),
+                                **({'source_session_drift_shapes': list(detail.session_drift_shapes)}
+                                   if detail.session_drift_shapes else {})}
+                               if detail.sessions or detail.session_diagnostics else {}),
+                            **({'acquisition_strategy': 'linked_page', 'linked_from': list(linked_from.get(url, ()))}
+                               if linked_from is not None else {}),
+                        },
+                    )
+                    items.append(item)
+                    seen.add(identity)
+                # A duplicate identity is still a successfully fetched and verified
+                # page; the manifest records the fetch even though no item is added.
+                outcomes.append(PageOutcome(index, url, PAGE_SUCCESS, final_url=canonical))
                 if len(items) == limit:
                     break
             except Exception as exc:
                 failures.append(ItemFailure(f'detail {index}: collection failed ({type(exc).__name__}; {safe_failure(exc)})'))
+                # Fixed vocabulary only: never the exception text, query params or
+                # page content. final_url stays None unless an end URL was verified.
+                outcomes.append(PageOutcome(index, url, PAGE_FAILED, final_url=final_url,
+                                            failure_category=failure_category(exc)))
                 if isinstance(exc, SourceAccessRestrictedError):
                     # Stop this source on rate limits/access refusals; preserve
                     # earlier successes without probing additional pages.
-                    break
-        return CollectionResult(source.id, tuple(items), tuple(failures))
+                    interrupted = True
+        return CollectionResult(source.id, tuple(items), tuple(failures),
+                                page_outcomes=tuple(outcomes))
 
 
 def validate_website_source(source: Source, limit: int) -> None:

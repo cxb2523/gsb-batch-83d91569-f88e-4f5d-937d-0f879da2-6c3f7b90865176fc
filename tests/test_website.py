@@ -14,7 +14,8 @@ from gatherradar.config import load_sources
 from gatherradar.domain import EvidenceBundle, EvidenceKind, Source, SourceType
 from gatherradar.domain.evidence import caption_fragment, primary_fragment
 from gatherradar.domain.website import WebsiteConfig
-from gatherradar.collectors.base import CollectorError, SourceAccessRestrictedError, SourceConfigurationError, SourceUnavailableError
+from gatherradar.collectors.base import (CollectorError, PageOutcome, SourceAccessRestrictedError,
+                                         SourceConfigurationError, SourceUnavailableError, failure_category)
 from gatherradar.collectors.website import WebsiteCollector
 from gatherradar.collectors.websites.adapters import build_adapter, GenericAdapter
 from gatherradar.collectors.websites.html import parse_html, content_text
@@ -485,6 +486,152 @@ class WebsitePipelineTests(unittest.TestCase):
             result = run_website_discovery(source.id, data_dir=directory, config_path=FIXTURE_CONFIG)
             self.assertEqual(result.observed, 1)
             self.assertEqual(len(result.malformed), 1)
+
+
+class WebsitePageOutcomeTests(unittest.TestCase):
+    """Offline per-page manifest tests; every transport is a fake, never the network."""
+
+    ALPHA = BASE + 'events/alpha?day=1'
+    BETA = BASE + 'events/beta'
+    THIRD = BASE + 'events/third'
+
+    def test_success_manifest_matches_candidate_order(self):
+        result = collect(limit=2)
+        self.assertEqual(len(result.items), 2)
+        self.assertEqual(result.failures, ())
+        statuses = [(o.candidate_index, o.status) for o in result.page_outcomes]
+        self.assertEqual(statuses, [(1, 'success'), (2, 'success')])
+        self.assertEqual([o.candidate_url for o in result.page_outcomes], [self.ALPHA, self.BETA])
+        self.assertEqual([o.final_url for o in result.page_outcomes], [self.ALPHA, self.BETA])
+        self.assertTrue(all(o.failure_category is None for o in result.page_outcomes))
+        self.assertFalse(result.interrupted)
+        self.assertEqual(result.not_attempted_count, 0)
+        # Additive field: legacy fields keep their old meaning.
+        self.assertEqual(result.observed, 2)
+
+    def test_single_page_failure_is_categorized_and_collection_continues(self):
+        transport = FakeTransport({BASE: html('generic-list.html'),
+                                   self.ALPHA: SourceUnavailableError('boom', category='timeout')})
+        result = collect(transport)
+        self.assertEqual(len(result.items), 1)
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual([(o.candidate_index, o.status, o.failure_category) for o in result.page_outcomes],
+                         [(1, 'failed', 'timeout'), (2, 'success', None)])
+        failed, succeeded = result.page_outcomes
+        self.assertIsNone(failed.final_url)
+        self.assertEqual(succeeded.final_url, self.BETA)
+        # The later candidate was still fetched: failure did not stop the source.
+        self.assertEqual(transport.calls[-1], self.BETA)
+        self.assertFalse(result.interrupted)
+        self.assertEqual(result.not_attempted_count, 0)
+
+    def test_failure_categories_use_fixed_vocabulary_and_never_leak_details(self):
+        cases = (
+            (SourceUnavailableError('x', category='timeout'), 'timeout'),
+            (SourceUnavailableError('x', category='dns'), 'network'),
+            (SourceUnavailableError('x', category='tls'), 'network'),
+            (SourceUnavailableError('x', category='network'), 'network'),
+            (SourceAccessRestrictedError('x', category='redirect'), 'redirect'),
+            (SourceUnavailableError('x', category='content_type'), 'content_type'),
+            (SourceUnavailableError('x', category='encoding'), 'content_type'),
+            (SourceUnavailableError('x', category='layout'), 'layout'),
+            (SourceAccessRestrictedError('x', category='http_status', http_status=429), 'collection_failure'),
+            (RuntimeError('secret token=xyz'), 'collection_failure'),
+        )
+        transport = FakeTransport({BASE: html('generic-list.html'), self.ALPHA: cases[0][0]})
+        result = collect(transport)
+        self.assertEqual(result.page_outcomes[0].failure_category, 'timeout')
+        for exc, expected in cases:
+            with self.subTest(exc=type(exc).__name__):
+                self.assertEqual(failure_category(exc), expected)
+        # No exception wording, query string or page content in any outcome/failure text.
+        for outcome in result.page_outcomes:
+            blob = repr(outcome)
+            self.assertNotIn('boom', blob)
+            self.assertNotIn('secret', blob)
+        self.assertNotIn('boom', result.failures[0].reason)
+
+    def test_access_restriction_marks_interruption_and_keeps_successes(self):
+        transport = FakeTransport({BASE: html('generic-list.html') + '<a href="/events/third">Third</a>',
+                                   self.BETA: SourceAccessRestrictedError('public HTTP access refused (429)',
+                                                                          category='http_status', http_status=429)})
+        result = collect(transport, limit=3)
+        # Earlier success is preserved; the refusing page fails; the rest are untried.
+        self.assertEqual(len(result.items), 1)
+        self.assertEqual([item.content_url for item in result.items], [self.ALPHA])
+        self.assertEqual([(o.candidate_index, o.status, o.failure_category) for o in result.page_outcomes],
+                         [(1, 'success', None), (2, 'failed', 'collection_failure'),
+                          (3, 'not_attempted', None)])
+        self.assertIsNone(result.page_outcomes[2].final_url)
+        self.assertTrue(result.interrupted)
+        self.assertEqual(result.not_attempted_count, 1)
+        # Interruption point: index 2 is the last touched candidate.
+        self.assertEqual(transport.calls, [BASE, self.ALPHA, self.BETA])
+        self.assertNotIn(self.THIRD, transport.calls)
+        # The legacy failure record stays secret-safe and unchanged in shape.
+        self.assertEqual(len(result.failures), 1)
+        self.assertNotIn('public HTTP access refused', result.failures[0].reason)
+        self.assertTrue(result.failures[0].reason.startswith('detail 2: collection failed ('))
+
+    def test_candidates_over_budget_are_capped_without_extra_fetches(self):
+        transport = FakeTransport({BASE: ''.join(f'<a href="/events/{n}">item</a>' for n in range(40))})
+        for n in range(40):
+            transport.pages[BASE + f'events/{n}'] = RuntimeError('failed')
+        result = collect(transport)  # limit=1 -> min(1*3, 30) = 3 candidates
+        self.assertEqual(len(result.page_outcomes), 3)
+        self.assertEqual([o.candidate_index for o in result.page_outcomes], [1, 2, 3])
+        self.assertTrue(all(o.status == 'failed' for o in result.page_outcomes))
+        self.assertTrue(all(o.failure_category == 'collection_failure' for o in result.page_outcomes))
+        # One listing fetch plus exactly three detail fetches; no candidate beyond the cap.
+        self.assertEqual(len(transport.calls), 4)
+        self.assertNotIn(BASE + 'events/3', transport.calls)
+        self.assertFalse(result.interrupted)
+        self.assertEqual(result.not_attempted_count, 0)
+
+    def test_limit_stop_records_only_the_attempted_candidates(self):
+        result = collect(limit=1)
+        self.assertEqual(len(result.items), 1)
+        self.assertEqual([o.status for o in result.page_outcomes], ['success'])
+
+    def test_duplicate_identity_is_a_successful_page_outcome(self):
+        transport = FakeTransport({BASE: html('generic-list.html')})
+        for url in (self.ALPHA, self.BETA):
+            transport.pages[url] = Page(BASE + 'events/final', html('generic-detail.html'))
+        result = collect(transport, limit=2)
+        self.assertEqual(len(result.items), 1)  # dedup unchanged
+        self.assertEqual([o.status for o in result.page_outcomes], ['success', 'success'])
+        self.assertTrue(all(o.final_url == BASE + 'events/final' for o in result.page_outcomes))
+
+    def test_redirect_outside_layout_is_classified_as_redirect(self):
+        transport = FakeTransport({BASE: html('generic-list.html'),
+                                   self.ALPHA: SourceAccessRestrictedError('redirect left the permitted detail layout',
+                                                                          category='redirect')})
+        result = collect(transport)
+        self.assertEqual(result.page_outcomes[0].status, 'failed')
+        self.assertEqual(result.page_outcomes[0].failure_category, 'redirect')
+        self.assertIsNone(result.page_outcomes[0].final_url)
+
+    def test_final_url_failing_layout_check_uses_collection_failure_vocabulary(self):
+        # The collector's own end-URL verification raises without a category;
+        # the manifest must still use a fixed word rather than the message.
+        transport = FakeTransport({BASE: html('generic-list.html'),
+                                   self.ALPHA: Page('https://other.example/events/a', html('generic-detail.html'))})
+        result = collect(transport)
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(result.page_outcomes[0].failure_category, 'collection_failure')
+        self.assertNotIn('other.example', repr(result.page_outcomes[0]))
+
+    def test_page_outcome_contract_rejects_unknown_status_and_bad_category(self):
+        PageOutcome(1, self.ALPHA, 'success')
+        PageOutcome(2, self.BETA, 'not_attempted')
+        with self.assertRaises(ValueError):
+            PageOutcome(1, self.ALPHA, 'bogus')
+        with self.assertRaises(ValueError):
+            PageOutcome(1, self.ALPHA, 'failed')  # missing fixed category
+        with self.assertRaises(ValueError):
+            PageOutcome(1, self.ALPHA, 'failed', failure_category='leaked message')
+        with self.assertRaises(ValueError):
+            PageOutcome(1, self.ALPHA, 'success', failure_category='layout')
 
 
 if __name__ == '__main__':

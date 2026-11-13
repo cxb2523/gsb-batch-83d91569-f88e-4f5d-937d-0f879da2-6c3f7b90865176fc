@@ -331,6 +331,8 @@ class LinkedPagePlanTests(unittest.TestCase):
         (item,) = collected.items
         self.assertEqual(item.raw_metadata['acquisition_strategy'], 'linked_page')
         self.assertEqual(item.raw_metadata['linked_from'], ['ig:1'])
+        self.assertEqual([(o.candidate_index, o.status, o.final_url) for o in collected.page_outcomes],
+                         [(1, 'success', detail)])
         with self.assertRaises(SourceUnavailableError):
             WebsiteCollector(transport=Pages({})).collect_linked(source, ('https://evil.example/x',), limit=1,
                                                                   linked_from={})

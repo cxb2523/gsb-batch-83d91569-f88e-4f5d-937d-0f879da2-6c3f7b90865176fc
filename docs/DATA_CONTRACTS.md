@@ -226,6 +226,16 @@ attempts, one listing, no pagination). Offline discovery instead takes latest ob
 in first-seen storage order; no capture-run manifest reconstructs later live list order.
 Missing/deleted events are not tombstoned. One detail page remains one RawItem and one
 Event; supported explicit dates/sessions become occurrences within that Event.
+Each run's `CollectionResult.page_outcomes` is an additive, ordered per-page manifest with
+one `PageOutcome` per bounded candidate: 1-based `candidate_index`, `candidate_url`,
+`status` (`success`, `failed`, `not_attempted`), the verified `final_url` when determinable,
+and for failures a fixed `failure_category` only — `timeout`, `network`, `redirect`,
+`content_type`, `layout` or `collection_failure`. Exception text, query parameters and page
+content are never recorded. An access refusal (e.g. HTTP 429) still stops the source
+immediately: the refusing page is `failed`, every remaining bounded candidate is
+`not_attempted` (surfaced via `not_attempted_count`/`interrupted`), and earlier successes
+are retained. Reaching `limit` still stops without not-attempted entries. The legacy
+`items`, `failures` and `observed` semantics are unchanged.
 Related content must be excluded structurally by the adapter;
 arbitrary page segmentation and cross-page event merging are not implemented.
 See [source field coverage](SOURCE_FIELD_COVERAGE.md) for the per-adapter fact inventory.

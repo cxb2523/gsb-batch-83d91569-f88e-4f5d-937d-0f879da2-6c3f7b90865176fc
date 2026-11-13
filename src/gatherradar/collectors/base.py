@@ -15,11 +15,32 @@ class CollectorError(Exception):
         self.category, self.operation, self.http_status = category, operation, http_status
 
 
-def safe_failure(exc: Exception) -> str:
-    """Fixed vocabulary only; never serialize exception messages or payloads."""
+def failure_category(exc: Exception) -> str:
+    """Map any exception onto the fixed failure vocabulary; never its message.
+
+    The returned words are the only safe values allowed in per-page outcomes:
+    timeout, network, redirect, content_type, layout or collection_failure.
+    Transport-level categories outside that set collapse to collection_failure.
+    """
     categories = {'dns', 'timeout', 'network', 'tls', 'robots', 'http_status', 'redirect',
                   'encoding', 'content_type', 'layout', 'collection_failure'}
     category = getattr(exc, 'category', 'collection_failure')
+    if category not in categories:
+        category = 'collection_failure'
+    return {
+        'dns': 'network',
+        'tls': 'network',
+        'robots': 'collection_failure',
+        'http_status': 'collection_failure',
+        'encoding': 'content_type',
+    }.get(category, category)
+
+
+def safe_failure(exc: Exception) -> str:
+    """Fixed vocabulary only; never serialize exception messages or payloads."""
+    category = getattr(exc, 'category', 'collection_failure')
+    categories = {'dns', 'timeout', 'network', 'tls', 'robots', 'http_status', 'redirect',
+                  'encoding', 'content_type', 'layout', 'collection_failure'}
     if category not in categories:
         category = 'collection_failure'
     operation = getattr(exc, 'operation', 'collect')
@@ -70,16 +91,67 @@ class ItemFailure:
     external_id: str | None = None
 
 
+# Per-page outcome vocabulary. Statuses are fixed words; failure categories come
+# from failure_category() only. Nothing here carries exception text, query
+# parameters from a failed request, or page content.
+PAGE_SUCCESS = 'success'
+PAGE_FAILED = 'failed'
+PAGE_NOT_ATTEMPTED = 'not_attempted'
+PAGE_STATUSES = frozenset({PAGE_SUCCESS, PAGE_FAILED, PAGE_NOT_ATTEMPTED})
+PAGE_FAILURE_CATEGORIES = frozenset(
+    {'timeout', 'network', 'redirect', 'content_type', 'layout', 'collection_failure'})
+
+
+@dataclass(frozen=True, slots=True)
+class PageOutcome:
+    """The ending of one attempted (or skipped) detail link in a single run.
+
+    `candidate_index` is the 1-based position in the bounded candidate list.
+    `final_url` is the verified end URL when it could be determined, else None.
+    Failed and not-attempted records never embed exception messages or content;
+    `failure_category` holds a fixed vocabulary word and is None on success or
+    when the page was never tried after an access-restricted stop.
+    """
+
+    candidate_index: int
+    candidate_url: str
+    status: str
+    final_url: str | None = None
+    failure_category: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in PAGE_STATUSES:
+            raise ValueError('unknown page outcome status')
+        if self.status == PAGE_FAILED:
+            if self.failure_category not in PAGE_FAILURE_CATEGORIES:
+                raise ValueError('failed page outcome requires a fixed failure category')
+        elif self.failure_category is not None:
+            raise ValueError('only failed page outcomes carry a failure category')
+
+
 @dataclass(frozen=True, slots=True)
 class CollectionResult:
     source_id: str
     items: tuple[RawItem, ...] = ()
     failures: tuple[ItemFailure, ...] = ()
     warnings: tuple[str, ...] = ()
+    # Additive per-page manifest of the website detail phase; other collectors
+    # leave it empty. One record per candidate in the bounded list, in order.
+    page_outcomes: tuple[PageOutcome, ...] = ()
 
     @property
     def observed(self) -> int:
         return len(self.items) + len(self.failures)
+
+    @property
+    def not_attempted_count(self) -> int:
+        """Candidates never fetched because an access refusal stopped the source."""
+        return sum(1 for outcome in self.page_outcomes if outcome.status == PAGE_NOT_ATTEMPTED)
+
+    @property
+    def interrupted(self) -> bool:
+        """Whether an access-restricted response halted the remaining candidates."""
+        return any(outcome.status == PAGE_NOT_ATTEMPTED for outcome in self.page_outcomes)
 
 
 class Collector(Protocol):

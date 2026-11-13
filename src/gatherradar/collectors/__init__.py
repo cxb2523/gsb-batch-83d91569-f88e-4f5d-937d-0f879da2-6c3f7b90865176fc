@@ -3,12 +3,14 @@ from .base import (
     Collector,
     CollectorError,
     ItemFailure,
+    PageOutcome,
     SourceAccessRestrictedError,
     SourceConfigurationError,
     SourceDisabledError,
     SourceNotFoundError,
     SourceTypeMismatchError,
     SourceUnavailableError,
+    failure_category,
 )
 from .instagram import InstagramCollector
 from .instagram_browser import BrowserMediaFetcher
@@ -30,10 +32,12 @@ __all__ = [
     "InstagramCollector",
     "InstaloaderPostFetcher",
     "ItemFailure",
+    "PageOutcome",
     "SourceAccessRestrictedError",
     "SourceConfigurationError",
     "SourceDisabledError",
     "SourceNotFoundError",
     "SourceTypeMismatchError",
     "SourceUnavailableError",
+    "failure_category",
 ]
