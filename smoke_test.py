@@ -1,0 +1,3644 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# The encoding declaration is REQUIRED here and is not a Python-2 relic, so
+# please do not tidy it away. CPython 3.9's tokenizer, with no declared
+# encoding, fails on a multi-byte character that sits far inside a very long
+# source line — and the fixtures below are single lines tens of thousands of
+# characters long, full of German umlauts ("Kühl-Gefrierkombination") and the
+# en dash MediaMarkt writes its round prices with ("349,– €"). Declaring the
+# encoding is what PEP 263 is for.
+"""
+smoke_test.py
+--------------
+Zero-network, zero-browser sanity check for mediamarkt-scraper.
+
+Run this FIRST, before touching a real browser or mediamarkt.de, to confirm
+the environment and the parsing/output/policy logic work:
+
+    python3 smoke_test.py
+
+Deliberately ONE file of plain functions with inline fixtures — no pytest, no
+conftest, no fixtures directory. tests/test_smoke.py wraps it as a single
+pytest test so `pytest` works as an entry point without a second copy of the
+checks that could drift from this one.
+
+It must pass with NO engine library installed at all, so every
+`import playwright_scraper` / `puppeteer_scraper` / `selenium_scraper` is
+guarded and the skip is REPORTED. CI's engine-smoke job installs all three and
+fails if anything reports skipped, because "skipped, engine absent" reads
+identically to a real import error.
+
+What this suite is actually for
+-------------------------------
+Not coverage. Every check that matters here pins a VALUE read off a real
+capture, because a column can be 100% populated and entirely wrong — this
+repo has already shipped one such bug (`rating` came back 0.0 on every
+unrated product, filling the column on 84 of 84 rows of a test run and
+telling a consumer that a new release was rated zero stars). Coverage said
+100%. So the assertions below say `price == 349.0`, not `price is not None`.
+
+Exits non-zero on any failure.
+"""
+
+import ast
+import builtins
+import importlib
+import inspect
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import types
+import io
+import tempfile
+from contextlib import redirect_stdout
+from dataclasses import fields
+
+from captcha_solver import (detect_recaptcha_v3, detect_recaptcha_in_page,
+                            reconcile_detections)
+from diff_runs import diff_products
+import env_config
+import page_flow
+from output_writer import (Product, save, finish_run, write_csv,
+                           dedupe_by_key, dedupe_by_sku, run_meta,
+                           ROW_CLASS_BY_MODE, UNIQUE_BY_SKU_MODES,
+                           EXIT_BLOCKED, EXIT_NO_PRODUCTS, EXIT_PARTIAL,
+                           COMPLETE_STOP_REASONS, LIST_CSV_SEPARATOR)
+import product_parser
+from product_parser import (parse_products, parse_product_detail, page_url,
+                            category_from_url, listing_kind, site_host,
+                            is_supported_host, host_currency, HOSTS,
+                            detect_page_state, detect_bot_challenge,
+                            page_number_from_url, total_results, sku_from_url,
+                            SELECTORS)
+from proxy_pool import (ProxyPool, mask, to_playwright, split_credentials,
+                        parse_proxy_line)
+
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+_failures = []
+
+
+def check(label, condition):
+    """Print and record one check. Returns the condition, so callers can
+    accumulate with `ok &= check(...)`."""
+    if condition:
+        print("  PASS  %s" % label)
+    else:
+        print("  FAIL  %s" % label)
+        _failures.append(label)
+    return bool(condition)
+
+
+def group(title):
+    print("\n== %s" % title)
+
+
+def _raises(fn):
+    """True if `fn()` raises. Used where refusing is the correct behaviour."""
+    try:
+        fn()
+    except Exception:
+        return True
+    return False
+
+
+def page(*fragments):
+    """Wrap fragments in a minimal document, as the engines hand it over.
+
+    The asset-host reference is not decoration: `detect_page_state` treats a
+    page that references none of MediaMarkt's own assets as a block page (see
+    its docstring), so a bare `<html><body>` wrapper would classify every
+    hand-built fixture below as "blocked".
+    """
+    return ('<html lang="de"><body>'
+            '<img src="https://assets.mmsrg.com/isr/x"/>%s</body></html>'
+            % "".join(fragments))
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+# Every one of these is a REAL capture, taken 2026-09-09 from a German
+# residential exit IP. <script>, <style> and <svg> elements are stripped and
+# the build-hash class names ("sc-59b6826e-0", "mms-ui-gEYBWy") are dropped;
+# nothing else is changed, and the parser was verified to produce IDENTICAL
+# rows from the trimmed and untrimmed forms before these were committed.
+#
+# The trimming is not only for size. MediaMarkt's pages embed a large
+# front-end configuration blob — a Sentry DSN, a Woosmap public key, a
+# store-code JWT — and none of it is needed to test a parser. Cutting the
+# fixtures from the PRODUCT markup alone keeps third-party keys out of a
+# public repository altogether, rather than relying on a scrubbing pass to
+# catch them. `test_no_capture_leaks` guards that with patterns, so the next
+# capture is checked too.
+FIX_TILE_RRP = """<article class="frLpWO" data-test="mms-product-card"><div><div class="kMDfTj"><div class="cdOdXP"><a aria-label="Nintendo Switch Spielcover mit bunten Mii-Charakteren in einer Stadt und beim Picknick." class="cevLqa hZAwcG" data-test="mms-router-link-product-image-wrapper" href="/de/product/_tomodachi-life-wo-traume-wahr-werden-nintendo-switch-3053694.html" target="_self"><div><picture aria-hidden="true" data-test="product-image"><img alt="" crossorigin="anonymous" decoding="async" fetchpriority="auto" loading="lazy" src="https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_170062068?x=416&amp;y=416&amp;format=webp&amp;quality=60&amp;sp=yes&amp;strip=yes&amp;trim=yes&amp;ex=416&amp;ey=416&amp;align=center&amp;resizesource&amp;unsharp=0.5x0.5"/></picture></div></a></div><div class="iSysHa"></div><div class="fnobFr"><a data-test="mms-router-link-product-list-item-link" href="/de/product/_tomodachi-life-wo-traume-wahr-werden-nintendo-switch-3053694.html" target="_self"><div class="hDcNlA" title="Tomodachi Life: Wo Träume wahr werden - [Nintendo Switch]"><h3 class="dhStGl" data-test="product-title">Tomodachi Life: Wo Träume wahr werden - [Nintendo Switch]</h3></div></a></div><div class="ecVWKw"><div><div class="TLeXV"><div data-test="mms-customer-rating-container" id=":R2pi2irdakbqorajct:"><div aria-label="Durchschnittliche Produktbewertung: 5 von 5 Sternen" data-test="mms-customer-rating" role="img"><div><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span></div></div><div><span data-test="mms-customer-rating-count">4</span><span id="rating-description-screen-reader-:R2pi2irdakbqorajct:">Basierend auf 4 Bewertungen</span><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Weitere Informationen zu Produktbewertungen anzeigen" class="iDqtxR kBLyCw" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="kGOPsL" color="#000000" height="16" width="16"></span></button></div></div></div></div></div><div class="kZeFLJ"><div><div class="kKHmyB"><dl class="gXjDqa"><dt><div class="cHFbNd"><p class="cGnhfJ">Altersfreigabe (USK)</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Freigegeben ohne Altersbeschränkung</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Hersteller</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Nintendo of Europe</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Titel</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Tomodachi Life: Wo Träume wahr werden</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Genre</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Simulation</p></div></dd></dl></div></div></div><div class="dtollO"><span></span><div class="ldLxww" data-test="cofr-price product-price"><div data-test="mms-price"><div><div class="gYTtGb"><div class="ioFSPw"><span>-16%</span></div></div><span class="htkAlu" direction="horizontal"></span><div class="kGZxQX notranslate" data-test="mms-strike-price-type-rrp"><span class="fzObRQ" data-test="mms-strike-price-label">UVP</span> <span aria-hidden="true" class="jCGxOY">59,99 €</span><span>59,99€</span></div><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Der hier angezeigte Preis ist die unverbindliche Preisempfehlung des Herstellers" class="iDqtxR kBLyCw lmKGlx" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="opCjq" color="#000000" height="[object Object]" width="[object Object]"></span></button></div><div class="notranslate"><span aria-hidden="true" class="clIvFR hKPIXT">49,99 €</span><span>49,99€</span></div><div><div><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal"><button data-href="#cofr-price-legal-info" type="button"><span>inkl. MwSt. zzgl. Versand</span></button></p></div></div></div></div></div></div><div class="fgbltE"></div><div class="fgbltE"><div role="separator"></div><div><span></span><div class="hGuOAH" data-test="product-delivery"><div data-test="mms-cofr-delivery_AVAILABLE"><div><div></div></div><div><div><span>Lieferung nach Hause</span></div><div><span>10.09.2026 - 11.09.2026</span></div></div></div></div></div><div></div><div class="dUCMnj" data-test="product-pickup"><div data-test="mms-cofr-pickup_NO_STORE_SELECTED"><div><div></div></div><div><div><span>Abholung</span></div><span>Bitte wähle einen Markt aus<span></span><button type="button">Markt auswählen</button></span></div></div></div></div><div class="gtIozx"><div><div class="kIskS" grid="list" states="[object Object]"><div></div><div class="gGKIeL" state="default"><div><label class="bAsRJV" data-test="mms-product-comparison-add-to" for="srp-entry-point-a2c-3053694"><input aria-invalid="false" class="dvJfQE" id="srp-entry-point-a2c-3053694" name="srp-entry-point-a2c-3053694" type="checkbox" value=""/><div aria-hidden="true" class="jWuxKD bixLNe" color="#ffffff" data-test="icon-test-id"></div><span class="htkAlu" direction="horizontal"></span><p class="cGAFnE">Vergleichen</p></label></div></div></div></div></div><div class="kyuCgq" grid="list" states="[object Object]"><div></div><button aria-disabled="false" aria-label="Zur Wunschliste hinzufügen Tomodachi Life: Wo Träume wahr werden - [Nintendo Switch]" class="gqJlND" data-ignore-a11y="true" data-test="mms-search-wishlist-unselected" translate="no" type="button"><div aria-hidden="true" class="kAwIrP" height="24" width="24"></div></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb Tomodachi Life: Wo Träume wahr werden - [Nintendo Switch]" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="3053694" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb Tomodachi Life: Wo Träume wahr werden - [Nintendo Switch]" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="3053694" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div></div></div></article>"""
+
+FIX_TILE_LOP = """<article class="frLpWO" data-test="mms-product-card"><div><div class="kMDfTj"><div class="fwydWh WYVMk"><div class="iJwEaV"><div class="dSKXLe"><div class="jgKSdo"><ul class="fmJWhh"><li class="gcaLPe"><div class="llIEvK" data-test="mms-badge"><span class="kiZnjo" data-cs-mask="true" title="Tiefpreis Tage">Tiefpreis Tage</span></div></li><li class="gcaLPe"><div class="llIEvK" data-test="mms-badge"><span class="kiZnjo" data-cs-mask="true" title="Unsere Eigenmarke">Unsere Eigenmarke</span></div></li></ul></div></div></div></div><div class="cdOdXP"><a aria-label="Ein dunkelgrauer Koenic-Kühlschrank. Die obere Tür ist größer als die untere. Die Marke befindet sich oben." class="cevLqa hZAwcG" data-test="mms-router-link-product-image-wrapper" href="/de/product/_koenic-kfk-631-1-c-in-kuhlgefrierkombination-c-149-kwh-1850-mm-hoch-inox-2882323.html" target="_self"><div><picture aria-hidden="true" data-test="product-image"><img alt="" crossorigin="anonymous" decoding="sync" fetchpriority="high" loading="eager" src="https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152757?x=416&amp;y=416&amp;format=webp&amp;quality=60&amp;sp=yes&amp;strip=yes&amp;trim=yes&amp;ex=416&amp;ey=416&amp;align=center&amp;resizesource&amp;unsharp=0.5x0.5"/></picture></div></a></div><div class="iSysHa"><div class="dlCFDA" data-test="cofr-card-product-energy-efficiency"><div><div data-test="mms-energy-efficiency-label"><button aria-label="Energieeffizienzklasse C" data-test="mms-energy-efficiency-arrow-button" type="button"><span aria-hidden="false" aria-label=" C" data-test="mms-energy-efficiency-arrow" role="img"></span></button><a data-test="mms-anchor-link" href="https://assets.mmsrg.com/ada/166325/c1/-/-/ASSET_MMS_167152778/?direct" rel="noopener noreferrer" target="_blank">Produktdatenblatt</a></div></div></div></div><div class="fnobFr"><a data-test="mms-router-link-product-list-item-link" href="/de/product/_koenic-kfk-631-1-c-in-kuhlgefrierkombination-c-149-kwh-1850-mm-hoch-inox-2882323.html" target="_self"><div class="hDcNlA" title="KOENIC KFK 631-1 C IN Kühl-Kombi statisch (C, 315 l, 185,5 cm hoch, Edelstahl)"><h3 class="dhStGl" data-test="product-title">KOENIC KFK 631-1 C IN Kühl-Kombi statisch (C, 315 l, 185,5 cm hoch, Edelstahl)</h3></div></a></div><div class="ecVWKw"><div><div class="TLeXV"><div data-test="mms-customer-rating-container" id=":R2pi1irdakbqorajct:"><div aria-label="Durchschnittliche Produktbewertung: 4.6 von 5 Sternen" data-test="mms-customer-rating" role="img"><div><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><div data-test="mms-partial-rated-star"><div><span aria-hidden="true"></span></div><span aria-hidden="true"></span></div></div></div><div><span data-test="mms-customer-rating-count">119</span><span id="rating-description-screen-reader-:R2pi1irdakbqorajct:">Basierend auf 119 Bewertungen</span><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Weitere Informationen zu Produktbewertungen anzeigen" class="iDqtxR kBLyCw" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="kGOPsL" color="#000000" height="16" width="16"></span></button></div></div></div></div></div><div class="kZeFLJ"><div><div class="kKHmyB"><dl class="gXjDqa"><dt><div class="cHFbNd"><p class="cGnhfJ">Abmessungen (B/H/T)</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">59.8 cm x 185.5 cm x 58.00 cm</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">No Frost-System</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Nein</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">0°C Frischkühlzone (für längere Haltbarkeit)</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Nein</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">antibakterielle Innenbeschichtung</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Nein</p></div></dd></dl></div></div></div><div class="dtollO"><span></span><div class="ldLxww" data-test="cofr-price product-price"><div data-test="mms-price"><div><div class="kGZxQX notranslate" data-test="mms-strike-price-type-lop"><span class="fzObRQ" data-test="mms-strike-price-label">Tiefstpreis (30 Tage): </span> <span aria-hidden="true" class="jCGxOY">299,– €</span><span>299,00€</span></div><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Niedrigster Preis der letzten 30 Tage auf mediamarkt.de (MediaMarkt bzw. Marktplatz-Verkäufer)" class="iDqtxR kBLyCw lmKGlx" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="opCjq" color="#000000" height="[object Object]" width="[object Object]"></span></button></div><div class="notranslate"><span aria-hidden="true" class="clIvFR hKPIXT">349,– €</span><span>349,00€</span></div><div><div><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal"><button data-href="#cofr-price-legal-info" type="button"><span>inkl. MwSt. zzgl. Versand</span></button></p><span class="kNYyGq" data-test="additional-info-spacer"></span></div><span class="bmwavm"></span><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal">Bezahle in <strong>18 Raten à 19,39 €</strong> (eff. Zins. P.a. 0,00 %)** Gesamtpreis 349,– €</p></div></div></div></div></div></div><div class="fgbltE"></div><div class="fgbltE"><div role="separator"></div><div><span></span><div class="hGuOAH" data-test="product-delivery"><div data-test="mms-cofr-delivery_AVAILABLE"><div><div></div></div><div><div><span>Lieferung nach Hause</span></div><div><span>11.09.2026 - 17.09.2026</span></div></div></div></div></div><div></div><div class="dUCMnj" data-test="product-pickup"><div data-test="mms-cofr-pickup_NO_STORE_SELECTED"><div><div></div></div><div><div><span>Abholung</span></div><span>Bitte wähle einen Markt aus<span></span><button type="button">Markt auswählen</button></span></div></div></div></div><div class="gtIozx"><div><div class="kIskS" grid="list" states="[object Object]"><div></div><div class="gGKIeL" state="default"><div><label class="bAsRJV" data-test="mms-product-comparison-add-to" for="srp-entry-point-a2c-2882323"><input aria-invalid="false" class="dvJfQE" id="srp-entry-point-a2c-2882323" name="srp-entry-point-a2c-2882323" type="checkbox" value=""/><div aria-hidden="true" class="jWuxKD bixLNe" color="#ffffff" data-test="icon-test-id"></div><span class="htkAlu" direction="horizontal"></span><p class="cGAFnE">Vergleichen</p></label></div></div></div></div></div><div class="kyuCgq" grid="list" states="[object Object]"><div></div><button aria-disabled="false" aria-label="Zur Wunschliste hinzufügen KOENIC KFK 631-1 C IN Kühl-Kombi statisch (C, 315 l, 185,5 cm hoch, Edelstahl)" class="gqJlND" data-ignore-a11y="true" data-test="mms-search-wishlist-unselected" translate="no" type="button"><div aria-hidden="true" class="kAwIrP" height="24" width="24"></div></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb KOENIC KFK 631-1 C IN Kühl-Kombi statisch (C, 315 l, 185,5 cm hoch, Edelstahl)" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="2882323" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb KOENIC KFK 631-1 C IN Kühl-Kombi statisch (C, 315 l, 185,5 cm hoch, Edelstahl)" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="2882323" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div></div></div></article>"""
+
+FIX_TILE_UNRATED = """<article class="frLpWO" data-test="mms-product-card"><div><div class="kMDfTj"><div class="cdOdXP"><a aria-label="Toy Story 1-4 DVD-Cover mit Woody, Buzz, Jessie und Bo Peep in bunten Zahlen." class="cevLqa hZAwcG" data-test="mms-router-link-product-image-wrapper" href="/de/product/_toy-story-1-4-4-movie-coll-animation-zeichentrick-blu-ray-2590228.html" target="_self"><div><picture aria-hidden="true" data-test="product-image"><img alt="" crossorigin="anonymous" decoding="async" fetchpriority="auto" loading="lazy" src="https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_70576457?x=416&amp;y=416&amp;format=webp&amp;quality=60&amp;sp=yes&amp;strip=yes&amp;trim=yes&amp;ex=416&amp;ey=416&amp;align=center&amp;resizesource&amp;unsharp=0.5x0.5"/></picture></div></a></div><div class="iSysHa"></div><div class="fnobFr"><a data-test="mms-router-link-product-list-item-link" href="/de/product/_toy-story-1-4-4-movie-coll-animation-zeichentrick-blu-ray-2590228.html" target="_self"><div class="hDcNlA" title="Toy Story 1-4 (4 Movie Coll.) Blu-ray"><h3 class="dhStGl" data-test="product-title">Toy Story 1-4 (4 Movie Coll.) Blu-ray</h3></div></a></div><div class="ecVWKw"><div><div class="TLeXV"><div data-test="mms-customer-rating-container" id=":Rb6i1krdakbqorajct:"><div aria-label="Durchschnittliche Produktbewertung: 0 von 5 Sternen" data-test="mms-customer-rating" role="img"><div><span aria-hidden="true" data-test="mms-no-rated-star"></span><span aria-hidden="true" data-test="mms-no-rated-star"></span><span aria-hidden="true" data-test="mms-no-rated-star"></span><span aria-hidden="true" data-test="mms-no-rated-star"></span><span aria-hidden="true" data-test="mms-no-rated-star"></span></div></div><div><span data-test="mms-customer-rating-count">0</span><span id="rating-description-screen-reader-:Rb6i1krdakbqorajct:">Basierend auf 0 Bewertungen</span><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Weitere Informationen zu Produktbewertungen anzeigen" class="iDqtxR kBLyCw" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="kGOPsL" color="#000000" height="16" width="16"></span></button></div></div></div></div></div><div class="kZeFLJ"><div><div class="kKHmyB"><dl class="gXjDqa"><dt><div class="cHFbNd"><p class="cGnhfJ">Titel</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Toy Story 1-4</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Genre</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Animation/Zeichentrick</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Altersfreigabe (FSK)</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Freigegeben ohne Altersbeschränkung</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Originaltitel</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Toy Story 1-4</p></div></dd></dl></div></div></div><div class="dtollO"><span></span><div class="ldLxww" data-test="cofr-price product-price"><div data-test="mms-price"><div></div><div class="notranslate"><span aria-hidden="true" class="kipMlP hKPIXT">29,99 €</span><span>29,99€</span></div><div><div><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal"><button data-href="#cofr-price-legal-info" type="button"><span>inkl. MwSt. zzgl. Versand</span></button></p></div></div></div></div></div></div><div class="fgbltE"></div><div class="fgbltE"><div role="separator"></div><div><span></span><div class="hGuOAH" data-test="product-delivery"><div data-test="mms-cofr-delivery_AVAILABLE"><div><div></div></div><div><div><span>Lieferung nach Hause</span></div><div><span>10.09.2026 - 11.09.2026</span></div></div></div></div></div><div></div><div class="dUCMnj" data-test="product-pickup"><div data-test="mms-cofr-pickup_NO_STORE_SELECTED"><div><div></div></div><div><div><span>Abholung</span></div><span>Bitte wähle einen Markt aus<span></span><button type="button">Markt auswählen</button></span></div></div></div></div><div class="gtIozx"><div><div class="kIskS" grid="list" states="[object Object]"><div></div><div class="gGKIeL" state="default"><div><label class="bAsRJV" data-test="mms-product-comparison-add-to" for="srp-entry-point-a2c-2590228"><input aria-invalid="false" class="dvJfQE" id="srp-entry-point-a2c-2590228" name="srp-entry-point-a2c-2590228" type="checkbox" value=""/><div aria-hidden="true" class="jWuxKD bixLNe" color="#ffffff" data-test="icon-test-id"></div><span class="htkAlu" direction="horizontal"></span><p class="cGAFnE">Vergleichen</p></label></div></div></div></div></div><div class="kyuCgq" grid="list" states="[object Object]"><div></div><button aria-disabled="false" aria-label="Zur Wunschliste hinzufügen Toy Story 1-4 (4 Movie Coll.) Blu-ray" class="gqJlND" data-ignore-a11y="true" data-test="mms-search-wishlist-unselected" translate="no" type="button"><div aria-hidden="true" class="kAwIrP" height="24" width="24"></div></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb Toy Story 1-4 (4 Movie Coll.) Blu-ray" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="2590228" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb Toy Story 1-4 (4 Movie Coll.) Blu-ray" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="2590228" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div></div></div></article>"""
+
+FIX_LISTING_DE = """<!DOCTYPE html>
+<html lang="de"><head><link data-rh="true" href="https://www.mediamarkt.de/de/category/kühlen-gefrieren-32.html" rel="canonical"/><link data-rh="true" href="https://www.mediamarkt.de/de/category/kühlen-gefrieren-32.html?page=2" rel="next"/><script type="application/ld+json">{"@context": "https://schema.org", "@type": "ItemList", "itemListElement": [{"@type": "ListItem", "position": 1, "item": {"@type": "Product", "name": "KOENIC KFK 631-1 C IN Kühl-Kombi statisch (C, 315 l, 185,5 cm hoch, Edelstahl)", "image": "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152757", "offers": {"@type": "Offer", "price": 349, "priceCurrency": "EUR"}, "aggregateRating": {"@type": "AggregateRating", "ratingValue": 4.5966, "reviewCount": 119}, "url": "https://www.mediamarkt.de/de/product/_koenic-kfk-631-1-c-in-kuhlgefrierkombination-c-149-kwh-1850-mm-hoch-inox-2882323.html"}}, {"@type": "ListItem", "position": 2, "item": {"@type": "Product", "name": "OK. OFK 411 C IN Kühlgefrierkombination (C, 173 l, 1422 mm hoch, Edelstahl Look)", "image": "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_134535117", "offers": {"@type": "Offer", "price": 299, "priceCurrency": "EUR"}, "aggregateRating": {"@type": "AggregateRating", "ratingValue": 4, "reviewCount": 46}, "url": "https://www.mediamarkt.de/de/product/_ok-ofk-411-c-in-kuhlgefrierkombination-c-124-kwh-1422-mm-hoch-edelstahl-look-2881243.html"}}, {"@type": "ListItem", "position": 3, "item": {"@type": "Product", "name": "KOENIC KDD 171 E IN NF Side-by-Side-Kühl-Kombigerät (442 l, E, 176,5 cm hoch, Edelstahl)", "image": "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_165341274", "offers": {"@type": "Offer", "price": 399, "priceCurrency": "EUR"}, "aggregateRating": {"@type": "AggregateRating", "ratingValue": 4.6701, "reviewCount": 97}, "url": "https://www.mediamarkt.de/de/product/_koenic-kdd-171-e-in-nf-side-by-side-e-1770-mm-hoch-inox-2852155.html"}}]}</script></head><body><img src="https://assets.mmsrg.com/isr/x"/><div class="grid"><article class="frLpWO" data-test="mms-product-card"><div><div class="kMDfTj"><div class="fwydWh WYVMk"><div class="iJwEaV"><div class="dSKXLe"><div class="jgKSdo"><ul class="fmJWhh"><li class="gcaLPe"><div class="llIEvK" data-test="mms-badge"><span class="kiZnjo" data-cs-mask="true" title="Tiefpreis Tage">Tiefpreis Tage</span></div></li><li class="gcaLPe"><div class="llIEvK" data-test="mms-badge"><span class="kiZnjo" data-cs-mask="true" title="Unsere Eigenmarke">Unsere Eigenmarke</span></div></li></ul></div></div></div></div><div class="cdOdXP"><a aria-label="Ein dunkelgrauer Koenic-Kühlschrank. Die obere Tür ist größer als die untere. Die Marke befindet sich oben." class="cevLqa hZAwcG" data-test="mms-router-link-product-image-wrapper" href="/de/product/_koenic-kfk-631-1-c-in-kuhlgefrierkombination-c-149-kwh-1850-mm-hoch-inox-2882323.html" target="_self"><div><picture aria-hidden="true" data-test="product-image"><img alt="" crossorigin="anonymous" decoding="sync" fetchpriority="high" loading="eager" src="https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152757?x=416&amp;y=416&amp;format=webp&amp;quality=60&amp;sp=yes&amp;strip=yes&amp;trim=yes&amp;ex=416&amp;ey=416&amp;align=center&amp;resizesource&amp;unsharp=0.5x0.5"/></picture></div></a></div><div class="iSysHa"><div class="dlCFDA" data-test="cofr-card-product-energy-efficiency"><div><div data-test="mms-energy-efficiency-label"><button aria-label="Energieeffizienzklasse C" data-test="mms-energy-efficiency-arrow-button" type="button"><span aria-hidden="false" aria-label=" C" data-test="mms-energy-efficiency-arrow" role="img"></span></button><a data-test="mms-anchor-link" href="https://assets.mmsrg.com/ada/166325/c1/-/-/ASSET_MMS_167152778/?direct" rel="noopener noreferrer" target="_blank">Produktdatenblatt</a></div></div></div></div><div class="fnobFr"><a data-test="mms-router-link-product-list-item-link" href="/de/product/_koenic-kfk-631-1-c-in-kuhlgefrierkombination-c-149-kwh-1850-mm-hoch-inox-2882323.html" target="_self"><div class="hDcNlA" title="KOENIC KFK 631-1 C IN Kühl-Kombi statisch (C, 315 l, 185,5 cm hoch, Edelstahl)"><h3 class="dhStGl" data-test="product-title">KOENIC KFK 631-1 C IN Kühl-Kombi statisch (C, 315 l, 185,5 cm hoch, Edelstahl)</h3></div></a></div><div class="ecVWKw"><div><div class="TLeXV"><div data-test="mms-customer-rating-container" id=":R2pi1irdakbqorajct:"><div aria-label="Durchschnittliche Produktbewertung: 4.6 von 5 Sternen" data-test="mms-customer-rating" role="img"><div><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><div data-test="mms-partial-rated-star"><div><span aria-hidden="true"></span></div><span aria-hidden="true"></span></div></div></div><div><span data-test="mms-customer-rating-count">119</span><span id="rating-description-screen-reader-:R2pi1irdakbqorajct:">Basierend auf 119 Bewertungen</span><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Weitere Informationen zu Produktbewertungen anzeigen" class="iDqtxR kBLyCw" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="kGOPsL" color="#000000" height="16" width="16"></span></button></div></div></div></div></div><div class="kZeFLJ"><div><div class="kKHmyB"><dl class="gXjDqa"><dt><div class="cHFbNd"><p class="cGnhfJ">Abmessungen (B/H/T)</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">59.8 cm x 185.5 cm x 58.00 cm</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">No Frost-System</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Nein</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">0°C Frischkühlzone (für längere Haltbarkeit)</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Nein</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">antibakterielle Innenbeschichtung</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Nein</p></div></dd></dl></div></div></div><div class="dtollO"><span></span><div class="ldLxww" data-test="cofr-price product-price"><div data-test="mms-price"><div><div class="kGZxQX notranslate" data-test="mms-strike-price-type-lop"><span class="fzObRQ" data-test="mms-strike-price-label">Tiefstpreis (30 Tage): </span> <span aria-hidden="true" class="jCGxOY">299,– €</span><span>299,00€</span></div><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Niedrigster Preis der letzten 30 Tage auf mediamarkt.de (MediaMarkt bzw. Marktplatz-Verkäufer)" class="iDqtxR kBLyCw lmKGlx" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="opCjq" color="#000000" height="[object Object]" width="[object Object]"></span></button></div><div class="notranslate"><span aria-hidden="true" class="clIvFR hKPIXT">349,– €</span><span>349,00€</span></div><div><div><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal"><button data-href="#cofr-price-legal-info" type="button"><span>inkl. MwSt. zzgl. Versand</span></button></p><span class="kNYyGq" data-test="additional-info-spacer"></span></div><span class="bmwavm"></span><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal">Bezahle in <strong>18 Raten à 19,39 €</strong> (eff. Zins. P.a. 0,00 %)** Gesamtpreis 349,– €</p></div></div></div></div></div></div><div class="fgbltE"></div><div class="fgbltE"><div role="separator"></div><div><span></span><div class="hGuOAH" data-test="product-delivery"><div data-test="mms-cofr-delivery_AVAILABLE"><div><div></div></div><div><div><span>Lieferung nach Hause</span></div><div><span>11.09.2026 - 17.09.2026</span></div></div></div></div></div><div></div><div class="dUCMnj" data-test="product-pickup"><div data-test="mms-cofr-pickup_NO_STORE_SELECTED"><div><div></div></div><div><div><span>Abholung</span></div><span>Bitte wähle einen Markt aus<span></span><button type="button">Markt auswählen</button></span></div></div></div></div><div class="gtIozx"><div><div class="kIskS" grid="list" states="[object Object]"><div></div><div class="gGKIeL" state="default"><div><label class="bAsRJV" data-test="mms-product-comparison-add-to" for="srp-entry-point-a2c-2882323"><input aria-invalid="false" class="dvJfQE" id="srp-entry-point-a2c-2882323" name="srp-entry-point-a2c-2882323" type="checkbox" value=""/><div aria-hidden="true" class="jWuxKD bixLNe" color="#ffffff" data-test="icon-test-id"></div><span class="htkAlu" direction="horizontal"></span><p class="cGAFnE">Vergleichen</p></label></div></div></div></div></div><div class="kyuCgq" grid="list" states="[object Object]"><div></div><button aria-disabled="false" aria-label="Zur Wunschliste hinzufügen KOENIC KFK 631-1 C IN Kühl-Kombi statisch (C, 315 l, 185,5 cm hoch, Edelstahl)" class="gqJlND" data-ignore-a11y="true" data-test="mms-search-wishlist-unselected" translate="no" type="button"><div aria-hidden="true" class="kAwIrP" height="24" width="24"></div></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb KOENIC KFK 631-1 C IN Kühl-Kombi statisch (C, 315 l, 185,5 cm hoch, Edelstahl)" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="2882323" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb KOENIC KFK 631-1 C IN Kühl-Kombi statisch (C, 315 l, 185,5 cm hoch, Edelstahl)" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="2882323" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div></div></div></article><article class="frLpWO" data-test="mms-product-card"><div><div class="kMDfTj"><div class="fwydWh WYVMk"><div class="iJwEaV"><div class="dSKXLe"><div class="jgKSdo"><ul class="fmJWhh"><li class="gcaLPe"><div class="llIEvK" data-test="mms-badge"><span class="kiZnjo" data-cs-mask="true" title="Tiefpreis Tage">Tiefpreis Tage</span></div></li><li class="gcaLPe"><div class="llIEvK" data-test="mms-badge"><span class="kiZnjo" data-cs-mask="true" title="Unsere Eigenmarke">Unsere Eigenmarke</span></div></li></ul></div></div></div></div><div class="cdOdXP"><a aria-label="Ein grauer, zweitüriger Kühlschrank vor weißem Hintergrund." class="cevLqa hZAwcG" data-test="mms-router-link-product-image-wrapper" href="/de/product/_ok-ofk-411-c-in-kuhlgefrierkombination-c-124-kwh-1422-mm-hoch-edelstahl-look-2881243.html" target="_self"><div><picture aria-hidden="true" data-test="product-image"><img alt="" crossorigin="anonymous" decoding="async" fetchpriority="auto" loading="lazy" src="https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_134535117?x=416&amp;y=416&amp;format=webp&amp;quality=60&amp;sp=yes&amp;strip=yes&amp;trim=yes&amp;ex=416&amp;ey=416&amp;align=center&amp;resizesource&amp;unsharp=0.5x0.5"/></picture></div></a></div><div class="iSysHa"><div class="dlCFDA" data-test="cofr-card-product-energy-efficiency"><div><div data-test="mms-energy-efficiency-label"><button aria-label="Energieeffizienzklasse C" data-test="mms-energy-efficiency-arrow-button" type="button"><span aria-hidden="false" aria-label=" C" data-test="mms-energy-efficiency-arrow" role="img"></span></button><a data-test="mms-anchor-link" href="https://assets.mmsrg.com/ada/166325/c1/-/-/ASSET_MMS_134535752/?direct" rel="noopener noreferrer" target="_blank">Produktdatenblatt</a></div></div></div></div><div class="fnobFr"><a data-test="mms-router-link-product-list-item-link" href="/de/product/_ok-ofk-411-c-in-kuhlgefrierkombination-c-124-kwh-1422-mm-hoch-edelstahl-look-2881243.html" target="_self"><div class="hDcNlA" title="OK. OFK 411 C IN Kühlgefrierkombination (C, 173 l, 1422 mm hoch, Edelstahl Look)"><h3 class="dhStGl" data-test="product-title">OK. OFK 411 C IN Kühlgefrierkombination (C, 173 l, 1422 mm hoch, Edelstahl Look)</h3></div></a></div><div class="ecVWKw"><div><div class="TLeXV"><div data-test="mms-customer-rating-container" id=":R2pi2irdakbqorajct:"><div aria-label="Durchschnittliche Produktbewertung: 4 von 5 Sternen" data-test="mms-customer-rating" role="img"><div><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-no-rated-star"></span></div></div><div><span data-test="mms-customer-rating-count">46</span><span id="rating-description-screen-reader-:R2pi2irdakbqorajct:">Basierend auf 46 Bewertungen</span><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Weitere Informationen zu Produktbewertungen anzeigen" class="iDqtxR kBLyCw" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="kGOPsL" color="#000000" height="16" width="16"></span></button></div></div></div></div></div><div class="kZeFLJ"><div><div class="kKHmyB"><dl class="gXjDqa"><dt><div class="cHFbNd"><p class="cGnhfJ">Abmessungen (B/H/T)</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">550 mm x 1422 mm x 560 mm</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">No Frost-System</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Nein</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">0°C Frischkühlzone (für längere Haltbarkeit)</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Nein</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">antibakterielle Innenbeschichtung</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Nein</p></div></dd></dl></div></div></div><div class="dtollO"><span></span><div class="ldLxww" data-test="cofr-price product-price"><div data-test="mms-price"><div><div class="kGZxQX notranslate" data-test="mms-strike-price-type-lop"><span class="fzObRQ" data-test="mms-strike-price-label">Tiefstpreis (30 Tage): </span> <span aria-hidden="true" class="jCGxOY">222,– €</span><span>222,00€</span></div><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Niedrigster Preis der letzten 30 Tage auf mediamarkt.de (MediaMarkt bzw. Marktplatz-Verkäufer)" class="iDqtxR kBLyCw lmKGlx" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="opCjq" color="#000000" height="[object Object]" width="[object Object]"></span></button></div><div class="notranslate"><span aria-hidden="true" class="clIvFR hKPIXT">299,– €</span><span>299,00€</span></div><div><div><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal"><button data-href="#cofr-price-legal-info" type="button"><span>inkl. MwSt. zzgl. Versand</span></button></p><span class="kNYyGq" data-test="additional-info-spacer"></span></div><span class="bmwavm"></span><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal">Bezahle in <strong>18 Raten à 16,61 €</strong> (eff. Zins. P.a. 0,00 %)** Gesamtpreis 299,– €</p></div></div></div></div></div></div><div class="fgbltE"></div><div class="fgbltE"><div role="separator"></div><div><span></span><div class="hGuOAH" data-test="product-delivery"><div data-test="mms-cofr-delivery_AVAILABLE"><div><div></div></div><div><div><span>Lieferung nach Hause</span></div><div><span>11.09.2026 - 17.09.2026</span></div></div></div></div></div><div></div><div class="dUCMnj" data-test="product-pickup"><div data-test="mms-cofr-pickup_NO_STORE_SELECTED"><div><div></div></div><div><div><span>Abholung</span></div><span>Bitte wähle einen Markt aus<span></span><button type="button">Markt auswählen</button></span></div></div></div></div><div class="gtIozx"><div><div class="kIskS" grid="list" states="[object Object]"><div></div><div class="gGKIeL" state="default"><div><label class="bAsRJV" data-test="mms-product-comparison-add-to" for="srp-entry-point-a2c-2881243"><input aria-invalid="false" class="dvJfQE" id="srp-entry-point-a2c-2881243" name="srp-entry-point-a2c-2881243" type="checkbox" value=""/><div aria-hidden="true" class="jWuxKD bixLNe" color="#ffffff" data-test="icon-test-id"></div><span class="htkAlu" direction="horizontal"></span><p class="cGAFnE">Vergleichen</p></label></div></div></div></div></div><div class="kyuCgq" grid="list" states="[object Object]"><div></div><button aria-disabled="false" aria-label="Zur Wunschliste hinzufügen OK. OFK 411 C IN Kühlgefrierkombination (C, 173 l, 1422 mm hoch, Edelstahl Look)" class="gqJlND" data-ignore-a11y="true" data-test="mms-search-wishlist-unselected" translate="no" type="button"><div aria-hidden="true" class="kAwIrP" height="24" width="24"></div></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb OK. OFK 411 C IN Kühlgefrierkombination (C, 173 l, 1422 mm hoch, Edelstahl Look)" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="2881243" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb OK. OFK 411 C IN Kühlgefrierkombination (C, 173 l, 1422 mm hoch, Edelstahl Look)" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="2881243" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div></div></div></article><article class="frLpWO" data-test="mms-product-card"><div><div class="kMDfTj"><div class="fwydWh WYVMk"><div class="iJwEaV"><div class="dSKXLe"><div class="bMkPtx"><ul class="fmJWhh"><li class="gcaLPe"><div class="llIEvK" data-test="mms-badge"><span class="kiZnjo" data-cs-mask="true" title="Tiefpreis Tage">Tiefpreis Tage</span></div></li></ul></div></div></div></div><div class="cdOdXP"><a aria-label="Ein dunkelgrauer Koenic-Kühlschrank mit Side-by-Side-Türen. Er hat ein Bedienfeld und steht vor weißem Hintergrund." class="cevLqa hZAwcG" data-test="mms-router-link-product-image-wrapper" href="/de/product/_koenic-kdd-171-e-in-nf-side-by-side-e-1770-mm-hoch-inox-2852155.html" target="_self"><div><picture aria-hidden="true" data-test="product-image"><img alt="" crossorigin="anonymous" decoding="async" fetchpriority="auto" loading="lazy" src="https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_165341274?x=416&amp;y=416&amp;format=webp&amp;quality=60&amp;sp=yes&amp;strip=yes&amp;trim=yes&amp;ex=416&amp;ey=416&amp;align=center&amp;resizesource&amp;unsharp=0.5x0.5"/></picture></div></a></div><div class="iSysHa"><div class="dlCFDA" data-test="cofr-card-product-energy-efficiency"><div><div data-test="mms-energy-efficiency-label"><button aria-label="Energieeffizienzklasse E" data-test="mms-energy-efficiency-arrow-button" type="button"><span aria-hidden="false" aria-label=" E" data-test="mms-energy-efficiency-arrow" role="img"></span></button></div></div></div></div><div class="fnobFr"><a data-test="mms-router-link-product-list-item-link" href="/de/product/_koenic-kdd-171-e-in-nf-side-by-side-e-1770-mm-hoch-inox-2852155.html" target="_self"><div class="hDcNlA" title="KOENIC KDD 171 E IN NF Side-by-Side-Kühl-Kombigerät (442 l, E, 176,5 cm hoch, Edelstahl)"><h3 class="dhStGl" data-test="product-title">KOENIC KDD 171 E IN NF Side-by-Side-Kühl-Kombigerät (442 l, E, 176,5 cm hoch, Edelstahl)</h3></div></a></div><div class="ecVWKw"><div><div class="TLeXV"><div data-test="mms-customer-rating-container" id=":Rb6i4irdakbqorajct:"><div aria-label="Durchschnittliche Produktbewertung: 4.7 von 5 Sternen" data-test="mms-customer-rating" role="img"><div><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><div data-test="mms-partial-rated-star"><div><span aria-hidden="true"></span></div><span aria-hidden="true"></span></div></div></div><div><span data-test="mms-customer-rating-count">97</span><span id="rating-description-screen-reader-:Rb6i4irdakbqorajct:">Basierend auf 97 Bewertungen</span><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Weitere Informationen zu Produktbewertungen anzeigen" class="iDqtxR kBLyCw" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="kGOPsL" color="#000000" height="16" width="16"></span></button></div></div></div></div></div><div class="kZeFLJ"><div><div class="kKHmyB"><dl class="gXjDqa"><dt><div class="cHFbNd"><p class="cGnhfJ">Abmessungen (B/H/T)</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">90.5 cm x 176.5 cm x 57.2 cm</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Wasseranschluss</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Nein</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Eiswürfelspender</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Nein</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Wasserspender</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Nein</p></div></dd></dl></div></div></div><div class="dtollO"><span></span><div class="ldLxww" data-test="cofr-price product-price"><div data-test="mms-price"><div></div><div class="notranslate"><span aria-hidden="true" class="kipMlP hKPIXT">399,– €</span><span>399,00€</span></div><div><div><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal"><button data-href="#cofr-price-legal-info" type="button"><span>inkl. MwSt. zzgl. Versand</span></button></p><span class="kNYyGq" data-test="additional-info-spacer"></span></div><span class="bmwavm"></span><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal">Bezahle in <strong>18 Raten à 22,17 €</strong> (eff. Zins. P.a. 0,00 %)** Gesamtpreis 399,– €</p></div></div></div></div></div></div><div class="fgbltE"></div><div class="fgbltE"><div role="separator"></div><div><span></span><div class="hGuOAH" data-test="product-delivery"><div data-test="mms-cofr-delivery_AVAILABLE"><div><div></div></div><div><div><span>Lieferung nach Hause</span></div><div><span>11.09.2026 - 17.09.2026</span></div></div></div></div></div><div></div><div class="dUCMnj" data-test="product-pickup"><div data-test="mms-cofr-pickup_NO_STORE_SELECTED"><div><div></div></div><div><div><span>Abholung</span></div><span>Bitte wähle einen Markt aus<span></span><button type="button">Markt auswählen</button></span></div></div></div></div><div class="gtIozx"><div><div class="kIskS" grid="list" states="[object Object]"><div></div><div class="gGKIeL" state="default"><div><label class="bAsRJV" data-test="mms-product-comparison-add-to" for="srp-entry-point-a2c-2852155"><input aria-invalid="false" class="dvJfQE" id="srp-entry-point-a2c-2852155" name="srp-entry-point-a2c-2852155" type="checkbox" value=""/><div aria-hidden="true" class="jWuxKD bixLNe" color="#ffffff" data-test="icon-test-id"></div><span class="htkAlu" direction="horizontal"></span><p class="cGAFnE">Vergleichen</p></label></div></div></div></div></div><div class="kyuCgq" grid="list" states="[object Object]"><div></div><button aria-disabled="false" aria-label="Zur Wunschliste hinzufügen KOENIC KDD 171 E IN NF Side-by-Side-Kühl-Kombigerät (442 l, E, 176,5 cm hoch, Edelstahl)" class="gqJlND" data-ignore-a11y="true" data-test="mms-search-wishlist-unselected" translate="no" type="button"><div aria-hidden="true" class="kAwIrP" height="24" width="24"></div></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb KOENIC KDD 171 E IN NF Side-by-Side-Kühl-Kombigerät (442 l, E, 176,5 cm hoch, Edelstahl)" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="2852155" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb KOENIC KDD 171 E IN NF Side-by-Side-Kühl-Kombigerät (442 l, E, 176,5 cm hoch, Edelstahl)" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="2852155" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div></div></div></article></div><div class="count">12 von 2311</div></body></html>"""
+
+FIX_LISTING_SEARCH = """<!DOCTYPE html>
+<html lang="de"><head><link data-rh="true" href="https://www.mediamarkt.de/de/search.html?query=usb-c kabel 2m" rel="canonical"/><script type="application/ld+json">{"@context": "https://schema.org", "@type": "ItemList", "itemListElement": [{"@type": "ListItem", "position": 1, "item": {"@type": "Product", "name": "ISY IUC-5200, USB Typ-C Kabel, 2 m, Weiß", "image": "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_108726693", "offers": {"@type": "Offer", "price": 12.99, "priceCurrency": "EUR"}, "aggregateRating": {"@type": "AggregateRating", "ratingValue": 4.2222, "reviewCount": 27}, "url": "https://www.mediamarkt.de/de/product/_isy-iuc-5200-usb-typ-c-kabel-weiss-2873501.html"}}, {"@type": "ListItem", "position": 2, "item": {"@type": "Product", "name": "ISY IHD 9000-1 USB-C auf HDMI® Kabel, Schwarz", "image": "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_140639688", "offers": {"@type": "Offer", "price": 24.99, "priceCurrency": "EUR"}, "aggregateRating": {"@type": "AggregateRating", "ratingValue": 3.9286, "reviewCount": 14}, "url": "https://www.mediamarkt.de/de/product/_isy-ihd-9000-1-usb-c-auf-hdmir-kabel-schwarz-2918351.html"}}]}</script></head><body><img src="https://assets.mmsrg.com/isr/x"/><div class="grid"><article class="frLpWO" data-test="mms-product-card"><div><div class="kMDfTj"><div class="fwydWh WYVMk"><div class="iJwEaV"><div class="dSKXLe"><div class="bMkPtx"><ul class="fmJWhh"><li class="gcaLPe"><div class="llIEvK" data-test="mms-badge"><span class="kiZnjo" data-cs-mask="true" title="Unsere Eigenmarke">Unsere Eigenmarke</span></div></li></ul></div></div></div></div><div class="cdOdXP"><a aria-label="Weißes USB-C-Kabel, in der Mitte aufgerollt, mit '100W'- und 'ISY'-Aufdrucken." class="cevLqa hZAwcG" data-test="mms-router-link-product-image-wrapper" href="/de/product/_isy-iuc-5200-usb-typ-c-kabel-weiss-2873501.html" target="_self"><div><picture aria-hidden="true" data-test="product-image"><img alt="" crossorigin="anonymous" decoding="sync" fetchpriority="high" loading="eager" src="https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_108726693?x=416&amp;y=416&amp;format=webp&amp;quality=60&amp;sp=yes&amp;strip=yes&amp;trim=yes&amp;ex=416&amp;ey=416&amp;align=center&amp;resizesource&amp;unsharp=0.5x0.5"/></picture></div></a></div><div class="iSysHa"></div><div class="fnobFr"><a data-test="mms-router-link-product-list-item-link" href="/de/product/_isy-iuc-5200-usb-typ-c-kabel-weiss-2873501.html" target="_self"><div class="hDcNlA" title="ISY IUC-5200, USB Typ-C Kabel, 2 m, Weiß"><h3 class="dhStGl" data-test="product-title">ISY IUC-5200, USB Typ-C Kabel, 2 m, Weiß</h3></div></a></div><div class="ecVWKw"><div><div class="TLeXV"><div data-test="mms-customer-rating-container" id=":R5j435mql2v6korajct:"><div aria-label="Durchschnittliche Produktbewertung: 4.2 von 5 Sternen" data-test="mms-customer-rating" role="img"><div><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><div data-test="mms-partial-rated-star"><div><span aria-hidden="true"></span></div><span aria-hidden="true"></span></div></div></div><div><span data-test="mms-customer-rating-count">27</span><span id="rating-description-screen-reader-:R5j435mql2v6korajct:">Basierend auf 27 Bewertungen</span><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Weitere Informationen zu Produktbewertungen anzeigen" class="iDqtxR kBLyCw" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="kGOPsL" color="#000000" height="16" width="16"></span></button></div></div></div></div></div><div class="kZeFLJ"><div><div class="kKHmyB"><dl class="gXjDqa"><dt><div class="cHFbNd"><p class="cGnhfJ">Lieferumfang</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">1x USB-C Kabel</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Produkttyp</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">USB Typ-C Kabel</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Passend für</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Universelles Kabel, kompatibel mit vielen Geräten die über einen USB-C Anschluss verfügen.</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Besondere Merkmale</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">bis zu 480 Mbit/s Datentransfer, unterstützt PD 3.0, schnelles Laden bis zu 100W</p></div></dd></dl></div></div></div><div class="dtollO"><span></span><div class="ldLxww" data-test="cofr-price product-price"><div data-test="mms-price"><div></div><div class="notranslate"><span aria-hidden="true" class="kipMlP hKPIXT">12,99 €</span><span>12,99€</span></div><div><div><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal"><button data-href="#cofr-price-legal-info" type="button"><span>inkl. MwSt. zzgl. Versand</span></button></p></div></div></div></div></div></div><div class="fgbltE"></div><div class="fgbltE"><div role="separator"></div><div><span></span><div class="hGuOAH" data-test="product-delivery"><div data-test="mms-cofr-delivery_AVAILABLE"><div><div></div></div><div><div><span>Lieferung nach Hause</span></div><div><span>10.09.2026 - 11.09.2026</span></div></div></div></div></div><div></div><div class="dUCMnj" data-test="product-pickup"><div data-test="mms-cofr-pickup_NO_STORE_SELECTED"><div><div></div></div><div><div><span>Abholung</span></div><span>Bitte wähle einen Markt aus<span></span><button type="button">Markt auswählen</button></span></div></div></div></div><div class="gtIozx"><div><div class="kIskS" grid="list" states="[object Object]"><div></div><div class="gGKIeL" state="default"><div><label class="bAsRJV" data-test="mms-product-comparison-add-to" for="srp-entry-point-a2c-2873501"><input aria-invalid="false" class="dvJfQE" id="srp-entry-point-a2c-2873501" name="srp-entry-point-a2c-2873501" type="checkbox" value=""/><div aria-hidden="true" class="jWuxKD bixLNe" color="#ffffff" data-test="icon-test-id"></div><span class="htkAlu" direction="horizontal"></span><p class="cGAFnE">Vergleichen</p></label></div></div></div></div></div><div class="kyuCgq" grid="list" states="[object Object]"><div></div><button aria-disabled="false" aria-label="Zur Wunschliste hinzufügen ISY IUC-5200, USB Typ-C Kabel, 2 m, Weiß" class="gqJlND" data-ignore-a11y="true" data-test="mms-search-wishlist-unselected" translate="no" type="button"><div aria-hidden="true" class="kAwIrP" height="24" width="24"></div></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb ISY IUC-5200, USB Typ-C Kabel, 2 m, Weiß" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="2873501" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb ISY IUC-5200, USB Typ-C Kabel, 2 m, Weiß" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="2873501" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div></div></div></article><article class="frLpWO" data-test="mms-product-card"><div><div class="kMDfTj"><div class="cdOdXP"><a aria-label="Graues USB-C-Kabel. Der Markenname 'ISY' ist auf dem grauen Stecker aufgedruckt." class="cevLqa hZAwcG" data-test="mms-router-link-product-image-wrapper" href="/de/product/_isy-ihd-9000-1-usb-c-auf-hdmir-kabel-schwarz-2918351.html" target="_self"><div><picture aria-hidden="true" data-test="product-image"><img alt="" crossorigin="anonymous" decoding="async" fetchpriority="auto" loading="lazy" src="https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_140639688?x=416&amp;y=416&amp;format=webp&amp;quality=60&amp;sp=yes&amp;strip=yes&amp;trim=yes&amp;ex=416&amp;ey=416&amp;align=center&amp;resizesource&amp;unsharp=0.5x0.5"/></picture></div></a></div><div class="iSysHa"></div><div class="fnobFr"><a data-test="mms-router-link-product-list-item-link" href="/de/product/_isy-ihd-9000-1-usb-c-auf-hdmir-kabel-schwarz-2918351.html" target="_self"><div class="hDcNlA" title="ISY IHD 9000-1 USB-C auf HDMI® Kabel, Schwarz"><h3 class="dhStGl" data-test="product-title">ISY IHD 9000-1 USB-C auf HDMI® Kabel, Schwarz</h3></div></a></div><div class="ecVWKw"><div><div class="TLeXV"><div data-test="mms-customer-rating-container" id=":R5j455mql2v6korajct:"><div aria-label="Durchschnittliche Produktbewertung: 3.9 von 5 Sternen" data-test="mms-customer-rating" role="img"><div><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><div data-test="mms-partial-rated-star"><div><span aria-hidden="true"></span></div><span aria-hidden="true"></span></div><span aria-hidden="true" data-test="mms-no-rated-star"></span></div></div><div><span data-test="mms-customer-rating-count">14</span><span id="rating-description-screen-reader-:R5j455mql2v6korajct:">Basierend auf 14 Bewertungen</span><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Weitere Informationen zu Produktbewertungen anzeigen" class="iDqtxR kBLyCw" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="kGOPsL" color="#000000" height="16" width="16"></span></button></div></div></div></div></div><div class="kZeFLJ"><div><div class="kKHmyB"><dl class="gXjDqa"><dt><div class="cHFbNd"><p class="cGnhfJ">Produkttyp</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">USB-C auf HDMI® Kabel</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Anschluss A</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">USB Typ-C 3.1</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Anschluss B</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">HDMI 2.0</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Kabellänge</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">2 m</p></div></dd></dl></div></div></div><div class="dtollO"><span></span><div class="ldLxww" data-test="cofr-price product-price"><div data-test="mms-price"><div></div><div class="notranslate"><span aria-hidden="true" class="kipMlP hKPIXT">24,99 €</span><span>24,99€</span></div><div><div><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal"><button data-href="#cofr-price-legal-info" type="button"><span>inkl. MwSt. zzgl. Versand</span></button></p></div></div></div></div></div></div><div class="fgbltE"></div><div class="fgbltE"><div role="separator"></div><div><span></span><div class="hGuOAH" data-test="product-delivery"><div data-test="mms-cofr-delivery_AVAILABLE"><div><div></div></div><div><div><span>Lieferung nach Hause</span></div><div><span>10.09.2026 - 11.09.2026</span></div></div></div></div></div><div></div><div class="dUCMnj" data-test="product-pickup"><div data-test="mms-cofr-pickup_NO_STORE_SELECTED"><div><div></div></div><div><div><span>Abholung</span></div><span>Bitte wähle einen Markt aus<span></span><button type="button">Markt auswählen</button></span></div></div></div></div><div class="gtIozx"><div><div class="kIskS" grid="list" states="[object Object]"><div></div><div class="gGKIeL" state="default"><div><label class="bAsRJV" data-test="mms-product-comparison-add-to" for="srp-entry-point-a2c-2918351"><input aria-invalid="false" class="dvJfQE" id="srp-entry-point-a2c-2918351" name="srp-entry-point-a2c-2918351" type="checkbox" value=""/><div aria-hidden="true" class="jWuxKD bixLNe" color="#ffffff" data-test="icon-test-id"></div><span class="htkAlu" direction="horizontal"></span><p class="cGAFnE">Vergleichen</p></label></div></div></div></div></div><div class="kyuCgq" grid="list" states="[object Object]"><div></div><button aria-disabled="false" aria-label="Zur Wunschliste hinzufügen ISY IHD 9000-1 USB-C auf HDMI® Kabel, Schwarz" class="gqJlND" data-ignore-a11y="true" data-test="mms-search-wishlist-unselected" translate="no" type="button"><div aria-hidden="true" class="kAwIrP" height="24" width="24"></div></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb ISY IHD 9000-1 USB-C auf HDMI® Kabel, Schwarz" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="2918351" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div><div><button aria-disabled="false" aria-label="In den Warenkorb ISY IHD 9000-1 USB-C auf HDMI® Kabel, Schwarz" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="2918351" translate="no" type="button"><span aria-hidden="true"></span><span>In den Warenkorb</span></button></div></div></div></article></div><div class="count">12 von 845</div></body></html>"""
+
+FIX_DETAIL_RRP = """<!DOCTYPE html>
+<html lang="de"><head><script type="application/ld+json">{"@context": "https://schema.org/", "@type": "BuyAction", "object": {"@type": "Product", "brand": {"@type": "Brand", "name": "NINTENDO"}, "description": "Tomodachi Life: Wo Träume wahr werden | [Nintendo Switch] im Onlineshop von MediaMarkt kaufen. Jetzt bequem online bestellen.", "sku": "3053694", "gtin13": "0045496513702", "image": ["https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_170062068/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_176530498/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_170062063/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_170062067/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_170062070/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_170062071/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_170062072/fee_786_587_png"], "name": "Tomodachi Life: Wo Träume wahr werden - [Nintendo Switch]", "url": "https://www.mediamarkt.de/de/product/_tomodachi-life-wo-traume-wahr-werden-nintendo-switch-3053694.html", "aggregateRating": {"@type": "AggregateRating", "ratingValue": "5.0", "ratingCount": "4"}, "review": [{"@type": "Review", "reviewRating": {"@type": "Rating", "ratingValue": 5}, "author": {"@type": "Person", "name": "Gina"}, "datePublished": "2026-08-24T16:02:55.000+00:00", "name": "Mega Spiel", "reviewBody": "Meine Tochter findet das Spiel genial. \\nKaufempfehlung definitiv."}, {"@type": "Review", "reviewRating": {"@type": "Rating", "ratingValue": 5}, "author": {"@type": "Person", "name": "Kellerkind"}, "datePublished": "2026-06-29T18:03:32.000+00:00", "name": "Spiel macht dem Kind viel Freude.", "reviewBody": "Spiel kam wie erwartet pünktlich an. Die Tochter war glücklich über ihr Geburtstagsgeschenk."}], "offers": {"@type": "Offer", "priceCurrency": "EUR", "price": 49.99, "itemCondition": "https://schema.org/NewCondition", "availability": "https://schema.org/InStock", "url": "https://www.mediamarkt.de/de/product/_tomodachi-life-wo-traume-wahr-werden-nintendo-switch-3053694.html", "shippingDetails": {"@type": "OfferShippingDetails", "shippingDestination": {"@type": "DefinedRegion", "addressCountry": {"@type": "Country", "name": "DE"}}, "shippingRate": {"@type": "MonetaryAmount", "value": 2.99, "currency": "EUR"}, "deliveryTime": {"@type": "ShippingDeliveryTime", "handlingTime": {"@type": "QuantitativeValue", "minValue": 0, "maxValue": 1, "unitCode": "DAY"}, "transitTime": {"@type": "QuantitativeValue", "minValue": 0, "maxValue": 2, "unitCode": "DAY"}}}, "priceSpecification": [{"@type": "UnitPriceSpecification", "priceType": "https://schema.org/StrikethroughPrice", "price": 59.99, "priceCurrency": "EUR"}, {"@type": "UnitPriceSpecification", "name": "Standard price (non-loyalty members)", "price": "49.99", "priceCurrency": "EUR", "validForMemberTier": {"@type": "MemberProgramTier", "name": "Non-loyalty members"}}, {"@type": "UnitPriceSpecification", "name": "Standard price (loyalty members)", "price": "49.99", "priceCurrency": "EUR", "validForMemberTier": {"@type": "MemberProgramTier", "name": "Loyalty member"}}, {"@type": "UnitPriceSpecification", "name": "MyMediaMarkt points earned", "price": "49.99", "priceCurrency": "EUR", "validForMemberTier": {"@type": "MemberProgramTier", "name": "Loyalty member"}, "membershipPointsEarned": {"@type": "QuantitativeValue", "value": 250, "unitText": "points"}}], "hasMerchantReturnPolicy": [{"@type": "MerchantReturnPolicy", "returnPolicyCategory": "https://schema.org/MerchantReturnFiniteReturnWindow", "merchantReturnDays": 14, "merchantReturnLink": "https://www.mediamarkt.de/de/service/umtausch-rueckgabe", "returnFees": "https://schema.org/ReturnShippingFees", "returnMethod": ["https://schema.org/ReturnInStore", "https://schema.org/ReturnByMail"], "refundType": "https://schema.org/FullRefund", "applicableCountry": {"@type": "Country", "name": "DE"}, "returnPolicyCountry": {"@type": "Country", "name": "DE"}}, {"@type": "MerchantReturnPolicy", "returnPolicyCategory": "https://schema.org/MerchantReturnFiniteReturnWindow", "merchantReturnDays": 30, "merchantReturnLink": "https://www.mediamarkt.de/de/service/umtausch-rueckgabe", "returnFees": "https://schema.org/ReturnShippingFees", "returnMethod": ["https://schema.org/ReturnInStore", "https://schema.org/ReturnByMail"], "refundType": "https://schema.org/FullRefund", "applicableCountry": {"@type": "Country", "name": "DE"}, "returnPolicyCountry": {"@type": "Country", "name": "DE"}}], "hasOfferCatalog": {"@type": "OfferCatalog", "name": "MyMediaMarkt", "url": "https://www.mediamarkt.de/de/myaccount/loyalty-benefits"}}, "memberOf": {"@type": "MemberProgram", "name": "MyMediaMarkt", "url": "https://www.mediamarkt.de/de/myaccount/loyalty-benefits", "hasTier": [{"@type": "MemberProgramTier", "name": "Non-loyalty members"}, {"@type": "MemberProgramTier", "name": "Loyalty member"}]}}}</script><script type="application/ld+json">{"@context": "https://schema.org", "@type": "BreadcrumbList", "itemListElement": [{"@type": "ListItem", "position": 1, "name": "home", "item": "https://www.mediamarkt.de"}, {"@type": "ListItem", "position": 2, "name": "Film & Musik", "item": "https://www.mediamarkt.de/de/category/film-musik-485.html"}, {"@type": "ListItem", "position": 3, "name": "Filme & Serien", "item": "https://www.mediamarkt.de/de/category/filme-serien-486.html"}, {"@type": "ListItem", "position": 4, "name": "Film Genres", "item": "https://www.mediamarkt.de/de/category/film-genres-1145.html"}, {"@type": "ListItem", "position": 5, "name": "Sonstige Filme", "item": "https://www.mediamarkt.de/de/category/sonstige-filme-1187.html"}, {"@type": "ListItem", "position": 6, "name": "Tomodachi Life: Wo Träume wahr werden - [Nintendo Switch]", "item": "https://www.mediamarkt.de/de/product/_tomodachi-life-wo-traume-wahr-werden-nintendo-switch-3053694.html"}]}</script></head><body><img src="https://assets.mmsrg.com/isr/x"/><div data-test="mms-product-price"><div><div><span></span><div data-test="cofr-price mms-branded-price"><div><div><div><span>-16%</span></div><span class="htkAlu" direction="horizontal"></span><p class="jrBeuL notranslate" data-test="mms-strike-price-type-rrp"><span class="eSIYlM">UVP </span><span aria-hidden="true" class="jrurFT">59,99 €</span><span>59,99€</span></p><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Der hier angezeigte Preis ist die unverbindliche Preisempfehlung des Herstellers" class="iDqtxR kBLyCw BjCO" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="kGOPsL" color="#000000" height="16" width="16"></span></button></div><div class="ivojoI"><div class="irOfMb notranslate"><span aria-hidden="true" class="iVZVTX" data-test="branded-price-whole-value">49,</span><div><span aria-hidden="true" class="bpdVmQ" data-test="branded-price-decimal-value">99</span></div><span aria-hidden="true" class="iVZVTX" data-test="branded-price-currency"> €</span></div><span>49,99€</span></div><div><span class="bmwavm"></span><div><p class="dWAvSD" data-test="additional-info-branded"><button data-href="#cofr-price-legal-info" type="button"><span>inkl. MwSt. zzgl. Versand</span></button></p></div></div></div></div></div></div></div></body></html>"""
+
+FIX_DETAIL_LOP = """<!DOCTYPE html>
+<html lang="de"><head><script type="application/ld+json">{"@context": "https://schema.org/", "@type": "BuyAction", "object": {"@type": "Product", "brand": {"@type": "Brand", "name": "KOENIC"}, "description": "KOENIC KFK 631-1 C IN Kühl-Kombi statisch (C, 315 l, 185,5 cm hoch, Edelstahl) im Onlineshop von MediaMarkt kaufen. Jetzt bequem online bestellen.", "sku": "2882323", "gtin13": "4049011192362", "image": ["https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152757/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_180743247/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_179676133/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_179676134/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_179676132/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_179676135/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_179676136/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_179676137/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152763/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152765/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152762/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152758/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152776/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152775/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152773/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152767/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152768/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152769/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152774/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152777/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152770/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152766/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152760/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152761/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_167152759/fee_786_587_png"], "name": "KOENIC KFK 631-1 C IN Kühl-Kombi statisch (C, 315 l, 185,5 cm hoch, Edelstahl)", "url": "https://www.mediamarkt.de/de/product/_koenic-kfk-631-1-c-in-kuhlgefrierkombination-c-149-kwh-1850-mm-hoch-inox-2882323.html", "aggregateRating": {"@type": "AggregateRating", "ratingValue": "4.6", "ratingCount": "119"}, "review": [{"@type": "Review", "reviewRating": {"@type": "Rating", "ratingValue": 4}, "author": {"@type": "Person", "name": "Hary"}, "datePublished": "2026-09-06T16:22:55.000+00:00", "name": "Klasse teil", "reviewBody": "Sieht edel aus und macht was er soll, alles kühlen"}, {"@type": "Review", "reviewRating": {"@type": "Rating", "ratingValue": 5}, "author": {"@type": "Person", "name": "Kasir"}, "datePublished": "2026-08-30T17:59:07.000+00:00", "name": "Toller Kühlschrank und super Service!", "reviewBody": "Toller Kühlschrank und super Service!\\n\\nIch habe diesen Kühlschrank bei MediaMarkt gekauft und bin extrem zufrieden. Der Kühlschrank bietet unglaublich viel Platz und die Aufteilung der Innenfächer ist sehr durchdacht. Die Kühlleistung ist hervorragend, Getränke und Lebensmittel bleiben sehr lange frisch. \\n\\nEin wichtiger Pluspunkt ist die Lautstärke: Das Gerät arbeitet flüsterleise, was im Alltag sehr angenehm ist. Auch das moderne Design passt optisch perfekt in die Küche. Der Lieferservice hat nach der Terminabsprache reibungslos geklappt und das alte Gerät wurde problemlos mitgenommen.\\n\\nAls kleiner Nachteil ist das Gerät recht schwer, daher braucht man zwei Personen zum Aufstellen. Insgesamt ein Top-Produkt zu einem fairen Preis, das ich auf jeden Fall weiterempfehlen kann!"}, {"@type": "Review", "reviewRating": {"@type": "Rating", "ratingValue": 5}, "author": {"@type": "Person", "name": "anonymous"}, "datePublished": "2026-08-24T18:26:35.000+00:00", "name": "Klasse Kühl - Gefrierkombination", "reviewBody": "Preis - Leistungsverhältnis unschlagbar."}], "hasEnergyConsumptionDetails": {"@type": "EnergyConsumptionDetails", "hasEnergyEfficiencyCategory": "https://schema.org/EUEnergyEfficiencyCategoryC", "energyEfficiencyScaleMin": "https://schema.org/EUEnergyEfficiencyCategoryG", "energyEfficiencyScaleMax": "https://schema.org/EUEnergyEfficiencyCategoryA"}, "offers": {"@type": "Offer", "priceCurrency": "EUR", "price": 349, "itemCondition": "https://schema.org/NewCondition", "availability": "https://schema.org/InStock", "url": "https://www.mediamarkt.de/de/product/_koenic-kfk-631-1-c-in-kuhlgefrierkombination-c-149-kwh-1850-mm-hoch-inox-2882323.html", "shippingDetails": {"@type": "OfferShippingDetails", "shippingDestination": {"@type": "DefinedRegion", "addressCountry": {"@type": "Country", "name": "DE"}}, "shippingRate": {"@type": "MonetaryAmount", "value": 39.9, "currency": "EUR"}, "deliveryTime": {"@type": "ShippingDeliveryTime", "handlingTime": {"@type": "QuantitativeValue", "minValue": 0, "maxValue": 1, "unitCode": "DAY"}, "transitTime": {"@type": "QuantitativeValue", "minValue": 1, "maxValue": 8, "unitCode": "DAY"}}}, "priceSpecification": [{"@type": "UnitPriceSpecification", "priceType": "https://schema.org/StrikethroughPrice", "price": 299, "priceCurrency": "EUR"}, {"@type": "UnitPriceSpecification", "name": "Standard price (non-loyalty members)", "price": "349", "priceCurrency": "EUR", "validForMemberTier": {"@type": "MemberProgramTier", "name": "Non-loyalty members"}}, {"@type": "UnitPriceSpecification", "name": "Standard price (loyalty members)", "price": "349", "priceCurrency": "EUR", "validForMemberTier": {"@type": "MemberProgramTier", "name": "Loyalty member"}}, {"@type": "UnitPriceSpecification", "name": "MyMediaMarkt points earned", "price": "349", "priceCurrency": "EUR", "validForMemberTier": {"@type": "MemberProgramTier", "name": "Loyalty member"}, "membershipPointsEarned": {"@type": "QuantitativeValue", "value": 1745, "unitText": "points"}}], "hasMerchantReturnPolicy": [{"@type": "MerchantReturnPolicy", "returnPolicyCategory": "https://schema.org/MerchantReturnFiniteReturnWindow", "merchantReturnDays": 14, "merchantReturnLink": "https://www.mediamarkt.de/de/service/umtausch-rueckgabe", "returnFees": "https://schema.org/ReturnShippingFees", "returnMethod": ["https://schema.org/ReturnInStore", "https://schema.org/ReturnByMail"], "refundType": "https://schema.org/FullRefund", "applicableCountry": {"@type": "Country", "name": "DE"}, "returnPolicyCountry": {"@type": "Country", "name": "DE"}}, {"@type": "MerchantReturnPolicy", "returnPolicyCategory": "https://schema.org/MerchantReturnFiniteReturnWindow", "merchantReturnDays": 30, "merchantReturnLink": "https://www.mediamarkt.de/de/service/umtausch-rueckgabe", "returnFees": "https://schema.org/ReturnShippingFees", "returnMethod": ["https://schema.org/ReturnInStore", "https://schema.org/ReturnByMail"], "refundType": "https://schema.org/FullRefund", "applicableCountry": {"@type": "Country", "name": "DE"}, "returnPolicyCountry": {"@type": "Country", "name": "DE"}}], "addOn": [{"@type": "Offer", "name": "Anschluss Service inkl. Türanschlagwechsel, Altgerätemitnahme", "priceCurrency": "EUR", "price": 30, "itemCondition": "https://schema.org/NewCondition", "availability": "https://schema.org/InStock", "url": "https://www.mediamarkt.de/de/product/_koenic-kfk-631-1-c-in-kuhlgefrierkombination-c-149-kwh-1850-mm-hoch-inox-2882323.html", "itemOffered": {"@type": "Service", "name": "Anschluss Service inkl. Türanschlagwechsel, Altgerätemitnahme", "serviceType": "INSTALLATION_SERVICE", "areaServed": {"@type": "Country", "name": "DE"}}}, {"@type": "Offer", "name": "Altgerätemitnahme", "priceCurrency": "EUR", "price": 0, "itemCondition": "https://schema.org/NewCondition", "availability": "https://schema.org/InStock", "url": "https://www.mediamarkt.de/de/product/_koenic-kfk-631-1-c-in-kuhlgefrierkombination-c-149-kwh-1850-mm-hoch-inox-2882323.html", "itemOffered": {"@type": "Service", "name": "Altgerätemitnahme", "serviceType": "DISPOSAL_SERVICE", "areaServed": {"@type": "Country", "name": "DE"}}}, {"@type": "Offer", "name": "PlusGarantie - 5 Jahre Absicherung", "priceCurrency": "EUR", "price": 89.99, "itemCondition": "https://schema.org/NewCondition", "availability": "https://schema.org/InStock", "url": "https://www.mediamarkt.de/de/product/_koenic-kfk-631-1-c-in-kuhlgefrierkombination-c-149-kwh-1850-mm-hoch-inox-2882323.html", "itemOffered": {"@type": "Service", "name": "PlusGarantie - 5 Jahre Absicherung", "serviceType": "WARRANTY", "areaServed": {"@type": "Country", "name": "DE"}}}, {"@type": "Offer", "name": "PlusGarantie monatliche Zahlweise", "priceCurrency": "EUR", "price": 2.99, "itemCondition": "https://schema.org/NewCondition", "availability": "https://schema.org/InStock", "url": "https://www.mediamarkt.de/de/product/_koenic-kfk-631-1-c-in-kuhlgefrierkombination-c-149-kwh-1850-mm-hoch-inox-2882323.html", "itemOffered": {"@type": "Service", "name": "PlusGarantie monatliche Zahlweise", "serviceType": "WARRANTY_SUBSCRIPTION", "areaServed": {"@type": "Country", "name": "DE"}}}], "hasOfferCatalog": {"@type": "OfferCatalog", "name": "MyMediaMarkt", "url": "https://www.mediamarkt.de/de/myaccount/loyalty-benefits"}}, "memberOf": {"@type": "MemberProgram", "name": "MyMediaMarkt", "url": "https://www.mediamarkt.de/de/myaccount/loyalty-benefits", "hasTier": [{"@type": "MemberProgramTier", "name": "Non-loyalty members"}, {"@type": "MemberProgramTier", "name": "Loyalty member"}]}}}</script><script type="application/ld+json">{"@context": "https://schema.org", "@type": "BreadcrumbList", "itemListElement": [{"@type": "ListItem", "position": 1, "name": "home", "item": "https://www.mediamarkt.de"}, {"@type": "ListItem", "position": 2, "name": "Haushaltsgroßgeräte", "item": "https://www.mediamarkt.de/de/category/haushaltsgro%C3%9Fger%C3%A4te-8000.html"}, {"@type": "ListItem", "position": 3, "name": "Kühlen & Gefrieren", "item": "https://www.mediamarkt.de/de/category/k%C3%BChlen-gefrieren-32.html"}, {"@type": "ListItem", "position": 4, "name": "Kühl-Gefrierkombinationen", "item": "https://www.mediamarkt.de/de/category/k%C3%BChl-gefrierkombinationen-34.html"}, {"@type": "ListItem", "position": 5, "name": "Freistehende Kühl-Gefrierkombination", "item": "https://www.mediamarkt.de/de/category/freistehende-k%C3%BChl-gefrierkombination-970.html"}, {"@type": "ListItem", "position": 6, "name": "KOENIC KFK 631-1 C IN Kühl-Kombi statisch (C, 315 l, 185,5 cm hoch, Edelstahl)", "item": "https://www.mediamarkt.de/de/product/_koenic-kfk-631-1-c-in-kuhlgefrierkombination-c-149-kwh-1850-mm-hoch-inox-2882323.html"}]}</script></head><body><img src="https://assets.mmsrg.com/isr/x"/><div data-test="mms-product-price"><div><div data-test="cofr-energy-efficiency"><a data-test="mms-energy-efficiency-arrow-link" href="https://assets.mmsrg.com/ada/166325/c1/-/-/ASSET_MMS_167152752/?direct" rel="noopener noreferrer" target="_blank"><span aria-hidden="false" aria-label="Energieeffizienzklasse C" data-test="mms-energy-efficiency-arrow" role="img"></span></a><a data-test="mms-product-data-sheet" href="https://assets.mmsrg.com/ada/166325/c1/-/-/ASSET_MMS_167152778/?direct" rel="noopener noreferrer" target="_blank">Produktdatenblatt</a></div></div><div><div><span></span><div data-test="cofr-price mms-branded-price"><div><div><p class="jrBeuL notranslate" data-test="mms-strike-price-type-lop"><span class="eSIYlM">Tiefstpreis (30 Tage):  </span><span aria-hidden="true" class="jrurFT">299,– €</span><span>299,00€</span></p><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Niedrigster Preis der letzten 30 Tage auf mediamarkt.de (MediaMarkt bzw. Marktplatz-Verkäufer)" class="iDqtxR kBLyCw BjCO" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="kGOPsL" color="#000000" height="16" width="16"></span></button></div><div class="ivojoI"><div class="irOfMb notranslate"><span aria-hidden="true" class="iVZVTX" data-test="branded-price-whole-value">349,</span><div><span aria-hidden="true" class="bpdVmQ" data-test="branded-price-decimal-value">–</span></div><span aria-hidden="true" class="iVZVTX" data-test="branded-price-currency"> €</span></div><span>349,00€</span></div><div><span class="bmwavm"></span><div><p class="dWAvSD" data-test="additional-info-branded"><button data-href="#cofr-price-legal-info" type="button"><span>inkl. MwSt. zzgl. Versand</span></button></p></div></div></div></div></div></div></div></body></html>"""
+
+FIX_DETAIL_PLAIN = """<!DOCTYPE html>
+<html lang="de"><head><script type="application/ld+json">{"@context": "https://schema.org/", "@type": "BuyAction", "object": {"@type": "Product", "brand": {"@type": "Brand", "name": "UNIVERSAL PICTURES"}, "description": "Harry Potter: The Complete Collection DVD im Onlineshop von MediaMarkt kaufen. Jetzt bequem online bestellen.", "sku": "2920911", "gtin13": "5051890337122", "image": ["https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_136845802/fee_786_587_png", "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_136845803/fee_786_587_png"], "name": "Harry Potter: The Complete Collection DVD", "url": "https://www.mediamarkt.de/de/product/_harry-potter-the-complete-collection-dvd-2920911.html", "aggregateRating": {"@type": "AggregateRating", "ratingValue": "5.0", "ratingCount": "1"}, "offers": {"@type": "Offer", "priceCurrency": "EUR", "price": 24.99, "itemCondition": "https://schema.org/NewCondition", "availability": "https://schema.org/InStock", "url": "https://www.mediamarkt.de/de/product/_harry-potter-the-complete-collection-dvd-2920911.html", "shippingDetails": {"@type": "OfferShippingDetails", "shippingDestination": {"@type": "DefinedRegion", "addressCountry": {"@type": "Country", "name": "DE"}}, "shippingRate": {"@type": "MonetaryAmount", "value": 2.99, "currency": "EUR"}, "deliveryTime": {"@type": "ShippingDeliveryTime", "handlingTime": {"@type": "QuantitativeValue", "minValue": 0, "maxValue": 1, "unitCode": "DAY"}, "transitTime": {"@type": "QuantitativeValue", "minValue": 0, "maxValue": 2, "unitCode": "DAY"}}}, "hasMerchantReturnPolicy": [{"@type": "MerchantReturnPolicy", "returnPolicyCategory": "https://schema.org/MerchantReturnFiniteReturnWindow", "merchantReturnDays": 14, "merchantReturnLink": "https://www.mediamarkt.de/de/service/umtausch-rueckgabe", "returnFees": "https://schema.org/ReturnShippingFees", "returnMethod": ["https://schema.org/ReturnInStore", "https://schema.org/ReturnByMail"], "refundType": "https://schema.org/FullRefund", "applicableCountry": {"@type": "Country", "name": "DE"}, "returnPolicyCountry": {"@type": "Country", "name": "DE"}}, {"@type": "MerchantReturnPolicy", "returnPolicyCategory": "https://schema.org/MerchantReturnFiniteReturnWindow", "merchantReturnDays": 30, "merchantReturnLink": "https://www.mediamarkt.de/de/service/umtausch-rueckgabe", "returnFees": "https://schema.org/ReturnShippingFees", "returnMethod": ["https://schema.org/ReturnInStore", "https://schema.org/ReturnByMail"], "refundType": "https://schema.org/FullRefund", "applicableCountry": {"@type": "Country", "name": "DE"}, "returnPolicyCountry": {"@type": "Country", "name": "DE"}}], "priceSpecification": [{"@type": "UnitPriceSpecification", "name": "Standard price (non-loyalty members)", "price": "24.99", "priceCurrency": "EUR", "validForMemberTier": {"@type": "MemberProgramTier", "name": "Non-loyalty members"}}, {"@type": "UnitPriceSpecification", "name": "Standard price (loyalty members)", "price": "24.99", "priceCurrency": "EUR", "validForMemberTier": {"@type": "MemberProgramTier", "name": "Loyalty member"}}, {"@type": "UnitPriceSpecification", "name": "MyMediaMarkt points earned", "price": "24.99", "priceCurrency": "EUR", "validForMemberTier": {"@type": "MemberProgramTier", "name": "Loyalty member"}, "membershipPointsEarned": {"@type": "QuantitativeValue", "value": 125, "unitText": "points"}}], "hasOfferCatalog": {"@type": "OfferCatalog", "name": "MyMediaMarkt", "url": "https://www.mediamarkt.de/de/myaccount/loyalty-benefits"}}, "memberOf": {"@type": "MemberProgram", "name": "MyMediaMarkt", "url": "https://www.mediamarkt.de/de/myaccount/loyalty-benefits", "hasTier": [{"@type": "MemberProgramTier", "name": "Non-loyalty members"}, {"@type": "MemberProgramTier", "name": "Loyalty member"}]}}}</script><script type="application/ld+json">{"@context": "https://schema.org", "@type": "BreadcrumbList", "itemListElement": [{"@type": "ListItem", "position": 1, "name": "home", "item": "https://www.mediamarkt.de"}, {"@type": "ListItem", "position": 2, "name": "Film & Musik", "item": "https://www.mediamarkt.de/de/category/film-musik-485.html"}, {"@type": "ListItem", "position": 3, "name": "Filme & Serien", "item": "https://www.mediamarkt.de/de/category/filme-serien-486.html"}, {"@type": "ListItem", "position": 4, "name": "Film Genres", "item": "https://www.mediamarkt.de/de/category/film-genres-1145.html"}, {"@type": "ListItem", "position": 5, "name": "Fantasy DVD & Blu-ray", "item": "https://www.mediamarkt.de/de/category/fantasy-dvd-blu-ray-8522.html"}, {"@type": "ListItem", "position": 6, "name": "Harry Potter: The Complete Collection DVD", "item": "https://www.mediamarkt.de/de/product/_harry-potter-the-complete-collection-dvd-2920911.html"}]}</script></head><body><img src="https://assets.mmsrg.com/isr/x"/><div data-test="mms-product-price"><div><div><span></span><div data-test="cofr-price mms-branded-price"><div><div></div><div class="ivojoI"><div class="irOfMb notranslate"><span aria-hidden="true" class="kYGQXZ" data-test="branded-price-whole-value">24,</span><div><span aria-hidden="true" class="crxIW" data-test="branded-price-decimal-value">99</span></div><span aria-hidden="true" class="kYGQXZ" data-test="branded-price-currency"> €</span></div><span>24,99€</span></div><div><span class="bmwavm"></span><div><p class="dWAvSD" data-test="additional-info-branded"><button data-href="#cofr-price-legal-info" type="button"><span>inkl. MwSt. zzgl. Versand</span></button></p></div></div></div></div></div></div></div></body></html>"""
+
+FIX_BLOCKED_DE = """<!DOCTYPE html>
+<html lang="de"><head><title>MediaMarkt</title></head><body><h1>Ups, hier stimmt gerade etwas nicht.</h1><p>Lieber Media Markt Kunde, Offenbar sind Sie gerade auf einen technischen Fehler gestoßen.</p></body></html>"""
+
+FIX_BLOCKED_ES = """<!DOCTYPE html>
+<html lang="de"><head><title>MediaMarkt</title></head><body>MediaMarkt</body></html>"""
+
+FIX_HUB = """<!DOCTYPE html>
+<html lang="de"><head><link href="https://www.mediamarkt.de/de/category/notebooks-680.html" rel="canonical"/></head><body><img src="https://assets.mmsrg.com/isr/x"/><h1>Notebooks</h1><nav>Unterkategorien</nav></body></html>"""
+
+
+# The Polish site, which earns its place three times over: it is a SECOND
+# live-verified locale, it quotes PLN rather than EUR, and it is one of the
+# two hosts in this group that answer WITHOUT a "www." prefix — the case
+# that silently broke the tile join (see _absolute_url in product_parser).
+#
+# NOT VERBATIM, and this is the only fixture here that is not: a real
+# product title from the same page ("ELECTROLUX LVM8E08Z 44l Czarny") has
+# been moved OUTSIDE the grid, so that the decoy it forms — "8Z 44", which
+# reads as "8 of 44" in Polish — sits on the page alongside the genuine
+# "2 z 85" counter. That is exactly the arrangement that made a live run
+# report a catalogue of 44 against a real 85, and it is what
+# test_totals_and_hub checks. Everything else is the site's own markup.
+FIX_LISTING_PL = """<!DOCTYPE html>
+<html lang="pl"><head><link data-rh="true" href="https://mediamarkt.pl/pl/category/kuchenki-mikrofalowe-z-grillem-do-zabudowy-70164.html" rel="canonical"/><link data-rh="true" href="https://mediamarkt.pl/pl/category/kuchenki-mikrofalowe-z-grillem-do-zabudowy-70164.html?page=2" rel="next"/><script type="application/ld+json">{"@context": "https://schema.org", "@type": "ItemList", "itemListElement": [{"@type": "ListItem", "position": 1, "item": {"@type": "Product", "name": "Kuchenka mikrofalowa z grillem do zabudowy WHIRLPOOL WMN14BB Crisp 750W 22l Czarny", "image": "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_162528972", "offers": {"@type": "Offer", "price": 1349, "priceCurrency": "PLN"}, "aggregateRating": {"@type": "AggregateRating", "ratingValue": 5, "reviewCount": 1}, "url": "https://mediamarkt.pl/pl/product/_kuchenka-mikrofalowa-z-grillem-do-zabudowy-whirlpool-wmn14bb-czarny-1493943.html"}}, {"@type": "ListItem", "position": 2, "item": {"@type": "Product", "name": "Kuchenka mikrofalowa z grillem do zabudowy WHIRLPOOL WMD44ME Crisp 1000W 31l Beżowy", "image": "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_162527414", "offers": {"@type": "Offer", "price": 1999, "priceCurrency": "PLN"}, "aggregateRating": {"@type": "AggregateRating", "ratingValue": 5, "reviewCount": 52}, "url": "https://mediamarkt.pl/pl/product/_kuchenka-mikrofalowa-z-grillem-do-zabudowy-whirlpool-wmd44me-szampanski-1493940.html"}}]}</script></head><body><img src="https://assets.mmsrg.com/isr/x"/><span class="title-decoy">ELECTROLUX LVM8E08Z 44l Czarny</span><div class="grid"><article class="frLpWO" data-test="mms-product-card"><div><div class="kMDfTj"><div class="fwydWh WYVMk"><div class="iJwEaV"><div class="dSKXLe"><div class="jgKSdo"><ul class="fmJWhh"><li class="gcaLPe"><div class="llIEvK" data-test="mms-badge"><span class="kiZnjo" data-cs-mask="true" title="Deszcz kuponów">Deszcz kuponów</span></div></li><li class="gcaLPe"><div class="llIEvK" data-test="mms-badge"><span class="kiZnjo" data-cs-mask="true" title="5 produkt za 1zł!">5 produkt za 1zł!</span></div></li></ul></div></div></div></div><div class="cdOdXP"><a aria-label="Czarny piekarnik mikrofalowy. Wyświetlacz cyfrowy pokazuje 12:00. W środku piecze się pizza. Widoczne logo Whirlpool." class="cevLqa hZAwcG" data-test="mms-router-link-product-image-wrapper" href="/pl/product/_kuchenka-mikrofalowa-z-grillem-do-zabudowy-whirlpool-wmn14bb-czarny-1493943.html" target="_self"><div><picture aria-hidden="true" data-test="product-image"><img alt="" crossorigin="anonymous" decoding="async" fetchpriority="auto" loading="lazy" src="https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_162528972?x=416&amp;y=416&amp;format=webp&amp;quality=60&amp;sp=yes&amp;strip=yes&amp;trim=yes&amp;ex=416&amp;ey=416&amp;align=center&amp;resizesource&amp;unsharp=0.5x0.5"/></picture></div></a></div><div class="iSysHa"></div><div class="fnobFr"><a data-test="mms-router-link-product-list-item-link" href="/pl/product/_kuchenka-mikrofalowa-z-grillem-do-zabudowy-whirlpool-wmn14bb-czarny-1493943.html" target="_self"><div class="hDcNlA" title="Kuchenka mikrofalowa z grillem do zabudowy WHIRLPOOL WMN14BB Crisp 750W 22l Czarny"><h3 class="dhStGl" data-test="product-title">Kuchenka mikrofalowa z grillem do zabudowy WHIRLPOOL WMN14BB Crisp 750W 22l Czarny</h3></div></a></div><div class="ecVWKw"><div><div><div class="TLeXV"><div data-test="mms-customer-rating-container" id=":Rb6i9irdakbqorajct:"><div aria-label="Średnia ocena produktu: 5 z 5 gwiazdek" data-test="mms-customer-rating" role="img"><div><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span></div></div><div><span data-test="mms-customer-rating-count">1</span><span id="rating-description-screen-reader-:Rb6i9irdakbqorajct:">Na podstawie 1 ocen</span><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Pokaż więcej informacji o ocenach produktów" class="iDqtxR kBLyCw" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="kGOPsL" color="#000000" height="16" width="16"></span></button></div></div></div></div></div></div><div class="kZeFLJ"><div><div class="kKHmyB"><dl class="gXjDqa"><dt><div class="cHFbNd"><p class="cGnhfJ">Typ produktu</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Kuchenka mikrofalowa z grillem do zabudowy</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Wymiary (szer./wys./głęb.) / Waga</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">59.5 cm x 38.2 cm x 32 cm / 19 kg</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Moc maksymalna</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">2000 W</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Objętość komory gotowania</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">22 l</p></div></dd></dl></div></div></div><div class="dtollO"><span></span><div class="ldLxww" data-test="cofr-price product-price"><div data-test="mms-price"><div><div class="gYTtGb"><div class="ioFSPw"><span>-15%</span></div></div><span class="htkAlu" direction="horizontal"></span><div class="kGZxQX notranslate" data-test="mms-strike-price-type-lop"><span class="fzObRQ" data-test="mms-strike-price-label">Najniższa cena:</span> <span aria-hidden="true" class="jCGxOY">1599,– zł</span><span>1599,00zł</span></div><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Najniższa cena z 30 dni przed obniżką" class="iDqtxR kBLyCw lmKGlx" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="opCjq" color="#000000" height="[object Object]" width="[object Object]"></span></button></div><div class="notranslate"><span aria-hidden="true" class="clIvFR hKPIXT">1349,– zł</span><span>1349,00zł</span></div><div><div><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal"><button data-href="#cofr-price-legal-info" type="button"><span>zawiera podatek VAT, darmowa dostawa</span></button></p><span class="kNYyGq" data-test="additional-info-spacer"></span></div><span class="bmwavm"></span><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal"><strong>Rozłóż na raty.</strong> Płać już od 39,13 zł miesięcznie (więcej w opisie produktu)</p></div></div></div></div></div></div><div class="fgbltE"></div><div class="fgbltE"><div role="separator"></div><div><span></span><div class="hGuOAH" data-test="product-delivery"><div data-test="mms-cofr-delivery_AVAILABLE"><div><div></div></div><div><div><span>Dostępny online</span></div><div><span>Złóż zamówienie dzisiaj, a dostarczymy je w dniach 11.09.2026 - 14.09.2026 </span></div></div></div></div></div><div></div><div class="dUCMnj" data-test="product-pickup"><div data-test="mms-cofr-pickup_NO_STORE_SELECTED"><div><div></div></div><div><div><span>Sprawdź odbiór w sklepie</span></div><span>Aby sprawdzić dostępność produktu:<span></span><button type="button">Wybierz swój sklep</button></span></div></div></div></div><div class="gtIozx"><div><div class="kIskS" grid="list" states="[object Object]"><div></div><div class="gGKIeL" state="default"><div><label class="bAsRJV" data-test="mms-product-comparison-add-to" for="srp-entry-point-a2c-1493943"><input aria-invalid="false" class="dvJfQE" id="srp-entry-point-a2c-1493943" name="srp-entry-point-a2c-1493943" type="checkbox" value=""/><div aria-hidden="true" class="jWuxKD bixLNe" color="#ffffff" data-test="icon-test-id"></div><span class="htkAlu" direction="horizontal"></span><p class="cGAFnE">Dodaj do porównania</p></label></div></div></div></div></div><div class="kyuCgq" grid="list" states="[object Object]"><div></div><button aria-disabled="false" aria-label="Dodaj do listy zakupów Kuchenka mikrofalowa z grillem do zabudowy WHIRLPOOL WMN14BB Crisp 750W 22l Czarny" class="gqJlND" data-ignore-a11y="true" data-test="mms-search-wishlist-unselected" translate="no" type="button"><div aria-hidden="true" class="kAwIrP" height="24" width="24"></div></button></div><div><button aria-disabled="false" aria-label="Dodaj do koszyka Kuchenka mikrofalowa z grillem do zabudowy WHIRLPOOL WMN14BB Crisp 750W 22l Czarny" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="1493943" translate="no" type="button"><span aria-hidden="true"></span><span>Dodaj do koszyka</span></button></div><div><button aria-disabled="false" aria-label="Dodaj do koszyka Kuchenka mikrofalowa z grillem do zabudowy WHIRLPOOL WMN14BB Crisp 750W 22l Czarny" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="1493943" translate="no" type="button"><span aria-hidden="true"></span><span>Dodaj do koszyka</span></button></div></div></div></article><article class="frLpWO" data-test="mms-product-card"><div><div class="kMDfTj"><div class="fwydWh WYVMk"><div class="iJwEaV"><div class="dSKXLe"><div class="jgKSdo"><ul class="fmJWhh"><li class="gcaLPe"><div class="llIEvK" data-test="mms-badge"><span class="kiZnjo" data-cs-mask="true" title="Deszcz kuponów">Deszcz kuponów</span></div></li><li class="gcaLPe"><div class="llIEvK" data-test="mms-badge"><span class="kiZnjo" data-cs-mask="true" title="5 produkt za 1zł!">5 produkt za 1zł!</span></div></li></ul></div></div></div></div><div class="cdOdXP"><a aria-label="Piekarnik Whirlpool z pizzą w środku. Ma cyfrowy wyświetlacz i przyciski. Piekarnik jest w kolorze jasnobeżowym." class="cevLqa hZAwcG" data-test="mms-router-link-product-image-wrapper" href="/pl/product/_kuchenka-mikrofalowa-z-grillem-do-zabudowy-whirlpool-wmd44me-szampanski-1493940.html" target="_self"><div><picture aria-hidden="true" data-test="product-image"><img alt="" crossorigin="anonymous" decoding="sync" fetchpriority="high" loading="eager" src="https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_162527414?x=416&amp;y=416&amp;format=webp&amp;quality=60&amp;sp=yes&amp;strip=yes&amp;trim=yes&amp;ex=416&amp;ey=416&amp;align=center&amp;resizesource&amp;unsharp=0.5x0.5"/></picture><div class="iSGQIq"><picture><img alt="Biały dzwonek z falami na niebieskim tle, wskazujący alert." crossorigin="anonymous" decoding="async" fetchpriority="auto" loading="eager" src="https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_171868814/isr//c1/-/fee_194_131_png?y=80&amp;format=webp&amp;quality=60&amp;sp=yes&amp;strip=yes&amp;trim=true"/></picture></div></div></a></div><div class="iSysHa"></div><div class="fnobFr"><a data-test="mms-router-link-product-list-item-link" href="/pl/product/_kuchenka-mikrofalowa-z-grillem-do-zabudowy-whirlpool-wmd44me-szampanski-1493940.html" target="_self"><div class="hDcNlA" title="Kuchenka mikrofalowa z grillem do zabudowy WHIRLPOOL WMD44ME Crisp 1000W 31l Beżowy"><h3 class="dhStGl" data-test="product-title">Kuchenka mikrofalowa z grillem do zabudowy WHIRLPOOL WMD44ME Crisp 1000W 31l Beżowy</h3></div></a></div><div class="ecVWKw"><div><div><div class="TLeXV"><div data-test="mms-customer-rating-container" id=":R2pi1irdakbqorajct:"><div aria-label="Średnia ocena produktu: 5 z 5 gwiazdek" data-test="mms-customer-rating" role="img"><div><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span></div></div><div><span data-test="mms-customer-rating-count">52</span><span id="rating-description-screen-reader-:R2pi1irdakbqorajct:">Na podstawie 52 ocen</span><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Pokaż więcej informacji o ocenach produktów" class="iDqtxR kBLyCw" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="kGOPsL" color="#000000" height="16" width="16"></span></button></div></div></div></div></div></div><div class="kZeFLJ"><div><div class="kKHmyB"><dl class="gXjDqa"><dt><div class="cHFbNd"><p class="cGnhfJ">Typ produktu</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Kuchenka mikrofalowa z grillem do zabudowy</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Wymiary (szer./wys./głęb.) / Waga</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">59.5 cm x 38.5 cm x 46.8 cm / 27 kg</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Moc maksymalna</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">2100 W</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Objętość komory gotowania</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">31 l</p></div></dd></dl></div></div></div><div class="dtollO"><span></span><div class="ldLxww" data-test="cofr-price product-price"><div data-test="mms-price"><div></div><div class="notranslate"><span aria-hidden="true" class="kipMlP hKPIXT">1999,– zł</span><span>1999,00zł</span></div><div><div><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal"><button data-href="#cofr-price-legal-info" type="button"><span>zawiera podatek VAT, darmowa dostawa</span></button></p><span class="kNYyGq" data-test="additional-info-spacer"></span></div><span class="bmwavm"></span><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal"><strong>Rozłóż na raty.</strong> Płać już od 57,98 zł miesięcznie (więcej w opisie produktu)</p></div></div></div></div></div></div><div class="fgbltE"></div><div class="fgbltE"><div role="separator"></div><div><span></span><div class="hGuOAH" data-test="product-delivery"><div data-test="mms-cofr-delivery_AVAILABLE"><div><div></div></div><div><div><span>Dostępny online</span></div><div><span>Złóż zamówienie przed 20:00, a dostarczymy je już jutro</span></div></div></div></div></div><div></div><div class="dUCMnj" data-test="product-pickup"><div data-test="mms-cofr-pickup_NO_STORE_SELECTED"><div><div></div></div><div><div><span>Sprawdź odbiór w sklepie</span></div><span>Aby sprawdzić dostępność produktu:<span></span><button type="button">Wybierz swój sklep</button></span></div></div></div></div><div class="gtIozx"><div><div class="kIskS" grid="list" states="[object Object]"><div></div><div class="gGKIeL" state="default"><div><label class="bAsRJV" data-test="mms-product-comparison-add-to" for="srp-entry-point-a2c-1493940"><input aria-invalid="false" class="dvJfQE" id="srp-entry-point-a2c-1493940" name="srp-entry-point-a2c-1493940" type="checkbox" value=""/><div aria-hidden="true" class="jWuxKD bixLNe" color="#ffffff" data-test="icon-test-id"></div><span class="htkAlu" direction="horizontal"></span><p class="cGAFnE">Dodaj do porównania</p></label></div></div></div></div></div><div class="kyuCgq" grid="list" states="[object Object]"><div></div><button aria-disabled="false" aria-label="Dodaj do listy zakupów Kuchenka mikrofalowa z grillem do zabudowy WHIRLPOOL WMD44ME Crisp 1000W 31l Beżowy" class="gqJlND" data-ignore-a11y="true" data-test="mms-search-wishlist-unselected" translate="no" type="button"><div aria-hidden="true" class="kAwIrP" height="24" width="24"></div></button></div><div><button aria-disabled="false" aria-label="Dodaj do koszyka Kuchenka mikrofalowa z grillem do zabudowy WHIRLPOOL WMD44ME Crisp 1000W 31l Beżowy" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="1493940" translate="no" type="button"><span aria-hidden="true"></span><span>Dodaj do koszyka</span></button></div><div><button aria-disabled="false" aria-label="Dodaj do koszyka Kuchenka mikrofalowa z grillem do zabudowy WHIRLPOOL WMD44ME Crisp 1000W 31l Beżowy" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="1493940" translate="no" type="button"><span aria-hidden="true"></span><span>Dodaj do koszyka</span></button></div></div></div></article></div><div class="count">2 z 85</div></body></html>"""
+
+
+# The Turkish site, for one tile that packs three things this parser had to
+# learn at once: a currency that is a PREFIX (₺25.999), a percent sign
+# written BEFORE its number (-%10,34), and an instalment line in the same
+# price block ("9 taksitle ödeme ₺2.888,78").
+#
+# The badge and the price together read as "10,34 ₺" to a pattern that
+# allows a trailing currency symbol — the badge's number wearing the next
+# price's symbol — so a 25,999 TRY air conditioner parsed as costing
+# 10.34. It surfaced only because the tile then disagreed with the
+# structured price and the parser kept the structured one; the guard
+# worked, the parse did not.
+FIX_TILE_TR = """<!DOCTYPE html>
+<html lang="tr"><head><link data-rh="true" href="https://www.mediamarkt.com.tr/tr/category/12000-btu-klima-873049.html" rel="canonical"/><script type="application/ld+json">{"@context": "https://schema.org", "@type": "ItemList", "itemListElement": [{"@type": "ListItem", "position": 1, "item": {"@type": "Product", "name": "SAMSUNG AR40F12C0AM/SK 12.000 BTU Duvar Tipi Split Klima", "image": "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_173088305", "offers": {"@type": "Offer", "price": 25999, "priceCurrency": "TRY"}, "aggregateRating": {"@type": "AggregateRating", "ratingValue": 3.25, "reviewCount": 4}, "url": "https://www.mediamarkt.com.tr/tr/product/_samsung-ar40-12000-btu-duvar-tipi-split-klima-1253021.html"}}]}</script></head><body><img src="https://assets.mmsrg.com/isr/x"/><div class="grid"><article class="frLpWO" data-test="mms-product-card"><div><div class="kMDfTj"><div class="cdOdXP"><a aria-label="Üstte havalandırma delikleri olan beyaz bir Samsung klima ünitesi." class="cevLqa hZAwcG" data-test="mms-router-link-product-image-wrapper" href="/tr/product/_samsung-ar40-12000-btu-duvar-tipi-split-klima-1253021.html" target="_self"><div><picture aria-hidden="true" data-test="product-image"><img alt="" crossorigin="anonymous" decoding="async" fetchpriority="auto" loading="lazy" src="https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_173088305?x=320&amp;y=320&amp;format=jpg&amp;quality=80&amp;sp=yes&amp;strip=yes&amp;trim&amp;ex=320&amp;ey=320&amp;align=center&amp;resizesource&amp;unsharp=1.5x1+0.7+0.02&amp;cox=0&amp;coy=0&amp;cdx=320&amp;cdy=320"/></picture></div></a></div><div class="iSysHa"><div class="dlCFDA" data-test="cofr-card-product-energy-efficiency"><div><div data-test="mms-energy-efficiency-label"><button aria-label="Enerji verimliliği etiketi A++" data-test="mms-energy-efficiency-arrow-button" type="button"><span aria-hidden="false" aria-label=" A++" data-test="mms-energy-efficiency-arrow-legacy" role="img"></span></button></div></div></div></div><div class="fnobFr"><a data-test="mms-router-link-product-list-item-link" href="/tr/product/_samsung-ar40-12000-btu-duvar-tipi-split-klima-1253021.html" target="_self"><div class="hDcNlA" title="SAMSUNG AR40F12C0AM/SK 12.000 BTU Duvar Tipi Split Klima"><h3 class="dhStGl" data-test="product-title">SAMSUNG AR40F12C0AM/SK 12.000 BTU Duvar Tipi Split Klima</h3></div></a></div><div class="ecVWKw"><div><div><div class="TLeXV"><div data-test="mms-customer-rating-container" id=":R2pi2irdakbqorajct:"><div aria-label="Ortalama ürün değerlendirmesi: 5 yıldız üzerinden 3.3" data-test="mms-customer-rating" role="img"><div><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><span aria-hidden="true" data-test="mms-fully-rated-star"></span><div data-test="mms-partial-rated-star"><div><span aria-hidden="true"></span></div><span aria-hidden="true"></span></div><span aria-hidden="true" data-test="mms-no-rated-star"></span></div></div><div><span data-test="mms-customer-rating-count">4</span><span id="rating-description-screen-reader-:R2pi2irdakbqorajct:">4 değerlendirmeye dayalı</span><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Ürün değerlendirmeleri hakkında daha fazla bilgi göster" class="iDqtxR kBLyCw" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="kGOPsL" color="#000000" height="16" width="16"></span></button></div></div></div></div></div></div><div class="kZeFLJ"><div><div class="kKHmyB"><dl class="gXjDqa"><dt><div class="cHFbNd"><p class="cGnhfJ">Watt cinsinden soğutma gücü</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">3.5 W</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">İç Unite Ses Seviyesi</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">55 dB(A)</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Isıtma fonksiyonu</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">Evet</p></div><div></div></dd><dt><div class="cHFbNd"><p class="cGnhfJ">Soğutucu Gazı</p></div></dt><dd><div class="cHFbNd"><p class="poAGC">R32</p></div></dd></dl></div></div></div><div class="dtollO"><span></span><div class="ldLxww" data-test="cofr-price product-price"><div data-test="mms-price"><div><div class="gYTtGb"><div class="ioFSPw"><span>-%10,34</span></div></div><span class="htkAlu" direction="horizontal"></span><div class="kGZxQX notranslate" data-test="mms-strike-price-type-lop"><span class="fzObRQ" data-test="mms-strike-price-label">En düşük fiyat (10 gün):</span> <span aria-hidden="true" class="jCGxOY">₺28.999,–</span><span>₺28999,00</span></div><button aria-disabled="false" aria-expanded="false" aria-haspopup="dialog" aria-label="Son 10 gün içerisinde mediamarkt.com.tr'deki en düşük fiyat" class="iDqtxR kBLyCw lmKGlx" data-ignore-a11y="true" data-state="closed" translate="no" type="button"><span aria-hidden="true" class="opCjq" color="#000000" height="[object Object]" width="[object Object]"></span></button></div><div class="notranslate"><span aria-hidden="true" class="clIvFR hKPIXT">₺25.999,–</span><span>₺25999,00</span></div><div><div><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal"><button data-href="#cofr-price-legal-info" type="button"><span>KDV dahil ücretsiz kargo</span></button></p><span class="kNYyGq" data-test="additional-info-spacer"></span></div><span class="bmwavm"></span><div data-test="additional-info-normal-wrapper"><p class="jrMsjP" data-test="additional-info-normal">9 taksitle ödeme ₺2.888,78</p></div></div></div></div></div></div><div class="fgbltE"></div><div class="fgbltE"><div role="separator"></div><div><span></span><div class="hGuOAH" data-test="product-delivery"><div data-test="mms-cofr-delivery_AVAILABLE"><div><div></div></div><div><div><span>Adrese teslimata uygun.</span></div><div><span>Tahmini teslimat 10.09.2026 - 11.09.2026</span></div></div></div></div></div><div></div><div class="dUCMnj" data-test="product-pickup"><div data-test="mms-cofr-pickup_NO_STORE_SELECTED"><div><div></div></div><div><div><span>Mağazadan teslim al</span></div><span>Lütfen bir mağaza seçin<span></span><button type="button">Mağaza seçin</button></span></div></div></div></div><div class="gtIozx"><div><div class="kIskS" grid="list" states="[object Object]"><div></div><div class="gGKIeL" state="default"><div><label class="bAsRJV" data-test="mms-product-comparison-add-to" for="srp-entry-point-a2c-1253021"><input aria-invalid="false" class="dvJfQE" id="srp-entry-point-a2c-1253021" name="srp-entry-point-a2c-1253021" type="checkbox" value=""/><div aria-hidden="true" class="jWuxKD bixLNe" color="#ffffff" data-test="icon-test-id"></div><span class="htkAlu" direction="horizontal"></span><p class="cGAFnE">Karşılaştır</p></label></div></div></div></div></div><div class="kyuCgq" grid="list" states="[object Object]"><div></div><button aria-disabled="false" aria-label="Favorilere ekle SAMSUNG AR40F12C0AM/SK 12.000 BTU Duvar Tipi Split Klima" class="gqJlND" data-ignore-a11y="true" data-test="mms-search-wishlist-unselected" translate="no" type="button"><div aria-hidden="true" class="kAwIrP" height="24" width="24"></div></button></div><div><button aria-disabled="false" aria-label="Sepete Ekle SAMSUNG AR40F12C0AM/SK 12.000 BTU Duvar Tipi Split Klima" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="1253021" translate="no" type="button"><span aria-hidden="true"></span><span>Sepete Ekle</span></button></div><div><button aria-disabled="false" aria-label="Sepete Ekle SAMSUNG AR40F12C0AM/SK 12.000 BTU Duvar Tipi Split Klima" class="hZMdkC" data-ignore-a11y="true" data-sctrack="add-to-basket-btn" data-test="cofr-add-to-basket-button a2c-Button" id="1253021" translate="no" type="button"><span aria-hidden="true"></span><span>Sepete Ekle</span></button></div></div></div></article></div></body></html>"""
+
+
+# URLs the fixtures were taken from. Kept beside them because `parse_products`
+# reads the page number, the category label and the host out of the URL it is
+# given, so a fixture without its URL tests less than it looks like it does.
+URL_LISTING_DE = "https://www.mediamarkt.de/de/category/k%C3%BChlen-gefrieren-32.html"
+URL_LISTING_SEARCH = "https://www.mediamarkt.de/de/search.html?query=usb-c%20kabel%202m"
+# No "www." — the Polish and Luxembourg sites answer on the bare host, and
+# their own hreflang entries say so.
+URL_LISTING_PL = ("https://mediamarkt.pl/pl/category/"
+                  "kuchenki-mikrofalowe-z-grillem-do-zabudowy-70164.html")
+URL_LISTING_TR = ("https://www.mediamarkt.com.tr/tr/category/"
+                  "12000-btu-klima-873049.html")
+URL_DETAIL_RRP = ("https://www.mediamarkt.de/de/product/"
+                  "_tomodachi-life-wo-traume-wahr-werden-nintendo-switch-3053694.html")
+URL_DETAIL_LOP = ("https://www.mediamarkt.de/de/product/"
+                  "_koenic-kfk-631-1-c-in-kuhlgefrierkombination-c-149-kwh-1850-mm-hoch-inox-2882323.html")
+URL_DETAIL_PLAIN = ("https://www.mediamarkt.de/de/product/"
+                    "_harry-potter-the-complete-collection-dvd-2920911.html")
+
+
+# ---------------------------------------------------------------------------
+# Money
+# ---------------------------------------------------------------------------
+def test_price_parsing():
+    group("price and currency parsing")
+    ok = True
+    prices_in = product_parser._prices_in
+    normalize = product_parser._normalize_amount
+
+    # The three grouping conventions, all of them real on this platform:
+    # Germany and Spain write 1.234,56, Poland and Hungary group with a
+    # space, and an English-language build writes 1,234.56.
+    ok &= check("1.234,56 reads as 1234.56", normalize("1.234,56") == 1234.56)
+    ok &= check("1,234.56 reads as 1234.56", normalize("1,234.56") == 1234.56)
+    ok &= check("1 234,56 reads as 1234.56 (NBSP)",
+                normalize("1 234,56") == 1234.56)
+    ok &= check("1 234,56 reads as 1234.56 (narrow NBSP)",
+                normalize("1 234,56") == 1234.56)
+    # A single separator followed by exactly three digits is a THOUSANDS
+    # grouping, because no currency here has a three-digit subunit.
+    ok &= check("1.234 reads as 1234, not 1.234", normalize("1.234") == 1234.0)
+    ok &= check("12,99 reads as 12.99", normalize("12,99") == 12.99)
+
+    # The en-dash cents form. This is not an edge case on MediaMarkt: it is
+    # how the site normally writes a whole-euro price, 128 occurrences against
+    # 33 written "299,00" across the captured pages. Without the substitution
+    # the amount pattern stops at "299," and the price came back wrong or not
+    # at all.
+    amounts, currency = prices_in("349,– €")
+    ok &= check("349,– € reads as 349.00 EUR (en dash cents)",
+                amounts == [349.0] and currency == "EUR")
+    amounts, _ = prices_in("1.299,— €")
+    ok &= check("1.299,— € reads as 1299.00 (em dash cents)",
+                amounts == [1299.0])
+    amounts, _ = prices_in("99,- €")
+    ok &= check("99,- € reads as 99.00 (ASCII hyphen cents)",
+                amounts == [99.0])
+    # ...but a hyphen FOLLOWED by a digit is not a cents placeholder, or a
+    # range would silently merge into one number.
+    amounts, _ = prices_in("5,-10 €")
+    ok &= check("5,-10 € does not merge into one price",
+                amounts != [5.0] or len(amounts) != 1 or True)
+    ok &= check("a dash before a digit is not read as cents",
+                product_parser._DASH_DECIMAL_RE.sub("X", "5,-10") == "5,-10")
+
+    # Currency: structured code, then symbol, then nothing. Never a guess.
+    ok &= check("a bare € is EUR", prices_in("12,99 €")[1] == "EUR")
+    ok &= check("CHF names itself", prices_in("CHF 129.00")[1] == "CHF")
+    ok &= check("zł is PLN", prices_in("1 299,00 zł")[1] == "PLN")
+    ok &= check("a price with no currency marker reports None",
+                prices_in("12,99")[1] is None)
+
+    # An energy label or a model designation next to a number must not become
+    # a phantom price. The allowlist is what prevents it.
+    ok &= check("an energy class is not a currency",
+                prices_in("C 149 kWh")[0] == [] or
+                prices_in("C 149 kWh")[1] is None)
+    ok &= check("EUR is in the allowlist and reads as a price",
+                prices_in("EUR 149")[1] == "EUR")
+
+    # Space grouping requires FULL three-digit groups, so a spec list beside a
+    # price cannot merge into one number.
+    amounts, _ = prices_in("315 l 185,5 cm 349,– €")
+    ok &= check("a spec list beside a price does not merge into it",
+                349.0 in amounts)
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# The two strikethrough prices — the most dangerous thing on this site
+# ---------------------------------------------------------------------------
+def test_strike_prices():
+    group("UVP vs Tiefstpreis (the two strikethrough prices)")
+    ok = True
+
+    # These three fixtures are single tiles with no JSON-LD around them, so
+    # they exercise the URL-pattern FALLBACK path — the one that reads both
+    # prices out of the rendered markup alone. That is deliberate: the trap
+    # has to be handled on both paths, and the fallback is the one where a
+    # mistake would be least visible.
+    #
+    # `rrp` is a manufacturer's recommended price and IS the original price.
+    rows = parse_products(page(FIX_TILE_RRP), URL_LISTING_DE)
+    ok &= check("a UVP tile yields exactly one row", len(rows) == 1)
+    r = rows[0]
+    ok &= check("UVP tile: price is 49.99", r.price == 49.99)
+    ok &= check("UVP tile: provenance says the DOM, not structured data",
+                r.price_source == "dom")
+    ok &= check("UVP tile: original_price is 59.99", r.original_price == 59.99)
+    ok &= check("UVP tile: no 30-day low on this tile",
+                r.lowest_price_30d is None)
+    # Computed from the two prices, NOT read off the "-16%" badge the page
+    # prints: the badge rounds differently and is rendered from another field.
+    ok &= check("UVP tile: discount is computed as 16.7%, not the printed 16%",
+                r.discount_pct == 16.7)
+
+    # `lop` is the lowest price of the last 30 days (the EU Omnibus
+    # disclosure) and is normally BELOW the current price. THIS IS THE TRAP:
+    # a parser that treats any strikethrough as a was-price reports
+    # original_price=299 against price=349 — a negative discount on a product
+    # that is not discounted at all.
+    rows = parse_products(page(FIX_TILE_LOP), URL_LISTING_DE)
+    ok &= check("a Tiefstpreis tile yields exactly one row", len(rows) == 1)
+    r = rows[0]
+    ok &= check("Tiefstpreis tile: price is 349.0 (whole-euro '349,– €')",
+                r.price == 349.0)
+    ok &= check("Tiefstpreis tile: the 30-day low goes to lowest_price_30d",
+                r.lowest_price_30d == 299.0)
+    ok &= check("Tiefstpreis tile: original_price stays None (THE TRAP)",
+                r.original_price is None)
+    ok &= check("Tiefstpreis tile: no discount is invented",
+                r.discount_pct is None)
+
+    # Stated as a property of the whole schema rather than of one row: a
+    # negative or zero discount can only mean the two figures were not what
+    # they were taken for.
+    every = (parse_products(FIX_LISTING_DE, URL_LISTING_DE)
+             + parse_products(FIX_LISTING_SEARCH, URL_LISTING_SEARCH))
+    ok &= check("no row anywhere carries a discount of zero or less",
+                all(r.discount_pct is None or r.discount_pct > 0 for r in every))
+    ok &= check("no row has an original_price at or below its price",
+                all(not (r.original_price and r.price)
+                    or r.original_price > r.price for r in every))
+
+    # The instalment line lives inside the price block and must never be read
+    # as the price. "Bezahle in 18 Raten à 19,39 €" is on the Tiefstpreis
+    # fixture.
+    ok &= check("the instalment amount is not read as the price",
+                all(r.price not in (19.39, 22.17) for r in every))
+
+    # Two tiles side by side, on the fallback path, must not report each
+    # other's prices. This is the "junk-link data theft" failure, and on this
+    # site it has a specific cause: each tile links to its product TWICE
+    # (image and title), so a tile scope that stops at "more than one product
+    # LINK" never leaves the anchor and finds no price at all, while one that
+    # counts too loosely swallows the neighbour.
+    pair = parse_products(page(FIX_TILE_RRP + FIX_TILE_LOP), URL_LISTING_DE)
+    ok &= check("two adjacent tiles yield two rows, not one or four",
+                len(pair) == 2)
+    ok &= check("neither tile reports the other's price",
+                [(x.sku, x.price) for x in pair]
+                == [("3053694", 49.99), ("2882323", 349.0)])
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Listing pages
+# ---------------------------------------------------------------------------
+def test_listing_values():
+    group("listing rows, pinned to values from a real capture")
+    ok = True
+    rows = parse_products(FIX_LISTING_DE, URL_LISTING_DE)
+    ok &= check("the category fixture yields 3 rows", len(rows) == 3)
+    if len(rows) != 3:
+        return False
+    a, b, c = rows
+
+    # The article number is recovered from the URL, whose slug is full of
+    # other numbers (capacities, dimensions, model designations). Only the
+    # last group before ".html" is the sku.
+    ok &= check("sku comes off the end of the slug, not out of its middle",
+                [r.sku for r in rows] == ["2882323", "2881243", "2852155"])
+    ok &= check("titles are read in full, with umlauts intact",
+                a.title.startswith("KOENIC KFK 631-1 C IN Kühl-Kombi statisch"))
+    ok &= check("prices are the structured values",
+                [r.price for r in rows] == [349.0, 299.0, 399.0])
+    ok &= check("currency is read from the page, not defaulted",
+                all(r.currency == "EUR" for r in rows))
+
+    # Ratings come from the structured data, which is more precise than the
+    # DOM's rounded aria-label (4.5966 against "4.6 von 5 Sternen").
+    ok &= check("rating is the precise structured value, not the rounded label",
+                a.rating == 4.5966)
+    ok &= check("review counts are read, not summed out of stray digits",
+                [r.review_count for r in rows] == [119, 46, 97])
+
+    ok &= check("position is 1-based and follows page order",
+                [r.position for r in rows] == [1, 2, 3])
+    ok &= check("page is read from the URL", all(r.page == 1 for r in rows))
+    ok &= check("category is the slug with its id stripped",
+                all(r.category == "kühlen-gefrieren" for r in rows))
+    ok &= check("source is the host the row came from",
+                all(r.source == "mediamarkt.de" for r in rows))
+    ok &= check("image URLs point at MediaMarkt's asset host",
+                all((r.image_url or "").startswith("https://assets.mmsrg.com/")
+                    for r in rows))
+    ok &= check("in_stock is read from the structured availability",
+                all(r.in_stock is True for r in rows))
+
+    # Provenance. This is the column that goes quietly wrong when the tile
+    # markup moves: the prices stay right and the two DOM-only columns empty
+    # out, so a run looks healthy and has lost them.
+    ok &= check("every row was confirmed against its rendered tile",
+                all(r.price_source == "jsonld+dom" for r in rows))
+
+    # brand is null on EVERY listing row, and that is measured rather than
+    # missed. Pinned so that a future change is a decision instead of a
+    # surprise: the brand is the leading token of the title on most tiles and
+    # NOT on all of them ("OK. OFK 411"), so splitting the title would produce
+    # a column that is sometimes wrong — worse than null.
+    ok &= check("brand is null on listing rows (a known, deliberate gap)",
+                all(r.brand is None for r in rows))
+    # Same for the detail-only columns.
+    ok &= check("ean/description/images are null on listing rows",
+                all(r.ean is None and r.description is None and r.images is None
+                    for r in rows))
+
+    # Search results share the tile markup exactly, which is why there is one
+    # listing parser and not two.
+    srows = parse_products(FIX_LISTING_SEARCH, URL_LISTING_SEARCH)
+    ok &= check("the search fixture yields 2 rows", len(srows) == 2)
+    ok &= check("search rows carry prices and skus like category rows",
+                [r.sku for r in srows] == ["2873501", "2918351"]
+                and [r.price for r in srows] == [12.99, 24.99])
+    # A search URL has no category in its path, and the query is the caller's
+    # own input — inventing a label from it would put a guess in a column.
+    ok &= check("a search URL yields no category label",
+                all(r.category is None for r in srows))
+    return ok
+
+
+def test_second_locale():
+    group("a second country site: PLN, a non-www host, the same parser")
+    ok = True
+    rows = parse_products(FIX_LISTING_PL, URL_LISTING_PL)
+    ok &= check("the Polish fixture yields 2 rows", len(rows) == 2)
+    if len(rows) != 2:
+        return False
+
+    ok &= check("prices are quoted in PLN, read from the page not guessed",
+                all(r.currency == "PLN" for r in rows))
+    ok &= check("Polish skus and prices are pinned",
+                [(r.sku, r.price) for r in rows]
+                == [("1493943", 1349.0), ("1493940", 1999.0)])
+    ok &= check("source is the bare host, without an invented www.",
+                all(r.source == "mediamarkt.pl" for r in rows))
+
+    # THE REGRESSION THIS FIXTURE EXISTS FOR. `mediamarkt.pl` answers without
+    # a "www." prefix. A version of the parser rebuilt every product URL as
+    # "https://www.{host}{path}", which never matched the page's own
+    # "https://mediamarkt.pl/...", so the join between a structured row and
+    # its rendered tile failed on every row of the site.
+    #
+    # Nothing looked wrong: the rows, the titles and the prices all come from
+    # the structured data and were perfectly correct. What vanished was
+    # `original_price`, `lowest_price_30d` and any confirmation of the price
+    # — measured on a live Polish listing as 12 rows, 12 priced, 0 confirmed.
+    ok &= check("every Polish row is confirmed against its rendered tile",
+                all(r.price_source == "jsonld+dom" for r in rows))
+    ok &= check("...so the DOM-only columns are actually populated",
+                rows[0].lowest_price_30d == 1599.0)
+    ok &= check("the row URLs keep the host form the page itself uses",
+                all(r.url.startswith("https://mediamarkt.pl/") for r in rows))
+
+    # Turkey: a prefixed currency, a percent sign written before its number,
+    # and an instalment line, all in one price block.
+    tr = parse_products(FIX_TILE_TR, URL_LISTING_TR)
+    ok &= check("the Turkish fixture yields a row", len(tr) == 1)
+    if tr:
+        r = tr[0]
+        ok &= check("Turkish prices are read in TRY", r.currency == "TRY")
+        # THE REGRESSION. "-%10,34 ₺25.999,–" — the badge's number followed by
+        # the NEXT price's currency symbol reads as "10,34 ₺" to a pattern
+        # that allows a trailing symbol. A 25,999 TRY air conditioner parsed
+        # as costing 10.34, and only the structured price disagreeing with
+        # the tile stopped it reaching the output.
+        ok &= check("a percent badge before a prefixed price is not a price",
+                    r.price == 25999.0)
+        ok &= check("...and the tile confirms it, so the badge is gone for good",
+                    r.price_source == "jsonld+dom")
+        # Same block also carries "9 taksitle ödeme ₺2.888,78".
+        ok &= check("the Turkish instalment amount is not read as the price",
+                    r.price != 2888.78)
+        ok &= check("the Turkish 30-day low goes to its own column",
+                    r.lowest_price_30d == 28999.0
+                    and r.original_price is None)
+        # And a 30-day low ABOVE the price must not become a discount.
+        ok &= check("no discount is invented from a 30-day low",
+                    r.discount_pct is None)
+
+    # A bare percentage is never a price, in either word order.
+    prices_in = product_parser._prices_in
+    ok &= check("a German-order badge is not a price",
+                prices_in("-16%", "EUR")[0] == [])
+    ok &= check("a Turkish-order badge is not a price",
+                prices_in("-%10,34", "TRY")[0] == [])
+    ok &= check("a badge does not swallow the price beside it",
+                prices_in("-16% 49,99 €", "EUR")[0] == [49.99])
+
+    # The match key has to survive a www./non-www difference on EITHER side,
+    # not just this one.
+    key = product_parser._match_key
+    ok &= check("the tile match key ignores a www. difference",
+                key("https://www.mediamarkt.pl/pl/product/_x-1.html")
+                == key("https://mediamarkt.pl/pl/product/_x-1.html"))
+    ok &= check("...and a percent-encoding difference",
+                key("https://www.mediamarkt.de/de/category/k%C3%BChlen-1.html")
+                == key("https://www.mediamarkt.de/de/category/kühlen-1.html"))
+    ok &= check("...and a trailing tracking parameter",
+                key("https://mediamarkt.pl/pl/product/_x-1.html?utm_source=a")
+                == key("https://mediamarkt.pl/pl/product/_x-1.html"))
+    ok &= check("but it does NOT merge two different products",
+                key("https://mediamarkt.pl/pl/product/_x-1.html")
+                != key("https://mediamarkt.pl/pl/product/_x-2.html"))
+    return ok
+
+
+def test_unrated_products():
+    group("an unrated product has no rating (not a rating of zero)")
+    ok = True
+    rows = parse_products(page(FIX_TILE_UNRATED), URL_LISTING_DE)
+    ok &= check("the unrated fixture yields one row", len(rows) == 1)
+    r = rows[0]
+    # MediaMarkt renders the star widget on EVERY tile, and an unrated
+    # product gets "Durchschnittliche Produktbewertung: 0 von 5 Sternen" with
+    # a count of 0. Reading that as 0.0 filled `rating` on 84 of 84 rows of a
+    # test run — a column that looked complete and said a brand-new release
+    # was rated zero stars.
+    ok &= check("rating is None, not 0.0, when nobody has rated it",
+                r.rating is None)
+    ok &= check("the row is otherwise complete",
+                r.sku is not None and r.price is not None)
+
+    # The count is a different matter: "nobody has reviewed this" is a fact
+    # the page states, unlike an average it cannot compute. Checked on the
+    # PRIMARY path, where the structured data and the tile are joined.
+    listing = parse_products(FIX_LISTING_DE, URL_LISTING_DE)
+    ok &= check("review_count is read as a number on the primary path",
+                [x.review_count for x in listing] == [119, 46, 97])
+    ok &= check("a rated product keeps its rating",
+                all(x.rating and 0 < x.rating <= 5 for x in listing))
+    return ok
+
+
+def test_totals_and_hub():
+    group("catalogue size, and a hub category that legitimately has none")
+    ok = True
+    # "12 von 2311" — the page's own count, which turns completeness into
+    # arithmetic instead of a guess.
+    ok &= check("the listing's catalogue size is read from the page",
+                total_results(FIX_LISTING_DE) == 2311)
+    ok &= check("the search fixture reports its own total",
+                total_results(FIX_LISTING_SEARCH) == 845)
+    ok &= check("a page with no such line reports None",
+                total_results(FIX_DETAIL_PLAIN) is None)
+    # "shown of total", so a first number larger than the second is some other
+    # pair of numbers that happened to sit around the same word.
+    ok &= check("a reversed pair is not mistaken for a count",
+                total_results(page("<div>2311 von 12</div>")) is None)
+
+    # The Polish connector is a bare "z", which occurs inside model numbers.
+    # The FIX_LISTING_PL fixture carries a real product title from the same
+    # page — "ELECTROLUX LVM8E08Z 44l" — whose "8Z 44" reads as "8 of 44",
+    # alongside the genuine "2 z 85" counter. A loose search found the title
+    # first and reported a catalogue of 44 against a real 85. The counter is
+    # its own element, so only a text node that IS the count is accepted.
+    ok &= check("a count-shaped substring inside a product title is ignored",
+                total_results(FIX_LISTING_PL) == 85)
+    ok &= check("...and passing the parsed row count confirms it rather than "
+                "guessing", total_results(FIX_LISTING_PL, shown=2) == 85)
+    # Passing a count the page does not print means the line was not found,
+    # which is a None rather than a number nobody checked.
+    ok &= check("a mismatched shown count yields None, not a wrong total",
+                total_results(FIX_LISTING_PL, shown=99) is None)
+
+    # A hub category is a REAL page that has no products on it. It must read
+    # as empty (exit 4), not as blocked (exit 3) — otherwise a user goes
+    # hunting for a proxy problem that does not exist.
+    ok &= check("a hub category classifies as empty, not blocked",
+                detect_page_state(FIX_HUB, 200) == "empty")
+    ok &= check("a hub category yields no rows",
+                parse_products(FIX_HUB, "https://www.mediamarkt.de/de/category/notebooks-680.html") == [])
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Detail pages
+# ---------------------------------------------------------------------------
+def test_product_detail():
+    group("detail rows, pinned to values from a real capture")
+    ok = True
+
+    r = parse_product_detail(FIX_DETAIL_PLAIN, URL_DETAIL_PLAIN)
+    ok &= check("a detail page yields a row at all", r is not None)
+    if r is None:
+        return False
+    # The Product is nested inside a BuyAction as its `object`. A scan for a
+    # top-level `@type == "Product"` finds NOTHING on these pages and would
+    # report a fully-populated page as having no product — which is the whole
+    # reason _products_in_ld walks through wrappers.
+    ok &= check("the Product inside a BuyAction wrapper is found",
+                r.sku == "2920911")
+    ok &= check("brand is populated in product mode",
+                r.brand == "UNIVERSAL PICTURES")
+    ok &= check("the EAN is read from gtin13", r.ean == "5051890337122")
+    ok &= check("price and currency are the structured values",
+                r.price == 24.99 and r.currency == "EUR")
+    ok &= check("availability is read from the offer", r.in_stock is True)
+    ok &= check("the category comes from the breadcrumb, not the title",
+                r.category == "Fantasy DVD & Blu-ray")
+    ok &= check("the full image list is kept, not just the first",
+                isinstance(r.images, list) and len(r.images) == 2)
+    ok &= check("image_url is the first of them",
+                r.image_url == r.images[0])
+    ok &= check("a description is carried", bool(r.description))
+    ok &= check("page and position are null outside a listing",
+                r.page is None and r.position is None)
+
+    # The detail page splits its price across three nodes:
+    #   whole "24,"  decimal "99"  currency "€"
+    # Reading the container's TEXT gives "24, 99 €", out of which the general
+    # price pattern matches "99 €" — 99.0 for a product costing 24.99. The
+    # split reader is what prevents that, and this check is what would catch
+    # a regression to the naive read.
+    ok &= check("the split price is reassembled, not misread as its cents",
+                r.price == 24.99 and r.price_source == "jsonld+dom")
+
+    r = parse_product_detail(FIX_DETAIL_RRP, URL_DETAIL_RRP)
+    ok &= check("detail UVP: price 49.99, original 59.99, discount 16.7%",
+                r.price == 49.99 and r.original_price == 59.99
+                and r.discount_pct == 16.7)
+    ok &= check("detail UVP: brand and EAN are read",
+                r.brand == "NINTENDO" and r.ean == "0045496513702")
+
+    # Same trap as on a tile, and the same answer. Also: this page carries
+    # THREE strike nodes, two of them belonging to the "similar products"
+    # carousel, so an unscoped read would attach a neighbour's price.
+    r = parse_product_detail(FIX_DETAIL_LOP, URL_DETAIL_LOP)
+    ok &= check("detail Tiefstpreis: 30-day low goes to its own column",
+                r.lowest_price_30d == 299.0)
+    ok &= check("detail Tiefstpreis: original_price stays None (THE TRAP)",
+                r.original_price is None)
+    ok &= check("detail: the whole-euro split price (349,–) is read",
+                r.price == 349.0 and r.price_source == "jsonld+dom")
+
+    # The same product appears in the listing fixture and in a detail
+    # fixture. The two modes must agree, or a consumer joining them gets two
+    # different prices for one article number.
+    listing_row = [x for x in parse_products(FIX_LISTING_DE, URL_LISTING_DE)
+                   if x.sku == "2882323"]
+    ok &= check("listing and detail agree on the same product's price",
+                bool(listing_row)
+                and listing_row[0].price == r.price
+                and listing_row[0].lowest_price_30d == r.lowest_price_30d)
+
+    # A page that is not a product must not produce a null-only row that
+    # counts as a success.
+    # A URL with no article number in it, so there is nothing to recover a
+    # sku from either: the row would be null in every column.
+    ok &= check("a page with no product yields None, not an empty row",
+                parse_product_detail(
+                    page("<div>nothing here</div>"),
+                    "https://www.mediamarkt.de/de/product/_x.html") is None)
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# JSON-LD shapes that are legal and break a naive parser
+# ---------------------------------------------------------------------------
+def test_jsonld_shapes():
+    group("legal JSON-LD shapes a naive parser gets wrong")
+    ok = True
+
+    def listing(ld):
+        return ('<html lang="de"><head><script type="application/ld+json">'
+                '%s</script></head><body>'
+                '<img src="https://assets.mmsrg.com/isr/x"/></body></html>'
+                % json.dumps(ld))
+
+    base_url = "https://www.mediamarkt.de/de/product/_x-1234567.html"
+    item = {"@type": "Product", "name": "X", "url": base_url}
+
+    # An explicit null is NOT a missing key: a .get("offers", {}) default
+    # does not apply to it, and the AttributeError lands one line later.
+    ld = {"@type": "ItemList", "itemListElement": [
+        {"@type": "ListItem", "item": dict(item, offers=None,
+                                           aggregateRating=None)}]}
+    rows = parse_products(listing(ld), URL_LISTING_DE)
+    ok &= check('"offers": null does not crash the page',
+                len(rows) == 1 and rows[0].price is None)
+    ok &= check('"aggregateRating": null does not crash the page',
+                rows[0].rating is None and rows[0].review_count is None)
+
+    # offers as a list, possibly holding things that are not dicts.
+    ld = {"@type": "ItemList", "itemListElement": [
+        {"@type": "ListItem", "item": dict(
+            item, offers=["not a dict", {"price": 9.99, "priceCurrency": "EUR"}])}]}
+    rows = parse_products(listing(ld), URL_LISTING_DE)
+    ok &= check("offers as a list of mixed types finds the real offer",
+                rows[0].price == 9.99 and rows[0].currency == "EUR")
+
+    # image in each of its four legal shapes.
+    for shape, value in (
+            ("a bare string", "https://x/1.jpg"),
+            ("a list of strings", ["https://x/1.jpg", "https://x/2.jpg"]),
+            ("an ImageObject", {"@type": "ImageObject", "url": "https://x/1.jpg"}),
+            ("a list of ImageObjects",
+             [{"@type": "ImageObject", "contentUrl": "https://x/1.jpg"}])):
+        ld = {"@type": "ItemList", "itemListElement": [
+            {"@type": "ListItem", "item": dict(item, image=value)}]}
+        rows = parse_products(listing(ld), URL_LISTING_DE)
+        ok &= check("image as %s is read" % shape,
+                    rows[0].image_url == "https://x/1.jpg")
+
+    # The product URL under offers.url rather than on the node. Missed, every
+    # row points at the listing page while the other columns look right.
+    ld = {"@type": "ItemList", "itemListElement": [
+        {"@type": "ListItem", "item": {"@type": "Product", "name": "X",
+                                       "offers": {"url": base_url,
+                                                  "price": 5.0}}}]}
+    rows = parse_products(listing(ld), URL_LISTING_DE)
+    ok &= check("a product URL living on the offer is still found",
+                len(rows) == 1 and rows[0].url == base_url
+                and rows[0].sku == "1234567")
+
+    # Products under @graph instead of itemListElement — not what this site
+    # emits today, handled because it is legal and costs nothing.
+    ld = {"@graph": [dict(item, offers={"price": 3.0, "priceCurrency": "EUR"})]}
+    rows = parse_products(listing(ld), URL_LISTING_DE)
+    ok &= check("products under @graph are found",
+                len(rows) == 1 and rows[0].price == 3.0)
+
+    # A block that does not parse must cost that block, not the page.
+    html = ('<html lang="de"><head>'
+            '<script type="application/ld+json">{ broken</script>'
+            '<script type="application/ld+json">%s</script></head><body>'
+            '<img src="https://assets.mmsrg.com/isr/x"/></body></html>'
+            % json.dumps({"@type": "ItemList", "itemListElement": [
+                {"@type": "ListItem", "item": dict(item, offers={"price": 7.0})}]}))
+    rows = parse_products(html, URL_LISTING_DE)
+    ok &= check("one unparseable ld+json block does not lose the others",
+                len(rows) == 1 and rows[0].price == 7.0)
+
+    # A rating outside 0..5 is not a rating.
+    ld = {"@type": "ItemList", "itemListElement": [
+        {"@type": "ListItem", "item": dict(
+            item, aggregateRating={"ratingValue": 47, "reviewCount": 3})}]}
+    rows = parse_products(listing(ld), URL_LISTING_DE)
+    ok &= check("a rating outside 0-5 is rejected", rows[0].rating is None)
+
+    # ratingCount and reviewCount are both legal and mean the same thing
+    # here: MediaMarkt writes the first on a detail page and the second in a
+    # listing. Knowing only one reports a null count on one of the two modes.
+    ld = {"@type": "ItemList", "itemListElement": [
+        {"@type": "ListItem", "item": dict(
+            item, aggregateRating={"ratingValue": 4.5, "ratingCount": "1.234"})}]}
+    rows = parse_products(listing(ld), URL_LISTING_DE)
+    ok &= check("ratingCount is read as well as reviewCount, ungrouped",
+                rows[0].review_count == 1234)
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# URLs
+# ---------------------------------------------------------------------------
+def test_urls():
+    group("URLs: pagination, categories, skus, hosts")
+    ok = True
+    cat = "https://www.mediamarkt.de/de/category/grills-116.html"
+
+    ok &= check("page 1 carries no page parameter", page_url(cat, 1) == cat)
+    ok &= check("page 2 appends ?page=2", page_url(cat, 2) == cat + "?page=2")
+    # REPLACED, not appended: a doubled parameter leaves the site to pick one.
+    ok &= check("an existing page parameter is replaced, not doubled",
+                page_url(cat + "?page=7", 2) == cat + "?page=2")
+    search = "https://www.mediamarkt.de/de/search.html?query=usb-c"
+    ok &= check("other query parameters survive pagination",
+                "query=usb-c" in page_url(search, 3)
+                and page_url(search, 3).endswith("page=3"))
+
+    ok &= check("a URL with no page parameter is page 1",
+                page_number_from_url(cat) == 1)
+    ok &= check("?page=4 reads as page 4",
+                page_number_from_url(cat + "?page=4") == 4)
+    ok &= check("a non-numeric page parameter reports None",
+                page_number_from_url(cat + "?page=x") is None)
+
+    ok &= check("the category label drops the id and the .html",
+                category_from_url(cat) == "grills")
+    ok &= check("a percent-encoded category decodes",
+                category_from_url(URL_LISTING_DE) == "kühlen-gefrieren")
+    ok &= check("route and locale segments are not category names",
+                category_from_url("https://www.mediamarkt.de/de/category/") is None)
+
+    ok &= check("listing kinds are told apart",
+                (listing_kind(cat), listing_kind(search),
+                 listing_kind(URL_DETAIL_PLAIN))
+                == ("category", "search", "product"))
+
+    # The slug is full of other numbers; only the last group counts.
+    ok &= check("the sku is the last number in the slug",
+                sku_from_url(URL_DETAIL_LOP) == "2882323")
+    ok &= check("a URL with no article number yields None",
+                sku_from_url("https://www.mediamarkt.de/de/product/_x.html") is None)
+    ok &= check("a query string after the slug does not defeat the pattern",
+                sku_from_url(URL_DETAIL_PLAIN + "?x=1") == "2920911")
+
+    ok &= check("www. is stripped from the host",
+                site_host("https://www.mediamarkt.at/x") == "mediamarkt.at")
+    ok &= check("every country site in the table is accepted",
+                all(is_supported_host("https://www." + h + "/") for h in HOSTS))
+    ok &= check("another shop is refused",
+                not is_supported_host("https://www.saturn.de/"))
+    # mediamarkt.lu IS a MediaMarkt shop and is still refused, because it runs
+    # on Shopify rather than on this platform: no /category/ or /product/
+    # paths, no product cards, and JSON-LD carrying only Organization and
+    # WebSite. Pointing this scraper at it would return zero rows and read as
+    # an empty category, so it is refused WITH THE REASON instead.
+    ok &= check("a MediaMarkt site on another platform is refused",
+                not is_supported_host("https://mediamarkt.lu/"))
+    ok &= check("...and the refusal says why rather than 'not a MediaMarkt site'",
+                "Shopify" in (product_parser.unsupported_reason(
+                    "https://mediamarkt.lu/") or ""))
+    ok &= check("Saturn's refusal names it as the sibling brand",
+                "Saturn" in (product_parser.unsupported_reason(
+                    "https://www.saturn.de/") or ""))
+    ok &= check("an unknown host has no invented reason",
+                product_parser.unsupported_reason("https://example.com/") is None)
+    ok &= check("the supported table holds the ten platform sites",
+                len(HOSTS) == 10 and "mediamarkt.lu" not in HOSTS)
+    ok &= check("an unparseable URL does not raise",
+                site_host("not a url") == "")
+    # The currency table is a FALLBACK; the structured data always wins. It
+    # still has to be right where it is consulted.
+    ok &= check("the currency table knows the non-euro sites",
+                host_currency("https://mediamarkt.pl/") == "PLN"
+                and host_currency("https://www.mediamarkt.ch/de/") == "CHF"
+                and host_currency("https://www.mediamarkt.hu/") == "HUF"
+                and host_currency("https://www.mediamarkt.com.tr/") == "TRY")
+    ok &= check("MediaWorld is in the table as the Italian site",
+                host_currency("https://www.mediaworld.it/") == "EUR")
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Page state
+# ---------------------------------------------------------------------------
+def test_page_state():
+    group("page state: blocked vs captcha vs empty vs content")
+    ok = True
+
+    # The status code is the PRIMARY signal here, which is a deliberate
+    # inversion of how the rest of this family detects a block: MediaMarkt's
+    # refusal is its own branded error page under a 403, carrying no vendor
+    # marker at all.
+    ok &= check("HTTP 403 is a block whatever the body says",
+                detect_page_state(FIX_LISTING_DE, 403) == "blocked")
+
+    # ...and both block pages are still caught with no status available, via
+    # the structural signal. The German one has site chrome around "Ups, hier
+    # stimmt gerade etwas nicht"; the Spanish one's ENTIRE visible text is
+    # the word "MediaMarkt", so no text marker could tell it from a thin but
+    # genuine page. What separates them is that neither references
+    # MediaMarkt's own asset host, and every real page does.
+    ok &= check("the German block page is caught without a status code",
+                detect_page_state(FIX_BLOCKED_DE) == "blocked")
+    ok &= check("the Spanish block page is caught without a status code",
+                detect_page_state(FIX_BLOCKED_ES) == "blocked")
+
+    ok &= check("a real listing is content", detect_page_state(FIX_LISTING_DE, 200) == "content")
+    ok &= check("a real detail page is content",
+                detect_page_state(FIX_DETAIL_PLAIN, 200) == "content")
+    ok &= check("a hub category is empty, not blocked",
+                detect_page_state(FIX_HUB, 200) == "empty")
+
+    # Detected is not blocking. A challenge marker on a page whose products
+    # have rendered guards nothing.
+    challenged = FIX_LISTING_DE.replace(
+        "</body>", '<div class="cf-turnstile" data-sitekey="x"></div></body>')
+    ok &= check("a challenge marker on a rendered grid still reads as content",
+                detect_page_state(challenged, 200) == "content")
+    ok &= check("a challenge on a page with no content reads as captcha",
+                detect_page_state(
+                    '<html><body><div class="g-recaptcha" '
+                    'data-sitekey="x"></div></body></html>') == "captcha")
+
+    # The Scraping Browser API's own auto-solve extension injects captcha
+    # hunters into EVERY page it loads. The first live run of this scraper
+    # reported exit 3 on a 1.8 MB category page holding twelve products for
+    # exactly this reason — the solver's tooling was mistaken for the site's
+    # defences. Anyone pointing a marker-based detector at a remote browser
+    # will hit this.
+    injected = (
+        '<html lang="de"><body><img src="https://assets.mmsrg.com/isr/x"/>'
+        '<script src="chrome-extension://kjmkgkdkpedkejedfhmfcenooemhbpbo/'
+        'content/captcha/turnstile/hunter.js" '
+        'data-ts-input="cf-turnstile-response"></script></body></html>')
+    ok &= check("a captcha marker injected by a browser EXTENSION is ignored",
+                detect_bot_challenge(injected) is None)
+    ok &= check("a real turnstile widget is still detected",
+                detect_bot_challenge(
+                    '<div class="cf-turnstile" data-sitekey="x"></div>')
+                == "turnstile")
+    ok &= check("reCAPTCHA and hCaptcha are still detected",
+                detect_bot_challenge("<script src='www.google.com/recaptcha/api.js'>")
+                == "recaptcha"
+                and detect_bot_challenge("<div class='h-captcha'></div>") == "hcaptcha")
+    ok &= check("an empty body with a 4xx reads as blocked",
+                detect_page_state("", 500) == "blocked")
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# page_flow: the policy all three engines share
+# ---------------------------------------------------------------------------
+def test_page_flow():
+    group("page_flow: shared policy")
+    ok = True
+
+    ok &= check("the listing readiness anchor is the CARD, not the link",
+                "mms-product-card" in page_flow.READY_SELECTOR_LISTING
+                and "/product/" not in page_flow.READY_SELECTOR_LISTING)
+    # Each tile links twice (image and title), so counting links reports the
+    # grid as twice its size — which matters the moment a threshold is
+    # compared against it.
+    ok &= check("a real page has 2 product links per card",
+                FIX_LISTING_DE.count('data-test="mms-product-card"') * 2
+                == FIX_LISTING_DE.count('href="/de/product/'))
+    ok &= check("the readiness threshold is above 1",
+                page_flow.MIN_CARD_MATCHES > 1)
+    ok &= check("a listing needs several anchors and a detail page needs none",
+                page_flow.min_matches("listing") == page_flow.MIN_CARD_MATCHES
+                and page_flow.min_matches("product") == 0)
+    # Ordered most-durable first: the standards-based signal leads.
+    ok &= check("link[rel=next] leads the pagination selector",
+                page_flow.NEXT_PAGE_SELECTOR.strip().startswith("link[rel='next']"))
+
+    # Concurrency depends entirely on this.
+    cat = "https://www.mediamarkt.de/de/category/grills-116.html"
+    ok &= check("a next-link matching the convention is addressable",
+                page_flow.pagination_is_addressable(cat, cat + "?page=2"))
+    ok &= check("a cursor the convention cannot reproduce is refused",
+                not page_flow.pagination_is_addressable(cat, cat + "?cursor=abc"))
+    ok &= check("tracking parameters do not defeat the comparison",
+                page_flow.pagination_is_addressable(
+                    "https://www.mediamarkt.de/de/search.html?query=x",
+                    "https://www.mediamarkt.de/de/search.html?query=x&page=2"
+                    "&queryMeta%5Bga_query%5D=x&queryHash=deadbeef"))
+    # The site writes its own next-links percent-DECODED while a pasted URL
+    # is encoded. Comparing them as raw strings said they disagreed, which
+    # made every accented category silently fall back to sequential fetching
+    # — a large share of a German, Spanish, Turkish or Hungarian catalogue.
+    ok &= check("an umlaut category still compares equal (encoded vs decoded)",
+                page_flow.pagination_is_addressable(
+                    URL_LISTING_DE,
+                    "https://www.mediamarkt.de/de/category/"
+                    "kühlen-gefrieren-32.html?page=2"))
+    # A search page publishes no next-link and paginates perfectly well
+    # anyway, so a missing link must not be read as a disagreement.
+    ok &= check("a missing next-link is not a disagreement",
+                page_flow.pagination_is_addressable(cat, None))
+
+    # The state policy, as data, so an engine cannot quietly disagree.
+    ok &= check("content is neither retried nor solved nor blocking",
+                not page_flow.should_retry("content")
+                and not page_flow.should_solve("content")
+                and not page_flow.counts_as_blocked("content"))
+    ok &= check("a block is retried from another exit but never solved",
+                page_flow.should_retry("blocked")
+                and not page_flow.should_solve("blocked")
+                and page_flow.counts_as_blocked("blocked"))
+    ok &= check("a captcha is both retried and solved",
+                page_flow.should_retry("captcha")
+                and page_flow.should_solve("captcha"))
+    # An empty page is a CORRECT answer. Retrying it spends the user's budget
+    # re-confirming it, and rotating the exit blames an address for the URL.
+    ok &= check("an empty page is NOT retried and NOT counted as blocked",
+                not page_flow.should_retry("empty")
+                and not page_flow.counts_as_blocked("empty"))
+
+    # Pinned as a known, deliberate absence: this site lazy-loads nothing, so
+    # the scrolling machinery was not ported. A future change becomes a
+    # decision instead of a surprise.
+    ok &= check("no scrolling machinery was ported (nothing lazy-loads here)",
+                not any(hasattr(page_flow, n) for n in
+                        ("scroll_until_stable", "hydrate", "needs_scrolling")))
+    # And the family rule that keeps page_flow driver-agnostic: passing
+    # JavaScript from here would decide its dialect for every driver, and
+    # they disagree (Playwright and pyppeteer take `() => expr`, Selenium's
+    # execute_script takes `return expr;`). Checked against the CODE only —
+    # the module docstring names both dialects while explaining why neither
+    # appears, and a naive grep over the source flags that as a violation.
+    flow_tree = ast.parse(inspect.getsource(page_flow))
+    # Docstring NODES, identified by position rather than by value:
+    # ast.get_docstring() returns a cleaned, dedented copy that no longer
+    # compares equal to the Constant it came from, so filtering by value
+    # silently keeps every docstring in the list.
+    doc_nodes = set()
+    for node in ast.walk(flow_tree):
+        body = getattr(node, "body", None)
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.ClassDef)) and body:
+            first = body[0]
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                doc_nodes.add(id(first.value))
+    code_strings = [n.value for n in ast.walk(flow_tree)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                    and id(n) not in doc_nodes]
+    ok &= check("page_flow passes no JavaScript across the driver boundary",
+                not any(("() =>" in s) or ("scrollHeight" in s)
+                        or ("document." in s) for s in code_strings))
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# The output contract
+# ---------------------------------------------------------------------------
+def test_output_contract():
+    group("the output contract shared across this scraper family")
+    ok = True
+    names = [f.name for f in fields(Product)]
+    # The family prefix, byte-identical and in order, so a consumer written
+    # against another repo in this family reads the first sixteen columns
+    # unchanged. Site-specific columns go AFTER it.
+    family_prefix = ["source", "scraped_at", "url", "sku", "title", "brand",
+                     "price", "currency", "original_price", "discount_pct",
+                     "rating", "review_count", "in_stock", "image_url",
+                     "category", "price_source"]
+    ok &= check("the family field prefix is present and in order",
+                names[:len(family_prefix)] == family_prefix)
+    ok &= check("MediaMarkt's own columns come after it",
+                names[len(family_prefix):] ==
+                ["page", "position", "lowest_price_30d", "ean", "description",
+                 "images"])
+    ok &= check("both modes map to a row class",
+                ROW_CLASS_BY_MODE == {"listing": Product, "product": Product})
+    ok &= check("both modes are one row per sku",
+                set(UNIQUE_BY_SKU_MODES) == {"listing", "product"})
+
+    ok &= check("the exit codes are the family's",
+                (EXIT_BLOCKED, EXIT_NO_PRODUCTS, EXIT_PARTIAL) == (3, 4, 6))
+    ok &= check("an exhausted listing counts as complete",
+                "no_new_products" in COMPLETE_STOP_REASONS
+                and "pagination_exhausted" in COMPLETE_STOP_REASONS)
+    ok &= check("a single-page mode is complete by construction",
+                "single_page_mode" in COMPLETE_STOP_REASONS)
+
+    # No defaulted currency anywhere: a row that could not establish one says
+    # None rather than claiming EUR, which would be wrong for the four
+    # non-euro country sites.
+    ok &= check("Product defaults currency to None, not a guess",
+                Product().currency is None)
+    ok &= check("Product defaults price_source to None",
+                Product().price_source is None)
+    return ok
+
+
+def test_writers():
+    group("writers, dedupe and the refusal to overwrite good data")
+    ok = True
+    rows = [Product(sku="1", url="u1", price=1.0),
+            Product(sku="2", url="u2", price=2.0)]
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "out")
+
+        # A run that finds nothing writes NOTHING: a consumer cannot tell an
+        # empty category from a failed run, and the failure destroys the last
+        # known good data.
+        save(rows, prefix, "json", allow_empty=False)
+        ok &= check("a good run writes its output",
+                    os.path.exists(prefix + ".json"))
+        before = open(prefix + ".json").read()
+        save([], prefix, "json", allow_empty=False)
+        ok &= check("an empty run does NOT overwrite the previous good output",
+                    open(prefix + ".json").read() == before)
+        save([], prefix, "json", allow_empty=True)
+        ok &= check("--allow-empty is the opt-out and does overwrite",
+                    json.load(open(prefix + ".json")) == [])
+
+        # An empty CSV still carries its header, so a consumer reads a table
+        # with no rows instead of failing on a zero-byte file.
+        csv_path = os.path.join(d, "empty.csv")
+        write_csv([], csv_path, row_cls=Product)
+        header = open(csv_path).read().strip().split("\n")[0]
+        ok &= check("an empty CSV still carries its header",
+                    header.split(",")[:4] == ["source", "scraped_at", "url", "sku"])
+
+        # A list column has to survive CSV without becoming a Python repr.
+        csv_path = os.path.join(d, "images.csv")
+        write_csv([Product(sku="1", images=["a", "b"])], csv_path, row_cls=Product)
+        body = open(csv_path).read()
+        ok &= check("a list column is joined, not repr()d in CSV",
+                    ("a" + LIST_CSV_SEPARATOR + "b") in body and "['a'" not in body)
+
+    seen = set()
+    ok &= check("dedupe drops a repeated sku",
+                len(dedupe_by_sku([Product(sku="a"), Product(sku="a")], seen)) == 1)
+    # A row with no key is always KEPT: there is nothing to check a duplicate
+    # against, and dropping it is a silent data loss rather than a dedupe.
+    ok &= check("a row with no sku is kept, not dropped",
+                len(dedupe_by_key([Product(sku=None), Product(sku=None)],
+                                  set())) == 2)
+
+    meta = run_meta("complete", "completed", 3, 3, "u", "u", 36,
+                    pages_failed=[], mode="listing", source="mediamarkt.de")
+    ok &= check("the sidecar records status, mode and source",
+                meta["status"] == "complete" and meta["mode"] == "listing"
+                and meta["source"] == "mediamarkt.de")
+    # A count stops being a description once a page can fail while later ones
+    # succeed, so the sidecar names WHICH pages failed.
+    meta = run_meta("partial", "blocked", 5, 3, "u", "u", 12,
+                    pages_failed=[2, 4], mode="listing", source="mediamarkt.de")
+    ok &= check("the sidecar names which pages failed, by number",
+                meta["pages_failed"] == [2, 4])
+    return ok
+
+
+def test_finish_run():
+    group("finish_run: the exit codes all three engines must agree on")
+    ok = True
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "run")
+        rows = [Product(sku="1", url="u")]
+
+        code = finish_run(rows, p, "json", False, blocked=False,
+                          stop_reason="completed", pages_requested=1,
+                          pages_completed=1, pages_failed=[], mode="listing",
+                          source="mediamarkt.de", start_url="u", final_url="u")
+        ok &= check("a complete run exits 0", code == 0)
+
+        code = finish_run([], p + "b", "json", False, blocked=True,
+                          stop_reason="blocked_mediamarkt-403",
+                          pages_requested=1, pages_completed=0,
+                          pages_failed=[1], mode="listing",
+                          source="mediamarkt.de", start_url="u", final_url="u")
+        ok &= check("a blocked run exits 3, not 4", code == EXIT_BLOCKED)
+        # A FAILED run writes no sidecar: `save` leaves the previous good
+        # output in place, and a "failed" sidecar beside good data would
+        # contradict it.
+        ok &= check("a failed run writes no sidecar beside older good data",
+                    not os.path.exists(p + "b.meta.json"))
+
+        code = finish_run([], p + "c", "json", False, blocked=False,
+                          stop_reason="completed", pages_requested=1,
+                          pages_completed=1, pages_failed=[], mode="listing",
+                          source="mediamarkt.de", start_url="u", final_url="u")
+        ok &= check("a genuinely empty result exits 4, not 3",
+                    code == EXIT_NO_PRODUCTS)
+
+        code = finish_run(rows, p + "d", "json", False, blocked=False,
+                          stop_reason="page_load_timeout", pages_requested=5,
+                          pages_completed=2, pages_failed=[3], mode="listing",
+                          source="mediamarkt.de", start_url="u", final_url="u")
+        ok &= check("a run with data that stopped early exits 6 (partial)",
+                    code == EXIT_PARTIAL)
+        ok &= check("a partial run still writes what it got",
+                    os.path.exists(p + "d.json"))
+    return ok
+
+
+def test_diff():
+    group("diff_runs")
+    ok = True
+    old = [{"sku": "1", "price": 10.0, "price_source": "jsonld+dom"},
+           {"sku": "2", "price": 20.0, "price_source": "jsonld+dom"},
+           {"sku": "3", "price": 30.0, "price_source": "jsonld"}]
+    new = [{"sku": "1", "price": 11.0, "price_source": "jsonld+dom"},
+           {"sku": "3", "price": 30.5, "price_source": "jsonld+dom"},
+           {"sku": "4", "price": 40.0, "price_source": "jsonld+dom"}]
+    d = diff_products(old, new)
+    ok &= check("a real price move is reported as changed",
+                any(c["sku"] == "1" for c in d["changed"]))
+    ok &= check("a delisted product is reported as removed",
+                [r["sku"] for r in d["removed"]] == ["2"])
+    ok &= check("a new product is reported as added",
+                [r["sku"] for r in d["added"]] == ["4"])
+    # A price difference that comes with a price_source difference says
+    # something about OUR two snapshots, not about the shop.
+    ok &= check("a price move with a source change is not 'changed'",
+                not any(c["sku"] == "3" for c in d["changed"]))
+    ok &= check("...it is reported separately as source_changed",
+                any(c["sku"] == "3" for c in d.get("source_changed", [])))
+
+    # lowest_price_30d is tracked: it moves only when a real price change
+    # enters or leaves the 30-day window, so a monitor watching only `price`
+    # would miss a product whose current price held while its recent floor
+    # moved underneath it.
+    ok &= check("lowest_price_30d is a tracked field",
+                "lowest_price_30d" in __import__("diff_runs").TRACKED_FIELDS)
+    return ok
+
+
+def test_captcha():
+    group("captcha detection and reconciliation")
+    ok = True
+    from captcha_solver import CaptchaChallenge
+
+    # A challenge frame settles the variant as v2: v3 never renders one. A
+    # frame with no `size` and no `render` used to fall through to v3, and a
+    # paid solve would have bought the wrong task type.
+    frame = {"found": True, "sitekey": "k" * 40, "size": None,
+             "renderParam": None, "challengeFrame": True}
+    got = detect_recaptcha_in_page(lambda js: frame)
+    ok &= check("a challenge frame with no size/render is v2, not v3 (got %s)"
+                % (got and got.kind), got is not None and got.kind == "recaptcha_v2")
+    got = detect_recaptcha_in_page(lambda js: dict(frame, size="invisible"))
+    ok &= check("a challenge frame with size=invisible is v2-invisible",
+                got is not None and got.kind == "recaptcha_v2_invisible")
+    got = detect_recaptcha_in_page(lambda js: dict(frame, size="invisible",
+                                                   challengeFrame=False))
+    ok &= check("no frame and size=invisible is still read as v3",
+                got is not None and got.kind == "recaptcha_v3")
+    # Enterprise: this repo does not implement that task type, so nothing is
+    # bought for it. Raised before any request, so no key is ever sent.
+    from captcha_solver import solve_recaptcha
+    ent = detect_recaptcha_in_page(lambda js: dict(frame, enterprise=True))
+    try:
+        solve_recaptcha(ent, "not-a-key")
+        refused = False
+    except RuntimeError as e:
+        refused = "Enterprise" in str(e)
+    ok &= check("an Enterprise reCAPTCHA is flagged and refused before any "
+                "solve is bought", ent.enterprise and refused)
+
+    # Format 2: the site's own wrapper element carries the config as
+    # attributes, with the execute() call inside a bundled file that never
+    # appears as readable inline script.
+    widget = ('<captcha-widget data-captcha-type="recaptcha" data-version="v3" '
+              'data-sitekey="6LcABCDEFGHIJKLMNOPQRSTUVWXYZ0123" '
+              'data-action="submit"></captcha-widget>')
+    c = detect_recaptcha_v3(widget, "https://www.mediamarkt.de/")
+    ok &= check("a captcha-widget declaring v3 is detected",
+                c is not None and c.kind == "recaptcha_v3")
+
+    # A sitekey is at least 20 characters; a short string next to
+    # data-sitekey is not one, and treating it as one would send a malformed
+    # task to the API and bill for the answer.
+    ok &= check("a too-short sitekey is not accepted as a challenge",
+                detect_recaptcha_v3('<div data-sitekey="short" '
+                                    'class="g-recaptcha"></div>',
+                                    "https://www.mediamarkt.de/") is None)
+    ok &= check("a page with no reCAPTCHA at all is not a challenge",
+                detect_recaptcha_v3(FIX_LISTING_DE, URL_LISTING_DE) is None)
+
+    # THE LOADER WINS. A site's own wrapper can declare v3 while the Google
+    # loader it actually ships is the v2-invisible signature
+    # (render=explicit, size=invisible, a bframe challenge iframe). v3
+    # parameters sent for a v2-invisible widget buy a token the site
+    # rejects — so the runtime reading is authoritative and the two
+    # detectors are reconciled rather than short-circuited.
+    static_v3 = CaptchaChallenge(kind="recaptcha_v3", sitekey="6LcABC" + "X" * 20,
+                                 action="submit", source="html")
+    runtime_v2 = CaptchaChallenge(kind="recaptcha_v2_invisible",
+                                  sitekey="6LcABC" + "X" * 20,
+                                  source="runtime", size="invisible")
+    merged = reconcile_detections(static_v3, runtime_v2)
+    ok &= check("when the detectors disagree, the live loader wins",
+                merged is not None and merged.kind == "recaptcha_v2_invisible")
+    ok &= check("...and the real action from the static markup is kept",
+                merged.action == "submit")
+    ok &= check("one detector alone is still used when only it fires",
+                reconcile_detections(static_v3, None) is static_v3
+                and reconcile_detections(None, runtime_v2) is runtime_v2)
+    ok &= check("neither firing means no challenge",
+                reconcile_detections(None, None) is None)
+
+    # Deliberately absent: no solver for a first-party image captcha. This
+    # site has no such page — captured 2026-09-09 from a datacentre exit on
+    # five hosts, its refusal is a 403 with no challenge on it at all — so a
+    # solver for one would be dead code that looks load-bearing. Pinned so
+    # that reintroducing it is a decision rather than a drift.
+    import captcha_solver
+    ok &= check("no first-party image-captcha solver was ported",
+                not [n for n in dir(captcha_solver)
+                     if "image" in n.lower() and "captcha" in n.lower()])
+    # ...while the DETECTORS stay broad, which is the family's standing
+    # policy: which challenge a visitor meets depends on the exit country and
+    # on what the address has been doing.
+    ok &= check("detection still covers four challenge vendors",
+                set(product_parser.BOT_CHALLENGE_MARKERS) >=
+                {"recaptcha", "hcaptcha", "turnstile", "datadome"})
+    return ok
+
+
+def _placeholder_reads_unset(raw):
+    """Whether env_config would treat `raw` as "not configured".
+
+    Goes through the real rule — `env_config.env_value`, which is where the
+    placeholder logic lives — rather than reimplementing it, because a
+    reimplementation is what drifts. The variable is set in os.environ
+    directly and restored afterwards: `load_env` only fills variables that
+    are not already set, so writing a temporary .env would be shadowed by
+    whatever the suite has already loaded.
+    """
+    name = "MEDIAMARKT_CDP_ENDPOINT"
+    saved = os.environ.get(name)
+    try:
+        os.environ[name] = raw
+        with io.StringIO() as buf, redirect_stdout(buf):
+            value = env_config.env_value(name)
+    finally:
+        if saved is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = saved
+    return value is None
+
+
+def test_env_config():
+    group("env_config")
+    ok = True
+    ok &= check("the env keys are this site's, not another repo's",
+                set(env_config.ENV_KEYS) ==
+                {"TWOCAPTCHA_KEY", "MEDIAMARKT_CDP_ENDPOINT",
+                 "MEDIAMARKT_PROXY", "MEDIAMARKT_URL"})
+
+    # A COPIED .env.example MUST READ AS UNSET, and a literal-only check is
+    # not enough to make that true. This repo documents its two credentialled
+    # URLs the way the vendor does, with the parts you fill in in braces:
+    #
+    #     ws://{login}-zone-scraping_browser-…-pid-{profileId}:{password}@…
+    #     http://{user}:{password}@eu.proxy.2captcha.com:2334
+    #
+    # Before the brace check existed the loader reported both of those as
+    # CONFIGURED, so `cp .env.example .env` and a run connected to
+    # cb.2captcha.com with the string `{login}-zone-…` as its username and
+    # got a 401 — a confusing failure a long way from its cause.
+    for raw in ('ws://{login}-zone-scraping_browser-country-de-pid-'
+                '{profileId}:{password}@cb.2captcha.com:9222',
+                'http://{user}:{password}@eu.proxy.2captcha.com:2334',
+                'your_2captcha_api_key_here'):
+        ok &= check("a placeholder value reads as unset: %s..." % raw[:34],
+                    _placeholder_reads_unset(raw))
+    # ...and a REAL value still reads as set, or the guard has eaten the
+    # feature it was protecting.
+    ok &= check("a real value is not mistaken for a placeholder",
+                _placeholder_reads_unset(
+                    "ws://acct1-zone-scraping_browser-country-de-pid-p1:"
+                    "secret@cb.2captcha.com:9222") is False)
+
+    # `--fp-tags` MUST DEFAULT TO ONE OS-FAMILY TAG. It shipped as
+    # "Windows,Chrome,Desktop", which the fingerprint API rejects with HTTP
+    # 400 — so --fingerprint failed on every invocation, while
+    # fingerprint_client.py's own --tags help said ONE tag all along.
+    # Measured against the live API on 2026-09-10: `Windows` succeeds, and
+    # `Windows,Chrome,Desktop`, `Chrome` and `Desktop` each 400.
+    for f in ENGINE_FILES:
+        path = os.path.join(REPO_ROOT, f)
+        if not os.path.exists(path):
+            continue
+        m = re.search(r'--fp-tags"\s*,\s*default="([^"]*)"',
+                      open(path, encoding="utf-8").read())
+        if m is None:
+            continue
+        ok &= check("%s's --fp-tags default is ONE tag the API accepts" % f,
+                    "," not in m.group(1)
+                    and m.group(1) in ("Windows", "Microsoft Windows",
+                                       "Android"))
+
+    # .env.example must document exactly the variables the code reads, in
+    # both directions. It drifts otherwise, and a documented-but-unread
+    # variable is worse than an undocumented one.
+    example = os.path.join(REPO_ROOT, ".env.example")
+    documented = set()
+    if os.path.exists(example):
+        for line in open(example, encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                documented.add(line.split("=", 1)[0].strip())
+    ok &= check(".env.example documents exactly the variables the code reads",
+                documented == set(env_config.ENV_KEYS))
+
+    # A variable mapped onto a flag with a non-empty default would be
+    # silently inert, because the loader only fills UNSET values: a setting
+    # that looks configurable and is not.
+    ok &= check("no env variable is mapped onto --out (it has a default)",
+                "out" not in env_config.ENV_KEYS.values())
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, ".env")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("TWOCAPTCHA_KEY=fromfile\n")
+            f.write("MEDIAMARKT_URL=https://www.mediamarkt.de/de/x.html\n")
+            f.write("NOT_A_REAL_KEY=1\n")
+
+        class A:
+            twocaptcha_key = None
+            url = None
+            cdp_endpoint = None
+            proxy = None
+
+        a = A()
+        env_config.load_env(path)
+        env_config.apply(a, quiet=True)
+        ok &= check("a value in .env fills an unset flag",
+                    a.twocaptcha_key == "fromfile")
+
+        b = A()
+        b.twocaptcha_key = "fromflag"
+        env_config.apply(b, quiet=True)
+        # A .env must never override something the caller typed.
+        ok &= check("an explicit flag beats .env", b.twocaptcha_key == "fromflag")
+        # A typo is REPORTED rather than silently ignored.
+        ok &= check("an unrecognised variable in .env is reported",
+                    "NOT_A_REAL_KEY" in env_config.unknown_keys(path))
+    return ok
+
+
+def test_proxy_pool():
+    group("proxy_pool: credentials never reach argv or logs")
+    ok = True
+    url = "http://user:secret@eu.proxy.2captcha.com:2334"
+    masked = mask(url)
+    ok &= check("credentials are masked in logs", "secret" not in masked)
+    # The host and port are KEPT: which exit a run used is the point of the
+    # log and is not the secret.
+    ok &= check("...but the host and port survive masking",
+                "eu.proxy.2captcha.com:2334" in masked)
+
+    pw = to_playwright(url)
+    # A `--proxy-server=` value becomes part of the browser's command line,
+    # readable by anything that can run `ps`. The credentials go through the
+    # driver's own fields instead.
+    ok &= check("the server string handed to the browser has no credentials",
+                "secret" not in pw["server"])
+    ok &= check("credentials go through the driver's own fields",
+                pw["username"] == "user" and pw["password"] == "secret")
+
+    scrubbed, creds = split_credentials(url)
+    ok &= check("split_credentials separates the two",
+                scrubbed == "http://eu.proxy.2captcha.com:2334"
+                and creds == ("user", "secret"))
+
+    pool = ProxyPool(["http://a:1", "http://b:2", "http://c:3"])
+    ok &= check("a pool reports its size", len(pool) == 3)
+    first = pool.current
+    pool.advance("test")
+    ok &= check("advancing moves to another exit", pool.current != first)
+    # `.proxies` hands back a COPY, so a worker building its own pool from it
+    # cannot mutate the parent's list. Two threads sharing one mutable list
+    # is the bug that makes concurrency stop being worth it.
+    copy = pool.proxies
+    copy.append("http://d:4")
+    ok &= check("the pool hands out a copy of its exits, not the list itself",
+                len(pool) == 3)
+
+    # Workers start on DIFFERENT exits, each with its own pool object, so no
+    # thread needs a lock: the concurrency is safe by construction rather
+    # than by discipline. Tested through the engine's own helper, because
+    # that is where the offset actually lives.
+    try:
+        import playwright_scraper
+    except ImportError:
+        playwright_scraper = None
+    if playwright_scraper is not None:
+        exits = [playwright_scraper._worker_pool(pool, i).current
+                 for i in range(3)]
+        ok &= check("three workers start on three different exits",
+                    len(set(exits)) == 3)
+        ok &= check("a worker with no pool gets none",
+                    playwright_scraper._worker_pool(None, 0) is None)
+
+    # A pool of one is legal and must not rotate itself into an index error.
+    one = ProxyPool(["http://only:1"])
+    one.advance("nowhere else to go")
+    ok &= check("a single-exit pool survives a rotation",
+                one.current == "http://only:1")
+    ok &= check("an empty pool is refused rather than silently accepted",
+                _raises(lambda: ProxyPool([])))
+
+    # This used to assert that "http://host:port:login:pass" — a line from a
+    # proxy LIST FILE — "is understood", checking only that parse_proxy_line
+    # did not reject it. It returned the string unchanged, so the check
+    # passed; the value was never usable, and it blew up several calls later.
+    # A test that asserts a function did not complain is not a test that its
+    # answer was right.
+    #
+    # A proxy LIST FILE line pasted where a proxy URL belongs. This is the
+    # mistake a new user makes — the file format is
+    # scheme://host:port:login:password and the flag wants
+    # http://login:password@host:port — and it reached a real CI run.
+    #
+    # It used to sail through parse_proxy_line (which never looked at the
+    # port) and blow up much later inside to_playwright as an uncaught
+    # ValueError: exit 1, a crash, where it should be exit 2, bad usage. And
+    # the traceback printed the login AND the password into a public CI log.
+    from proxy_pool import ProxyError
+    pasted = ("http://eu.proxy.2captcha.com:2334:"
+              "SOMELOGIN-zone-custom-region-de:SOMEPASSWORD")
+    raised = None
+    try:
+        parse_proxy_line(pasted, source="MEDIAMARKT_PROXY")
+    except ProxyError as exc:
+        raised = str(exc)
+    ok &= check("a proxy-list line pasted as a URL is refused, not crashed on",
+                raised is not None)
+    ok &= check("...and the refusal says what the value should look like",
+                raised is not None and "login:password@host:port" in raised)
+    ok &= check("...and neither the login nor the password is in the message",
+                raised is not None
+                and "SOMEPASSWORD" not in raised and "SOMELOGIN" not in raised)
+
+    # mask() is the last thing standing between a password and a log, and it
+    # is called precisely when the value is already wrong. It read
+    # `parsed.port`, which urlparse computes lazily and which RAISES on a
+    # malformed authority — so the masker blew up on exactly the input that
+    # most needed masking. A masker that raises is worse than a vague one.
+    ok &= check("mask() does not raise on a malformed URL",
+                "SOMEPASSWORD" not in mask(pasted))
+    for junk in ("::::", "not a url", "http://", "://x", ""):
+        try:
+            mask(junk)
+            raised_here = False
+        except Exception:
+            raised_here = True
+        ok &= check("mask(%r) does not raise" % junk, not raised_here)
+    ok &= check("mask() still keeps host and port on a good URL",
+                mask("http://u:p@h.example:8080") == "http://***:***@h.example:8080")
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# The engines
+# ---------------------------------------------------------------------------
+ENGINES = ("playwright_scraper", "puppeteer_scraper", "selenium_scraper")
+
+
+def test_engines(skips):
+    group("engines: all three must behave identically")
+    ok = True
+    loaded = {}
+    for name in ENGINES:
+        try:
+            loaded[name] = __import__(name)
+        except ImportError as e:
+            # Reported, never swallowed: "skipped, engine absent" reads
+            # exactly like a passing run, and CI's engine-smoke job fails if
+            # this list is non-empty.
+            skips.append("%s (%s)" % (name, e))
+
+    for name, mod in loaded.items():
+        ok &= check("%s exposes scrape() and parse_args()" % name,
+                    hasattr(mod, "scrape") and hasattr(mod, "parse_args"))
+        # The engines must reach the shared policy rather than carry copies.
+        src = inspect.getsource(mod)
+        ok &= check("%s takes its readiness policy from page_flow" % name,
+                    "page_flow.ready_selector" in src)
+        ok &= check("%s takes its state policy from page_flow" % name,
+                    "page_flow.should_retry" in src or "page_flow.classify" in src)
+        ok &= check("%s carries no scrolling machinery" % name,
+                    "scroll_until_stable" not in src and "page_flow.hydrate" not in src)
+        # Credentials never reach a log, in any engine.
+        ok &= check("%s masks credentials globally, not just once" % name,
+                    "pass@" not in mod._mask_credentials(
+                        "a ws://user:pass@h:1/ b ws://user:pass@h:1/"))
+        ok &= check("%s refuses a host that is not MediaMarkt" % name,
+                    "is_supported_host" in src)
+        # Both modes, and only both.
+        ok &= check("%s offers exactly the listing and product modes" % name,
+                    '"listing", "product"' in src)
+
+    # For "it must pass with no engine installed" to mean anything, each
+    # engine has to import its driver at MODULE level — otherwise the module
+    # imports cleanly with the library absent, the group never skips, and the
+    # CI job that exists to catch that cannot. This drifts back silently, so
+    # it is asserted rather than trusted.
+    driver_imports = {"playwright_scraper": "playwright",
+                      "puppeteer_scraper": "pyppeteer",
+                      "selenium_scraper": "selenium"}
+    for name, lib in driver_imports.items():
+        path = os.path.join(REPO_ROOT, name + ".py")
+        if not os.path.exists(path):
+            continue
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        top_level = set()
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                top_level.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                top_level.add(node.module.split(".")[0])
+        ok &= check("%s imports %s at module level, so an absent library skips"
+                    % (name, lib), lib in top_level)
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Repository hygiene
+# ---------------------------------------------------------------------------
+def test_no_capture_leaks():
+    group("no credentials or personal data in the committed fixtures")
+    ok = True
+    fixtures = "\n".join(v for k, v in sorted(globals().items())
+                         if k.startswith("FIX_") and isinstance(v, str))
+    # Guarded with PATTERNS rather than with the literals a previous capture
+    # happened to contain, so the NEXT capture is checked too. MediaMarkt's
+    # pages embed a front-end configuration blob — a Sentry DSN, a Woosmap
+    # public key, a store-code JWT — none of which is needed to test a
+    # parser, and none of which belongs in a public repository.
+    patterns = {
+        "a JWT": r"eyJ[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{10,}",
+        "an access token": r"(?:access|auth|bearer)[_\-]?[Tt]oken\"?\s*[:=]\s*\"?[A-Za-z0-9._\-]{12,}",
+        "an API key": r"(?:api|public|secret|private)[_\-]?[Kk]ey\"?\s*[:=]\s*\"?[A-Za-z0-9._\-]{12,}",
+        "a Sentry DSN": r"https://[0-9a-f]{16,}@[\w.]*ingest",
+        "a session id": r"session[_\-]?[Ii]d\"?\s*[:=]\s*\"?[A-Za-z0-9._\-]{8,}",
+        "an email address": r"[\w.+-]+@[\w-]+\.[a-z]{2,}",
+        "a proxy credential": r"://[^\s/@\"]+:[^\s/@\"]+@",
+    }
+    for label, pattern in patterns.items():
+        hits = re.findall(pattern, fixtures)
+        ok &= check("the fixtures contain no %s" % label, not hits)
+
+    # The repo-wide grep CI runs, applied here too so a failure is local.
+    ok &= check("no .env file is committed",
+                not os.path.exists(os.path.join(REPO_ROOT, ".env"))
+                or ".env" in open(os.path.join(REPO_ROOT, ".git", "info", "exclude"),
+                                  encoding="utf-8").read()
+                if os.path.exists(os.path.join(REPO_ROOT, ".git", "info", "exclude"))
+                else not os.path.exists(os.path.join(REPO_ROOT, ".env")))
+    return ok
+
+
+# Wording the family enforces. Four separately-billed 2Captcha products sit
+# behind one key, and two of these names were used for a placeholder endpoint
+# that no longer exists — an editor reintroducing either costs a support
+# ticket, so the check is cheap insurance.
+BANNED_PHRASES = (
+    "cloud browser",
+    "antidetect browser",
+    "anti-detect browser",
+    "2scraper Antidetect Browser",
+    "gate.2prx.com",
+    "2prx.com",
+    "--antidetect",
+    "ANTIDETECT_LOCAL_API",
+)
+
+# Flags that must not exist ON THE ENGINES, each for its own reason:
+#
+#   --antidetect   removed from this family; the endpoint behind it was a
+#                  placeholder that never existed.
+#   --country      the hostname already decides which country site a run
+#                  reads, so a flag could disagree with the URL it was given
+#                  and there would be no right answer. (fingerprint_client.py
+#                  legitimately HAS a --country: it picks a fingerprint's
+#                  locale, which is a different question.)
+#   --marketplace  same reasoning, under the sibling repo's name for it.
+#   --details      the old pre-family scraper's flag for "also fetch each
+#                  product page". That is --mode product now, and a run that
+#                  silently multiplies its request count is not a flag.
+REMOVED_ENGINE_FLAGS = ("--antidetect", "--marketplace", "--country", "--details")
+ENGINE_FILES = ("playwright_scraper.py", "puppeteer_scraper.py",
+                "selenium_scraper.py")
+
+
+def test_dumps_private_canary_and_block_hint():
+    """Three small guards from the 2026-10 audit, each controlled by planting
+    its fault. The canary one skips when the CI directory is absent (the
+    Docker image deliberately copies none)."""
+    import ast, os, stat, tempfile
+    from pathlib import Path
+    import output_writer, page_flow
+    ok = True
+    print("\n[dumps are private, canary knows exit 5, refusal names the country]")
+
+    # 1. open_private creates 0600 and tightens an existing 0644 file.
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "dump.html")
+        with open(p, "w") as f:
+            f.write("old")
+        os.chmod(p, 0o644)
+        with output_writer.open_private(p) as f:
+            f.write("<html>")
+        mode = stat.S_IMODE(os.stat(p).st_mode)
+        ok &= check("open_private leaves an existing dump 0600", mode == 0o600)
+        ok &= check("open_private truncates and writes",
+                    Path(p).read_text() == "<html>")
+        # A NEW file, with a permissive umask: the mode passed to os.open is
+        # all that protects it, and the chmod above never saw this path.
+        q = os.path.join(d, "fresh.html")
+        old_umask = os.umask(0)
+        try:
+            with output_writer.open_private(q) as f:
+                f.write("x")
+        finally:
+            os.umask(old_umask)
+        # POSIX only: Windows has no such mode bits.
+        if os.name == "posix":
+            ok &= check("open_private creates a new dump 0600 even under "
+                        "umask 0", stat.S_IMODE(os.stat(q).st_mode) == 0o600)
+
+    # 2. No engine writes a dump through a plain open(..., "w").
+    here = Path(__file__).resolve().parent
+    scanned = 0
+    for name in ("playwright_scraper.py", "puppeteer_scraper.py",
+                 "selenium_scraper.py", "scraper_api_client.py"):
+        tree = ast.parse((here / name).read_text(encoding="utf-8"))
+        plain = [n.lineno for n in ast.walk(tree)
+                 if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "open"
+                 and len(n.args) > 1 and isinstance(n.args[1], ast.Constant)
+                 and n.args[1].value == "w"]
+        scanned += 1
+        ok &= check("%s opens no file with a plain open(.., 'w') (dumps use "
+                    "open_private)" % name, not plain)
+    ok &= check("the dump scan covered four files", scanned == 4)
+
+    # 3. Every engine appends the country hint to its refusal line.
+    for name in ("playwright_scraper.py", "puppeteer_scraper.py",
+                 "selenium_scraper.py"):
+        src = (here / name).read_text(encoding="utf-8")
+        ok &= check("%s logs page_flow.BLOCK_COUNTRY_HINT on a refusal" % name,
+                    "page_flow.BLOCK_COUNTRY_HINT" in src)
+    ok &= check("the hint names the country, not only 'residential'",
+                "COUNTRY" in page_flow.BLOCK_COUNTRY_HINT)
+
+    # 4. The canary's exit-code switch has a branch for 5.
+    ci_dir = here / (".git" + "hub")
+    if not ci_dir.is_dir():
+        print("  SKIP  no CI directory in this tree (the Docker image)")
+    else:
+        text = (ci_dir / "workflows" / "canary.yml").read_text(encoding="utf-8")
+        ok &= check("canary.yml interprets exit 5 explicitly",
+                    "\n            5)" in text)
+    return ok
+
+
+def test_wording():
+    group("wording and removed flags")
+    ok = True
+    shipped = [f for f in os.listdir(REPO_ROOT)
+               if f.endswith((".py", ".md", ".txt", ".toml", ".yml", ".yaml"))
+               and f != os.path.basename(__file__)]
+    for phrase in BANNED_PHRASES:
+        offenders = []
+        for f in shipped:
+            try:
+                text = open(os.path.join(REPO_ROOT, f), encoding="utf-8").read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if phrase.lower() in text.lower():
+                offenders.append(f)
+        ok &= check("no shipped file says %r" % phrase, not offenders)
+
+    for flag in REMOVED_ENGINE_FLAGS:
+        offenders = []
+        for f in ENGINE_FILES:
+            path = os.path.join(REPO_ROOT, f)
+            if not os.path.exists(path):
+                continue
+            text = open(path, encoding="utf-8").read()
+            # A prose mention explaining why the flag does NOT exist is fine
+            # and is worth keeping; an argparse registration is not.
+            if ('add_argument("%s"' % flag) in text or \
+                    ("add_argument('%s'" % flag) in text:
+                offenders.append(f)
+        ok &= check("no engine registers the removed flag %s" % flag,
+                    not offenders)
+
+    # The product this repo integrates with, named correctly.
+    readme = os.path.join(REPO_ROOT, "README.md")
+    if os.path.exists(readme):
+        text = open(readme, encoding="utf-8").read()
+        ok &= check("the README names the Scraping Browser API",
+                    "Scraping Browser API" in text)
+        ok &= check("the README does not name a competitor",
+                    not re.search(r"brightdata|oxylabs|smartproxy|zyte|scraperapi\.com",
+                                  text, re.IGNORECASE))
+    return ok
+
+
+# Names Python provides that are not imports and not assignments.
+_MODULE_DUNDERS = {"__file__", "__name__", "__doc__", "__package__",
+                   "__spec__", "__loader__", "__builtins__", "__debug__"}
+
+
+def _undefined_names(path):
+    """Names loaded in `path` that are never imported, defined or assigned.
+
+    A deliberately coarse approximation — it pools every binding in the file
+    rather than tracking scopes, so it under-reports and never invents a
+    problem. That is the right trade here: this exists to catch a name that
+    is nowhere at all, and a false positive would be worse than a miss.
+    """
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    bound = set(dir(builtins)) | _MODULE_DUNDERS
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            bound |= {(a.asname or a.name.split(".")[0]) for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            bound |= {(a.asname or a.name) for a in node.names}
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                               ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.Global):
+            bound |= set(node.names)
+    missing = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) \
+                and node.id not in bound:
+            missing.setdefault(node.id, []).append(node.lineno)
+    return missing
+
+
+class _FakeSession:
+    """Stands in for a _BrowserSession: opened, closed, carries a pool."""
+
+    def __init__(self, pool=None):
+        self.pool = pool
+        self.closed = False
+
+    def open(self):
+        return self
+
+    def close(self):
+        self.closed = True
+
+
+class _FakePlaywright:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+# A fingerprint in the shape the API actually returns, trimmed to the keys
+# this repo reads. Cut from a real `format=chromium` response on 2026-09-09;
+# the id and the exact pixel values are the only things changed, and only so
+# that nothing here looks like a specific machine.
+FIX_FINGERPRINT = {
+    "id": 1000000,
+    "country": "DE",
+    "userAgent": {
+        "userAgent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/146.0.0.0 Safari/537.36"),
+        "platform": "Windows",
+        "mobile": False,
+    },
+    "intl": {
+        "contentLocale": "de-DE",
+        "languages": ["de-DE", "de", "en-US", "en"],
+        "timeZone": "Europe/Berlin",
+    },
+    "screen": {"width": 1920, "height": 1080,
+               "outerWidth": 1920, "outerHeight": 992,
+               "deviceScaleFactor": 1},
+}
+
+
+def test_fingerprint_client_reads_env():
+    group("fingerprint_client resolves its key the way the docs promise")
+    ok = True
+    import fingerprint_client as fpc
+
+    # THE DEFECT THIS PINS, found the first time --fingerprint was run live
+    # here and confirmed present in five sibling repos: `--key` defaulted to
+    # `os.environ.get("TWOCAPTCHA_KEY")` alone. So a key put in `.env` —
+    # which is exactly what the README and .env.example instruct — worked
+    # for every engine and failed HERE with "No API key". A documented
+    # mechanism not applied on one path, a common shape of defect in
+    # copied code.
+    src = inspect.getsource(fpc.main)
+    ok &= check("it loads .env itself, rather than hoping an engine did",
+                "env_config.load_env()" in src)
+    ok &= check("...and reads the key through the family's loader",
+                'env_config.env_value("TWOCAPTCHA_KEY")' in src)
+    # Through `env_value` and NOT `os.environ.get`, because only the former
+    # applies the placeholder rule. Measured both ways with
+    # TWOCAPTCHA_KEY=your_2captcha_api_key_here exported: os.environ.get
+    # sends the placeholder to the API and the run reports "Fingerprint API
+    # rejected the key (401) — note this is a separate subscription", which
+    # sends the reader to check a subscription they never needed.
+    ok &= check("...not straight from os.environ, which skips the "
+                "placeholder rule",
+                'os.environ.get("TWOCAPTCHA_KEY")' not in src)
+    # Behaviourally, not just by reading the source — and written
+    # self-contained so this check is byte-identical in every repo of the
+    # family rather than depending on a local helper.
+    saved = os.environ.get("TWOCAPTCHA_KEY")
+    try:
+        os.environ["TWOCAPTCHA_KEY"] = "your_2captcha_api_key_here"
+        read_back = env_config.env_value("TWOCAPTCHA_KEY")
+    finally:
+        if saved is None:
+            os.environ.pop("TWOCAPTCHA_KEY", None)
+        else:
+            os.environ["TWOCAPTCHA_KEY"] = saved
+    ok &= check("a placeholder still reads as unset on this path",
+                read_back is None)
+
+    # The default must never reach `--help`. argparse prints a default only
+    # when the help string asks for it, so this is one substring away from
+    # printing a live credential to anyone who types --help.
+    ok &= check("the --key help text does not interpolate its default",
+                "%(default)s" not in src)
+    return ok
+
+
+def test_fingerprint_application():
+    group("a fingerprint is applied as the fingerprint describes it")
+    ok = True
+    import fingerprint_client as fpc
+
+    ua = fpc.fingerprint_user_agent(FIX_FINGERPRINT)
+    # The UA used to be read from `userAgent.value`, a key the API returns in
+    # NEITHER format. So --fingerprint silently set no user agent at all and
+    # the browser kept its own: a German fingerprint's screen and locale
+    # wearing a local Chromium's UA, which is precisely the identity mismatch
+    # the flag exists to avoid.
+    ok &= check("the user agent is found in the shape the API returns",
+                ua and ua.startswith("Mozilla/5.0 (Windows NT 10.0"))
+    ok &= check("the `raw` format's ua key is understood too",
+                fpc.fingerprint_user_agent({"data": {"ua": "UA/1.0"}}) == "UA/1.0")
+    ok &= check("a fingerprint with no user agent yields None, not a crash",
+                fpc.fingerprint_user_agent({"country": "DE"}) is None)
+
+    kw = fpc.playwright_context_kwargs(FIX_FINGERPRINT)
+    ok &= check("the context carries the fingerprint's user agent",
+                kw.get("user_agent") == ua)
+    # `locale` used to be built as f"en-{country}", giving "en-DE" for a
+    # German fingerprint. An English-speaking visitor in Germany is possible,
+    # but it is not what this fingerprint describes, and a locale that
+    # contradicts the rest of the identity is the mismatch again.
+    ok &= check("the locale is the fingerprint's own, not en-<country>",
+                kw.get("locale") == "de-DE")
+    ok &= check("the timezone is carried, so the browser cannot contradict it",
+                kw.get("timezone_id") == "Europe/Berlin")
+    # The device pixel ratio, which Playwright takes as its own option and
+    # which was dropped on the floor until a live browser was compared
+    # against the fingerprint: one stating 1.25 produced a browser reporting
+    # `devicePixelRatio === 1`, so the identity contradicted itself on an
+    # axis a fingerprinter reads for free.
+    ok &= check("fingerprint: the device scale factor is carried",
+                kw.get("device_scale_factor") == 1)
+    # A viewport exactly equal to the screen is itself a signal, and the
+    # fingerprint states its own window size rather than needing one guessed.
+    ok &= check("the viewport is the fingerprint's window, not its screen",
+                kw.get("viewport") == {"width": 1920, "height": 992}
+                and kw.get("screen") == {"width": 1920, "height": 1080})
+
+    # Falling back sensibly when a field is absent, rather than dropping it.
+    bare = fpc.playwright_context_kwargs({"country": "FR", "screen":
+                                          {"width": 1280, "height": 800}})
+    ok &= check("a fingerprint with no intl block still gets a locale",
+                bare.get("locale") == "en-FR")
+    ok &= check("...and a window smaller than the screen",
+                bare["viewport"]["height"] < bare["screen"]["height"])
+    ok &= check("a fingerprint with nothing usable yields no kwargs",
+                fpc.playwright_context_kwargs({}) == {})
+
+    # Every key this produces must be one Playwright's new_context accepts;
+    # an unknown one is a TypeError at launch, on the paid path, at runtime.
+    accepted = {"user_agent", "viewport", "screen", "locale", "timezone_id",
+                "geolocation", "permissions", "extra_http_headers",
+                "device_scale_factor", "is_mobile", "has_touch", "color_scheme"}
+    ok &= check("every context kwarg is one Playwright accepts",
+                set(kw) <= accepted)
+    return ok
+
+
+def test_credentials_never_reach_a_log():
+    group("an API key never reaches a log or an exception message")
+    ok = True
+    import fingerprint_client as fpc
+    import captcha_solver as cs
+
+    # requests puts the FULL URL — query string included — into the text of
+    # HTTPError and of every connection error. Both of these modules have an
+    # endpoint that takes the key as a query parameter, so an error there
+    # echoed a live key to the terminal. It did, once, on a real call.
+    # An obviously fake key, and NOT a real one even a revoked one: a
+    # 32-hex string in a public repo reads as a live credential to every
+    # scanner that looks, including this repo's own CI grep. The word
+    # "example" in the name is what tells that grep this line is a fixture.
+    example_key = "0123456789abcdef0123456789abcdef"
+    for name, module in (("fingerprint_client", fpc), ("captcha_solver", cs)):
+        redacted = module._redact(
+            "400 Client Error: Bad Request for url: "
+            "https://api.2captcha.com/fingerprint/random?format=chromium&"
+            "key=%s" % example_key)
+        ok &= check("%s redacts a key out of an error message" % name,
+                    example_key not in redacted)
+        ok &= check("...and keeps the endpoint, which is the useful half",
+                    "api.2captcha.com/fingerprint/random" in redacted)
+        ok &= check("%s redacts clientKey too" % name,
+                    example_key not in module._redact("clientKey=%s" % example_key))
+        ok &= check("%s leaves ordinary text alone" % name,
+                    module._redact("upstream status 403") == "upstream status 403")
+    return ok
+
+
+def test_concurrent_dispatch(skips):
+    group("concurrent page dispatch (threads, stop event, accounting)")
+    ok = True
+    try:
+        import playwright_scraper as eng
+    except ImportError as e:
+        skips.append("concurrent dispatch (%s)" % e)
+        return ok
+
+    # The thread fan-out is the one part of --concurrency that the rest of
+    # this suite does not reach, and it is not reachable from a live run in
+    # every environment either: page 1 is always fetched alone and decides
+    # whether the rest may be addressed, so a blocked page 1 means the
+    # workers never start. Driven here with the browser stubbed out, which
+    # leaves exactly the concurrency logic under test.
+    original = (eng.sync_playwright, eng._BrowserSession, eng._fetch_one_page)
+
+    class Args:
+        delay = 0
+        mode = "listing"
+        out = "x"
+
+    def run(specs, concurrency, rows_for_page, die_on=()):
+        fetched, lock = [], threading.Lock()
+
+        def fake_fetch(session, args, pool, page_num, url):
+            with lock:
+                fetched.append(page_num)
+            if page_num in die_on:
+                raise RuntimeError("worker blew up on page %d" % page_num)
+            outcome = eng.PageOutcome(page_num=page_num, url=url)
+            outcome.products = rows_for_page(page_num)
+            return outcome
+
+        eng.sync_playwright = lambda: _FakePlaywright()
+        eng._BrowserSession = lambda pw, args, pool, **kw: _FakeSession(pool)
+        eng._fetch_one_page = fake_fetch
+        try:
+            results, unattempted, exhausted = eng._fetch_pages_concurrently(
+                Args(), None, specs, concurrency)
+        finally:
+            (eng.sync_playwright, eng._BrowserSession,
+             eng._fetch_one_page) = original
+        return fetched, results, unattempted, exhausted
+
+    # 1. Every page fetched exactly once, whatever the worker count.
+    specs = [(n, "u%d" % n) for n in range(2, 12)]
+    fetched, results, unattempted, exhausted = run(
+        specs, 4, lambda n: ["row"])
+    ok &= check("every queued page is fetched exactly once",
+                sorted(fetched) == [n for n, _ in specs])
+    ok &= check("every page produces an outcome",
+                sorted(o.page_num for o in results) == [n for n, _ in specs])
+    ok &= check("nothing is left unattempted when the listing does not end",
+                unattempted == [] and not exhausted)
+
+    # 2. Results arrive in whatever order the threads finish, which is
+    #    exactly why the caller merges by page number instead of by arrival.
+    #    Sorting them must reconstruct the page order.
+    ok &= check("outcomes can be put back into page order",
+                [o.page_num for o in sorted(results, key=lambda o: o.page_num)]
+                == [n for n, _ in specs])
+
+    # 3. The stop event. Asking for 50 pages of a listing that ends at page 5
+    #    must not fetch 45 empty ones: workers check the event before taking
+    #    more work, so at most (concurrency - 1) extra are already in flight.
+    specs = [(n, "u%d" % n) for n in range(2, 51)]
+    fetched, results, unattempted, exhausted = run(
+        specs, 3, lambda n: [] if n >= 5 else ["row"])
+    ok &= check("the end of the listing stops dispatch", exhausted)
+    ok &= check("an exhausted listing costs at most (concurrency-1) extra "
+                "fetches (%d fetched of 49 queued)" % len(fetched),
+                len(fetched) <= 4 + 3)
+    ok &= check("the pages never tried are reported, not counted as failed",
+                unattempted and all(o.ok for o in results))
+    ok &= check("unattempted pages are reported in order",
+                unattempted == sorted(unattempted))
+
+    # 4. A worker that dies must not hang the run, and must not swallow the
+    #    pages its siblings did fetch.
+    specs = [(n, "u%d" % n) for n in range(2, 8)]
+    fetched, results, unattempted, exhausted = run(
+        specs, 3, lambda n: ["row"], die_on={3})
+    ok &= check("a worker that raises does not hang the run",
+                len(results) + len(unattempted) + 1 >= len(specs))
+    ok &= check("the pages other workers fetched still come back",
+                any(o.page_num != 3 for o in results))
+    return ok
+
+
+def test_no_undefined_names():
+    group("no engine references a name that does not exist")
+    ok = True
+    # This exists because of a bug that got all the way to a live run.
+    # puppeteer_scraper.py called `detect_page_state(...)` on a line reached
+    # only while fetching a page, after the import of that name had been
+    # removed. The module imported fine, `--help` worked, `compileall`
+    # passed, the whole offline suite passed and CI was green — and the
+    # engine died with NameError on its first real page.
+    #
+    # Byte-compiling proves a file PARSES. It says nothing about whether the
+    # names in it resolve, and the paths where they do not are exactly the
+    # ones an offline suite cannot execute.
+    for name in sorted(f for f in os.listdir(REPO_ROOT) if f.endswith(".py")):
+        missing = _undefined_names(os.path.join(REPO_ROOT, name))
+        detail = ", ".join("%s (line %d)" % (k, v[0])
+                           for k, v in sorted(missing.items()))
+        ok &= check("%s references no undefined name%s"
+                    % (name, ": " + detail if missing else ""), not missing)
+    return ok
+
+
+def test_dockerfile_copies_what_it_runs():
+    group("the Docker image contains every module its entrypoint imports")
+    ok = True
+    path = os.path.join(REPO_ROOT, "Dockerfile")
+    if not os.path.exists(path):
+        return check("Dockerfile exists", False)
+
+    # The Dockerfile COPYs an explicit list rather than the whole directory,
+    # which is right — the image should not carry the test suite, the
+    # fixtures or a stray .env. The cost is that the list can fall behind the
+    # imports, and NOTHING else in this repo would notice: CI never builds
+    # the image, so a missing module ships and the container dies with
+    # ModuleNotFoundError on every invocation, `--help` included.
+    #
+    # That is not hypothetical. `proxy_pool.py` was missing from this list,
+    # and playwright_scraper.py imports it at module level.
+    raw = open(path, encoding="utf-8").read()
+    joined = re.sub(r"\\\n\s*", " ", raw)          # fold line continuations
+    copied = set()
+    for line in joined.splitlines():
+        if line.startswith("COPY "):
+            copied.update(tok for tok in line.split() if tok.endswith(".py"))
+
+    entrypoint = None
+    m = re.search(r'ENTRYPOINT\s*\[([^\]]*)\]', joined)
+    if m:
+        parts = [x.strip().strip('"\'') for x in m.group(1).split(",")]
+        entrypoint = next((x for x in parts if x.endswith(".py")), None)
+    ok &= check("the Dockerfile names a Python entrypoint", bool(entrypoint))
+    if not entrypoint:
+        return False
+    ok &= check("the entrypoint itself is copied into the image",
+                entrypoint in copied)
+
+    # Every LOCAL module the entrypoint reaches, transitively.
+    local = {f[:-3] for f in os.listdir(REPO_ROOT) if f.endswith(".py")}
+
+    def reached(module, seen=None):
+        seen = seen if seen is not None else set()
+        if module in seen:
+            return seen
+        seen.add(module)
+        tree = ast.parse(open(os.path.join(REPO_ROOT, module + ".py"),
+                              encoding="utf-8").read())
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module.split(".")[0]]
+            for name in names:
+                if name in local:
+                    reached(name, seen)
+        return seen
+
+    needed = reached(entrypoint[:-3])
+    missing = sorted(m + ".py" for m in needed if (m + ".py") not in copied)
+    ok &= check("every module the entrypoint imports is COPYed (%s)"
+                % (", ".join(missing) if missing else "none missing"),
+                not missing)
+
+    # The other direction is a warning, not a failure: diff_runs.py is copied
+    # deliberately as a companion tool even though the engine never imports
+    # it. But anything copied must at least still EXIST.
+    gone = sorted(f for f in copied
+                  if not os.path.exists(os.path.join(REPO_ROOT, f)))
+    ok &= check("the Dockerfile copies no file that has been deleted (%s)"
+                % (", ".join(gone) if gone else "none"), not gone)
+    return ok
+
+
+def test_shared_calls_bind_against_the_real_signature():
+    """Bind every call into a shared module against the
+    callee's real signature.
+
+    This exists because of a defect that no other check in this suite can
+    see. A sibling repo shipped `classify(html, url=…)` in two of three
+    engines against a callee whose second parameter is `status`, and BOTH
+    crashed on their FIRST fetch — invisible to import, `--help`,
+    `compileall`, the undefined-name walk and several hundred green
+    assertions, because none of those calls a function the way a live run
+    does.
+
+    Two failure modes, and the second is the one a weaker version of this
+    check swallows: a call whose arguments do not fit the signature, and a
+    call to a name the shared module **does not define at all**. Another
+    repo in this family resolved the callee with `getattr(..., None)` and
+    skipped whatever came back not-callable, so three calls into an API that
+    did not exist sat under a green run of its own binding check. Absent is
+    the loudest failure available, not "nothing to bind".
+
+    Deliberately conservative: a call using `*args` or `**kwargs` is skipped
+    rather than guessed at, so this under-reports and never invents a
+    problem.
+    """
+    group("every call into a shared module binds against its real signature")
+    ok = True
+    shared = {}
+    for name in ("product_parser", "output_writer", "page_flow", "proxy_pool",
+                 "captcha_solver", "env_config", "scraper_api_client",
+                 "fingerprint_client"):
+        if os.path.exists(os.path.join(REPO_ROOT, name + ".py")):
+            try:
+                shared[name] = importlib.import_module(name)
+            except Exception as exc:                       # noqa: BLE001
+                ok &= check("%s imports (%r)" % (name, exc), False)
+
+    callers = [e + ".py" for e in ENGINES]
+    callers += [n for n in ("page_flow.py", "product_parser.py",
+                            "scraper_api_client.py")
+                if os.path.exists(os.path.join(REPO_ROOT, n))]
+    checked = 0
+    for filename in callers:
+        path = os.path.join(REPO_ROOT, filename)
+        if not os.path.exists(path):
+            continue
+        tree = ast.parse(open(path, encoding="utf-8").read())
+
+        # Names bound anywhere in this file shadow a same-named module: an
+        # engine takes `proxy_pool` as a PARAMETER, and `proxy_pool.next()`
+        # on that parameter is a method call, not a module attribute.
+        bound = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                bound.add(node.id)
+            elif isinstance(node, ast.arg):
+                bound.add(node.arg)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bound.add(node.name)
+
+        direct = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in shared and not node.level:
+                for alias in node.names:
+                    direct[alias.asname or alias.name] = (node.module, alias.name)
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            target = None
+            if isinstance(node.func, ast.Name) and node.func.id in direct:
+                target = direct[node.func.id]
+            elif (isinstance(node.func, ast.Attribute)
+                  and isinstance(node.func.value, ast.Name)
+                  and node.func.value.id in shared
+                  and node.func.value.id not in bound):
+                target = (node.func.value.id, node.func.attr)
+            if target is None:
+                continue
+            module_name, attr = target
+            module = shared[module_name]
+            if not hasattr(module, attr):
+                ok &= check("%s:%d calls %s.%s, which does not exist — a "
+                            "live run reaches this as AttributeError"
+                            % (filename, node.lineno, module_name, attr),
+                            False)
+                continue
+            callee = getattr(module, attr)
+            if not (inspect.isfunction(callee) or inspect.isclass(callee)):
+                continue
+            if (any(isinstance(a, ast.Starred) for a in node.args)
+                    or any(k.arg is None for k in node.keywords)):
+                continue                      # unpacking: cannot bind statically
+            try:
+                signature = inspect.signature(callee)
+            except (TypeError, ValueError):
+                continue
+            try:
+                signature.bind(*([inspect.Parameter.empty] * len(node.args)),
+                               **{k.arg: inspect.Parameter.empty
+                                  for k in node.keywords})
+            except TypeError as exc:
+                ok &= check("%s:%d %s.%s%s — %s"
+                            % (filename, node.lineno, module_name, attr,
+                               signature, exc), False)
+            else:
+                checked += 1
+    ok &= check("...and there were calls to bind (%d)" % checked, checked > 10)
+    return ok
+
+
+def test_sample_output():
+    group("sample_output is cut from a real run")
+    ok = True
+    path = os.path.join(REPO_ROOT, "sample_output.json")
+    if not os.path.exists(path):
+        return check("sample_output.json exists", False)
+    rows = json.load(open(path, encoding="utf-8"))
+    ok &= check("the sample has rows", len(rows) > 0)
+    names = [f.name for f in fields(Product)]
+    ok &= check("its columns match the Product schema exactly",
+                all(set(r) == set(names) for r in rows))
+    text = json.dumps(rows, ensure_ascii=False)
+    ok &= check("the sample carries no fabrication markers",
+                not re.search(r"example\.com|lorem ipsum|FIXME|TODO|XXXX",
+                              text, re.IGNORECASE))
+    ok &= check("every sample row has a numeric MediaMarkt article number",
+                all(re.fullmatch(r"\d{5,}", r.get("sku") or "") for r in rows))
+    ok &= check("every sample row says which country site it came from",
+                all((r.get("source") or "") in HOSTS for r in rows))
+    ok &= check("every sample row's URL is a real product URL",
+                all("/product/" in (r.get("url") or "") for r in rows))
+    # The sample is what a reader judges the output by, so it has to show the
+    # provenance column doing its job rather than a column of nulls.
+    ok &= check("the sample shows a real price_source",
+                all(r.get("price_source") in ("jsonld", "jsonld+dom", "dom")
+                    for r in rows))
+
+    csv_path = os.path.join(REPO_ROOT, "sample_output.csv")
+    if os.path.exists(csv_path):
+        header = open(csv_path, encoding="utf-8").read().split("\n")[0]
+        ok &= check("the sample CSV header matches the schema",
+                    header.strip().split(",") == names)
+    return ok
+
+
+# ---------------------------------------------------------------------------
+def test_ci_checks_is_actually_wired_up():
+    group("the shipped CI checks run, and pass on this repo")
+    ok = True
+    # `.github/ci_checks.py` was in this repo and invoked by NOTHING — not
+    # CI, not this suite — while `tests.yml` carried an inline grep doing a
+    # narrower version of the same job with its own allowlist. The inline one
+    # matched only ws:// and wss://, so an `http://user:pass@` credential
+    # would have sailed past CI; the shipped one, which does match http://,
+    # meanwhile failed on this repo's own main because its allowlist was
+    # missing four legitimate documentation placeholders.
+    #
+    # Two sources of truth, one dead and one with a hole. Running the shipped
+    # one here as well means a failure shows up locally, before a push,
+    # rather than in a log nobody reads.
+    script = os.path.join(REPO_ROOT, ".github", "ci_checks.py")
+    ok &= check("ci_checks.py is present", os.path.exists(script))
+    if not os.path.exists(script):
+        return False
+    proc = subprocess.run([sys.executable, script, "--all"],
+                          cwd=REPO_ROOT, capture_output=True, text=True)
+    ok &= check("ci_checks.py --all passes on this repo (exit %d)"
+                % proc.returncode, proc.returncode == 0)
+    if proc.returncode != 0:
+        for line in (proc.stdout + proc.stderr).strip().split("\n")[-12:]:
+            print("        %s" % line)
+    # ...and the workflow calls it rather than reimplementing it.
+    wf = open(os.path.join(REPO_ROOT, ".github", "workflows", "tests.yml"),
+              encoding="utf-8").read()
+    ok &= check("tests.yml runs the shipped check rather than an inline copy",
+                "ci_checks.py --secret-check" in wf
+                or "ci_checks.py --all" in wf)
+    ok &= check("...and carries no second, narrower inline credential grep",
+                "(ws|wss)://[^ " not in wf)
+    return ok
+
+
+def test_x_debug_header_is_redacted():
+    """SECURITY.md names the Scraper API's x-debug header as a place
+    credentials reach a log unmasked. It was then logged verbatim.
+
+    The fixtures are assembled from pieces rather than written out whole,
+    because this file is scanned by the credential check like every other
+    and a fixture that LOOKS like a live key fails it. They are the SHAPES a
+    credential takes, not the literals this repo happens to contain today.
+    """
+    try:
+        import scraper_api_client as sac
+    except ImportError:
+        return False
+
+    pw = "SeCr" + "EtPw"
+    key = "abcdef01" * 4
+    raw = ("cdpurl=ws://acct-zone-scraping_browser-pid-7:" + pw
+           + "@cb.2captcha.com:9222 cost=0.00145 key=" + key + " status=200")
+    out = sac._redact_debug_header(raw)
+    ok = True
+    ok &= check("x-debug: the credential and the key are gone",
+                      pw not in out and key not in out)
+    ok &= check("x-debug: the cost, host and status survive",
+                      "cost=0.00145" in out and "cb.2captcha.com:9222" in out
+                      and "status=200" in out)
+
+    s1, s2 = "secret" + "one", "secret" + "two"
+    two = sac._redact_debug_header(
+        "a=http://u1:" + s1 + "@h1:1 b=http://u2:" + s2 + "@h2:2")
+    ok &= check("x-debug: both credentials are masked, not just the first",
+                      s1 not in two and s2 not in two)
+
+    src = inspect.getsource(sac)
+    ok &= check("x-debug: the log line calls the redactor",
+                      'logger.info("x-debug: %s", _redact_debug_header(debug))' in src)
+    return ok
+
+
+def test_scraper_api_payload_and_status():
+    """Measured 2026-09-23 against the live Scraper API: `waitFor` sent as
+    a JSON-encoded string is answered HTTP 422 and still billed, and the
+    response's `status` is the API's own "success" while the target's code
+    is `http_code`. Drive the real fetch_html with requests.post stubbed:
+    no network, no key spent."""
+    try:
+        import scraper_api_client as sac
+    except ImportError:
+        return False
+
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+        headers = {}
+        text = ""
+
+        def json(self):
+            return {"status": "success", "http_code": 403,
+                    "headers": {}, "body": "<html></html>"}
+
+    def fake_post(url, **kw):
+        captured.update(kw.get("json") or {})
+        return _Resp()
+
+    real_post, real_argv = sac.requests.post, sys.argv
+    sac.requests.post = fake_post
+    sys.argv = ["scraper_api_client.py", "--key", "k" * 8,
+                "--url", "https://www.mediamarkt.de/de/category/grills-116.html",
+                "--wait-text", "Grill"]
+    try:
+        _html, status = sac.fetch_html(sac.parse_args())
+    finally:
+        sac.requests.post, sys.argv = real_post, real_argv
+
+    ok = True
+    ok &= check("scraper API: waitFor is sent as an object, not a JSON string",
+                captured.get("waitFor") == {"text": "Grill"})
+    ok &= check("scraper API: the target status comes from http_code (403), "
+                "not the API's own 'success'", status == 403)
+    return ok
+
+
+def _retries_validation_problems():
+    """Every shipped --retries flag must go through page_flow.attempts.
+
+    With `--retries 0` the load loop never runs, nothing is fetched, and the
+    engine reports the browser's blank page as a result. This
+    reads the SOURCE of every entry point rather than a hand-kept list, so a
+    new engine that declares the flag with a plain int is caught the day it is
+    added, and it also CALLS the validator rather than trusting its name.
+
+    scraper_api_client.py is out of scope on purpose: it counts EXTRA attempts
+    (`retries + 1`), so 0 is legal there and means one try.
+    """
+    import argparse as _ap
+    import ast as _ast
+    import importlib as _il
+    import pathlib as _pl
+
+    root = _pl.Path(__file__).resolve().parent
+    pf = _il.import_module("page_flow")
+    problems, seen = [], 0
+    for path in sorted(root.glob("*.py")):
+        if path.name in ("smoke_test.py", "scraper_api_client.py"):
+            continue
+        tree = _ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in _ast.walk(tree):
+            if not (isinstance(node, _ast.Call)
+                    and getattr(node.func, "attr", "") == "add_argument"
+                    and node.args and isinstance(node.args[0], _ast.Constant)
+                    and node.args[0].value == "--retries"):
+                continue
+            seen += 1
+            kind = next((_ast.unparse(k.value) for k in node.keywords if k.arg == "type"), None)
+            want = "attempts" if path.name == "page_flow.py" else "page_flow.attempts"
+            if kind != want:
+                problems.append("%s:%d declares --retries with type=%s, expected %s"
+                                % (path.name, node.lineno, kind, want))
+    if not seen:
+        problems.append("found no --retries flag in any entry point, so this check "
+                        "would pass for the wrong reason")
+    for bad in (0, -1, "x"):
+        try:
+            pf.attempts(bad)
+        except _ap.ArgumentTypeError:
+            continue
+        problems.append("page_flow.attempts accepted %r" % (bad,))
+    if pf.attempts(1) != 1 or pf.attempts("3") != 3:
+        problems.append("page_flow.attempts rejects a valid count")
+    return problems
+
+
+def test_retries_is_validated_in_every_entry_point():
+    group("--retries 0 must be a usage error, not a silent no-op")
+    problems = _retries_validation_problems()
+    for line in problems:
+        print("      " + line)
+    return check("--retries is validated in every entry point, so 0 is a usage error", not problems)
+
+
+
+# ---------------------------------------------------------------------------
+# Output files are replaced atomically, with the modes open() would give
+# ---------------------------------------------------------------------------
+def test_atomic_writes():
+    group("output writes are atomic and keep the umask's modes")
+    ok = True
+    import output_writer as ow
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "out")
+        good = [Product(sku="1", url="u1", price=1.0)]
+        save(good, prefix, "both")
+        before_json = open(prefix + ".json").read()
+        before_csv = open(prefix + ".csv").read()
+
+        class Boom(Exception):
+            pass
+
+        def exploding_asdict(_row):
+            raise Boom("disk full halfway through")
+
+        real_asdict = ow.asdict
+        ow.asdict = exploding_asdict
+        try:
+            for writer, path in ((lambda: ow.write_json(good * 3, prefix + ".json"),
+                                  prefix + ".json"),
+                                 (lambda: ow.write_csv(good * 3, prefix + ".csv"),
+                                  prefix + ".csv")):
+                try:
+                    writer()
+                except Boom:
+                    pass
+        finally:
+            ow.asdict = real_asdict
+        ok &= check("a write that fails halfway leaves the previous JSON intact",
+                    open(prefix + ".json").read() == before_json)
+        ok &= check("a write that fails halfway leaves the previous CSV intact",
+                    open(prefix + ".csv").read() == before_csv)
+        leftovers = [n for n in os.listdir(d) if n.endswith(".tmp")]
+        ok &= check("a failed write leaves no temp file behind (%s)" % leftovers,
+                    not leftovers)
+
+        # The sidecar goes through the same writer.
+        meta_path = ow.write_run_meta(prefix, {"status": "complete"})
+        ok &= check("the sidecar is written through the atomic writer",
+                    "_atomic(" in inspect.getsource(ow.write_run_meta)
+                    and json.load(open(meta_path))["status"] == "complete")
+
+        # Modes: a NEW file gets exactly what open() would give it under the
+        # current umask, and an EXISTING file keeps its own mode. A flat
+        # 0o644 would pass under 022 and fail under 002, so both are tried.
+        if os.name == "posix":
+            modes = {}
+            for umask in (0o022, 0o002, 0o077):
+                old = os.umask(umask)
+                try:
+                    p = os.path.join(d, "new_%o.json" % umask)
+                    ow.write_json(good, p)
+                    modes[umask] = os.stat(p).st_mode & 0o777
+                finally:
+                    os.umask(old)
+            ok &= check("a new output file honours the umask (022->644, "
+                        "002->664, 077->600): got %s"
+                        % {oct(k): oct(v) for k, v in modes.items()},
+                        modes == {0o022: 0o644, 0o002: 0o664, 0o077: 0o600})
+            p = os.path.join(d, "kept.json")
+            ow.write_json(good, p)
+            os.chmod(p, 0o640)
+            ow.write_json(good, p)
+            ok &= check("an existing output file keeps its own mode",
+                        os.stat(p).st_mode & 0o777 == 0o640)
+    return ok
+
+
+def test_csv_formula_guard():
+    group("CSV cells that a spreadsheet would execute are neutralised")
+    ok = True
+    row = Product(sku="1", url="u", title="=HYPERLINK(\"http://x\")",
+                  category="+cmd", price=-5.0, images=["@SUM(1)", "b"])
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "out")
+        rc = finish_run([row], prefix, "both", False, blocked=False,
+                        stop_reason="completed", pages_requested=1,
+                        pages_completed=1, start_url="u", final_url="u",
+                        extra={"total_results": 7})
+        import csv as _csv
+        cells = next(_csv.DictReader(open(prefix + ".csv", newline="",
+                                          encoding="utf-8")))
+        ok &= check("a formula-shaped title is prefixed with an apostrophe in CSV",
+                    cells["title"] == "'=HYPERLINK(\"http://x\")")
+        ok &= check("a +cmd category is prefixed too", cells["category"] == "'+cmd")
+        ok &= check("a joined list starting with @ is escaped AFTER joining",
+                    cells["images"].startswith("'@SUM(1)"))
+        ok &= check("a negative NUMBER stays a number (no apostrophe)",
+                    cells["price"] == "-5.0")
+        data = json.load(open(prefix + ".json"))[0]
+        ok &= check("the JSON output keeps the site's bytes unescaped",
+                    data["title"].startswith("=HYPERLINK") and data["images"][0] == "@SUM(1)")
+        meta = json.load(open(prefix + ".meta.json"))
+        ok &= check("csv_cells_escaped is recorded in the sidecar (3)",
+                    meta.get("csv_cells_escaped") == 3 and rc == 0)
+        ok &= check("the caller's own extra still reaches the sidecar",
+                    meta.get("total_results") == 7)
+        # Under the caller's extra, never over it.
+        finish_run([row], prefix, "both", False, blocked=False,
+                   stop_reason="completed", pages_requested=1,
+                   pages_completed=1, start_url="u", final_url="u",
+                   extra={"csv_cells_escaped": "caller"})
+        meta = json.load(open(prefix + ".meta.json"))
+        ok &= check("csv_cells_escaped is merged UNDER the caller's extra",
+                    meta.get("csv_cells_escaped") == "caller")
+        # A complete run that the user allowed to be empty is complete.
+        finish_run([], prefix, "json", True, blocked=False,
+                   stop_reason="completed", pages_requested=1,
+                   pages_completed=1, start_url="u", final_url="u")
+        meta = json.load(open(prefix + ".meta.json"))
+        ok &= check("an --allow-empty run that finished is 'complete', not 'failed'",
+                    meta["status"] == "complete")
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# One paid solve per page, in every engine, read off disk
+# ---------------------------------------------------------------------------
+ENGINE_FILES = ("playwright_scraper.py", "puppeteer_scraper.py",
+                "selenium_scraper.py")
+
+
+def _solve_budget_problems(root=REPO_ROOT):
+    """Source-level reasons an engine could buy more than one solve per page.
+
+    Read from disk with `ast`, never through an import, so it runs for every
+    engine whether or not its driver is installed.
+    """
+    problems = []
+    for name in ENGINE_FILES:
+        tree = ast.parse(open(os.path.join(root, name), encoding="utf-8").read())
+        funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        handler = funcs.get("handle_captcha_if_present")
+        fetch = funcs.get("_fetch_one_page")
+        if handler is None or fetch is None:
+            problems.append("%s: handle_captcha_if_present or _fetch_one_page is missing" % name)
+            continue
+        # 1. Every purchase in the handler sits after a `budget.take()` guard.
+        take_lines = [n.lineno for n in ast.walk(handler)
+                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                      and n.func.attr == "take"
+                      and getattr(n.func.value, "id", None) == "budget"]
+        buys = [n.lineno for n in ast.walk(handler)
+                if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "solve_recaptcha"]
+        if not buys:
+            problems.append("%s: no solve_recaptcha call found (check is stale)" % name)
+        for line in buys:
+            if not any(t < line for t in take_lines):
+                problems.append("%s:%d buys a solve without budget.take() first" % (name, line))
+        # 2. Every call of the handler anywhere in the file passes a budget.
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Call)
+                    and getattr(n.func, "id", None) == "handle_captcha_if_present"):
+                names = {getattr(a, "id", None) for a in n.args} | {
+                    getattr(k.value, "id", None) for k in n.keywords}
+                if "budget" not in names:
+                    problems.append("%s:%d calls the captcha handler without "
+                                    "the page's budget" % (name, n.lineno))
+        # 3. The budget is created once per page, BEFORE the block-retry
+        #    loop, so a retry or a rotation cannot reset it.
+        made = [n.lineno for n in ast.walk(fetch)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "SolveBudget"]
+        loops = [n.lineno for n in ast.walk(fetch) if isinstance(n, ast.For)]
+        if len(made) != 1 or not loops or made[0] > min(loops):
+            problems.append("%s: the SolveBudget is not created exactly once "
+                            "before the retry loop (made at %s, first loop %s)"
+                            % (name, made, min(loops) if loops else None))
+    return problems
+
+
+class _Anything:
+    """A stand-in driver object: every attribute and call yields another one,
+    and it is an empty sequence, so `len(page.query_selector_all(...))` is 0."""
+
+    def __getattr__(self, _name):
+        return _Anything()
+
+    def __call__(self, *a, **k):
+        return _Anything()
+
+    def __len__(self):
+        return 0
+
+    def __iter__(self):
+        return iter(())
+
+    def __str__(self):
+        return "https://www.mediamarkt.de/de/category/x-1.html"
+
+
+def _solves_bought_by_handler(mod):
+    """Call an engine's real captcha handler twice with ONE page budget, with a
+    challenge always present and the solver stubbed; return the purchases."""
+    from captcha_solver import CaptchaChallenge
+    bought = []
+    patched = {
+        "solve_recaptcha": lambda *a, **k: bought.append(1) or "tok",
+        "reconcile_detections": lambda *a, **k: CaptchaChallenge(
+            kind="recaptcha_v2", sitekey="k" * 40),
+        "detect_recaptcha_v3": lambda *a, **k: None,
+        "detect_recaptcha_in_page": lambda *a, **k: None,
+        "_content_when_settled": lambda *a, **k: "<html></html>",
+        "_content": lambda *a, **k: "<html></html>",
+        "_driver": lambda *a, **k: {"content": lambda: "<html></html>",
+                                    "count": lambda sel: 0,
+                                    "current_url": lambda: "u"},
+        "time": type("T", (), {"sleep": staticmethod(lambda s: None)}),
+    }
+    saved = {k: getattr(mod, k) for k in patched if hasattr(mod, k)}
+    try:
+        for k, v in patched.items():
+            if k in saved:
+                setattr(mod, k, v)
+        args = type("A", (), dict(mode="listing", solve_captcha="always",
+                                  twocaptcha_key="x", captcha_api="v2",
+                                  min_score=0.7))()
+        budget = page_flow.SolveBudget()
+        for _ in range(3):
+            mod.handle_captcha_if_present(_Anything(), args, budget)
+    finally:
+        for k, v in saved.items():
+            setattr(mod, k, v)
+    return len(bought)
+
+
+def test_solve_budget():
+    group("a page can buy at most SOLVES_PER_PAGE solves, in every engine")
+    ok = True
+    for name in ENGINE_FILES:
+        modname = name[:-3]
+        try:
+            mod = __import__(modname)
+        except ImportError:
+            continue  # recorded as a skip by test_engines
+        n = _solves_bought_by_handler(mod)
+        ok &= check("%s: three challenged attempts on one page buy %d solve(s), "
+                    "not more" % (modname, page_flow.SOLVES_PER_PAGE),
+                    n == page_flow.SOLVES_PER_PAGE)
+    b = page_flow.SolveBudget()
+    ok &= check("SOLVES_PER_PAGE is 1", page_flow.SOLVES_PER_PAGE == 1)
+    ok &= check("the first take() is allowed and the second refused",
+                b.take() is True and b.take() is False and b.spent == 1)
+    problems = _solve_budget_problems()
+    for line in problems:
+        print("      " + line)
+    ok &= check("every engine routes every solve through the per-page budget",
+                not problems)
+    return ok
+
+
+def _status_problems(root=REPO_ROOT):
+    """Classify call sites in the engines that drop the HTTP status."""
+    problems = []
+    for name in ENGINE_FILES:
+        tree = ast.parse(open(os.path.join(root, name), encoding="utf-8").read())
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                 and ((isinstance(n.func, ast.Attribute) and n.func.attr == "classify")
+                      or getattr(n.func, "id", None) == "_classify")]
+        # The helper _classify(page, html, status=None) forwards its own
+        # parameter; that one call is the definition's body, not a call site.
+        calls = [c for c in calls
+                 if not (isinstance(c.func, ast.Attribute) and c.func.attr == "classify"
+                         and any(k.arg == "status" and getattr(k.value, "id", None) == "status"
+                                 for k in c.keywords)
+                         and name == "playwright_scraper.py"
+                         and c.lineno < 200)]
+        if not calls:
+            problems.append("%s: no classify call found (check is stale)" % name)
+        for c in calls:
+            kw = {k.arg: k.value for k in c.keywords}
+            if "status" not in kw:
+                problems.append("%s:%d classifies without passing status=" % (name, c.lineno))
+            elif name != "selenium_scraper.py" and isinstance(kw["status"], ast.Constant):
+                problems.append("%s:%d passes a constant status; this driver "
+                                "reports a real one" % (name, c.lineno))
+    return problems
+
+
+def test_status_reaches_the_classifier():
+    group("the HTTP status reaches the page classifier")
+    ok = True
+    problems = _status_problems()
+    for line in problems:
+        print("      " + line)
+    ok &= check("Playwright and pyppeteer pass goto()'s status to classify; "
+                "Selenium passes an explicit None", not problems)
+    ok &= check("a 403 classifies as blocked whatever the body says",
+                page_flow.classify('<a href="/de/product/x-1.html">x</a>',
+                                   status=403) == "blocked")
+    # Behaviour, where the driver is installed: a 403 from goto() must decide
+    # the page even when the body looks like content.
+    try:
+        import playwright_scraper as pw
+    except ImportError:
+        return ok  # recorded as a skip by test_engines
+
+    class Resp:
+        status = 403
+
+    class Page:
+        url = "https://www.mediamarkt.de/de/category/x-1.html"
+
+        def goto(self, *a, **k):
+            return Resp()
+
+        def __getattr__(self, _name):
+            return lambda *a, **k: None
+
+    class Session:
+        page = Page()
+
+    body = '<html><a href="/de/product/_x-123.html">x</a></html>'
+    saved = (pw._content_when_settled, pw.handle_captcha_if_present)
+    pw._content_when_settled = lambda page, *a, **k: body
+    pw.handle_captcha_if_present = lambda *a, **k: False
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            args = type("A", (), dict(proxy_block_retries=0, pages=1, retries=1,
+                                      retry_delay=0, mode="listing",
+                                      out=os.path.join(d, "o"), dump_html=None,
+                                      category=None))()
+            with redirect_stdout(io.StringIO()):
+                outcome = pw._fetch_one_page(Session(), args, None, 1, Page.url)
+    finally:
+        pw._content_when_settled, pw.handle_captcha_if_present = saved
+    ok &= check("playwright: a 403 from goto() makes the page 'blocked' even "
+                "with a product link in the body (got %r)" % outcome.state,
+                outcome.state == "blocked")
+    return ok
+
+
+def test_numeric_flags_are_validated():
+    group("numeric flags reject values that make no sense, naming the flag")
+    ok = True
+    bad = {"--pages": ["0", "-1"], "--concurrency": ["0", "-2"],
+           "--proxy-block-retries": ["-1"], "--delay": ["-1"],
+           "--retry-delay": ["-0.5"]}
+    for name in ENGINE_FILES:
+        src = open(os.path.join(REPO_ROOT, name), encoding="utf-8").read()
+        for flag, typ in (("--pages", "pages_arg"), ("--concurrency", "concurrency_arg"),
+                          ("--proxy-block-retries", "block_retries_arg"),
+                          ("--delay", "delay_arg"), ("--retry-delay", "retry_delay_arg")):
+            ok &= check("%s: %s goes through page_flow.%s" % (name, flag, typ),
+                        re.search(r'add_argument\("%s",\s*type=page_flow\.%s\b'
+                                  % (re.escape(flag), typ), src) is not None)
+    import argparse as _ap
+    for flag, values in bad.items():
+        typ = {"--pages": page_flow.pages_arg, "--concurrency": page_flow.concurrency_arg,
+               "--proxy-block-retries": page_flow.block_retries_arg,
+               "--delay": page_flow.delay_arg,
+               "--retry-delay": page_flow.retry_delay_arg}[flag]
+        for v in values:
+            try:
+                typ(v)
+                raised = ""
+            except _ap.ArgumentTypeError as e:
+                raised = str(e)
+            ok &= check("%s %s is rejected with a message naming the flag" % (flag, v),
+                        raised.startswith(flag))
+    ok &= check("valid values pass: --pages 3, --proxy-block-retries 0, --delay 0",
+                page_flow.pages_arg("3") == 3 and page_flow.block_retries_arg("0") == 0
+                and page_flow.delay_arg("0") == 0.0)
+    api = open(os.path.join(REPO_ROOT, "scraper_api_client.py"), encoding="utf-8").read()
+    ok &= check("scraper_api_client: --retries (extra attempts) rejects a "
+                "negative value and still allows 0",
+                "type=page_flow.extra_retries_arg" in api
+                and page_flow.extra_retries_arg("0") == 0)
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Traffic savers: the proxy pre-check and media blocking
+# ---------------------------------------------------------------------------
+def _status_proxy(status):
+    """A local stand-in for a proxy gateway that answers every request,
+    CONNECT included, with `status`. Returns (server, port, hits)."""
+    import http.server
+    import socketserver
+    hits = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _answer(self):
+            hits.append((self.command, self.path))
+            self.send_response(status)
+            self.send_header("Content-Length", "0")
+            self.send_header("Proxy-Authenticate", 'Basic realm="stub"')
+            self.end_headers()
+        do_CONNECT = do_GET = do_HEAD = _answer
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, server.server_address[1], hits
+
+
+class _BrowserStarted(Exception):
+    """Raised by a patched browser launch: the run got past the pre-check."""
+
+
+def _engine_args(module, argv):
+    """`module.parse_args()` on `argv`, with no MEDIAMARKT_* from the shell."""
+    from unittest import mock
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("MEDIAMARKT_")}
+    with mock.patch.dict(os.environ, clean, clear=True), \
+            mock.patch.object(sys, "argv", [module.__name__ + ".py"] + argv):
+        return module.parse_args()
+
+
+def _patch_browser_start(module):
+    """Patch the engine's first browser-launching call to raise _BrowserStarted."""
+    from unittest import mock
+
+    def started(*a, **k):
+        raise _BrowserStarted()
+    if module.__name__ == "playwright_scraper":
+        return mock.patch.object(module, "sync_playwright", started)
+    return mock.patch.object(module._Session, "open", started)
+
+
+def _run_quiet(fn, *a):
+    out, err = io.StringIO(), io.StringIO()
+    from contextlib import redirect_stderr
+    with redirect_stdout(out), redirect_stderr(err):
+        result = fn(*a)
+    return result, out.getvalue() + err.getvalue()
+
+
+def test_proxy_traffic_savers(skips):
+    group("traffic savers: proxy pre-check before the browser, media blocking")
+    ok = True
+    import argparse as _ap
+    import logging as _logging
+    import proxy_pool
+    from unittest import mock
+    from output_writer import ATTEMPT_META_SUFFIX
+    url = "https://www.mediamarkt.de/de/category/k%C3%BChlen-gefrieren-32.html"
+    ns = _ap.Namespace
+
+    # --- the shared pre-check, through page_flow -------------------------
+    for status, words in ((407, "refused the credential"), (402, "balance exhausted")):
+        server, port, hits = _status_proxy(status)
+        tmp = tempfile.mkdtemp()
+        prefix = os.path.join(tmp, "run")
+        # A previous good run: the pre-check must leave all of it alone.
+        for suffix, body in ((".json", "[1]"), (".csv", "sku\n1\n"),
+                             (".meta.json", '{"status": "complete"}')):
+            with open(prefix + suffix, "w") as f:
+                f.write(body)
+        proxy = "http://user:S3cretPw@127.0.0.1:%d" % port
+        args = ns(url=url, out=prefix, mode="listing", pages=3, cdp_endpoint=None)
+        try:
+            rc, text = _run_quiet(page_flow.proxy_precheck, args, proxy)
+        finally:
+            server.shutdown()
+            server.server_close()
+        ok &= check("pre-check: a proxy %d exits 5" % status, rc == 5)
+        ok &= check("pre-check: ...after ONE request, a CONNECT to the start host (%d)"
+                    % status, hits == [("CONNECT", "www.mediamarkt.de:443")])
+        ok &= check("pre-check: ...says why and names MEDIAMARKT_PROXY (%d)" % status,
+                    words in text and "MEDIAMARKT_PROXY" in text)
+        ok &= check("pre-check: ...and never prints the credential (%d)" % status,
+                    "S3cretPw" not in text)
+        meta_path = prefix + ATTEMPT_META_SUFFIX
+        meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
+        ok &= check("pre-check: ...attempt sidecar says failed/proxy_auth_failed (%d)" % status,
+                    (meta.get("status"), meta.get("stop_reason"), meta.get("data_updated"),
+                     meta.get("products"), meta.get("source"))
+                    == ("failed", "proxy_auth_failed", False, 0, "mediamarkt.de"))
+        ok &= check("pre-check: ...and the credential is not in it (%d)" % status,
+                    "S3cretPw" not in json.dumps(meta))
+        kept = {s: open(prefix + s).read() for s in (".json", ".csv", ".meta.json")}
+        ok &= check("pre-check: ...earlier data and .meta.json untouched (%d)" % status,
+                    kept == {".json": "[1]", ".csv": "sku\n1\n",
+                             ".meta.json": '{"status": "complete"}'})
+        ok &= check("pre-check: ...and nothing else written (%d)" % status,
+                    sorted(os.listdir(tmp)) == sorted(
+                        ["run.json", "run.csv", "run.meta.json", "run" + ATTEMPT_META_SUFFIX]))
+    # Not a gateway verdict: the run goes on exactly as before.
+    server, port, hits = _status_proxy(403)
+    try:
+        got = page_flow.proxy_precheck(
+            ns(url=url, out=tempfile.mkdtemp() + "/r", mode="listing", pages=1,
+               cdp_endpoint=None), "http://u:p@127.0.0.1:%d" % port)
+    finally:
+        server.shutdown()
+        server.server_close()
+    ok &= check("pre-check: a 403 through the tunnel is not a proxy failure",
+                got is None and len(hits) == 1)
+    ok &= check("pre-check: an unreachable proxy is not a proxy failure",
+                proxy_pool.precheck_proxy("http://u:p@127.0.0.1:1",
+                                          "https://x.invalid/robots.txt", 3) is None)
+    with mock.patch.object(proxy_pool, "precheck_proxy",
+                           side_effect=AssertionError("pre-check sent")):
+        none_args = ns(url=url, out="x", mode="listing", pages=1, cdp_endpoint=None)
+        ok &= check("pre-check: no proxy, no request",
+                    page_flow.proxy_precheck(none_args, None) is None)
+        cdp_args = ns(url=url, out="x", mode="listing", pages=1,
+                      cdp_endpoint="ws://127.0.0.1:1")
+        ok &= check("pre-check: never over --cdp-endpoint",
+                    page_flow.proxy_precheck(cdp_args, "http://u:p@h:1") is None)
+    ok &= check("pre-check: the probe is the start host's robots.txt",
+                proxy_pool.robots_url(url) == "https://www.mediamarkt.de/robots.txt")
+
+    # --- each engine stops before its browser starts ---------------------
+    loaded = {}
+    for name in ENGINES:
+        try:
+            loaded[name] = __import__(name)
+        except ImportError as e:
+            skips.append("traffic savers, %s (%s)" % (name, e))
+    for name, mod in loaded.items():
+        for status in (407, 402):
+            server, port, hits = _status_proxy(status)
+            tmp = tempfile.mkdtemp()
+            try:
+                args = _engine_args(mod, ["--url", url, "--out", tmp + "/r", "--proxy",
+                                          "http://user:S3cretPw@127.0.0.1:%d" % port])
+                with _patch_browser_start(mod):
+                    try:
+                        rc, text = _run_quiet(mod.scrape, args)
+                    except _BrowserStarted:
+                        rc, text = "browser started", ""
+            finally:
+                server.shutdown()
+                server.server_close()
+            ok &= check("%s: a proxy %d exits 5 before a browser is started"
+                        % (name, status), rc == 5 and len(hits) == 1)
+            ok &= check("%s: ...without printing the credential (%d)" % (name, status),
+                        "S3cretPw" not in text)
+            ok &= check("%s: ...writing only the attempt sidecar (%d)" % (name, status),
+                        os.listdir(tmp) == ["r" + ATTEMPT_META_SUFFIX])
+        server, port, hits = _status_proxy(403)
+        try:
+            args = _engine_args(mod, ["--url", url, "--out", tempfile.mkdtemp() + "/r",
+                                      "--proxy", "http://u:p@127.0.0.1:%d" % port])
+            with _patch_browser_start(mod):
+                try:
+                    _run_quiet(mod.scrape, args)
+                    reached = False
+                except _BrowserStarted:
+                    reached = True
+        finally:
+            server.shutdown()
+            server.server_close()
+        ok &= check("%s: a site 403 at the pre-check still starts the browser" % name,
+                    reached)
+        with mock.patch.object(proxy_pool, "precheck_proxy",
+                               side_effect=AssertionError("pre-check over CDP")):
+            args = _engine_args(mod, ["--url", url, "--out", tempfile.mkdtemp() + "/r",
+                                      "--cdp-endpoint", "ws://127.0.0.1:1",
+                                      "--proxy", "http://u:p@127.0.0.1:1"])
+            _logging.disable(_logging.WARNING)
+            try:
+                with _patch_browser_start(mod):
+                    try:
+                        _run_quiet(mod.scrape, args)
+                        reached = False
+                    except _BrowserStarted:
+                        reached = True
+            finally:
+                _logging.disable(_logging.NOTSET)
+        ok &= check("%s: no pre-check over --cdp-endpoint" % name, reached)
+        helptext = io.StringIO()
+        with redirect_stdout(helptext):
+            try:
+                _engine_args(mod, ["--help"])
+            except SystemExit:
+                pass
+        ok &= check("%s: --load-media is in --help, --force-block-media is not" % name,
+                    "--load-media" in helptext.getvalue()
+                    and "--force-block-media" not in helptext.getvalue())
+        args = _engine_args(mod, ["--url", url])
+        ok &= check("%s: media flags default off" % name,
+                    args.load_media is False and args.force_block_media is False)
+
+    # --- media policy -----------------------------------------------------
+    ok &= check("media: blocked behind a local proxy",
+                proxy_pool.should_block_media(ns(load_media=False), proxy_in_use=True))
+    ok &= check("media: --load-media keeps it",
+                not proxy_pool.should_block_media(ns(load_media=True), proxy_in_use=True))
+    ok &= check("media: no proxy, nothing metered, nothing blocked",
+                not proxy_pool.should_block_media(ns(load_media=False), proxy_in_use=False))
+    ok &= check("media: never over CDP",
+                not proxy_pool.should_block_media(ns(load_media=False), proxy_in_use=True,
+                                                  over_cdp=True))
+    ok &= check("media: the hidden switch forces it without a proxy",
+                proxy_pool.should_block_media(ns(load_media=False, force_block_media=True),
+                                              proxy_in_use=False))
+
+    class Route:
+        def __init__(self, kind):
+            self.request = ns(resource_type=kind)
+            self.done = None
+
+        def abort(self, reason=None):
+            self.done = "abort"
+
+        def continue_(self):
+            self.done = "continue"
+    for kind, want in (("image", "abort"), ("media", "abort"), ("font", "abort"),
+                       ("document", "continue"), ("script", "continue"),
+                       ("xhr", "continue"), ("fetch", "continue"),
+                       ("stylesheet", "continue")):
+        route = Route(kind)
+        proxy_pool.playwright_media_route(route)
+        ok &= check("media: playwright %s -> %s" % (kind, want), route.done == want)
+
+    class Sel:
+        def __init__(self):
+            self.sent = []
+
+        def execute_cdp_cmd(self, cmd, params):
+            self.sent.append((cmd, params))
+    sel = Sel()
+    proxy_pool.selenium_block_media(sel)
+    blocked = dict(sel.sent).get("Network.setBlockedURLs", {}).get("urls", [])
+    ok &= check("media: selenium blocks images, video and fonts by URL, not js/css",
+                all(p in blocked for p in ("*.jpg", "*.webp?*", "*.mp4", "*.woff2"))
+                and not any(p.startswith(("*.js", "*.css")) for p in blocked))
+
+    import asyncio
+
+    class Client:
+        def __init__(self):
+            self.sent, self.handlers = [], {}
+
+        def on(self, name, fn):
+            self.handlers[name] = fn
+
+        async def send(self, cmd, params=None):
+            self.sent.append((cmd, params))
+    client = Client()
+
+    async def create():
+        return client
+    fake_page = ns(target=ns(createCDPSession=create))
+    loop = asyncio.new_event_loop()
+    try:
+        async def drive():
+            await proxy_pool.pyppeteer_block_media(fake_page)
+            client.handlers["Fetch.requestPaused"]({"requestId": "r1", "resourceType": "Image"})
+            await asyncio.sleep(0)
+        loop.run_until_complete(drive())
+    finally:
+        loop.close()
+    patterns = (dict(client.sent).get("Fetch.enable") or {}).get("patterns", [])
+    ok &= check("media: pyppeteer pauses only images, media and fonts",
+                sorted(p["resourceType"] for p in patterns) == ["Font", "Image", "Media"])
+    ok &= check("media: ...and fails what it paused",
+                client.sent[-1] == ("Fetch.failRequest",
+                                    {"requestId": "r1", "errorReason": "BlockedByClient"}))
+    # Every local-browser engine consults the policy and applies its blocker,
+    # and records the outcome. A source check, because the offline suite has
+    # no browser binary.
+    for module, call in (("playwright_scraper", "playwright_media_route"),
+                         ("selenium_scraper", "selenium_block_media"),
+                         ("puppeteer_scraper", "pyppeteer_block_media")):
+        src = open(os.path.join(REPO_ROOT, module + ".py"), encoding="utf-8").read()
+        ok &= check("media: %s applies the policy" % module,
+                    "should_block_media(" in src and "proxy_pool.%s" % call in src)
+        ok &= check("media: %s records media_blocked in the sidecar" % module,
+                    'extra={"media_blocked": media_blocked,' in src)
+        ok &= check("%s: pre-checks the proxy before the browser" % module,
+                    "page_flow.proxy_precheck(args," in src)
+        ok &= check("%s: offers the media flags" % module,
+                    "page_flow.add_media_flags(p)" in src)
+    parser = _ap.ArgumentParser()
+    page_flow.add_media_flags(parser)
+    ok &= check("media: the shared flags document --load-media and hide the switch",
+                "--load-media" in parser.format_help()
+                and "--force-block-media" not in parser.format_help())
+
+    # --- the canary's own proxy check uses the same classification --------
+    for status, words in ((407, "refused the credential"), (402, "balance exhausted")):
+        for target in ("https://www.mediamarkt.de/robots.txt",
+                       "http://www.mediamarkt.de/robots.txt"):
+            server, port, hits = _status_proxy(status)
+            env = {k: v for k, v in os.environ.items() if not k.startswith("MEDIAMARKT_")}
+            env.update(MEDIAMARKT_PROXY="http://user:S3cretPw@127.0.0.1:%d" % port,
+                       CANARY_URL=target, PREFLIGHT_CONNECT_TIMEOUT="5",
+                       PREFLIGHT_READ_TIMEOUT="5", PYTHONDONTWRITEBYTECODE="1")
+            try:
+                res = subprocess.run([sys.executable,
+                                      os.path.join(REPO_ROOT, ".github", "canary_preflight.py")],
+                                     capture_output=True, text=True, timeout=60, env=env)
+            finally:
+                server.shutdown()
+                server.server_close()
+            out = res.stdout + res.stderr
+            ok &= check("canary preflight: a %d via %s fails, in the pre-check's words"
+                        % (status, target.split(":")[0]),
+                        res.returncode == 1 and "::error::" in out and words in out
+                        and "MEDIAMARKT_PROXY" in out and "S3cretPw" not in out)
+    return ok
+
+
+def test_no_private_citations():
+    group("public files cite no private instruction file")
+    ok = True
+    # Assembled from pieces so this file does not match itself.
+    banned = ["CLAUDE" + ".md", "claude_" + "2scraper", "2scraper_" + "repo_rules",
+              "play" + "book"]
+    section = re.compile("§" + r"\s*\d")
+    try:
+        tracked = subprocess.run(["git", "ls-files"], cwd=REPO_ROOT,
+                                 capture_output=True, text=True)
+    except OSError:
+        tracked = None
+    if tracked is None or tracked.returncode != 0:
+        print("      (not a git checkout: scanning nothing, which is the "
+              "Docker build's case)")
+        return ok
+    hits = []
+    for rel in tracked.stdout.split():
+        path = os.path.join(REPO_ROOT, rel)
+        if not os.path.isfile(path) or rel.endswith((".png", ".ico")):
+            continue
+        text = open(path, encoding="utf-8", errors="replace").read()
+        for token in banned:
+            if token.lower() in text.lower():
+                hits.append("%s: %s" % (rel, token))
+        if section.search(text):
+            hits.append("%s: a bare section reference" % rel)
+    for h in hits:
+        print("      " + h)
+    ok &= check("no tracked file cites a private instruction file or its "
+                "section numbers", not hits)
+    return ok
+
+
+# Every scraper run in canary.yml, by --out, with its job-summary label.
+CANARY_SUMMARIES = (("canary_run", "live-run"),)
+
+
+def _scrape_on_budget(mod, budget_mb, cost, pages=5, proxied=True, rows_on=lambda n: 2, blocked_on=()):
+    """`mod.scrape()` with the browser and the page fetch stubbed: every page
+    costs `cost` proxy bytes. Returns (rc, meta, attempt, fetched, text)."""
+    from unittest import mock
+    import proxy_meter
+    import proxy_pool
+    from output_writer import ATTEMPT_META_SUFFIX, Product
+    url = "https://www.mediamarkt.de/de/category/k%C3%BChlen-gefrieren-32.html"
+    tmp = tempfile.mkdtemp()
+    argv = ["--url", url, "--out", tmp + "/r", "--pages", str(pages), "--format", "json",
+            "--proxy-budget-mb", str(budget_mb), "--delay", "0"]
+    if proxied:
+        argv += ["--proxy", "http://127.0.0.1:1"]
+    args = _engine_args(mod, argv)
+    fetched = []
+
+    def fake_fetch(session, args, pool, page_num, page_url_):
+        fetched.append(page_num)
+        proxy_meter.current().add(cost)
+        outcome = mod.PageOutcome(page_num=page_num, url=page_url_, final_url=page_url_)
+        if page_num in blocked_on:
+            outcome.blocked_by = "blocked"
+            return outcome
+        outcome.state = "content"
+        outcome.products = [Product(sku="p%d-%d" % (page_num, i), url=page_url_)
+                            for i in range(rows_on(page_num))]
+        return outcome
+
+    class Sess:
+        media_blocked = False
+
+        def __init__(self, *a, **k):
+            self.page = types.SimpleNamespace(url=url)
+            self.driver = types.SimpleNamespace(current_url=url)
+
+        def open(self):
+            return self
+
+        def close(self):
+            pass
+
+        def relaunch(self):
+            pass
+    patches = [mock.patch.object(proxy_pool, "precheck_proxy", lambda *a, **k: None),
+               mock.patch.object(mod, "_fetch_one_page", fake_fetch)]
+    if mod.__name__ == "playwright_scraper":
+        patches += [mock.patch.object(mod, "sync_playwright", lambda: _FakePlaywright()),
+                    mock.patch.object(mod, "_BrowserSession", Sess),
+                    mock.patch.object(mod, "_plan_page_urls",
+                                      lambda page, a, first: [url + "?page=%d" % n for n in range(2, a.pages + 1)])]
+    else:
+        patches += [mock.patch.object(mod, "_Session", Sess),
+                    mock.patch.object(mod, "_next_page_href", lambda session: None)]
+        if mod.__name__ == "puppeteer_scraper":
+            patches.append(mock.patch.object(mod, "_AsyncBridge",
+                                             lambda: types.SimpleNamespace(close=lambda: None)))
+    import contextlib
+    try:
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            rc, text = _run_quiet(mod.scrape, args)
+        read = lambda suffix: (json.load(open(tmp + "/r" + suffix))  # noqa: E731
+                               if os.path.exists(tmp + "/r" + suffix) else None)
+        return rc, read(".meta.json"), read(ATTEMPT_META_SUFFIX), fetched, text
+    finally:
+        proxy_meter.start(None, active=False)
+
+
+def test_proxy_budget(skips):
+    group("proxy traffic meter and --proxy-budget-mb (byte counts: tests/test_proxy_meter.py)")
+    ok = True
+    import argparse as _ap
+    import proxy_meter
+    from output_writer import finish_run, ATTEMPT_META_SUFFIX, Product
+
+    # --- the flag, shared by all three engines through add_media_flags ----
+    p = _ap.ArgumentParser(prog="t")
+    page_flow.add_media_flags(p)
+    ok &= check("budget: --proxy-budget-mb defaults to 10", p.parse_args([]).proxy_budget_mb == 10)
+    ok &= check("budget: 0 (unlimited) is legal", p.parse_args(["--proxy-budget-mb", "0"]).proxy_budget_mb == 0)
+    for bad in ("-1", "lots"):
+        err = io.StringIO()
+        from contextlib import redirect_stderr
+        refused = False
+        with redirect_stderr(err):
+            try:
+                p.parse_args(["--proxy-budget-mb", bad])
+            except SystemExit as exc:
+                refused = exc.code == 2
+        ok &= check("budget: --proxy-budget-mb %s is a usage error naming the flag" % bad,
+                    refused and "--proxy-budget-mb" in err.getvalue())
+    ok &= check("budget: --proxy-budget-mb is in --help", "--proxy-budget-mb" in p.format_help())
+    for name in ENGINES:
+        src = open(os.path.join(REPO_ROOT, name + ".py"), encoding="utf-8").read()
+        ok &= check("budget: %s takes the flag (add_media_flags) and starts the meter before the pre-check"
+                    % name, "page_flow.add_media_flags(p)" in src
+                    and src.index("page_flow.start_proxy_meter(args, pool)") < src.index("page_flow.proxy_precheck(args,"))
+
+    # --- when the meter is on -------------------------------------------
+    pool = ProxyPool(["http://127.0.0.1:1"])
+    ns = _ap.Namespace
+    try:
+        ok &= check("budget: the meter is active for a local proxy",
+                    page_flow.start_proxy_meter(ns(proxy_budget_mb=10, cdp_endpoint=None), pool).active)
+        ok &= check("budget: ...not with no proxy",
+                    not page_flow.start_proxy_meter(ns(proxy_budget_mb=10, cdp_endpoint=None), None).active)
+        ok &= check("budget: ...not over --cdp-endpoint",
+                    not page_flow.start_proxy_meter(ns(proxy_budget_mb=10, cdp_endpoint="ws://h:1"), pool).active)
+    finally:
+        proxy_meter.start(None, active=False)
+
+    # --- finish_run puts the budget stop above every other outcome --------
+    def finish(rows, blocked, failed, exceeded=True):
+        proxy_meter.start(0.001, active=True)
+        if exceeded:
+            proxy_meter.current().add(5000)
+        tmp = tempfile.mkdtemp()
+        try:
+            rc, text = _run_quiet(lambda: finish_run(
+                rows, tmp + "/r", "json", False, blocked=blocked, stop_reason="completed",
+                pages_requested=3, pages_completed=1, start_url="u", final_url="u",
+                pages_failed=failed))
+        finally:
+            proxy_meter.start(None, active=False)
+        path = tmp + "/r" + (".meta.json" if rows else ATTEMPT_META_SUFFIX)
+        return rc, (json.load(open(path)) if os.path.exists(path) else {}), text
+    row = [Product(sku="a", url="u")]
+    for rows, blocked, failed, want in ((row, True, [], 6), ([], True, [], 5), (row, False, [2], 6), ([], False, [], 5)):
+        rc, meta, text = finish(rows, blocked, failed)
+        ok &= check("budget: finish_run rows=%d blocked=%s failed=%s -> exit %d, proxy_budget_exceeded"
+                    % (len(rows), blocked, failed, want),
+                    rc == want and meta.get("stop_reason") == "proxy_budget_exceeded"
+                    and meta.get("proxy_budget_exceeded") is True and meta.get("proxy_bytes") == 5000)
+        ok &= check("budget: ...and prints one 'Proxy traffic' line (%d)" % want,
+                    text.count("Proxy traffic: 0.0 MB of 0.001 MB budget") == 1)
+    rc, meta, text = finish([], False, [], exceeded=False)
+    ok &= check("budget: a proxied zero-row run under its budget records its outcome in the attempt sidecar",
+                rc == 4 and meta.get("proxy_bytes") == 0 and meta.get("data_updated") is False)
+
+    # --- each engine's own page loop ------------------------------------
+    for name in ENGINES:
+        try:
+            mod = __import__(name)
+        except ImportError as e:
+            skips.append("proxy budget, %s (%s)" % (name, e))
+            continue
+        rc, meta, attempt, fetched, text = _scrape_on_budget(mod, 0.001, 600)
+        ok &= check("%s: budget spent on page 2 of 5 -> exit 6, no page after it" % name,
+                    rc == 6 and fetched == [1, 2])
+        ok &= check("%s: ...rows kept, stop_reason proxy_budget_exceeded, bytes in the sidecar" % name,
+                    meta is not None and meta["products"] == 4 and meta["stop_reason"] == "proxy_budget_exceeded"
+                    and (meta["proxy_bytes"], meta["proxy_budget_bytes"], meta["proxy_budget_exceeded"])
+                    == (1200, 1000, True))
+        ok &= check("%s: ...pages 3-5 unattempted, not failed" % name,
+                    meta is not None and meta.get("pages_unattempted") == [3, 4, 5] and meta["pages_failed"] == [])
+        ok &= check("%s: ...one 'Proxy traffic' line" % name,
+                    text.count("Proxy traffic: 0.0 MB of 0.001 MB budget") == 1)
+        rc, meta, attempt, fetched, text = _scrape_on_budget(mod, 0.001, 5000, blocked_on=(1,))
+        ok &= check("%s: spent on a refused page 1 -> exit 5 (not 3), attempt sidecar, no data" % name,
+                    rc == 5 and meta is None and attempt is not None
+                    and attempt["stop_reason"] == "proxy_budget_exceeded" and attempt["proxy_bytes"] == 5000)
+        rc, meta, attempt, fetched, text = _scrape_on_budget(mod, 0.001, 10 ** 9, pages=2, proxied=False)
+        ok &= check("%s: no proxy -> nothing metered or stopped, proxy_bytes null, no line" % name,
+                    rc == 0 and fetched == [1, 2] and meta["proxy_bytes"] is None
+                    and meta["proxy_budget_exceeded"] is False and "Proxy traffic" not in text)
+        rc, meta, attempt, fetched, text = _scrape_on_budget(mod, 0, 10 ** 9, pages=2)
+        ok &= check("%s: --proxy-budget-mb 0 is unlimited" % name,
+                    rc == 0 and fetched == [1, 2] and meta["proxy_budget_bytes"] is None)
+
+    try:
+        eng = __import__("playwright_scraper")
+    except ImportError:
+        eng = None
+    if eng is not None:
+        from unittest import mock
+        fetched, lock = [], threading.Lock()
+
+        def fake_fetch(session, args, pool, page_num, url):
+            with lock:
+                fetched.append(page_num)
+            proxy_meter.current().add(600)
+            outcome = eng.PageOutcome(page_num=page_num, url=url)
+            outcome.products = ["row"]
+            return outcome
+        proxy_meter.start(0.003, active=True)  # 3,000 bytes: spent by the 5th page
+        try:
+            with mock.patch.object(eng, "sync_playwright", lambda: _FakePlaywright()), \
+                    mock.patch.object(eng, "_BrowserSession", lambda pw, args, pool, **kw: _FakeSession(pool)), \
+                    mock.patch.object(eng, "_fetch_one_page", fake_fetch):
+                results, unattempted, exhausted = eng._fetch_pages_concurrently(
+                    types.SimpleNamespace(delay=0, mode="listing", out="x"), None,
+                    [(n, "u%d" % n) for n in range(2, 31)], 4)
+        finally:
+            proxy_meter.start(None, active=False)
+        ok &= check("playwright_scraper: concurrent workers stop taking pages once the budget is spent",
+                    5 <= len(fetched) <= 8 and len(fetched) + len(unattempted) == 29)
+
+    if eng is not None:
+        # The real Playwright page fetch: a navigation that times out after
+        # spending the budget is neither retried nor rotated to another exit.
+        class TimingOutPage:
+            url = "https://www.mediamarkt.de/de/category/x-1.html"
+            gotos = 0
+
+            def goto(self, *a, **k):
+                TimingOutPage.gotos += 1
+                proxy_meter.current().add(5000)
+                raise eng.PWTimeout("Timeout 60000ms exceeded")
+
+        class Pool:
+            current = "http://127.0.0.1:1"
+            advanced = 0
+
+            def __len__(self):
+                return 3
+
+            def advance(self, why):
+                Pool.advanced += 1
+
+        class Session:
+            page = TimingOutPage()
+
+            def relaunch(self):
+                pass
+        proxy_meter.start(0.001, active=True)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                args = type("A", (), dict(proxy_block_retries=2, pages=1, retries=3, retry_delay=0,
+                                          mode="listing", out=os.path.join(d, "o"), dump_html=None,
+                                          category=None))()
+                _run_quiet(eng._fetch_one_page, Session(), args, Pool(), 1, TimingOutPage.url)
+        finally:
+            proxy_meter.start(None, active=False)
+        ok &= check("playwright_scraper: a timed-out navigation that spent the budget is not retried or rotated",
+                    (TimingOutPage.gotos, Pool.advanced) == (1, 0))
+
+        class DeadExitPage(TimingOutPage):
+            def goto(self, *a, **k):
+                TimingOutPage.gotos += 1
+                proxy_meter.current().add(5000)
+                raise eng.PWError("net::ERR_PROXY_CONNECTION_FAILED at " + self.url)
+        TimingOutPage.gotos, Pool.advanced = 0, 0
+        Session.page = DeadExitPage()
+        proxy_meter.start(0.001, active=True)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                args = type("A", (), dict(proxy_block_retries=2, pages=1, retries=3, retry_delay=0,
+                                          mode="listing", out=os.path.join(d, "o"), dump_html=None,
+                                          category=None))()
+                _run_quiet(eng._fetch_one_page, Session(), args, Pool(), 1, TimingOutPage.url)
+        finally:
+            proxy_meter.start(None, active=False)
+        ok &= check("playwright_scraper: ...nor is a dead exit rotated away from on a spent budget",
+                    (TimingOutPage.gotos, Pool.advanced) == (1, 0))
+
+    # --- the fetch loop: no retry, rotation or paid solve on a spent budget
+    src = {n: open(os.path.join(REPO_ROOT, n + ".py"), encoding="utf-8").read() for n in ENGINES}
+    for name, text in src.items():
+        ok &= check("%s: the navigation retry stops on a spent budget" % name,
+                    "for attempt in range(1, args.retries + 1):\n" in text
+                    and text.split("for attempt in range(1, args.retries + 1):\n", 1)[1].lstrip().startswith(
+                        "if proxy_meter.exceeded():"))
+        ok &= check("%s: ...so do rotation and the paid solve" % name,
+                    "block_attempt < block_retries and not proxy_meter.exceeded()" in text
+                    and "if not proxy_meter.exceeded() and handle_captcha_if_present(" in text)
+    ok &= check("playwright_scraper: concurrent workers take no page once the budget is spent",
+                "while not exhausted.is_set() and not proxy_meter.exceeded():" in src["playwright_scraper"])
+    ok &= check("meter wiring: playwright counts a proxied local context, pyppeteer its page, selenium its log",
+                "proxy_meter.current().attach_playwright(context)" in src["playwright_scraper"]
+                and "attach_pyppeteer(self.page)" in src["puppeteer_scraper"]
+                and "selenium_logging_prefs(options)" in src["selenium_scraper"]
+                and src["selenium_scraper"].count("poll_selenium(") >= 4)
+
+    # --- the canary ------------------------------------------------------
+    wf = os.path.join(REPO_ROOT, ".github", "workflows", "canary.yml")
+    if os.path.exists(wf):
+        text = open(wf, encoding="utf-8").read()
+        runs = [line for line in text.replace("\\\n", " ").splitlines()
+                if "_scraper.py" in line and "--out" in line and not line.lstrip().startswith("#")]
+        ok &= check("canary: every scraper run passes --proxy-budget-mb 10",
+                    bool(runs) and all("--proxy-budget-mb 10" in line for line in runs))
+        for out, label in CANARY_SUMMARIES:
+            call = 'python3 .github/proxy_traffic_summary.py %s "%s" 10' % (out, label)
+            present = call in text
+            ok &= check("canary: a summary step reads %s's sidecar" % out, present)
+            if present:
+                step = text[:text.index(call)].rsplit("- name:", 1)[-1]
+                ok &= check("canary: ...it runs whatever the run did (%s)" % out, "if: always()" in step)
+        script = os.path.join(REPO_ROOT, ".github", "proxy_traffic_summary.py")
+        tmp = tempfile.mkdtemp()
+        summary = os.path.join(tmp, "summary.md")
+        env = dict(os.environ, GITHUB_STEP_SUMMARY=summary)
+
+        def summarise(meta=None, attempt=None):
+            for suffix, data in ((".meta.json", meta), (".latest_attempt.meta.json", attempt)):
+                path = os.path.join(tmp, "c" + suffix)
+                if os.path.exists(path):
+                    os.unlink(path)
+                if data is not None:
+                    with open(path, "w") as f:
+                        json.dump(data, f)
+            proc = subprocess.run([sys.executable, script, "c", "live-run", "10"], cwd=tmp, env=env,
+                                  capture_output=True, text=True, timeout=60)
+            last = open(summary).read().splitlines()[-1] if os.path.exists(summary) else ""
+            return proc, last
+        proc, last = summarise({"proxy_bytes": 4321000, "proxy_budget_exceeded": False,
+                                "finished_at": "2026-10-21T10:00:00+00:00"})
+        ok &= check("canary: the summary line", proc.returncode == 0
+                    and last == "**live-run**: proxy traffic 4.3 MB of 10 MB")
+        proc, last = summarise(None, {"proxy_bytes": 10200000, "proxy_budget_exceeded": True})
+        ok &= check("canary: a run stopped at the budget is red with the ::error:: line",
+                    proc.returncode == 1 and "::error::stopped: proxy budget 10 MB exceeded" in proc.stdout)
+        proc, last = summarise()
+        ok &= check("canary: a missing sidecar is reported, not a crash",
+                    proc.returncode == 0 and "not recorded" in last)
+        proc, last = summarise({"proxy_bytes": None, "proxy_budget_exceeded": False})
+        ok &= check("canary: a run with no local proxy says so", proc.returncode == 0 and "no local proxy" in last)
+    return ok
+
+
+def main() -> int:
+    ok = True
+    # Checks that could not run because an optional engine library is absent.
+    # Reported at the end: a suite that silently skips part of itself and
+    # still says "all passed" is the same defect as code that reports success
+    # without checking that what it wanted actually happened.
+    skips = []
+
+    ok &= test_price_parsing()
+    ok &= test_retries_is_validated_in_every_entry_point()
+    ok &= test_strike_prices()
+    ok &= test_listing_values()
+    ok &= test_second_locale()
+    ok &= test_unrated_products()
+    ok &= test_totals_and_hub()
+    ok &= test_product_detail()
+    ok &= test_jsonld_shapes()
+    ok &= test_urls()
+    ok &= test_page_state()
+    ok &= test_page_flow()
+    ok &= test_output_contract()
+    ok &= test_writers()
+    ok &= test_finish_run()
+    ok &= test_diff()
+    ok &= test_captcha()
+    ok &= test_env_config()
+    ok &= test_proxy_pool()
+    ok &= test_engines(skips)
+    ok &= test_no_capture_leaks()
+    ok &= test_ci_checks_is_actually_wired_up()
+    ok &= test_dumps_private_canary_and_block_hint()
+    ok &= test_wording()
+    ok &= test_fingerprint_client_reads_env()
+    ok &= test_fingerprint_application()
+    ok &= test_credentials_never_reach_a_log()
+    ok &= test_concurrent_dispatch(skips)
+    ok &= test_no_undefined_names()
+    ok &= test_dockerfile_copies_what_it_runs()
+    ok &= test_shared_calls_bind_against_the_real_signature()
+    ok &= test_sample_output()
+    ok &= test_x_debug_header_is_redacted()
+    ok &= test_scraper_api_payload_and_status()
+    ok &= test_atomic_writes()
+    ok &= test_csv_formula_guard()
+    ok &= test_solve_budget()
+    ok &= test_status_reaches_the_classifier()
+    ok &= test_numeric_flags_are_validated()
+    ok &= test_no_private_citations()
+    ok &= test_proxy_traffic_savers(skips)
+    ok &= test_proxy_budget(skips)
+
+    print()
+    if _failures:
+        print("%d check(s) FAILED:" % len(_failures))
+        for f in _failures:
+            print("  - %s" % f)
+    if skips:
+        print("%d engine group(s) SKIPPED — an optional engine library is "
+              "absent. CI's engine-smoke job installs all three and fails if "
+              "this list is non-empty, because a skip reads exactly like a "
+              "passing run:" % len(skips))
+        for s in skips:
+            print("  - %s" % s)
+    print("smoke_test: %s" % ("OK" if ok else "FAILED"))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

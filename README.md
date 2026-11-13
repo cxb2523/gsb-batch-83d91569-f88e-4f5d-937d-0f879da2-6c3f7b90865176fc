@@ -1,0 +1,533 @@
+# MediaMarkt Scraper — Product Prices, Ratings and Stock in Python
+
+[![release](https://img.shields.io/github/v/release/2scraper/mediamarkt-scraper?sort=semver)](https://github.com/2scraper/mediamarkt-scraper/releases)
+[![tests](https://github.com/2scraper/mediamarkt-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/mediamarkt-scraper/actions/workflows/tests.yml)
+[![canary](https://github.com/2scraper/mediamarkt-scraper/actions/workflows/canary.yml/badge.svg)](https://github.com/2scraper/mediamarkt-scraper/actions/workflows/canary.yml)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
+[![licence](https://img.shields.io/badge/licence-MIT-lightgrey)](LICENSE)
+[![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20pyppeteer%20%7C%20CDP-informational)](#engines)
+[![needs a residential IP](https://img.shields.io/badge/needs-a%20residential%20IP-orange)](#the-one-thing-you-actually-need)
+
+**MediaMarkt scraper** — an open-source (MIT) Python tool that reads category grids, search results and product pages on MediaMarkt's ten country sites and writes prices, manufacturer's recommended prices, 30-day lowest prices, ratings, stock and EAN to JSON or CSV. Measured on 2026-09-09, MediaMarkt refused every datacentre and VPN address, and each country site was served from a residential exit in its own country. Use it for price monitoring across countries, or compare two runs with `diff_runs.py`.
+
+Scrapes MediaMarkt category grids, search results and product pages across the
+group's ten country sites. JSON or CSV, one row schema for both modes, and
+a run-metadata sidecar that says whether the result is complete.
+
+Three engines: **Playwright** (primary), **Selenium**, **pyppeteer**, or a
+remote browser over CDP such as the **Scraping Browser API**.
+
+---
+
+## The one thing you actually need
+
+Most scrapers in this family open with what works for free. This one cannot,
+and saying so is more useful than a pitch.
+
+**MediaMarkt refuses every datacentre and VPN address.** Measured
+**2026-09-09**, from a hosting IP in Amsterdam:
+
+```
+GET https://www.mediamarkt.de/de/category/filme-serien-486.html   -> 403
+GET https://www.mediamarkt.es/es/category/smartphones-165.html    -> 403
+GET https://www.mediamarkt.nl/nl/category/smartphones-486.html    -> 403
+GET https://mediamarkt.pl/                                        -> 403
+GET https://www.mediaworld.it/                                    -> 403
+```
+
+Identical bytes for every URL on a host. A real headless Chromium from the
+same address got the same 403 — so this is IP reputation, not browser
+detection, and no amount of stealth patching changes it.
+
+**From a German residential address the same request just works** — and it
+works without a browser at all:
+
+```
+$ python3 playwright_scraper.py \
+    --url "https://www.mediamarkt.de/de/category/k%C3%BChlen-gefrieren-32.html" \
+    --pages 3
+
+Parsed 12 row(s) from page 1.  Price coverage: 12/12 (100%).  DOM confirmation: 12/12 (100%).
+Parsed 12 row(s) from page 2.  Price coverage: 12/12 (100%).  DOM confirmation: 12/12 (100%).
+Parsed 12 row(s) from page 3.  Price coverage: 12/12 (100%).  DOM confirmation: 12/12 (100%).
+This listing holds 2311 product(s) in total; this run took 36 (1.6%).
+[+] Saved 36 products -> mediamarkt_products.json
+[+] Wrote run metadata -> mediamarkt_products.meta.json (status=complete)
+$ echo $?
+0
+```
+
+The pages are fully server-rendered: a plain `requests.get` through the same
+exit returns the same 1.8 MB of HTML with every product in it, no JavaScript
+executed. The browser is not what MediaMarkt is checking.
+
+So what do the 2Captcha products buy here?
+
+| Product | What it is for on MediaMarkt |
+|---|---|
+| **Proxies** (`--proxy-file`) | The requirement, not an optimisation. A residential exit is the difference between 403 on every URL and 200 on every URL. Also the only way to choose which country site you are served. |
+| **Scraping Browser API** (`--cdp-endpoint`) | A browser you do not run or patch, with a persistent profile and a chosen exit country, in one endpoint instead of a proxy plus a local Chromium. |
+| **Captcha solving** (`--twocaptcha-key`) | **Not for the block page.** MediaMarkt's refusal is its own branded error page under a 403 with no challenge on it — nothing to solve, and this scraper does not try. The key is for the reCAPTCHA the site uses on account and checkout flows, and for fingerprints. |
+| **Fingerprints** (`--fingerprint`) | A consistent device identity across runs, matched to the exit country. |
+| **Scraper API** (`scraper_api_client.py`) | HTML over plain HTTPS, no browser to install. Measured 2026-09-09 at $0.0005 a page — the cheapest path here, but **only with `--cdp-url`**: the Scraper API's own exit is refused like every other datacentre address. |
+
+If you already have residential exits from somewhere else, this repo works
+with them: `--proxy-file` takes any list.
+
+---
+
+## Install
+
+```bash
+git clone https://github.com/2scraper/mediamarkt-scraper
+cd mediamarkt-scraper
+pip install -r requirements.txt -r requirements-playwright.txt
+playwright install chromium
+```
+
+**Install exactly one engine.** The three declare mutually unsatisfiable pins
+(playwright and pyppeteer disagree on `pyee`, pyppeteer and selenium on
+`urllib3`). They do run side by side in practice, because neither library
+touches the incompatible part — but `pip check` reports the conflict and pip
+may resolve it by downgrading something you wanted. Use a virtualenv per
+engine if you need more than one.
+
+**macOS system Python (3.9, built against LibreSSL)** makes urllib3 v2 print a
+`NotOpenSSLWarning` on every run. It is harmless to the scraper, and a
+Python from Homebrew or python.org (built against OpenSSL) removes it.
+
+Run the offline suite first. It needs no network, no browser and no
+credentials:
+
+```bash
+python3 smoke_test.py
+```
+
+---
+
+## Usage
+
+```bash
+# A category grid, three pages
+python3 playwright_scraper.py \
+  --url "https://www.mediamarkt.de/de/category/grills-116.html" --pages 3
+
+# Search results paginate the same way
+python3 playwright_scraper.py \
+  --url "https://www.mediamarkt.de/de/search.html?query=usb-c+kabel" --pages 5
+
+# One product page: adds brand, EAN, description and the full image list
+python3 playwright_scraper.py --mode product \
+  --url "https://www.mediamarkt.de/de/product/_harry-potter-the-complete-collection-dvd-2920911.html"
+
+# Through a pool of residential exits, four pages at a time
+python3 playwright_scraper.py \
+  --url "https://www.mediamarkt.de/de/category/grills-116.html" \
+  --pages 20 --concurrency 4 --proxy-file exits.txt
+
+# Through the Scraping Browser API instead of a local browser
+python3 playwright_scraper.py \
+  --url "https://www.mediamarkt.de/de/category/grills-116.html" \
+  --cdp-endpoint "ws://{login}-zone-scraping_browser-country-de-pid-{profileId}:{password}@cb.2captcha.com:9222"
+```
+
+Credentials belong in `.env`, never on a command line — a secret in `argv` is
+readable by anything that can run `ps` and lands in your shell history. Copy
+`.env.example` to `.env` and run `python3 env_config.py` to see what was
+picked up (it prints no secrets).
+
+### Country sites
+
+Ten, and the list is not guessed: it is mediamarkt.de's own `hreflang` set,
+minus one site that turned out not to run on this platform at all.
+
+**All ten are live-verified.** Each was fetched on 2026-09-09 from a
+residential exit in its own country, and each returned a full page of twelve
+products with **every row confirmed against its rendered tile**:
+
+| Host | Locale | Currency | Live check |
+|---|---|---|---|
+| mediamarkt.de | de-DE | EUR | 12 rows, 12/12 confirmed |
+| mediamarkt.at | de-AT | EUR | 12 rows, 12/12 confirmed |
+| mediamarkt.ch | de-CH, fr-CH, it-CH | **CHF** | 12 rows, 12/12 confirmed |
+| mediamarkt.nl | nl-NL | EUR | 12 rows, 12/12 confirmed |
+| mediamarkt.be | nl-BE, fr-BE | EUR | 12 rows, 12/12 confirmed |
+| mediamarkt.es | es-ES | EUR | 12 rows, 12/12 confirmed |
+| mediaworld.it | it-IT | EUR | 12 rows, 12/12 confirmed |
+| mediamarkt.pl | pl-PL | **PLN** | 12 rows, 12/12 confirmed |
+| mediamarkt.hu | hu-HU | **HUF** | 12 rows, 12/12 confirmed |
+| mediamarkt.com.tr | tr-TR | **TRY** | 12 rows, 12/12 confirmed |
+
+**`mediamarkt.lu` is deliberately NOT supported**, and it is the interesting
+omission: it is a real MediaMarkt shop that does not run on this platform.
+Fetched from a Luxembourg exit it answers 200 with a full French storefront
+containing zero `/category/` paths, zero `/product/` paths, zero product
+cards, and JSON-LD carrying only `Organization` and `WebSite` — it is a
+Shopify store. Every selector here would find nothing, so the host is refused
+**with that reason** rather than returning an empty category. Saturn
+(saturn.de, saturn.at) is refused the same way, as an unverified sibling
+brand.
+
+There is no `--country` flag: the hostname in `--url` decides, so a flag and
+a URL cannot disagree about which shop a run is reading. A host outside this
+list is refused with exit 2 rather than attempted — the selectors, the
+article-number pattern and the pagination convention are all MediaMarkt's,
+and pointing them at another shop would not fail loudly, it would return zero
+rows and read as an empty category.
+
+**Use an exit in the site's own country.** That is measured, not assumed. A
+single German residential address was accepted by `.de`, `.es` and `.pl` and
+**refused with 403 by the other seven** — while each of those seven answered
+normally from an exit in its own country. So a residential IP is necessary
+and not sufficient: the country has to match, or at least be one the site
+accepts.
+
+With a 2Captcha proxy that is a one-word change (`-region-de` to `-region-it`
+and so on); with the Scraping Browser API it is the `country-` segment of the
+endpoint.
+
+---
+
+## What you get
+
+One row per product, same schema in both modes and in JSON and CSV. See
+[`sample_output.json`](sample_output.json) — cut from a real run, not written
+by hand.
+
+```json
+{
+  "source": "mediamarkt.de",
+  "scraped_at": "2026-09-09T09:32:33.779503+00:00",
+  "url": "https://www.mediamarkt.de/de/product/_gorenje-rk518e2s4-...-3047256.html",
+  "sku": "3047256",
+  "title": "GORENJE RK518E2S4 Kühlgefrierkombination (E, 269 l, 1800 mm hoch, Silber)",
+  "brand": null,
+  "price": 279.0,
+  "currency": "EUR",
+  "original_price": 459.0,
+  "discount_pct": 39.2,
+  "rating": 4.2,
+  "review_count": 5,
+  "in_stock": true,
+  "image_url": "https://assets.mmsrg.com/isr/166325/c1/-/ASSET_MMS_180626469",
+  "category": "kühlen-gefrieren",
+  "price_source": "jsonld+dom",
+  "page": 2,
+  "position": 4,
+  "lowest_price_30d": null,
+  "ean": null,
+  "description": null,
+  "images": null
+}
+```
+
+The first sixteen columns are this scraper family's shared prefix, in the
+same order in every repo, so a consumer written against one reads another
+unchanged. `page`, `position`, `lowest_price_30d`, `ean`, `description` and
+`images` are MediaMarkt's own and come after it.
+
+### `lowest_price_30d` is not an old price
+
+MediaMarkt renders **two** struck-through prices, and they mean opposite
+things:
+
+| On the page | Column | What it is |
+|---|---|---|
+| `UVP 59,99 €` | `original_price` | The manufacturer's recommended price. Above the current price. |
+| `Tiefstpreis (30 Tage): 299,– €` | `lowest_price_30d` | The lowest price charged in the last 30 days, which EU price-indication law requires beside a reduced price. Usually **below** the current price. |
+
+A scraper that treats any strikethrough as a was-price reports
+`original_price: 299` against `price: 349` — a negative discount on a product
+that is not discounted at all. Both forms are common (22 UVP and 14
+Tiefstpreis nodes across the captured pages), so this is not an edge case.
+`discount_pct` is computed from `price` and `original_price` only, and is
+`null` whenever there is no UVP.
+
+### `price_source` says how much to trust the price
+
+`jsonld+dom` means the structured price and the rendered tile agreed —
+100% of rows on every page measured so far. `jsonld` means no tile was found
+to confirm it against. `dom` means the structured data was missing entirely
+and the price was read off the markup.
+
+`diff_runs.py` reports a price difference that comes with a `price_source`
+difference as `source_changed` rather than `changed`, and `--fail-on-change`
+ignores it: that says something about our own two snapshots, not about what
+MediaMarkt charges.
+
+---
+
+## Traps that look like bugs
+
+Each of these is the site behaving normally. A reader who hits one unwarned
+concludes the tool is broken.
+
+**A category URL that returns zero products.** MediaMarkt has *hub*
+categories — landing pages that list sub-categories and carry no grid.
+`/de/category/notebooks-680.html` is one: HTTP 200, a real page, no products.
+That is exit 4 (`no products`), not exit 3 (`blocked`), and no proxy or
+captcha key changes it. Pick a leaf category — one with an actual product
+grid.
+
+**`brand` is null on every listing row.** Measured, not missed: MediaMarkt's
+tile markup carries no brand line and the listing's JSON-LD publishes no
+`brand` key (checked across 96 tiles on eight pages). It IS the leading token
+of the title on most products and *not* on all of them — "OK. OFK 411",
+"PLAION PICTURES" — so splitting the title would produce a column that is
+sometimes wrong, which is worse than one that is honestly empty. Use
+`--mode product` where you need it: the detail page publishes `brand`
+properly, along with the EAN.
+
+**`rating` is null on plenty of rows.** MediaMarkt draws the star widget on
+every tile, and an unrated product gets "0 von 5 Sternen" with a count of 0.
+That is the widget's empty state, not a score, so the row reports
+`rating: null` and `review_count: 0`. (An earlier version of this scraper
+read it as `0.0` and filled the column on 84 of 84 rows — a column that
+looked complete and said a brand-new release was rated zero stars.)
+
+**Twelve products a page, not twenty.** That is the page size. The site
+offers a "12 weitere Produkte anzeigen" button, but `?page=N` addresses every
+page directly, so this scraper paginates rather than clicking. Nothing
+lazy-loads: eight scroll rounds on a live category page left the card count
+at 12 and the document height unchanged at 13648px.
+
+**A run that asked for 50 pages stops early.** Each listing prints its own
+catalogue size ("12 von 2311"), and the run stops when a page adds no product
+it has not already seen. `stop_reason: no_new_products` in the sidecar is a
+*complete* result, not a truncated one.
+
+---
+
+## Engines
+
+All three produce the same rows, the same exit codes and the same run status;
+the decisions that determine them live in `page_flow.py` and
+`output_writer.finish_run()` so they cannot drift apart. Playwright is the
+primary engine and the only one with `--concurrency`.
+
+Known limits, stated here rather than left to be discovered:
+
+- **Selenium cannot use an authenticated remote CDP endpoint.** Playwright's
+  `connect_over_cdp` and pyppeteer's `browserWSEndpoint` take a full
+  `ws://user:pass@host:port` and authenticate on the WebSocket upgrade;
+  chromedriver's `debuggerAddress` takes a bare `host:port` with nowhere to
+  put a password. It is not a generic "connect to CDP" option.
+- **Selenium cannot authenticate a proxy at all.** `--proxy-server=` accepts
+  no credentials. This repo strips them and warns rather than letting you
+  believe a `user:pass` URL is doing something — which matters more here than
+  elsewhere, since an unauthenticated proxy means a 403 on every page.
+- **pyppeteer is effectively unmaintained** and its own README points at
+  Playwright.
+
+### Concurrency
+
+`--concurrency N` fetches pages through N parallel workers. It is safe here
+because pagination is *addressable*: page 1's own `<link rel="next">` reads
+`?page=2`, exactly what the URL convention would build, so page 5's address
+is knowable without fetching page 4. The scraper checks that agreement on
+every run and falls back to sequential chaining if the site ever starts
+issuing a cursor it cannot reproduce.
+
+A worker owns one browser and one exit for its lifetime, and each starts on a
+*different* exit, so no thread needs a lock. Page 1 is always fetched alone.
+
+Two refusals worth knowing: `--concurrency` with no proxy pool warns rather
+than refuses (N workers then send N× the traffic from one address, and on
+this site an address that works is one worth not burning), and it is refused
+outright with `--cdp-endpoint`, because a Scraping Browser profile allows one
+live connection — several `pid`s, one run each, is the way.
+
+### Traffic through a paid proxy
+
+A residential proxy bills per byte, so three things happen only while a LOCAL
+browser goes through `--proxy` / `--proxy-file` (or `MEDIAMARKT_PROXY`).
+None applies with `--cdp-endpoint`: that remote browser brings its own exit
+and is billed on its own side. None applies with no proxy either, because
+then nothing is metered.
+
+**Pre-check before the browser starts.** All three engines send ONE
+`HEAD https://<start host>/robots.txt` through the proxy (for a `.de` URL,
+`https://www.mediamarkt.de/robots.txt`) before launching a browser:
+
+- `407`: the gateway refused the credential, or the traffic balance is
+  exhausted. Exit `5`.
+- `402`: the proxy's traffic or balance is exhausted. Exit `5`.
+
+The message names `MEDIAMARKT_PROXY` and never prints its value. The run
+writes `<out>.latest_attempt.meta.json` with `status: failed` and
+`stop_reason: proxy_auth_failed`. The data files and `<out>.meta.json` from
+an earlier run are left exactly as they were. Any other answer (a `200`, the
+site's own `403`, a timeout, a DNS error) is not a verdict on the proxy, and
+the run carries on exactly as before. With `--proxy-file` the first exit of the
+pool is the one checked. The pre-check is a single request and is never
+retried or rotated. The canary's own proxy check
+(`.github/canary_preflight.py`) classifies a `407`/`402` with the same code and
+the same wording.
+
+**Media is not downloaded.** Images, video/audio and web fonts are aborted:
+
+| Engine | How | What still loads |
+|---|---|---|
+| Playwright | `context.route` by resource type | nothing of those three types |
+| pyppeteer | CDP `Fetch.enable` with resource-type patterns, then `Fetch.failRequest` | nothing of those three types |
+| Selenium | CDP `Network.setBlockedURLs` by file extension | an image or font served from a URL **without** an extension |
+
+`--load-media` keeps them. The parser reads markup and structured data only:
+`image_url` comes from the page's JSON-LD or from the tile's `src` /
+`data-src` attribute, and nothing reads image bytes, image dimensions or
+load events. Two side effects to know about: a debug screenshot taken behind
+a proxy shows no images, and Playwright switches its HTTP cache off while a
+route is installed, so repeated assets in one run are fetched again (scripts
+and stylesheets, which are not blocked). `<out>.meta.json` records
+`media_blocked`.
+
+**Traffic budget.** Every byte the browser sends or receives through the
+proxy is counted, and `--proxy-budget-mb` (default `10`; `0` = unlimited)
+caps the run. Once the running total passes it, no new page, retry, exit
+rotation or captcha solve is started (with `--concurrency`, no worker takes
+another page; pages already loading finish), the browser aborts any request
+it still tries, the rows already read are kept, and the run ends with
+`stop_reason: proxy_budget_exceeded`: exit `6` with rows, `5` without (a
+block on the last page included). It never goes on silently. A proxied run
+prints one line at the end, e.g. `Proxy traffic: 3.2 MB of 10 MB budget`, and
+the sidecar records `proxy_bytes`, `proxy_budget_bytes` and
+`proxy_budget_exceeded` (`null` / `null` / `false` with no local proxy), plus
+`pages_unattempted` after a stop. A proxied run that writes no rows records
+them in `<out>.latest_attempt.meta.json`, leaving the data and
+`<out>.meta.json` as they were.
+
+The count is an estimate of the tunnelled payload: request line, headers and
+body sent, response headers and body as received. TLS records, the `CONNECT`
+exchange, WebSocket frames and Chrome's own background requests are not
+visible to it, so the proxy's bill is a few per cent higher. 1 MB = 1,000,000
+bytes. The pre-check's `HEAD` is counted; the canary's separate preflight
+script is not (it is another process).
+
+| Engine | Counted from |
+|---|---|
+| Playwright | `request.sizes()` of every finished or failed request |
+| pyppeteer | CDP `Network.loadingFinished.encodedDataLength` of every response that came over the network, plus each request's line, headers and body |
+| Selenium | the same CDP events, from Chrome's performance log |
+
+Live comparison, 2026-10-20: one category page through Playwright with no
+proxy, once as it is and once with blocking forced on, to compare the rows.
+It was not possible from this datacentre address: both runs got the site's
+`403` refusal page, as every datacentre address does (see above). The
+verification is therefore offline: the fixtures, the reading of the parser
+above, and each real browser driven against a local test page. With blocking,
+only the HTML and the script were fetched, and the script still ran.
+
+---
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Complete |
+| `1` | Crash |
+| `2` | Bad usage (including a URL that is not a MediaMarkt host) |
+| `3` | Blocked — the 403 refusal, or a challenge |
+| `4` | Zero products — including a hub category, which is a correct answer |
+| `5` | The content was never obtained — a remote API error, a navigation timeout, a dead or unauthenticated proxy (a gateway `407`/`402` at the pre-check stops here before a browser starts), or `--proxy-budget-mb` spent before any row (`proxy_budget_exceeded`). No data was written |
+| `6` | Partial — some pages fetched, then stopped early (including `proxy_budget_exceeded`) |
+
+**A run that finds nothing writes nothing.** Last night's good output is not
+replaced with `[]`; `--allow-empty` is the opt-out. A consumer cannot tell an
+empty category from a failed run, and the failure destroys the last known
+good data. A failed run writes no `<out>.meta.json` either, because a
+`"failed"` sidecar beside good data would contradict it. The one exception is
+a proxy refused at the pre-check (see *Traffic through a paid proxy*): that run
+records itself in `<out>.latest_attempt.meta.json`, a separate file, and
+leaves `<out>.meta.json` alone.
+
+`<out>.meta.json` records `status`, `stop_reason`, `mode`, `source` and
+**which** pages failed by number — a count stops being a description once a
+page can fail while later ones succeed.
+
+---
+
+## Comparing two runs
+
+```bash
+python3 diff_runs.py --old monday.json --new tuesday.json --fail-on-change
+```
+
+Reports added, removed and changed products by `sku`. It refuses to compare
+two runs that are not both `complete`, because a partial run's un-fetched
+pages otherwise read as delisted products, and it refuses a pair whose modes
+or sources differ.
+
+---
+
+## Troubleshooting
+
+**Every page comes back exit 3.** Check the exit address first: this site
+refuses datacentre IPs outright, so a run from a VPS, a CI runner or most
+VPNs will be blocked on page 1 regardless of settings. `--dump-html` writes
+the page the parser was given; the German block page says "Ups, hier stimmt
+gerade etwas nicht" and the Spanish one is almost blank.
+
+**Exit 4 on a URL that plainly has products in a browser.** You are probably
+on a hub category — see the traps above — or one page past the end of the
+listing.
+
+**"Blocked by turnstile" over `--cdp-endpoint`, on a page that clearly
+loaded.** Fixed in this repo, and worth knowing about if you write your own
+detector: the Scraping Browser API's auto-solve extension injects its own
+captcha hunters into every page it loads, so `cf-turnstile` appears in the
+markup of a perfectly good category grid. This scraper strips
+`chrome-extension://` scripts before looking for challenge markers, and never
+treats a marker as blocking when products have already rendered.
+
+**HTTP 500 from the Scraping Browser endpoint.** A profile allows one live
+connection at a time; another run is probably still holding that `pid`.
+
+More in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
+---
+
+## Measurements in this README
+
+Everything above was measured rather than estimated. The numbers come from
+live runs on **2026-09-09** against all ten country sites, each from a
+residential exit in its own country, plus page captures taken the same day.
+The offline suite pins the field values from those captures — including a
+Polish listing (a second language, a non-euro currency, and the host that
+answers without a `www.` prefix) and a Turkish tile (a prefixed currency, a
+percent sign written before its number, and an instalment line in the same
+price block) — so a change in the site's markup fails a test rather than
+quietly emptying a column.
+
+`python3 smoke_test.py` runs the offline suite: no network beyond stub
+servers on `127.0.0.1`, no browser, no credentials. Each check prints a PASS or FAIL line, and an engine group whose
+library is not installed is reported as SKIPPED at the end.
+
+---
+
+## Legal
+
+For research, price monitoring and comparison. You are responsible for
+complying with MediaMarkt's terms, with `robots.txt`, and with the data
+protection law that applies to you. This repo reads publicly rendered product
+listings; it does not attempt to reach anything behind an account.
+
+MIT licensed — see [LICENSE](LICENSE).
+
+Built by [2Captcha](https://2captcha.com).
+
+## Guides
+
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [Montblanc scraper](https://github.com/2scraper/montblanc-scraper) — Per-market prices, stock, collections and full variant…
+- [Pottery Barn scraper](https://github.com/2scraper/potterybarn-scraper) — Every product in a Pottery Barn category, and every SKU's…
+- [Rakuten Ichiba scraper](https://github.com/2scraper/rakuten-scraper) — Japan's largest marketplace
+- [SHEIN scraper](https://github.com/2scraper/shein-scraper) — us.shein.com search, category and product pages…
+- [Sleep Number scraper](https://github.com/2scraper/sleepnumber-scraper) — Smart beds, mattresses and bedding from sleepnumber.com
+- [StockX scraper](https://github.com/2scraper/stockx-scraper) — Search results, category listings and product pages
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
