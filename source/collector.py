@@ -27,7 +27,7 @@ from queryHandler.Query import Query
 from messages import MSG
 from collections import defaultdict
 from typing import Optional, Any, List, Union
-from threading import Thread
+from threading import Thread, Lock
 from metadata import MetadataHandler
 from bridgeLogger import getBridgeLogger
 from refresher import TopoRefreshManager
@@ -35,6 +35,55 @@ from utils import classattributes, cond_execution_time, get_runtime_statistics
 
 
 local_cache = set()
+
+
+class CollectionStatus(object):
+    """Terminal states of a single collection run.
+
+    The members are plain strings so that a ``CollectionResult`` can be
+    inspected without importing any additional type and serializes cleanly
+    when it is surfaced to an API response.
+    """
+
+    SUCCESS = 'success'
+    NO_DATA = 'no_data'
+    INVALID_FILTER = 'invalid_filter'
+    QUERY_FAILED = 'query_failed'
+
+
+class CollectionResult(object):
+    """Structured outcome of one :meth:`SensorCollector.run_collection` call.
+
+    Each call owns its own result instance, so collector threads running
+    concurrently can never share or overwrite each others status or error
+    description.
+
+    Attributes:
+        status: one of the constants defined in :class:`CollectionStatus`
+        error: human readable, directly presentable explanation of what went
+            wrong; ``None`` for successful collections
+        metrics: mapping ``metric name -> MetricTimeSeries`` with the
+            collected data on success, otherwise an empty dict
+        exception: the original exception retained when the underlying query
+            raised, otherwise ``None``
+    """
+
+    def __init__(self, status: str, error: Optional[str] = None,
+                 metrics: Optional[dict] = None,
+                 exception: Optional[BaseException] = None) -> None:
+        self.status = status
+        self.error = error
+        self.metrics = metrics if metrics is not None else {}
+        self.exception = exception
+
+    @property
+    def ok(self) -> bool:
+        """True when the collection finished with data."""
+        return self.status == CollectionStatus.SUCCESS
+
+    def __repr__(self) -> str:
+        return (f'CollectionResult(status={self.status!r}, error={self.error!r}, '
+                f'metrics={list(self.metrics.keys())!r})')
 
 
 class TimeSeries(object):
@@ -178,6 +227,15 @@ class SensorTimeSeries(object):
             self._setup_static_metrics_data(metrics)
 
     def _setup_static_metrics_data(self, metric_names: List[str]):
+        self.metrics = self._build_static_metrics_dict(metric_names)
+
+    def _build_static_metrics_dict(self, metric_names: List[str]) -> dict:
+        """Create a fresh metric name -> MetricTimeSeries mapping.
+
+        Kept separate from :meth:`_setup_static_metrics_data` so the
+        thread-safe collection entry point can build its own isolated
+        mapping without touching the shared ``self.metrics`` state.
+        """
         mDict = {}
         spec = self.md.metricsDesc
         metricsTypes = self.md.metaData.metricsType
@@ -192,7 +250,7 @@ class SensorTimeSeries(object):
                                   spec.get(name, "Desc not found"),
                                   mtype)
             mDict[name] = ts
-        self.metrics = mDict
+        return mDict
 
     def _get_all_filters(self):
         return self.md.metaData.getAllFilterMapsForSensor(self.sensor)
@@ -273,6 +331,8 @@ class SensorCollector(SensorTimeSeries):
         super().__init__(sensor, period)
         self.__query = None
         self.__ds_interval = None
+        self.__query_lock = Lock()
+        self.__ds_interval_lock = Lock()
         self.request = request
         self.logger = logger
         self.bundle_id = bundle_id  # Store bundle_id as instance property
@@ -291,15 +351,20 @@ class SensorCollector(SensorTimeSeries):
 
     @property
     def query(self):
-        if not self.__query:
-            self.__query = self.request.get_zimon_query()
-        return self.__query
+        # Lazily build the zimon query under a lock: several collector
+        # threads may share one SensorCollector and must not race on the
+        # private query cache.
+        with self.__query_lock:
+            if not self.__query:
+                self.__query = self.request.get_zimon_query()
+            return self.__query
 
     @property
     def dsInterval(self):
-        if self.__ds_interval is None:
-            self.__ds_interval = self._calc_ds_interval()
-        return self.__ds_interval
+        with self.__ds_interval_lock:
+            if self.__ds_interval is None:
+                self.__ds_interval = self._calc_ds_interval()
+            return self.__ds_interval
 
     def start_collect(self):
         """ Function to start collect in a thread"""
@@ -346,25 +411,45 @@ class SensorCollector(SensorTimeSeries):
         return dsInterval
 
     def _collect(self):
-        '''Executes zimon query and returns results'''
+        '''Executes zimon query and stores results in ``self.metrics``'''
+
+        metrics, error, _ = self._run_query_and_collect()
+        if error is None:
+            self.metrics = metrics
+
+    def _run_query_and_collect(self):
+        '''Executes the zimon query and builds the metrics mapping.
+
+        All state needed to assemble the result is kept in local variables
+        so that concurrent invocations (also via :meth:`run_collection`)
+        never share intermediate data. The method mirrors the behaviour of
+        the legacy :meth:`_collect` flow, including the query failure and
+        empty-result handling, but returns its outcome instead of only
+        logging it.
+
+        :return: tuple ``(metrics, error, exception)`` where ``metrics`` is
+                 a fresh metric name -> MetricTimeSeries dict, ``error`` is
+                 ``None`` on success and otherwise one of the
+                 :class:`CollectionStatus` failure constants, and
+                 ``exception`` retains the original exception when the
+                 underlying query raised.
+        '''
 
         try:
             res = self.md.qh.runQuery(self.query)
         except Exception as e:
             self.logger.error(MSG['QueryError'].format(e))
-            return
+            return {}, CollectionStatus.QUERY_FAILED, e
 
         if res is None:
             self.logger.error(MSG['NoData'])
-            # self.stop_collect()
-            # raise cherrypy.HTTPError(400, MSG['NoData'])
-            return
+            return {}, CollectionStatus.NO_DATA, None
         self.logger.details("res.rows length: {}".format(len(res.rows)))
         if self.removeNoData:
             res.remove_rows_with_no_data()
 
         if len(res.rows) < 1:
-            return
+            return {}, CollectionStatus.NO_DATA, None
         rows = res.rows
         if self.request.dsOp and self.dsInterval and len(res.rows) > 1:
             self.logger.trace(MSG['DownsampleAggregation'].format(
@@ -383,20 +468,190 @@ class SensorCollector(SensorTimeSeries):
                 for value, columnInfo in zip(row.values, res.columnInfos):
                     columnValues[columnInfo][row.tstamp] = value
 
+        # Fresh, locally owned metric containers: this mapping is never
+        # stored on shared instance state, so parallel collection runs can
+        # not interleave their TimeSeries objects.
+        metrics = self._build_static_metrics_dict(list(self.metrics.keys()))
         for columnInfo, dps in columnValues.items():
             ts = TimeSeries(columnInfo, dps, self.filtersMap, self.labels)
-            if self.metrics.get(columnInfo.keys[0].metric) is not None:
+            if metrics.get(columnInfo.keys[0].metric) is not None:
                 self.logger.trace(MSG['MetricInResults'].format(
                     columnInfo.keys[0].metric))
-                self.metrics[columnInfo.keys[0].metric].timeseries.append(ts)
+                metrics[columnInfo.keys[0].metric].timeseries.append(ts)
             else:
                 # metric not in Collector.metrcs
                 self.logger.warning(MSG['MetricNotInResults'].format(
                     columnInfo.keys[0].metric))
                 mt = MetricTimeSeries(columnInfo.keys[0].metric, '')
                 mt.timeseries.append(ts)
-                self.metrics[columnInfo.keys[0].metric] = mt
-        # self.logger.info(f'rows data {str(columnValues)}')
+                metrics[columnInfo.keys[0].metric] = mt
+        return metrics, None, None
+
+    def run_collection(self) -> CollectionResult:
+        """Unified, thread-safe entry point for one collection cycle.
+
+        The request filters and group tags are validated first (reusing the
+        existing :meth:`validate_query_filters` and
+        :meth:`validate_group_tags` semantics, including ``*`` wildcard and
+        ``|`` separated multi-value handling), then the zimon query is
+        executed. Everything that could fail is translated into a
+        :class:`CollectionResult`:
+
+        * :attr:`CollectionStatus.SUCCESS` - data was collected, available
+          in ``result.metrics``
+        * :attr:`CollectionStatus.NO_DATA` - the query returned no rows /
+          ``None``
+        * :attr:`CollectionStatus.INVALID_FILTER` - a filter or group tag is
+          not supported by this sensor; ``result.error`` names the offending
+          tag name or value
+        * :attr:`CollectionStatus.QUERY_FAILED` - the query raised an
+          exception, which is retained on ``result.exception``
+
+        The method only reads shared collector state (request, topology
+        metadata) and keeps all intermediate data in local variables, so
+        concurrent threads calling it on the same instance cannot clobber
+        each others validation findings or error messages, and one thread's
+        invalid filter never affects another thread's successful run.
+        """
+
+        validation_error = self._validate_request()
+        if validation_error is not None:
+            status, error = validation_error
+            return CollectionResult(status, error)
+
+        metrics, error, exception = self._run_query_and_collect()
+        if error == CollectionStatus.QUERY_FAILED:
+            reason = str(exception) if exception is not None else 'unknown error'
+            return CollectionResult(
+                CollectionStatus.QUERY_FAILED,
+                MSG['QueryError'].format(reason),
+                exception=exception)
+        if error == CollectionStatus.NO_DATA:
+            return CollectionResult(CollectionStatus.NO_DATA, MSG['NoData'])
+
+        return CollectionResult(CollectionStatus.SUCCESS, metrics=metrics)
+
+    def _validate_request(self):
+        """Validate filters and group tags, returning ``(status, error)``.
+
+        Returns ``None`` when the request is valid. The original validation
+        behaviour (raising ``cherrypy.HTTPError(400, ...)``) is preserved
+        for the existing callers; this wrapper only translates the raised
+        errors into structured, specific descriptions.
+        """
+
+        try:
+            self.validate_query_filters()
+        except cherrypy.HTTPError:
+            return CollectionStatus.INVALID_FILTER, self._describe_filter_error()
+
+        try:
+            self.validate_group_tags()
+        except cherrypy.HTTPError:
+            return CollectionStatus.INVALID_FILTER, self._describe_group_tags_error()
+
+        return None
+
+    def _describe_filter_error(self) -> str:
+        """Build a specific explanation of why the request filters fail.
+
+        Distinguishes unsupported tag names from unsupported tag values and
+        keeps the special treatment of ``*`` wildcards and ``|`` separated
+        conditional values used by :meth:`validate_query_filters`.
+        """
+
+        if not self.request.filters:
+            return MSG['AttrNotValid'].format('filter')
+
+        if not self.filtersMap:
+            return MSG['FilterByErr']
+
+        supported_keys = set()
+        for filtersDict in self.filtersMap:
+            supported_keys.update(filtersDict.keys())
+
+        problems = []
+        for key, value in self.request.filters.items():
+            str_key = str(key)
+            str_value = str(value)
+
+            # wildcard in the tag name: the tag is resolved from the
+            # requested value, mirroring validate_query_filters. When no
+            # tag matches, the legacy validator simply applies no filter
+            # and stays valid, so it must not be reported as a problem here
+            if '*' in str_key:
+                found_keys = self.md.metaData.getAllKeysForTagValue(value)
+                if found_keys and not any(key in supported_keys
+                                          for key in found_keys):
+                    problems.append(
+                        f"filter tag name '{str_key}' (value '{str_value}') is not "
+                        f"supported by sensor '{self.sensor}'")
+                continue
+
+            if str_key not in supported_keys:
+                problems.append(
+                    f"filter tag name '{str_key}' is not supported by sensor "
+                    f"'{self.sensor}'")
+                continue
+
+            if '*' in str_value:
+                # wildcard value matches everything of an existing tag name;
+                # it only fails when the tag has no known values at all
+                if not self.md.metaData.getAllValuesForTagName(str_key):
+                    problems.append(
+                        f"filter value '{str_value}' for tag '{str_key}' does not "
+                        f"match any known component of sensor '{self.sensor}'")
+                continue
+
+            if '|' in str_value:
+                # conditional filters keep every map whose value is one of
+                # the pipe separated values; the filter only fails when none
+                # of the requested values matches, mirroring
+                # validate_query_filters
+                candidates = str_value.split('|')
+                known_values = {filtersDict[str_key] for filtersDict in
+                                self.filtersMap if str_key in filtersDict}
+                unknown = [candidate for candidate in candidates
+                           if candidate not in known_values]
+                if unknown and not any(candidate in known_values
+                                       for candidate in candidates):
+                    problems.append(
+                        f"filter value(s) '{', '.join(unknown)}' for tag "
+                        f"'{str_key}' are not supported by sensor '{self.sensor}'")
+                continue
+
+            known_values = {filtersDict[str_key] for filtersDict in
+                            self.filtersMap if str_key in filtersDict}
+            if str_value not in known_values:
+                problems.append(
+                    f"filter value '{str_value}' for tag '{str_key}' is not "
+                    f"supported by sensor '{self.sensor}'")
+
+        if problems:
+            return '; '.join(problems)
+
+        # Fallback for combinations that only fail when applied together
+        return MSG['FilterByErr']
+
+    def _describe_group_tags_error(self) -> str:
+        """Build a specific explanation of why the group tags fail."""
+
+        filter_keys = set()
+        for filtersDict in self.filtersMap:
+            filter_keys.update(filtersDict.keys())
+
+        if not filter_keys:
+            return MSG['GroupByErr']
+
+        unsupported = [tag for tag in self.request.grouptags
+                       if tag not in filter_keys]
+        if unsupported:
+            return (
+                f"groupBy tag name(s) '{', '.join(unsupported)}' are not "
+                f"supported by sensor '{self.sensor}'. Supported groupBy tags: "
+                f"{', '.join(sorted(filter_keys))}")
+
+        return MSG['AttrNotValid'].format('groupBy key')
 
     @cond_execution_time(detail_level=2)
     def prepare_static_metrics_data(self):
