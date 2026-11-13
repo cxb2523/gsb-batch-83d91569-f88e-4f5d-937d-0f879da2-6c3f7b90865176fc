@@ -1,0 +1,284 @@
+# GitHub registers a workflow when a push to the default branch touches its
+# file. The first push of this repo registered only tests.yml, so this one
+# exists to register the rest (2026-09-23).
+# Real runs against tiktok.com. tests.yml (deliberately) never touches the
+# site, a credential or a paid product; everything that does is here.
+#
+# WHY THIS CANARY IS NOT GATED ON A SECRET
+# ----------------------------------------
+# A canary that CAN pass without a credential should never be gated on one:
+# a skipped canary is not a tested success (proven on bbb-scraper and
+# rakuten-scraper).
+#
+# This repo is such a case. Its central README claim is that TikTok's
+# EU Ad Library answers a bare datacentre address with no key, no proxy
+# and no account — measured 2026-09-22 from Hetzner Helsinki. The one
+# header that gates it is minted by the library's own page, which is why
+# this canary drives a browser and why a 421 in its output would be a
+# real finding rather than an access condition. A GitHub runner is a bare datacentre address
+# in a different network. So this job runs a real scrape every Monday and
+# is EXPECTED to be green, and if TikTok ever puts that route behind a
+# challenge the badge goes red on the next weekly run and the claim is retested
+# without anyone having to remember to.
+#
+# Any exit other than 0 (blocked 3, nothing obtained 5, partial 6 —
+# including a listing the site cut short) and any region short of a full
+# page is red: there is no skip and no notice path.
+name: canary
+
+on:
+  schedule:
+    - cron: "39 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ads:
+    name: a real multi-region ad scrape, with no credentials at all
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the core and the Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+
+      - name: Install the browser
+        run: python -m playwright install --with-deps chromium
+
+      # THREE regions rather than one, and two of them chosen to exercise
+      # the thing this repo got wrong before `row_key` existed: an EU ad
+      # buy commonly runs in several member states at once, so DE and FR
+      # share most of a page while GB — outside the EU — shares almost
+      # none. A single-region canary would never see that.
+      #
+      # Two cursor pages, because with one page the CURSOR is never
+      # exercised and `offset` being a decoy would go unnoticed — which is
+      # why a multi-page feature needs a multi-page check.
+      - name: Scrape three regions, two cursor pages each
+        id: run
+        run: |
+          set +e   # GitHub runs `run:` under `bash -e`, and a non-zero exit
+                   # would abort the step BEFORE the echo below.
+          # --dump-html keeps the exact payloads, so a red run can be
+          # diagnosed from the artifact (a short page under a huge `total`,
+          # or an ad with no creative) rather than guessed at.
+          python playwright_scraper.py --region DE,FR,GB --pages 2 \
+            --delay 0.3 --format both --out canary_ads --dump-html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Assert what the run actually produced
+        run: |
+          python - <<'PY'
+          import glob, json, re, sys
+
+          rc = int("${{ steps.run.outputs.exit_code }}")
+          meta = json.load(open("canary_ads.meta.json"))
+          rows = json.load(open("canary_ads.json"))
+          fail = []
+
+          # Exit 5 is a DEFECT here, not an access condition: this canary
+          # uses no credential.
+          if rc != 0:
+              fail.append(f"exit {rc}")
+          if meta["status"] != "complete":
+              fail.append(f"status {meta['status']!r}, expected 'complete'")
+
+          # Six cursor pages at twelve ads each, minus whatever overlapped.
+          if not 40 <= len(rows) <= 72:
+              fail.append(f"{len(rows)} rows — six cursor pages of twelve "
+                          f"should land between 40 and 72 after dedupe")
+
+          # Per region, the floor is the endpoint's own page contract,
+          # not a volume: page 1 is a full page of twelve distinct ads,
+          # and page 2 adds at least one ad page 1 did not have (adjacent
+          # pages of this live feed overlap by up to a few ads). Measured
+          # 2026-09-23..10-15: every green run held 21-24 ads per region
+          # from two pages; the one region below that (FR, 2 ads,
+          # 2026-10-13) was a page cut short, which the scraper itself now
+          # reports as `short_page`, exit 6. A region collapsing is also
+          # the bug row_key exists to prevent.
+          per_region = meta.get("ads_per_region") or {}
+          for region in ("DE", "FR", "GB"):
+              p1 = sum(1 for r in rows
+                       if r.get("region") == region and r.get("page") == 1)
+              p2 = sum(1 for r in rows
+                       if r.get("region") == region and r.get("page") == 2)
+              if p1 != meta.get("ads_per_page", 12) or p2 < 1:
+                  fail.append(f"{region}: page 1 gave {p1} ads and page 2 "
+                              f"{p2} new — a full page then at least one "
+                              f"new ad was expected "
+                              f"(region total {per_region.get(region)})")
+          if meta.get("short_pages"):
+              fail.append(f"the site cut a listing short: "
+                          f"{meta['short_pages']}")
+
+          # Independent of the scraper's own verdict: every dumped page
+          # must carry a full page, unless it brings the region up to the
+          # response's stated total. A short page the scraper did not flag
+          # is a defect in its run status.
+          served = {}
+          for path in sorted(glob.glob("canary_ads_ads_*_p*.json")):
+              m = re.search(r"_ads_([A-Z]{2})_p(\d+)\.json$", path)
+              page = json.load(open(path))
+              if not m or not isinstance(page, dict):
+                  continue
+              region, n = m.group(1), int(m.group(2))
+              got = len(page.get("data") or [])
+              before = served.get(region, 0)
+              served[region] = before + got
+              total = page.get("total")
+              if (0 < got < meta.get("ads_per_page", 12)
+                      and isinstance(total, int)
+                      and total > before + got
+                      and not any(s.get("region") == region
+                                  and s.get("page") == n
+                                  for s in meta.get("short_pages") or [])):
+                  fail.append(f"{region} page {n} served {got} under a "
+                              f"total of {total} and the run did not "
+                              f"record it in short_pages")
+          if not served:
+              fail.append("no page payloads were dumped")
+
+          # row_key must be unique while ad ids need not be.
+          keys = [r.get("row_key") for r in rows]
+          if len(set(keys)) != len(keys):
+              fail.append("row_key is not unique")
+          if any(not r.get("row_key") for r in rows):
+              fail.append("some rows have no row_key")
+
+          # The cursor really advanced: page 2 rows must exist.
+          if not any(r.get("page") == 2 for r in rows):
+              fail.append("no page-2 rows — the cursor did not advance, "
+                          "which is what `offset` being a decoy looks like")
+
+          # The sidecar must keep saying how small a sample this is.
+          totals = meta.get("site_total_per_region") or {}
+          if not totals or any(not v for v in totals.values()):
+              fail.append("the sidecar stopped recording the site's own "
+                          "totals, which is what makes 'complete' honest")
+
+          # Columns that must be on every row.
+          for column in ("sku", "ad_id", "region", "first_shown_at",
+                         "last_shown_at"):
+              missing = [r["sku"] for r in rows if r.get(column) is None]
+              if missing:
+                  fail.append(f"{column} is null on {len(missing)} row(s)")
+
+          # `creative_type` is derived from the creatives a record carries,
+          # and some records carry none: on 2026-10-15 four of 71 had
+          # `videos: []` and `image_urls: []` in the payload itself, and
+          # null is the honest value for them. So it is tested against
+          # the dumped record: null exactly when the record has neither.
+          raw = {}
+          for path in glob.glob("canary_ads_ads_*_p*.json"):
+              m = re.search(r"_ads_([A-Z]{2})_p\d+\.json$", path)
+              page = json.load(open(path))
+              if m and isinstance(page, dict):
+                  for ad in page.get("data") or []:
+                      if isinstance(ad, dict) and ad.get("id"):
+                          raw[(m.group(1), str(ad["id"]))] = ad
+          for r in rows:
+              ad = raw.get((r.get("region"), str(r.get("ad_id"))))
+              if ad is None:
+                  continue
+              carries = bool([v for v in ad.get("videos") or []
+                              if isinstance(v, dict) and v.get("video_url")]
+                             or [u for u in ad.get("image_urls") or [] if u])
+              if carries != (r.get("creative_type") is not None):
+                  fail.append(f"{r['sku']}: creative_type "
+                              f"{r.get('creative_type')!r} while the record "
+                              f"{'carries' if carries else 'has no'} "
+                              f"creative")
+
+          # Dates in this century. TikTok publishes milliseconds; read as
+          # seconds they land in the year 58,700.
+          bad_dates = [r["sku"] for r in rows
+                       if not str(r.get("first_shown_at", "")).startswith("20")]
+          if bad_dates:
+              fail.append(f"{len(bad_dates)} row(s) have an implausible "
+                          f"first_shown_at — milliseconds read as seconds?")
+
+          if fail:
+              print("::error::canary FAILED")
+              for line in fail:
+                  print(f"  - {line}")
+              sys.exit(1)
+          shared = len(rows) - len({r["ad_id"] for r in rows})
+          print(f"canary OK: {len(rows)} ads across {len(per_region)} "
+                f"regions ({per_region}), {shared} ad(s) running in more "
+                f"than one region, status {meta['status']}")
+          PY
+
+      # The keyword must FILTER. Audit 2026-09-29: with the wrong
+      # query_type the library ignored the keyword and answered the whole
+      # region, and every run still looked healthy. A positive and a
+      # negative control, compared with each other rather than against a
+      # fixed number, since the totals are a live count.
+      - name: A keyword filters, and a nonsense word matches nothing
+        run: |
+          set +e
+          python playwright_scraper.py --region DE --pages 1 --query nike \
+            --out canary_kw
+          kw=$?
+          python playwright_scraper.py --region DE --pages 1 \
+            --query zzqxjvwkplmq --out canary_none
+          none=$?
+          set -e
+          python - "$kw" "$none" <<'PY'
+          import json, sys
+          kw, none = int(sys.argv[1]), int(sys.argv[2])
+          fail = []
+          region = json.load(open("canary_ads.meta.json"))
+          whole = (region.get("site_total_per_region") or {}).get("DE")
+          if kw != 0:
+              fail.append(f"keyword run exit {kw}")
+          else:
+              meta = json.load(open("canary_kw.meta.json"))
+              got = (meta.get("site_total_per_region") or {}).get("DE")
+              if meta.get("query_type") != "1":
+                  fail.append(f"query_type {meta.get('query_type')!r}")
+              if not got or not whole or got >= whole / 100:
+                  fail.append(f"'nike' matched {got} of the region's "
+                              f"{whole} — the keyword is not filtering")
+          if none != 4:
+              fail.append(f"a nonsense keyword exited {none}, expected 4 "
+                          f"(the site's own 'nothing matched')")
+          if fail:
+              print("::error::keyword control FAILED")
+              for line in fail:
+                  print(f"  - {line}")
+              sys.exit(1)
+          print("keyword control OK")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-ads
+          path: |
+            canary_ads.json
+            canary_ads.csv
+            canary_ads.meta.json
+            canary_ads_ads_*.json
+            canary_kw.meta.json
+          retention-days: 7
+
+  # NO paid job here, deliberately.
+  #
+  # The sibling repos have one that skips without a key. This repo has no
+  # Scraper API path at all: that service fetches a URL and hands back what
+  # the site returned, and the Ad Library's search is a POST gated by a
+  # header only its own page JavaScript mints. A service that renders a URL
+  # cannot produce one for a request it is not making.
+  #
+  # Saying that here rather than shipping a job that would skip forever
+  # (a check that is always the same teaches everyone to
+  # ignore checks).
