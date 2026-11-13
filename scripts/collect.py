@@ -11,9 +11,15 @@ Design notes:
   - Idempotent: re-running for the same day overwrites that day's file.
   - Self-healing: each run re-collects a recall window, so a missed run (laptop
     was off) is backfilled automatically. No scheduler catch-up needed.
+  - Bounded recall: the window's start never predates the oldest day already on
+    disk, so a lost or hand-edited `last_success_date` watermark cannot make a
+    run re-read months of history. With no data yet, it behaves as before.
   - Non-destructive for old days: beyond `final_after_days`, values may only
     grow. A shrunken re-read (because transcripts were cleaned up) must never
-    overwrite a correct larger value already on record.
+    overwrite a correct larger value already on record. A merge that leaves the
+    file byte-identical is counted as skipped and the file is not rewritten.
+  - Dry run: `--dry-run` reports the same write/skip decisions without writing
+    files, updating `_meta.json`, or touching git.
 
 Targets Python 3.9 (macOS system python3). Standard library only.
 """
@@ -299,10 +305,44 @@ def git_sync(cfg, message):
 # -------------------------------------------------------------------------- run
 
 
-def decide_window(cfg, meta, today, args):
+def earliest_on_disk(host_dir):
+    """Earliest date already recorded for this host, or None if no data yet.
+
+    Only `<YYYY-MM-DD>.json` files count; `_meta.json` is deliberately ignored
+    because the whole point of the floor is to survive a missing or hand-edited
+    watermark. Returns a date object so callers can compare without formatting.
+    """
+    earliest = None
+    try:
+        names = os.listdir(host_dir)
+    except OSError:
+        return None
+    for name in names:
+        if not name.endswith(".json") or not name.startswith("2"):
+            continue
+        try:
+            day = dt.date.fromisoformat(name[:-len(".json")])
+        except ValueError:
+            continue
+        if earliest is None or day < earliest:
+            earliest = day
+    return earliest
+
+
+def decide_window(cfg, meta, today, args, floor=None):
+    """Return (start, end) for this run; start=None means "all ccusage has".
+
+    The recall window is `clamp(gap + slack, min_days, max_days)` as before, but
+    its start is never allowed to predate the oldest day already on disk. If
+    `_meta.json`'s watermark is missing (or was edited backwards), the old
+    behaviour would re-read months of history; the floor keeps the recovery
+    window to data we have actually not recorded yet. With no data on disk,
+    behaviour is unchanged.
+    """
     if args.since:
         start = dt.date.fromisoformat(args.since)
-        return start, (dt.date.fromisoformat(args.until) if args.until else today)
+        end = dt.date.fromisoformat(args.until) if args.until else today
+        return start, end
 
     rc = cfg.get("recall") or {}
     min_days = int(rc.get("min_days", 3))
@@ -311,12 +351,21 @@ def decide_window(cfg, meta, today, args):
 
     last_run = (meta or {}).get("last_success_date")
     if not last_run:
-        # First run on this host: take everything ccusage still has.
-        return None, today
+        # No watermark: first run, or the watermark was lost. Take everything
+        # ccusage still has — but never before our own oldest recorded day.
+        return (floor if floor is not None else None), today
 
-    gap = (today - dt.date.fromisoformat(last_run)).days
+    try:
+        gap = (today - dt.date.fromisoformat(last_run)).days
+    except ValueError:
+        # Corrupt watermark: treat it as missing rather than crash.
+        return (floor if floor is not None else None), today
     span = max(min_days, min(max_days, gap + slack))
-    return today - dt.timedelta(days=span - 1), today
+    start = today - dt.timedelta(days=span - 1)
+    if floor is not None and start < floor:
+        log("recall window start {} clamped to earliest on-disk day {}".format(start, floor))
+        start = floor
+    return start, today
 
 
 def main():
@@ -340,10 +389,17 @@ def main():
     meta_path = os.path.join(host_dir, "_meta.json")
     meta = read_json(meta_path, default={}) or {}
 
+    # Oldest day already on disk. The recall window may never start earlier:
+    # otherwise a lost or backwards-edited `last_success_date` makes the run
+    # re-read days we already recorded (and that ccusage may no longer have).
+    # `--all` is an explicit full backfill and `--since` an explicit choice,
+    # so neither is floored — the guard is about the automatic window only.
+    floor = earliest_on_disk(host_dir)
     if args.all:
         start, end = None, today
     else:
-        start, end = decide_window(cfg, meta, today, args)
+        start, end = decide_window(cfg, meta, today, args,
+                                   floor=None if args.since else floor)
 
     version = ccusage_version(spec)
     log("ccusage {} | host={} | tz={} | window={}..{}".format(
@@ -364,7 +420,9 @@ def main():
     if start is not None:
         all_dates = [d for d in all_dates if start.isoformat() <= d <= end.isoformat()]
     if not all_dates:
-        log("no usage data in window, nothing to do")
+        log("recall window {}..{} is empty (ccusage returned no data), nothing to do".format(
+            start.isoformat() if start else "(all)", end.isoformat()))
+        log("no files written, _meta.json unchanged, no commit")
         return
 
     now_iso = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -392,10 +450,16 @@ def main():
         path = os.path.join(host_dir, date_str + ".json")
         existing = read_json(path)
         if existing and (today - day).days > final_after:
-            # Old day: values may only grow. Metadata still refreshes.
+            # Old day: values may only grow. Metadata still refreshes when the
+            # data does change. If merge_max leaves the data exactly as it is
+            # on disk, there is nothing to write at all — count it as skipped
+            # so the run's summary and the no-commit logic below can tell
+            # "nothing to do" from "quietly overwrote a good record".
             merged_sources = merge_max(existing.get("sources") or {}, sources)
             if merged_sources == (existing.get("sources") or {}):
                 skipped += 1
+                log("  {} {} (old day, merge_max leaves it unchanged)".format(
+                    "would skip" if args.dry_run else "skip", date_str))
                 continue
             record["sources"] = merged_sources
             record["status"] = existing.get("status", "final")
@@ -406,19 +470,37 @@ def main():
             write_json(path, record)
         written += 1
 
-    log("{} day(s) written, {} unchanged old day(s) skipped".format(written, skipped))
+    log("{} day(s) {}, {} unchanged old day(s) {}".format(
+        written, "would be written" if args.dry_run else "written",
+        skipped, "would be skipped" if args.dry_run else "skipped"))
 
-    if args.dry_run:
-        log("dry run, not updating _meta.json or git")
+    if written == 0:
+        # Every day in the window was already correct on disk. Writing
+        # _meta.json alone would manufacture a metadata-only commit every run;
+        # the watermark stays put, and the next window is still bounded by
+        # max_days (and by the on-disk floor), so nothing is lost.
+        log("nothing to write for window {}..{}: all {} day(s) unchanged{}".format(
+            start.isoformat() if start else "(all)", end.isoformat(), skipped,
+            " (dry run)" if args.dry_run else ""))
+        log("_meta.json unchanged, no commit")
         return
 
+    if args.dry_run:
+        log("dry run: no files written, _meta.json unchanged, git untouched")
+        return
+
+    earliest_written = all_dates[0]
+    if floor is not None and floor.isoformat() < earliest_written:
+        earliest_written = floor.isoformat()
     meta.update({
         "host": host,
         "timezone": tz_name,
         "last_success_date": today.isoformat(),
         "last_success_at": now_iso,
         "ccusageVersion": version,
-        "earliest_date": min([meta["earliest_date"]] + all_dates) if meta.get("earliest_date") else all_dates[0],
+        # Never move `earliest_date` forward: `--since` and the floor mean the
+        # oldest day we know about may sit outside this run's window.
+        "earliest_date": min([meta["earliest_date"]] + [earliest_written]) if meta.get("earliest_date") else earliest_written,
         "latest_date": max([meta.get("latest_date", "")] + all_dates),
     })
     write_json(meta_path, meta)
