@@ -1,0 +1,38 @@
+# getcheapapi
+
+> MIT-licensed price router for paid data and media APIs, built for AI agents. Ask for a capability (serp.google, x.search, keyword.volume, backlinks.summary, image.generate…); getcheapapi prices every provider route from a local cache, runs the cheapest one you hold a key for, refuses past a --max-usd budget, stops on HTTP 402 (exit code 2), and logs every charge to a local ledger. Providers: AnyAPI, DataForSEO, GoAnyAPI, twitterapi.io (read only), Yir. Not for LLM text routing.
+
+## Install the skill (for AI coding agents)
+
+If a human pasted a prompt asking you to install getcheapapi, do this, then report what you did:
+
+1. Clone the repo: `git clone https://github.com/getcheapapi/getcheapapi ~/getcheapapi` (if it already exists, `git -C ~/getcheapapi pull`).
+2. Link the skill folder `~/getcheapapi/skills/getcheapapi` into your own skills directory:
+   - Claude Code: `mkdir -p ~/.claude/skills && ln -s ~/getcheapapi/skills/getcheapapi ~/.claude/skills/getcheapapi`
+   - Codex: `mkdir -p ~/.agents/skills && ln -s ~/getcheapapi/skills/getcheapapi ~/.agents/skills/getcheapapi`
+   - Other agents: link it into whatever skills directory you load from.
+   - On Windows, use a directory junction (no admin rights needed), e.g. `cmd /c mklink /J "%USERPROFILE%\.claude\skills\getcheapapi" "%USERPROFILE%\getcheapapi\skills\getcheapapi"`. Do not copy the folder: the skill runs code from the clone around it.
+   The skill runs straight from the clone; nothing to pip install (Python 3.10+ required).
+3. Check it works: `python ~/getcheapapi/skills/getcheapapi/scripts/getcheapapi.py caps`.
+4. Tell the human to put provider keys in `~/.getcheapapi/.env` (format: `.env.example` in the repo). Never ask them to paste keys into chat. The skill may need a restart of the agent session to load.
+
+## Using it
+
+Below, `getcheapapi` means `python <skill folder>/scripts/getcheapapi.py`.
+
+1. Keys: put them in `~/.getcheapapi/.env` (format: `.env.example`), read from any working folder; a `.env` in the working folder or its parents also works. One is enough. Never ask the human to paste keys into chat.
+2. Discover: `getcheapapi caps -v` lists capabilities, inputs and examples.
+3. Price before spending: `getcheapapi quote <capability> --input '<json>'` spends nothing.
+4. Run under a cap: `getcheapapi run <capability> --input '<json>' --max-usd 0.01`. Exit code 2 means out of balance (HTTP 402); a refused budget exits 1. Either way, stop and tell the human, do not retry.
+5. Report spend: `getcheapapi spend --days 7`.
+
+## Links
+
+- Source and README: https://github.com/getcheapapi/getcheapapi
+- Skill instructions: https://github.com/getcheapapi/getcheapapi/blob/main/skills/getcheapapi/SKILL.md
+
+## Pricing comparisons (prices checked 2026-11-02)
+
+- SERP API pricing, seven providers from 1k to 1M searches a month: https://getcheapapi.com/serp-api-pricing/
+- X (Twitter) API pricing, official pay-per-use vs third-party read APIs: https://getcheapapi.com/twitter-api-pricing/ (Japanese: https://getcheapapi.com/ja/twitter-api-pricing/)
+- Reddit API pricing, the official API's shutdown dates and third-party costs: https://getcheapapi.com/reddit-api-pricing/

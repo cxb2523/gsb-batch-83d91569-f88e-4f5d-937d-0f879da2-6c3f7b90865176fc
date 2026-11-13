@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reddit API Pricing 2026: Cost, Shutdown Dates and Alternatives</title>
+    <meta name="description" content="Reddit stopped taking new Data API requests on October 31, 2026 and closes public access in March 2027. What the official API costs, and what Reddit data costs elsewhere." />
+    <link rel="canonical" href="https://getcheapapi.com/reddit-api-pricing/" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#232323" />
+    <meta property="og:title" content="Reddit API pricing in 2026, and what replaces it" />
+    <meta property="og:description" content="The official API is closing to new apps. Third-party search APIs sell 1,000 Reddit posts for $0.014 to $3.40." />
+    <meta property="og:url" content="https://getcheapapi.com/reddit-api-pricing/" />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:image" content="https://getcheapapi.com/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Same data, five prices. Your agent pays the lowest." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500&family=Geist+Mono:wght@400;500&display=swap" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Article",
+            "headline": "Reddit API pricing in 2026, and what replaces it",
+            "description": "Reddit stopped accepting new Data API requests on October 31, 2026 and closes public access in March 2027. What the official API costs, and what Reddit data costs elsewhere.",
+            "url": "https://getcheapapi.com/reddit-api-pricing/",
+            "datePublished": "2026-11-02",
+            "dateModified": "2026-11-02",
+            "inLanguage": "en",
+            "publisher": {
+              "@type": "Organization",
+              "name": "getcheapapi",
+              "url": "https://getcheapapi.com/"
+            }
+          },
+          {
+            "@type": "FAQPage",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "How much does the Reddit API cost?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Reddit set $0.24 per 1,000 calls for apps above the free limits in 2023 and has not published a newer rate. Commercial use needs a written agreement with Reddit."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Is the Reddit API free?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "It was free for eligible non-commercial use at up to 100 queries per minute per OAuth client. Reddit stopped accepting new access requests on October 31, 2026, so new projects cannot start on that tier."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Is the Reddit API shutting down?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Public access is. Reddit says access starts closing on January 12, 2027 for apps that have not registered with it, and public access ends in March 2027, except for partners with written agreements."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Can I still get a Reddit API key?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Not through the public process: new requests have not been accepted since October 31, 2026. The remaining route is a written agreement with Reddit."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "What is the cheapest way to search Reddit by API?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "On our November 2026 prices, AnyAPI's reddit.search pinned to its cheapest source: $0.00035 for a page of 25 posts, about $0.014 per 1,000. That source cannot page, so going deeper into one query costs $0.0008 per page."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Where do these prices come from?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Reddit's 2023 API announcement, reporting on its September 30, 2026 schedule, AnyAPI's live per-source price API and Apify's store page, checked on November 2, 2026. Run getcheapapi quote reddit.search to price your own query; it spends nothing. Routes are ranked by price only."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "What happens to apps that already use the Reddit API?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Reddit says apps must register or respond to its outreach before January 12, 2027, when access starts closing. Public access ends in March 2027; only partners with written agreements keep it."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Do Reddit RSS feeds still work?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Only until November 13, 2026, the date Reddit set for ending support. From that date on, feeds of subreddits and searches need another source."
+                }
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+    <link rel="stylesheet" href="/src/site.css" />
+    <link rel="stylesheet" href="/src/pricing.css" />
+    <script>document.documentElement.classList.add('js');</script>
+    <script type="module" src="/src/site.js"></script>
+  </head>
+  <body>
+    <header class="navwrap">
+      <nav class="pill" aria-label="Main">
+        <div class="pill-row">
+          <a class="mark" href="/" aria-label="getcheapapi home">
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2 3h5v5h5v5h5v6h3" /><path d="M2 19h18" stroke-dasharray="2 2" /></svg>
+          </a>
+          <div class="links mono" id="navlinks">
+            <a href="#official">Official API</a>
+            <a href="#compare">Compared</a>
+            <a href="#monthly">Per month</a>
+            <a href="#faq">FAQ</a>
+            <a class="only-sm" href="https://github.com/getcheapapi/getcheapapi">GitHub ↗</a>
+          </div>
+          <span class="grow"></span>
+          <a class="mono gh" href="https://github.com/getcheapapi/getcheapapi">GitHub ↗</a>
+          <button class="menu" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="navlinks">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 5h14M2 9h14M2 13h14" /></svg>
+          </button>
+        </div>
+      </nav>
+    </header>
+
+    <main>
+      <section id="top" class="p-hero">
+        <div class="p-hero-copy">
+          <h1>Reddit API pricing in 2026, and what replaces it</h1>
+          <p class="hero-lede">Reddit's official API costs $0.24 per 1,000 calls, but it stopped taking new applications on October 31, 2026. Third-party search APIs sell 1,000 Reddit posts for $0.014 to $3.40. Checked on November 2, 2026.</p>
+          <div class="ctas">
+            <a class="btn dark mono" href="#official">See the shutdown dates</a>
+            <a class="btn grey mono" href="#compare">Compare prices</a>
+          </div>
+        </div>
+        <figure class="ladder dark dots" aria-labelledby="ladder-cap">
+          <p id="ladder-cap" class="mono dim">1,000 Reddit posts from keyword search</p>
+          <ol class="ladder-rows mono">
+            <li style="--w: 100%"><span class="l-name">Apify Reddit Scraper Lite</span><span class="l-bar"><i></i></span><span class="l-usd">$3.40</span></li>
+            <li style="--w: 1.4%"><span class="l-name">AnyAPI, dearest source</span><span class="l-bar"><i></i></span><span class="l-usd">$0.048</span></li>
+            <li style="--w: 0.94%"><span class="l-name">AnyAPI, paging source</span><span class="l-bar"><i></i></span><span class="l-usd">$0.032</span></li>
+            <li class="lo" style="--w: 0.41%"><span class="l-name">AnyAPI, cheapest source</span><span class="l-bar"><i></i></span><span class="l-usd">$0.014</span></li>
+          </ol>
+        </figure>
+      </section>
+
+      <section id="official" class="p-sec">
+        <div class="p-head">
+          <h2>The official Reddit API is closing to new apps</h2>
+          <p class="sub">Reddit published this schedule on September 30, 2026, citing automated scraping.</p>
+        </div>
+        <div class="p-body">
+          <table class="p-table p-timeline mono">
+            <caption class="visually-hidden">Reddit Data API pricing and shutdown timeline</caption>
+            <thead><tr><th scope="col">Date</th><th scope="col">What changes</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Jul 2023</th><td>Paid access at $0.24 per 1,000 calls; free for eligible non-commercial use up to 100 queries per minute per OAuth client</td></tr>
+              <tr class="lo"><th scope="row">Oct 31, 2026</th><td>New requests for public API access no longer accepted</td></tr>
+              <tr><th scope="row">Nov 13, 2026</th><td>RSS feeds stop working</td></tr>
+              <tr><th scope="row">Nov 30, 2026</th><td>Registration closes for the migration bounty: $1,000 per app that moves, from a $1 million fund</td></tr>
+              <tr><th scope="row">Jan 12, 2027</th><td>Access starts closing for apps and users that have not registered with Reddit</td></tr>
+              <tr><th scope="row">Mar 2027</th><td>Public access ends; partners with written agreements are exempt</td></tr>
+            </tbody>
+          </table>
+          <ul class="p-notes">
+            <li>Commercial use has needed a written agreement with Reddit since 2023, and Reddit has published no newer rate than $0.24 per 1,000 calls.</li>
+            <li>A search call returns up to 100 posts, so the 2023 rate works out below every third-party price here, for apps that still have access.</li>
+            <li>Sources: <a href="https://www.reddit.com/r/reddit/comments/145bram/addressing_the_community_about_changes_to_our_api/">Reddit's 2023 API post</a>; the 2026 schedule as reported by <a href="https://ppc.land/reddit-to-halt-public-data-api-access-in-march-2027-as-14-000-apps-register/">PPC Land</a> and TechCrunch from Reddit's r/redditdev and r/modnews posts.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="compare" class="p-sec">
+        <div class="p-head">
+          <h2>What Reddit search costs outside the official API</h2>
+          <p class="sub">Keyword search across all of Reddit, priced per call and per 1,000 posts returned.</p>
+        </div>
+        <div class="p-body">
+          <div class="p-scroll">
+            <table class="p-table mono">
+              <caption class="visually-hidden">Third-party Reddit search API prices, November 2026</caption>
+              <thead><tr><th scope="col">Route</th><th scope="col">How it bills</th><th scope="col">1,000 posts</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Apify Reddit Scraper Lite</th><td>$3.40 per 1,000 results stored</td><td>$3.40</td></tr>
+                <tr><th scope="row">AnyAPI, dearest source</th><td>$0.0012 per page of 25</td><td>$0.048</td></tr>
+                <tr><th scope="row">AnyAPI, paging source</th><td>$0.0008 per page of 25, with a next page</td><td>$0.032</td></tr>
+                <tr><th scope="row">AnyAPI, second source</th><td>$0.00038 per page of 25</td><td>$0.015</td></tr>
+                <tr class="lo"><th scope="row">AnyAPI, cheapest source</th><td>$0.00035 per page of 25, first page only</td><td>$0.014</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="p-foot">The cheapest AnyAPI source returns no next page. For more than 25 posts on one query, either page through the $0.0008 source, or take first pages with other sorts, time windows or <code>subreddit:</code> filters at $0.00035 each. Sources: AnyAPI's live price API, <a href="https://apify.com/trudax/reddit-scraper-lite">Apify Reddit Scraper Lite</a>.</p>
+        </div>
+      </section>
+
+      <section id="monthly" class="p-sec">
+        <div class="p-head">
+          <h2>What Reddit monitoring costs per month</h2>
+          <p class="sub">50 keywords checked daily, 100 posts each: 150,000 posts a month.</p>
+        </div>
+        <div class="p-body">
+          <table class="p-table mono">
+            <caption class="visually-hidden">Monthly cost of reading 150,000 Reddit posts from keyword searches, by route</caption>
+            <thead><tr><th scope="col">Route</th><th scope="col">Calls</th><th scope="col">Per month</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Apify Reddit Scraper Lite</th><td>150,000 results</td><td>$510.00</td></tr>
+              <tr><th scope="row">AnyAPI, dearest source</th><td>6,000 pages</td><td>$7.20</td></tr>
+              <tr><th scope="row">AnyAPI, paging source</th><td>6,000 pages</td><td>$4.80</td></tr>
+              <tr class="lo"><th scope="row">AnyAPI, cheapest source</th><td>6,000 first pages</td><td>$2.10</td></tr>
+            </tbody>
+          </table>
+          <p class="p-foot">The cheapest row takes four first pages per keyword (new, top, past week, past month), so some posts repeat; the paging row walks four pages of one sort. For X monitoring at the same scale, see <a href="/twitter-api-pricing/#monthly">what X API monitoring costs per month</a>.</p>
+        </div>
+      </section>
+
+      <section id="pick" class="p-sec">
+        <div class="p-head">
+          <h2>Where a Reddit data bill grows</h2>
+        </div>
+        <div class="p-body">
+          <dl class="p-picks">
+            <div><dt>Asking for a next page</dt><dd>On AnyAPI, requiring <code>nextCursor</code> routes every page to the $0.0008 source, 2.3× a first page.</dd></div>
+            <div><dt>Silent failover</dt><dd>AnyAPI retries a failed cheap source on a dearer one by default, up to 3.4× for Reddit search and 28× for <a href="/twitter-api-pricing/#compare">X (Twitter) API search</a>. Pin the source and turn failover off.</dd></div>
+            <div><dt>Paying per result</dt><dd>Scrapers billed per stored result cost the same for every post, so broad searches with many weak matches add up fast.</dd></div>
+            <div><dt>Terms of use</dt><dd>Third-party Reddit APIs are not run or endorsed by Reddit, which restricts commercial use of its data without an agreement. Check both sets of terms.</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section id="reproduce" class="install">
+        <h2>Check any price yourself, free</h2>
+        <div class="card dark dots">
+          <span class="corner tl" aria-hidden="true">+</span><span class="corner tr" aria-hidden="true">+</span><span class="corner bl" aria-hidden="true">+</span><span class="corner br" aria-hidden="true">+</span>
+          <i class="node" aria-hidden="true"></i>
+          <div class="card-main">
+            <p class="dim">getcheapapi is an open-source agent skill. Its quote prices your query on every route it knows and spends nothing. Paste this into Claude Code or Codex to add it:</p>
+            <div class="cmd">
+              <code>Read https://getcheapapi.com/llms.txt and install the getcheapapi skill for this agent by following its install steps.</code>
+              <button class="mono" type="button" data-copy="Read https://getcheapapi.com/llms.txt and install the getcheapapi skill for this agent by following its install steps." data-copied="copied"><span data-copy-label>copy</span></button>
+            </div>
+            <p class="dim cli-or">Then ask your agent:</p>
+            <div class="cmd">
+              <code>Quote reddit.search for “your keywords”. Don’t run it.</code>
+              <button class="mono" type="button" data-copy="Quote reddit.search for “your keywords”. Don’t run it." data-copied="copied"><span data-copy-label>copy</span></button>
+            </div>
+          </div>
+          <pre class="quote-out" aria-label="Example output of getcheapapi quote reddit.search">reddit.search: 1 input(s), prices per run
+  anyapi reddit.search
+    $0.00035  x1.0  1 call  ok
+    (the cheapest source returns no
+     nextCursor; paging costs 2.3x)
+would run: anyapi reddit.search $0.00035</pre>
+        </div>
+      </section>
+
+      <canvas class="melt" data-field="melt" data-dark="below" aria-hidden="true"></canvas>
+
+      <section id="faq" class="dark dots faq">
+        <h2>Reddit API pricing questions</h2>
+        <div class="faq-list">
+          <details><summary class="mono"><span>Q.001 / </span>How much does the Reddit API cost?</summary><p>Reddit set $0.24 per 1,000 calls for apps above the free limits in 2023 and has not published a newer rate. Commercial use needs a written agreement with Reddit.</p></details>
+          <details><summary class="mono"><span>Q.002 / </span>Is the Reddit API free?</summary><p>It was free for eligible non-commercial use at up to 100 queries per minute per OAuth client. Reddit stopped accepting new access requests on October 31, 2026, so new projects cannot start on that tier.</p></details>
+          <details><summary class="mono"><span>Q.003 / </span>Is the Reddit API shutting down?</summary><p>Public access is. Reddit says access starts closing on January 12, 2027 for apps that have not registered with it, and public access ends in March 2027, except for partners with written agreements.</p></details>
+          <details><summary class="mono"><span>Q.004 / </span>Can I still get a Reddit API key?</summary><p>Not through the public process: new requests have not been accepted since October 31, 2026. The remaining route is a written agreement with Reddit.</p></details>
+          <details><summary class="mono"><span>Q.005 / </span>What is the cheapest way to search Reddit by API?</summary><p>On our November 2026 prices, AnyAPI's reddit.search pinned to its cheapest source: $0.00035 for a page of 25 posts, about $0.014 per 1,000. That source cannot page, so going deeper into one query costs $0.0008 per page.</p></details>
+          <details><summary class="mono"><span>Q.006 / </span>Where do these prices come from?</summary><p>Reddit's 2023 API announcement, reporting on its September 30, 2026 schedule, AnyAPI's live per-source price API and Apify's store page, checked on November 2, 2026. Run getcheapapi quote reddit.search to price your own query; it spends nothing. Routes are ranked by price only.</p></details>
+          <details><summary class="mono"><span>Q.007 / </span>What happens to apps that already use the Reddit API?</summary><p>Reddit says apps must register or respond to its outreach before January 12, 2027, when access starts closing. Public access ends in March 2027; only partners with written agreements keep it.</p></details>
+          <details><summary class="mono"><span>Q.008 / </span>Do Reddit RSS feeds still work?</summary><p>Only until November 13, 2026, the date Reddit set for ending support. From that date on, feeds of subreddits and searches need another source.</p></details>
+        </div>
+      </section>
+
+      <canvas class="melt" data-field="melt" data-dark="above" aria-hidden="true"></canvas>
+    </main>
+
+    <footer class="foot">
+      <div class="foot-top">
+        <div class="foot-brand">
+          <p class="mono foot-name"><span class="mark-box" aria-hidden="true"><svg width="28" height="28" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 3h5v5h5v5h5v6h3" /><path d="M2 19h18" stroke-dasharray="2 2" /></svg></span>getcheapapi</p>
+          <p class="muted">Open-source agent skill that sends every data and media API call down the cheapest route. Free, and yours to change.</p>
+        </div>
+        <div class="foot-cols mono">
+          <div><p>Project</p><a href="/">Home</a><a href="https://github.com/getcheapapi/getcheapapi">GitHub</a><a href="/llms.txt">llms.txt</a></div>
+          <div><p>Pricing</p><a href="/serp-api-pricing/">SERP API pricing</a><a href="/twitter-api-pricing/">X API pricing</a><a href="/reddit-api-pricing/" aria-current="page">Reddit API pricing</a></div>
+        </div>
+      </div>
+      <p class="wordmark" aria-hidden="true">getcheapapi</p>
+      <div class="foot-bar mono"><span>MIT · 2026</span><span>Prices checked 2026-11-02</span></div>
+    </footer>
+  </body>
+</html>

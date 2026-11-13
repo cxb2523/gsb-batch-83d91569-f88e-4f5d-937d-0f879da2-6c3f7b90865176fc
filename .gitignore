@@ -1,0 +1,14 @@
+.env
+google-ads-oauth.json
+client_secret_*.json
+__pycache__/
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+internal/
+node_modules/
+.wrangler/
+.claude/
+.impeccable/

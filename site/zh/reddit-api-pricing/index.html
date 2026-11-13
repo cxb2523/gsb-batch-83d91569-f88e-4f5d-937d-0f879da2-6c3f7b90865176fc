@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reddit API 价格 2026：收费标准、停止申请时间表与替代方案</title>
+    <meta name="description" content="Reddit 已于 2026 年 10 月 31 日停止受理新的 Data API 申请，2027 年 3 月关闭公开访问。官方 API 怎么收费，其他渠道拿 Reddit 数据又要多少钱。" />
+    <link rel="canonical" href="https://getcheapapi.com/zh/reddit-api-pricing/" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#232323" />
+    <meta property="og:title" content="2026 年 Reddit API 价格，以及停用后用什么替代" />
+    <meta property="og:description" content="官方 API 不再对新应用开放。第三方搜索 API 拿 1,000 条 Reddit 帖子，价格从 $0.014 到 $3.40 不等。" />
+    <meta property="og:url" content="https://getcheapapi.com/zh/reddit-api-pricing/" />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:image" content="https://getcheapapi.com/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="同样的数据，五种价格。你的 Agent 只付最低的那个。" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500&family=Geist+Mono:wght@400;500&display=swap" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Article",
+            "headline": "2026 年 Reddit API 价格，以及停用后用什么替代",
+            "description": "Reddit 已于 2026 年 10 月 31 日停止受理新的 Data API 申请，2027 年 3 月关闭公开访问。官方 API 怎么收费，其他渠道拿 Reddit 数据又要多少钱。",
+            "url": "https://getcheapapi.com/zh/reddit-api-pricing/",
+            "datePublished": "2026-11-02",
+            "dateModified": "2026-11-02",
+            "inLanguage": "zh-Hans",
+            "publisher": {
+              "@type": "Organization",
+              "name": "getcheapapi",
+              "url": "https://getcheapapi.com/"
+            }
+          },
+          {
+            "@type": "FAQPage",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "Reddit API 收费多少？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Reddit 在 2023 年定价：超出免费额度的应用每 1,000 次调用 $0.24，此后没有公布过新价格。商业用途需要和 Reddit 签书面协议。"
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Reddit API 免费吗？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "符合条件的非商业用途曾经免费，每个 OAuth 客户端每分钟最多 100 次请求。Reddit 从 2026 年 10 月 31 日起不再受理新的访问申请，新项目已经用不上这一档。"
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Reddit API 要停用了吗？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "公开访问要停。Reddit 表示，2027 年 1 月 12 日起开始关闭未向其登记的应用的访问，2027 年 3 月公开访问彻底结束，签了书面协议的合作方除外。"
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "现在还能申请 Reddit API key 吗？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "走公开流程已经不行了：2026 年 10 月 31 日起不再受理新申请。剩下的路只有和 Reddit 签书面协议。"
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "用 API 搜索 Reddit，最便宜的办法是什么？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "按我们 2026 年 11 月核对的价格，是把 AnyAPI 的 reddit.search 固定到它最便宜的数据源：一页 25 条帖子 $0.00035，约合每 1,000 条 $0.014。这个数据源不能翻页，同一个查询要往深处翻，每页 $0.0008。"
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "这些价格从哪来？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "来自 Reddit 2023 年的 API 公告、媒体对其 2026 年 9 月 30 日时间表的报道、AnyAPI 按数据源实时报价的价格 API，以及 Apify 的商店页面，核对于 2026 年 11 月 2 日。运行 getcheapapi quote reddit.search 可以给你自己的查询报价，不花一分钱。路线只按价格排序。"
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "已经在用 Reddit API 的应用会怎样？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Reddit 表示，应用须在 2027 年 1 月 12 日开始关闭访问之前完成登记或回复其联系。2027 年 3 月公开访问结束，只有签了书面协议的合作方能继续用。"
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Reddit 的 RSS 订阅还能用吗？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "只到 2026 年 11 月 13 日，这是 Reddit 定下的停止支持日期。从那天起，订阅版块和搜索结果都得另找数据源。"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+    <link rel="stylesheet" href="/src/site.css" />
+    <link rel="stylesheet" href="/src/pricing.css" />
+    <script>document.documentElement.classList.add('js');</script>
+    <script type="module" src="/src/site.js"></script>
+  </head>
+  <body>
+    <header class="navwrap">
+      <nav class="pill" aria-label="主导航">
+        <div class="pill-row">
+          <a class="mark" href="/" aria-label="getcheapapi 首页">
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2 3h5v5h5v5h5v6h3" /><path d="M2 19h18" stroke-dasharray="2 2" /></svg>
+          </a>
+          <div class="links mono" id="navlinks">
+            <a href="#official">官方 API</a>
+            <a href="#compare">价格对比</a>
+            <a href="#monthly">每月成本</a>
+            <a href="#faq">常见问题</a>
+            <a class="only-sm" href="https://github.com/getcheapapi/getcheapapi">GitHub ↗</a>
+          </div>
+          <span class="grow"></span>
+          <a class="mono gh" href="https://github.com/getcheapapi/getcheapapi">GitHub ↗</a>
+          <button class="menu" type="button" aria-label="打开菜单" aria-expanded="false" aria-controls="navlinks">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 5h14M2 9h14M2 13h14" /></svg>
+          </button>
+        </div>
+      </nav>
+    </header>
+
+    <main>
+      <section id="top" class="p-hero">
+        <div class="p-hero-copy">
+          <h1>2026 年 Reddit API 价格，以及停用后用什么替代</h1>
+          <p class="hero-lede">Reddit 官方 API 每 1,000 次调用 $0.24，但已于 2026 年 10 月 31 日停止受理新申请。第三方搜索 API 拿 1,000 条 Reddit 帖子，价格从 $0.014 到 $3.40 不等。核对于 2026 年 11 月 2 日。</p>
+          <div class="ctas">
+            <a class="btn dark mono" href="#official">查看停用时间表</a>
+            <a class="btn grey mono" href="#compare">对比价格</a>
+          </div>
+        </div>
+        <figure class="ladder dark dots" aria-labelledby="ladder-cap">
+          <p id="ladder-cap" class="mono dim">关键词搜索 1,000 条 Reddit 帖子</p>
+          <ol class="ladder-rows mono">
+            <li style="--w: 100%"><span class="l-name">Apify Reddit Scraper Lite</span><span class="l-bar"><i></i></span><span class="l-usd">$3.40</span></li>
+            <li style="--w: 1.4%"><span class="l-name">AnyAPI，最贵的数据源</span><span class="l-bar"><i></i></span><span class="l-usd">$0.048</span></li>
+            <li style="--w: 0.94%"><span class="l-name">AnyAPI，可翻页的数据源</span><span class="l-bar"><i></i></span><span class="l-usd">$0.032</span></li>
+            <li class="lo" style="--w: 0.41%"><span class="l-name">AnyAPI，最便宜的数据源</span><span class="l-bar"><i></i></span><span class="l-usd">$0.014</span></li>
+          </ol>
+        </figure>
+      </section>
+
+      <section id="official" class="p-sec">
+        <div class="p-head">
+          <h2>Reddit 官方 API 不再对新应用开放</h2>
+          <p class="sub">Reddit 于 2026 年 9 月 30 日公布了这份时间表，理由是自动化抓取。</p>
+        </div>
+        <div class="p-body">
+          <table class="p-table p-timeline mono">
+            <caption class="visually-hidden">Reddit Data API 收费与停用时间表</caption>
+            <thead><tr><th scope="col">日期</th><th scope="col">变化</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">2023 年 7 月</th><td>付费访问每 1,000 次调用 $0.24；符合条件的非商业用途免费，每个 OAuth 客户端每分钟最多 100 次请求</td></tr>
+              <tr class="lo"><th scope="row">2026 年 10 月 31 日</th><td>不再受理新的公开 API 访问申请</td></tr>
+              <tr><th scope="row">2026 年 11 月 13 日</th><td>RSS 订阅停止工作</td></tr>
+              <tr><th scope="row">2026 年 11 月 30 日</th><td>迁移奖励截止登记：每个完成迁移的应用 $1,000，总奖金池 $100 万</td></tr>
+              <tr><th scope="row">2027 年 1 月 12 日</th><td>开始关闭未向 Reddit 登记的应用和用户的访问</td></tr>
+              <tr><th scope="row">2027 年 3 月</th><td>公开访问结束；签有书面协议的合作方不受影响</td></tr>
+            </tbody>
+          </table>
+          <ul class="p-notes">
+            <li>自 2023 年起，商业用途就需要和 Reddit 签书面协议，Reddit 也没有公布过比每 1,000 次调用 $0.24 更新的价格。</li>
+            <li>一次搜索调用最多返回 100 条帖子，所以对仍有访问权限的应用来说，2023 年的价格比这里所有第三方价格都低。</li>
+            <li>来源：<a href="https://www.reddit.com/r/reddit/comments/145bram/addressing_the_community_about_changes_to_our_api/">Reddit 2023 年的 API 公告</a>；2026 年时间表见 <a href="https://ppc.land/reddit-to-halt-public-data-api-access-in-march-2027-as-14-000-apps-register/">PPC Land</a> 和 TechCrunch 依据 Reddit 在 r/redditdev、r/modnews 发帖所做的报道。</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="compare" class="p-sec">
+        <div class="p-head">
+          <h2>不走官方 API，搜索 Reddit 要花多少钱</h2>
+          <p class="sub">在全站范围按关键词搜索 Reddit，分别按每次调用和每返回 1,000 条帖子计价。</p>
+        </div>
+        <div class="p-body">
+          <div class="p-scroll">
+            <table class="p-table mono">
+              <caption class="visually-hidden">第三方 Reddit 搜索 API 价格，2026 年 11 月</caption>
+              <thead><tr><th scope="col">路线</th><th scope="col">计费方式</th><th scope="col">1,000 条帖子</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Apify Reddit Scraper Lite</th><td>每存储 1,000 条结果 $3.40</td><td>$3.40</td></tr>
+                <tr><th scope="row">AnyAPI，最贵的数据源</th><td>每页 25 条 $0.0012</td><td>$0.048</td></tr>
+                <tr><th scope="row">AnyAPI，可翻页的数据源</th><td>每页 25 条 $0.0008，带下一页</td><td>$0.032</td></tr>
+                <tr><th scope="row">AnyAPI，第二便宜的数据源</th><td>每页 25 条 $0.00038</td><td>$0.015</td></tr>
+                <tr class="lo"><th scope="row">AnyAPI，最便宜的数据源</th><td>每页 25 条 $0.00035，只有第一页</td><td>$0.014</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="p-foot">AnyAPI 最便宜的数据源不返回下一页。同一个查询想要超过 25 条帖子，要么走 $0.0008 的数据源逐页翻，要么换排序方式、时间范围或加 <code>subreddit:</code> 过滤，各取第一页，每次 $0.00035。来源：AnyAPI 实时价格 API、<a href="https://apify.com/trudax/reddit-scraper-lite">Apify Reddit Scraper Lite</a>。</p>
+        </div>
+      </section>
+
+      <section id="monthly" class="p-sec">
+        <div class="p-head">
+          <h2>监控 Reddit 每月要花多少钱</h2>
+          <p class="sub">50 个关键词每天查一次，每个取 100 条帖子：每月 150,000 条。</p>
+        </div>
+        <div class="p-body">
+          <table class="p-table mono">
+            <caption class="visually-hidden">按关键词搜索读取 150,000 条 Reddit 帖子的每月成本，按路线列出</caption>
+            <thead><tr><th scope="col">路线</th><th scope="col">调用量</th><th scope="col">每月</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Apify Reddit Scraper Lite</th><td>150,000 条结果</td><td>$510.00</td></tr>
+              <tr><th scope="row">AnyAPI，最贵的数据源</th><td>6,000 页</td><td>$7.20</td></tr>
+              <tr><th scope="row">AnyAPI，可翻页的数据源</th><td>6,000 页</td><td>$4.80</td></tr>
+              <tr class="lo"><th scope="row">AnyAPI，最便宜的数据源</th><td>6,000 个第一页</td><td>$2.10</td></tr>
+            </tbody>
+          </table>
+          <p class="p-foot">最便宜那一行每个关键词取四个第一页（最新、热门、过去一周、过去一个月），所以会有部分帖子重复；可翻页那一行是同一种排序连翻四页。同等规模监控 X 的成本，见 <a href="/twitter-api-pricing/#monthly">X API 监控每月要花多少钱</a>。</p>
+        </div>
+      </section>
+
+      <section id="pick" class="p-sec">
+        <div class="p-head">
+          <h2>Reddit 数据账单会在哪里变贵</h2>
+        </div>
+        <div class="p-body">
+          <dl class="p-picks">
+            <div><dt>要求下一页</dt><dd>在 AnyAPI 上，一旦要求 <code>nextCursor</code>，每一页都会被路由到 $0.0008 的数据源，是第一页价格的 2.3×。</dd></div>
+            <div><dt>悄悄切换数据源</dt><dd>AnyAPI 默认在便宜数据源失败时改用更贵的数据源重试，Reddit 搜索最多贵到 3.4×，<a href="/twitter-api-pricing/#compare">X（Twitter）API 搜索</a>最多 28×。记得固定数据源，并关掉自动切换。</dd></div>
+            <div><dt>按结果计费</dt><dd>按存储结果计费的抓取工具每条帖子价格都一样，宽泛的搜索匹配到大量弱相关结果，费用很快就涨上去。</dd></div>
+            <div><dt>使用条款</dt><dd>第三方 Reddit API 并非 Reddit 运营或认可，而 Reddit 限制未签协议的商业使用其数据。两边的条款都要看。</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section id="reproduce" class="install">
+        <h2>任何价格都能自己免费核对</h2>
+        <div class="card dark dots">
+          <span class="corner tl" aria-hidden="true">+</span><span class="corner tr" aria-hidden="true">+</span><span class="corner bl" aria-hidden="true">+</span><span class="corner br" aria-hidden="true">+</span>
+          <i class="node" aria-hidden="true"></i>
+          <div class="card-main">
+            <p class="dim">getcheapapi 是开源的 Agent Skill 和 CLI。<code>quote</code> 会在它知道的每条路线上给你的查询报价，不花一分钱。</p>
+            <div class="cmd">
+              <code>getcheapapi quote reddit.search --input '{"query":"your keywords"}'</code>
+              <button class="mono" type="button" data-copy="getcheapapi quote reddit.search --input '{&quot;query&quot;:&quot;your keywords&quot;}'" data-copied="已复制"><span data-copy-label>复制</span></button>
+            </div>
+            <p class="dim cli-or">先安装 CLI：</p>
+            <div class="cmd">
+              <code>pip install git+https://github.com/getcheapapi/getcheapapi</code>
+              <button class="mono" type="button" data-copy="pip install git+https://github.com/getcheapapi/getcheapapi" data-copied="已复制"><span data-copy-label>复制</span></button>
+            </div>
+          </div>
+          <pre class="quote-out" aria-label="getcheapapi quote reddit.search 的示例输出">reddit.search: 1 input(s), prices per run
+  anyapi reddit.search
+    $0.00035  x1.0  1 call  ok
+    (the cheapest source returns no
+     nextCursor; paging costs 2.3x)
+would run: anyapi reddit.search $0.00035</pre>
+        </div>
+      </section>
+
+      <canvas class="melt" data-field="melt" data-dark="below" aria-hidden="true"></canvas>
+
+      <section id="faq" class="dark dots faq">
+        <h2>Reddit API 价格常见问题</h2>
+        <div class="faq-list">
+          <details><summary class="mono"><span>Q.001 / </span>Reddit API 收费多少？</summary><p>Reddit 在 2023 年定价：超出免费额度的应用每 1,000 次调用 $0.24，此后没有公布过新价格。商业用途需要和 Reddit 签书面协议。</p></details>
+          <details><summary class="mono"><span>Q.002 / </span>Reddit API 免费吗？</summary><p>符合条件的非商业用途曾经免费，每个 OAuth 客户端每分钟最多 100 次请求。Reddit 从 2026 年 10 月 31 日起不再受理新的访问申请，新项目已经用不上这一档。</p></details>
+          <details><summary class="mono"><span>Q.003 / </span>Reddit API 要停用了吗？</summary><p>公开访问要停。Reddit 表示，2027 年 1 月 12 日起开始关闭未向其登记的应用的访问，2027 年 3 月公开访问彻底结束，签了书面协议的合作方除外。</p></details>
+          <details><summary class="mono"><span>Q.004 / </span>现在还能申请 Reddit API key 吗？</summary><p>走公开流程已经不行了：2026 年 10 月 31 日起不再受理新申请。剩下的路只有和 Reddit 签书面协议。</p></details>
+          <details><summary class="mono"><span>Q.005 / </span>用 API 搜索 Reddit，最便宜的办法是什么？</summary><p>按我们 2026 年 11 月核对的价格，是把 AnyAPI 的 reddit.search 固定到它最便宜的数据源：一页 25 条帖子 $0.00035，约合每 1,000 条 $0.014。这个数据源不能翻页，同一个查询要往深处翻，每页 $0.0008。</p></details>
+          <details><summary class="mono"><span>Q.006 / </span>这些价格从哪来？</summary><p>来自 Reddit 2023 年的 API 公告、媒体对其 2026 年 9 月 30 日时间表的报道、AnyAPI 按数据源实时报价的价格 API，以及 Apify 的商店页面，核对于 2026 年 11 月 2 日。运行 getcheapapi quote reddit.search 可以给你自己的查询报价，不花一分钱。路线只按价格排序。</p></details>
+          <details><summary class="mono"><span>Q.007 / </span>已经在用 Reddit API 的应用会怎样？</summary><p>Reddit 表示，应用须在 2027 年 1 月 12 日开始关闭访问之前完成登记或回复其联系。2027 年 3 月公开访问结束，只有签了书面协议的合作方能继续用。</p></details>
+          <details><summary class="mono"><span>Q.008 / </span>Reddit 的 RSS 订阅还能用吗？</summary><p>只到 2026 年 11 月 13 日，这是 Reddit 定下的停止支持日期。从那天起，订阅版块和搜索结果都得另找数据源。</p></details>
+        </div>
+      </section>
+
+      <canvas class="melt" data-field="melt" data-dark="above" aria-hidden="true"></canvas>
+    </main>
+
+    <footer class="foot">
+      <div class="foot-top">
+        <div class="foot-brand">
+          <p class="mono foot-name"><span class="mark-box" aria-hidden="true"><svg width="28" height="28" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 3h5v5h5v5h5v6h3" /><path d="M2 19h18" stroke-dasharray="2 2" /></svg></span>getcheapapi</p>
+          <p class="muted">开源 Agent Skill，让每一次数据与媒体 API 调用都走最便宜的路线。免费，而且随你修改。</p>
+        </div>
+        <div class="foot-cols mono">
+          <div><p>项目</p><a href="/">首页</a><a href="https://github.com/getcheapapi/getcheapapi">GitHub</a><a href="/llms.txt">llms.txt</a></div>
+          <div><p>价格</p><a href="/serp-api-pricing/">SERP API 价格</a><a href="/twitter-api-pricing/">X API 价格</a><a href="/reddit-api-pricing/" aria-current="page">Reddit API 价格</a></div>
+        </div>
+      </div>
+      <p class="wordmark" aria-hidden="true">getcheapapi</p>
+      <div class="foot-bar mono"><span>MIT · 2026</span><span>价格核对于 2026-11-02</span></div>
+    </footer>
+  </body>
+</html>

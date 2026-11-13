@@ -1,0 +1,38 @@
+{
+ "_at": "2026-11-03",
+ "anyapi": {
+  "bing.search": 0.00085,
+  "google.search": 0.0005,
+  "google.trends": 0.002,
+  "reddit.search": 0.00035,
+  "tiktok.search_keyword": 0.0006,
+  "twitter.search": 0.00054
+ },
+ "goanyapi": {
+  "ads-statistics": 0.005,
+  "adsense": 0.003,
+  "backlink": 0.004,
+  "bing-serp": 0.002,
+  "capcut-most-used-history": 0.002,
+  "capcut-most-used-realtime": 0.002,
+  "capcut-most-used-times": 0.0,
+  "dr": 0.002,
+  "google-intitle": 0.004,
+  "google-site-search": 0.004,
+  "google-trends": 0.006,
+  "html-to-markdown-api": 0.001,
+  "keyword-difficulty": 0.003,
+  "keyword-generator": 0.003,
+  "keyword-search-volume": 0.003,
+  "keyword-suggestions": 0.001,
+  "serp": 0.003,
+  "serp-stable": 0.001,
+  "serp-standard": 0.002,
+  "taaft-just-released-api": 0.005,
+  "taaft-just-released-realtime": 0.006,
+  "taaft-tools-api": 0.002,
+  "tiktok-creator": 0.003,
+  "traffic": 0.006,
+  "transparency": 0.004
+ }
+}

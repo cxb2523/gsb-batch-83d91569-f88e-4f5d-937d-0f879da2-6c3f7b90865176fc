@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>X（Twitter）API 价格 2026：官方收费与更便宜的替代</title>
+    <meta name="description" content="X 官方 API 每读一条帖子收 $0.005。同样的搜索在 twitterapi.io 和 AnyAPI 上要多少钱？按每 1,000 条和每月成本对比，每个价格都注明核对日期。" />
+    <link rel="canonical" href="https://getcheapapi.com/zh/twitter-api-pricing/" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#232323" />
+    <meta property="og:title" content="X（Twitter）API 价格，按每 1,000 条帖子算" />
+    <meta property="og:description" content="官方按量付费 vs 第三方读取 API：同一次搜索，每 1,000 条分别是 $5.00、$0.15 和 $0.027。" />
+    <meta property="og:url" content="https://getcheapapi.com/zh/twitter-api-pricing/" />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:image" content="https://getcheapapi.com/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="同样的数据，五个价格。你的 Agent 只付最低的那个。" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500&family=Geist+Mono:wght@400;500&display=swap" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Article",
+            "headline": "X（Twitter）API 价格，按每 1,000 条帖子算",
+            "description": "X 官方 API 每读一条帖子收 $0.005。同样的搜索在 twitterapi.io 和 AnyAPI 上要多少钱，按每 1,000 条和每月成本对比。",
+            "url": "https://getcheapapi.com/zh/twitter-api-pricing/",
+            "datePublished": "2026-11-02",
+            "dateModified": "2026-11-02",
+            "inLanguage": "zh-Hans",
+            "publisher": {
+              "@type": "Organization",
+              "name": "getcheapapi",
+              "url": "https://getcheapapi.com/"
+            }
+          },
+          {
+            "@type": "FAQPage",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "X API 免费吗？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "对新开发者来说不免费。从 2026 年 2 月 6 日起，按量付费成了默认方式，新注册账号没有免费档。首次购买后，X 会送 $20 额度。"
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "X API 每月要多少钱？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "按量付费没有月费，按资源计费。每月读 300,000 条帖子，按每条 $0.005 算就是 $1,500。按量付费每月最多读 300 万条帖子，再多就得签 Enterprise 方案。"
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "twitterapi.io 怎么收费？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "每返回 1,000 条帖子 $0.15（每条 15 credits，$1 = 100,000 credits），每次调用最少扣 15 credits，哪怕一条也没返回。用户资料按 100 个以上一批查询时，每个 1 credit。"
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "第三方 Twitter API 能用吗？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "它们不归 X 运营，也没有 X 的背书，而且 X 的条款限制在其 API 之外采集数据。请对照你的用途，把它们的条款和 X 的条款都读一遍；发帖、点赞、发私信这类操作只能走官方 API。"
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "按关键词搜索 X，最便宜的办法是什么？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "按我们 2026 年 11 月核对的价格，是 AnyAPI 的 twitter.search 固定到最便宜的来源：每页约 20 条 $0.00054，折合每 1,000 条约 $0.027。它最贵的来源要贵 28 倍，所以记得关掉自动故障转移。"
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "这些价格从哪来？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "来自 X 的开发者价格页、twitterapi.io 的价格页，以及 AnyAPI 按来源实时报价的价格 API，核对于 2026 年 11 月 2 日。运行 getcheapapi quote x.search 可以给你自己的查询报价，不花一分钱。路线只按价格排序。"
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "通过 API 在 X 上发帖要多少钱？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "每条 $0.015，帖子里带 URL 则是 $0.200。点赞、关注、转帖和私信每次 $0.015。第三方读取 API 不能发帖。"
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "怎么拿到 X API key？",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "在 X 的 Developer Console 里创建应用并购买额度，之后读写操作都按资源从余额里扣费。新的付费账号首次购买后会获得 $20 额度。"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+    <link rel="stylesheet" href="/src/site.css" />
+    <link rel="stylesheet" href="/src/pricing.css" />
+    <script>document.documentElement.classList.add('js');</script>
+    <script type="module" src="/src/site.js"></script>
+  </head>
+  <body>
+    <header class="navwrap">
+      <nav class="pill" aria-label="主导航">
+        <div class="pill-row">
+          <a class="mark" href="/" aria-label="getcheapapi 首页">
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2 3h5v5h5v5h5v6h3" /><path d="M2 19h18" stroke-dasharray="2 2" /></svg>
+          </a>
+          <div class="links mono" id="navlinks">
+            <a href="#official">官方价格</a>
+            <a href="#compare">价格对比</a>
+            <a href="#monthly">每月成本</a>
+            <a href="#faq">常见问题</a>
+            <a class="only-sm" href="https://github.com/getcheapapi/getcheapapi">GitHub ↗</a>
+          </div>
+          <span class="grow"></span>
+          <a class="mono gh" href="https://github.com/getcheapapi/getcheapapi">GitHub ↗</a>
+          <button class="menu" type="button" aria-label="打开菜单" aria-expanded="false" aria-controls="navlinks">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 5h14M2 9h14M2 13h14" /></svg>
+          </button>
+        </div>
+      </nav>
+    </header>
+
+    <main>
+      <section id="top" class="p-hero">
+        <div class="p-hero-copy">
+          <h1>X（Twitter）API 价格：每 1,000 条帖子要多少钱</h1>
+          <p class="hero-lede">X 官方 API 每返回一条帖子收 $0.005。同样的关键词搜索，第三方读取 API 便宜 33 到 185 倍。下面每个价格都核对于 2026 年 11 月 2 日。</p>
+          <div class="ctas">
+            <a class="btn dark mono" href="#compare">查看完整对比</a>
+            <a class="btn grey mono" href="#reproduce">给你的查询报价</a>
+          </div>
+        </div>
+        <figure class="ladder dark dots" aria-labelledby="ladder-cap">
+          <p id="ladder-cap" class="mono dim">一次关键词搜索，取回 1,000 条帖子</p>
+          <ol class="ladder-rows mono">
+            <li style="--w: 100%"><span class="l-name">X API，按量付费</span><span class="l-bar"><i></i></span><span class="l-usd">$5.00</span></li>
+            <li style="--w: 15.4%"><span class="l-name">AnyAPI，最贵来源</span><span class="l-bar"><i></i></span><span class="l-usd">$0.77</span></li>
+            <li style="--w: 3%"><span class="l-name">twitterapi.io</span><span class="l-bar"><i></i></span><span class="l-usd">$0.15</span></li>
+            <li class="lo" style="--w: 0.54%"><span class="l-name">AnyAPI，最便宜来源</span><span class="l-bar"><i></i></span><span class="l-usd">$0.027</span></li>
+          </ol>
+        </figure>
+      </section>
+
+      <section id="official" class="p-sec">
+        <div class="p-head">
+          <h2>2026 年 X API 官方收费标准</h2>
+          <p class="sub">从 2026 年 2 月 6 日起，新开发者按返回的资源付费，没有免费档，也没有月付套餐。</p>
+        </div>
+        <div class="p-body">
+          <table class="p-table mono">
+            <caption class="visually-hidden">X API 按量付费价格，来自 X 开发者价格页，2026 年 11 月</caption>
+            <thead><tr><th scope="col">操作</th><th scope="col">单价</th><th scope="col">每 1,000 次</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">读取帖子</th><td>$0.005</td><td>$5.00</td></tr>
+              <tr><th scope="row">读取用户（资料）</th><td>$0.010</td><td>$10.00</td></tr>
+              <tr><th scope="row">读取粉丝 / 关注列表</th><td>$0.010</td><td>$10.00</td></tr>
+              <tr><th scope="row">你自己的帖子、提及、粉丝</th><td>$0.001</td><td>$1.00</td></tr>
+              <tr><th scope="row">发帖</th><td>$0.015</td><td>$15.00</td></tr>
+              <tr><th scope="row">发带 URL 的帖子</th><td>$0.200</td><td>$200.00</td></tr>
+              <tr><th scope="row">点赞、关注、转帖、私信</th><td>$0.015</td><td>$15.00</td></tr>
+              <tr><th scope="row">近期帖子计数</th><td>$0.005</td><td>$5.00</td></tr>
+            </tbody>
+          </table>
+          <ul class="p-notes">
+            <li>按量付费每个计费月最多读 300 万条帖子，超出就需要签 Enterprise 合同。</li>
+            <li>新的付费账号首次购买后获得 $20 额度。可以在 Developer Console 里给每个计费周期设消费上限。</li>
+            <li>原来的 Basic（每月 $200）和 Pro（每月 $5,000）套餐已不再向新开发者提供。</li>
+            <li>来源：<a href="https://docs.x.com/x-api/getting-started/pricing">X API 价格，docs.x.com</a>。X 表示以 Developer Console 中显示的价格为准。</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="compare" class="p-sec">
+        <div class="p-head">
+          <h2>同一次搜索，四个价格</h2>
+          <p class="sub">一次返回 10,000 条帖子的关键词搜索，按各家的计费方式算钱。</p>
+        </div>
+        <div class="p-body">
+          <div class="p-scroll">
+            <table class="p-table mono">
+              <caption class="visually-hidden">在 X 上关键词搜索取回 10,000 条帖子的费用，按供应商对比，2026 年 11 月</caption>
+              <thead><tr><th scope="col">路线</th><th scope="col">计费方式</th><th scope="col">10,000 条</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">X API，按量付费</th><td>每返回一条 $0.005</td><td>$50.00</td></tr>
+                <tr><th scope="row">AnyAPI，最贵来源</th><td>每页约 20 条 $0.0154</td><td>$7.70</td></tr>
+                <tr><th scope="row">twitterapi.io</th><td>每条 $0.00015，每次调用至少按一条算</td><td>$1.50</td></tr>
+                <tr class="lo"><th scope="row">AnyAPI，最便宜来源</th><td>每页约 20 条 $0.00054</td><td>$0.27</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="p-foot">AnyAPI 的 <code>twitter.search</code> 有四个来源，每次调用分别是 $0.00054、$0.0006、$0.0051 和 $0.0154。它默认会在便宜来源失败时换到更贵的来源重试，所以同一个请求可能贵出 28 倍，除非你固定来源并关掉故障转移。<a href="/serp-api-pricing/#traps">Google SERP API</a> 也有同样的坑。来源：<a href="https://docs.x.com/x-api/getting-started/pricing">X</a>、<a href="https://twitterapi.io/pricing">twitterapi.io</a>、AnyAPI 实时价格 API。</p>
+        </div>
+      </section>
+
+      <section id="pick" class="p-sec">
+        <div class="p-head">
+          <h2>什么活儿该用哪家 X API</h2>
+        </div>
+        <div class="p-body">
+          <dl class="p-picks">
+            <div><dt>发帖、点赞、私信、读自己账号的数据</dt><dd>用 X 官方 API。第三方读取 API 不能写入，而读自己的数据每次只要 $0.001。</dd></div>
+            <div><dt>关键词搜索与监控</dt><dd>AnyAPI <code>twitter.search</code> 固定到最便宜的来源，按每条算比 twitterapi.io 便宜约 5.6 倍。</dd></div>
+            <div><dt>用户资料、粉丝、按 ID 取单条帖子</dt><dd>用 twitterapi.io。用户资料按 100 个以上一批查询时每个 1 credit，X 上每个资料要 $0.010。</dd></div>
+            <div><dt>经常搜不到结果的查询</dt><dd>留意最低收费。twitterapi.io 空结果也扣 15 credits；X 按返回的帖子数计费。</dd></div>
+          </dl>
+          <p class="p-foot">twitterapi.io 和 AnyAPI 不归 X 运营，也没有 X 的背书，而且 X 的条款限制在其 API 之外采集数据。请对照你的用途把两边的条款都看一遍。还要监控 Reddit？它的官方 API 已停止接受新应用，见 <a href="/reddit-api-pricing/">Reddit API 价格与停用时间表</a>。</p>
+        </div>
+      </section>
+
+      <section id="monthly" class="p-sec">
+        <div class="p-head">
+          <h2>一个监控任务每月要花多少</h2>
+          <p class="sub">20 个关键词，每个每天约 500 条新帖：每月 300,000 条。</p>
+        </div>
+        <div class="p-body">
+          <table class="p-table mono">
+            <caption class="visually-hidden">通过关键词搜索每月读取 300,000 条帖子的费用，按供应商对比</caption>
+            <thead><tr><th scope="col">路线</th><th scope="col">调用量</th><th scope="col">每月</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">X API，按量付费</th><td>300,000 条</td><td>$1,500.00</td></tr>
+              <tr><th scope="row">AnyAPI，最贵来源</th><td>15,000 页</td><td>$231.00</td></tr>
+              <tr><th scope="row">twitterapi.io</th><td>300,000 条</td><td>$45.00</td></tr>
+              <tr class="lo"><th scope="row">AnyAPI，最便宜来源</th><td>15,000 页</td><td>$8.10</td></tr>
+            </tbody>
+          </table>
+          <p class="p-foot">按每页约 20 条估算。实际搜索的最后一页往往不满，有些页还是空的，所以按页计费的路线每条实际会稍贵一点。</p>
+        </div>
+      </section>
+
+      <section id="reproduce" class="install">
+        <h2>任何价格都能自己免费核对</h2>
+        <div class="card dark dots">
+          <span class="corner tl" aria-hidden="true">+</span><span class="corner tr" aria-hidden="true">+</span><span class="corner bl" aria-hidden="true">+</span><span class="corner br" aria-hidden="true">+</span>
+          <i class="node" aria-hidden="true"></i>
+          <div class="card-main">
+            <p class="dim">getcheapapi 是一个开源的 Agent Skill 和 CLI。<code>quote</code> 会按实时价格给你的查询在每条路线上报价，不花一分钱。</p>
+            <div class="cmd">
+              <code>getcheapapi quote x.search --input '{"query":"your keywords"}'</code>
+              <button class="mono" type="button" data-copy="getcheapapi quote x.search --input '{&quot;query&quot;:&quot;your keywords&quot;}'" data-copied="已复制"><span data-copy-label>复制</span></button>
+            </div>
+            <p class="dim cli-or">先安装 CLI：</p>
+            <div class="cmd">
+              <code>pip install git+https://github.com/getcheapapi/getcheapapi</code>
+              <button class="mono" type="button" data-copy="pip install git+https://github.com/getcheapapi/getcheapapi" data-copied="已复制"><span data-copy-label>复制</span></button>
+            </div>
+          </div>
+          <pre class="quote-out" aria-label="getcheapapi quote x.search 的示例输出">x.search: 1 input(s), prices per run
+  anyapi twitter.search
+    $0.00054  x1.0  1 call   ok
+  twitterapi twitter/tweet/advanced_search
+    $0.00300  x5.6  1 call   ok
+would run: anyapi twitter.search $0.00054</pre>
+        </div>
+      </section>
+
+      <canvas class="melt" data-field="melt" data-dark="below" aria-hidden="true"></canvas>
+
+      <section id="faq" class="dark dots faq">
+        <h2>X API 价格常见问题</h2>
+        <div class="faq-list">
+          <details><summary class="mono"><span>Q.001 / </span>X API 免费吗？</summary><p>对新开发者来说不免费。从 2026 年 2 月 6 日起，按量付费成了默认方式，新注册账号没有免费档。首次购买后，X 会送 $20 额度。</p></details>
+          <details><summary class="mono"><span>Q.002 / </span>X API 每月要多少钱？</summary><p>按量付费没有月费，按资源计费。每月读 300,000 条帖子，按每条 $0.005 算就是 $1,500。按量付费每月最多读 300 万条帖子，再多就得签 Enterprise 方案。</p></details>
+          <details><summary class="mono"><span>Q.003 / </span>twitterapi.io 怎么收费？</summary><p>每返回 1,000 条帖子 $0.15（每条 15 credits，$1 = 100,000 credits），每次调用最少扣 15 credits，哪怕一条也没返回。用户资料按 100 个以上一批查询时，每个 1 credit。</p></details>
+          <details><summary class="mono"><span>Q.004 / </span>第三方 Twitter API 能用吗？</summary><p>它们不归 X 运营，也没有 X 的背书，而且 X 的条款限制在其 API 之外采集数据。请对照你的用途，把它们的条款和 X 的条款都读一遍；发帖、点赞、发私信这类操作只能走官方 API。</p></details>
+          <details><summary class="mono"><span>Q.005 / </span>按关键词搜索 X，最便宜的办法是什么？</summary><p>按我们 2026 年 11 月核对的价格，是 AnyAPI 的 twitter.search 固定到最便宜的来源：每页约 20 条 $0.00054，折合每 1,000 条约 $0.027。它最贵的来源要贵 28 倍，所以记得关掉自动故障转移。</p></details>
+          <details><summary class="mono"><span>Q.006 / </span>这些价格从哪来？</summary><p>来自 X 的开发者价格页、twitterapi.io 的价格页，以及 AnyAPI 按来源实时报价的价格 API，核对于 2026 年 11 月 2 日。运行 getcheapapi quote x.search 可以给你自己的查询报价，不花一分钱。路线只按价格排序。</p></details>
+          <details><summary class="mono"><span>Q.007 / </span>通过 API 在 X 上发帖要多少钱？</summary><p>每条 $0.015，帖子里带 URL 则是 $0.200。点赞、关注、转帖和私信每次 $0.015。第三方读取 API 不能发帖。</p></details>
+          <details><summary class="mono"><span>Q.008 / </span>怎么拿到 X API key？</summary><p>在 X 的 Developer Console 里创建应用并购买额度，之后读写操作都按资源从余额里扣费。新的付费账号首次购买后会获得 $20 额度。</p></details>
+        </div>
+      </section>
+
+      <canvas class="melt" data-field="melt" data-dark="above" aria-hidden="true"></canvas>
+    </main>
+
+    <footer class="foot">
+      <div class="foot-top">
+        <div class="foot-brand">
+          <p class="mono foot-name"><span class="mark-box" aria-hidden="true"><svg width="28" height="28" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 3h5v5h5v5h5v6h3" /><path d="M2 19h18" stroke-dasharray="2 2" /></svg></span>getcheapapi</p>
+          <p class="muted">开源 Agent Skill，让每一次数据与媒体 API 调用都走最便宜的路线。免费，而且随你修改。</p>
+        </div>
+        <div class="foot-cols mono">
+          <div><p>项目</p><a href="/">首页</a><a href="https://github.com/getcheapapi/getcheapapi">GitHub</a><a href="/llms.txt">llms.txt</a></div>
+          <div><p>价格</p><a href="/serp-api-pricing/">SERP API 价格</a><a href="/twitter-api-pricing/" aria-current="page">X API 价格</a><a href="/reddit-api-pricing/">Reddit API 价格</a></div>
+        </div>
+      </div>
+      <p class="wordmark" aria-hidden="true">getcheapapi</p>
+      <div class="foot-bar mono"><span>MIT · 2026</span><span>价格核对于 2026-11-02</span></div>
+    </footer>
+  </body>
+</html>

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.wrangler/
+# Rendered by vite.config.js from src/page.html and i18n/ (translated pages under /<code>/<slug>/ are committed)
+/index.html
+/es/index.html
+/ja/index.html
+/ko/index.html
+/pt/index.html
+/zh/index.html

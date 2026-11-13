@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // getcheapapi.com: the Vite build in dist/ served by Workers static assets. The Worker only runs for /stats/*,
+  // the Rybbit proxy; its upstream is the RYBBIT_UPSTREAM secret (wrangler secret put RYBBIT_UPSTREAM).
+  "name": "getcheapapi-www",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-01",
+  "routes": [{ "pattern": "getcheapapi.com", "custom_domain": true }],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page",
+    "run_worker_first": ["/stats/*"]
+  }
+}

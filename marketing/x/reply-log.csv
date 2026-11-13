@@ -1,0 +1,5 @@
+found_date,status,account,target_url,target_author,target_followers,topic,angle,our_reply_url,posted_at_utc,link_used,skip_reason,kind
+,skipped,,post: reddit-api-shutdown,,,reddit-api,"Reddit API 停收新应用、11/13 RSS 停用；第三方 1,000 帖 $0.014–$3.40",,,https://getcheapapi.com/reddit-api-pricing/,方向改为开源产品宣发，价格话题留作后续,post
+,skipped,,post: x-api-185x,,,x-api,"同一次 X 关键词搜索 1,000 帖 $5.00 vs $0.027，差 185 倍；默认 failover 可贵 28 倍",,,https://getcheapapi.com/twitter-api-pricing/,方向改为开源产品宣发，价格话题留作后续,post
+,skipped,,post: agent-no-brakes,,,product,Agent 一夜乱花钱的三件事 → 预算上限、402 即停、逐笔记账,,,https://github.com/getcheapapi/getcheapapi,方向改为开源产品宣发，价格话题留作后续,post
+,drafted,,post: launch-zh,,,launch,开源发布：给 Agent 用的付费数据 API 比价路由（中文串帖）,,,https://github.com/getcheapapi/getcheapapi,,post

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "getcheapapi"
+version = "0.1.0"
+description = "Open-source price router for paid data and media APIs: pick the cheapest upstream per call, with budget guards for AI agents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.urls]
+Homepage = "https://getcheapapi.com"
+Repository = "https://github.com/getcheapapi/getcheapapi"
+
+[project.scripts]
+getcheapapi = "getcheapapi.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+getcheapapi = ["data/*.json"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

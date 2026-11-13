@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>X API 料金【2026年11月】従量課金の単価と安い代替APIを比較</title>
+    <meta name="description" content="X API の料金は従量課金で、投稿の読み取りは1件0.005ドル、投稿は1件0.015ドル（URL付きは0.20ドル）。無料枠はありません。公式とサードパーティAPIの料金を1,000件あたり・月額で比較し、円換算も載せています。" />
+    <link rel="canonical" href="https://getcheapapi.com/ja/twitter-api-pricing/" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#232323" />
+    <meta property="og:title" content="X API 料金：従量課金の単価と、読み取りを安くする方法" />
+    <meta property="og:description" content="公式APIは読み取り1件0.005ドル。同じキーワード検索をサードパーティAPIなら1,000件0.15ドル、0.027ドルで。" />
+    <meta property="og:url" content="https://getcheapapi.com/ja/twitter-api-pricing/" />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="ja_JP" />
+    <meta property="og:image" content="https://getcheapapi.com/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="同じデータに5つの価格。エージェントは最安で払う。" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500&family=Geist+Mono:wght@400;500&display=swap" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Article",
+            "headline": "X API 料金：従量課金の単価と、読み取りを安くする方法",
+            "description": "X API の料金は従量課金で、投稿の読み取りは1件0.005ドル、投稿は1件0.015ドル（URL付きは0.20ドル）。公式とサードパーティAPIの料金を1,000件あたり・月額で比較。",
+            "url": "https://getcheapapi.com/ja/twitter-api-pricing/",
+            "datePublished": "2026-11-03",
+            "dateModified": "2026-11-03",
+            "inLanguage": "ja",
+            "publisher": { "@type": "Organization", "name": "getcheapapi", "url": "https://getcheapapi.com/" }
+          },
+          {
+            "@type": "FAQPage",
+            "mainEntity": [
+              { "@type": "Question", "name": "X APIは無料で使えますか？", "acceptedAnswer": { "@type": "Answer", "text": "新規の開発者は無料では使えません。2026年2月6日から従量課金が標準になり、新規登録に無料枠はありません。初回のクレジット購入後に20ドル分のクレジットがもらえます。" } },
+              { "@type": "Question", "name": "X APIの料金はいくらですか？", "acceptedAnswer": { "@type": "Answer", "text": "他人の投稿の読み取りが1件0.005ドル（約0.8円）、ユーザー情報の読み取りが1件0.010ドル、投稿が1件0.015ドル、URL付きの投稿が1件0.200ドルです。月額の基本料はありません。" } },
+              { "@type": "Question", "name": "X APIの料金は値上げされましたか？", "acceptedAnswer": { "@type": "Answer", "text": "2026年4月の改定で、URL付き投稿が1件0.200ドルになりました。URLなしの投稿は0.015ドルのままです。読み取りの単価は0.005ドルです。" } },
+              { "@type": "Question", "name": "自動投稿すると月いくらかかりますか？", "acceptedAnswer": { "@type": "Answer", "text": "1日1本、URLなしなら月0.45ドル（約71円）、すべてURL付きなら月6.00ドル（約950円）です。投稿はサードパーティAPIではできないため、公式APIの料金になります。" } },
+              { "@type": "Question", "name": "読み取り件数に上限はありますか？", "acceptedAnswer": { "@type": "Answer", "text": "従量課金では、投稿の読み取りは請求月あたり300万件が上限です。それ以上はEnterpriseプランが必要です。開発者コンソールで請求月ごとの支出上限も設定できます。" } },
+              { "@type": "Question", "name": "サードパーティのX APIは使っても大丈夫ですか？", "acceptedAnswer": { "@type": "Answer", "text": "twitterapi.io や AnyAPI はXが運営・公認するサービスではなく、Xの規約はAPI以外でのデータ収集を制限しています。用途に照らして、両方の規約を確認してください。" } },
+              { "@type": "Question", "name": "一番安くキーワード検索する方法は？", "acceptedAnswer": { "@type": "Answer", "text": "2026年11月時点の価格では、AnyAPI の twitter.search を最安のソースに固定するのが最安で、約20件のページが0.00054ドル、1,000件で約0.027ドル（約4円）です。最も高いソースは28倍なので、フェイルオーバーは切ってください。" } },
+              { "@type": "Question", "name": "料金の出典は？", "acceptedAnswer": { "@type": "Answer", "text": "Xの開発者向け料金ページ、twitterapi.io の料金ページ、AnyAPI のソース別ライブ価格APIで、2026年11月2日に確認しました。円は1ドル＝158円の概算です。getcheapapi quote x.search で自分のクエリの価格を無料で確認できます。" } }
+            ]
+          }
+        ]
+      }
+    </script>
+    <link rel="stylesheet" href="/src/site.css" />
+    <link rel="stylesheet" href="/src/pricing.css" />
+    <script>document.documentElement.classList.add('js');</script>
+    <script type="module" src="/src/site.js"></script>
+  </head>
+  <body>
+    <header class="navwrap">
+      <nav class="pill" aria-label="メイン">
+        <div class="pill-row">
+          <a class="mark" href="/" aria-label="getcheapapi ホーム">
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2 3h5v5h5v5h5v6h3" /><path d="M2 19h18" stroke-dasharray="2 2" /></svg>
+          </a>
+          <div class="links mono" id="navlinks">
+            <a href="#official">料金表</a>
+            <a href="#compare">比較</a>
+            <a href="#monthly">月額</a>
+            <a href="#faq">FAQ</a>
+            <a class="only-sm" href="https://github.com/getcheapapi/getcheapapi">GitHub ↗</a>
+          </div>
+          <span class="grow"></span>
+          <a class="mono gh" href="https://github.com/getcheapapi/getcheapapi">GitHub ↗</a>
+          <button class="menu" type="button" aria-label="メニューを開く" aria-expanded="false" aria-controls="navlinks">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 5h14M2 9h14M2 13h14" /></svg>
+          </button>
+        </div>
+      </nav>
+    </header>
+
+    <main>
+      <section id="top" class="p-hero">
+        <div class="p-hero-copy">
+          <h1>X API 料金：従量課金の単価と、読み取りを安くする方法</h1>
+          <p class="hero-lede">公式のX APIは、他人の投稿を1件読むごとに0.005ドルかかります。同じキーワード検索は、サードパーティの読み取りAPIなら33〜185分の1の料金です。価格は2026年11月2日に確認しました。</p>
+          <div class="ctas">
+            <a class="btn dark mono" href="#compare">料金を比較する</a>
+            <a class="btn grey mono" href="#reproduce">自分のクエリで確かめる</a>
+          </div>
+        </div>
+        <figure class="ladder dark dots" aria-labelledby="ladder-cap">
+          <p id="ladder-cap" class="mono dim">キーワード検索で投稿1,000件を取得</p>
+          <ol class="ladder-rows mono">
+            <li style="--w: 100%"><span class="l-name">公式 X API（従量課金）</span><span class="l-bar"><i></i></span><span class="l-usd">$5.00 · 約790円</span></li>
+            <li style="--w: 15.4%"><span class="l-name">AnyAPI 最も高いソース</span><span class="l-bar"><i></i></span><span class="l-usd">$0.77 · 約122円</span></li>
+            <li style="--w: 3%"><span class="l-name">twitterapi.io</span><span class="l-bar"><i></i></span><span class="l-usd">$0.15 · 約24円</span></li>
+            <li class="lo" style="--w: 0.54%"><span class="l-name">AnyAPI 最安のソース</span><span class="l-bar"><i></i></span><span class="l-usd">$0.027 · 約4円</span></li>
+          </ol>
+        </figure>
+      </section>
+
+      <section id="official" class="p-sec">
+        <div class="p-head">
+          <h2>X API の料金表（2026年11月）</h2>
+          <p class="sub">取得したリソース1件ごと、投稿1回ごとに課金されます。月額の基本料はありません。</p>
+        </div>
+        <div class="p-body">
+          <div class="p-scroll">
+            <table class="p-table mono">
+              <caption class="visually-hidden">X API 従量課金の料金表（Xの開発者向け料金ページ、2026年11月）</caption>
+              <thead><tr><th scope="col">操作</th><th scope="col">1件あたり</th><th scope="col">1,000件あたり</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">投稿の読み取り</th><td>$0.005</td><td>$5.00 · 約790円</td></tr>
+                <tr><th scope="row">ユーザー情報の読み取り</th><td>$0.010</td><td>$10.00 · 約1,580円</td></tr>
+                <tr><th scope="row">フォロワー・フォローの読み取り</th><td>$0.010</td><td>$10.00 · 約1,580円</td></tr>
+                <tr><th scope="row">自分の投稿・メンション・フォロワー</th><td>$0.001</td><td>$1.00 · 約158円</td></tr>
+                <tr><th scope="row">投稿</th><td>$0.015</td><td>$15.00 · 約2,370円</td></tr>
+                <tr><th scope="row">URL付きの投稿</th><td>$0.200</td><td>$200.00 · 約31,600円</td></tr>
+                <tr><th scope="row">いいね・フォロー・リポスト・DM</th><td>$0.015</td><td>$15.00 · 約2,370円</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="p-foot">円は1ドル＝158円の概算です。出典：<a href="https://docs.x.com/x-api/getting-started/pricing" hreflang="en">X API pricing（docs.x.com）</a>。Xは開発者コンソールの表示を正としています。</p>
+        </div>
+      </section>
+
+      <section id="changes" class="p-sec">
+        <div class="p-head">
+          <h2>無料枠の終了と値上げ：2026年に変わったこと</h2>
+        </div>
+        <div class="p-body">
+          <table class="p-table p-timeline mono">
+            <caption class="visually-hidden">2026年のX API料金の変更</caption>
+            <thead><tr><th scope="col">時期</th><th scope="col">変更内容</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">2026年2月6日</th><td>従量課金が標準になり、新規登録の無料枠がなくなる。旧Basic（月200ドル）・Pro（月5,000ドル）は新規提供なし</td></tr>
+              <tr class="lo"><th scope="row">2026年4月</th><td>URL付き投稿が1件0.200ドルに。URLなしの投稿は0.015ドル</td></tr>
+              <tr><th scope="row">2026年11月</th><td>読み取りは1件0.005ドル、請求月あたり300万件まで</td></tr>
+            </tbody>
+          </table>
+          <p class="p-foot">読み取りの上限を「月200万件」とする記事もありますが、Xの料金ページの現在の記載は300万件です。</p>
+        </div>
+      </section>
+
+      <section id="compare" class="p-sec">
+        <div class="p-head">
+          <h2>キーワード検索1万件の料金比較</h2>
+          <p class="sub">同じ検索で投稿1万件を取得した場合の料金です。読み取りだけなら、公式以外の選択肢があります。</p>
+        </div>
+        <div class="p-body">
+          <div class="p-scroll">
+            <table class="p-table mono">
+              <caption class="visually-hidden">X のキーワード検索で投稿1万件を取得する料金、2026年11月</caption>
+              <thead><tr><th scope="col">ルート</th><th scope="col">課金方法</th><th scope="col">1万件</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">公式 X API（従量課金）</th><td>取得した投稿1件ごとに$0.005</td><td>$50.00 · 約7,900円</td></tr>
+                <tr><th scope="row">AnyAPI 最も高いソース</th><td>約20件のページごとに$0.0154</td><td>$7.70 · 約1,220円</td></tr>
+                <tr><th scope="row">twitterapi.io</th><td>投稿1件ごとに$0.00015、1回の呼び出しで最低1件分</td><td>$1.50 · 約240円</td></tr>
+                <tr class="lo"><th scope="row">AnyAPI 最安のソース</th><td>約20件のページごとに$0.00054</td><td>$0.27 · 約43円</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="p-foot">AnyAPI の <code>twitter.search</code> は4つのソースから提供され、1回$0.00054・$0.0006・$0.0051・$0.0154です。初期設定では安いソースが失敗すると高いソースで再試行するため、ソースを固定してフェイルオーバーを切らないと最大28倍かかります。出典：<a href="https://twitterapi.io/pricing" hreflang="en">twitterapi.io</a>、AnyAPI のライブ価格API。</p>
+        </div>
+      </section>
+
+      <section id="monthly" class="p-sec">
+        <div class="p-head">
+          <h2>監視・リサーチの月額目安</h2>
+          <p class="sub">キーワード検索で他人の投稿を読む場合。1ページ約20件で計算しています。</p>
+        </div>
+        <div class="p-body">
+          <div class="p-scroll">
+            <table class="p-table p-wide mono">
+              <caption class="visually-hidden">X の投稿を毎日200件、毎日1万件読む場合の月額</caption>
+              <thead><tr><th scope="col">ルート</th><th scope="col">毎日200件</th><th scope="col">毎日1万件</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">公式 X API</th><td>$30.00 · 約4,740円</td><td>$1,500 · 約237,000円</td></tr>
+                <tr><th scope="row">AnyAPI 最も高いソース</th><td>$4.62 · 約730円</td><td>$231 · 約36,500円</td></tr>
+                <tr><th scope="row">twitterapi.io</th><td>$0.90 · 約142円</td><td>$45.00 · 約7,110円</td></tr>
+                <tr class="lo"><th scope="row">AnyAPI 最安のソース</th><td>$0.16 · 約26円</td><td>$8.10 · 約1,280円</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="p-foot">実際の検索では最後のページが短かったり空のページがあったりするため、ページ課金のルートは1件あたりが少し高くなります。</p>
+        </div>
+      </section>
+
+      <section id="posting" class="p-sec">
+        <div class="p-head">
+          <h2>自動投稿の月額目安</h2>
+          <p class="sub">投稿・いいね・DMは公式APIでしかできません。URLを付けるかどうかで料金が13倍変わります。</p>
+        </div>
+        <div class="p-body">
+          <table class="p-table mono">
+            <caption class="visually-hidden">X API で自動投稿する場合の月額</caption>
+            <thead><tr><th scope="col">投稿の頻度</th><th scope="col">月の本数</th><th scope="col">月額</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">1日1本、URLなし</th><td>30本</td><td>$0.45 · 約71円</td></tr>
+              <tr><th scope="row">1日1本、すべてURL付き</th><td>30本</td><td>$6.00 · 約950円</td></tr>
+              <tr><th scope="row">1日10本、URLなし</th><td>300本</td><td>$4.50 · 約710円</td></tr>
+              <tr><th scope="row">1日10本、すべてURL付き</th><td>300本</td><td>$60.00 · 約9,480円</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="pick" class="p-sec">
+        <div class="p-head">
+          <h2>用途別：どのAPIを使うか</h2>
+        </div>
+        <div class="p-body">
+          <dl class="p-picks">
+            <div><dt>投稿・いいね・DM、自分のアカウントのデータ</dt><dd>公式 X API。サードパーティの読み取りAPIは書き込みができず、自分のデータの読み取りは1件0.001ドルです。</dd></div>
+            <div><dt>キーワード検索・エゴサーチ・競合の監視</dt><dd>AnyAPI の <code>twitter.search</code> を最安のソースに固定。1件あたり twitterapi.io の約5.6分の1です。</dd></div>
+            <div><dt>プロフィール・フォロワー・IDでの投稿取得</dt><dd>twitterapi.io。プロフィールは100件以上まとめて取得すると1件1クレジットで、公式の1件0.010ドルより大幅に安くなります。</dd></div>
+            <div><dt>結果が空になりやすい検索</dt><dd>最低料金に注意。twitterapi.io は空の結果でも15クレジットかかり、公式は取得した投稿の件数で課金されます。</dd></div>
+          </dl>
+          <p class="p-foot">twitterapi.io と AnyAPI はXが運営・公認するサービスではなく、Xの規約はAPI以外でのデータ収集を制限しています。用途に照らして両方の規約を確認してください。SERP（検索結果）APIの料金は <a href="/serp-api-pricing/">SERP API pricing（英語）</a> で比較しています。</p>
+        </div>
+      </section>
+
+      <section id="reproduce" class="install">
+        <h2>料金は自分で確かめられます（無料）</h2>
+        <div class="card dark dots">
+          <span class="corner tl" aria-hidden="true">+</span><span class="corner tr" aria-hidden="true">+</span><span class="corner bl" aria-hidden="true">+</span><span class="corner br" aria-hidden="true">+</span>
+          <i class="node" aria-hidden="true"></i>
+          <div class="card-main">
+            <p class="dim">getcheapapi はオープンソースのエージェントスキルです。見積もりは全ルートの価格を比べるだけで、お金はかかりません。Claude Code や Codex に次を貼り付けて追加します：</p>
+            <div class="cmd">
+              <code>https://getcheapapi.com/llms.txt を読み、その手順に従ってこのエージェントに getcheapapi スキルをインストールしてください。</code>
+              <button class="mono" type="button" data-copy="https://getcheapapi.com/llms.txt を読み、その手順に従ってこのエージェントに getcheapapi スキルをインストールしてください。" data-copied="コピーしました"><span data-copy-label>コピー</span></button>
+            </div>
+            <p class="dim cli-or">続けてエージェントに頼みます：</p>
+            <div class="cmd">
+              <code>「検索キーワード」で x.search の見積もりだけ出して。実行はしないで。</code>
+              <button class="mono" type="button" data-copy="「検索キーワード」で x.search の見積もりだけ出して。実行はしないで。" data-copied="コピーしました"><span data-copy-label>コピー</span></button>
+            </div>
+          </div>
+          <pre class="quote-out" aria-label="getcheapapi quote x.search の出力例">x.search: 1 input(s), prices per run
+  anyapi twitter.search
+    $0.00054  x1.0  1 call   ok
+  twitterapi twitter/tweet/advanced_search
+    $0.00300  x5.6  1 call   ok
+would run: anyapi twitter.search $0.00054</pre>
+        </div>
+      </section>
+
+      <section id="faq" class="dark dots faq">
+        <h2>X API 料金のよくある質問</h2>
+        <div class="faq-list">
+          <details><summary class="mono"><span>Q.001 / </span>X APIは無料で使えますか？</summary><p>新規の開発者は無料では使えません。2026年2月6日から従量課金が標準になり、新規登録に無料枠はありません。初回のクレジット購入後に20ドル分のクレジットがもらえます。</p></details>
+          <details><summary class="mono"><span>Q.002 / </span>X APIの料金はいくらですか？</summary><p>他人の投稿の読み取りが1件0.005ドル（約0.8円）、ユーザー情報の読み取りが1件0.010ドル、投稿が1件0.015ドル、URL付きの投稿が1件0.200ドルです。月額の基本料はありません。</p></details>
+          <details><summary class="mono"><span>Q.003 / </span>X APIの料金は値上げされましたか？</summary><p>2026年4月の改定で、URL付き投稿が1件0.200ドルになりました。URLなしの投稿は0.015ドルのままです。読み取りの単価は0.005ドルです。</p></details>
+          <details><summary class="mono"><span>Q.004 / </span>自動投稿すると月いくらかかりますか？</summary><p>1日1本、URLなしなら月0.45ドル（約71円）、すべてURL付きなら月6.00ドル（約950円）です。投稿はサードパーティAPIではできないため、公式APIの料金になります。</p></details>
+          <details><summary class="mono"><span>Q.005 / </span>読み取り件数に上限はありますか？</summary><p>従量課金では、投稿の読み取りは請求月あたり300万件が上限です。それ以上はEnterpriseプランが必要です。開発者コンソールで請求月ごとの支出上限も設定できます。</p></details>
+          <details><summary class="mono"><span>Q.006 / </span>サードパーティのX APIは使っても大丈夫ですか？</summary><p>twitterapi.io や AnyAPI はXが運営・公認するサービスではなく、Xの規約はAPI以外でのデータ収集を制限しています。用途に照らして、両方の規約を確認してください。</p></details>
+          <details><summary class="mono"><span>Q.007 / </span>一番安くキーワード検索する方法は？</summary><p>2026年11月時点の価格では、AnyAPI の twitter.search を最安のソースに固定するのが最安で、約20件のページが0.00054ドル、1,000件で約0.027ドル（約4円）です。最も高いソースは28倍なので、フェイルオーバーは切ってください。</p></details>
+          <details><summary class="mono"><span>Q.008 / </span>料金の出典は？</summary><p>Xの開発者向け料金ページ、twitterapi.io の料金ページ、AnyAPI のソース別ライブ価格APIで、2026年11月2日に確認しました。円は1ドル＝158円の概算です。getcheapapi quote x.search で自分のクエリの価格を無料で確認できます。</p></details>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <div class="foot-top">
+        <div class="foot-brand">
+          <p class="mono foot-name"><span class="mark-box" aria-hidden="true"><svg width="28" height="28" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 3h5v5h5v5h5v6h3" /><path d="M2 19h18" stroke-dasharray="2 2" /></svg></span>getcheapapi</p>
+          <p class="muted">データ・メディアAPIの呼び出しを、毎回いちばん安いルートで。オープンソースのエージェントスキルです。</p>
+        </div>
+        <div class="foot-cols mono">
+          <div><p>プロジェクト</p><a href="/">ホーム</a><a href="https://github.com/getcheapapi/getcheapapi">GitHub</a><a href="/llms.txt">llms.txt</a></div>
+          <div><p>料金比較</p><a href="/twitter-api-pricing/" aria-current="page">X API 料金</a><a href="/serp-api-pricing/">SERP API pricing</a><a href="/reddit-api-pricing/">Reddit API pricing</a></div>
+        </div>
+      </div>
+      <p class="wordmark" aria-hidden="true">getcheapapi</p>
+      <div class="foot-bar mono"><span>MIT · 2026</span><span>価格確認日 2026-11-02</span></div>
+    </footer>
+  </body>
+</html>

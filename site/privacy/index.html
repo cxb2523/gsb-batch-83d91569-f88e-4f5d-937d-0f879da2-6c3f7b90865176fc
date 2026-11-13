@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Privacy Policy · getcheapapi</title>
+    <meta name="description" content="How GetCheapAPI handles website analytics, local CLI data, and Google Ads authorization and keyword metrics." />
+    <link rel="canonical" href="https://getcheapapi.com/privacy/" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/src/site.css" />
+    <style>
+      .policy { max-width: 48rem; margin-inline: auto; padding: clamp(36px, 8vw, 96px) 24px; }
+      .policy header { margin-bottom: 36px; }
+      .policy h1 { font-size: clamp(36px, 6vw, 54px); line-height: 1.1; margin-block: 16px 8px; }
+      .policy section + section { margin-top: 32px; }
+      .policy h2 { font-size: 23px; margin-bottom: 12px; }
+      .policy p + p { margin-top: 12px; }
+    </style>
+  </head>
+  <body>
+    <main class="policy">
+      <header>
+        <a class="mono" href="/">GetCheapAPI</a>
+        <h1>Privacy Policy</h1>
+        <p class="muted">Last updated November 10, 2026</p>
+      </header>
+
+      <section>
+        <h2>Scope</h2>
+        <p>This policy covers the GetCheapAPI website, the local command-line tool, and the optional GetCheapAPI Keyword Research desktop workflow for Google Ads.</p>
+      </section>
+
+      <section>
+        <h2>Website visits</h2>
+        <p>Cloudflare serves the website and processes connection information such as IP addresses to deliver it. We use Google Analytics and Rybbit to understand which pages people visit and how they use the site. Analytics may process page views, referrers, device and browser information, and approximate location. Our Rybbit proxy forwards the visitor IP for geolocation. Google Analytics may use cookies, and the site stores language preferences in your browser.</p>
+        <p>You can clear cookies and site storage or restrict analytics through your browser. Provider sign-up links take you to sites governed by their own privacy policies.</p>
+      </section>
+
+      <section>
+        <h2>Local CLI and API providers</h2>
+        <p>The CLI runs on your device. It reads provider credentials from your local configuration and sends the selected provider the request inputs and authentication needed to fulfill your request. Inputs can include search queries, URLs, prompts, or media references, depending on the command. Each provider handles those requests under its own privacy policy.</p>
+        <p>The CLI keeps cached prices, request and spend records, and saved API responses locally, by default in <code>~/.getcheapapi/</code>. It can also read credentials from environment variables or local configuration files. You can remove local records and credential files from your device and revoke provider keys with the provider that issued them.</p>
+      </section>
+
+      <section>
+        <h2>Google Ads authorization and data</h2>
+        <p>If you authorize the desktop keyword research workflow, it uses Google OAuth to connect to the Ads accounts you can access. Google describes the <code>adwords</code> permission as allowing the app to view and manage Google Ads accounts and data. The workflow uses that permission to read accessible customer IDs and request historical keyword metrics for the account you select. It sends Google the selected customer ID, keywords, and targeting settings, and uses the response to show the metrics and compare them with a baseline you already have. It does not create or edit campaigns, ads, budgets, or billing settings.</p>
+        <p>The desktop workflow handles OAuth tokens and Google Ads responses on the device where you run it. It does not send them to the GetCheapAPI website, website analytics services, or other API providers. GetCheapAPI does not sell Google user data or use it to target advertisements. The workflow uses Google user data to provide the keyword research you request, in accordance with the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including its Limited Use requirements where applicable.</p>
+        <p>To disconnect the workflow, revoke its access in your Google Account and delete any saved OAuth credentials and results from your device. Revoking access stops future authorized calls. It does not erase files already saved on your device.</p>
+      </section>
+
+      <section>
+        <h2>Privacy questions</h2>
+        <p>For private questions about the Google Ads connection or its data, use the support email shown on the Google authorization screen for GetCheapAPI Keyword Research. For general questions about this policy, use the <a href="https://github.com/getcheapapi/getcheapapi/issues">GetCheapAPI issue tracker</a>. Keep credentials, customer IDs, and personal information out of public issues.</p>
+      </section>
+    </main>
+  </body>
+</html>

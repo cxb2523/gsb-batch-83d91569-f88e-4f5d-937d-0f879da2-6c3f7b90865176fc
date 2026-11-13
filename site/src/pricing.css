@@ -1,0 +1,73 @@
+/* Pricing pages: same paper, ink and dot as the home page; tables carry the content. */
+.p-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 48px; padding: 160px var(--gutter) 96px; align-items: center; }
+.p-hero-copy { display: flex; flex-direction: column; gap: 28px; }
+.p-hero h1 { font-size: clamp(40px, 3.7vw, 54px); line-height: 1.06; letter-spacing: -0.02em; max-width: 14ch; }
+
+.ladder { border-radius: 4px; padding: 32px; display: flex; flex-direction: column; gap: 28px; }
+.ladder > p { font-size: 12.5px; }
+.ladder-rows { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 22px; font-size: 13px; }
+.ladder-rows li { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name usd" "bar bar"; gap: 8px 16px; }
+.l-name { grid-area: name; color: var(--w60); }
+.l-usd { grid-area: usd; }
+.l-bar { grid-area: bar; height: 10px; border-bottom: 1px dashed var(--w20); }
+.l-bar i { display: block; height: 100%; width: max(var(--w), 3px); background: #fff; }
+.ladder-rows .lo .l-name, .ladder-rows .lo .l-usd { color: #fff; }
+.ladder-rows .lo .l-bar i { background: var(--dot); }
+.js .ladder .l-bar i { transform-origin: left; animation: grow 0.9s cubic-bezier(.2, .7, .2, 1) both; }
+.js .ladder li:nth-child(2) .l-bar i { animation-delay: .12s; }
+.js .ladder li:nth-child(3) .l-bar i { animation-delay: .24s; }
+.js .ladder li:nth-child(4) .l-bar i { animation-delay: .36s; }
+@keyframes grow { from { transform: scaleX(0); } }
+
+.p-sec { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); gap: 48px; padding: 96px var(--gutter); border-top: 1px dashed var(--line); align-items: start; }
+.p-head { display: flex; flex-direction: column; gap: 18px; position: sticky; top: 48px; }
+.p-head h2 { max-width: 16ch; }
+.p-body { display: flex; flex-direction: column; gap: 28px; min-width: 0; }
+.p-scroll { overflow-x: auto; }
+.p-table { width: 100%; border-collapse: collapse; font-size: 13.5px; border-bottom: 1px dashed var(--line); }
+.p-table th, .p-table td { padding: 15px 0; border-top: 1px dashed var(--line); text-align: left; font-weight: 400; vertical-align: top; }
+.p-table thead th { color: var(--muted); font-size: 12px; }
+.p-table td { color: var(--muted); padding-left: 16px; }
+.p-table td:last-child, .p-table thead th:last-child { text-align: right; white-space: nowrap; color: var(--ink); }
+.p-timeline th { white-space: nowrap; }
+.p-table.p-timeline td:last-child, .p-table.p-timeline thead th:last-child { white-space: normal; text-align: left; }
+.p-wide td, .p-wide thead th:not(:first-child) { text-align: right; white-space: nowrap; }
+.p-table .lo th, .p-table .lo td:last-child { background: var(--ink); color: var(--paper); }
+.p-table .lo th { padding-left: 8px; }
+.p-table .lo td:last-child { padding-right: 8px; }
+.p-table .lo td { background: var(--ink); color: var(--w60); }
+.p-notes { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 10px; font-size: 15.5px; color: var(--muted); }
+.p-foot { font-size: 15.5px; color: var(--muted); max-width: 62ch; }
+.p-picks { margin: 0; border-bottom: 1px dashed var(--line); }
+.p-picks div { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 24px; padding: 18px 0; border-top: 1px dashed var(--line); }
+.p-picks dt { font-weight: 500; }
+.p-picks dd { margin: 0; color: var(--muted); }
+
+#reproduce { padding-top: 96px; border-top: 1px dashed var(--line); }
+.quote-out { margin: 0; border-left: 1px dashed var(--w20); padding: 40px; font-family: var(--mono); font-size: 13px; line-height: 1.7; color: var(--w60); white-space: pre; overflow-x: auto; }
+
+@media (min-width: 981px) and (max-width: 1280px) {
+  .p-hero, .p-sec { gap: 40px; }
+}
+@media (min-width: 981px) and (max-height: 900px) {
+  .p-hero { padding-top: 112px; padding-bottom: 72px; }
+  .p-hero h1 { font-size: clamp(38px, 3.4vw, 50px); }
+  .p-sec { padding-top: 72px; padding-bottom: 72px; }
+  .p-head { top: 32px; }
+}
+@media (max-width: 980px) {
+  .p-hero, .p-sec { grid-template-columns: minmax(0, 1fr); }
+  .p-hero { padding-top: 128px; padding-bottom: 64px; }
+  .p-sec { padding: 72px var(--gutter); gap: 32px; }
+  .p-head { position: static; }
+  .quote-out { border-left: 0; border-top: 1px dashed var(--w20); }
+}
+@media (max-width: 560px) {
+  .ladder { padding: 22px; }
+  .p-table { font-size: 12.5px; }
+  .p-picks div { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .quote-out { padding: 24px 22px; font-size: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .js .ladder .l-bar i { animation: none; }
+}
