@@ -1,0 +1,304 @@
+# One real run against wellfound.com. tests.yml (deliberately) never touches
+# the site — see its own header.
+#
+# THIS CANARY NEEDS A RESIDENTIAL EXIT, AND THAT IS A MEASUREMENT.
+#
+# Wellfound refuses a datacenter address on EVERY route, `robots.txt`
+# included. Measured 2026-09-17 from a Hetzner VPS: HTTP 403 to plain HTTP,
+# to headless Chromium and to headful Chromium alike; from a 2captcha
+# residential US exit, HTTP 200 on `/`, `/jobs`, every `/role/…` shape and
+# `/jobs/{id}-{slug}`, three times out of three.
+#
+# A GitHub runner is a datacenter address, so the job that checks real data
+# (`listing`) runs through the WELLFOUND_PROXY secret:
+#
+#     gh secret set WELLFOUND_PROXY --repo 2scraper/wellfound-scraper
+#
+# WITHOUT that secret the job FAILS with an error naming it. It used to skip
+# with a notice and end green, and 28 green runs in a row had never touched
+# the site: a skipped canary is not a tested success.
+#
+# The secret goes through the ENVIRONMENT, never a `--proxy` flag: a
+# credential on a command line is readable by anything that can run `ps`.
+# `env_config.py` already reads exactly this variable.
+#
+# The second job (`datacentre`) needs no secret. It is documented as
+# "datacentre refusal expected": it runs the same engine from the bare
+# runner and requires the refusal to be RECOGNISED as one (exit 3 with the
+# refusal page saved), or real rows if the site ever serves the runner. A
+# crash, a timeout or an unreadable page (exit 1/5) is red there. It proves
+# the engine reaches the site and classifies what it gets; it does not
+# replace `listing`, which is the job that tests real data.
+#
+# `secrets` is not available in a job-level `if`, so presence is tested
+# through job `env` and read in a step.
+
+name: canary
+
+on:
+  schedule:
+    # 05:40 UTC. Not on the hour: every scheduled workflow on GitHub fires at
+    # :00 and the queue there is long.
+    - cron: "40 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  listing:
+    name: role listing (needs the WELLFOUND_PROXY secret)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      HAVE_PROXY: ${{ secrets.WELLFOUND_PROXY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require the proxy secret
+        if: env.HAVE_PROXY != 'true'
+        run: |
+          echo "::error::WELLFOUND_PROXY is not set, so this canary cannot reach wellfound.com and has tested nothing. Wellfound answers a datacenter address (a GitHub runner) with HTTP 403 on every route; set a residential exit: gh secret set WELLFOUND_PROXY --repo 2scraper/wellfound-scraper"
+          {
+            echo "### Canary did not run"
+            echo "No \`WELLFOUND_PROXY\` secret. A datacenter address cannot reach this"
+            echo "site, so without a residential exit there is nothing to test."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      # >= 3 pages, because with one page pagination is never exercised —
+      # which is exactly how a silent single-page bug survived in a sibling
+      # repo.
+      - name: Run
+        id: run
+        env:
+          # Through the environment, not argv. See the header.
+          WELLFOUND_PROXY: ${{ secrets.WELLFOUND_PROXY }}
+        run: |
+          set +e   # GitHub runs `run:` under `bash -e`, and a non-zero exit
+                   # would abort the step BEFORE the echo below.
+          python playwright_scraper.py \
+            --role software-engineer --remote \
+            --pages 3 --format both --proxy-budget-mb 10 --out canary
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Proxy traffic of the listing run
+        # The run meters what it sends through WELLFOUND_PROXY and stops at
+        # --proxy-budget-mb 10. This puts the figure in the step summary and
+        # fails the job when the cap was hit, so a page that has grown heavy
+        # is a red run rather than a quietly larger bill.
+        if: ${{ !cancelled() }}
+        run: python3 .github/proxy_traffic.py "listing" canary
+
+      - name: Check what came back
+        env:
+          EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+
+          code = int(os.environ["EXIT_CODE"])
+          if code != 0:
+              print(f"::error::The run exited {code}.")
+              # Interpret it rather than just failing: the codes mean
+              # different things and only some of them are this repo's fault.
+              print({
+                  3: "Blocked (exit 3). Wellfound refused the proxy exit. A "
+                     "residential exit answered 200 on every route three "
+                     "times out of three on 2026-09-17, so this is most "
+                     "likely the exit rather than the site — check the proxy "
+                     "credential before concluding the site changed.",
+                  4: "Zero jobs (exit 4). Either this role genuinely has no "
+                     "listings now, or the Apollo payload shape moved.",
+                  5: "Content not obtained (exit 5): a load timeout, a dead "
+                     "exit, or a page that was served but could not be read "
+                     "(parse_error). Check the saved debug page.",
+                  6: "Partial (exit 6): some pages came back and some did not.",
+              }.get(code, "See the log."))
+              sys.exit(1)
+
+          meta = json.load(open("canary.meta.json"))
+          rows = json.load(open("canary.json"))
+          print(json.dumps(meta, indent=1))
+
+          failures = []
+          def want(label, ok, detail):
+              if not ok:
+                  failures.append(f"{label}: {detail}")
+
+          want("status", meta["status"] == "complete", meta["status"])
+          want("pages_completed", meta["pages_completed"] == 3,
+               f'{meta["pages_completed"]} of 3')
+          want("no failed pages", not meta["pages_failed"],
+               str(meta["pages_failed"]))
+
+          # A landing page carries the jobs of TWENTY COMPANIES, not twenty
+          # jobs, so the per-page row count varies: 32, 37, 43 and 45 across
+          # the 2026-09-17 captures, and 37+38+39 = 114 on the first live
+          # 3-page run. The floor sits well under that on purpose — a
+          # threshold that fires on a healthy run teaches the reader to
+          # ignore it.
+          want("row floor", len(rows) >= 60, f"{len(rows)} rows")
+          # The site's own arithmetic must still be readable. If this goes
+          # None the Results node moved and pagination is flying blind.
+          want("the site still states its pageCount",
+               isinstance(meta.get("pages_available"), int)
+               and meta["pages_available"] > 0,
+               f'pages_available was {meta.get("pages_available")}')
+          want("the site still states a job total",
+               isinstance(meta.get("total_jobs"), int) and meta["total_jobs"] > 0,
+               f'total_jobs was {meta.get("total_jobs")}')
+
+          # The columns Wellfound fills on every record — 203 of 203 job
+          # records across the captures. NOT `compensation` (63 of 375 state
+          # no pay) and NOT `company_badges` (a company may have none).
+          for column in ("title", "url", "sku", "company_name", "company_id"):
+              filled = sum(1 for r in rows if r.get(column) not in (None, "", []))
+              share = 100.0 * filled / len(rows)
+              print(f"{column}: {filled}/{len(rows)} ({share:.0f}%)")
+              want(f"{column} coverage", share >= 99, f"{share:.0f}%")
+
+          # A landing row always carries a description; the /jobs feed's
+          # thinner type never does. This job scrapes a landing page, so a
+          # drop here means the Apollo type changed under us.
+          described = sum(1 for r in rows if r.get("description"))
+          print(f"description: {described}/{len(rows)}")
+          want("description coverage on a LANDING run",
+               100.0 * described / len(rows) >= 95,
+               f"{100.0 * described / len(rows):.0f}%")
+
+          # Pay is parsed out of a rendered string, so a share that collapses
+          # means the string shape moved even though the column still exists.
+          # Measured 83% over 375 rows; the floor is deliberately far below.
+          paid = sum(1 for r in rows if r.get("salary_min") is not None)
+          print(f"salary parsed: {paid}/{len(rows)} "
+                f"({100.0 * paid / len(rows):.0f}%)")
+          want("salary parse rate", 100.0 * paid / len(rows) >= 50,
+               f"{100.0 * paid / len(rows):.0f}% — the compensation string shape may have moved")
+
+          # The traps most likely to come back silently.
+          want("no salary_max below its salary_min",
+               not any(r.get("salary_min") is not None
+                       and r.get("salary_max") is not None
+                       and r["salary_max"] < r["salary_min"] for r in rows),
+               "a range came out inverted")
+          want("no equity written into a salary column",
+               not any(r.get("salary_min") is not None and r["salary_min"] < 100
+                       for r in rows),
+               "a percentage was read as a salary")
+          want("every row's data_source is apollo",
+               {r.get("data_source") for r in rows} == {"apollo"},
+               str({r.get("data_source") for r in rows}))
+
+          # page+position must be unique across pages, or the column is
+          # worthless — position restarts at 1 on every page.
+          pairs = [(r["page"], r["position"]) for r in rows]
+          want("page+position unique", len(set(pairs)) == len(pairs),
+               f"{len(pairs) - len(set(pairs))} collisions")
+          want("sku unique", len({r["sku"] for r in rows}) == len(rows),
+               "duplicate skus")
+          # The pages must not be the same page three times — which is what
+          # the site serves if a run walks past the end.
+          want("three distinct pages", len({r["page"] for r in rows}) == 3,
+               str(sorted({r["page"] for r in rows})))
+
+          print(f"Wellfound reports {meta.get('total_jobs')} job(s) at "
+                f"{meta.get('total_companies')} compan(ies) across "
+                f"{meta.get('pages_available')} page(s)")
+
+          if failures:
+              for line in failures:
+                  print(f"::error::{line}")
+              sys.exit(1)
+          print("All canary assertions passed.")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-listing
+          path: |
+            canary.json
+            canary.csv
+            canary.meta.json
+            canary_page*_debug.html
+          if-no-files-found: ignore
+
+  datacentre:
+    # Datacentre refusal expected — see the header. Exit 3 is accepted here
+    # ONLY because `listing` is the job that requires real rows.
+    name: bare runner (datacentre refusal expected)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Run from the runner's own address
+        id: run
+        run: |
+          set +e
+          python playwright_scraper.py \
+            --role software-engineer --remote \
+            --pages 1 --format json --proxy-budget-mb 10 --out bare
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Proxy traffic of the bare run
+        # No proxy on this job, so this reports "not metered"; kept so the
+        # summary says so rather than leaving the reader to guess.
+        if: ${{ !cancelled() }}
+        run: python3 .github/proxy_traffic.py "datacentre" bare
+
+      - name: Check the refusal was recognised
+        env:
+          EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+        run: |
+          code="$EXIT_CODE"
+          if [ "$code" = "3" ]; then
+            if ls bare_page1_debug.html >/dev/null 2>&1; then
+              echo "::notice::Datacentre refusal recognised (exit 3), as expected from a GitHub runner. Real data is checked by the 'listing' job."
+              exit 0
+            fi
+            echo "::error::Exit 3 without the refusal page saved — the block path did not run as designed."
+            exit 1
+          fi
+          if [ "$code" = "0" ]; then
+            rows=$(python -c "import json; print(len(json.load(open('bare.json'))))")
+            if [ "$rows" -ge 20 ]; then
+              echo "::notice::Wellfound served the bare runner ($rows rows). The datacentre gating may have changed; re-measure."
+              exit 0
+            fi
+            echo "::error::Exit 0 with only $rows rows."
+            exit 1
+          fi
+          echo "::error::The bare-runner run exited $code: neither a recognised refusal (3) nor real rows (0). 5 means content was not obtained (timeout or an unreadable page); 1 is a crash."
+          exit 1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-datacentre
+          path: |
+            bare.json
+            bare.meta.json
+            bare_page1_debug.html
+          if-no-files-found: ignore
