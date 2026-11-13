@@ -28,6 +28,7 @@ import json
 import logging
 import math
 import re
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -64,6 +65,44 @@ _VIDEO_DURATION_KEY = 76647426  # presence indicates a video; we skip those
 _LIVEPHOTO_KEY = 146008172
 _LOCATION_HEADER_BYTES = 256 * 1024
 
+# -- Pagination outcome ------------------------------------------------------
+# The five mutually exclusive ways a ``fetch_album`` run can end. The first
+# four describe pagination itself; ``not_started`` means the share HTML never
+# yielded album keys, so no batchexecute page was ever requested.
+SCRAPE_STOP_EMPTY_TOKEN = "empty_token"        # next-page token missing: album exhausted
+SCRAPE_STOP_NO_NEW_ITEMS = "no_new_items"      # a page added zero unseen photos
+SCRAPE_STOP_LIMIT = "limit_reached"            # hit the hard 20_000-item ceiling
+SCRAPE_STOP_PAGE_ERROR = "page_error"          # a batchexecute page raised
+SCRAPE_STOP_NOT_STARTED = "not_started"        # no album key in the share HTML
+
+
+@dataclass(frozen=True)
+class ScrapeOutcome:
+    """How a :func:`fetch_album` run ended, so callers can spot truncation.
+
+    ``failure_type`` deliberately carries only the exception *type name*
+    (e.g. ``"TimeoutError"``); it must never hold a URL, album key, auth key
+    or response body.
+    """
+
+    complete: bool
+    pages_fetched: int
+    failed_page: int | None
+    failure_type: str | None
+    limit_reached: bool
+    stop_reason: str
+
+
+def _outcome_not_started() -> ScrapeOutcome:
+    return ScrapeOutcome(
+        complete=False,
+        pages_fetched=0,
+        failed_page=None,
+        failure_type=None,
+        limit_reached=False,
+        stop_reason=SCRAPE_STOP_NOT_STARTED,
+    )
+
 
 class _AlbumKeys:
     __slots__ = ("album_key", "auth_key")
@@ -75,8 +114,13 @@ class _AlbumKeys:
 
 async def fetch_album(
     session, share_url: str, *, timeout: float = 30.0
-) -> tuple[str | None, list[MediaItem], set[str]]:
-    """Fetch a shared album in full. Returns (title, items, video_keys).
+) -> tuple[str | None, list[MediaItem], set[str], ScrapeOutcome]:
+    """Fetch a shared album in full.
+
+    Returns ``(title, items, video_keys, outcome)``. The first three values
+    keep their historical shape; ``outcome`` is a :class:`ScrapeOutcome`
+    describing how pagination ended so callers can tell a truncated album
+    apart from a complete one (and which page failed, and why).
 
     The HTML page is fetched once - just to recover the album/auth keys and
     title. All actual photo enumeration goes through Google's ``batchexecute``
@@ -85,16 +129,26 @@ async def fetch_album(
     ``video_keys`` holds the media keys of items skipped as video. The
     publicalbum.org source returns no media type at all, so it relies on these
     to drop the same videos (see #26).
+
+    A failing page never propagates: photos collected on earlier pages are
+    returned and ``outcome`` records the failure (page number and exception
+    type name only). When the share HTML itself yields no album key, an empty
+    list is returned and ``outcome`` is marked as pagination not started.
     """
     video_keys: set[str] = set()
     keys, title = await _fetch_album_keys(session, share_url, timeout=timeout)
     if keys is None:
-        return None, [], video_keys
+        return None, [], video_keys, _outcome_not_started()
 
     items: list[MediaItem] = []
     seen_urls: set[str] = set()
     page_id: str | None = None
     page_no = 0
+    pages_fetched = 0
+    failed_page: int | None = None
+    failure_type: str | None = None
+    limit_reached = False
+    stop_reason: str = SCRAPE_STOP_EMPTY_TOKEN
     while True:
         page_no += 1
         try:
@@ -102,12 +156,19 @@ async def fetch_album(
                 session, keys, page_id, timeout=timeout, video_keys=video_keys
             )
         except Exception as err:
+            # Keep only the exception type name - never the message, which may
+            # embed the request URL, album key or response body.
+            failed_page = page_no
+            failure_type = type(err).__name__
+            stop_reason = SCRAPE_STOP_PAGE_ERROR
             _LOGGER.warning(
-                "Album scrape: page %d batchexecute failed (%s); returning %d items so far",
-                page_no, err, len(items),
+                "Album scrape: page %d batchexecute failed (%s); "
+                "returning %d items so far",
+                page_no, failure_type, len(items),
             )
             break
 
+        pages_fetched += 1
         added = 0
         for it in page_items:
             if it.url in seen_urls:
@@ -121,14 +182,34 @@ async def fetch_album(
             "Album scrape: page %d returned %d items (%d new), running total %d",
             page_no, len(page_items), added, len(items),
         )
-        if not page_id or len(items) >= _MAX_ITEMS or added == 0:
+        # The four stop conditions are checked in a fixed order so that each
+        # run lands on exactly one, unambiguous stop_reason.
+        if len(items) >= _MAX_ITEMS:
+            limit_reached = True
+            stop_reason = SCRAPE_STOP_LIMIT
+            break
+        if not page_id:
+            stop_reason = SCRAPE_STOP_EMPTY_TOKEN
+            break
+        if added == 0:
+            stop_reason = SCRAPE_STOP_NO_NEW_ITEMS
             break
 
-    _LOGGER.info(
-        "Album scraper: batchexecute fetched %d photos in %d page(s)",
-        len(items), page_no,
+    outcome = ScrapeOutcome(
+        complete=stop_reason == SCRAPE_STOP_EMPTY_TOKEN,
+        pages_fetched=pages_fetched,
+        failed_page=failed_page,
+        failure_type=failure_type,
+        limit_reached=limit_reached,
+        stop_reason=stop_reason,
     )
-    return title, items, video_keys
+    _LOGGER.info(
+        "Album scraper: batchexecute fetched %d photos in %d page(s) "
+        "(complete=%s, stop_reason=%s%s)",
+        len(items), pages_fetched, outcome.complete, stop_reason,
+        f", failed_page={failed_page} ({failure_type})" if failed_page else "",
+    )
+    return title, items, video_keys, outcome
 
 
 async def fetch_metadata_keys(session, share_url: str, *, timeout: float = 15.0):

@@ -613,3 +613,292 @@ def test_google_location_header_rejects_invalid_responses(status, content_type, 
     session = SimpleNamespace(get=lambda *args, **kwargs: response)
     with pytest.raises(ValueError):
         asyncio.run(gs.fetch_photo_location_header(session, "https://lh3.googleusercontent.com/photo"))
+
+
+# -- fetch_album: pagination outcome ----------------------------------------
+# Everything below is fully offline: the fake session serves canned share
+# HTML and batchexecute bodies, so no test here touches a real Google service.
+
+_SHARE_URL = "https://photos.app.goo.gl/testAlbum"
+_ALBUM_KEY = "AF1QipAlbumKey_abc-123"
+_AUTH_KEY = "AuthKey_secret-xyz_456"
+
+
+class _FakeHtmlResponse:
+    status = 200
+
+    def __init__(self, html):
+        self._html = html
+        self.headers = {"Content-Type": "text/html; charset=utf-8"}
+
+    def raise_for_status(self):
+        return None
+
+    async def text(self):
+        return self._html
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class _FakePageResponse:
+    status = 200
+
+    def __init__(self, body):
+        self._body = body
+
+    def raise_for_status(self):
+        return None
+
+    async def text(self):
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class _FakeTimeout(Exception):
+    """Stands in for asyncio.TimeoutError / aiohttp.ClientTimeout."""
+
+
+class _FailingPage:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def raise_for_status(self):
+        return None
+
+    async def __aenter__(self):
+        raise self._exc
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class _FakeSession:
+    """One GET for the share HTML, then scripted batchexecute pages."""
+
+    def __init__(self, html, page_responses):
+        self._html = html
+        self._page_responses = list(page_responses)
+        self.post_urls = []
+        self.post_bodies = []
+        self.page_calls = 0
+
+    def get(self, url, **kwargs):
+        return _FakeHtmlResponse(self._html)
+
+    def post(self, url, **kwargs):
+        self.post_urls.append(url)
+        self.post_bodies.append(kwargs.get("data", ""))
+        self.page_calls += 1
+        return self._page_responses.pop(0)
+
+
+def _share_html(with_keys=True):
+    if not with_keys:
+        return "<html><body>no album data here</body></html>"
+    return (
+        "<html><head><title>My Vacation - Google Photos</title></head><body>"
+        f'<script>"snAcKc",request:["{_ALBUM_KEY}",null,null,"{_AUTH_KEY}"]</script>'
+        "</body></html>"
+    )
+
+
+def _page_photo(page, index):
+    return [
+        f"mk-p{page}-{index}",
+        [f"https://lh3.googleusercontent.com/p{page}-{index}", 1920, 1080],
+        1700000000000,
+        "dedup",
+    ]
+
+
+def _page_body(page, count, next_page_id):
+    return _make_batchexecute_response(
+        [_page_photo(page, i) for i in range(count)], next_page_id
+    )
+
+
+def _session(pages, *, with_keys=True):
+    return _FakeSession(_share_html(with_keys), pages)
+
+
+def test_fetch_album_paginates_until_empty_token_and_reports_complete():
+    session = _session([
+        _FakePageResponse(_page_body(1, 2, "token-page-2")),
+        _FakePageResponse(_page_body(2, 3, None)),  # empty token: album exhausted
+    ])
+
+    title, items, video_keys, outcome = asyncio.run(
+        gs.fetch_album(session, _SHARE_URL)
+    )
+
+    assert title == "My Vacation"
+    assert len(items) == 5
+    assert [it.source_id for it in items] == [
+        "mk-p1-0", "mk-p1-1", "mk-p2-0", "mk-p2-1", "mk-p2-2",
+    ]
+    assert video_keys == set()
+    assert session.page_calls == 2
+    assert outcome.complete is True
+    assert outcome.pages_fetched == 2
+    assert outcome.failed_page is None
+    assert outcome.failure_type is None
+    assert outcome.limit_reached is False
+    assert outcome.stop_reason == gs.SCRAPE_STOP_EMPTY_TOKEN
+
+
+def test_fetch_album_keeps_first_page_when_second_page_times_out():
+    session = _session([
+        _FakePageResponse(_page_body(1, 2, "token-page-2")),
+        _FailingPage(_FakeTimeout("connection timed out")),
+    ])
+
+    # The page error must not escape fetch_album.
+    title, items, video_keys, outcome = asyncio.run(
+        gs.fetch_album(session, _SHARE_URL)
+    )
+
+    assert title == "My Vacation"
+    assert len(items) == 2
+    assert [it.source_id for it in items] == ["mk-p1-0", "mk-p1-1"]
+    assert video_keys == set()
+    assert session.page_calls == 2
+    assert outcome.complete is False
+    assert outcome.pages_fetched == 1
+    assert outcome.failed_page == 2
+    assert outcome.failure_type == "_FakeTimeout"
+    assert outcome.limit_reached is False
+    assert outcome.stop_reason == gs.SCRAPE_STOP_PAGE_ERROR
+
+
+def test_fetch_album_failure_type_never_leaks_urls_keys_or_bodies(caplog):
+    secret_body = _page_body(1, 1, "token-page-2")
+    leaky_error = _FakeTimeout(
+        f"POST https://photos.google.com/album/{_ALBUM_KEY}?key={_AUTH_KEY} "
+        f"failed after body {secret_body}"
+    )
+    session = _session([
+        _FakePageResponse(_page_body(1, 1, "token-page-2")),
+        _FailingPage(leaky_error),
+    ])
+
+    with caplog.at_level("WARNING"):
+        _, items, _, outcome = asyncio.run(gs.fetch_album(session, _SHARE_URL))
+
+    assert len(items) == 1
+    assert outcome.failure_type == "_FakeTimeout"
+    logged = "\n".join(caplog.messages)
+    assert _ALBUM_KEY not in logged
+    assert _AUTH_KEY not in logged
+    assert "photos.google.com" not in logged
+    assert "wrb.fr" not in logged
+    assert _SHARE_URL not in logged
+
+
+def test_fetch_album_single_page_with_empty_token_is_complete():
+    session = _session([_FakePageResponse(_page_body(1, 3, None))])
+
+    _, items, _, outcome = asyncio.run(gs.fetch_album(session, _SHARE_URL))
+
+    assert len(items) == 3
+    assert session.page_calls == 1
+    assert outcome.complete is True
+    assert outcome.pages_fetched == 1
+    assert outcome.failed_page is None
+    assert outcome.failure_type is None
+    assert outcome.limit_reached is False
+    assert outcome.stop_reason == gs.SCRAPE_STOP_EMPTY_TOKEN
+
+
+def test_fetch_album_without_album_keys_returns_empty_not_started_outcome():
+    session = _session([], with_keys=False)
+
+    title, items, video_keys, outcome = asyncio.run(gs.fetch_album(
+        session, _SHARE_URL
+    ))
+
+    assert title is None
+    assert items == []
+    assert video_keys == set()
+    assert session.page_calls == 0  # pagination never began
+    assert outcome.complete is False
+    assert outcome.pages_fetched == 0
+    assert outcome.failed_page is None
+    assert outcome.failure_type is None
+    assert outcome.limit_reached is False
+    assert outcome.stop_reason == gs.SCRAPE_STOP_NOT_STARTED
+
+
+def test_fetch_album_stops_and_reports_when_the_item_limit_is_hit(monkeypatch):
+    monkeypatch.setattr(gs, "_MAX_ITEMS", 3)
+    session = _session([
+        _FakePageResponse(_page_body(1, 2, "token-page-2")),
+        _FakePageResponse(_page_body(2, 2, "token-page-3")),
+        _FakePageResponse(_page_body(3, 2, None)),
+    ])
+
+    _, items, _, outcome = asyncio.run(gs.fetch_album(session, _SHARE_URL))
+
+    assert len(items) == 3
+    assert session.page_calls == 2  # page 3 never requested
+    assert outcome.complete is False
+    assert outcome.pages_fetched == 2
+    assert outcome.failed_page is None
+    assert outcome.failure_type is None
+    assert outcome.limit_reached is True
+    assert outcome.stop_reason == gs.SCRAPE_STOP_LIMIT
+
+
+def test_fetch_album_stops_when_a_page_adds_no_new_photos():
+    # Page 2 repeats page 1's URLs exactly, so nothing new is added even
+    # though Google still hands back a continuation token.
+    repeated = _page_body(1, 2, "token-page-2")
+    session = _session([
+        _FakePageResponse(repeated),
+        _FakePageResponse(repeated),
+    ])
+
+    _, items, _, outcome = asyncio.run(gs.fetch_album(session, _SHARE_URL))
+
+    assert len(items) == 2
+    assert session.page_calls == 2
+    assert outcome.complete is False
+    assert outcome.pages_fetched == 2
+    assert outcome.failed_page is None
+    assert outcome.failure_type is None
+    assert outcome.limit_reached is False
+    assert outcome.stop_reason == gs.SCRAPE_STOP_NO_NEW_ITEMS
+
+
+def test_fetch_album_still_collects_video_keys_while_paginating():
+    photo = _page_photo(1, 0)
+    video = [
+        "mk-video-1",
+        ["https://lh3.googleusercontent.com/v1", 1920, 1080],
+        1700000000000,
+        "dedup",
+        None,
+        None,
+        {"76647426": [12345]},
+    ]
+    session = _session([
+        _FakePageResponse(_make_batchexecute_response([photo, video], None)),
+    ])
+
+    _, items, video_keys, outcome = asyncio.run(
+        gs.fetch_album(session, _SHARE_URL)
+    )
+
+    assert len(items) == 1
+    assert video_keys == {"mk-video-1"}
+    assert outcome.complete is True
+    assert outcome.pages_fetched == 1
+

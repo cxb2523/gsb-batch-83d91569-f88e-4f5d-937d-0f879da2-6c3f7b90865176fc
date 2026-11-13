@@ -3437,16 +3437,33 @@ class AlbumCoordinator(DataUpdateCoordinator):
         # Media keys the scraper identified as video. publicalbum.org returns
         # no media type at all, so this is what lets us drop them there too.
         video_keys: set[str] = set()
+        # How the scraper's pagination ended (truncation/page failure details).
+        scrape_outcome = None
         try:
             from . import google_scraper
 
-            scraped_title, scraped_items, video_keys = await google_scraper.fetch_album(
-                session, album_url
+            scraped_title, scraped_items, video_keys, scrape_outcome = (
+                await google_scraper.fetch_album(session, album_url)
             )
         except Exception as err:  # never let scrape failure break the integration
             _LOGGER.debug(
                 "Google shared album: scrape raised %s; falling back to publicalbum.org",
                 err,
+            )
+
+        if scrape_outcome is not None and not scrape_outcome.complete:
+            _LOGGER.warning(
+                "Google shared album scrape is incomplete (stop_reason=%s, "
+                "pages_fetched=%d, items=%d%s)",
+                scrape_outcome.stop_reason,
+                scrape_outcome.pages_fetched,
+                len(scraped_items),
+                (
+                    f", failed_page={scrape_outcome.failed_page} "
+                    f"({scrape_outcome.failure_type})"
+                )
+                if scrape_outcome.failed_page
+                else "",
             )
 
         # Run publicalbum.org in parallel-ish: only call it if scrape was thin.
@@ -3460,6 +3477,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
             return {
                 "title": scraped_title or self.entry.title,
                 "items": scraped_items,
+                "scrape_outcome": scrape_outcome,
             }
 
         try:
@@ -3473,6 +3491,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 return {
                     "title": scraped_title or self.entry.title,
                     "items": scraped_items,
+                    "scrape_outcome": scrape_outcome,
                 }
             raise
 
@@ -3550,6 +3569,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
             return {
                 "title": scraped_title or result.get("title") or self.entry.title,
                 "items": scraped_items,
+                "scrape_outcome": scrape_outcome,
             }
 
         if not api_items and not scraped_items:
@@ -3577,4 +3597,5 @@ class AlbumCoordinator(DataUpdateCoordinator):
         return {
             "title": result.get("title") or self.entry.title,
             "items": api_items,
+            "scrape_outcome": scrape_outcome,
         }
