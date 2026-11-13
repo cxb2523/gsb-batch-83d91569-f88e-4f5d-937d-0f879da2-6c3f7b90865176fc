@@ -1,0 +1,58 @@
+name: Site changed
+description: TikTok changed something and this scraper no longer reads it.
+labels: ["site-change"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The most common way a scraper stops working, and worth its own report
+        because the fix is different from a code bug: something on
+        `shop.tiktok.com` moved.
+
+        This repo reads one structured source, never the rendered page:
+        `<script id="__MODERN_ROUTER_DATA__">` → `loaderData[…].page_config.components_map[*].component_data.product_info`, found by shape and never by index.
+
+        **Never paste an API key, a proxy password or a `ws://…` endpoint.**
+
+  - type: dropdown
+    id: what_broke
+    attributes:
+      label: What stopped working
+      options:
+        - Exit 3 through a Scraping Browser profile that used to work
+        - A served page reported as a challenge (a marker firing on a good page)
+        - 0 rows on a page that visibly shows a product
+        - Price, currency or discount wrong
+        - A column is null or wrong (say which)
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: What you asked for
+      description: The exact target, the exit you used (datacentre, residential, or Scraping Browser), and its country.
+      placeholder: "https://shop.tiktok.com/view/product/1732432759321694958 (exit: datacentre, FI)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: |
+        A capture beats a description.
+
+        Run with `--dump-html` and attach the `<out>_product_<ID>.json` it writes. Say whether it came through `--cdp-endpoint`, and never paste the endpoint itself.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it reproduces on a second engine, from a different exit, and
+        when it last worked.

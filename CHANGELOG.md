@@ -1,0 +1,222 @@
+# Changelog
+
+All notable changes to this project are documented here. Keep a Changelog
+format; SemVer as closely as a CLI toolkit can manage.
+
+## [Unreleased]
+
+### Changed
+
+- CI only: the scheduled canary now starts at 09:07 UTC (Mondays) instead of 06:47, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.
+- CI only: the canary bills a Scraping Browser session (`TIKTOK_CDP_ENDPOINT`),
+  so it now runs weekly (Mondays 06:47 UTC) instead of daily; a manual dispatch
+  still runs it.
+
+## [0.2.0] — 2026-10-15
+
+> **Behaviour changes.**
+> - A served product page that parses to no product is now a parser
+>   failure: the run exits 5 (6 if other products were read), with the page
+>   in `pages_failed`. It used to be reported as "product unavailable",
+>   exit 4. Exit 4 remains for the shop's own "does not exist" error code.
+> - Output files are no longer always 0600: a new file gets the mode the
+>   umask allows (0644 under umask 022), and a replaced file keeps its mode.
+> - In the CSV only, text cells beginning with `=`, `+`, `-`, `@`, a tab or a
+>   line break get a leading `'`. The sidecar counts them as
+>   `csv_cells_escaped`. JSON is unchanged.
+> - Negative `--retries`, `--retry-delay`, `--delay` and
+>   `--proxy-block-retries`, and `--pages`/`--concurrency` below 1, are
+>   refused with exit 2 naming the flag, in all three engines (and
+>   `--retries`, `--retry-delay`, `--timeout` in `scraper_api_client.py`).
+>   `--retries 0` is still accepted and fetches each page once.
+> - `scraper_api_client.py` refuses with exit 2 before asking for a key.
+>   It used to ask for a key and then exit 5.
+> - The canary fails, rather than skipping green, when the
+>   `TIKTOK_CDP_ENDPOINT` secret is not set.
+
+### Fixed
+
+- The Selenium engine's comment claimed every classified response carried
+  an HTTP status; it never does through Selenium, and the comment now says
+  so.
+- Removed unused session methods (`post_json`) and an unread
+  `client_version` slot from every transport, and the pagination stop
+  reasons that nothing in this repo produces.
+- The README and `.env.example` no longer claim that Scraping Browser
+  credentials last about a day; that figure was not measured here.
+- Comments and docs state their rules directly instead of citing internal
+  notes, and a check keeps it that way.
+
+## [0.1.2] — 2026-09-29
+
+> **Behaviour changes.** `region` is the market (`US`), not the language
+> (`en-US`). A page is "product unavailable" (exit 4) only when the shop
+> says so with its own error code; TikTok's risk frame is blocked (exit 3),
+> and an unrecognised frame is a parse error — both used to read as
+> "product unavailable". A page refused once and then served is no longer
+> blocked.
+
+### Fixed
+
+- **A recovered page is not a blocked one.** `_fetch_with_policy` kept a
+  "refusal seen" flag that a later successful attempt never cleared, so a
+  retry that got the page still reported it blocked. Measured live on
+  2026-09-29 (pyppeteer, @nasa): one empty HTTP 200, then the profile,
+  then `partial` / `stop_reason: blocked` with `pages_failed: []`. And the
+  HTTP -> browser switch spent a `--retries` attempt, so with `--retries 0`
+  a browser started and was never asked for the page. Both fixed in all
+  three engines, with a check that drives the real function.
+- **`region` held the language.** It read `basic_info.lang` ("en-US"); it
+  now reads the shop's own `region` ("US"), and the sidecar records the
+  page's `region_info` (sale, IP and path region, and the canonical
+  address) per product.
+- **"Product unavailable" was any frame without a product.** Counting the
+  captures: the two real missing products carry the shop's own
+  `error_code` 23002002; the two other pages read as missing were TikTok's
+  risk frame (a search route, `risk_level: medium`, no page config at
+  all). Now: the site's code is unavailable (exit 4), the risk frame is a
+  new `risk_refused` state treated as blocked (exit 3), and anything else
+  is a parse error. Two pinned checks that asserted the old reading were
+  rewritten on the real shape.
+- **A regional URL is reported, not silently re-routed.** A `/gb/pdp/…`
+  URL is fetched as `/view/product/{id}` — the one address measured
+  working — and the run now warns that the exit, not the path, picks the
+  market. Fetching the regional path was not changed because it has never
+  been measured.
+- **The canary badge was green when nothing had been scraped.** It is now
+  a fixed grey "skipped without a CDP profile" badge.
+> **`diff_runs.py` never reported a price change.** Its `TRACKED_FIELDS`
+> were tiktok-profile-scraper's account columns, 26 of which `ShopProduct`
+> does not have, and `price` was not among them — while the README says a
+> price change reported by `diff_runs.py` is ordinary here. It now tracks
+> this repo's own columns (price, discount, sales, rating, shop figures,
+> shipping). `smoke_test.py` pins every tracked name against the dataclass
+> and checks that a changed column is actually reported.
+
+> **A copied `.env.example` set `TIKTOK_URL=nasa`**, a TikTok handle, which
+> is not a product. It is now a real product id, and the file says the
+> Scraping Browser endpoint is the access here rather than calling a key
+> unnecessary because "a profile page is served".
+
+- **Donor prose removed from the shared core.** `output_writer.py`,
+  `diff_runs.py`, the engines, `page_flow.py`, `smoke_test.py`,
+  `.github/ci_checks.py` and the `Dockerfile` carried text from the repos
+  this core was copied from — YouTube comment threads, `--sort top`,
+  reply threads, job listings, "the business", `--mode comments --out
+  software-engineer` — describing those sites as if they were this one.
+  Rewritten from this repo's own README, code and fixtures, or deleted
+  where there was no measured equivalent. Explicit sibling provenance
+  ("measured on tiktok-profile-scraper's route", "a sibling repo
+  (youtube-scraper) had…") is kept and now says whose it is.
+- tiktok-ads-scraper leftovers removed: an unused `capture_search_token`
+  / `_click_search` pair in all three engines, Selenium's performance-log
+  capability that only existed for it, an unused `Advertisement` alias, an
+  unused `page_flow.sample_share` with the Ad Library's numbers in it, and
+  `SOURCE_DEFAULT`'s comment about the Ad Library.
+- `page_flow.py`, the engines and `smoke_test.py` described a profile
+  page, an account and `video_unavailable`; they now describe a product
+  page. `run_meta`'s test data is a `product` run on `shop.tiktok.com`.
+- `.github/ci_checks.py` no longer exempts an `avatar_id` column this repo
+  does not have from the credential scan.
+
+- `captcha_solver.py`'s docstring pointed at a "No DataDome solver" section
+  that does not exist in this repo (it came with the copied core). Removed.
+- **The Scraper API engine failed on every `--wait-text` / `--wait-element` /
+  `--wait-state` call, and was billed for it.** It sent `waitFor` as a
+  JSON-encoded string; measured 2026-09-23 the live API answers that with
+  HTTP 422 "params.waitFor must be an object" and still charges $0.0005,
+  while the same request with an object is answered 200. It is now sent as
+  an object. (The target status was already read from `http_code`; the new
+  regression check pins that too, driving the real `fetch_html` with
+  `requests.post` stubbed.)
+- **`--wait-state networkidle` is refused by the Scraper API** (HTTP 422
+  "params.waitFor.state must be one of: load, domcontentloaded", still
+  billed — measured 2026-09-23 on a sibling repo with the object-shaped
+  `waitFor`). The choice is removed.
+
+## [0.1.1] — 2026-09-23
+
+> **Correction to v0.1.0.** It described a 2Captcha captcha-solving method
+> for TikTok as available and shipped two CLI flags for its parameters.
+> That method is deprecated. Both flags are removed (nothing read them),
+> and the documentation no longer offers it. The challenge policy
+> for the slide puzzle now says `solve: False`, which is what the code
+> already did.
+
+## [0.1.0] — 2026-09-22
+
+First release. Reads TikTok Shop product listings.
+
+### The access, measured
+
+TikTok Shop's web surface is behind TikTok's own slide-puzzle captcha.
+Measured 2026-09-22, every combination available:
+
+    curl                       datacentre                Security Check
+    curl                       US residential            Security Check
+    headless Chromium          datacentre                Security Check
+    headful Chromium           datacentre                Security Check
+    headless Chromium          US residential (Comcast)  Security Check
+    Scraping Browser           fresh profile             Security Check
+    Scraping Browser           profile that had already
+                               visited tiktok.com        SERVED, 3 of 3
+
+A `pid-` profile keeps its cookies between connections. `--warm` (on by
+default) is what gets a NEW profile there; a local browser warmed the same
+way reached 11 cookies and was still refused.
+
+This is the one repo in the family where a paid product is the access.
+
+### What is NOT claimed
+
+* THIS REPO does not solve the shop's slide puzzle; it implements no
+  solver for ByteDance's captcha. The access is a warmed profile.
+* The Scraping Browser's auto-solve extension does not cover it either:
+  sixteen hunters injected, ByteDance's widget untouched, no
+  `Captcha.solveFinished` across three routes and 35-second waits.
+
+### The marker that cost three live runs
+
+`oec-ttweb-captcha` was in the shared marker set, adopted on a count of 25
+captures from `tiktok.com` — 0 served, 2 challenge — because no served
+TikTok Shop page existed to count it on. Once one did, the count inverted:
+**5 on served shop pages against 8 on challenges.** The shop loads its
+captcha SDK on every page. While it was carried, this engine reported exit
+3 on a 240 KB page holding the product it had asked for.
+
+Removed from `tiktok_payload.py`, which is byte-identical across four
+repos — so all four digests move in that commit, which is what the digest
+is for.
+
+### Two more bugs this build found in itself
+
+* **Warming was a no-op.** It used the shared readiness primitive, which
+  returns the moment its selector matches — and this repo's selector ends
+  in `body`. So the "warm" was a navigation and nothing else. Replaced
+  with an explicit dwell.
+* **The settle loop gave up too early.** It stopped as soon as the state
+  was readable, and `challenge` is readable — so it read the challenge on
+  a session that was about to be served. It now waits the challenge OUT,
+  which is what the successful probe did (13–15 s).
+
+### Also measured
+
+* Prices MOVE: two fetches of one listing minutes apart gave 100.80 and
+  94.81.
+* The page states TikTok's OWN verdict on the request — `bot_info.is_bot`
+  and `basic_info.risk_level` — which most sites leave to be inferred.
+  Both are columns.
+* The shipping fee lives under an opaque warehouse-id key and is found by
+  walking, not by naming; a first attempt returned null on a page that
+  plainly states 7.99.
+* A description is structured BLOCKS, not text. Written through raw, the
+  column holds JSON that looks populated and is unreadable.
+* An unreviewed product has null rating and null count, never zero.
+
+### Deliberately not here
+
+* **Shop search.** `/shop/s/{query}` redirects away with
+  `enter_method=not_supported_region`, from a US exit as well as a
+  datacentre.
+* **A Scraper API path.** The access is a persistent browser profile; that
+  service fetches a URL per call.

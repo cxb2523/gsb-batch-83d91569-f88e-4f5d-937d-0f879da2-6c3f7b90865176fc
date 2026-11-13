@@ -1,0 +1,251 @@
+# TikTok Shop Scraper — Product Prices, Sales and Sellers in Python
+
+[![release](https://img.shields.io/github/v/release/2scraper/tiktok-shop-scraper?sort=semver)](https://github.com/2scraper/tiktok-shop-scraper/releases)
+[![tests](https://github.com/2scraper/tiktok-shop-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/tiktok-shop-scraper/actions/workflows/tests.yml)
+[![canary](https://github.com/2scraper/tiktok-shop-scraper/actions/workflows/canary.yml/badge.svg)](#the-canary)
+[![python](https://img.shields.io/badge/python-3.9%20%7C%203.12-blue)](pyproject.toml)
+[![licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+[![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20pyppeteer%20%7C%20CDP-informational)](#what-it-took-to-get-a-single-product-page)
+[![needs the Scraping Browser API](https://img.shields.io/badge/needs-Scraping%20Browser%20API-orange)](#what-it-took-to-get-a-single-product-page)
+
+**TikTok Shop scraper** — an open-source (MIT) Python tool that reads TikTok Shop product pages and writes price and original price, discount, units sold, rating and review count, the seller and their shop statistics and the shipping fee to JSON or CSV. Measured 2026-09-22, curl, local Chromium and a US residential exit all got TikTok's Security Check page, and only a 2Captcha Scraping Browser API profile that had already visited tiktok.com was served (3 of 3 product pages), so this repo asks for `--cdp-endpoint`. Use it for product price monitoring, or compare two runs with `diff_runs.py`.
+
+Extract TikTok Shop product listings — price and original price, the
+discount, units sold, rating and review count, the seller and their shop
+statistics, images, shipping fee and package dimensions.
+
+**This is the one repo in the tiktok-* family where a paid product is the
+access rather than a convenience.** Its three siblings say you need none
+of them and mean it. This one says the opposite, and the measurement is
+below.
+
+---
+
+## What it took to get a single product page
+
+TikTok Shop's web surface is behind TikTok's own slide-puzzle captcha —
+a "Security Check" page of about 11 KB served under HTTP 200. Measured
+**2026-09-22**, every combination available:
+
+| client | exit | result |
+|---|---|---|
+| `curl` | Hetzner datacentre | Security Check |
+| `curl` | US residential | Security Check |
+| headless Chromium | Hetzner datacentre | Security Check |
+| headful Chromium | Hetzner datacentre | Security Check |
+| headless Chromium | US residential (Comcast, Washington) | Security Check |
+| **2Captcha Scraping Browser**, fresh profile | US | Security Check |
+| **2Captcha Scraping Browser**, profile that had already visited tiktok.com | US | **SERVED — 3 of 3 product pages** |
+
+A Scraping Browser `pid-` profile keeps its cookies between connections.
+Once it has been through `tiktok.com` it stays served: a later run that
+connected cold and went straight to a product was served 3 of 3 on a
+profile already carrying ~30 cookies. A local browser warmed exactly the
+same way reached 11 cookies and was still refused.
+
+So `--cdp-endpoint` is what this repo asks for, and `--warm` (on by
+default) is what gets a **new** profile there — two page loads on
+tiktok.com before the first product.
+
+```bash
+./venv/bin/python playwright_scraper.py \
+    --url 1732432759321694958 \
+    --cdp-endpoint "ws://{login}-zone-scraping_browser-country-us-pid-{profileId}:{password}@cb.2captcha.com:9222"
+```
+
+**One clone, one virtualenv.** The four tiktok-* repos share top-level
+module names (`product_parser`, `output_writer`, `playwright_scraper`, …),
+so `pip install .` of two of them into one environment makes the second
+silently replace the first. The commands above never do that — keep it
+that way, and give each repo its own venv.
+
+Without `--cdp-endpoint` the run **warns and tries anyway**, and will
+almost certainly exit 3. It is a warning rather than a refusal on purpose:
+a transport that refuses to try can never report that the site has
+changed.
+
+---
+
+## What is NOT claimed here about the captcha
+
+This matters enough to state precisely, because the easiest thing to write
+would be wrong.
+
+* **This repo does not solve the shop's slide puzzle.** It implements no
+  solver for ByteDance's captcha (`oec-ttweb-captcha`, verification endpoint
+  `api-verification.tiktokshop.com`). What gets a run in is a Scraping
+  Browser profile that has already visited tiktok.com — see the table above.
+* **The Scraping Browser's auto-solve extension does not cover it
+  either.** It injected all sixteen of its hunters into the challenge page
+  — turnstile, recaptcha, arkose, geetest, amazon_waf and the rest — and
+  left ByteDance's widget untouched. `Captcha.setAutoSolve` returned `{}`
+  and no `Captcha.solveFinished` event fired, across three shop routes
+  with waits up to 35 seconds.
+
+No sentence here says the captcha cannot be solved. That would be a claim
+about a vendor, and the only claim a repo is entitled to is about itself.
+**No money was spent** establishing any of the above: every rejected task
+was rejected before creation.
+
+---
+
+## The marker that cost three live runs
+
+Worth reading if you maintain anything in this family.
+
+`oec-ttweb-captcha` was in the shared marker set, adopted on a count of 25
+captures — 0 on every served page, 2 on the challenge — and every one of
+those captures came from `tiktok.com`, because at the time **no served
+TikTok Shop page existed to count it on**.
+
+Once one did, the count inverted. Across 5 served shop pages and 4
+challenge pages:
+
+| marker | served | challenge |
+|---|---:|---:|
+| `oec-ttweb-captcha` | **5** | 8 |
+| `secsdk-captcha` | 0 | 12 |
+| `captcha-init` | 0 | 4 |
+| `captcha_verify_img_slide` | 0 | 3 |
+| `captcha_verify_container` | 0 | 3 |
+
+The shop loads its captcha SDK on **every** page, ready to fire. So the
+loader's name is a fact about the route, not a signal about the response
+— and while it was carried, this engine reported exit 3 on a 240 KB page
+holding the product it had asked for.
+
+The rule ("count a marker on a page you know is good") did not fail
+because it was ignored. It failed because the good page did not exist yet.
+A marker is only as verified as the corpus it was counted against, and a
+new route is a new corpus.
+
+---
+
+## What you get
+
+39 columns. The ones worth naming:
+
+| column | note |
+|---|---|
+| `price`, `original_price`, `currency` | from TikTok's own price object, which states the currency as a **fact** rather than leaving it to a symbol |
+| `discount_pct` | TikTok's own figure, **checked** against the two prices — where they disagree by more than a point the column is null and the disagreement goes in the sidecar |
+| `sold_count`, `review_count`, `rating` | a product with no reviews has **null** rating and null count, never a rating of zero |
+| `shop_name`, `shop_rating`, `shop_sold_count`, `shop_review_count`, `shop_followers`, `shop_product_count`, `shop_url` | the seller behind the listing |
+| `description` | **text**, not the block JSON TikTok publishes — written through raw it looks populated and is unreadable |
+| `image_urls`, `image_count`, `video_count`, `sku_count`, `sale_properties` | the listing's media and its variant axes as TikTok names them |
+| `shipping_fee`, `package_weight_g`, `package_*_cm` | the fee lives under an opaque warehouse-id key and is found by walking, not by naming |
+| `site_says_bot`, `site_risk_level` | **TikTok's own verdict on your request.** The page's loader data states whether its bot detection classified the fetch as a bot, and at what risk level. Most sites leave that to be inferred; this one says it outright |
+
+### Prices move
+
+Two fetches of the same listing minutes apart returned **100.80** and then
+**94.81**. That is the site, not the parser — so `diff_runs.py` reporting a
+price change here is ordinary rather than alarming, and the offline suite
+pins that the two fixtures really do differ.
+
+---
+
+## What this repo does not do
+
+* **Shop search.** `/shop/s/{query}` redirects away to the main site with
+  `enter_method=not_supported_region` — measured from a US exit as well as
+  from a datacentre. Refused with that reason rather than returning
+  nothing.
+* **A Scraper API path.** The measured access is a *persistent* Scraping
+  Browser profile; the Scraper API is a different 2Captcha product that
+  fetches a URL per call. That is what this repo does not implement, not a
+  limitation of the service. `scraper_api_client.py` says so and exits 2.
+
+---
+
+## Exit codes
+
+| code | meaning |
+|---|---|
+| 0 | ok |
+| 1 | crash |
+| 2 | bad usage |
+| 3 | blocked — the challenge, or TikTok's risk frame (a page with a risk verdict and no product) |
+| 4 | zero products — the shop SAID the product does not exist (its own `error_code`; the page reads "not available in this country or region") |
+| 5 | the content was never obtained, or a served product page parsed to nothing (a parser failure, never reported as an unavailable product) |
+| 6 | partial — some products read, another failed |
+
+**A run that finds nothing writes nothing.** `--allow-empty` is the
+opt-out. Output files honour the umask when new and keep their mode when
+replaced. In the CSV only, a text cell beginning with `=`, `+`, `-`, `@`,
+a tab or a line break gets a leading `'` so a spreadsheet does not run it
+as a formula; the sidecar's `csv_cells_escaped` counts them, and the JSON
+keeps the values as served. `region` is the market that ANSWERED, as the shop states it, and
+the sidecar records that page's own `region_info` per product; a
+`/gb/pdp/…` URL is fetched as `/view/product/{id}`, and the market is
+decided by the exit (`--cdp-endpoint`'s `country-`), not the path — the run
+says so rather than silently serving another market. A challenged run exits 3 and leaves the previous good output in
+place — which the first live run of this engine did correctly while the
+marker set was still wrong, and that is the contract working.
+
+---
+
+## Configuration
+
+```bash
+cp .env.example .env
+python3 env_config.py      # prints what was picked up, WITHOUT printing secrets
+```
+
+Variables: `TWOCAPTCHA_KEY`, `TIKTOK_CDP_ENDPOINT`, `TIKTOK_PROXY`,
+`TIKTOK_URL`. Never paste a working Scraping Browser endpoint anywhere
+durable — `.env.example` documents the shape, not a credential.
+
+---
+
+## The canary
+
+`canary.yml` runs weekly (Mondays) and on dispatch. Unlike its three siblings, this
+repo's canary **needs a secret**: the access is a Scraping Browser profile
+that has already visited tiktok.com (measured 2026-09-22: 0 of 3 product
+pages to a plain client, a local browser or a US residential exit), so a
+bare GitHub runner has no free path to the shop.
+
+Without the `TIKTOK_CDP_ENDPOINT` secret the job fails with an error naming
+it, rather than skipping green: a skipped canary is not a tested success.
+With it, the run must exit 0 with a complete status and one product whose
+price, currency, title, seller, shop, images and description are filled.
+Anything else — a challenge (exit 3), a page not obtained (exit 5), zero
+rows — is red.
+
+---
+
+## Guides
+
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [Tokopedia scraper](https://github.com/2scraper/tokopedia-scraper) — IDR prices, discounts, ratings, sold counts and shops…
+- [Tractor Supply scraper](https://github.com/2scraper/tractorsupply-scraper) — Categories, departments and searches
+- [Woolworths scraper](https://github.com/2scraper/woolworths-scraper) — Prices, unit prices, specials, health star ratings…
+- [Amazon scraper](https://github.com/2scraper/amazon-scraper) — Search results, best-seller grids, product pages and reviews…
+- [Andie Swim scraper](https://github.com/2scraper/andieswim-scraper) — Collections, keyword lookups and per-size stock…
+- [Bershka scraper](https://github.com/2scraper/bershka-scraper) — Every SKU in a Bershka category
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
+
+## Contributing
+
+```bash
+python3 smoke_test.py       # the offline suite — no network, no browser needed
+python3 -m pytest
+```
+
+---
+
+## Licence
+
+MIT. See `LICENSE`.
+
+Captcha solving, the Scraping Browser API, proxies and fingerprints are
+four separately-billed [2Captcha](https://2captcha.com) products behind
+one key. This repo needs the **Scraping Browser**, and the table at the top
+is why.

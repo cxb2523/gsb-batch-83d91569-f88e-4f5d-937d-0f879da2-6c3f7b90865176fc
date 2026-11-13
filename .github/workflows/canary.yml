@@ -1,0 +1,142 @@
+# Real runs against TikTok Shop. tests.yml (deliberately) never touches
+# the site, a credential or a paid product; everything that does is here.
+#
+# WHY THIS CANARY NEEDS A SECRET, UNLIKE ITS THREE SIBLINGS
+# ---------------------------------------------------------
+# Measured 2026-09-22, TikTok Shop served 0 of 3 product pages to a plain
+# HTTP client, 0 of 3 to a local browser (headless and headful), 0 of 3
+# through a US residential exit, and 3 of 3 through a 2Captcha Scraping
+# Browser profile that had already visited tiktok.com. A bare GitHub runner
+# has none of that, so there is no free path to test here.
+#
+# A canary that skips is not a tested success. So without the
+# TIKTOK_CDP_ENDPOINT secret this job FAILS with an error naming it rather
+# than going green, and with it any exit other than 0, a non-complete
+# status, a missing output file or zero rows is red too.
+name: canary
+
+on:
+  schedule:
+    # Mondays 09:07 UTC. Weekly, not daily: every run bills a Scraping Browser session.
+    - cron: "7 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  product:
+    name: a real product scrape through a Scraping Browser profile
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Require the Scraping Browser profile secret
+        env:
+          TIKTOK_CDP_ENDPOINT: ${{ secrets.TIKTOK_CDP_ENDPOINT }}
+        run: |
+          if [ -z "$TIKTOK_CDP_ENDPOINT" ]; then
+            echo "::error::TIKTOK_CDP_ENDPOINT secret is not set. This canary"\
+                 "cannot reach TikTok Shop without a 2Captcha Scraping Browser"\
+                 "profile (measured 2026-09-22: 0 of 3 pages to a plain"\
+                 "client, a local browser or a US residential exit). Set the"\
+                 "secret; until then this job is red, not skipped."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the core and the Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+
+      - name: Scrape one product
+        id: run
+        env:
+          # Through the ENVIRONMENT, never a --flag: a secret in argv is
+          # readable by anything that can run `ps`.
+          TIKTOK_CDP_ENDPOINT: ${{ secrets.TIKTOK_CDP_ENDPOINT }}
+        run: |
+          set +e   # GitHub runs `run:` under `bash -e`, and a non-zero exit
+                   # would abort the step BEFORE the echo below.
+          python playwright_scraper.py --url 1732432759321694958 \
+            --format both --out canary_product --dump-html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Assert what the run actually produced
+        run: |
+          python - <<'PY'
+          import json, sys
+
+          import os
+
+          rc = int("${{ steps.run.outputs.exit_code }}" or 1)
+          if not os.path.exists("canary_product.json"):
+              # Exits 3, 4 and 5 write no output by design.
+              print(f"::error::canary FAILED: exit {rc} and no output file "
+                    f"— the product page was not obtained")
+              sys.exit(1)
+          meta = json.load(open("canary_product.meta.json"))
+          rows = json.load(open("canary_product.json"))
+          fail = []
+
+          # Exit 3 is the interesting failure here and it is NOT tolerated:
+          # the whole point of this canary is to notice when the one
+          # configuration that works stops working.
+          if rc == 3:
+              fail.append("exit 3 — the challenge was not cleared. That is "
+                          "this canary's job to report: the Scraping "
+                          "Browser profile has stopped getting through.")
+          elif rc != 0:
+              fail.append(f"exit {rc}")
+          if meta["status"] != "complete":
+              fail.append(f"status {meta['status']!r}")
+          if len(rows) != 1:
+              fail.append(f"{len(rows)} rows, expected 1")
+
+          for row in rows:
+              # The columns that only a SERVED page can fill.
+              for column in ("price", "currency", "title", "seller_id",
+                             "shop_name", "image_urls", "description"):
+                  if row.get(column) in (None, "", []):
+                      fail.append(f"{column} is empty")
+              # Price sanity: a range, never an equality — two fetches
+              # minutes apart returned 100.80 and 94.81 on this listing.
+              price = row.get("price")
+              if not isinstance(price, (int, float)) or not 1 < price < 10_000:
+                  fail.append(f"price {price!r} is outside a plausible range")
+              if row.get("original_price") and row["original_price"] < price:
+                  fail.append("original_price is below price — the EU "
+                              "30-day-low trap this family met elsewhere")
+              # The site's own verdict, which only a served page carries.
+              if row.get("site_risk_level") is None:
+                  fail.append("no site_risk_level — was this page served?")
+
+          if meta.get("products_challenged"):
+              fail.append(f"challenged: {meta['products_challenged']}")
+
+          if fail:
+              print("::error::canary FAILED")
+              for line in fail:
+                  print(f"  - {line}")
+              sys.exit(1)
+          row = rows[0]
+          print(f"canary OK: {row['title'][:48]!r} at "
+                f"{row['price']} {row['currency']}, TikTok's own verdict "
+                f"risk_level={row['site_risk_level']} "
+                f"is_bot={row['site_says_bot']}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-product
+          path: |
+            canary_product.json
+            canary_product.csv
+            canary_product.meta.json
+            canary_product_product_*.json
+          retention-days: 7
