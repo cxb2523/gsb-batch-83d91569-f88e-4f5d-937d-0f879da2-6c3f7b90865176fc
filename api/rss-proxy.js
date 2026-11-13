@@ -3,17 +3,27 @@ import { UA_BROWSER } from './_ua.js';
 
 export const config = { runtime: 'edge' };
 
-// Fetch with timeout
-async function fetchWithTimeout(url, options, timeoutMs = 15000) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    return response;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
+/**
+ * Categories a single feed retrieval can end in. Every failure mode keeps its
+ * own label so diagnostics can tell a blocked domain apart from an upstream
+ * 5xx, a timeout, or a redirect that left the allowlist.
+ */
+export const FEED_OUTCOME = Object.freeze({
+  SUCCESS: 'success',
+  INVALID_URL: 'invalid-url',
+  INVALID_PROTOCOL: 'invalid-protocol',
+  DOMAIN_NOT_ALLOWED: 'domain-not-allowed',
+  REDIRECT_NOT_ALLOWED: 'redirect-not-allowed',
+  UPSTREAM_ERROR: 'upstream-error',
+  TIMEOUT: 'timeout',
+  NETWORK_ERROR: 'network-error',
+});
+
+const HTTP_PROTOCOLS = new Set(['http:', 'https:']);
+const DEFAULT_TIMEOUT_MS = 12000;
+const GOOGLE_NEWS_TIMEOUT_MS = 20000;
+const GOOGLE_NEWS_HOST = 'news.google.com';
+const MAX_REDIRECTS = 5;
 
 // Browser-like request headers. Many publishers reject the default fetch UA or
 // a bare UA; sending a realistic header set recovers the feeds that only do
@@ -39,20 +49,8 @@ const FEED_HEADERS = {
 const EMPTY_RSS =
   '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>unavailable</title><description>Feed temporarily unavailable</description></channel></rss>';
 
-function emptyFeed(corsHeaders, upstreamStatus) {
-  return new Response(EMPTY_RSS, {
-    status: 200,
-    headers: {
-      'Content-Type': 'application/xml',
-      'Cache-Control': 'public, max-age=120, s-maxage=120, stale-while-revalidate=60',
-      'X-Feed-Status': String(upstreamStatus ?? 'error'),
-      ...corsHeaders,
-    },
-  });
-}
-
 // Allowed RSS feed domains for security
-const ALLOWED_DOMAINS = [
+export const ALLOWED_DOMAINS = [
   'feeds.bbci.co.uk',
   'www.theguardian.com',
   'feeds.npr.org',
@@ -327,7 +325,265 @@ const ALLOWED_DOMAINS = [
   'phantom.app',
 ];
 
-export default async function handler(req) {
+function toErrorMessage(error) {
+  if (error instanceof Error) return error.message;
+  return String(error || 'unknown error');
+}
+
+function isAllowedFeedUrl(url) {
+  return HTTP_PROTOCOLS.has(url.protocol) && ALLOWED_DOMAINS.includes(url.hostname);
+}
+
+/**
+ * Request one URL with a hard timeout. `redirect: 'manual'` keeps every hop
+ * under our control so the allowlist can be re-checked before each request.
+ */
+async function requestWithTimeout(url, fetchImpl, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchImpl(url, {
+      headers: FEED_HEADERS,
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const timeoutError = new Error(`timed out after ${timeoutMs}ms`);
+      timeoutError.name = 'TimeoutError';
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function buildOutcome(feedUrl, startedAt, fields) {
+  return {
+    // Requested address (kept raw) plus the address the last request was
+    // actually sent to.
+    feedUrl,
+    url: feedUrl,
+    category: fields.category,
+    ok: fields.category === FEED_OUTCOME.SUCCESS,
+    // Upstream HTTP status when a response was received, otherwise null.
+    status: fields.status ?? null,
+    // Human-readable reason for non-success outcomes (status text for the
+    // upstream-error case, the exception message otherwise).
+    error: fields.error ?? null,
+    redirected: Boolean(fields.redirected),
+    finalUrl: fields.finalUrl ?? feedUrl,
+    redirectChain: fields.redirectChain ?? [],
+    durationMs: Math.max(0, Math.round(Date.now() - startedAt)),
+    // Raw XML body on success so callers do not need to re-fetch.
+    body: fields.body ?? null,
+  };
+}
+
+/**
+ * Retrieve a single feed and return a structured outcome describing exactly
+ * what happened. This is the export tests (and other callers) should use; the
+ * default handler below only translates an outcome into the HTTP contract.
+ *
+ * @param {string} feedUrl
+ * @param {{ fetchImpl?: typeof fetch, timeoutMs?: number }} [options]
+ * @returns {Promise<{
+ *   feedUrl: string, url: string,
+ *   category: string, ok: boolean,
+ *   status: number | null, error: string | null,
+ *   redirected: boolean, finalUrl: string, redirectChain: string[],
+ *   durationMs: number, body: string | null,
+ * }>}
+ */
+export async function fetchFeedOutcome(feedUrl, options = {}) {
+  const startedAt = Date.now();
+  const requestedUrl = typeof feedUrl === 'string' ? feedUrl : '';
+  const fail = (category, fields = {}) =>
+    buildOutcome(requestedUrl, startedAt, { category, ...fields });
+
+  if (!requestedUrl) {
+    return fail(FEED_OUTCOME.INVALID_URL, { error: 'missing feed url' });
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(requestedUrl);
+  } catch (error) {
+    return fail(FEED_OUTCOME.INVALID_URL, { error: `invalid feed url: ${toErrorMessage(error)}` });
+  }
+
+  // Security: Only allow http/https protocols (prevent file://, data://, etc.)
+  if (!HTTP_PROTOCOLS.has(parsedUrl.protocol)) {
+    return fail(FEED_OUTCOME.INVALID_PROTOCOL, {
+      error: `protocol not allowed: ${parsedUrl.protocol}`,
+    });
+  }
+
+  // Security: Check if domain is allowed
+  if (!ALLOWED_DOMAINS.includes(parsedUrl.hostname)) {
+    return fail(FEED_OUTCOME.DOMAIN_NOT_ALLOWED, {
+      error: `domain not allowed: ${parsedUrl.hostname}`,
+    });
+  }
+
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  // Google News is slow - use longer timeout
+  const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+    ? options.timeoutMs
+    : (requestedUrl.includes(GOOGLE_NEWS_HOST) ? GOOGLE_NEWS_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
+
+  let currentUrl = parsedUrl.href;
+  let redirected = false;
+  const redirectChain = [];
+
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    let response;
+    try {
+      response = await requestWithTimeout(currentUrl, fetchImpl, timeoutMs);
+    } catch (error) {
+      const category = error?.name === 'TimeoutError'
+        ? FEED_OUTCOME.TIMEOUT
+        : FEED_OUTCOME.NETWORK_ERROR;
+      return fail(category, {
+        error: toErrorMessage(error),
+        redirected,
+        finalUrl: currentUrl,
+        redirectChain: [...redirectChain],
+      });
+    }
+
+    const status = typeof response.status === 'number' ? response.status : null;
+
+    if (status !== null && status >= 300 && status < 400) {
+      let location = null;
+      try {
+        location = response.headers.get('location');
+      } catch {
+        location = null;
+      }
+      if (!location) {
+        return fail(FEED_OUTCOME.UPSTREAM_ERROR, {
+          status,
+          error: `upstream redirect without location (HTTP ${status})`,
+          redirected,
+          finalUrl: currentUrl,
+          redirectChain: [...redirectChain],
+        });
+      }
+
+      let redirectUrl;
+      try {
+        redirectUrl = new URL(location, currentUrl);
+      } catch (error) {
+        return fail(FEED_OUTCOME.REDIRECT_NOT_ALLOWED, {
+          status,
+          error: `invalid redirect location: ${toErrorMessage(error)}`,
+          redirected: true,
+          finalUrl: location,
+          redirectChain: [...redirectChain, location],
+        });
+      }
+
+      redirected = true;
+      redirectChain.push(redirectUrl.href);
+
+      // The redirect target must pass the same protocol + allowlist checks as
+      // the original request. Anything else is treated as unavailable.
+      if (!isAllowedFeedUrl(redirectUrl)) {
+        return fail(FEED_OUTCOME.REDIRECT_NOT_ALLOWED, {
+          status,
+          error: `redirect target not allowed: ${redirectUrl.href}`,
+          redirected: true,
+          finalUrl: redirectUrl.href,
+          redirectChain: [...redirectChain],
+        });
+      }
+
+      if (hop === MAX_REDIRECTS) {
+        return fail(FEED_OUTCOME.NETWORK_ERROR, {
+          status,
+          error: `too many redirects (>${MAX_REDIRECTS})`,
+          redirected: true,
+          finalUrl: currentUrl,
+          redirectChain: [...redirectChain],
+        });
+      }
+
+      currentUrl = redirectUrl.href;
+      continue;
+    }
+
+    // Any non-OK upstream status (403 bot-block, 404 dead feed, 5xx) degrades
+    // to an empty feed so it does not surface as a failed request client-side.
+    if (status === null || status < 200 || status >= 300) {
+      return fail(FEED_OUTCOME.UPSTREAM_ERROR, {
+        status,
+        error: `upstream returned HTTP ${status}`,
+        redirected,
+        finalUrl: currentUrl,
+        redirectChain: [...redirectChain],
+      });
+    }
+
+    try {
+      const body = await response.text();
+      return buildOutcome(requestedUrl, startedAt, {
+        category: FEED_OUTCOME.SUCCESS,
+        status,
+        redirected,
+        finalUrl: currentUrl,
+        redirectChain: [...redirectChain],
+        body,
+      });
+    } catch (error) {
+      return fail(FEED_OUTCOME.NETWORK_ERROR, {
+        status,
+        error: `failed reading upstream body: ${toErrorMessage(error)}`,
+        redirected,
+        finalUrl: currentUrl,
+        redirectChain: [...redirectChain],
+      });
+    }
+  }
+
+  // The loop always returns inside; this keeps the function total.
+  return fail(FEED_OUTCOME.NETWORK_ERROR, {
+    error: `too many redirects (>${MAX_REDIRECTS})`,
+    redirected,
+    finalUrl: currentUrl,
+    redirectChain: [...redirectChain],
+  });
+}
+
+function emptyFeed(corsHeaders, outcome) {
+  const headers = {
+    'Content-Type': 'application/xml',
+    'Cache-Control': 'public, max-age=120, s-maxage=120, stale-while-revalidate=60',
+    'X-Feed-Status': outcome.category,
+    'X-Feed-Duration-Ms': String(outcome.durationMs),
+    ...corsHeaders,
+  };
+  if (typeof outcome.status === 'number') {
+    headers['X-Feed-Upstream-Status'] = String(outcome.status);
+  }
+  if (outcome.redirected) {
+    headers['X-Feed-Final-Url'] = outcome.finalUrl;
+  }
+  return new Response(EMPTY_RSS, {
+    status: 200,
+    headers,
+  });
+}
+
+function jsonError(corsHeaders, status, message) {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...corsHeaders },
+  });
+}
+
+export default async function handler(req, options = {}) {
   const corsHeaders = getCorsHeaders(req, 'GET, OPTIONS');
 
   // Handle CORS preflight
@@ -339,89 +595,38 @@ export default async function handler(req) {
   const feedUrl = requestUrl.searchParams.get('url');
 
   if (!feedUrl) {
-    return new Response(JSON.stringify({ error: 'Missing url parameter' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
-    });
+    return jsonError(corsHeaders, 400, 'Missing url parameter');
   }
 
-  try {
-    const parsedUrl = new URL(feedUrl);
+  const outcome = await fetchFeedOutcome(feedUrl, options);
 
-    // Security: Only allow http/https protocols (prevent file://, data://, etc.)
-    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-      return new Response(JSON.stringify({ error: 'Invalid protocol' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders },
-      });
+  if (outcome.category === FEED_OUTCOME.INVALID_PROTOCOL) {
+    return jsonError(corsHeaders, 400, 'Invalid protocol');
+  }
+  if (outcome.category === FEED_OUTCOME.DOMAIN_NOT_ALLOWED) {
+    return jsonError(corsHeaders, 403, 'Domain not allowed');
+  }
+
+  if (outcome.category === FEED_OUTCOME.SUCCESS) {
+    const headers = {
+      'Content-Type': 'application/xml',
+      'Cache-Control': 'public, max-age=300, s-maxage=300, stale-while-revalidate=60',
+      'X-Feed-Status': outcome.category,
+      'X-Feed-Duration-Ms': String(outcome.durationMs),
+      ...corsHeaders,
+    };
+    if (outcome.redirected) {
+      headers['X-Feed-Final-Url'] = outcome.finalUrl;
     }
-
-    // Security: Check if domain is allowed
-    if (!ALLOWED_DOMAINS.includes(parsedUrl.hostname)) {
-      return new Response(JSON.stringify({ error: 'Domain not allowed' }), {
-        status: 403,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders },
-      });
-    }
-
-    // Google News is slow - use longer timeout
-    const isGoogleNews = feedUrl.includes('news.google.com');
-    const timeout = isGoogleNews ? 20000 : 12000;
-
-    const response = await fetchWithTimeout(feedUrl, {
-      headers: FEED_HEADERS,
-      redirect: 'manual',
-    }, timeout);
-
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get('location');
-      if (location) {
-        try {
-          const redirectUrl = new URL(location, feedUrl);
-          if (!['http:', 'https:'].includes(redirectUrl.protocol) || !ALLOWED_DOMAINS.includes(redirectUrl.hostname)) {
-            // Feed moved off the allowlist (e.g. to a different domain) — treat
-            // as unavailable rather than erroring.
-            return emptyFeed(corsHeaders, response.status);
-          }
-          const redirectResponse = await fetchWithTimeout(redirectUrl.href, {
-            headers: FEED_HEADERS,
-          }, timeout);
-          if (!redirectResponse.ok) {
-            return emptyFeed(corsHeaders, redirectResponse.status);
-          }
-          const data = await redirectResponse.text();
-          return new Response(data, {
-            status: 200,
-            headers: {
-              'Content-Type': 'application/xml',
-              'Cache-Control': 'public, max-age=300, s-maxage=300, stale-while-revalidate=60',
-              ...corsHeaders,
-            },
-          });
-        } catch {
-          return emptyFeed(corsHeaders, 'redirect-error');
-        }
-      }
-    }
-
-    // Any non-OK upstream status (403 bot-block, 404 dead feed, 5xx) degrades
-    // to an empty feed so it does not surface as a failed request client-side.
-    if (!response.ok) {
-      return emptyFeed(corsHeaders, response.status);
-    }
-
-    const data = await response.text();
-    return new Response(data, {
+    return new Response(outcome.body, {
       status: 200,
-      headers: {
-        'Content-Type': 'application/xml',
-        'Cache-Control': 'public, max-age=300, s-maxage=300, stale-while-revalidate=60',
-        ...corsHeaders,
-      },
+      headers,
     });
-  } catch (error) {
-    const isTimeout = error.name === 'AbortError';
-    console.warn('RSS proxy error:', feedUrl, error.message);
-    return emptyFeed(corsHeaders, isTimeout ? 'timeout' : 'fetch-error');
   }
+
+  if (outcome.category === FEED_OUTCOME.TIMEOUT || outcome.category === FEED_OUTCOME.NETWORK_ERROR) {
+    console.warn('RSS proxy error:', feedUrl, outcome.category, outcome.error);
+  }
+
+  return emptyFeed(corsHeaders, outcome);
 }
