@@ -1,0 +1,71 @@
+"""Alert engine: at most one active alert per server and rule, resolved once the rule clears.
+
+Callers describe *conditions* by a stable ``rule_key``. Raising an alert that is
+already active only refreshes its severity and text, so a condition that persists
+across many check-ins never produces duplicates.
+"""
+from __future__ import annotations
+
+from collections.abc import Iterable
+from datetime import datetime, timezone
+
+from ..agent import jobs as agent_jobs
+from .models import IncidentAlert
+
+INFO, WARNING, CRITICAL = "INFO", "WARNING", "CRITICAL"
+SEVERITIES = (INFO, WARNING, CRITICAL)
+
+SERVER_OFFLINE_RULE = "server_offline"
+CONTAINER_RULE_PREFIX = "container:"
+
+
+def _active(db, server_id: int):
+    return db.query(IncidentAlert).filter(IncidentAlert.server_id == server_id, IncidentAlert.status == "active")
+
+
+def active_rule_keys(db, server_id: int, prefix: str) -> set[str]:
+    return {key for (key,) in _active(db, server_id).filter(IncidentAlert.rule_key.startswith(prefix)).with_entities(IncidentAlert.rule_key)}
+
+
+def raise_alert(db, server_id: int, rule_key: str, severity: str, title: str, description: str) -> bool:
+    """Open an alert for ``rule_key``, or refresh the active one. Returns True if a new alert was opened."""
+    if severity not in SEVERITIES:
+        raise ValueError(f"Unknown severity: {severity}")
+    existing = _active(db, server_id).filter(IncidentAlert.rule_key == rule_key).first()
+    if existing:
+        # A more severe state is worth a new look by the agent; the same or a milder one is not.
+        if agent_jobs.SEVERITY_RANK.get(severity, 0) > agent_jobs.SEVERITY_RANK.get(existing.severity, 0):
+            agent_jobs.note(db, agent_jobs.WORSENED, existing, severity)
+        existing.severity, existing.title, existing.description = severity, title[:255], description
+        return False
+    # The agent closed the last one because its fix held; events still inside the rule's window don't reopen it.
+    held = db.query(IncidentAlert.reopen_after).filter(IncidentAlert.server_id == server_id, IncidentAlert.rule_key == rule_key, IncidentAlert.status == "resolved",
+                                                     IncidentAlert.reopen_after.isnot(None)).order_by(IncidentAlert.reopen_after.desc()).limit(1).scalar()
+    if held is not None and (held if held.tzinfo else held.replace(tzinfo=timezone.utc)) > datetime.now(timezone.utc):
+        return False
+    alert = IncidentAlert(server_id=server_id, rule_key=rule_key, severity=severity, title=title[:255], description=description)
+    db.add(alert)
+    agent_jobs.note(db, agent_jobs.OPENED, alert, severity)
+    return True
+
+
+def resolve_alerts(db, server_id: int, rule_keys: Iterable[str], now: datetime | None = None) -> int:
+    """Resolve the active alerts for the given rules. Returns how many were resolved."""
+    rule_keys = list(rule_keys)
+    if not rule_keys:
+        return 0
+    return _active(db, server_id).filter(IncidentAlert.rule_key.in_(rule_keys)).update(
+        {"status": "resolved", "resolved_at": now or datetime.now(timezone.utc)}, synchronize_session=False
+    )
+
+
+def sync_alerts(db, server_id: int, prefix: str, firing: dict[str, tuple[str, str, str]], now: datetime | None = None) -> None:
+    """Make the active alerts under ``prefix`` match ``firing`` ({rule_key: (severity, title, description)}).
+
+    Rules that are firing are raised or refreshed; active rules under the prefix that
+    are no longer firing are resolved.
+    """
+    for rule_key, (severity, title, description) in firing.items():
+        raise_alert(db, server_id, rule_key, severity, title, description)
+    resolve_alerts(db, server_id, active_rule_keys(db, server_id, prefix) - firing.keys(), now)
+
