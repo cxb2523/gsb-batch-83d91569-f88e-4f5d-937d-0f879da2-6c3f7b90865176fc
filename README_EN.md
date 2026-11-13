@@ -129,6 +129,12 @@ exports/
    └─ videos/
 ```
 
+`meta.json` includes a `resources` manifest that accounts for every image and video candidate:
+
+- `images` / `videos`: one row per candidate with the original URL (credential parameters redacted), `result` (`saved` / `skipped` / `failed`), `reason` (such as `ok`, `domain_not_allowed`, `request_timeout`, `encrypted_hls`), and `local_path` for saved files.
+- `counts`: `saved` / `skipped` / `failed` totals per kind and overall.
+- The export response text and logs report the same three counts. A skipped or failed resource never aborts the rest of the export.
+
 ## Why Is a Refresh Sometimes Needed?
 
 WeChat for Windows may restore an already opened article directly from its WebView page cache. In that case, the article's main HTML is not requested again, so WxArticleSaver has no chance to inject the export button.

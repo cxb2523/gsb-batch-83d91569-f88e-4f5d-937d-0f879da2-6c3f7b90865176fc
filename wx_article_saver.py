@@ -25,7 +25,15 @@ import threading
 import hashlib
 import html as html_lib
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs, urljoin
+from urllib.parse import (
+    parse_qs,
+    parse_qsl,
+    urlencode,
+    urljoin,
+    urlparse,
+    urlsplit,
+    urlunsplit,
+)
 
 import requests
 from bs4 import BeautifulSoup
@@ -54,6 +62,58 @@ CURRENT_ARTICLE_TOKEN = ""
 CACHE_TTL = 30 * 60
 MAX_VIDEO_BYTES = 1024 * 1024 * 1024  # 1 GiB/video safety cap
 MAX_VIDEOS_PER_EXPORT = 12
+MAX_IMAGE_BYTES = 25 * 1024 * 1024  # 25 MiB/image safety cap
+
+# Resource manifest vocabulary: result + reason classification.
+RESULT_SAVED = "saved"
+RESULT_SKIPPED = "skipped"
+RESULT_FAILED = "failed"
+RESULTS = (RESULT_SAVED, RESULT_SKIPPED, RESULT_FAILED)
+
+REASON_OK = "ok"
+REASON_MISSING_URL = "missing_url"
+REASON_INLINE_DATA = "inline_data_uri"
+REASON_INVALID_URL = "invalid_url"
+REASON_DOMAIN_NOT_ALLOWED = "domain_not_allowed"
+REASON_DUPLICATE = "duplicate_url"
+REASON_TOO_LARGE = "too_large"
+REASON_HTTP_ERROR = "http_error"
+REASON_EMPTY_RESPONSE = "empty_response"
+REASON_TIMEOUT = "request_timeout"
+REASON_DOWNLOAD_ERROR = "download_error"
+REASON_HLS_ENCRYPTED = "encrypted_hls"
+REASON_HLS_BYTERANGE = "hls_byterange_unsupported"
+REASON_HLS_NO_SEGMENTS = "hls_no_segments"
+REASON_NOT_VIDEO = "not_video_response"
+REASON_TOO_SMALL = "response_too_small"
+REASON_CANDIDATE_LIMIT = "candidate_limit_exceeded"
+
+# Query keys that carry credentials/signatures and must never be persisted.
+_SENSITIVE_KEY_NAMES = (
+    "pass_ticket",
+    "pass_ticket_id",
+    "appmsg_token",
+    "ticket",
+    "cookie",
+    "authorization",
+    "access_token",
+    "refresh_token",
+    "session_key",
+    "session_id",
+    "sessionid",
+    "token",
+    "signature",
+    "sig",
+)
+_SENSITIVE_KEY_RE = re.compile(
+    r"^(?:" + "|".join(re.escape(k) for k in _SENSITIVE_KEY_NAMES) + r")$",
+    re.IGNORECASE,
+)
+_SENSITIVE_ASSIGN_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(k) for k in _SENSITIVE_KEY_NAMES) + r")\b"
+    r"[=:]\s*[^&;\s\"'<>]+",
+    re.IGNORECASE,
+)
 
 # -------------------- cached WebView auto-refresh --------------------
 # WeChat PC may restore an article from its own WebView/page cache.  In that
@@ -293,6 +353,126 @@ def allowed_image_url(url: str) -> bool:
         return False
 
 
+# -------------------- logging + credential redaction --------------------
+
+def log_info(message: str):
+    """Log through mitmproxy when available; keep the parser usable in tests."""
+    if ctx is not None:
+        ctx.log.info(message)
+    else:
+        print(message, flush=True)
+
+
+def log_warn(message: str):
+    if ctx is not None:
+        ctx.log.warn(message)
+    else:
+        print(message, flush=True)
+
+
+def log_error(message: str):
+    if ctx is not None:
+        ctx.log.error(message)
+    else:
+        print(message, flush=True)
+
+
+def redact_credentials_text(text: str) -> str:
+    """Replace credential-looking key/value pairs in free text (errors, logs)."""
+    if not text:
+        return ""
+
+    def _repl(match):
+        token = match.group(0)
+        sep = ":" if ":" in token.split(" ", 1)[0] else "="
+        key = token.split(sep, 1)[0].strip()
+        return f"{key}{sep}[redacted]"
+
+    return _SENSITIVE_ASSIGN_RE.sub(_repl, str(text))
+
+
+def sanitize_url_for_manifest(url: str) -> str:
+    """Strip userinfo and redact credential query parameters from a URL.
+
+    The manifest is written to disk, so Cookie/Authorization/pass_ticket-like
+    values must never survive there.
+    """
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(str(url))
+        query = parse_qsl(parts.query, keep_blank_values=True)
+    except Exception:
+        return redact_credentials_text(url)
+
+    redacted_keys = [
+        name for name, _ in query if _SENSITIVE_KEY_RE.match(name)
+    ]
+    has_userinfo = bool(parts.username or parts.password)
+    if not redacted_keys and not has_userinfo:
+        return str(url)
+
+    new_query = urlencode(
+        [
+            (name, "REDACTED" if _SENSITIVE_KEY_RE.match(name) else value)
+            for name, value in query
+        ],
+        doseq=True,
+    )
+    hostname = parts.hostname or ""
+    netloc = f"{hostname}:{parts.port}" if parts.port else hostname
+    return urlunsplit((parts.scheme, netloc, parts.path, new_query, parts.fragment))
+
+
+# -------------------- resource manifest --------------------
+
+def resource_entry(url, result, reason, local_path=None, detail="", **extra):
+    """Build one manifest row for a single image or video candidate."""
+    row = {
+        "url": sanitize_url_for_manifest(url),
+        "result": result,
+        "reason": reason,
+    }
+    if local_path:
+        row["local_path"] = local_path
+    if detail:
+        row["detail"] = redact_credentials_text(detail)
+    for key, value in extra.items():
+        if key in ("headers", "cookie", "authorization") or value is None:
+            continue
+        row[key] = value
+    return row
+
+
+def count_results(entries):
+    counts = {RESULT_SAVED: 0, RESULT_SKIPPED: 0, RESULT_FAILED: 0}
+    for entry in entries or []:
+        result = entry.get("result")
+        if result in counts:
+            counts[result] += 1
+    return counts
+
+
+def build_resource_manifest(images, videos):
+    image_counts = count_results(images)
+    video_counts = count_results(videos)
+    combined = {
+        result: image_counts[result] + video_counts[result] for result in RESULTS
+    }
+    return {
+        "images": list(images or []),
+        "videos": list(videos or []),
+        "counts": {
+            "images": image_counts,
+            "videos": video_counts,
+            "total": combined,
+            RESULT_SAVED: combined[RESULT_SAVED],
+            RESULT_SKIPPED: combined[RESULT_SKIPPED],
+            RESULT_FAILED: combined[RESULT_FAILED],
+        },
+    }
+
+
 def ext_from_response(url, content_type):
     ct = (content_type or "").split(";")[0].strip().lower()
     mapping = {
@@ -453,47 +633,109 @@ def normalize_article(article):
     return article
 
 
+def _classify_request_error(exc):
+    """Map a requests exception onto a manifest reason."""
+    if isinstance(exc, requests.Timeout):
+        return REASON_TIMEOUT, f"请求超时: {exc}"
+    return REASON_DOWNLOAD_ERROR, f"{type(exc).__name__}: {exc}"
+
+
 def download_images(article, folder, referer):
+    """Download allowed article images, returning (saved_count, manifest entries).
+
+    Every image candidate gets one manifest row, including skipped and failed
+    ones, so a partial export is fully attributable.
+    """
     images_dir = folder / "images"
     images_dir.mkdir(exist_ok=True)
     seen = {}
-    count = 0
+    saved = 0
+    entries = []
     for img in article.find_all("img"):
-        src = (img.get("src") or "").strip()
-        if not src or src.startswith("data:"):
+        raw_src = (img.get("src") or "").strip()
+        if not raw_src:
+            entries.append(resource_entry("", RESULT_SKIPPED, REASON_MISSING_URL))
             continue
-        src = urljoin(referer, src)
+        if raw_src.startswith("data:"):
+            entries.append(
+                resource_entry("", RESULT_SKIPPED, REASON_INLINE_DATA,
+                               detail="base64/内联图片未单独保存")
+            )
+            continue
+        if raw_src.startswith(("javascript:", "mailto:")):
+            entries.append(
+                resource_entry("", RESULT_SKIPPED, REASON_INVALID_URL,
+                               detail="非 http(s) 图片地址")
+            )
+            continue
+
+        src = urljoin(referer, raw_src)
         if not allowed_image_url(src):
+            entries.append(
+                resource_entry(src, RESULT_SKIPPED, REASON_DOMAIN_NOT_ALLOWED,
+                               detail="域名不在图片白名单内")
+            )
             continue
         if src in seen:
             img["src"] = seen[src]
+            entries.append(
+                resource_entry(src, RESULT_SAVED, REASON_DUPLICATE,
+                               local_path=seen[src],
+                               detail="重复图片，复用已保存文件")
+            )
             continue
+
         try:
             r = requests.get(
                 src,
                 timeout=12,
                 headers={"User-Agent": "Mozilla/5.0", "Referer": referer or f"https://{HOST}/"},
             )
-            if r.status_code != 200 or not r.content:
+            if r.status_code != 200:
+                entries.append(
+                    resource_entry(src, RESULT_FAILED, REASON_HTTP_ERROR,
+                                   detail=f"HTTP {r.status_code}")
+                )
                 continue
-            if len(r.content) > 25 * 1024 * 1024:
+            content = r.content or b""
+            if not content:
+                entries.append(
+                    resource_entry(src, RESULT_FAILED, REASON_EMPTY_RESPONSE,
+                                   detail="响应为空")
+                )
                 continue
-            count += 1
+            if len(content) > MAX_IMAGE_BYTES:
+                entries.append(
+                    resource_entry(src, RESULT_SKIPPED, REASON_TOO_LARGE,
+                                   detail=f"{len(content)} bytes > 25 MiB")
+                )
+                continue
+
+            saved += 1
             digest = hashlib.sha1(src.encode("utf-8", "ignore")).hexdigest()[:8]
             ext = ext_from_response(src, r.headers.get("Content-Type", ""))
-            filename = f"{count:03d}-{digest}{ext}"
-            (images_dir / filename).write_bytes(r.content)
+            filename = f"{saved:03d}-{digest}{ext}"
+            (images_dir / filename).write_bytes(content)
             rel = f"images/{filename}"
             img["src"] = rel
             seen[src] = rel
+            entries.append(
+                resource_entry(src, RESULT_SAVED, REASON_OK, local_path=rel,
+                               bytes=len(content))
+            )
         except Exception as e:
-            ctx.log.warn(f"[WxArticleSaver] 图片下载失败: {src[:100]} - {e}")
-    if count == 0:
+            reason, detail = _classify_request_error(e)
+            log_warn(
+                f"[WxArticleSaver] 图片下载失败: {sanitize_url_for_manifest(src)} - {detail}"
+            )
+            entries.append(resource_entry(src, RESULT_FAILED, reason, detail=detail))
+
+    if saved == 0:
         try:
             images_dir.rmdir()
         except Exception:
             pass
-    return count
+    return saved, entries
 
 
 # -------------------- video capture/download --------------------
@@ -562,7 +804,7 @@ def remember_media_for_current_article(flow: http.HTTPFlow):
         "headers": safe_media_request_headers(flow),
         "captured_at": time.time(),
     })
-    ctx.log.info(f"[WxArticleSaver] 已捕获视频媒体地址，等待手动导出: {canonical[:180]}")
+    log_info(f"[WxArticleSaver] 已捕获视频媒体地址，等待手动导出: {canonical[:180]}")
 
 
 def response_extension(url: str, content_type: str) -> str:
@@ -621,9 +863,16 @@ def download_hls_video(url, headers, videos_dir: Path, index: int):
     try:
         r = requests.get(url, headers=headers or {}, timeout=30, allow_redirects=True)
     except Exception as e:
-        return {"ok": False, "url": url, "reason": f"HLS 请求失败: {e}"}
+        code = REASON_TIMEOUT if isinstance(e, requests.Timeout) else REASON_DOWNLOAD_ERROR
+        return {
+            "ok": False, "url": url, "reason": f"HLS 请求失败: {e}",
+            "reason_code": code, "result": RESULT_FAILED,
+        }
     if r.status_code != 200:
-        return {"ok": False, "url": url, "reason": f"HLS HTTP {r.status_code}"}
+        return {
+            "ok": False, "url": url, "reason": f"HLS HTTP {r.status_code}",
+            "reason_code": REASON_HTTP_ERROR, "result": RESULT_FAILED,
+        }
 
     playlist = r.text
     base_url = r.url or url
@@ -632,9 +881,16 @@ def download_hls_video(url, headers, videos_dir: Path, index: int):
         try:
             r2 = requests.get(variant, headers=headers or {}, timeout=30, allow_redirects=True)
         except Exception as e:
-            return {"ok": False, "url": url, "reason": f"HLS 子清单请求失败: {e}"}
+            code = REASON_TIMEOUT if isinstance(e, requests.Timeout) else REASON_DOWNLOAD_ERROR
+            return {
+                "ok": False, "url": url, "reason": f"HLS 子清单请求失败: {e}",
+                "reason_code": code, "result": RESULT_FAILED,
+            }
         if r2.status_code != 200:
-            return {"ok": False, "url": url, "reason": f"HLS 子清单 HTTP {r2.status_code}"}
+            return {
+                "ok": False, "url": url, "reason": f"HLS 子清单 HTTP {r2.status_code}",
+                "reason_code": REASON_HTTP_ERROR, "result": RESULT_FAILED,
+            }
         playlist = r2.text
         base_url = r2.url or variant
 
@@ -643,6 +899,8 @@ def download_hls_video(url, headers, videos_dir: Path, index: int):
             "ok": False,
             "url": url,
             "reason": "检测到加密 HLS（EXT-X-KEY），未尝试解密",
+            "reason_code": REASON_HLS_ENCRYPTED,
+            "result": RESULT_SKIPPED,
             "encrypted": True,
         }
 
@@ -655,12 +913,20 @@ def download_hls_video(url, headers, videos_dir: Path, index: int):
             if m:
                 init_segment = urljoin(base_url, m.group(1))
         elif line.startswith("#EXT-X-BYTERANGE"):
-            return {"ok": False, "url": url, "reason": "HLS 使用 BYTERANGE，当前版本仅保留链接"}
+            return {
+                "ok": False, "url": url,
+                "reason": "HLS 使用 BYTERANGE，当前版本仅保留链接",
+                "reason_code": REASON_HLS_BYTERANGE,
+                "result": RESULT_SKIPPED,
+            }
         elif not line.startswith("#"):
             segments.append(urljoin(base_url, line))
 
     if not segments:
-        return {"ok": False, "url": url, "reason": "HLS 未找到媒体分片"}
+        return {
+            "ok": False, "url": url, "reason": "HLS 未找到媒体分片",
+            "reason_code": REASON_HLS_NO_SEGMENTS, "result": RESULT_FAILED,
+        }
 
     ext = ".mp4" if init_segment or any(".m4s" in x.lower() for x in segments) else ".ts"
     filename = f"video-{index:03d}{ext}"
@@ -684,11 +950,19 @@ def download_hls_video(url, headers, videos_dir: Path, index: int):
                 sr.close()
     except Exception as e:
         out.unlink(missing_ok=True)
-        return {"ok": False, "url": url, "reason": f"HLS 下载失败: {e}"}
+        too_large = "1 GiB" in str(e)
+        return {
+            "ok": False, "url": url, "reason": f"HLS 下载失败: {e}",
+            "reason_code": REASON_TOO_LARGE if too_large else REASON_DOWNLOAD_ERROR,
+            "result": RESULT_SKIPPED if too_large else RESULT_FAILED,
+        }
 
     if total < 1024:
         out.unlink(missing_ok=True)
-        return {"ok": False, "url": url, "reason": "HLS 输出过小"}
+        return {
+            "ok": False, "url": url, "reason": "HLS 输出过小",
+            "reason_code": REASON_TOO_SMALL, "result": RESULT_FAILED,
+        }
 
     return {
         "ok": True,
@@ -698,6 +972,8 @@ def download_hls_video(url, headers, videos_dir: Path, index: int):
         "bytes": total,
         "content_type": "application/vnd.apple.mpegurl",
         "kind": "hls",
+        "reason_code": REASON_OK,
+        "result": RESULT_SAVED,
     }
 
 
@@ -705,11 +981,18 @@ def download_direct_video(url, headers, videos_dir: Path, index: int):
     try:
         r = requests.get(url, headers=headers or {}, timeout=60, stream=True, allow_redirects=True)
     except Exception as e:
-        return {"ok": False, "url": url, "reason": f"请求失败: {e}"}
+        code = REASON_TIMEOUT if isinstance(e, requests.Timeout) else REASON_DOWNLOAD_ERROR
+        return {
+            "ok": False, "url": url, "reason": f"请求失败: {e}",
+            "reason_code": code, "result": RESULT_FAILED,
+        }
 
     try:
         if r.status_code not in (200, 206):
-            return {"ok": False, "url": url, "reason": f"HTTP {r.status_code}"}
+            return {
+                "ok": False, "url": url, "reason": f"HTTP {r.status_code}",
+                "reason_code": REASON_HTTP_ERROR, "result": RESULT_FAILED,
+            }
 
         ct = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         final_url = r.url or url
@@ -721,13 +1004,20 @@ def download_direct_video(url, headers, videos_dir: Path, index: int):
             ct.startswith("video/")
             or urlparse(final_url).path.lower().endswith((".mp4", ".webm", ".mov", ".m4v", ".ts", ".m4s"))
         ):
-            return {"ok": False, "url": url, "reason": f"不是可直接下载的视频响应: {ct or 'unknown'}"}
+            return {
+                "ok": False, "url": url,
+                "reason": f"不是可直接下载的视频响应: {ct or 'unknown'}",
+                "reason_code": REASON_NOT_VIDEO, "result": RESULT_FAILED,
+            }
 
         length = r.headers.get("Content-Length")
         if length:
             try:
                 if int(length) > MAX_VIDEO_BYTES:
-                    return {"ok": False, "url": url, "reason": "视频超过 1 GiB 安全上限"}
+                    return {
+                        "ok": False, "url": url, "reason": "视频超过 1 GiB 安全上限",
+                        "reason_code": REASON_TOO_LARGE, "result": RESULT_SKIPPED,
+                    }
             except Exception:
                 pass
 
@@ -742,12 +1032,18 @@ def download_direct_video(url, headers, videos_dir: Path, index: int):
                 total += len(chunk)
                 if total > MAX_VIDEO_BYTES:
                     out.unlink(missing_ok=True)
-                    return {"ok": False, "url": url, "reason": "视频超过 1 GiB 安全上限"}
+                    return {
+                        "ok": False, "url": url, "reason": "视频超过 1 GiB 安全上限",
+                        "reason_code": REASON_TOO_LARGE, "result": RESULT_SKIPPED,
+                    }
                 f.write(chunk)
 
         if total < 1024:
             out.unlink(missing_ok=True)
-            return {"ok": False, "url": url, "reason": "视频响应过小"}
+            return {
+                "ok": False, "url": url, "reason": "视频响应过小",
+                "reason_code": REASON_TOO_SMALL, "result": RESULT_FAILED,
+            }
 
         return {
             "ok": True,
@@ -757,6 +1053,8 @@ def download_direct_video(url, headers, videos_dir: Path, index: int):
             "bytes": total,
             "content_type": ct,
             "kind": "direct",
+            "reason_code": REASON_OK,
+            "result": RESULT_SAVED,
         }
     finally:
         try:
@@ -766,6 +1064,7 @@ def download_direct_video(url, headers, videos_dir: Path, index: int):
 
 
 def collect_video_candidates(embed_videos, captured_media):
+    """Return (candidates, overflow). Keeps at most MAX_VIDEOS_PER_EXPORT."""
     result = []
     seen = set()
 
@@ -788,17 +1087,20 @@ def collect_video_candidates(embed_videos, captured_media):
         if looks_like_media_url(u):
             add(u, {"Referer": v.get("fallback_url") or ""}, "article")
 
-    return result[:MAX_VIDEOS_PER_EXPORT]
+    return result[:MAX_VIDEOS_PER_EXPORT], result[MAX_VIDEOS_PER_EXPORT:]
 
 
 def download_videos(embed_videos, captured_media, folder: Path, article_url: str):
-    candidates = collect_video_candidates(embed_videos, captured_media)
-    if not candidates:
-        return []
+    """Download video candidates, returning (download_results, manifest entries)."""
+    candidates, overflow = collect_video_candidates(embed_videos, captured_media)
+    if not candidates and not overflow:
+        return [], []
 
     videos_dir = folder / "videos"
-    videos_dir.mkdir(exist_ok=True)
+    if candidates:
+        videos_dir.mkdir(exist_ok=True)
     results = []
+    entries = []
     next_index = 1
 
     for item in candidates:
@@ -806,21 +1108,58 @@ def download_videos(embed_videos, captured_media, folder: Path, article_url: str
         headers = dict(item.get("headers") or {})
         headers.setdefault("Referer", article_url)
         low_path = urlparse(url).path.lower()
-        if low_path.endswith(".m3u8") or ".m3u8?" in url.lower():
-            result = download_hls_video(url, headers, videos_dir, next_index)
-        else:
-            result = download_direct_video(url, headers, videos_dir, next_index)
+        try:
+            if low_path.endswith(".m3u8") or ".m3u8?" in url.lower():
+                result = download_hls_video(url, headers, videos_dir, next_index)
+            else:
+                result = download_direct_video(url, headers, videos_dir, next_index)
+        except Exception as e:
+            # One bad candidate must not abort the rest of the article export.
+            detail = redact_credentials_text(f"{type(e).__name__}: {e}")
+            log_warn(f"[WxArticleSaver] 视频下载异常: {sanitize_url_for_manifest(url)} - {detail}")
+            result = {
+                "ok": False, "url": url, "reason": f"未预期的异常: {detail}",
+                "reason_code": REASON_DOWNLOAD_ERROR, "result": RESULT_FAILED,
+            }
         result["source"] = item.get("source")
         results.append(result)
         if result.get("ok"):
             next_index += 1
+
+        result_code = result.get("result")
+        if result_code not in RESULTS:
+            result_code = RESULT_SAVED if result.get("ok") else RESULT_FAILED
+        entries.append(
+            resource_entry(
+                url,
+                result_code,
+                result.get("reason_code") or (
+                    REASON_OK if result.get("ok") else REASON_DOWNLOAD_ERROR
+                ),
+                local_path=result.get("local"),
+                detail=result.get("reason", ""),
+                kind=result.get("kind"),
+                source=item.get("source"),
+            )
+        )
+
+    for item in overflow:
+        entries.append(
+            resource_entry(
+                item["url"],
+                RESULT_SKIPPED,
+                REASON_CANDIDATE_LIMIT,
+                detail=f"超过每篇 {MAX_VIDEOS_PER_EXPORT} 个视频候选上限",
+                source=item.get("source"),
+            )
+        )
 
     if not any(x.get("ok") for x in results):
         try:
             videos_dir.rmdir()
         except Exception:
             pass
-    return results
+    return results, entries
 
 
 def apply_downloaded_video_links(article, download_results):
@@ -875,6 +1214,54 @@ def find_article_content(soup):
     return None, ""
 
 
+def sanitize_video_downloads(video_downloads):
+    """Copy legacy video result dicts without headers or credential-bearing URLs."""
+    safe = []
+    for item in video_downloads or []:
+        row = {}
+        for key, value in item.items():
+            if key in ("headers", "cookie", "authorization"):
+                continue
+            if key in ("url", "final_url") and isinstance(value, str):
+                row[key] = sanitize_url_for_manifest(value)
+            elif key == "reason" and isinstance(value, str):
+                row[key] = redact_credentials_text(value)
+            else:
+                row[key] = value
+        safe.append(row)
+    return safe
+
+
+def sanitize_video_embeds(videos):
+    safe = []
+    for item in videos or []:
+        row = {}
+        for key, value in item.items():
+            if key in ("url", "fallback_url", "poster") and isinstance(value, str):
+                row[key] = sanitize_url_for_manifest(value) if value else value
+            else:
+                row[key] = value
+        safe.append(row)
+    return safe
+
+
+def format_export_summary(title, resources):
+    """Human-readable export result with saved/skipped/failed counts."""
+    counts = resources["counts"]
+    image_counts = counts["images"]
+    video_counts = counts["videos"]
+    total_counts = counts["total"]
+    return (
+        f"已导出：{title}；"
+        f"图片 已保存 {image_counts[RESULT_SAVED]}、跳过 {image_counts[RESULT_SKIPPED]}、"
+        f"失败 {image_counts[RESULT_FAILED]}；"
+        f"视频 已保存 {video_counts[RESULT_SAVED]}、跳过 {video_counts[RESULT_SKIPPED]}、"
+        f"失败 {video_counts[RESULT_FAILED]}；"
+        f"资源合计 已保存 {total_counts[RESULT_SAVED]}、跳过 {total_counts[RESULT_SKIPPED]}、"
+        f"失败 {total_counts[RESULT_FAILED]}"
+    )
+
+
 def save_article(url: str, html: str, captured_media=None):
     soup = BeautifulSoup(html, "html.parser")
     title = detect_title(soup)
@@ -882,7 +1269,7 @@ def save_article(url: str, html: str, captured_media=None):
     article, article_selector = find_article_content(soup)
     if article is None:
         raise ValueError("暂时无法识别当前文章正文，请刷新文章后重试")
-    ctx.log.info(
+    log_info(
         f"[WxArticleSaver] 正文解析成功: selector={article_selector} | "
         f"text={len(article.get_text(' ', strip=True))} | images={len(article.find_all('img'))}"
     )
@@ -901,14 +1288,17 @@ def save_article(url: str, html: str, captured_media=None):
     article_copy = BeautifulSoup(str(article), "html.parser")
 
     videos = replace_video_embeds(article_copy, url)
-    video_downloads = download_videos(videos, captured_media or [], folder, url)
+    video_downloads, video_manifest = download_videos(
+        videos, captured_media or [], folder, url
+    )
     apply_downloaded_video_links(article_copy, video_downloads)
 
     article_copy = normalize_article(article_copy)
     visible_text = article_copy.get_text("\n", strip=True)
     (folder / "article.txt").write_text(visible_text + "\n", encoding="utf-8")
 
-    image_count = download_images(article_copy, folder, url)
+    image_count, image_manifest = download_images(article_copy, folder, url)
+    resources = build_resource_manifest(image_manifest, video_manifest)
     markdown_body = md(str(article_copy), heading_style="ATX", bullets="-", strip=["script", "style"]).strip()
 
     header = f"# {title}\n\n"
@@ -956,21 +1346,29 @@ blockquote{{border-left:4px solid #ddd;margin-left:0;padding-left:14px;color:#66
         "markdown_chars": len(markdown_body),
         "images_downloaded": image_count,
         "videos_found": len(videos),
-        "videos": videos,
+        "videos": sanitize_video_embeds(videos),
         "captured_media_count": len(captured_media or []),
-        "video_downloads": video_downloads,
+        "video_downloads": sanitize_video_downloads(video_downloads),
         "videos_downloaded": sum(1 for x in video_downloads if x.get("ok")),
+        "resources": resources,
         "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "mode": "manual",
     }
     (folder / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    downloaded_count = sum(1 for x in video_downloads if x.get("ok"))
-    ctx.log.info(
+    counts = resources["counts"]["total"]
+    log_info(
         f"[WxArticleSaver] 手动导出成功: {title} | text={len(visible_text)} chars | "
-        f"images={image_count} | videos={len(videos)} | downloaded={downloaded_count} | {folder}"
+        f"图片 已保存={resources['counts']['images'][RESULT_SAVED]} "
+        f"跳过={resources['counts']['images'][RESULT_SKIPPED]} "
+        f"失败={resources['counts']['images'][RESULT_FAILED]} | "
+        f"视频 已保存={resources['counts']['videos'][RESULT_SAVED]} "
+        f"跳过={resources['counts']['videos'][RESULT_SKIPPED]} "
+        f"失败={resources['counts']['videos'][RESULT_FAILED]} | "
+        f"资源合计 已保存={counts[RESULT_SAVED]} 跳过={counts[RESULT_SKIPPED]} "
+        f"失败={counts[RESULT_FAILED]} | {folder}"
     )
-    return folder, title, downloaded_count
+    return folder, title, resources
 
 
 def cleanup_cache():
@@ -1019,6 +1417,15 @@ def button_markup(token):
       }});
       var msg = await resp.text();
       if (!resp.ok) throw new Error(msg || ('HTTP ' + resp.status));
+      // Show the resource manifest counts; the proxy returns a one-line summary.
+      var hint = document.getElementById('wxas-video-hint');
+      if (hint && msg) {{
+        hint.textContent = msg;
+        hint.style.color = '#444';
+        hint.style.fontSize = '12px';
+        hint.style.maxWidth = '420px';
+        hint.style.textAlign = 'right';
+      }}
       btn.textContent = '✓ 已导出';
       btn.style.background = '#19a974';
       setTimeout(function() {{
@@ -1086,7 +1493,7 @@ class WxArticleSaver:
             mark_article_document_seen(flow.request.pretty_url)
             flow.request.headers["Cache-Control"] = "no-cache, max-age=0"
             flow.request.headers["Pragma"] = "no-cache"
-            ctx.log.info(f"[WxArticleSaver] 文章请求已要求重新验证缓存: path={path}")
+            log_info(f"[WxArticleSaver] 文章请求已要求重新验证缓存: path={path}")
 
         if path != SAVE_PATH:
             return
@@ -1110,23 +1517,24 @@ class WxArticleSaver:
 
             html_to_export = rendered_html if rendered_html.strip() else item["html"]
             source = "rendered-dom" if rendered_html.strip() else "cached-response"
-            ctx.log.info(
+            log_info(
                 f"[WxArticleSaver] 开始导出: source={source} | html_bytes="
                 f"{len(html_to_export.encode('utf-8', 'ignore'))} | url={item['url'][:150]}"
             )
 
-            folder, title, video_count = save_article(
+            folder, title, resources = save_article(
                 item["url"], html_to_export, item.get("media") or []
             )
-            body = f"已导出：{title}；本地视频：{video_count} 个"
+            body = format_export_summary(title, resources)
             flow.response = http.Response.make(
                 200,
                 body.encode("utf-8"),
                 {"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store"},
             )
         except Exception as e:
-            ctx.log.error(f"[WxArticleSaver] 手动导出失败: {type(e).__name__}: {e}")
-            body = f"导出失败：{type(e).__name__}: {e}"
+            detail = redact_credentials_text(f"{type(e).__name__}: {e}")
+            log_error(f"[WxArticleSaver] 手动导出失败: {detail}")
+            body = f"导出失败：{detail}"
             flow.response = http.Response.make(
                 500,
                 body.encode("utf-8"),
@@ -1198,7 +1606,7 @@ class WxArticleSaver:
             if h in flow.response.headers:
                 del flow.response.headers[h]
 
-        ctx.log.info(
+        log_info(
             f"[WxArticleSaver] 已识别候选文章页，已注入导出按钮: "
             f"path={urlparse(url).path} | html_bytes={len(html.encode('utf-8', 'ignore'))} | {url[:150]}"
         )

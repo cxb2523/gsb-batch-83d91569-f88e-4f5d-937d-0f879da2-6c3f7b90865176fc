@@ -131,6 +131,12 @@ codex mcp remove wx-article-saver
 
 如果文章包含视频，建议先播放几秒，再点击「导出本文」。
 
+`meta.json` 中的 `resources` 字段逐项记录每个图片和视频候选的去向：
+
+- `images` / `videos`：每个候选一条记录，包含原始 URL（凭据参数已打码）、`result`（`saved` / `skipped` / `failed`）、`reason`（如 `ok`、`domain_not_allowed`、`request_timeout`、`encrypted_hls`）以及成功时的本地相对路径 `local_path`。
+- `counts`：按图片、视频和合计给出 `saved` / `skipped` / `failed` 计数。
+- 导出完成后的提示文本与日志会给出同样的三类计数；失败的资源只影响自身，不会中断整篇导出。
+
 ## 为什么有时需要刷新？
 
 微信桌面端可能直接从 WebView 缓存恢复文章，此时不会重新请求文章页面，工具就无法注入「导出本文」按钮。
