@@ -59,6 +59,8 @@ export interface ServerDeps {
   upstreamStreamIdleTimeoutMs?: number;
   /** Maximum number of requests waiting for an NVIDIA concurrency slot. */
   upstreamMaxQueue?: number;
+  /** Clock used for egress health remaining time; defaults to Date.now. */
+  now?: () => number;
 }
 
 export interface ServerInstance {
@@ -176,6 +178,7 @@ const oversized = () =>
 
 export async function createServer(deps: ServerDeps): Promise<ServerInstance> {
   const apiKeys = deps.apiKeys ?? env.apiKeys;
+  const now = deps.now ?? Date.now;
   const staticCatalog = deps.catalog ?? [];
   const getCatalog = deps.getCatalog ?? (() => staticCatalog);
   const upstreamBackoffMs = deps.upstreamBackoffMs ?? env.upstreamBackoffMs;
@@ -249,6 +252,36 @@ export async function createServer(deps: ServerDeps): Promise<ServerInstance> {
         owned_by: m.ownedBy,
       }));
       return json({ object: "list", data }, 200);
+    }
+
+    if (req.method === "GET" && url.pathname === "/v1/egress/health") {
+      // Read-only: never activates a route, mints tokens, or contacts upstream.
+      const generatedAt = now();
+      const snapshot = egress.getHealthSnapshot?.() ?? [
+        {
+          routeId: "direct",
+          kind: "direct" as const,
+          consecutiveFailures: 0,
+          cooldownUntil: 0,
+          active: false,
+        },
+      ];
+      const routes = snapshot.map((route) => {
+        const cooldownRemainingMs = Math.max(
+          0,
+          route.cooldownUntil - generatedAt,
+        );
+        return {
+          routeId: route.routeId,
+          kind: route.kind,
+          consecutiveFailures: route.consecutiveFailures,
+          cooldownUntil: route.cooldownUntil,
+          cooldownRemainingMs,
+          active: route.active,
+          eligible: cooldownRemainingMs === 0,
+        };
+      });
+      return json({ proxyMode: egress.proxyMode, routes, generatedAt }, 200);
     }
 
     if (url.pathname !== "/v1/chat/completions" || req.method !== "POST") {

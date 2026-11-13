@@ -2,11 +2,14 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseKeys } from "../src/constants.ts";
-import type {
-  EgressCoordinator,
-  GenerationLease,
-  GenerationOutcome,
+import {
+  type EgressCoordinator,
+  type EpochFactory,
+  type GenerationLease,
+  type GenerationOutcome,
+  RotatingEgressCoordinator,
 } from "../src/egress.ts";
+import type { ProxyDefinition } from "../src/proxy-list.ts";
 import {
   createServer,
   isAuthorized,
@@ -1785,6 +1788,297 @@ describe("route-aware egress integration", () => {
       expect(outcome).toBe("ambiguous_post_dispatch_failure");
     } finally {
       await s.stop(true);
+    }
+  });
+});
+
+describe("GET /v1/egress/health", () => {
+  const proxyDefinition = (id: string, octet: number): ProxyDefinition => ({
+    id,
+    scheme: "http",
+    host: `8.8.8.${octet}`,
+    port: 3000 + octet,
+    canonicalUrl: `http://8.8.8.${octet}:${3000 + octet}`,
+  });
+
+  const inertFactory = (): { factory: EpochFactory; created: () => number } => {
+    let creates = 0;
+    return {
+      factory: {
+        async create(route) {
+          creates++;
+          return {
+            async acquireToken() {
+              return `P1_${route.id}`;
+            },
+            async chat() {
+              return new Response("{}", {
+                headers: { "content-type": "application/json" },
+              });
+            },
+            async invalidateCaptcha() {},
+            async close() {},
+          };
+        },
+      },
+      created: () => creates,
+    };
+  };
+
+  const rotatingServer = async (clock: { value: number }) => {
+    const fake = inertFactory();
+    const egress = new RotatingEgressCoordinator({
+      routes: [proxyDefinition("route-a", 1), proxyDefinition("route-b", 2)],
+      factory: fake.factory,
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      now: () => clock.value,
+    });
+    const s = await createServer({ ...deps, egress, now: () => clock.value });
+    return { s, egress, fake };
+  };
+
+  const health = async (s: ServerInstance) => {
+    const r = await fetch(`${s.url}/v1/egress/health`);
+    expect(r.status).toBe(200);
+    return r.json();
+  };
+
+  const route = (
+    body: { routes: Array<Record<string, unknown>> },
+    id: string,
+  ) =>
+    body.routes.find((item) => item.routeId === id) as Record<string, unknown>;
+
+  test("success reports an active, eligible route with no cooldown", async () => {
+    const clock = { value: 1_000 };
+    const { s, egress } = await rotatingServer(clock);
+    try {
+      const lease = await egress.acquire();
+      await lease.acquireToken();
+      await lease.chat({
+        token: "P1",
+        messages: [{ role: "user", content: "hi" }],
+        model: "publisher1/model1",
+        route: { modelId: "test-namespace/model1", functionId: "default-fid" },
+        enableThinking: false,
+        stream: false,
+      });
+      await lease.finish("success");
+
+      const body = await health(s);
+      expect(body.proxyMode).toBe(true);
+      expect(typeof body.generatedAt).toBe("number");
+      expect(body.generatedAt).toBe(clock.value);
+      expect(
+        body.routes.map((item: { routeId: string }) => item.routeId),
+      ).toEqual(["route-a", "route-b", "direct"]);
+      expect(body.routes.map((item: { kind: string }) => item.kind)).toEqual([
+        "proxy",
+        "proxy",
+        "direct",
+      ]);
+      expect(route(body, "route-a")).toMatchObject({
+        consecutiveFailures: 0,
+        cooldownUntil: 0,
+        cooldownRemainingMs: 0,
+        active: true,
+        eligible: true,
+      });
+      expect(route(body, "route-b")).toMatchObject({
+        consecutiveFailures: 0,
+        cooldownRemainingMs: 0,
+        active: false,
+        eligible: true,
+      });
+      expect(route(body, "direct")).toMatchObject({
+        cooldownUntil: 0,
+        cooldownRemainingMs: 0,
+        active: false,
+        eligible: true,
+      });
+    } finally {
+      await egress.close();
+      await s.stop(true);
+    }
+  });
+
+  test("failure cools the route and remaining time is computed per request", async () => {
+    const clock = { value: 5_000 };
+    const { s, egress } = await rotatingServer(clock);
+    try {
+      const first = await egress.acquire();
+      expect(first.routeId).toBe("route-a");
+      await first.finish("pre_dispatch_route_failure");
+
+      const second = await egress.acquire();
+      expect(second.routeId).toBe("route-b");
+
+      let body = await health(s);
+      expect(route(body, "route-a")).toMatchObject({
+        consecutiveFailures: 1,
+        cooldownUntil: 5_100,
+        cooldownRemainingMs: 100,
+        active: false,
+        eligible: false,
+      });
+      expect(route(body, "route-b")).toMatchObject({
+        active: true,
+        eligible: true,
+      });
+
+      clock.value = 5_050;
+      body = await health(s);
+      expect(route(body, "route-a")).toMatchObject({
+        cooldownUntil: 5_100,
+        cooldownRemainingMs: 50,
+        eligible: false,
+      });
+      expect(body.generatedAt).toBe(5_050);
+
+      clock.value = 5_100;
+      body = await health(s);
+      expect(route(body, "route-a")).toMatchObject({
+        cooldownUntil: 5_100,
+        cooldownRemainingMs: 0,
+        eligible: true,
+        consecutiveFailures: 1,
+      });
+      await second.finish("neutral");
+    } finally {
+      await egress.close();
+      await s.stop(true);
+    }
+  });
+
+  test("all routes cooling shows direct fallback active and proxies ineligible", async () => {
+    const clock = { value: 10_000 };
+    const { s, egress } = await rotatingServer(clock);
+    try {
+      for (const routeId of ["route-a", "route-b"]) {
+        const lease = await egress.acquire();
+        expect(lease.routeId).toBe(routeId);
+        await lease.finish("pre_dispatch_route_failure");
+      }
+      const directLease = await egress.acquire();
+      expect(directLease.routeId).toBe("direct");
+
+      const body = await health(s);
+      expect(route(body, "route-a")).toMatchObject({
+        consecutiveFailures: 1,
+        cooldownUntil: 10_100,
+        cooldownRemainingMs: 100,
+        active: false,
+        eligible: false,
+      });
+      expect(route(body, "route-b")).toMatchObject({
+        consecutiveFailures: 1,
+        cooldownUntil: 10_100,
+        cooldownRemainingMs: 100,
+        active: false,
+        eligible: false,
+      });
+      expect(route(body, "direct")).toMatchObject({
+        kind: "direct",
+        consecutiveFailures: 0,
+        cooldownUntil: 0,
+        cooldownRemainingMs: 0,
+        active: true,
+        eligible: true,
+      });
+      await directLease.finish("neutral");
+    } finally {
+      await egress.close();
+      await s.stop(true);
+    }
+  });
+
+  test("a snapshot read never activates a route or mints a token", async () => {
+    const clock = { value: 0 };
+    const { s, egress, fake } = await rotatingServer(clock);
+    try {
+      for (let i = 0; i < 3; i++) {
+        const body = await health(s);
+        expect(
+          body.routes.every((item: { active: boolean }) => !item.active),
+        ).toBe(true);
+      }
+      expect(fake.created()).toBe(0);
+    } finally {
+      await egress.close();
+      await s.stop(true);
+    }
+  });
+
+  test("returns a direct-only view when proxy rotation is disabled", async () => {
+    const s = await createServer({ ...deps });
+    try {
+      const body = await health(s);
+      expect(body.proxyMode).toBe(false);
+      expect(body.routes).toHaveLength(1);
+      expect(body.routes[0]).toMatchObject({
+        routeId: "direct",
+        kind: "direct",
+        consecutiveFailures: 0,
+        cooldownUntil: 0,
+        cooldownRemainingMs: 0,
+        active: false,
+        eligible: true,
+      });
+    } finally {
+      await s.stop(true);
+    }
+  });
+
+  test("falls back to a direct-only view for coordinators without a snapshot", async () => {
+    const minimal: EgressCoordinator = {
+      proxyMode: false,
+      async acquire() {
+        throw new Error("unused");
+      },
+      beginShutdown() {},
+      async drain() {
+        return true;
+      },
+      async close() {},
+    };
+    const s = await createServer({ ...deps, egress: minimal });
+    try {
+      const body = await health(s);
+      expect(body.proxyMode).toBe(false);
+      expect(body.routes).toEqual([
+        {
+          routeId: "direct",
+          kind: "direct",
+          consecutiveFailures: 0,
+          cooldownUntil: 0,
+          cooldownRemainingMs: 0,
+          active: false,
+          eligible: true,
+        },
+      ]);
+    } finally {
+      await s.stop(true);
+    }
+  });
+
+  test("requires the same bearer key as /v1/models", async () => {
+    const keyed = await createServer({ ...deps, apiKeys: ["k"] });
+    try {
+      const missing = await fetch(`${keyed.url}/v1/egress/health`);
+      expect(missing.status).toBe(401);
+      const wrong = await fetch(`${keyed.url}/v1/egress/health`, {
+        headers: { authorization: "Bearer wrong" },
+      });
+      expect(wrong.status).toBe(401);
+      expect((await wrong.json()).error.code).toBe("invalid_api_key");
+      const ok = await fetch(`${keyed.url}/v1/egress/health`, {
+        headers: { authorization: "Bearer k" },
+      });
+      expect(ok.status).toBe(200);
+      expect((await ok.json()).routes).toHaveLength(1);
+    } finally {
+      await keyed.stop(true);
     }
   });
 });

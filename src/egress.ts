@@ -46,10 +46,19 @@ export interface EgressCoordinator {
   beginShutdown(): void;
   drain(timeoutMs?: number): Promise<boolean>;
   close(): Promise<void>;
+  /**
+   * Read-only health view of every configured route, including direct egress.
+   * Building it must not activate a route, mint tokens, or contact upstream;
+   * `cooldownUntil` is a raw timestamp the caller compares against its own
+   * clock so time-dependent fields stay live per request. Optional so custom
+   * coordinators keep compiling; the server falls back to a direct-only view.
+   */
+  getHealthSnapshot?(): RouteHealthSnapshot[];
 }
 
 export interface RouteHealthSnapshot {
   routeId: string;
+  kind: EgressRoute["kind"];
   consecutiveFailures: number;
   cooldownUntil: number;
   active: boolean;
@@ -211,6 +220,17 @@ export function createDirectEgressCoordinator(
           entry?.resolve();
         },
       };
+    },
+    getHealthSnapshot() {
+      return [
+        {
+          routeId: directRoute.id,
+          kind: directRoute.kind,
+          consecutiveFailures: 0,
+          cooldownUntil: 0,
+          active: active.size > 0,
+        },
+      ];
     },
     beginShutdown() {
       accepting = false;
@@ -436,6 +456,7 @@ export class RotatingEgressCoordinator implements EgressCoordinator {
       const health = this.healthFor(route);
       return {
         routeId: route.id,
+        kind: route.kind,
         consecutiveFailures: health.consecutiveFailures,
         cooldownUntil: health.cooldownUntil,
         active: this.active?.route.id === route.id,

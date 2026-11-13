@@ -315,3 +315,24 @@ test("generated success and neutral sequences never rotate", async () => {
     await egress.close();
   }
 });
+
+test("health snapshot lists every route including direct without activating", () => {
+  const fake = fakeFactory();
+  let clock = 0;
+  const egress = coordinator(fake.factory, () => clock);
+  try {
+    expect(fake.epochs).toHaveLength(0);
+    const health = egress.getHealthSnapshot();
+    expect(health.map((item) => item.routeId)).toEqual(["a", "b", "direct"]);
+    expect(health.map((item) => item.kind)).toEqual([
+      "proxy",
+      "proxy",
+      "direct",
+    ]);
+    expect(health.every((item) => item.active === false)).toBe(true);
+    expect(fake.epochs).toHaveLength(0);
+    clock = 1;
+  } finally {
+    void egress.close();
+  }
+});

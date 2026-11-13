@@ -120,6 +120,45 @@ Each model accepts a different subset of sampling params, read from its publishe
 
 Returns the list of available models.
 
+### `GET /v1/egress/health`
+
+Returns a read-only view of egress route health. It never activates a route, mints a captcha token, or contacts NVIDIA, so it is safe to poll. Authentication matches `GET /v1/models`: the same `Authorization: Bearer` key, and no key is required when `API_KEY` is unset.
+
+```bash
+curl -H "Authorization: Bearer secret1" http://localhost:8787/v1/egress/health
+```
+
+```json
+{
+  "proxyMode": true,
+  "generatedAt": 1763000000000,
+  "routes": [
+    {
+      "routeId": "route-a",
+      "kind": "proxy",
+      "consecutiveFailures": 1,
+      "cooldownUntil": 1763000100000,
+      "cooldownRemainingMs": 100000,
+      "active": false,
+      "eligible": false
+    },
+    {
+      "routeId": "direct",
+      "kind": "direct",
+      "consecutiveFailures": 0,
+      "cooldownUntil": 0,
+      "cooldownRemainingMs": 0,
+      "active": true,
+      "eligible": true
+    }
+  ]
+}
+```
+
+- `proxyMode` is `true` only when `PROXIES.txt` loaded usable routes. Otherwise the response has `proxyMode: false` and a single `direct` route instead of an error.
+- `cooldownRemainingMs` and `eligible` are computed at request time from `cooldownUntil`; polling the endpoint reflects the current wait without restarting anything.
+- `active` marks the route currently holding the egress epoch. When every proxy is cooling, `direct` is the active fallback, and the smallest `cooldownRemainingMs` across routes is the wait until an external route becomes eligible again.
+
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md).
