@@ -1,0 +1,66 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+npm-debug.log*
+dist/
+
+# Tools / coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+coverage/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Env / secrets — never commit real env files
+.env
+.env.*
+*.pem
+*.key
+cookies*.json
+storage-state*.json
+*.log
+
+# Playwright
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# Gate-v1 harness outputs
+experiments/gate-v1/out/
+
+# Trajectory cache (#63). NEVER commit these: tenant.jsonl holds tenant-scoped
+# rows by design, so a committed cache file is a privacy incident, and the
+# append-only history means one bad line is permanent. The file names are
+# matched anywhere, not just under .cache/, because the store takes an explicit
+# directory and a caller can point it somewhere else.
+.cache/
+pool.jsonl
+tenant.jsonl

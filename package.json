@@ -1,0 +1,72 @@
+{
+  "name": "paragent",
+  "version": "0.1.1",
+  "description": "Stateful execution layer for browser agents \u2014 record, compile with assertions, replay, repair. Pre-seed; thesis unproven; gate number pending.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DevToolie/Paragent.git"
+  },
+  "homepage": "https://github.com/DevToolie/Paragent#readme",
+  "bugs": {
+    "url": "https://github.com/DevToolie/Paragent/issues"
+  },
+  "keywords": [
+    "browser-automation",
+    "playwright",
+    "agent",
+    "trajectory",
+    "replay",
+    "web-agent"
+  ],
+  "type": "module",
+  "bin": {
+    "paragent": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src/",
+    "contracts/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-package-assets.mjs",
+    "lint": "eslint .",
+    "lint:docs": "node scripts/lint-docs.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run tests/unit",
+    "test:watch": "vitest",
+    "test:canary": "vitest run tests/canary",
+    "test:integration": "vitest run tests/integration",
+    "secret-scan": "node scripts/secret-scan.mjs",
+    "validate:contracts": "node scripts/validate-contracts.mjs",
+    "protect:main": "node scripts/apply-branch-protection.mjs",
+    "testbed": "node --import tsx src/testbed/cli.ts",
+    "recorder": "node --import tsx src/recorder/cli.ts",
+    "compile": "node --import tsx src/compiler/cli.ts",
+    "gate:matrix": "node --import tsx experiments/gate-v1/run-matrix.ts",
+    "gate:baseline": "node --import tsx experiments/gate-v1/fresh-baseline.ts",
+    "gate:report": "node --import tsx experiments/gate-v1/report/generate-amortized.ts",
+    "ci": "npm run secret-scan && npm run validate:contracts && npm run lint && npm run lint:docs && npm run typecheck && npm run test && npm run test:integration",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@eslint/compat": "^2.1.0",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.2.0",
+    "eslint": "^10.8.1",
+    "tsx": "^4.23.12",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.67.0",
+    "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.135.0",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "playwright": "^1.62.1"
+  }
+}

@@ -1,0 +1,319 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://paragent.dev/contracts/metrics.schema.json",
+  "title": "Metrics",
+  "description": "Instrumentation for PRD §9 gate metrics. Supports exact computation of: step-level replay-validity; task-level success with <=2 repairs; repair cost vs fresh-reasoning cost (tokens AND wall-clock); self-heal rate; time-to-repair; amortized tokens/task over N runs. Two distinct cost meanings are named separately and must not be conflated: cost_fresh is a PER-RUN comparison baseline, cost_program_build is the ONE-TIME cost of producing the compiled program (ADR-0010). repair_cost_measured=false marks a run whose repair cost is unobservable (delegated repair, ADR-0020) and excludes it from cost aggregates. NEVER invent values — emit measured fields only.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/stepMetric"
+    },
+    {
+      "$ref": "#/$defs/runMetric"
+    }
+  ],
+  "$defs": {
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tokens_in",
+        "tokens_out",
+        "wall_clock_ms"
+      ],
+      "properties": {
+        "tokens_in": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokens_out": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wall_clock_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "model_id": {
+          "type": "string",
+          "description": "Model used for this cost bucket, if any."
+        }
+      }
+    },
+    "stepOutcome": {
+      "type": "string",
+      "description": "BUDGET_EXHAUSTED (added in #84, ADR-0011): the step failed and the run's wall-clock budget ended its recovery. Distinct from TIMEOUT (the page did not respond in time — a property of the site) and REPAIR_EXHAUSTED (repair ran out of attempts); here attempts remained and time did not.",
+      "enum": [
+        "PASS",
+        "ASSERTION_FAILED",
+        "LOCATOR_NOT_FOUND",
+        "TIMEOUT",
+        "PAGE_ERROR",
+        "REPAIRED_PASS",
+        "REPAIR_EXHAUSTED",
+        "BUDGET_EXHAUSTED"
+      ]
+    },
+    "stepMetric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "metric_kind",
+        "run_id",
+        "site_key",
+        "task_key",
+        "step_index",
+        "testbed_version",
+        "outcome",
+        "replay_valid",
+        "mode",
+        "cost",
+        "recorded_at"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "1.0.0"
+        },
+        "metric_kind": {
+          "type": "string",
+          "const": "step"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "site_key": {
+          "type": "string"
+        },
+        "task_key": {
+          "type": "string"
+        },
+        "step_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "testbed_version": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/stepOutcome"
+        },
+        "replay_valid": {
+          "type": "boolean",
+          "description": "True iff first-pass replay satisfied the assertion without repair. Used for step-level replay-validity (PRD §9)."
+        },
+        "program_source": {
+          "type": "string",
+          "enum": [
+            "cache",
+            "file"
+          ],
+          "description": "Where this step's compiled action came from (ADR-0014). PROVENANCE, not outcome: a cache hit is program_source=cache AND replay_valid, two independent facts combined at aggregation time. Kept separate from replay_valid so neither field answers two questions. Absent means never set — never assumed to be 'file', because a run that never consulted a cache belongs in no hit-rate denominator."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "fresh",
+            "replay",
+            "repair"
+          ],
+          "description": "Which cost path produced this step attempt."
+        },
+        "cost": {
+          "$ref": "#/$defs/cost"
+        },
+        "repair_attempt": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "0 on first try; increments per repair. Null/omit when mode != repair."
+        },
+        "time_to_repair_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Wall-clock from failure detection to REPAIRED_PASS for this step."
+        },
+        "assertion_strength": {
+          "type": "string",
+          "enum": [
+            "strong",
+            "weak"
+          ]
+        },
+        "pre_action_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2,
+          "description": "Pre-actions this step ran before its own action (ADR-0024, #213): recorded ones on a first pass; on a REPAIRED_PASS, the recorded ones kept from the first pass plus the repair's own, matching the rewritten row. Absent when none ran. Lets §9 separate steps that passed by inserting an action from steps that did not."
+        },
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "runMetric": {
+      "type": "object",
+      "additionalProperties": false,
+      "dependentRequired": {
+        "cost_program_build": [
+          "program_build_id"
+        ]
+      },
+      "required": [
+        "schema_version",
+        "metric_kind",
+        "run_id",
+        "site_key",
+        "task_key",
+        "testbed_version",
+        "task_success",
+        "repair_count",
+        "success_with_le_2_repairs",
+        "steps_total",
+        "steps_replay_valid",
+        "self_healed",
+        "cost_fresh",
+        "cost_replay",
+        "cost_repair",
+        "wall_clock_total_ms",
+        "recorded_at"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "1.0.0"
+        },
+        "metric_kind": {
+          "type": "string",
+          "const": "run"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "site_key": {
+          "type": "string"
+        },
+        "task_key": {
+          "type": "string"
+        },
+        "testbed_version": {
+          "type": "string"
+        },
+        "task_success": {
+          "type": "boolean",
+          "description": "True if every step ended PASS or REPAIRED_PASS."
+        },
+        "repair_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "success_with_le_2_repairs": {
+          "type": "boolean",
+          "description": "PRD §9 task-level success criterion: task_success AND repair_count <= 2."
+        },
+        "steps_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "steps_attempted": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Steps that produced a step row. Below steps_total when the run stopped early — on a hard failure or on its wall-clock budget. Absent on rows written before #84. Unreached steps emit NO row: they were not attempted, and scoring them either way would invent a result (ADR-0011)."
+        },
+        "steps_replay_valid": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of steps with replay_valid=true. replay-validity = steps_replay_valid / steps_attempted (equal to steps_total on a run that finished)."
+        },
+        "self_healed": {
+          "type": "boolean",
+          "description": "True if any step reached REPAIRED_PASS. self-heal rate = mean(self_healed) over failing-first-pass runs."
+        },
+        "time_to_repair_total_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Sum of per-step time_to_repair_ms for the run."
+        },
+        "cost_fresh": {
+          "$ref": "#/$defs/cost",
+          "description": "PER-RUN comparison baseline: what a fresh (uncompiled) run of this task would cost NOW. Legitimately present on every row — it is the denominator of the §9 repair-cost-vs-fresh ratio, which is a per-run quantity. NOT the amortization numerator's first point; that is cost_program_build. Zeros mean 'not measured' and make repairCostVsFresh report no_data. See ADR-0010.",
+          "$comment": "Do not sum this across runs. Summing a per-run baseline over N runs grows the numerator linearly and flattens the amortization curve (#123)."
+        },
+        "cost_program_build": {
+          "$ref": "#/$defs/cost",
+          "description": "ONE-TIME capital cost: what it cost to produce the compiled program this run replays — the fresh reasoning that was paid once for this (site_key, task_key, program_build_id). Present only on the run that consumed a given build's payment; absent everywhere else. Absent means 'never measured', and amortization then reports no_data rather than seeding a curve with an assumed first point. See ADR-0010.",
+          "$comment": "Added in #123. Optional, so pre-existing NDJSON rows stay valid and readable."
+        },
+        "program_build_id": {
+          "type": "string",
+          "description": "Identifies the compiled program build this run replays. A re-record/recompile after churn is a NEW build id and a SECOND payment: it stays in the same (site_key, task_key) amortization series and shows as a step up, never as a reset that hides it. Required whenever cost_program_build is present, so a payment is always attributable."
+        },
+        "cost_replay": {
+          "$ref": "#/$defs/cost"
+        },
+        "cost_repair": {
+          "$ref": "#/$defs/cost"
+        },
+        "repair_cost_measured": {
+          "type": "boolean",
+          "description": "False when this run's repair path could not observe what it spent (ADR-0020, #189): a DELEGATED repair client, where the calling agent does the reasoning on its own budget and no usage block ever reaches Paragent. ABSENT MEANS MEASURED — every emitter that runs inference counts real tokens, and a stub's zeros are honest zeros. Rows marked false are EXCLUDED from the §9 cost aggregates (repair-cost-vs-fresh, amortization), never folded in with zeros: an unmeasured zero deflates mean(cost_repair) and moves the kill-line ratio toward a false pass. Outcome aggregates (self-heal rate, task success) still count these rows — whether the repair worked is measured regardless of who paid."
+        },
+        "wall_clock_total_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wall_clock_budget_ms": {
+          "type": "integer",
+          "description": "The per-run wall-clock ceiling in force for this run (#84). <= 0 records that the guard was deliberately disabled, which is a fact about the run and not a missing value."
+        },
+        "budget_exhausted": {
+          "type": "boolean",
+          "description": "True when the run stopped because wall_clock_budget_ms was spent rather than because it finished. Read it alongside steps_attempted vs steps_total: a truncated run's aggregates describe only the steps it reached."
+        },
+        "amortized_cost_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Optional precomputed: (sum(cost_program_build where present + cost_repair + cost_replay) over first N runs) / N — prefer computing in the report from raw rows. cost_fresh is NOT a term here; it is the per-run ratio baseline."
+        },
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "program_source": {
+          "type": "string",
+          "enum": [
+            "cache",
+            "file"
+          ],
+          "description": "Where this run's program came from (ADR-0014, #118). Absent on runs predating the field — never assumed."
+        },
+        "cache_program_invalidated": {
+          "type": "boolean",
+          "description": "True when the resolved program had at least one invalidated row (ADR-0009). Advisory: it never suppressed a step, because confidence does not gate the measurement. Only meaningful when program_source is 'cache'."
+        },
+        "repair_context_level": {
+          "type": "string",
+          "enum": [
+            "landmarks",
+            "interactive",
+            "tree"
+          ],
+          "description": "Context budget the repair model was given for this run (ADR-0012). Recorded because a self-heal rate is not reproducible without it: two runs with the same model_id and different levels are not comparable."
+        },
+        "repair_task_goal_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{12}$",
+          "description": "Which task goal the repair model was given (ADR-0025, #225): the first 12 hex characters of its sha256, never the text. Present only when a repair ran with one. Self-heal rates under different goals, or none, are not comparable, which is why the goal is identified rather than merely flagged."
+        },
+        "repair_cap": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "The per-run repair cap in force (ADR-0027). null = uncapped: the run repairs until the task finishes or wall_clock_budget_ms runs out. Absent on rows written before ADR-0027, which ran at 2. Does not move the §9 bar: success_with_le_2_repairs is fixed at 2 regardless."
+        }
+      }
+    }
+  }
+}

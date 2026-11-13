@@ -1,0 +1,197 @@
+# Paragent
+
+**Record a browser task once. Replay it deterministically, without the model. Repair it when the page changes.**
+
+[![CI](https://github.com/DevToolie/Paragent/actions/workflows/ci.yml/badge.svg)](https://github.com/DevToolie/Paragent/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](./tsconfig.json)
+
+Browser agents re-derive the same work on every run. Ask one to pull a report out of
+a dashboard, and it re-reads the DOM, re-plans, and re-infers every click — burning
+tokens and wall-clock to rediscover a path it already found yesterday, with a fresh
+chance of getting it wrong.
+
+Paragent takes the model out of the second run. It records a developer's **successful** trajectory
+through a web UI, compiles it into a deterministic replayable script with a
+**post-condition assertion on every step**, and replays it with no model in the loop.
+When an assertion fails — a button moved, a label changed — the model is called back
+in to repair just that step, and the repaired script is what runs next time.
+
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="Recording a trajectory, replaying it without the model, and repairing it after the UI changes" width="720">
+</p>
+
+<p align="center">
+  <sub>
+    Real run against the bundled fixture, driven by an illustrative script rather than the
+    documented <code>npm run</code> commands. The <b>record</b> and <b>replay</b> beats are what
+    the repo ships — <b>record</b> today means a developer typing the trajectory by hand
+    (<code>src/recorder/cli.ts</code>), not an agent proposing it; that on-ramp is scoped but
+    <a href="https://github.com/DevToolie/Paragent/issues/127">not yet built (#127)</a>. The
+    <b>repair</b> beat defaults to <code>StubRepairModelClient</code>, which proposes
+    nothing; two opt-in clients exist — <code>AnthropicRepairModelClient</code>
+    (<a href="https://github.com/DevToolie/Paragent/issues/27">#27</a>, needs a key) and
+    <code>DelegatedRepairModelClient</code>
+    (<a href="https://github.com/DevToolie/Paragent/issues/189">#189</a>, needs none) — but a
+    live self-heal has not been measured yet.
+  </sub>
+</p>
+
+
+
+## How it works
+
+| Stage | What happens | Model involved? |
+| --- | --- | --- |
+| **Record** | A developer completes the task once, by hand. Every action and its post-condition is captured as a trajectory. | No |
+| **Compile** | The trajectory becomes a bundle of cache rows — one per step, each with its assertion. Typed values become parameter slots. | No |
+| **Replay** | Steps execute in order. Each asserts its post-condition before the next runs. | No |
+| **Repair** | On assertion failure, the model is called to fix that step; the updated script is written back. | Only on failure |
+
+The assertion-per-step design is the load-bearing part: a replay that drifts fails
+loudly at the step that broke, instead of silently completing the wrong task.
+
+### Repair without an API key
+
+If you are already an agent with model access, Paragent does not need its own. Pass a callback
+and do the repair on your own budget — no `ANTHROPIC_API_KEY`, no second bill:
+
+```ts
+// The package ships a CLI (`bin`) and no root entry point yet, so library
+// consumers deep-import. See ADR-0020's open questions.
+import { DelegatedRepairModelClient } from "paragent/dist/src/runner/repair-delegated.js";
+import { ReplayRunner } from "paragent/dist/src/runner/replay.js";
+
+const runner = new ReplayRunner({
+  repairClient: new DelegatedRepairModelClient({
+    // `request` is the authorized repair view — the failed step, the assertion's
+    // type and strength, and the page's interactive elements. Never parameter
+    // values, never page text (ADR-0012).
+    handler: async (request) => {
+      const action = await yourAgent.proposeCorrectedAction(request);
+      return { corrected_action: action, model_id: "your-model" };
+    },
+  }),
+});
+```
+
+Return `null` to decline; the step records `REPAIR_EXHAUSTED` like any other failed proposal.
+
+Because your agent pays, Paragent cannot see what the repair cost. Those runs are marked
+`repair_cost_measured: false` and are **excluded** from the §9 cost metrics rather than counted as
+zero — see [ADR-0020](docs/decisions/ADR-0020-delegated-repair-cost-provenance.md). A gate
+measurement run still needs `AnthropicRepairModelClient`.
+
+## Try it in 60 seconds
+
+No clone, no credentials, no live site — a browser fixture ships inside the package.
+
+```bash
+npx playwright install chromium   # one-time: the browser binary Playwright drives
+
+# 1. Record a login → dashboard-list trajectory against the bundled fixture
+#    (the recorder serves it over loopback for the length of the recording)
+npx paragent record --fixture --out trajectory.json
+
+# 2. Compile it into a replayable bundle, one cache row per step
+npx paragent compile --in trajectory.json --out bundle.json
+```
+
+`npx playwright install chromium` is a separate step on purpose: it downloads a
+browser, and a package that pulls ~150 MB during `npm install` without asking is
+a bad guest. Everything else works offline.
+
+Replaying that bundle needs `host` and `port` bound to a server for the fixture
+pages — the same holes a recording against a real site carries.
+
+Point the recorder at a real site instead:
+
+```bash
+npx paragent record --base-url http://127.0.0.1:3000 --headed
+```
+
+Recorded values become parameter slots, so one recording covers a family of runs:
+
+```bash
+npx paragent record --fixture --dashboard-title "Q3 Latency" --series-count 5
+```
+
+<details>
+<summary>From a clone, if you want to contribute</summary>
+
+```bash
+git clone https://github.com/DevToolie/Paragent.git
+cd Paragent
+npm install
+npm run recorder -- --fixture --out trajectory.json
+npm run compile -- --in trajectory.json --out bundle.json
+```
+
+The npm scripts run the TypeScript sources through `tsx`; the published package
+ships compiled JavaScript and does not need it.
+</details>
+
+Credentials are read from `PARAGENT_USERNAME` / `PARAGENT_USER_SECRET` and are never
+persisted to disk. Full command list: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
+## Where this fits
+
+Most browser-agent frameworks optimise the *first* run — better planning, better DOM
+grounding, better recovery. Paragent is meant to compose with them rather than replace them:
+record whatever agent you already trust, then replay its output. That's the target, not what
+ships today — the recorder captures a developer's hand-typed actions, not an arbitrary agent's,
+until [#127](https://github.com/DevToolie/Paragent/issues/127) lands.
+
+It's aimed at work that is **repeated**, in a **browser**, where **no clean API
+exists** — the cases where you'd write a script if the UI would just hold still.
+
+## Project status — read this before you rely on it
+
+Paragent is pre-seed, two weeks old, and its central thesis is **not yet proven**. We
+publish the failures alongside the code:
+
+| Track | Question | Status |
+| --- | --- | --- |
+| Track 1 | Do compiled trajectories survive site churn? | Harness in progress — **no gate number yet** |
+| Track 2 | Is there a vertical where the counterparty hypothesis holds? | **FAIL** — no vertical locked |
+| Track 3 | Narrative / pitch | Wave-1 draft; all performance claims **[PENDING TRACK-1]** |
+
+Two consecutive vertical FAILs mean the project now rests on the Track-1 mechanism
+number, which does not exist yet. **There are no performance benchmarks in this README
+because there are none to report.** Any number you see here later will be traceable to
+a gate run.
+
+The full internal picture — research, decision records, both FAIL memos, the pitch
+pack, and the contributor rules — is preserved verbatim and kept current in
+**[docs/README-internal.md](docs/README-internal.md)**. Start there if you are an
+agent, a contributor, a candidate, or an investor. Nothing is softened there and
+nothing is hidden.
+
+## Docs
+
+| | |
+| --- | --- |
+| [docs/README-internal.md](docs/README-internal.md) | Full project status, tracks, and FAIL memos |
+| [docs/architecture.md](docs/architecture.md) | System design |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Commands, pre-PR checklist |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | What's next |
+| [docs/decisions/](docs/decisions/) | ADRs |
+| [docs/research/](docs/research/) | Census and vertical research, including failures |
+
+## Contributing
+
+`npm run ci` must be green before any PR — secret-scan, contract validation, lint,
+typecheck, unit tests, then integration tests. The privacy canary
+(`npm run test:canary`) is a separate merge-blocking job.
+
+This repo is public by design ([ADR-0005](docs/decisions/ADR-0005-repo-public.md)).
+Never commit credentials, cookies, session state, `.env` files, tokens, customer or
+design-partner names, or third-party portal content. Secret scanning with push
+protection is enabled and those checks may not be weakened.
+
+Read [CONTRIBUTING.md](./CONTRIBUTING.md) first — rule 4 is that findings are never
+softened, and it applies to everyone.
+
+## License
+
+[MIT](./LICENSE)

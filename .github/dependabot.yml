@@ -1,0 +1,71 @@
+# Dependabot version updates.
+# Security updates arrive regardless of the `ignore` rules below.
+# Docs: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - javascript
+    commit-message:
+      # `include: scope` appends the scope itself, so the prefix must NOT already
+      # contain one — "chore(deps)" + scope yielded "chore(deps)(deps-dev): ...",
+      # which fails the Conventional Commits check in pr-title.yml.
+      prefix: "chore"
+      prefix-development: "chore"
+      include: scope
+    groups:
+      dev-tooling:
+        applies-to: version-updates
+        patterns:
+          - "@eslint/*"
+          - "@types/*"
+          - eslint
+          - typescript
+          - typescript-eslint
+          - tsx
+          - vitest
+        update-types:
+          - minor
+          - patch
+      contracts-validation:
+        applies-to: version-updates
+        patterns:
+          - ajv
+          - ajv-formats
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # Playwright ships the browser build that gate measurements run against, so a
+      # major bump changes churn results. Bump it deliberately in its own PR
+      # alongside scripts/testbed/matrix.json (the single version matrix since
+      # #26 deleted experiments/gate-v1/versions.json). Security updates still land.
+      - dependency-name: playwright
+        update-types:
+          - version-update:semver-major
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github_actions
+    commit-message:
+      prefix: "chore(actions)"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

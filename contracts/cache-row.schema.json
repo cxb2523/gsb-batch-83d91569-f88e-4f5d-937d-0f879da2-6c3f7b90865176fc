@@ -1,0 +1,321 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://paragent.dev/contracts/cache-row.schema.json",
+  "title": "CacheRow",
+  "description": "One compiled step in the trajectory cache. pool_eligible is explicit and fail-closed: anything not on the B5 allowlist is tenant-scoped.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "row_id",
+    "site_key",
+    "task_key",
+    "step_index",
+    "compiled_action",
+    "assertion",
+    "confidence",
+    "success_count",
+    "failure_count",
+    "last_verified_at",
+    "pool_eligible"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "row_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "site_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "task_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "step_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "program": {
+      "type": "object",
+      "description": "The program this row is a step of (ADR-0013). Denormalized onto every row because the store is a flat append-only log with one record shape. steps_total is what lets a resolver distinguish a complete task from a truncated one: without it, rows 0-3 of an 8-step flow are indistinguishable from a complete 4-step flow, and every individual row is valid either way. Optional: rows written before #120 do not carry it, and a resolver treats its absence as a MISS with a reason rather than assuming completeness.",
+      "additionalProperties": false,
+      "required": [
+        "program_id",
+        "steps_total",
+        "compiled_at"
+      ],
+      "properties": {
+        "program_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "prog-<trajectory_id>. A naming convention, not a parsed format — see src/shared/program-id.ts."
+        },
+        "steps_total": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Step count of the complete program. Rows are step_index 0..steps_total-1."
+        },
+        "compiled_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the compiler produced this program. Breaks ties when a task has been recompiled and two program versions are both resolvable."
+        }
+      }
+    },
+    "pre_actions": {
+      "type": "array",
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/properties/compiled_action"
+      },
+      "description": "ADR-0024 (#213): actions run, in order, before compiled_action. Written only by a repair rewrite, for churn that adds an action. The step's assertion is checked once, after compiled_action. Each item's locators are classified for the pool exactly like compiled_action's; a pre-action that loses every locator makes the row pool-ineligible. Absent means none."
+    },
+    "compiled_action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "locator_fallback_chain"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "navigate",
+            "click",
+            "fill",
+            "select",
+            "check",
+            "uncheck",
+            "press",
+            "hover",
+            "wait",
+            "upload",
+            "custom"
+          ]
+        },
+        "param_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "url_template": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "custom_op": {
+          "type": "string"
+        },
+        "wait_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "For wait actions: the recorded duration in milliseconds (ADR-0008)."
+        },
+        "locator_fallback_chain": {
+          "type": "array",
+          "description": "Ordered locators from trajectory candidates after taint filtering.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "strategy"
+            ],
+            "properties": {
+              "strategy": {
+                "type": "string",
+                "enum": [
+                  "role_name",
+                  "label",
+                  "testid",
+                  "structural",
+                  "text",
+                  "placeholder",
+                  "css_vocab",
+                  "topology_only"
+                ]
+              },
+              "role": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "testid": {
+                "type": "string"
+              },
+              "structural_path": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "css": {
+                "type": "string"
+              },
+              "tenant_scoped": {
+                "type": "boolean",
+                "default": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "assertion": {
+      "description": "Embedded assertion object conforming to assertion.schema.json.",
+      "type": "object"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Empirical confidence from success/(success+failure); 0 if never verified."
+    },
+    "success_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "failure_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "last_verified_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "pool_eligible": {
+      "type": "boolean",
+      "description": "True ONLY if row content is entirely on the positive allowlist (B5). Default false."
+    },
+    "pool_ineligible_reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Required when pool_eligible=false. Null when eligible.",
+      "enum": [
+        null,
+        "tenant_locator_text",
+        "tainted_attribute",
+        "non_vocab_role",
+        "literal_in_assertion",
+        "topology_only_degraded",
+        "manual_hold",
+        "other"
+      ]
+    },
+    "flow_topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Pool-safe structural summary of the step's place in the flow.",
+      "properties": {
+        "prev_action_type": {
+          "type": "string"
+        },
+        "next_action_type": {
+          "type": "string"
+        },
+        "landmark": {
+          "type": "string"
+        }
+      }
+    },
+    "invalidated_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "description": "ISO timestamp at which confidence first fell below the invalidation threshold, or null when the row is not invalidated (ADR-0009). Stored rather than derived from confidence so that later tuning of the threshold cannot retroactively relabel history. Invalidated rows are kept, never deleted."
+    },
+    "repair_provenance": {
+      "type": "object",
+      "description": "Present only on a row written by a repair rewrite (ADR-0009): the recorded action failed and a different one passed. Links the new version to the repair that produced it.",
+      "additionalProperties": false,
+      "required": [
+        "repaired_at",
+        "run_id",
+        "repair_attempt"
+      ],
+      "properties": {
+        "repaired_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "repair_attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "replaced_action_type": {
+          "type": "string",
+          "description": "Action type of the version this one replaced."
+        },
+        "pre_action_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2,
+          "description": "Pre-actions the repair left on the step (ADR-0024). Absent means none."
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "pool_eligible": {
+            "const": false
+          }
+        },
+        "required": [
+          "pool_eligible"
+        ]
+      },
+      "then": {
+        "required": [
+          "pool_ineligible_reason"
+        ],
+        "properties": {
+          "pool_ineligible_reason": {
+            "not": {
+              "type": "null"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "pool_eligible": {
+            "const": true
+          }
+        },
+        "required": [
+          "pool_eligible"
+        ]
+      },
+      "then": {
+        "properties": {
+          "pool_ineligible_reason": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}
