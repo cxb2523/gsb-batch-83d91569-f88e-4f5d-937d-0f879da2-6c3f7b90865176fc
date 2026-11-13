@@ -1,0 +1,106 @@
+name: canary
+
+on:
+  schedule:
+    - cron: "27 8 * * 1"   # weekly, Mondays; avoid :00 so it doesn't pile up with everyone else's
+  workflow_dispatch: {}     # dispatch manually at least once before trusting the badge
+
+# Two jobs, and only the second one proves the site works.
+#
+# canary-datacentre runs the no-secrets default from a GitHub runner, which
+# is a datacentre address. SHEIN answers that address with its own
+# /risk/action/limit gateway on every run measured from 2026-10-01 to
+# 2026-10-15 (exit 3, zero rows), so a refusal THERE is expected and is
+# reported as a notice. Everything else is judged strictly: a crash, a
+# usage error, an empty listing (4), content never obtained or a page that
+# states products and parses to none (5) all fail the job, and a served run
+# must clear the row floor.
+#
+# canary-live is the job that tests real data, every Monday. It runs through
+# a 2Captcha Scraping Browser profile (the setup the README recommends) and
+# FAILS when the SHEIN_CDP_ENDPOINT secret is missing: a skipped or blocked
+# canary is not a green one. Blocked (3), empty (4), never obtained (5) or
+# too few rows are all red here.
+#
+# Thresholds test the parser, not the merchandising: at least 10 rows, and
+# at least 90% of them with a price and a title. "dress" always has far
+# more than 15 results.
+jobs:
+  canary-datacentre:
+    name: canary-datacentre (refusal expected)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Run the local-first default against a real search
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --query "dress" --max-results 15 --format json --out canary_out.json --dump-html
+          echo "exit_code=$?" >> "$GITHUB_ENV"
+
+      - name: Interpret the exit code
+        run: python3 .github/canary_assert.py canary_out.json "$exit_code" --refusal-expected
+
+      - name: Upload artifacts (output + debug HTML) on every run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-datacentre-${{ github.run_id }}
+          path: |
+            canary_out.json
+            canary_out.json.meta.json
+            canary_out_debug.html
+          retention-days: 14
+
+  canary-live:
+    name: canary-live (Scraping Browser, must return rows)
+    runs-on: ubuntu-latest
+    env:
+      HAS_CDP: ${{ secrets.SHEIN_CDP_ENDPOINT != '' }}
+    steps:
+      - name: Require the SHEIN_CDP_ENDPOINT secret
+        if: env.HAS_CDP != 'true'
+        run: |
+          echo "::error::canary-live needs the SHEIN_CDP_ENDPOINT repository secret (a 2Captcha Scraping Browser endpoint, ws://...). Without it nothing tests whether SHEIN still serves rows to this scraper, so this job fails rather than passing on a skip. TWOCAPTCHA_KEY is optional and lets the run solve SHEIN's /risk/challenge."
+          exit 1
+
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-playwright.txt
+
+      # Both secrets go through the ENVIRONMENT, never a command-line flag
+      # (credentials never reach argv). env_config.py reads
+      # SHEIN_CDP_ENDPOINT/TWOCAPTCHA_KEY, and an unset secret arrives as an
+      # empty string, which it treats as unset.
+      - name: Run over the Scraping Browser API
+        env:
+          SHEIN_CDP_ENDPOINT: ${{ secrets.SHEIN_CDP_ENDPOINT }}
+          TWOCAPTCHA_KEY: ${{ secrets.TWOCAPTCHA_KEY }}
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --query "dress" --max-results 15 --format json --out canary_cdp_out.json --dump-html
+          echo "exit_code=$?" >> "$GITHUB_ENV"
+
+      - name: Require real rows
+        run: python3 .github/canary_assert.py canary_cdp_out.json "$exit_code"
+
+      - name: Upload artifacts on every run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-live-${{ github.run_id }}
+          path: |
+            canary_cdp_out.json
+            canary_cdp_out.json.meta.json
+            canary_cdp_out_debug.html
+          retention-days: 14
