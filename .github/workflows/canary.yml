@@ -1,0 +1,225 @@
+# A real run of each mode against webmotors.com.br, weekly (Mondays; every run
+# bills the proxy or Scraping Browser session): a car search, a
+# motorcycle search, and the first adverts of the car search read in ad mode.
+# tests.yml (deliberately) never touches the site.
+#
+# THIS CANARY NEEDS A SECRET, and without one it FAILS. CloudFront refused
+# every datacentre address measured on 2026-09-28 (a VPS, headful Chromium
+# included, and the Scraper API's own exits), and a GitHub-hosted runner is a
+# datacentre address. So a run from the bare runner cannot reach the
+# listings, and a canary that skipped green in that case reported a scraper
+# as working when nothing had been tested. Set ONE of:
+#
+#     gh secret set WEBMOTORS_PROXY --repo 2scraper/webmotors-scraper
+#         a residential exit, http://user:pass@host:port
+#     gh secret set WEBMOTORS_CDP_ENDPOINT --repo 2scraper/webmotors-scraper
+#         a 2Captcha Scraping Browser API endpoint (country-br)
+#
+# They go through the ENVIRONMENT, not a command line: env_config.py reads
+# exactly those variables, an unset secret arrives as an empty string which
+# the loader treats as unset, and the credential never reaches a command
+# line. A Scraping Browser endpoint stops working when its credentials are
+# refused; how long that takes is not a fixed figure, so a 401 here means
+# "copy the endpoint again", not a broken scraper.
+
+name: canary
+
+on:
+  schedule:
+    # Mondays 06:07 UTC. Weekly, not daily: every run bills a paid route.
+    # Not on the hour: every scheduled workflow fires at :00.
+    - cron: "7 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 1,844 Gol listings on 2026-09-28, so three pages of 47 are full;
+          # the floor leaves room for a thin morning and for the dedupe of a
+          # live listing moving between pages.
+          - name: search
+            args: "--make volkswagen --model gol --pages 3"
+            floor: 120
+            ads: 3
+          - name: motorcycles
+            args: "--category motos --make honda --pages 3"
+            floor: 120
+            ads: 0
+    env:
+      WEBMOTORS_PROXY: ${{ secrets.WEBMOTORS_PROXY }}
+      WEBMOTORS_CDP_ENDPOINT: ${{ secrets.WEBMOTORS_CDP_ENDPOINT }}
+    steps:
+      # No skip: a run that never contacted the site must not end green.
+      - name: Require a residential exit
+        run: |
+          if [ -z "$WEBMOTORS_PROXY" ] && [ -z "$WEBMOTORS_CDP_ENDPOINT" ]; then
+            echo "::error::Neither the WEBMOTORS_PROXY nor the WEBMOTORS_CDP_ENDPOINT secret is set. CloudFront refuses datacentre addresses (a GitHub runner is one), so this canary cannot reach the site without one. See the workflow header."
+            echo "## ${{ matrix.name }}: FAILED — the site was NOT contacted" >> "$GITHUB_STEP_SUMMARY"
+            echo "Set the WEBMOTORS_PROXY or WEBMOTORS_CDP_ENDPOINT secret." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      # >= 3 pages, because with one page pagination is never exercised.
+      - name: Run
+        id: run
+        run: |
+          set +e   # `run:` is `bash -e`; without this a non-zero exit aborts
+                   # the step before the echo below records it.
+          python playwright_scraper.py ${{ matrix.args }} \
+            --proxy-budget-mb 10 \
+            --out canary --format both --dump-html canary_dump.json
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      # Through WEBMOTORS_PROXY the run meters what it sends and stops at
+      # --proxy-budget-mb 10. This puts the figure in the step summary and
+      # fails the job when the cap was hit. Over WEBMOTORS_CDP_ENDPOINT
+      # nothing is metered locally, and it says so.
+      - name: Proxy traffic of the search run
+        if: ${{ !cancelled() && steps.run.outcome != 'skipped' }}
+        env:
+          JOB_LABEL: ${{ matrix.name }}
+        run: python3 .github/proxy_traffic.py "$JOB_LABEL" canary
+
+      - name: Interpret
+        run: |
+          code="${{ steps.run.outputs.exit_code }}"
+          echo "exit code: $code"
+          case "$code" in
+            0) ;;
+            2) echo "::error::The run was refused as bad usage. If the log says the site did not recognise the make or model, the site renamed it."; exit 1 ;;
+            3) echo "::error::Blocked. If the log names cloudfront, the proxy's exits were refused for their ADDRESS; if perimeterx, the CLIENT was, which is the engines' identity handling failing."; exit 1 ;;
+            4) echo "::error::Zero rows from a search that is never empty. The endpoint's shape has moved; see canary_dump.json."; exit 1 ;;
+            5) echo "::error::The data never arrived (transport failure, or the API gateway refused the path)."; exit 1 ;;
+            6) echo "::error::Partial run: some pages failed. See canary.meta.json."; exit 1 ;;
+            *) echo "::error::Unexpected exit $code."; exit 1 ;;
+          esac
+
+      - name: Assert
+        run: |
+          python - <<'EOF'
+          import json, sys
+          meta = json.load(open("canary.meta.json"))
+          rows = json.load(open("canary.json"))
+          floor = ${{ matrix.floor }}
+          problems = []
+          if meta["status"] != "complete":
+              problems.append("status %r (%s)" % (meta["status"], meta["stop_reason"]))
+          if meta["pages_completed"] != 3:
+              problems.append("pages_completed %r, not 3" % meta["pages_completed"])
+          if len(rows) < floor:
+              problems.append("%d rows, floor %d" % (len(rows), floor))
+          if not meta.get("total_results"):
+              problems.append("no total_results in the sidecar")
+          if meta.get("currency") != "BRL":
+              problems.append("currency %r, not read from the listing's JSON-LD" % meta.get("currency"))
+          pairs = [(r["page"], r["position"]) for r in rows]
+          if len(set(pairs)) != len(pairs):
+              problems.append("page+position is not unique")
+          priced = sum(1 for r in rows if isinstance(r["price"], float) and r["price"] > 0)
+          if priced != len(rows):
+              problems.append("%d of %d rows have a price" % (priced, len(rows)))
+          if meta.get("malformed_records"):
+              problems.append("%d listing record(s) could not be read" % meta["malformed_records"])
+          if meta.get("columns_below_floor"):
+              problems.append("columns below their floor: %s" % meta["columns_below_floor"])
+          named = [r["sku"] for r in rows if r["seller_type"] == "private" and r["seller_name"]]
+          if named:
+              problems.append("a private seller carries a name: %s" % named[0])
+          bad = [r["url"] for r in rows if not r["url"].startswith("https://www.webmotors.com.br/comprar/")]
+          if bad:
+              problems.append("non-advert url: %s" % bad[0])
+          if problems:
+              print("canary FAILED: " + "; ".join(problems))
+              sys.exit(1)
+          print("canary OK: %d rows of %s, complete" % (len(rows), meta["total_results"]))
+          EOF
+
+      # Ad mode: the first adverts the search returned, each read from its
+      # own detail endpoint.
+      - name: Run ad mode
+        id: ads
+        if: matrix.ads > 0
+        run: |
+          python - <<'EOF'
+          import json
+          rows = json.load(open("canary.json"))
+          with open("canary_ads.txt", "w") as f:
+              f.write("\n".join(r["url"] for r in rows[:${{ matrix.ads }}]) + "\n")
+          EOF
+          set +e
+          python playwright_scraper.py --ads-file canary_ads.txt \
+            --proxy-budget-mb 10 \
+            --out canary_ad --format both --dump-html canary_ad_dump.json
+          code=$?
+          echo "exit code: $code"
+          if [ "$code" != 0 ]; then
+            echo "::error::Ad mode exited $code (3 blocked, 5 never arrived, 6 some adverts failed). See canary_ad.meta.json."
+            exit 1
+          fi
+
+      - name: Proxy traffic of the ad-mode run
+        if: ${{ !cancelled() && matrix.ads > 0 && steps.ads.outcome != 'skipped' }}
+        env:
+          JOB_LABEL: ${{ matrix.name }}/ads
+        run: python3 .github/proxy_traffic.py "$JOB_LABEL" canary_ad
+
+      - name: Assert ad mode
+        if: matrix.ads > 0
+        run: |
+          python - <<'EOF'
+          import json, sys
+          meta = json.load(open("canary_ad.meta.json"))
+          rows = json.load(open("canary_ad.json"))
+          want = ${{ matrix.ads }}
+          problems = []
+          if meta["status"] != "complete":
+              problems.append("status %r (%s)" % (meta["status"], meta["stop_reason"]))
+          if len(rows) != want:
+              problems.append("%d adverts, asked for %d" % (len(rows), want))
+          for r in rows:
+              if not (isinstance(r["price"], float) and r["price"] > 0):
+                  problems.append("advert %s has no price" % r["sku"])
+              if not r.get("make") or not r.get("year_model"):
+                  problems.append("advert %s lacks make/year_model" % r["sku"])
+              if r["seller_type"] == "private" and (r["seller_name"] or r["description"]):
+                  problems.append("private advert %s carries a name or text" % r["sku"])
+          if problems:
+              print("ad canary FAILED: " + "; ".join(problems))
+              sys.exit(1)
+          print("ad canary OK: %d adverts" % len(rows))
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-${{ matrix.name }}
+          path: |
+            canary.json
+            canary.csv
+            canary.meta.json
+            canary_dump.json*
+            canary_page*_debug.html
+            canary_ad.json
+            canary_ad.meta.json
+            canary_ad_dump.json*
+          if-no-files-found: ignore
