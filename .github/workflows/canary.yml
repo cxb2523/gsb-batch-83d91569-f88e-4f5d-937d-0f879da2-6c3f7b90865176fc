@@ -1,0 +1,152 @@
+name: canary
+
+# tests.yml deliberately never touches flippa.com, which leaves a real gap: a
+# change to the site itself only shows up when a user hits it, while the
+# offline badge stays green. This is the other half — one real run a week (Mondays)
+# against a known-good filtered URL.
+#
+# --pages 3, not 1: with one page pagination is never exercised, and
+# pagination is precisely where this site's failure mode lives. Every page
+# after the first is a CONSTRUCTED URL (?page=N), and if that convention
+# changes the run must go red rather than return page 1 three times and
+# report success.
+on:
+  schedule:
+    # Off the hour, so it is not competing with every other cron job for
+    # runner availability.
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  live-run:
+    runs-on: ubuntu-latest
+    # Needs no secret: the run goes direct from the runner. FLIPPA_PROXY is
+    # optional and only changes the route when it is set.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the Playwright engine
+        run: |
+          pip install --require-hashes -r requirements-playwright.lock
+          playwright install --with-deps chromium
+
+      - name: Scrape a real, known-good filtered listing
+        id: run
+        # The proxy goes through the ENVIRONMENT, never a commented-out
+        # --proxy line: env_config.py already reads FLIPPA_PROXY, an unset
+        # secret arrives as an empty string which the loader treats as unset,
+        # so this one line is correct with and without it — and the credential
+        # never reaches a command line.
+        #
+        # set +e: GitHub Actions runs `run:` steps under `bash -e`, so without
+        # it a non-zero exit aborts the step before the exit code can be
+        # captured. continue-on-error does not change that; it stops the step
+        # failing the job, not the shell's errexit.
+        continue-on-error: true
+        env:
+          FLIPPA_PROXY: ${{ secrets.FLIPPA_PROXY }}
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --url "https://flippa.com/search?filter%5Bproperty_type%5D=saas" \
+            --pages 3 --out canary_run --dump-html canary_run.html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Interpret the exit code
+        run: |
+          code="${{ steps.run.outputs.exit_code }}"
+          case "$code" in
+            0) echo "OK — listings parsed from a live run." ;;
+            # flippa.com serves this URL to a bare GitHub runner: every
+            # scheduled run from 2026-09-29 to 2026-10-14 reached the page and
+            # parsed it (exit 4 there was the parser, not a block). So a block
+            # is a real finding here and is never excused as "the runner's IP".
+            3) echo "::error::Blocked before parsing (exit 3). flippa.com has served this URL to GitHub's runners with no proxy, so this is a change on the site's side (or a new block on runner addresses) — read the dumped page in the artefacts." ; exit 1 ;;
+            4) echo "::error::Ran fine but parsed 0 listings (exit 4) on a URL known to have hundreds — this is the shape a real site-side break takes." ; exit 1 ;;
+            5) echo "::error::The content was never obtained (exit 5): navigation timed out, the page never painted, or it held listings the parser could not read. See the log and the dumped page." ; exit 1 ;;
+            6) echo "::error::Partial run (exit 6) — see the sidecar's stop_reason. 'pagination_not_addressable' means the ?page[number]= convention has stopped working." ; exit 1 ;;
+            *) echo "::error::Unexpected exit code $code (see the step above)." ; exit 1 ;;
+          esac
+
+      - name: Sanity-check the scraped data
+        # Exit 0 only means some listings were written; it says nothing about
+        # whether the columns are populated. (Any other exit already failed
+        # the job in the step above.)
+        if: steps.run.outputs.exit_code == '0'
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          from pathlib import Path
+
+          PAGES_REQUESTED = 3
+          # 50 listings per page since the site's 2026-09-29 rebuild, so three
+          # pages is 150. The floor is set well below that rather than tracking
+          # it; this filter had 671-676 matches on 2026-10-14/15.
+          MIN_LISTINGS = 120
+
+          rows = json.loads(Path("canary_run.json").read_text())
+          meta = json.loads(Path("canary_run.meta.json").read_text())
+          fail = []
+
+          if len(rows) < MIN_LISTINGS:
+              fail.append(f"only {len(rows)} listings, expected at least {MIN_LISTINGS}")
+          if meta.get("status") != "complete":
+              fail.append(f"run status is {meta.get('status')!r}, not 'complete'")
+          if meta.get("pages_completed", 0) < PAGES_REQUESTED:
+              fail.append(f"stopped after {meta.get('pages_completed')} of "
+                          f"{PAGES_REQUESTED} pages (stop_reason="
+                          f"{meta.get('stop_reason')!r})")
+          # The check the whole --pages 3 exists for.
+          if meta.get("addressable") is not True:
+              fail.append("page 2 did not carry listings page 1 lacked — the "
+                          "?page= convention has stopped working")
+          if len({r["sku"] for r in rows}) != len(rows):
+              fail.append("duplicate skus across pages")
+          if len({(r["page"], r["position"]) for r in rows}) != len(rows):
+              fail.append("page+position is not unique — the page number is "
+                          "not being threaded into the parser")
+
+          priced = sum(1 for r in rows if r.get("price") is not None)
+          if rows and priced / len(rows) < 0.95:
+              fail.append(f"only {priced}/{len(rows)} rows have a price")
+          # Columns every card carries. A share below 95% means the card
+          # markup moved under a column while the cards themselves still
+          # parse — the shape the 2026-09-29 rebuild would have taken had
+          # the card id survived. Measured 2026-10-15 on this URL: 150/150
+          # for each. Not seasonal: no promotion or badge decides them.
+          for column in ("title", "asset_type", "industry", "country",
+                         "age_text", "monthly_revenue"):
+              have = sum(1 for r in rows if r.get(column) is not None)
+              if rows and have / len(rows) < 0.95:
+                  fail.append(f"only {have}/{len(rows)} rows have {column}")
+          wrong = [r["sku"] for r in rows
+                   if r.get("original_price") is not None
+                   and r.get("price") is not None
+                   and r["original_price"] <= r["price"]]
+          if wrong:
+              fail.append(f"original_price at or below price on {wrong[:5]}")
+          for line in fail:
+              print(f"::error::{line}")
+          sys.exit(1 if fail else 0)
+          EOF
+
+      - name: Upload run artefacts
+        # Always, not just on failure: a run that returns the WRONG number of
+        # listings with no error is exactly the regression that needs the
+        # actual bytes the parser saw.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: canary-run-${{ github.run_id }}
+          path: |
+            canary_run.json
+            canary_run.csv
+            canary_run.meta.json
+            canary_run.html*
+            canary_run_page*_debug.*
+          if-no-files-found: ignore
+          retention-days: 14
