@@ -1,0 +1,221 @@
+/**
+ * Globale Keyboard Shortcuts
+ *
+ * Verantwortlich für:
+ * - globale Tastaturzustände
+ * - Delegation an:
+ *   - favorites.js
+ *   - search.js
+ *   - navigation.js
+ */
+
+import { handleFavoriteRecordingInput, handleFavoriteShortcut } from './favorites.js';
+
+import { handleSearchKeyDown } from './search.js';
+
+import { handleNavigationKeyDown } from './navigation.js';
+
+function getDigitFromEvent(e) {
+  const match = /^Digit([0-9])$/.exec(e.code ?? '');
+  return match?.[1] ?? (/^[0-9]$/.test(e.key) ? e.key : null);
+}
+
+export function handleGlobalKeyDown(e, app) {
+  if (app.readOnly && ((e.ctrlKey && e.key.toLowerCase() === "e") || e.key === "+")) return;
+  if (app.showQuickAdd || app.actionService || app.dialogConfig?.show || e.isComposing) return;
+  if (e.target.closest?.('input, textarea, select, [contenteditable="true"]') && !app.showSearch) return;
+  if (!app.readOnly && e.key.toLowerCase() === 'e' && e.ctrlKey && !e.altKey && !e.metaKey && !app.showConfigModal && !app.showSearch && !app.showHelp) {
+    e.preventDefault();
+    app.resetInput(false);
+    app.favoriteRecording = null;
+    app.editRecording = { categoryKey: '' };
+    app.currentInput = app.t('editSelectCategory');
+    return;
+  }
+  if (app.editRecording && !app.showConfigModal && !app.showSearch && !app.showHelp) {
+    e.preventDefault();
+    if (e.key === 'Escape') { app.resetInput(false); return; }
+    if (e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) return;
+    handleEditInput(e.key.toLowerCase(), app);
+    return;
+  }
+  if (!app.readOnly && e.key === '+' && !e.ctrlKey && !e.altKey && !e.metaKey && !app.showConfigModal && !app.showSearch && !app.showHelp && !e.target.closest?.('input, textarea, select, [contenteditable="true"]')) {
+    e.preventDefault(); app.openQuickAdd(); return;
+  }
+  // The modal owns its shortcuts, including Escape and unsaved-change handling.
+  if (app.showConfigModal) return;
+  /*
+   * Ctrl + Zahl
+   *
+   * Favoriten Shortcut
+   */
+  if (e.ctrlKey && /^[0-9]$/.test(e.key)) {
+    e.preventDefault();
+
+    handleFavoriteShortcut(e.key, app);
+
+    return;
+  }
+
+  /*
+   * Andere Modifier ignorieren
+   */
+  if ((e.ctrlKey && e.key !== ',') || e.altKey || e.metaKey) {
+    return;
+  }
+
+  /*
+   * Escape
+   */
+  if (e.key === 'Escape') {
+    if (app.favoriteRecording) {
+      app.favoriteRecording = null;
+    }
+
+    app.resetInput(true);
+
+    return;
+  }
+
+  /*
+   * Search Navigation
+   */
+  if (app.showSearch) {
+    handleSearchKeyDown(e, app);
+    return;
+  }
+
+  /*
+   * Help schließen
+   */
+  if (app.showHelp) return;
+
+  /*
+   * Keine Shortcuts in Inputs
+   */
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+    return;
+  }
+
+  /*
+   * Shift + Zahl
+   *
+   * Continue Shortcut (ändert die LRU-Reihenfolge nicht)
+   */
+  const shiftedDigit = e.shiftKey ? getDigitFromEvent(e) : null;
+  if (shiftedDigit) {
+    e.preventDefault();
+
+    app.launchContinueSlot(shiftedDigit);
+
+    return;
+  }
+
+  /*
+   * Favorit Aufnahme
+   */
+  if (app.favoriteRecording) {
+    if (e.key.length === 1 && /^[a-z]$/i.test(e.key)) {
+      handleFavoriteRecordingInput(e.key.toLowerCase(), app);
+    } else {
+      app.favoriteRecording = null;
+      app.resetInput(true);
+    }
+
+    return;
+  }
+
+  /*
+   * Hilfe
+   *
+   * Muss vor layoutabhängigen Symbol-Shortcuts geprüft werden.
+   */
+  if (e.key === '?') {
+    e.preventDefault();
+
+    app.showHelp = true;
+
+    return;
+  }
+
+  /*
+   * Continue-Übersicht öffnen
+   *
+   * Layoutabhängig über das tatsächlich erzeugte Zeichen erkennen.
+   * Eine Prüfung auf e.code === 'Minus' würde auf deutschen Layouts
+   * auch Shift + ß (= ?) abfangen und damit den Hilfe-Shortcut blockieren.
+   */
+  if (e.key === '_') {
+    e.preventDefault();
+    app.openContinueView('_');
+    return;
+  }
+
+  /*
+   * Durch die zuletzt verwendeten Services wechseln
+   */
+  if (e.key === '-') {
+    e.preventDefault();
+    app.toggleLastService();
+    return;
+  }
+
+  /*
+   * Config öffnen
+   */
+  if (e.ctrlKey && e.key === ',') {
+    e.preventDefault();
+
+    app.showConfigModal = true;
+
+    return;
+  }
+
+  /*
+   * Suche öffnen
+   */
+  if (e.key === ' ' || e.key === 'Spacebar') {
+    e.preventDefault();
+
+    app.openSearch();
+
+    return;
+  }
+
+  /*
+   * Grid/List Umschalten
+   */
+  if (e.key === '#' && !app.activeCategoryKey) {
+    e.preventDefault();
+
+    app.toggleViewMode();
+
+    return;
+  }
+
+  /*
+   * Navigation
+   */
+  if (e.key.length === 1) {
+    handleNavigationKeyDown(e.key.toLowerCase(), app);
+  }
+}
+
+function handleEditInput(key, app) {
+  const recording = app.editRecording;
+  if (!recording.categoryKey) {
+    const category = app.categories.find(c => c.categoryKey === key);
+    app.isInvalidInput = !category;
+    if (!category) return;
+    recording.categoryKey = key;
+    app.activeCategoryKey = key;
+    app.currentInput = app.t('editSelectService', { category: category.category });
+    return;
+  }
+  const service = app.categories.find(c => c.categoryKey === recording.categoryKey)?.services.find(s => s.key === key);
+  app.isInvalidInput = !service;
+  if (!service) return;
+  app.editRecording = null;
+  app.resetKeyboardInput();
+  app.openQuickAdd({ serviceId: service.id }, true);
+}
