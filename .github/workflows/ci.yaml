@@ -1,0 +1,76 @@
+name: CI
+
+# The two lists below hold only files that no step in this workflow reads, and
+# they are kept identical. They are deny lists on purpose: an allow list would
+# silently skip CI for any new path nobody remembered to add, whereas an unknown
+# file here still runs the full build. GitHub does not resolve YAML anchors, so
+# the list is written out twice.
+#
+# Two entries are absent deliberately. `.dockerignore` decides what reaches the
+# image, and a change to this workflow must be run by this workflow.
+on:
+  pull_request:
+    branches:
+      - master
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.env.example'
+      - '.pre-commit-config.yaml'
+      - '.github/dependabot.yml'
+      - 'docker-compose.yml'
+
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.env.example'
+      - '.pre-commit-config.yaml'
+      - '.github/dependabot.yml'
+      - 'docker-compose.yml'
+
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup python environment
+        uses: actions/setup-python@v7
+        with:
+          # Kept in step with the Dockerfile: checking on one version while
+          # shipping another is how a release that had no wheels for the
+          # image's interpreter went unnoticed.
+          python-version: '3.14'
+
+      - name: Install requirements
+        run: pip install -r requirements-ci.txt
+
+      - name: Style checking
+        run: make style
+
+      - name: Types checking
+        run: make types
+
+      # The suite stubs out every network call, so no browser is needed here.
+      - name: Tests
+        run: make test
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Building the image is the only thing that exercises the interpreter and
+      # the browser the service actually runs on. Its own job, so the fast
+      # checks above are not held up by it.
+      - name: Build the image
+        run: docker build -t amazon-location-cookies .

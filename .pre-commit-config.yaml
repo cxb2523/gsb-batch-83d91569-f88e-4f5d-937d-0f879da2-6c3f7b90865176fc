@@ -1,0 +1,46 @@
+default_stages:
+- pre-commit
+
+repos:
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v4.5.0
+  hooks:
+    - id: end-of-file-fixer
+    - id: trailing-whitespace
+    - id: check-yaml
+    - id: mixed-line-ending
+    - id: check-case-conflict
+    - id: requirements-txt-fixer
+
+- repo: https://github.com/pycqa/flake8
+  rev: 7.3.0
+  hooks:
+    # No `additional_dependencies` on purpose. Whatever is listed there runs
+    # only in the hook, never in `make style`, so the two enforce different
+    # rule sets under the same name. CI is the gate, so the hook matches it.
+    - id: flake8
+
+- repo: local
+  hooks:
+    - id: mypy
+      name: mypy
+      pass_filenames: false
+      language: python
+      entry: bash -c 'make types'
+
+- repo: https://github.com/psf/black
+  rev: 26.5.1
+  hooks:
+    - id: black
+      language_version: python
+
+- repo: https://github.com/PyCQA/isort
+  rev: 8.0.1
+  hooks:
+    - id: isort
+
+- repo: https://github.com/asottile/pyupgrade
+  rev: v3.21.2
+  hooks:
+    - id: pyupgrade
+      args: [--py312-plus]
