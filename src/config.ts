@@ -1,0 +1,569 @@
+/**
+ * src/config.ts — the single source for runtime configuration.
+ *
+ * Resolves the WebSocket port, the data dir (where the 0600 handshake lives),
+ * and the security `Policy` from one place: defaults < env < CLI flags < policy
+ * file. Nothing else in the codebase should read `process.argv` or invent its
+ * own port/policy — they take a `CliConfig`.
+ */
+
+import { homedir } from 'node:os';
+import { join, resolve as resolvePath } from 'node:path';
+import { readFileSync } from 'node:fs';
+
+import { DEFAULT_WS_PORT } from '../shared/protocol';
+import { normalizeDomainPattern } from '../shared/policy';
+import { type Policy, resolvePolicy } from './security/policy';
+import { renamedDirectory, runtimeEnv } from './compat';
+
+/** Local port for `--http` (one above the bridge's). */
+export const DEFAULT_HTTP_PORT = 38018;
+
+export type LogLevel = 'silent' | 'info' | 'debug';
+export type BackendPreference = 'extension' | 'cdp';
+
+export interface CliConfig {
+  /** Port the bridge binds; 0 = ephemeral (written to the handshake file). */
+  wsPort: number;
+  /** Directory holding handshake.json and the per-profile workspaces. */
+  dataDir: string;
+  /** Browser profile (identity). Selects `profiles/<profile>/` under the data dir. */
+  profile: string;
+  /** Task (run). Artifacts land in `profiles/<profile>/tasks/<task>/`. */
+  task: string;
+  /** Resolved, fully-defaulted security policy. */
+  policy: Policy;
+  /** Whether to fall back to a Playwright-driven Chromium when no extension is paired. */
+  cdpFallback: boolean;
+  /** Optional CDP endpoint to attach to instead of launching (e.g. http://127.0.0.1:9222). */
+  cdpEndpoint?: string;
+  /** Which backend to prefer when both are available (testing knob). */
+  prefer: BackendPreference;
+  /** Run the CDP-fallback Chromium headless. */
+  headless: boolean;
+  /** `--print-pairing`: write the handshake, print its path (never the token), and keep the bridge up until Ctrl-C. */
+  printPairing: boolean;
+  /** `--extension-path`: print the absolute path of the bundled extension (for Load unpacked) and exit. */
+  showExtensionPath: boolean;
+  /** `--persist-token`: reuse a stable on-disk token so the extension never re-pairs. */
+  persistToken: boolean;
+  /** `--no-telemetry`: send no anonymous usage statistics (see src/telemetry.ts). */
+  noTelemetry: boolean;
+  /** `--no-email-verification`: bypass the hosted access gate for trusted local use. */
+  noEmailVerification: boolean;
+  /** `--no-site-grants`: the allowlist is exactly what the flags say; the
+   *  extension's Options page cannot add sites at runtime. */
+  noSiteGrants: boolean;
+  /** `--no-auto-update`: run this copy even when npm has a newer mcp-browser-extension. */
+  noAutoUpdate: boolean;
+  /** `--no-native-host`: don't register the one-click pairing helper with Chrome. */
+  noNativeHost: boolean;
+  /** `--http`: serve MCP over HTTP on 127.0.0.1 (for remote clients) instead of stdio. */
+  http: boolean;
+  /** `--http-port`: the local HTTP port (default 38018). */
+  httpPort: number;
+  /** `--tunnel`: also open a Cloudflare quick tunnel to the HTTP port. Implies `--http`. */
+  tunnel: boolean;
+  /** `--relay <url>`: also link to a relay server for a permanent public address. Implies `--http`. */
+  relay?: string;
+  /** `--shared-relay`: link to the shared relay on mcp-browser-extension.com with a pass for an invited, verified email. Implies `--http`. */
+  sharedRelay?: boolean;
+  /** `--rotate-remote-key`: replace the remote key, cutting off every remote client. */
+  rotateRemoteKey: boolean;
+  /**
+   * `--tools`: advertise only these tools. `undefined` = the whole catalog.
+   * Names are validated against the catalog by `setToolAllowlist` at startup —
+   * config.ts deliberately does not import the tool surface.
+   */
+  tools?: string[];
+  showHelp: boolean;
+  showVersion: boolean;
+  logLevel: LogLevel;
+}
+
+/** Resolve the data dir: `$MCP_BROWSER_EXTENSION_DATA` or `~/.mcp-browser-extension`. */
+export function resolveDataDir(): string {
+  return runtimeEnv('DATA') ?? renamedDirectory(homedir(), '.mcp-browser-extension', '.chrome-mcp');
+}
+
+const DEFAULT_PROFILE = 'default';
+const DEFAULT_TASK = 'default';
+
+/**
+ * Reduce an arbitrary label to a single safe path segment: no separators, no
+ * `..` traversal, no leading dots. Profile/task names become directories under
+ * the data dir, so they must never escape it.
+ */
+export function sanitizeName(name: string, kind: 'profile' | 'task'): string {
+  const clean = name.trim().replace(/[^A-Za-z0-9._-]/g, '-').replace(/^\.+/, '');
+  if (!clean || clean === '.' || clean === '..') {
+    throw new Error(`invalid ${kind} name: ${JSON.stringify(name)}`);
+  }
+  return clean;
+}
+
+/** Active profile: `$MCP_BROWSER_EXTENSION_PROFILE` (set by `--profile`) or "default". */
+export function resolveProfile(): string {
+  return sanitizeName(runtimeEnv('PROFILE') ?? DEFAULT_PROFILE, 'profile');
+}
+
+/** Active task: `$MCP_BROWSER_EXTENSION_TASK` (set by `--task`) or "default". */
+export function resolveTask(): string {
+  return sanitizeName(runtimeEnv('TASK') ?? DEFAULT_TASK, 'task');
+}
+
+/** `profiles/<profile>/` — holds the Chrome user-data dir and this profile's tasks. */
+export function resolveProfileDir(dataDir: string, profile: string): string {
+  return join(dataDir, 'profiles', profile);
+}
+
+/** `profiles/<profile>/tasks/<task>/` — per-run artifacts (downloads, meta.json). */
+export function resolveTaskDir(dataDir: string, profile: string, task: string): string {
+  return join(resolveProfileDir(dataDir, profile), 'tasks', task);
+}
+
+function readPolicyFile(path: string): Partial<Policy> {
+  const raw = readFileSync(path, 'utf8');
+  const parsed = JSON.parse(raw) as Partial<Policy>;
+  if (typeof parsed !== 'object' || parsed === null) {
+    throw new Error(`policy file ${path} did not contain a JSON object`);
+  }
+  return parsed;
+}
+
+/**
+ * Parse argv (the slice AFTER `node script`, i.e. `process.argv.slice(2)`) plus
+ * env into a fully-resolved `CliConfig`. Pure except for the optional policy-file
+ * read triggered by `--policy <path>`.
+ */
+export function parseArgs(argv: string[]): CliConfig {
+  let wsPort = envInt('MCP_BROWSER_EXTENSION_WS_PORT') ?? DEFAULT_WS_PORT;
+  // Extension-only by default: never launch/attach a Chromium of our own unless
+  // the operator explicitly opts in with --cdp-fallback (or --prefer cdp / --cdp-endpoint).
+  let cdpFallback = false;
+  let cdpEndpoint: string | undefined;
+  let prefer: BackendPreference = 'extension';
+  let headless = false;
+  let printPairing = false;
+  let persistToken = false;
+  let noTelemetry = false;
+  let noEmailVerification = ['0', 'false', 'off'].includes(
+    (runtimeEnv('EMAIL_VERIFICATION') ?? '').toLowerCase(),
+  );
+  let noSiteGrants = false;
+  let noAutoUpdate = false;
+  let noNativeHost = false;
+  let http = false;
+  let httpPort = envInt('MCP_BROWSER_EXTENSION_HTTP_PORT') ?? DEFAULT_HTTP_PORT;
+  let tunnel = false;
+  let relay: string | undefined;
+  let sharedRelay = false;
+  let rotateRemoteKey = false;
+  let showHelp = false;
+  let showVersion = false;
+  let showExtensionPath = false;
+  let logLevel: LogLevel = 'info';
+  // Insertion-ordered so `--tools` keeps the order the operator wrote, and a
+  // name repeated across two flags is listed once.
+  const tools = new Set<string>();
+  let toolsFlagSeen = false;
+
+  // Policy assembled from flags, layered over an optional file.
+  let policyFile: Partial<Policy> | undefined;
+  const policyFlags: Partial<Policy> = {};
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    switch (arg) {
+      case '-h':
+      case '--help':
+        showHelp = true;
+        break;
+      case '-v':
+      case '--version':
+        showVersion = true;
+        break;
+      case '--extension-path':
+        showExtensionPath = true;
+        break;
+      case '--port':
+        wsPort = requireInt(argv[++i], '--port');
+        break;
+      case '--data-dir':
+        process.env.MCP_BROWSER_EXTENSION_DATA = requireValue(argv[++i], '--data-dir');
+        break;
+      case '--profile':
+        process.env.MCP_BROWSER_EXTENSION_PROFILE = requireValue(argv[++i], '--profile');
+        break;
+      case '--task':
+        process.env.MCP_BROWSER_EXTENSION_TASK = requireValue(argv[++i], '--task');
+        break;
+      case '--policy':
+        policyFile = readPolicyFile(requireValue(argv[++i], '--policy'));
+        break;
+      case '--unsafe-all-domains':
+        throw new Error('All-site access is no longer supported. Remove --unsafe-all-domains from your MCP configuration and approve websites in the Chrome extension popup.');
+      case '--allow-domain':
+        (policyFlags.allowDomains ??= []).push(requireValue(argv[++i], '--allow-domain'));
+        break;
+      case '--enable-mutations':
+        policyFlags.enableMutations = true;
+        break;
+      case '--unsafe-enable-eval':
+        policyFlags.allowEval = true;
+        break;
+      case '--enable-downloads':
+        policyFlags.allowDownloads = true;
+        break;
+      case '--enable-uploads':
+        policyFlags.allowUploads = true;
+        break;
+      case '--uploads-dir':
+        policyFlags.uploadsDir = resolvePath(requireValue(argv[++i], '--uploads-dir'));
+        break;
+      case '--allow-all-tabs':
+        policyFlags.allowAllTabs = true;
+        break;
+      case '--enable-observers':
+        policyFlags.allowObservers = true;
+        break;
+      case '--enable-cookie-values':
+        policyFlags.allowCookieValues = true;
+        break;
+      case '--redact':
+        policyFlags.redact = true;
+        break;
+      case '--redact-pattern':
+        // A custom pattern only means anything with redaction on, so asking for
+        // one turns it on rather than being silently ignored.
+        policyFlags.redact = true;
+        (policyFlags.redactPatterns ??= []).push(requireValue(argv[++i], '--redact-pattern'));
+        break;
+      case '--fail-on-auth-wall':
+        policyFlags.failOnAuthWall = true;
+        break;
+      case '--cdp-fallback':
+        cdpFallback = true;
+        break;
+      case '--no-cdp-fallback': // still accepted; fallback is already off by default
+        cdpFallback = false;
+        break;
+      case '--cdp-endpoint':
+        cdpEndpoint = requireValue(argv[++i], '--cdp-endpoint');
+        break;
+      case '--prefer':
+        prefer = requirePreference(argv[++i]);
+        break;
+      case '--headless':
+        headless = true;
+        break;
+      case '--print-pairing':
+        printPairing = true;
+        break;
+      case '--persist-token':
+        persistToken = true;
+        break;
+      case '--no-telemetry':
+        noTelemetry = true;
+        break;
+      case '--no-email-verification':
+        noEmailVerification = true;
+        break;
+      case '--no-site-grants':
+        noSiteGrants = true;
+        break;
+      case '--no-auto-update':
+        noAutoUpdate = true;
+        break;
+      case '--no-native-host':
+        noNativeHost = true;
+        break;
+      case '--http':
+        http = true;
+        break;
+      case '--http-port':
+        httpPort = requireInt(argv[++i], '--http-port');
+        break;
+      case '--tunnel':
+        tunnel = true;
+        http = true;
+        break;
+      case '--relay':
+        relay = requireValue(argv[++i], '--relay');
+        http = true;
+        break;
+      case '--shared-relay':
+        sharedRelay = true;
+        http = true;
+        break;
+      case '--rotate-remote-key':
+        rotateRemoteKey = true;
+        break;
+      case '--tools':
+        toolsFlagSeen = true;
+        for (const name of splitList(requireValue(argv[++i], '--tools'))) tools.add(name);
+        break;
+      case '--log-level':
+        logLevel = requireLogLevel(argv[++i]);
+        break;
+      default:
+        throw new Error(`unknown argument: ${arg}`);
+    }
+  }
+
+  // Fallback permanently removed — this build is EXTENSION-ONLY. It NEVER
+  // launches or attaches a Chromium of its own; it only ever drives the user's
+  // real Chrome through the paired extension. Any CDP flags (--cdp-fallback,
+  // --cdp-endpoint, --prefer cdp) are still accepted for back-compat but are
+  // hard-overridden here so no separate/"fallback" browser can ever open.
+  cdpFallback = false;
+  cdpEndpoint = undefined;
+  prefer = 'extension';
+
+  // The local verification bypass is intended for trusted processes on this
+  // machine. Do not expose it through a public Cloudflare tunnel.
+  if (noEmailVerification && tunnel) {
+    throw new Error('--no-email-verification cannot be used with --tunnel');
+  }
+  if (noEmailVerification && relay) {
+    throw new Error('--no-email-verification cannot be used with --relay');
+  }
+  if (relay && tunnel) {
+    throw new Error('--relay and --tunnel each give a public address; use one');
+  }
+  if (sharedRelay && (relay || tunnel)) {
+    throw new Error('--shared-relay, --relay and --tunnel each give a public address; use one');
+  }
+  if (noEmailVerification && sharedRelay) {
+    throw new Error('--no-email-verification cannot be used with --shared-relay');
+  }
+  if (relay) {
+    let protocol = '';
+    try {
+      protocol = new URL(relay).protocol;
+    } catch { /* reported below */ }
+    if (protocol !== 'https:' && !(protocol === 'http:' && /^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(relay))) {
+      throw new Error(`--relay needs an https URL (plain http only for a relay on this computer), got ${relay}`);
+    }
+  }
+
+  // File first, then flags win.
+  for (const source of [policyFile, policyFlags]) {
+    if (source?.allowDomains !== undefined && (!Array.isArray(source.allowDomains) ||
+      source.allowDomains.some((domain) => typeof domain !== 'string' || !normalizeDomainPattern(domain)))) {
+      throw new Error('Each allowed site must name a website. All-site access is no longer supported; approve websites in the Chrome extension popup.');
+    }
+  }
+  const policy = resolvePolicy({ ...policyFile, ...policyFlags });
+
+  // Uploads must be confined to a directory — refuse to start with uploads enabled
+  // but no dir, rather than silently allow unrestricted local-file access.
+  if (policy.allowUploads && !policy.uploadsDir) {
+    throw new Error('--enable-uploads requires --uploads-dir <path> (uploads must be confined to a directory)');
+  }
+
+  // `--tools ""` (or `--tools ,,`) means the operator asked for a restriction and
+  // got none — an empty surface is never what they wanted, and silently serving
+  // all 39 tools is the opposite of what they asked for.
+  if (toolsFlagSeen && tools.size === 0) {
+    throw new Error('--tools requires at least one tool name (comma-separated, e.g. --tools navigate,get_text)');
+  }
+
+  // Fail at startup, not on the first read, if a redaction pattern is malformed:
+  // a pattern the user believes is scrubbing secrets but that never compiled is
+  // the worst of both worlds.
+  for (const source of policy.redactPatterns ?? []) {
+    try {
+      new RegExp(source);
+    } catch (err) {
+      throw new Error(`--redact-pattern ${JSON.stringify(source)} is not a valid regular expression: ${String(err)}`);
+    }
+  }
+
+  return {
+    wsPort,
+    dataDir: resolveDataDir(),
+    profile: resolveProfile(),
+    task: resolveTask(),
+    policy,
+    cdpFallback,
+    cdpEndpoint,
+    prefer,
+    headless,
+    printPairing,
+    persistToken,
+    noTelemetry,
+    noEmailVerification,
+    noSiteGrants,
+    noAutoUpdate,
+    noNativeHost,
+    http,
+    httpPort,
+    tunnel,
+    relay,
+    sharedRelay,
+    rotateRemoteKey,
+    showHelp,
+    showVersion,
+    showExtensionPath,
+    logLevel,
+    tools: tools.size > 0 ? [...tools] : undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Small parsing helpers
+// ---------------------------------------------------------------------------
+
+function envInt(name: string): number | undefined {
+  const raw = runtimeEnv(name.replace(/^MCP_BROWSER_EXTENSION_/, ''));
+  if (raw === undefined) return undefined;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isInteger(n) || n < 0) throw new Error(`${name} must be a non-negative integer`);
+  return n;
+}
+
+function requireValue(value: string | undefined, flag: string): string {
+  if (value === undefined) throw new Error(`${flag} requires a value`);
+  return value;
+}
+
+function requireInt(value: string | undefined, flag: string): number {
+  const n = Number.parseInt(requireValue(value, flag), 10);
+  if (!Number.isInteger(n) || n < 0) throw new Error(`${flag} must be a non-negative integer`);
+  return n;
+}
+
+/** Split a repeatable comma/space-separated list flag, dropping empty entries. */
+function splitList(value: string): string[] {
+  return value
+    .split(/[,\s]+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+function requirePreference(value: string | undefined): BackendPreference {
+  if (value === 'extension' || value === 'cdp') return value;
+  throw new Error('--prefer must be "extension" or "cdp"');
+}
+
+function requireLogLevel(value: string | undefined): LogLevel {
+  if (value === 'silent' || value === 'info' || value === 'debug') return value;
+  throw new Error('--log-level must be "silent", "info", or "debug"');
+}
+
+/** Help text for `--help`. */
+export const HELP_TEXT = `mcp-browser-extension — the MCP Browser Extension server: drive your real Chrome over MCP.
+
+Usage: mcp-browser-extension [options]
+       mcp-browser-extension extension doctor [--json] [--user-data-dir <browser directory>]
+       mcp-browser-extension extension repair [--apply] [--user-data-dir <browser directory>]
+       mcp-browser-extension tasks list [--json]
+       mcp-browser-extension tasks gc   [--older-than <days>] [--keep <n>] [--profile <name>] [--dry-run]
+
+Connection:
+  --port <n>             WebSocket bridge port (default ${DEFAULT_WS_PORT}; 0 = ephemeral)
+  --data-dir <path>      Override the data dir (default ~/.mcp-browser-extension)
+  --profile <name>       Default browser profile / identity (default "default").
+                         Artifacts live under profiles/<name>/. At runtime, switch
+                         with the profile_use tool. Several browsers can pair to the
+                         SAME port+token at once; each is named automatically
+                         (default, profile-2, ...; rename with profile_rename) unless
+                         its extension Options pins a Profile. Tools route to the
+                         active profile.
+  --task <name>          Task label (default "default"). Downloads and a meta.json
+                         land in profiles/<profile>/tasks/<task>/.
+  --print-pairing        Write the handshake, print its path, and keep the bridge
+                         up until Ctrl-C (manual pairing; never serves MCP)
+  --extension-path       Install the extension to ~/mcp-browser-extension (or
+                         MCP_BROWSER_EXTENSION_EXTENSION_DIR) and print that path — the folder
+                         to pick in chrome://extensions -> Load unpacked. The server
+                         also refreshes it on every boot.
+  --persist-token        Reuse a stable on-disk token across restarts so the
+                         extension never has to re-pair (default: fresh per boot).
+                         MCP_BROWSER_EXTENSION_TOKEN env, if set, pins the token explicitly.
+  --no-native-host       Don't register the helper behind the extension's one-click
+                         Connect button (pairing is then by pasting port and token)
+  --http                 Serve MCP over HTTP on 127.0.0.1 instead of stdio, so a
+                         client elsewhere can connect. Runs until Ctrl-C. Every
+                         request needs the remote key (kept in <data-dir>/remote-key):
+                         in the path, /mcp/<key>, or as Authorization: Bearer <key>.
+  --http-port <n>        Port for --http (default 38018; env MCP_BROWSER_EXTENSION_HTTP_PORT)
+  --tunnel               --http plus a Cloudflare quick tunnel, and print a public
+                         connector URL for claude.ai, ChatGPT or any MCP client.
+                         Needs cloudflared. The URL changes on every start.
+  --relay <url>          --http plus a link out to your own relay server (for example
+                         on AWS), for a permanent public address. The relay checks
+                         this computer's relay token, kept in <data-dir>/relay-token.
+  --shared-relay         --http plus a link to the shared relay on mcp-browser-extension.com,
+                         for a permanent address at /remote/c/<id> and phone pairing.
+                         Needs a verified email that the owner has invited.
+  --rotate-remote-key    Make a new remote key: every remote client is cut off and
+                         needs the new URL.
+  --no-auto-update       Run this copy even when a newer mcp-browser-extension is published.
+                         By default an installed copy (npx or global) checks npm at
+                         startup and hands off to the latest release, so you never
+                         run a stale version. Same as MCP_BROWSER_EXTENSION_AUTO_UPDATE=0.
+  --no-telemetry         Send no anonymous usage statistics. Same as
+                         MCP_BROWSER_EXTENSION_TELEMETRY=0 or DO_NOT_TRACK=1. Only counts are
+                         ever sent (version, OS, tool calls, error codes) — never
+                         URLs, page content or arguments.
+  --no-email-verification  Skip the hosted email/device access gate for trusted local use.
+                         Email and device data are not sent to the access service.
+                         Same as MCP_BROWSER_EXTENSION_EMAIL_VERIFICATION=0.
+                         Cannot be combined with --tunnel or --relay; the domain allowlist,
+                         deny-all defaults, and other safety gates still apply.
+
+Backend:
+  This build is EXTENSION-ONLY — it drives ONLY your real Chrome via the paired
+  extension and never launches or attaches a Chromium of its own. The CDP flags
+  below are accepted for back-compat but IGNORED (there is no fallback).
+  --cdp-fallback         (ignored — fallback permanently removed)
+  --no-cdp-fallback      (ignored — extension-only is always on)
+  --cdp-endpoint <url>   (ignored — no CDP attach)
+  --prefer <which>       (ignored — always "extension")
+  --headless             (ignored — no CDP Chromium to run headless)
+
+Security (default: deny-all safe mode):
+  --policy <file>        Load a JSON policy file
+  --allow-domain <glob>  Add a domain to the allowlist (repeatable). Sites can also
+                         be allowed live from the extension's Options page (saved
+                         to <data-dir>/allowed-sites.json; no restart needed)
+  --no-site-grants       Ignore sites allowed from the extension's Options page; the
+                         allowlist is exactly what these flags and --policy say
+  --enable-mutations     Enable click/type/navigate/… (off by default)
+  --unsafe-enable-eval   Enable the eval primitive (off by default)
+  --enable-downloads     Enable download_file (off by default)
+  --enable-uploads       Enable upload_file — sends local files to a page (off by default)
+  --uploads-dir <path>   Restrict upload_file to files inside <path> (recommended with --enable-uploads)
+  --allow-all-tabs       Relax tab list/select to all tabs
+  --enable-observers     Enable console_logs / network_log / dialogs. Installs an
+                         in-page hook on allowlisted sites that records console
+                         output, fetch/XHR traffic, and intercepts alert/confirm/
+                         prompt (off by default: it patches page globals).
+  --enable-cookie-values Let get_cookies return cookie values. Off by default:
+                         a session cookie is the login itself, so get_cookies
+                         returns names and flags with every value hidden.
+  --redact               Scrub secret-shaped strings (JWTs, cloud keys, bearer
+                         tokens, private keys) out of page reads. Password field
+                         values are always suppressed, with or without this.
+  --redact-pattern <re>  Add a redaction regex (repeatable; implies --redact)
+  --fail-on-auth-wall    Fail any navigate/click/type/press/back/reload/wait_for
+                         with [AUTH_REQUIRED] when the page it lands on is a
+                         high-confidence sign-in wall (expired session), so an
+                         eval harness never scores it as some other failure.
+
+Tool surface:
+  --tools <list>         Advertise ONLY these tools (comma-separated, repeatable).
+                         Everything else is hidden from tools/list and refused if
+                         called — including from inside a batch op. The catalog is
+                         re-sent to the model on every turn, so trimming it to the
+                         tools a run actually needs is the cheapest context saving
+                         there is. Unknown names fail at startup.
+                         e.g. --tools tabs_list,navigate,get_text,click,type
+
+Misc:
+  --log-level <lvl>      silent | info | debug (default info)
+  -h, --help             Show this help
+  -v, --version          Show version
+`;

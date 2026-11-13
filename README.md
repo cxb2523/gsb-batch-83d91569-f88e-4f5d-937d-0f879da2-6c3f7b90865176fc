@@ -1,0 +1,905 @@
+# MCP Browser Extension
+
+[![CI](https://github.com/Mehmoodqureshi/mcp-browser-extension/actions/workflows/ci.yml/badge.svg)](https://github.com/Mehmoodqureshi/mcp-browser-extension/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/mcp-browser-extension?label=npm)](https://www.npmjs.com/package/mcp-browser-extension)
+[![license](https://img.shields.io/npm/l/mcp-browser-extension?label=license)](LICENSE)
+
+**Website and docs:** [mcp-browser-extension.com](https://mcp-browser-extension.com) ·
+[Quickstart](https://mcp-browser-extension.com/docs/quickstart) ·
+[All 43 tools](https://mcp-browser-extension.com/docs/tools) ·
+[Install the extension from the Chrome Web Store](https://chromewebstore.google.com/detail/mcp-browser-extension/jelfhdlkhbfmlpbghoeaepijllcnplgh)
+
+**Let Claude use the Chrome you are already logged into.** Not a fresh
+automated browser that greets every site as a stranger — *your* Chrome, with
+your sessions, your cookies, your 2FA already done. If you can see a page in
+your browser, your agent can read it, without logging in again and without
+pasting credentials anywhere.
+
+Most browser MCP servers launch their own Chromium and hand your agent a
+signed-out window. MCP Browser Extension does the opposite: an MV3 extension dials into a
+localhost WebSocket server and drives the browser you already have open, through
+`chrome.scripting`/`chrome.tabs`. Works with Claude Code, Claude Desktop, and any
+other MCP host.
+
+MCP Browser Extension has two parts: the extension, and a small MCP server you run
+with `npx` (npm package and command: `mcp-browser-extension`). The extension
+comes from the
+[Chrome Web Store](https://chromewebstore.google.com/detail/mcp-browser-extension/jelfhdlkhbfmlpbghoeaepijllcnplgh)
+or loaded unpacked.
+
+> **This build is extension-only.** It never launches or attaches a Chromium of
+> its own, so **the extension is required, not optional** — without it, no tool
+> can run. The CDP flags (`--cdp-fallback`, `--no-cdp-fallback`, `--cdp-endpoint`,
+> `--prefer`) are still accepted for back-compat but are **ignored**.
+
+> **Full design:** [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) — architecture, wire
+> protocol, the complete tool surface, the extension manifest, the security
+> model, and the phased build plan.
+
+## Use Claude in your signed-in Chrome
+
+You are already signed in to Gmail, GitHub, your analytics dashboards, the admin
+panel, the CRM. MCP Browser Extension lets Claude (Claude Code, Claude Desktop, or any
+other MCP host) work in those same tabs: no re-login, no second 2FA prompt, no
+password or cookie in a config file. The extension runs inside your normal
+Chrome, so a page the agent opens is the page you would see.
+
+- **Gmail** — read a thread or search results in a tab you already have open.
+- **GitHub** — go through PRs, issues and settings pages as yourself, private
+  repositories included.
+- **Dashboards** — pull numbers from analytics, billing or admin screens that
+  have no API, or whose API you never set up.
+
+Other tools drive a signed-in Chrome too (the `hangwin/mcp-chrome` extension,
+for one), so the question is what you get on top of the session:
+
+- **Website checks with explicit Chrome permission.** Local suspicious-site
+  checks are on by default. After one Chrome permission grant, ordinary sites
+  work automatically and flagged sites need Allow. Named-site approval remains
+  available; `--no-site-grants` enforces the server's fixed allowlist. Reads and
+  actions are checked in the extension. Mutations, eval, downloads and uploads
+  are separate opt-ins.
+- **Password values are never returned**, and `--redact` scrubs tokens, API
+  keys and JWTs out of page reads.
+- **An audit trail**: every call is logged with the URL, the allow/deny
+  verdict, duration and bytes returned.
+- **Recent activity in Chrome**: the popup shows the latest five activity rows (a tab's open/close pair shares one row);
+  Settings shows up to 100 with outcome filters. This session history contains
+  website names and app keys, without page text, entered values or full URLs.
+- **Stop access**: disconnect all apps from the popup or Settings. The stop
+  survives restarts; Resume connection requires fresh approval for each app.
+  A command already running may finish, and completed actions cannot be undone.
+- **It stays out of your tab**: the agent opens its own tabs in the background
+  and works there, so the page you are on is never navigated, clicked or pulled
+  out of focus. `batch` reads many of them at once in one call.
+- **Several Chrome profiles**: load the extension in your work and personal
+  profiles and switch between them with `profile_use`.
+- **`auth_check`**: when a session does expire, the agent gets an
+  `[AUTH_REQUIRED]` signal instead of a confusing timeout, so it can stop and
+  ask you to sign in again. MCP Browser Extension never holds credentials or signs in for
+  you.
+
+Setup is two pieces: the MCP server (`npx`, below) and the extension, which you
+can **[install from the Chrome Web Store](https://chromewebstore.google.com/detail/mcp-browser-extension/jelfhdlkhbfmlpbghoeaepijllcnplgh)**
+or load from the folder the server unpacks.
+
+## Quickstart
+
+### Up and running in one paste
+
+Hand this to your AI agent (Claude Code, Cursor, Windsurf, anything MCP) and it
+installs the server, wires it into the client, and walks you through installing
+the extension, verifying your email, and pairing Chrome:
+
+```text
+Set up MCP Browser Extension on this machine by fetching and following
+https://raw.githubusercontent.com/Mehmoodqureshi/mcp-browser-extension/main/SETUP.md
+exactly, step by step. Work autonomously and verify each step.
+```
+
+Prefer to read before you run an agent on your machine? [`SETUP.md`](SETUP.md)
+is the exact file the agent follows. The manual steps are below.
+
+**1. Register the MCP server** with your host.
+
+<details open>
+<summary><b>Claude Code (terminal)</b> — one command, no config file to find</summary>
+
+```bash
+claude mcp add mcp-browser-extension -s user -- \
+  npx -y mcp-browser-extension@latest \
+  --allow-domain example.com --enable-mutations --persist-token
+```
+
+Everything **before** `--` belongs to Claude Code; everything **after** it is this
+server's command and flags. Keep the `--` or `--allow-domain` gets read as a
+Claude Code option.
+
+`-s user` registers it for every project on your machine. Use `-s local` (the
+default) for just the current project, or `-s project` to write a `.mcp.json`
+your team can commit.
+
+Check it came up with `claude mcp list`. After upgrading the server, reconnect it
+with `/mcp` inside a session — no restart needed.
+
+</details>
+
+<details>
+<summary><b>Claude Desktop</b> and other MCP hosts — JSON config</summary>
+
+```jsonc
+{
+  "mcpServers": {
+    "mcp-browser-extension": {
+      "command": "npx",
+      "args": ["-y", "mcp-browser-extension@latest",
+               "--allow-domain", "example.com", "--enable-mutations",
+               "--persist-token"]
+    }
+  }
+}
+```
+
+</details>
+
+Website access requires app approval and Chrome permission. Suspicious-site
+checks are on by default; click **Allow website access** once in the extension.
+For a fixed named-site policy, use `--no-site-grants --allow-domain <glob>`.
+Mutations, downloads, uploads and eval stay off until enabled with
+`--enable-mutations`, `--enable-downloads`, `--enable-uploads` or `--unsafe-enable-eval`.
+
+Email verification is on by default. For a trusted, local unattended setup, you
+can opt out with `--no-email-verification` (or set
+`MCP_BROWSER_EXTENSION_EMAIL_VERIFICATION=0`). This skips the email prompt and
+the Firebase access service, so no email or device grant is sent there. The
+local MCP client still needs approval inside Chrome before using the extension,
+and stays within the configured domain and capability policy. Treat every process that can launch
+or reach this local server as trusted. This option is rejected with `--tunnel`
+and does not turn off telemetry or the npm update check.
+
+> `--enable-uploads` permits `upload_file` (setting local file(s) on a page's file
+> `<input>`). It is **off by default** because sending local files to a page is an
+> exfiltration risk; it is also gated by the destination-domain allowlist. Pair it
+> with `--uploads-dir <path>` to restrict uploads to files inside that directory
+> (`..` traversal is blocked) — strongly recommended for unattended use.
+
+**Keep transport pairing across restarts.** Both examples above include `--persist-token`, which
+is what makes the pairing survive a restart — drop it if you'd rather have the
+stricter default described next.
+
+Without `--persist-token` a fresh token is minted every boot (the secure
+default), which means re-pairing the extension on each restart. With it, the
+token is stored 0600 at `~/.mcp-browser-extension/token` and reused; the extension's
+keepalive auto-reconnects with no manual step. `MCP_BROWSER_EXTENSION_TOKEN` pins the token
+explicitly (and is never written to disk). This transport pairing does not grant
+an app access: every new app session has a separate key and needs Chrome approval.
+
+**2. Install the extension** — **required**; the server can drive nothing without it.
+
+**[Install MCP Browser Extension from the Chrome Web Store](https://chromewebstore.google.com/detail/mcp-browser-extension/jelfhdlkhbfmlpbghoeaepijllcnplgh)**.
+One click, no Developer mode, and **Chrome keeps it updated for you**. This is
+the way to install it.
+
+**3. Verify your email.** In your MCP client, ask the agent to call
+`chrome_status`. On this first browser tool call, the client shows an email
+prompt. Enter an address you can access, then open the sign-in link sent to
+that address and click **Verify this device**. The waiting tool reports
+**Email verified** and continues.
+
+If the tool returns `ACCESS_PENDING`, ask the agent to call `chrome_status`
+again to keep waiting on the same link. You do not need another email or a
+verification code.
+
+If your client suppresses the prompt (for example, in YOLO/bypass mode), does
+not support MCP elicitation, or the dialog is dismissed, the server automatically
+opens a temporary local verification form in your browser. The tool also returns
+`ACCESS_INPUT_REQUIRED` with the link, so you can open it yourself if necessary
+on the computer running the MCP server. Enter your email in the browser form,
+and open the sign-in link from your inbox. Click **Verify this device**, then
+call `chrome_status` to continue.
+The local form expires after 10 minutes; call the tool again for a fresh one.
+Opening the form does not send an email, and access remains blocked until the
+email link and device grant are verified. Installing the extension alone does
+not activate access.
+
+**4. Click Connect if Chrome is not already paired.** A fresh install opens the
+extension's Settings with a
+**Connect** button (it is in the toolbar popup too). Click it, allow the one
+permission Chrome asks for, and you are paired: the server registers a small
+helper with Chrome every time it starts, and the button asks it for the port and
+token. Chrome lets only this extension talk to that helper. If the server ever
+changes its token, the extension fetches the new one by itself. Nothing to copy
+or paste.
+
+**5. Approve the app connection in Chrome.** Run `chrome_status`, then open
+the extension popup's **App connections** section. Compare the key
+fingerprint with the one in the tool result and click **Approve for 8 hours**.
+App names are supplied by the app; the key identifies this particular session.
+Retry the tool after approving. A question-mark badge and the popup show pending
+requests, even if the client hides its prompts. Approve, deny, revoke and restore
+connections directly in the popup or in Settings.
+
+Each app session has its own signing key, held only in that server session's memory.
+Approval applies to this Chrome profile for eight hours. Restarting the app's MCP
+connection creates a new key and needs a new approval. **Remove access** blocks further
+commands from that key; an action already running may finish. YOLO, bypass-permission
+mode and `--no-email-verification` cannot skip this extension check.
+
+**6. Allow website access once.** Suspicious-site checks are on by default. In the
+popup or Settings, **Allow website access** asks Chrome for HTTP/HTTPS access. After
+you accept, ordinary sites work without an Allow request. Local checks pause
+flagged addresses and risky login forms and show their reasons under **Waiting
+for Allow**. Allow approves only the displayed reasons for that exact origin;
+new reasons ask again. **Blocked websites** lets you block or restore any site.
+Both the extension and connected server must be updated; `--no-site-grants`
+disables this option.
+
+These checks run locally with no external checking service. They can miss scams
+and flag legitimate sites. Form checks run after a page loads, before app reads
+or actions; they do not prevent page scripts from running or detect all malware.
+App approval, Stop access and the configured tool permissions still apply.
+
+Choose **Use per-site approval** or **Turn off** to use named-site access instead.
+With automatic access off, the popup shows a Website access request.
+Click **Allow**, then accept Chrome's website permission prompt if shown. This
+single flow grants that named website in both Chrome and the server's allowlist.
+Allowing a website lets approved apps read and take actions there, including
+sending messages, deleting information and making purchases, subject to the
+configured tool permissions. There is no separate extension approval for each
+action. Website access is remembered until removed and shared by approved app
+sessions; each app still needs its own unexpired connection approval.
+Removing the website also removes its Chrome permission. Existing server flags
+do not grant Chrome access, and an upgrade may ask you to approve websites again.
+
+Cookies and downloads ask separately under **Extra permissions** when needed.
+They start off, and their buttons also let you remove permission. Downloads are
+fetched without browser cookies, redirects are refused, and files are limited to
+50 MiB. Links that require a signed-in browser session or redirect may not
+work. Proxy
+authentication and IP lookups request permission from Settings. Chrome does not
+support making `debugger` or `proxy` optional; those remain required, and debugger
+commands still check website permission before they run.
+
+Update both the extension and server before using client approval. An older
+extension cannot enforce it, and the updated server refuses browser commands
+until the extension is updated. See [client approval details](docs/CLIENT-APPROVAL.md).
+
+<details>
+<summary>Developers: load it unpacked instead</summary>
+
+The extension also ships inside the npm package, and every time the server boots
+it copies it to `~/mcp-browser-extension` (`%USERPROFILE%\mcp-browser-extension` on
+Windows; `MCP_BROWSER_EXTENSION_EXTENSION_DIR` moves it). `chrome://extensions` → enable
+**Developer mode** → **Load unpacked** → pick that folder. It pairs itself from a
+`pairing.json` the server writes there, and the server refreshes the files on each
+boot (never with an older build) so it reloads itself within 30 seconds.
+
+An unpacked copy does not update through Chrome, so its popup suggests the store
+copy. Fresh unpacked builds carry the store's public key and so have the same id:
+load one *or* the store copy in a Chrome profile, not both. Updates preserve the
+ID of an existing unpacked installation, including older copies without a
+manifest key; those continue to pair through the bundled `pairing.json`.
+Working from a git clone?
+`npm install && npm run build:ext` first; `extension-dist/` is gitignored.
+`npm run clean` clears server build output and keeps `extension-dist/`, whose
+manifest and pairing data may belong to an installation already loaded in Chrome.
+
+</details>
+
+**Where to see the badge:** it sits on the extension's icon in Chrome's
+toolbar, not on the `chrome://extensions` page. Chrome hides new extensions
+behind the puzzle-piece button at the right of the address bar, so click that,
+find **MCP Browser Extension**, and click the pin next to it once; the icon then
+stays in the toolbar. Hover it for the status in words.
+
+| Badge | Meaning |
+|---|---|
+| green dot | transport paired and connected |
+| question mark | a connection or site needs your review |
+| yellow dots | connecting |
+| grey circle | not paired yet (no server has run, or no pairing file) |
+| red exclamation mark | token rejected; the server rotated it, re-pairs by itself in a moment |
+
+Manual fallback (the helper is turned off with `--no-native-host`, or Connect
+reports a problem): run `npx -y mcp-browser-extension@latest --print-pairing`,
+open the extension's **Settings**, and paste the `port` + `token` from
+`~/.mcp-browser-extension/handshake.json`.
+
+### Extension missing after restarting Chrome
+
+Run the read-only diagnostic to see the actual installation type, missing files,
+Chrome disable reasons, and any conflicting extension registrations:
+
+```bash
+npx -y mcp-browser-extension@latest extension doctor
+```
+
+Older unpacked copies could acquire a new ID when an update added the Web Store
+public key to their manifest. Chrome then retained both IDs for one folder and
+skipped that folder on its next startup. Updates now preserve existing IDs.
+For an installation already affected by this exact conflict:
+
+```bash
+npx -y mcp-browser-extension@latest extension repair
+# Review the preview, fully quit Chrome and other Chromium browsers, then:
+npx -y mcp-browser-extension@latest extension repair --apply
+```
+
+The repair backs up the original preferences under
+`~/.mcp-browser-extension/extension-repair-backups/`, removes only the confirmed obsolete
+registration, and preserves the current extension and its saved settings. It
+refuses to write while a Chromium browser is running. Reopen Chrome afterwards.
+Use `--user-data-dir <directory>` for a custom browser data location, or
+`extension doctor --json` for a diagnostic report. Reports contain extension
+paths and registration status, but no browsing history, cookies or pairing tokens.
+
+A Web Store installation with no matching stale-ID conflict is left unchanged.
+If the diagnostic finds missing files, a disabled Store copy, or no registration,
+that needs its own diagnosis; this command does not assume the cause or reset
+the browser profile. When moving from an unpacked copy to the Store version,
+remove the unpacked copy first, then install from the Store.
+
+### Running more than one session
+
+Every MCP host session (each Claude terminal, tab or window) starts its own
+MCP Browser Extension server, and they all share your Chrome at once. The first one to start owns
+the bridge port and the extension connections — the **hub**. Each later session
+finds the port held by a live MCP Browser Extension server and joins it as a **peer**: its tool
+calls are relayed through the hub to the same browsers, so every session keeps
+working side by side. Nobody is disconnected.
+
+When the hub's session ends, its peers race for the port; one takes it over
+(with the same token, so the extension re-pairs by itself within a few seconds)
+and the rest join the new hub. A call that was in flight at that moment fails
+once with `EXTENSION_DISCONNECTED` and is retried automatically when it is safe
+to repeat.
+
+Peers authenticate to the local transport with the pairing token from the 0600
+handshake file. That token alone cannot authorize browser commands: each session
+must sign its own commands with a key approved inside Chrome. A server too old to share the port is replaced as
+before: it is verified to be an MCP Browser Extension server, then stopped. Anything that isn't a
+verified MCP Browser Extension server is never touched — a port held by some other program is
+reported, never killed.
+
+Sessions share one browser, so they also share its tabs: two sessions driving
+the same tab at the same moment will step on each other. Give each session its
+own tabs (`tab_new`), or its own Chrome profile (below).
+
+Each session can also drive **several browsers at once**: load the extension
+in each Chrome profile and they all pair to the same server, each under its own
+profile name. Tools act on the active profile — pick it with `--profile <name>`
+at startup or the `profile_use` tool at runtime.
+
+Naming is automatic. Chrome won't tell an extension which profile it runs in, so
+each install keeps a random id and the server names it: the first browser is
+`default`, the next `profile-2`, then `profile-3`, and so on. Names are stored in
+`~/.mcp-browser-extension/profiles.json`, so a browser keeps its name across restarts.
+`chrome_status` lists every paired browser (with its active tab as a hint), and
+`profile_rename` gives one a friendly name (`profile-2` → `work`). To pin a name
+yourself instead, type it into the extension's Options → Profile; that always wins.
+
+Without `--port`, each server binds an ephemeral port (no conflict ever), but the
+port changes every boot — so you'd re-pair the extension each time. Pin `--port`
+plus `--persist-token` for a pair-once setup.
+
+### Windows
+
+WSL2 is **not** required — native Windows works. One config change is, though:
+on Windows `npx` is `npx.cmd`, a batch shim, and MCP hosts spawn the server
+without a shell, which cannot execute a `.cmd`. So `"command": "npx"` fails to
+start. Wrap it in `cmd /c`:
+
+```jsonc
+{
+  "mcpServers": {
+    "mcp-browser-extension": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "mcp-browser-extension@latest",
+               "--allow-domain", "example.com", "--enable-mutations",
+               "--persist-token"]
+    }
+  }
+}
+```
+
+Or from Claude Code: `claude mcp add mcp-browser-extension -- cmd /c npx -y mcp-browser-extension@latest --allow-domain example.com`
+
+For normal use, install the extension from the Chrome Web Store as described
+above, then click **Connect**. Do not use **Load unpacked** as part of the normal
+Windows setup. The unpacked developer build has the same extension ID as the
+Store build, so loading it can replace the Store installation; Chrome may then
+disable the non-Store copy. If you are developing mcp-browser-extension, load
+`%USERPROFILE%\mcp-browser-extension` in a separate Chrome profile.
+
+The tools cover tabs, navigation, interaction (`click`/`type`/`press`/`hover`/
+`scroll`/`select_option`), reads (`get_text`/`get_html`/`screenshot`/`eval`/`wait_for`),
+an accessibility `snapshot` (interactive elements with stable `ref`s the model can
+target instead of guessing CSS selectors), session access (`get_cookies`/`storage`),
+helpers (`extract_links`/`read_as_markdown`/`fill_form`/`download_file`/`upload_file`),
+and `chrome_status`. `upload_file` sets local file(s) on a file `<input>` without the
+OS dialog (requires `--enable-uploads`).
+
+`click`/`type` accept `trusted: true` for real OS-level input (works on
+React/Vue controlled inputs); interactions auto-wait for the target to appear.
+
+### Use it from anywhere — `--tunnel`
+
+Drive the Chrome on your computer from claude.ai, the Claude mobile app, ChatGPT,
+Claude Code on another machine, or an agent running on a server.
+
+```sh
+brew install cloudflared            # once (Windows: winget install --id Cloudflare.cloudflared)
+npx -y mcp-browser-extension@latest --tunnel --allow-domain example.com --enable-mutations
+```
+
+It prints a connector URL like `https://<random>.trycloudflare.com/mcp/<key>`:
+
+- **claude.ai / Claude mobile:** Settings > Connectors > Add custom connector, paste the URL.
+- **ChatGPT (web):** Plugins > Add > Add custom MCP server. Choose Server URL,
+  paste the complete connector URL (including `/mcp/<key>`), and choose No
+  authentication. Create and install the personal plugin, then select it with
+  `@` in a new chat. Keep the tunnel running.
+- **Claude Code elsewhere / agents:** use `<url>/mcp` with `Authorization: Bearer <key>`;
+  the exact `claude mcp add` line is printed too.
+
+The key (32 random bytes, kept in `~/.mcp-browser-extension/remote-key`) guards every
+request; a wrong or missing key gets a bare 404. Anyone holding the URL can drive
+your browser within the allowed sites, so keep it private and keep the allowlist
+tight. `--rotate-remote-key` cuts every client off. The quick-tunnel URL changes on
+each start; `--http` alone serves on `127.0.0.1:38018` (`--http-port`) for your
+own tunnel (ngrok, Tailscale Funnel, a reverse proxy). The server runs until Ctrl-C.
+
+### A permanent address and phone pairing — `--shared-relay` (invite only)
+
+```bash
+npx -y mcp-browser-extension@latest --shared-relay --allow-domain example.com --enable-mutations
+```
+
+`--shared-relay` links this computer to the shared relay on mcp-browser-extension.com
+and gives it a permanent private address, `https://mcp-browser-extension.com/remote/c/<id>`,
+that also serves phone pairing (Phone access in the extension popup). It needs a
+verified email that has been invited; until then the server logs that the email is
+not invited and retries every ten minutes. The relay only carries bytes: the remote
+key, app approval and site approval are still checked on your computer. Each invited
+computer is limited to 240 requests a minute and 2 GiB a day. `--relay <url>` links
+to a relay server you run yourself instead.
+
+### Proxy per Chrome profile — `proxy_status`
+
+Chrome applies a proxy to a whole profile, never one tab, so keep a Chrome profile
+per IP: set the proxy on the extension's Settings page in that profile, name the
+profile there, and switch with `profile_use`. A dead proxy fails pages rather than
+falling back to your real IP. `proxy_status` reports the exit IP and country; the
+agent cannot change the proxy or read its password.
+
+### Driving several tabs at once — `batch`
+
+`batch` runs many tool calls in **one** request — `parallel` (default) or
+`serial` (with optional `stopOnError`). Each sub-op goes through the **same**
+policy gate, rate limit, and error handling as a direct call (no bypass,
+no nesting). Use it to fan work out across tabs:
+
+```jsonc
+// open three product pages (background, so they don't fight for focus)…
+{ "name": "batch", "arguments": { "ops": [
+  { "tool": "tab_new", "args": { "url": "https://a.example/p" } },
+  { "tool": "tab_new", "args": { "url": "https://b.example/p" } },
+  { "tool": "tab_new", "args": { "url": "https://c.example/p" } }
+]}}
+
+// …then read them all at once (wall-clock ≈ the slowest one, not the sum)
+{ "name": "batch", "arguments": { "ops": [
+  { "tool": "get_text", "args": { "tabId": "<a tabId>" } },
+  { "tool": "get_text", "args": { "tabId": "<b tabId>" } },
+  { "tool": "get_text", "args": { "tabId": "<c tabId>" } }
+]}}
+```
+
+In `parallel` mode, tab-scoped ops **must** pass an explicit `tabId` — the
+active-tab default is unsafe under concurrency, so it's rejected rather than
+silently mis-routed. (`tab_new`, `tabs_list`, `chrome_status` are exempt.)
+
+> **The agent works in its own tab, not yours.** `tab_new` opens in the
+> background and that tab becomes the agent's tab: calls without a `tabId` go
+> there. `navigate` with no tab of its own yet opens one rather than replacing
+> your page, and `tab_new` only reuses blank tabs it opened itself, never a New
+> Tab page of yours. Before the agent opens anything, reads see your active tab,
+> so "summarize this page" still works; to act on your page, the agent passes its
+> `tabId` from `tabs_list`. Pass `active: true` to bring a tab to the front.
+
+### Reaching into iframes and shadow roots
+
+A selector that "should" match but doesn't almost always means the element is
+somewhere your selector cannot reach: inside an `<iframe>` (checkout widgets,
+OAuth consent screens, embedded editors) or inside a web component's shadow root.
+
+Shadow roots are handled for you — every selector and every `ref` now resolves
+through open shadow roots, so anything `snapshot` shows you is something you can
+click. (It used to show you elements no click could reach: the snapshot walked
+shadow roots, the actions did not.)
+
+Frames are opt-in, because reaching into one is a decision:
+
+```jsonc
+frames_list {}                                  // what frames exist, and their URLs
+click { "selector": "#pay", "allFrames": true } // find it in whichever frame has it
+get_text { "frameId": 7 }                       // pin one frame
+```
+
+Every frame is authorized against **its own** URL before anything runs in it, so
+an allowlisted page embedding a third-party iframe does not become a way to read
+that third party. Frames whose origin isn't on your allowlist are skipped.
+
+### Seeing why a page broke — `console_logs`, `network_log`, `dialogs`
+
+Reading the DOM tells you what a page looks like after it failed, not why. With
+`--enable-observers`, an in-page hook records console output, uncaught errors,
+and `fetch`/`XMLHttpRequest` traffic, and intercepts native dialogs:
+
+```jsonc
+console_logs { "level": "exception" }    // the uncaught error behind a broken page
+network_log  { "failedOnly": true }      // the 500 behind the blank screen
+dialogs      { "policy": "accept" }      // answer confirm() with true from here on
+```
+
+It is **off by default and deliberately so**: the hook patches `console`,
+`fetch`, `XMLHttpRequest` and the dialog functions on every allowlisted page in
+your real browser. When it's on, it is registered only for the domains on your
+allowlist, at document_start (so it catches load-time failures), and nothing it
+records leaves the page until a tool call reads it — through the same gate as any
+other page read.
+
+Dialog interception is also a fix, not just an observation: `alert`/`confirm`/
+`beforeunload` block the renderer, so a click that opened one used to hang every
+injected script until the command timed out and reported `TIMEOUT` with nothing
+to point at. With observers on, the dialog is answered (`dismiss` by default:
+confirm → false, prompt → null) and recorded.
+
+> **What `network_log` sees:** the requests page code makes — `fetch` and
+> `XMLHttpRequest`, with method, URL, status and duration — plus Resource Timing
+> entries (scripts, images, styles) when you ask for them. Not the document
+> request, redirects, or headers. That is the cost of not holding a debugger
+> session open on your browser.
+
+### Only what changed — `snapshot { diff: true }`
+
+A snapshot is the most expensive read in the tool surface, and the loop that uses
+it most (snapshot → click → snapshot) re-sends a page that is mostly identical
+every time. Ask for the delta instead:
+
+```jsonc
+snapshot { "diff": true }                       // added / removed / changed only
+click { "selector": "#save", "snapshotAfter": true }   // what the click changed
+```
+
+Nodes are matched across snapshots by role + accessible name, not by `ref` —
+refs renumber in document order on every snapshot, so diffing on them would
+report an unchanged button as removed-and-re-added the moment anything above it
+appears.
+
+### Remember a page and catch changes later — `page_watch`
+
+Save a named accessibility checkpoint, then compare the current page against it
+in a later session. Checkpoints live under the active Chrome profile, so work
+and personal browser identities stay separate:
+
+```jsonc
+page_watch { "action": "create", "name": "Vendor pricing" }
+page_watch { "action": "compare", "watchId": "watch_…" }
+page_watch { "action": "list" }
+page_watch { "action": "delete", "watchId": "watch_…" }
+```
+
+The result shows added, removed and changed controls. It stores accessibility
+labels and control state, strips URL query strings, applies configured redaction,
+and never saves live form values. Creating or comparing a checkpoint still
+requires the page's domain to be allowed.
+
+### Targeting by role and name
+
+Actions accept a locator instead of a CSS selector, so you don't need a snapshot
+first just to learn a ref:
+
+```jsonc
+click { "role": "button", "name": "Sign in" }
+type  { "role": "textbox", "name": "Email", "text": "a@b.com" }
+```
+
+Resolution is server-side and refuses to guess: an ambiguous locator fails with
+the candidates listed rather than acting on the first one (pass `nth` to pick).
+
+### Did the session expire? — `auth_check` and `failOnAuthWall`
+
+Reusing a signed-in Chrome removes the login step, but a session cookie can
+still expire mid-run. Without a distinct signal the next step fails as
+`SELECTOR_NOT_FOUND` or `TIMEOUT`, and an eval harness scores the run as an
+agent failure when it was an auth failure. Every `snapshot` now carries an
+`authWall` verdict when the page looks like a sign-in wall, and there is a
+dedicated probe:
+
+```jsonc
+auth_check {}                                   // { authRequired, confidence, signals }
+auth_check { "failOnAuthWall": true }           // [AUTH_REQUIRED] error instead
+navigate  { "url": "https://app.example.com/dashboard", "failOnAuthWall": true }
+snapshot  { "failOnAuthWall": true }
+```
+
+For a harness, set it once instead of per call:
+
+```
+npx -y mcp-browser-extension@latest --allow-domain app.example.com --enable-mutations --fail-on-auth-wall
+```
+
+With the flag on, every step that can move the tab (`navigate`, `click`, `type`,
+`select_option`, `press`, `fill_form`, `back`, `forward`, `reload`) checks the
+page it landed on and fails with `[AUTH_REQUIRED]` if that page is a sign-in
+wall, and a `wait_for` that times out on such a page reports `[AUTH_REQUIRED]`
+instead of `[TIMEOUT]`. Each guarded step costs one extra snapshot round-trip;
+with the flag off the cost is zero. `[AUTH_REQUIRED]` is where a harness pauses
+for a human to sign in again in the same Chrome, then retries the step. MCP Browser Extension
+never re-authenticates on its own: it holds no credentials, by design.
+
+Detection reads only what the snapshot already has: the URL (sign-in routes,
+identity-provider hosts such as `accounts.google.com`, `login.microsoftonline.com`,
+Okta, Auth0), the title, password fields, and sign-in controls. `high`
+confidence needs two independent cues (a password field plus a sign-in button,
+say); a lone password field or a bare `/auth/...` URL is `medium`. A header
+"Sign in" link on an ordinary page never counts. `failOnAuthWall` fires only on
+`high`, so a harness can bucket `[AUTH_REQUIRED]` separately from every other
+failure while a settings page with a "current password" field carries on.
+
+### Printing — `print_pdf`
+
+```jsonc
+print_pdf { "landscape": true }
+```
+
+Renders through Chrome's own print pipeline and saves to the task's `results/`
+dir, returning the path and size. The bytes themselves are never returned — a
+PDF is megabytes of base64 no model can read.
+
+### Paying less per turn — `--tools`
+
+Every MCP server you connect costs context before you ask it anything: the host
+sends the whole tool catalog to the model on **every** turn. MCP Browser Extension's 43
+tools are 28 KB of JSON Schema, about 7.1k tokens, on each one.
+
+Most runs need a handful of them. `--tools` advertises only those:
+
+```
+npx -y mcp-browser-extension@latest \
+  --allow-domain app.example.com --enable-mutations \
+  --tools tabs_list,tab_new,navigate,snapshot,click,type,get_text
+```
+
+That surface is **6.0 KB, ~1.5k tokens** — a 78% cut against the full catalog,
+for a run that was never going to print a PDF or upload a file.
+
+- Comma-separated and repeatable: `--tools navigate,get_text --tools click`.
+- A tool left out is hidden from `tools/list` **and refused if called** — a
+  `batch` op naming it fails the same way an unknown tool does. Hiding a tool is
+  a real restriction, not a display filter. It is not a substitute for the
+  policy gate, though: `--tools eval` still does nothing without
+  `--unsafe-enable-eval`.
+- An unknown name fails at startup and prints the catalog, so a typo can never
+  quietly drop `click` from the surface.
+- `mcp-browser-extension --help` prints the full catalog of 43 names to pick from.
+
+## Status
+
+v0.5.0 — **safe multi-tab concurrency.** Adds the `batch` fan-out tool, makes
+parallel tab automation race-free (explicit-`tabId` guard; per-tab
+`chrome.debugger` serialization; collision-free `tab_new`), captures screenshots
+via `chrome.debugger` (a specific tab without stealing focus — plus true
+full-page and element capture), and focuses newly opened tabs by default. 111
+automated tests + a gated headed extension smoke.
+
+v0.2.0 — all six build phases complete and green. End-to-end working:
+`npx mcp-browser-extension` ⇄ bridge ⇄ extension ⇄ your real Chrome, with a Playwright CDP
+fallback. v0.2 adds the accessibility `snapshot` + element refs, auto-wait,
+cookies/storage/`select_option`, trusted input (`chrome.debugger`), a toolbar
+status badge, and a stable pairing token (`--persist-token`).
+
+- [x] **Phase 0 — Contracts & skeleton:** `shared/protocol.ts` (wire contract),
+      `src/executor/types.ts` (Executor interface), `src/security/policy.ts`
+      (default-deny policy + capability gates), `src/config.ts` (CLI/env/policy
+      resolution), build + test harness.
+- [x] **Phase 1 — MCP server + StubExecutor:** `mcp/server.ts` (clean-stdout
+      stdio), `mcp/tools.ts` (28-tool catalog + never-throw dispatch +
+      drift-check), validators/envelopes/helpers, `ExecutorManager` +
+      `StubExecutor`, `cli.ts`. Point an MCP host at `node dist/src/cli.js` today.
+- [x] **Phase 2 — WebSocket bridge + auth:** `bridge/server.ts` (loopback WS,
+      hello-token gate, welcome/unauthorized, displacement), `bridge/auth.ts`
+      (per-boot 256-bit token, atomic-0600 handshake, SHA-256 `timingSafeEqual`),
+      `bridge/connection.ts` (id-correlation, method-aware timeouts, backpressure,
+      reject-all-on-close, heartbeat).
+- [x] **Phase 3 — ExtensionExecutor + CdpExecutor + selection:**
+      `executor/extension-executor.ts` (Executor over the bridge),
+      `executor/cdp-executor.ts` (Playwright connect/launch + lock recovery +
+      tab resolution), `executor/select.ts` (extension-if-ping-responsive else
+      CDP). CLI now starts the bridge, writes the 0600 handshake, and serves a
+      real backend. Adds `playwright`.
+- [x] **Phase 4 — MV3 extension:** `extension/` — `manifest.json`,
+      `sw/ws-client.ts` (dial + hello/welcome + pong), `sw/executor.ts`
+      (chrome.scripting/chrome.tabs command impls), `sw/router.ts` (never-throw +
+      drift), `sw/background.ts` (top-level listeners + 25s keepalive/reconnect),
+      options page (manual pairing), esbuild build → `extension-dist/`. Verified
+      by a live `--load-extension` smoke (pair → navigate → get_text). Adds
+      `esbuild` + `@types/chrome`.
+- [x] **Phase 5 — Helpers, downloads, HITL:** hardened `download_file`
+      (`shared/download.ts` — path-traversal/dangerous-ext sanitize + size cap,
+      wired into both backends), richer `read_as_markdown`, and a human-in-the-loop
+      harness (`hitl/` — `npm run test:hitl [-- --include-mutating]`) with pure,
+      unit-tested gating. 50 automated tests.
+- [x] **Phase 6 — Packaging & docs:** `files` whitelist (ships `dist/src`,
+      `dist/shared`, `extension-dist`, LICENSE, blueprint — not source/tests),
+      `prepack` build, `bin`, quickstart + `.mcp.json` snippet. Verified by a
+      tarball install smoke (`npm pack` → install → MCP `tools/list`).
+
+## Security posture (default)
+
+**Access requires consent.** The server starts with an empty named-site allowlist;
+the extension's default suspicious-site mode requires an explicit Chrome host
+grant before ordinary sites work automatically. Eval, downloads and mutations
+stay off until enabled. Named-site policy remains available:
+
+```
+mcp-browser-extension --no-site-grants --allow-domain example.com --enable-mutations
+mcp-browser-extension --policy ./policy.json          # see policy.example.json
+mcp-browser-extension --enable-observers              # console/network/dialog capture (patches page globals)
+mcp-browser-extension --redact                        # scrub secret-shaped strings out of page reads
+```
+
+**Named-site mode: allowing a site without a restart.** When a call is refused because its site
+is not allowed, the extension's toolbar icon shows a `?`. Click it: the popup
+lists the blocked site with an **Allow** button, shows whether the site you are on
+is allowed (with its own Allow), and lists the allowed sites. The Options page
+(Settings in the popup) also has a box to allow any other site. An allowed site applies at once to every session sharing that Chrome, and
+is saved to `~/.mcp-browser-extension/allowed-sites.json` so it survives restarts. Sites
+allowed there can be removed there; sites from `--allow-domain` stay until the
+flags change. Catch-all patterns do not grant access. Remove the retired
+`--unsafe-all-domains` option from older configurations before starting. The
+agent cannot approve a site itself: MCP Browser Extension never reads or drives the
+extension's own pages. Run with `--no-site-grants` to keep the allowlist exactly
+what the flags say.
+
+**What comes back is gated too.** The allowlist decides which pages may be read;
+it says nothing about what is on them. A logged-in page routinely renders a
+session token into a script tag or an API key onto a settings screen.
+
+- **Cookie values are hidden by default.** `get_cookies` returns each cookie's
+  name, domain, path and flags with the value replaced by `[hidden]`. A session
+  cookie can grant access to an account without its password.
+  Pass `--enable-cookie-values` if a task really needs them.
+- **Password field values are always suppressed** — in `get_html`, and in
+  `snapshot`, where the field still appears (so you can type into it) flagged
+  `secret: true` with no value. No flag, no opt-in: nobody wants those characters.
+- `--redact` additionally scrubs secret-shaped strings — JWTs, AWS/GitHub/Slack/
+  Google keys, `Bearer` headers, private-key blocks — out of `get_text`,
+  `get_html`, `read_as_markdown` and `eval`. It is opt-in because a pattern will
+  eventually fire on something you actually wanted. `--redact-pattern <regex>`
+  adds your own (and implies `--redact`); an invalid one fails at startup rather
+  than silently never matching.
+- Redaction runs **before** the output cap, so a truncated read cannot leak what
+  a full one would have hidden.
+
+Every call is recorded to the task's `history.jsonl` with the URL it touched, the
+policy verdict (`allowed`/`denied`), how long it took, how many bytes came back,
+and how many secrets were scrubbed — so "what did the agent do in my browser" has
+an answer after the fact.
+
+The per-boot 256-bit token in `~/.mcp-browser-extension/handshake.json` (mode 0600) is the
+only trust boundary; it is never written to stdout/stderr. On POSIX the mode is
+re-verified after every write and the server **fails closed** if the file ends up
+group/other-accessible. Windows has no such bits — `chmod` there only toggles the
+read-only attribute — so the check is skipped and the token's confidentiality
+rests on the per-user ACL of `%USERPROFILE%\.mcp-browser-extension`.
+
+## Updates
+
+You don't have to do anything to stay current. The setup snippets above use
+`@latest`, and on top of that an installed copy (npx or a global install) checks
+npm when it starts: if a newer version is published, it starts that version in
+its place, with the same arguments, so an MCP config written months ago still
+runs the newest release. The check gives up after 1.5 s when you are offline,
+and a copy run from a git checkout never updates itself. The new server also
+refreshes the unpacked extension in `~/mcp-browser-extension`, which reloads
+itself; the Chrome Web Store copy updates through Chrome as usual. Turn it off
+with `--no-auto-update` or `MCP_BROWSER_EXTENSION_AUTO_UPDATE=0`.
+
+## Telemetry
+
+The MCP Browser Extension **server** (not the extension) sends anonymous usage statistics to PostHog, so the
+project can see how many installs are active, which versions and platforms are
+in use, and which tools fail most. A notice is printed the first time it runs.
+
+What is sent: a random install id (kept in `~/.mcp-browser-extension/telemetry.json`), the
+server version, OS, CPU architecture and Node major version, whether the
+session owns the bridge port or shares it, how many browsers are paired, the
+paired extension's version and whether it is the store or an unpacked copy, and
+per-tool call and error **counts** with error codes. The first batch goes out a
+minute after the first tool call, then every 10 minutes. For PostHog's MCP
+Analytics view, each tool call is also sent as one `$mcp_tool_call` event
+carrying only the tool name and its group (reading, navigation...), its
+duration, whether it failed and the error **code**, the MCP client's name and
+version (such as `claude-code`), the MCP protocol revision, the AI model when the
+client names it in its own request metadata (Codex does), and a random session
+id that changes after 30 idle minutes. When a client connects, one event records
+that handshake and the names of the tools offered. Nothing an agent sends or
+reads: no arguments, results, error messages or intents. Batched every 15
+seconds. One `pair_check` event
+a minute after startup says whether a browser paired and, if not, which of a few
+fixed reasons applies (`no_extension`, `token_mismatch`, `version_mismatch`,
+`profile_mismatch`), so setup problems can be fixed where they happen.
+
+What is never sent: URLs, domains, tool arguments, page content, screenshots,
+cookies, profile names, tokens, file paths, or anything you type. Events are
+personless and GeoIP lookup is disabled.
+
+The **browser extension sends nothing** — it only ever talks to `127.0.0.1`.
+
+Turn it off with any of:
+
+```bash
+MCP_BROWSER_EXTENSION_TELEMETRY=0     # or false / off
+DO_NOT_TRACK=1
+--no-telemetry             # server flag
+```
+
+## Learn more
+
+The full documentation, setup guides for each MCP client and the security model
+live on the website: **[MCP Browser Extension docs](https://mcp-browser-extension.com/docs)**.
+
+- [What an MCP browser extension is, and when you need one](https://mcp-browser-extension.com/blog/what-is-an-mcp-browser-extension)
+- [Use Claude in your signed-in Chrome](https://mcp-browser-extension.com/logged-in-chrome)
+- [Give Claude Code browser access](https://mcp-browser-extension.com/blog/claude-code-browser)
+- [Give Cursor a real browser with MCP](https://mcp-browser-extension.com/blog/cursor-browser-mcp)
+- [Let VS Code Copilot use your real Chrome](https://mcp-browser-extension.com/blog/vscode-copilot-browser-mcp)
+- [Test a login flow end to end with an AI agent](https://mcp-browser-extension.com/blog/test-login-flow-ai-agent)
+- [Check a release page through a browser MCP tunnel](https://mcp-browser-extension.com/blog/check-release-page-remote-browser)
+- [Chrome DevTools MCP vs Playwright MCP vs an MCP extension](https://mcp-browser-extension.com/blog/chrome-devtools-mcp-vs-playwright-mcp)
+- [Best browser MCP servers in 2026](https://mcp-browser-extension.com/blog/best-browser-mcp-servers)
+- [How it compares with other browser MCP servers](https://mcp-browser-extension.com/docs/compare)
+
+## Develop
+
+```
+npm install
+npm run typecheck       # server/test sources
+npm run typecheck:ext   # extension sources (@types/chrome)
+npm run build:ext       # bundle the extension → extension-dist/
+npm test                # builds, then runs node --test on dist/test
+RUN_EXT_SMOKE=1 node --test dist/test/extension-smoke.test.js   # live, headed
+```
+
+## The extension
+
+Published on the Chrome Web Store as
+**[MCP Browser Extension](https://chromewebstore.google.com/detail/mcp-browser-extension/jelfhdlkhbfmlpbghoeaepijllcnplgh)**.
+Extension versions move only when `extension/` changes, so the listed build can
+sit a release behind the npm package; the two negotiate capabilities on
+connect, so an older extension loses features rather than breaking.
+
+For normal use, install from the Chrome Web Store above. The following is only
+for local development; do not load this unpacked copy in the same Chrome profile
+as the Store extension. On Windows, Chrome may disable a non-Store build.
+
+`extension/` builds (esbuild) to `extension-dist/`, loaded via
+`chrome://extensions` → **Load unpacked** → select `~/mcp-browser-extension`, the
+mirror the server refreshes from `extension-dist/` on every boot (loading
+`extension-dist/` directly also works). It pairs itself from the `pairing.json`
+the server writes into that folder; the **Options** page paste of `port` +
+`token` from `~/.mcp-browser-extension/handshake.json` (run
+`npx -y mcp-browser-extension@latest --print-pairing` to get the path) is only
+the fallback.
+
+> **Reads/interaction use `chrome.scripting`/`chrome.tabs`** — no "is being
+> debugged" banner, CSP-safe reads (isolated world), testable under Playwright.
+> `chrome.debugger` is used only where it's needed and worth it: `trusted: true`
+> input (real OS-level events on React/Vue inputs) and `screenshot` (captures a
+> specific tab **without** activating it — safe under parallel `batch` — with
+> true full-page and element capture). Those ops show the debug banner while
+> attached; the session lingers 1.5s after the last op so a burst of them
+> attaches once. Screenshots are JPEG (quality 70) at CSS-pixel size by
+> default — pass `format: "png"`, `quality`, or `scale` to change that.

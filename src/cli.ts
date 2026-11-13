@@ -1,0 +1,614 @@
+#!/usr/bin/env node
+/**
+ * src/cli.ts — `npx mcp-browser-extension` entrypoint.
+ *
+ * Boot order: resolve config → ensure data dir → generate a per-boot token →
+ * start the loopback bridge → write the 0600 handshake → configure the manager
+ * with the backend selector → serve MCP over stdio. `--help`/`--version` print
+ * and exit before stdio is claimed; `--print-pairing` runs only the bridge and
+ * prints the handshake path (for manual pairing), never serving MCP.
+ */
+
+import { runtimeEnv } from './compat';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { HELP_TEXT, parseArgs, resolveDataDir } from './config';
+import { bypassEmailVerification, requestRelayPass, requireAccess } from './access';
+import { type GcOptions, gcTasks, listTasks } from './bridge/tasks';
+import { configureManager } from './executor/manager';
+import { createSelector } from './executor/select';
+import { BridgeServer } from './bridge/server';
+import { toWirePolicy } from './security/policy';
+import { claimHost, supersededBy } from './bridge/host-claim';
+import { ensureDataDir, ensureWorkspace, handshakePath as handshakeFile, migrateLegacyLayout } from './bridge/datadir';
+import { peekActiveWorkspace, setActiveWorkspace } from './bridge/workspace';
+import { bundledPairingHeldByOther, removeHandshake, resolveToken, writeHandshake, writeBundledPairing } from './bridge/auth';
+import { logDebug, logErr, mcpClientInfo, setLogLevel, startMcpServer, stopMcpServer } from './mcp/server';
+import { startHttpMcp } from './remote/http';
+import { resolveRemoteKey } from './remote/key';
+import { startQuickTunnel, type Tunnel } from './remote/tunnel';
+import { SHARED_RELAY_URL, connectRelay, relayTokenPath, resolveRelayToken, sharedPassProvider, type RelayLink } from './remote/relay';
+import { PhonePairing } from './remote/phone-pairing';
+import { startPhoneControl } from './remote/phone-control';
+import { TOOL_NAMES, setProfileBridge, setToolAllowlist } from './mcp/tools';
+import { initTelemetry, stopTelemetry } from './telemetry';
+import { maybeHandOff } from './auto-update';
+import { registerNativeHost, runNativeHost } from './native-host';
+import { bundledExtensionDir, syncExtension } from './extension-install';
+import { runExtensionCommand } from './extension-command';
+
+/** Hard deadline for clean shutdown before we force-exit (a stuck socket must not hang us). */
+const SHUTDOWN_DEADLINE_MS = 3000;
+
+/**
+ * Race a best-effort shutdown against a hard deadline, then exit. The timer is
+ * unref'd so it never itself keeps the process alive; if it fires first we log a
+ * brief note that clean shutdown did not complete in time.
+ */
+function exitWithDeadline(work: Promise<unknown>): void {
+  let timer: NodeJS.Timeout;
+  const deadline = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), SHUTDOWN_DEADLINE_MS);
+    timer.unref();
+  });
+  void Promise.race([work.then(() => 'clean' as const), deadline]).then((outcome) => {
+    clearTimeout(timer);
+    if (outcome === 'timeout') {
+      logErr(`shutdown deadline (${SHUTDOWN_DEADLINE_MS}ms) hit before clean shutdown; forcing exit.`);
+    }
+    process.exit(0);
+  });
+}
+
+function version(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')) as {
+      version?: string;
+    };
+    return pkg.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+/** Telemetry fields for the paired extension: its version and store/unpacked. */
+function extensionContext(ext: { version?: string; source?: string } | null): Record<string, string> {
+  return {
+    ...(ext?.version ? { ext_version: ext.version } : {}),
+    ...(ext?.source ? { ext_source: ext.source } : {}),
+  };
+}
+
+/** The version of the extension bundled with this server, or undefined if unreadable. */
+function bundledExtensionVersion(): string | undefined {
+  try {
+    const m = JSON.parse(readFileSync(join(bundledExtensionDir(), 'manifest.json'), 'utf8')) as { version?: unknown };
+    return typeof m.version === 'string' ? m.version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Mirror the bundled extension into the visible install folder
+ * (`~/mcp-browser-extension`) and report where Chrome should load it from. On a
+ * read-only home the bundled folder is returned instead; both are loadable.
+ */
+function installExtension(): string {
+  const r = syncExtension();
+  if (!r.ok) {
+    logDebug(`extension not mirrored to the home folder (${r.error}); using the bundled copy at ${r.dir}`);
+    return r.dir;
+  }
+  if (r.created) {
+    logErr(
+      `developer extension files copied to ${r.dir}; this does not install the extension in Chrome. ` +
+        `For normal use, install MCP Browser Extension from the Chrome Web Store. ` +
+        `Only for local development: use chrome://extensions -> Developer mode -> Load unpacked. ` +
+        `Do not load the unpacked copy alongside the Store copy.`,
+    );
+  } else if (r.copied.length > 0) {
+    logErr(`developer extension files updated at ${r.dir} — a loaded unpacked copy reloads itself within 30 s`);
+  }
+  return r.dir;
+}
+
+/** Render a byte count as a short human string (1.2 MB, 904 KB, …). */
+function humanBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(1)} ${units[i]}`;
+}
+
+/** Pull `--flag value` / `--flag` out of an arg list, leaving positionals. */
+function flag(args: string[], name: string): string | undefined {
+  const i = args.indexOf(name);
+  if (i === -1) return undefined;
+  return args[i + 1];
+}
+function hasFlag(args: string[], name: string): boolean {
+  return args.includes(name);
+}
+
+const TASKS_HELP = `mcp-browser-extension tasks — inspect and prune per-profile task workspaces.
+
+Usage:
+  mcp-browser-extension tasks list [--json] [--data-dir <path>]
+  mcp-browser-extension tasks gc   [--older-than <days>] [--keep <n>] [--profile <name>]
+                        [--dry-run] [--data-dir <path>]
+
+gc removes a task only when it is NOT among the newest --keep AND is older than
+--older-than. At least one of --older-than / --keep is required.
+`;
+
+/**
+ * Handle the `tasks` subcommand family (list / gc). Returns true if argv was a
+ * tasks command (so main() should not start the server), false otherwise.
+ */
+function runTasksCommand(argv: string[]): boolean {
+  if (argv[0] !== 'tasks') return false;
+  const args = argv.slice(1);
+  const sub = args[0];
+
+  const dataDirFlag = flag(args, '--data-dir');
+  if (dataDirFlag) process.env.MCP_BROWSER_EXTENSION_DATA = dataDirFlag;
+  const dataDir = resolveDataDir();
+
+  if (sub === 'list') {
+    const tasks = listTasks(dataDir);
+    if (hasFlag(args, '--json')) {
+      process.stdout.write(`${JSON.stringify(tasks, null, 2)}\n`);
+      return true;
+    }
+    if (tasks.length === 0) {
+      process.stdout.write('no tasks found.\n');
+      return true;
+    }
+    process.stdout.write('PROFILE\tTASK\tCREATED\tFILES\tSIZE\n');
+    for (const t of tasks) {
+      process.stdout.write(`${t.profile}\t${t.task}\t${t.createdAt}\t${t.downloads}\t${humanBytes(t.bytes)}\n`);
+    }
+    return true;
+  }
+
+  if (sub === 'gc') {
+    const olderThan = flag(args, '--older-than');
+    const keep = flag(args, '--keep');
+    if (olderThan === undefined && keep === undefined) {
+      process.stderr.write('tasks gc: pass --older-than <days> and/or --keep <n>.\n');
+      process.exitCode = 1;
+      return true;
+    }
+    const opts: GcOptions = {
+      olderThanDays: olderThan === undefined ? undefined : Number.parseFloat(olderThan),
+      keep: keep === undefined ? undefined : Number.parseInt(keep, 10),
+      profile: flag(args, '--profile'),
+      dryRun: hasFlag(args, '--dry-run'),
+    };
+    const { removed, freedBytes } = gcTasks(dataDir, opts, Date.now());
+    const prefix = opts.dryRun ? '[dry-run] would remove' : 'removed';
+    process.stdout.write(`${prefix} ${removed.length} task(s), ${humanBytes(freedBytes)}\n`);
+    for (const t of removed) {
+      process.stdout.write(`  ${t.profile}/${t.task} (${humanBytes(t.bytes)})\n`);
+    }
+    return true;
+  }
+
+  process.stdout.write(TASKS_HELP);
+  return true;
+}
+
+/** The tool names, wrapped into indented lines for `--help`. */
+function toolList(): string {
+  const lines: string[] = [];
+  let line = ' ';
+  for (const name of TOOL_NAMES) {
+    if (line.length + name.length + 2 > 78) {
+      lines.push(line);
+      line = ' ';
+    }
+    line += ` ${name}`;
+  }
+  if (line.trim()) lines.push(line);
+  return lines.join('\n');
+}
+
+/** The value after `name` in argv, if any. */
+function argValue(argv: string[], name: string): string | undefined {
+  const i = argv.indexOf(name);
+  return i >= 0 ? argv[i + 1] : undefined;
+}
+
+async function main(): Promise<void> {
+  // Chrome starting the one-click pairing helper. Handled before anything else:
+  // Chrome appends its own arguments (the caller's origin, a window handle), and
+  // stdout must carry nothing but the framed reply.
+  if (process.argv.includes('--native-host')) {
+    const argv = process.argv.slice(2);
+    runNativeHost(argValue(argv, '--data-dir') ?? resolveDataDir(), argValue(argv, '--profile'));
+    return;
+  }
+  if (runTasksCommand(process.argv.slice(2))) return;
+  if (runExtensionCommand(process.argv.slice(2))) return;
+
+  const cfg = parseArgs(process.argv.slice(2));
+
+  // Apply verbosity before anything else logs, so `--log-level silent` really is
+  // silent from the first line rather than from wherever the first log happened
+  // to sit after startup.
+  setLogLevel(cfg.logLevel);
+
+  const accessGuard = cfg.noEmailVerification ? bypassEmailVerification : requireAccess;
+
+  if (cfg.showHelp) {
+    process.stdout.write(HELP_TEXT);
+    // The catalog is what `--tools` takes, so `--help` has to name it.
+    process.stdout.write(`\nTools (${TOOL_NAMES.length}) — any of these for --tools:\n${toolList()}\n`);
+    return;
+  }
+  if (cfg.showVersion) {
+    process.stdout.write(`${version()}\n`);
+    return;
+  }
+  if (cfg.showExtensionPath) {
+    process.stdout.write(`${installExtension()}\n`);
+    return;
+  }
+
+  // Before anything binds the port: if npm has a newer mcp-browser-extension, run that
+  // instead (stdio passes straight through), so no install stays on an old copy.
+  const handedOff = await maybeHandOff({
+    current: version(),
+    packageDir: join(__dirname, '..', '..'),
+    argv: process.argv.slice(2),
+    disabledByFlag: cfg.noAutoUpdate,
+    log: (m) => logErr(m),
+  });
+  if (handedOff !== null) process.exit(handedOff);
+
+  if (cfg.noEmailVerification) {
+    logErr('SECURITY: hosted email verification is disabled; only trusted local MCP clients should connect. The browser-domain allowlist and other safety gates remain active.');
+  }
+
+  // Before the bridge binds a port or writes a handshake: a typo'd `--tools`
+  // name should fail as a plain startup error, not leave a half-started server.
+  setToolAllowlist(cfg.tools);
+
+  const dataDir = ensureDataDir(cfg.dataDir);
+  const token = resolveToken(dataDir, { persist: cfg.persistToken });
+
+  const bridge = new BridgeServer({
+    token,
+    serverVersion: version(),
+    policy: toWirePolicy(cfg.policy),
+    siteGrants: !cfg.noSiteGrants,
+    latestExtensionVersion: bundledExtensionVersion(),
+    port: cfg.wsPort,
+    dataDir,
+    onLog: (m) => logErr(m),
+    onDisplacement: (d) =>
+      logErr(`SECURITY: extension connection displaced (different id: ${d.differentId})`),
+    // Only the server that owns the port publishes pairing files. A peer (another
+    // Claude session sharing this Chrome) leaves them alone, and publishes them
+    // itself if the hub exits and it takes the port over.
+    onRole: (role, info) => {
+      if (role === 'hub') publishPairing(info.port, info.token);
+      else {
+        logErr(`sharing the browsers of the mcp-browser-extension already on port ${info.port} (pid ${info.hubPid || '?'}) — several sessions can drive Chrome at once`);
+        // Refresh the unpacked extension folder from this session too: the hub
+        // may be an old process from a window left open for days, and it would
+        // keep the folder on its old files. The mirror never downgrades.
+        installExtension();
+      }
+    },
+  });
+
+  const publishPairing = (port: number, pairToken: string): void => {
+    // Synchronous so a handshake that can't be made private still fails closed.
+    const path = writeHandshake(dataDir, { port, token: pairToken });
+    logErr(`pairing handshake written to ${path} (mode 0600; token not logged)`);
+    publishBundledPairing(port, pairToken).catch((err) =>
+      logDebug(`auto-pairing file not written: ${err instanceof Error ? err.message : String(err)}`),
+    );
+  };
+
+  const publishBundledPairing = async (port: number, pairToken: string): Promise<void> => {
+    // Drop the same port + token into the bundled extension folder so a Load
+    // unpacked from there pairs itself. Best-effort: a read-only install just
+    // falls back to the Options-page paste. Never take over a pairing file that
+    // a different, still-running mcp-browser-extension published (a second server with its
+    // own data dir or port would otherwise re-point the user's extension).
+    const extDir = installExtension();
+    if (await bundledPairingHeldByOther(extDir, port)) {
+      logErr(
+        `auto-pairing file at ${extDir} belongs to another running mcp-browser-extension — left as is; pair this server from the extension Options page if you want it`,
+      );
+      return;
+    }
+    const bundled = writeBundledPairing(extDir, { port, token: pairToken });
+    if (bundled) {
+      logErr(`auto-pairing file written to ${bundled} — Load unpacked from ${extDir} needs no token paste`);
+    } else {
+      logDebug(`auto-pairing file not written (extension folder missing or read-only at ${extDir})`);
+    }
+    // Anyone who loaded the extension straight from the package folder (0.8.0
+    // docs) keeps pairing too.
+    const pkgDir = bundledExtensionDir();
+    if (extDir !== pkgDir && !(await bundledPairingHeldByOther(pkgDir, port))) {
+      writeBundledPairing(pkgDir, { port, token: pairToken });
+    }
+  };
+
+  const port = await bridge.start();
+  // One-click pairing: let the extension's Connect button fetch the port and
+  // token itself. Every session rewrites it, so it always runs the newest server.
+  if (!cfg.noNativeHost) {
+    void registerNativeHost({
+      dataDir,
+      cliPath: join(__dirname, 'cli.js'),
+      profile: cfg.profile && cfg.profile !== 'default' ? cfg.profile : undefined,
+      log: (m) => logDebug(m),
+    }).then((browsers) => logDebug(`one-click pairing helper registered with ${browsers.length} browser(s)`));
+  }
+  setProfileBridge(bridge);
+  initTelemetry({
+    dataDir,
+    version: version(),
+    disabledByFlag: cfg.noTelemetry,
+    log: (m) => logErr(m),
+    client: () => mcpClientInfo(),
+    context: () => ({
+      role: bridge.role,
+      browsers: bridge.connectedProfiles().length,
+      pair_state: bridge.pairState(peekActiveWorkspace()?.profile ?? cfg.profile),
+      ...extensionContext(bridge.extensionInfo(peekActiveWorkspace()?.profile ?? cfg.profile)),
+    }),
+  });
+  // Never includes the pairing token — only the resolved, non-secret config.
+  logDebug(
+    `resolved config: ${JSON.stringify({
+      wsPort: port,
+      dataDir: cfg.dataDir,
+      profile: cfg.profile,
+      task: cfg.task,
+      prefer: cfg.prefer,
+      policy: cfg.policy,
+    })}`,
+  );
+  const handshakePath = handshakeFile(dataDir);
+  if (runtimeEnv('TOKEN')) {
+    logErr('token: pinned from MCP_BROWSER_EXTENSION_TOKEN (stable; pair once, never again).');
+  } else if (cfg.persistToken) {
+    logErr('token: persisted across restarts (--persist-token; pair once, never again).');
+  }
+
+  const cleanup = (): void => {
+    // The handshake belongs to whichever server owns the port; a peer exiting
+    // must not delete the hub's.
+    if (bridge.role === 'hub') removeHandshake(dataDir);
+  };
+
+  // Manual pairing helper: run the bridge, print the path, keep alive. NOT MCP.
+  if (cfg.printPairing) {
+    process.stdout.write(`${handshakePath}\n`);
+    logErr('pairing mode — bridge is up; open the extension and pair, then Ctrl-C.');
+    process.on('SIGINT', () => {
+      cleanup();
+      exitWithDeadline(bridge.stop());
+    });
+    return;
+  }
+
+  // Each profile is an identity (its own Chrome user-data dir); each task is a
+  // run whose downloads/meta.json live under it. Handshake stays at the data-dir
+  // root (auth is machine-scoped, not per-profile). Fold any pre-0.6 flat layout
+  // into profiles/default/ first — before ensureWorkspace creates the targets.
+  for (const m of migrateLegacyLayout(dataDir)) logErr(`migrated legacy layout: ${m}`);
+  const workspace = ensureWorkspace(dataDir, cfg.profile, cfg.task, {
+    version: version(),
+    pid: process.pid,
+    createdAt: new Date().toISOString(),
+  });
+  setActiveWorkspace(workspace);
+  logErr(`workspace: profile "${workspace.profile}" task "${workspace.task}" → ${workspace.taskDir}`);
+
+  configureManager({
+    policy: cfg.policy,
+    select: createSelector({
+      bridge,
+      cdpFallback: cfg.cdpFallback,
+      prefer: cfg.prefer,
+      cdp: {
+        mode: cfg.cdpEndpoint ? 'connect' : 'launch',
+        cdpEndpoint: cfg.cdpEndpoint,
+        userDataDir: workspace.profileDir,
+        downloadDir: workspace.downloadDir,
+        headless: cfg.headless,
+        policy: toWirePolicy(cfg.policy),
+      },
+    }),
+  });
+  logErr(`backend: extension-if-paired else ${cfg.cdpFallback ? 'CDP fallback' : 'none'} (prefer: ${cfg.prefer})`);
+
+  if (cfg.http) {
+    await serveRemote(cfg, dataDir, () => {
+      cleanup();
+      return Promise.allSettled([stopTelemetry(), bridge.stop()]);
+    });
+    return;
+  }
+
+  let shuttingDown = false;
+  const shutdown = (): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    cleanup();
+    // Telemetry first: its final summary reads the bridge's role and paired
+    // browsers, which bridge.stop() clears synchronously.
+    exitWithDeadline(Promise.allSettled([stopTelemetry(), stopMcpServer(), bridge.stop()]));
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
+  // The MCP host owns our stdin. When it disconnects (host quit, or a
+  // "Reconnect" that spawns a fresh child), stdin reaches EOF — that's our cue
+  // to exit and release the port, so a stale process never lingers and blocks
+  // the next connection. This is what makes reconnects "just work".
+  process.stdin.on('end', shutdown);
+  process.stdin.on('close', shutdown);
+
+  // Some hosts, notably on Windows, kill the process that launched us without
+  // closing our stdin, so neither signal nor EOF ever arrives: the server lingers
+  // holding the port, and its usage is never reported. Notice instead when the
+  // parent is gone, or when writing to it fails.
+  const parentPid = process.ppid;
+  // A host that "reconnects" by spawning a new child may leave us running with
+  // our old flags; the newest server from the same parent claims the slot.
+  const hostProfile = cfg.profile ?? 'default';
+  try {
+    claimHost(dataDir, parentPid, hostProfile);
+  } catch (err) {
+    logDebug(`host claim skipped: ${(err as Error).message}`);
+  }
+  const watchdog = setInterval(() => {
+    if (process.ppid !== parentPid) return shutdown(); // reparented: the parent exited
+    const newer = supersededBy(dataDir, parentPid, hostProfile);
+    if (newer !== null) {
+      logErr(`replaced by a newer server (pid ${newer}) from the same MCP host; exiting`);
+      return shutdown();
+    }
+    try {
+      process.kill(parentPid, 0);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ESRCH') shutdown();
+    }
+  }, 5_000);
+  watchdog.unref();
+  process.stdout.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EPIPE' || err.code === 'ERR_STREAM_DESTROYED') shutdown();
+  });
+
+  // The resolved policy shapes the advertised catalog: a capability that is off
+  // means its tools are never described to the model.
+  await startMcpServer(version(), cfg.policy, accessGuard);
+}
+
+/**
+ * `--http` / `--tunnel`: a standalone server for clients on other machines.
+ * No stdin to watch and no parent to follow: it runs until Ctrl-C.
+ */
+async function serveRemote(
+  cfg: ReturnType<typeof parseArgs>,
+  dataDir: string,
+  stopBridge: () => Promise<unknown>,
+): Promise<void> {
+  const key = resolveRemoteKey(dataDir, { rotate: cfg.rotateRemoteKey });
+  const phonePairing = new PhonePairing(dataDir, cfg.profile);
+  if (cfg.rotateRemoteKey) for (const phone of phonePairing.state().devices) phonePairing.remove(phone.id);
+  if (cfg.rotateRemoteKey) logErr('remote key rotated: every earlier connector URL stops working.');
+  const http = await startHttpMcp({
+    port: cfg.httpPort,
+    key,
+    version: version(),
+    policy: cfg.policy,
+    log: (m) => logErr(m),
+    accessGuard: cfg.noEmailVerification ? bypassEmailVerification : undefined,
+    phonePairing,
+    phoneChat: process.env.MBE_PHONE_CODEX === '1' || process.env.MBE_PHONE_CHAT === '1',
+  });
+  const phoneControl = await startPhoneControl(phonePairing).catch(async (err) => { await http.close(); throw err; });
+  let tunnel: Tunnel | null = null;
+  let relay: RelayLink | null = null;
+  let shuttingDown = false;
+  const shutdown = (): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    tunnel?.stop();
+    relay?.stop();
+    exitWithDeadline(Promise.allSettled([phoneControl.close(), http.close(), stopBridge()]));
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
+  if (cfg.tunnel) {
+    try {
+      tunnel = await startQuickTunnel({
+        localPort: http.port,
+        log: (m) => logErr(m),
+        onExit: (code) => {
+          phonePairing.setPublicUrl();
+          if (shuttingDown) return;
+          logErr(`the tunnel closed (cloudflared exit ${code}); remote clients are cut off. Restart to get a new URL.`);
+        },
+      });
+      phonePairing.setPublicUrl(tunnel.url);
+    } catch (err) {
+      await phoneControl.close();
+      await http.close();
+      throw err;
+    }
+  }
+
+  const printConnector = (base: string, headline: string, notes: string[] = []): void => {
+    const lines = [
+      '',
+      headline,
+      '',
+      'Connector URL (paste into claude.ai > Settings > Connectors, ChatGPT, or any MCP client):',
+      `  ${base}/mcp/${key}`,
+      '',
+      'Or send the key as a header, e.g. for Claude Code on another computer:',
+      `  claude mcp add --transport http browser ${base}/mcp --header "Authorization: Bearer ${key}"`,
+      '',
+      'Anyone with this URL can drive this Chrome within the allowed sites. Keep it private.',
+      'Cut everyone off: restart with --rotate-remote-key.',
+      ...notes,
+      '',
+    ];
+    process.stdout.write(`${lines.join('\n')}\n`);
+  };
+
+  if (cfg.relay || cfg.sharedRelay) {
+    // The relay names the public address once it accepts this computer; print
+    // the connector then, and only once (the link reconnects after outages).
+    let announced = false;
+    if (cfg.sharedRelay) logErr(`linking to the shared relay at ${SHARED_RELAY_URL} (needs an invited, verified email)`);
+    else logErr(`linking to the relay at ${cfg.relay} (relay token: ${relayTokenPath(dataDir)})`);
+    relay = connectRelay({
+      url: cfg.sharedRelay ? SHARED_RELAY_URL : cfg.relay!,
+      token: cfg.sharedRelay ? sharedPassProvider(() => requestRelayPass(dataDir)) : resolveRelayToken(dataDir),
+      localPort: http.port,
+      log: (m) => logErr(m),
+      onOffline: () => phonePairing.setPublicUrl(),
+      onReady: (publicUrl) => {
+        try { phonePairing.setPublicUrl(publicUrl); } catch { logErr('phone pairing requires an HTTPS relay address'); }
+        if (announced) return logErr('relay link restored');
+        announced = true;
+        printConnector(publicUrl.replace(/\/+$/, ''), 'MCP Browser Extension is reachable from anywhere through your relay.',
+          ['The address stays the same; this computer reconnects to the relay on its own.']);
+      },
+    });
+    return;
+  }
+
+  printConnector(
+    tunnel ? tunnel.url : `http://127.0.0.1:${http.port}`,
+    tunnel ? 'MCP Browser Extension is reachable from anywhere.' : `MCP Browser Extension is serving MCP over HTTP on 127.0.0.1:${http.port}.`,
+    tunnel ? ['The tunnel URL changes every time this starts.'] : [],
+  );
+}
+
+main().catch((err) => {
+  // Port-busy and bad-flag failures carry a plain-English message already
+  // (a flag error starts with the flag); show it without a noisy stack trace.
+  const friendly = err instanceof Error && /^(Couldn't start:|--|unknown argument:)/.test(err.message);
+  logErr(friendly ? err.message : `fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+  process.exit(1);
+});

@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>MCP Browser Extension</title>
+    <link rel="stylesheet" href="brand.css" />
+    <link rel="stylesheet" href="activity-dashboard.css" />
+    <style>
+      * { box-sizing: border-box; }
+      html { width: 360px; min-width: 360px; scrollbar-width: none; }
+      html::-webkit-scrollbar { display: none; }
+      .access-list { scrollbar-color: var(--accent) var(--panel); scrollbar-width: thin; }
+      ::-webkit-scrollbar { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-track { background: var(--panel); border-radius: 8px; }
+      ::-webkit-scrollbar-thumb { background: var(--accent); border: 2px solid var(--panel); border-radius: 8px; }
+      body { margin: 0; width: 360px; font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; background: var(--bg); color: var(--fg); -webkit-font-smoothing: antialiased; }
+
+      /* Header and connection */
+      header { flex: none; display: flex; align-items: center; gap: 12px; padding: 16px; }
+      .logo { flex: none; width: 34px; height: 34px; border-radius: 10px; overflow: hidden; }
+      .logo img { width: 34px; height: 34px; display: block; }
+      .title { flex: 1; min-width: 0; }
+      .title h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+      .title span { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+      .connection-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .pill { display: inline-flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; font-weight: 500; }
+      .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+      .pill.ok .dot { background: var(--ok); }
+      .pill.warn .dot { background: var(--warn); }
+      .pill.bad .dot { background: var(--bad); }
+      #connect { flex: none; min-width: 92px; }
+      #connect.secondary { background: var(--panel); color: var(--fg); border-color: var(--line); }
+      .connect #connect-text { margin: 8px 0 0; }
+      .connect.done #connect-text { display: none; }
+      .connect .error { margin: 8px 0 0; color: var(--warn); }
+
+      /* Let Chrome size and scroll the popup document naturally. */
+      main { padding: 0 12px 12px; display: grid; gap: 12px; }
+      .card { min-width: 0; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+      h2 { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--fg); }
+      .count { font-size: 11px; font-weight: 500; padding: 1px 7px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); color: var(--muted); }
+      .note { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+      .note:empty { display: none; }
+      code { font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 5px; border-radius: 5px; background: var(--panel); border: 1px solid var(--line); color: var(--fg); }
+      ul { list-style: none; margin: 0; padding: 0; }
+      .access-list[data-overflow] { max-height: var(--list-height); overflow-y: auto; overflow-x: hidden; padding-right: 10px; scrollbar-gutter: stable; }
+      .access-list:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      .access-list[data-overflow] button:focus-visible, .access-list[data-overflow] summary:focus-visible { outline-offset: -2px; }
+
+      /* App connections */
+      #client-connections li { display: grid; gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+      #client-connections li:first-child { padding-top: 4px; }
+      #client-connections li:last-child { border-bottom: 0; }
+      .client-info { min-width: 0; display: grid; justify-items: start; gap: 4px; overflow-wrap: anywhere; }
+      .client-info strong { font-size: 13px; font-weight: 600; }
+      .client-info code { display: inline-block; }
+      .client-details { grid-column: 1 / -1; min-width: 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+      .client-details summary { width: fit-content; padding: 2px 0; cursor: pointer; }
+      .client-details summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+      .client-details p { margin: 4px 0; }
+      .client-details code { display: inline-block; margin-top: 4px; }
+      .client-status { color: var(--muted); font-size: 12px; }
+      [data-state="pending"] .client-status { color: var(--warn); }
+      [data-state="approved"] .client-status { color: var(--ok-text); }
+      .client-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+      .client-actions:empty { display: none; }
+      #client-connections li[data-state="approved"] { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+      #client-connections li[data-state="approved"] .client-actions { justify-content: end; }
+      #client-connections li[data-state="approved"] .client-actions button { padding: 6px 8px; font-size: 11px; }
+      #client-count[data-pending="true"] { color: var(--warn); background: var(--warn-soft); }
+      #client-note[data-error="true"] { color: var(--warn); }
+      .access-help { border-top: 1px solid var(--line); padding-top: 8px; color: var(--muted); font-size: 12px; }
+      .access-help summary { cursor: pointer; padding: 4px 0; }
+
+      /* Website and feature access */
+      .row { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 4px 0; border-radius: 8px; transition: background 0.15s; }
+      .row:hover { background: var(--panel); }
+      .row .host { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .mini { flex: none; width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; font-size: 10px; font-weight: 700; color: #fff; text-transform: uppercase; }
+      .tag { color: var(--muted); font-size: 11px; white-space: nowrap; }
+      .blocked { border-color: color-mix(in srgb, var(--warn) 28%, var(--line)); }
+      .blocked .count { color: var(--warn); background: var(--warn-soft); }
+      #extra-permissions-list li { padding: 12px 0; border-bottom: 1px solid var(--line); }
+      #extra-permissions-list li:first-child { padding-top: 0; }
+      #extra-permissions-list li:last-child { padding-bottom: 0; border-bottom: 0; }
+      #extra-permissions-list button { margin-top: 8px; }
+      .site { display: flex; align-items: center; gap: 12px; }
+      .avatar { flex: none; width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; font-weight: 600; font-size: 14px; color: #fff; text-transform: uppercase; }
+      .site-main { flex: 1; min-width: 0; }
+      .site-host { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .chip { display: inline-flex; align-items: center; gap: 4px; margin-top: 4px; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; }
+      .chip.ok { color: var(--ok-text); background: var(--ok-soft); }
+      .chip.warn { color: var(--warn); background: var(--warn-soft); }
+      #site-allow { margin-top: 12px; width: 100%; }
+
+      /* Controls */
+      button { min-height: 32px; font: inherit; font-size: 12px; font-weight: 500; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+      button:hover { border-color: color-mix(in srgb, var(--fg) 25%, var(--line)); }
+      button:active { background: var(--panel); }
+      button.primary { border-color: var(--button-primary-line); color: var(--button-primary-fg); background: var(--button-primary-bg); }
+      button.primary:hover { background: var(--button-primary-hover); }
+      button.ghost { background: transparent; border-color: transparent; color: var(--muted); padding: 6px 8px; }
+      button.ghost:hover { color: var(--fg); background: var(--panel); }
+      button:disabled { cursor: wait; opacity: 0.6; }
+      button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      .switch { display: flex; align-items: center; gap: 12px; min-height: 32px; cursor: pointer; user-select: none; font-size: 12px; }
+      .switch span { flex: 1; }
+      .switch input { appearance: none; flex: none; width: 36px; height: 20px; margin: 0; border-radius: 999px; background: var(--line); position: relative; cursor: pointer; transition: background 0.2s; }
+      .switch input::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3); transition: transform 0.2s; }
+      .switch input:checked { background: var(--accent); }
+      .switch input:checked::after { transform: translateX(16px); }
+      .switch input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+      /* Secondary navigation and update explanation */
+      footer { position: relative; flex: none; display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 12px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); }
+      footer .footer-link { display: inline-flex; align-items: center; gap: 4px; padding: 4px; border-color: transparent; background: transparent; color: var(--muted); font-size: 11px; }
+      footer .footer-link:hover { color: var(--fg); background: var(--panel); }
+      #settings { color: var(--fg); }
+      .update-help { display: inline-flex; }
+      .update-tooltip { position: absolute; z-index: 10; bottom: 100%; left: 12px; right: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--fg); box-shadow: var(--shadow); font-size: 12px; line-height: 1.5; visibility: hidden; }
+      .update-help:not([data-dismissed]):hover .update-tooltip,
+      .update-help:not([data-dismissed]):focus-within .update-tooltip { visibility: visible; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { animation: none !important; transition: none !important; }
+      }
+
+      [hidden] { display: none !important; }
+      .phone-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .phone-heading h2 { margin: 0; }
+      #phone-dialog { width: 336px; max-height: 520px; margin: auto; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--fg); box-shadow: var(--shadow); }
+      #phone-dialog::backdrop { background: rgb(0 0 0 / 55%); }
+      #phone-dialog button { min-height: 44px; }
+      #phone-qr { display: block; width: 264px; height: 264px; max-width: 100%; margin: 16px auto 8px; background: #fff; border-radius: 8px; }
+      #phone-expiry { text-align: center; font-variant-numeric: tabular-nums; }
+      #phone-error { color: var(--warn); }
+      #phone-devices li { border-top: 1px solid var(--line); padding: 12px 0; overflow-wrap: anywhere; }
+      #phone-devices strong { display: block; }
+      .phone-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+      .phone-code { font-size: 20px; font-weight: 600; letter-spacing: 3px; font-variant-numeric: tabular-nums; }
+    </style>
+  </head>
+  <body data-view="popup">
+    <header>
+      <div class="logo"><img src="icon48.png" alt="" /></div>
+      <div class="title">
+        <h1>MCP Browser Extension</h1>
+        <span id="paired-as">Lets your AI agent use this Chrome</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="card connect" id="connect-card" aria-label="Browser connection">
+        <div class="connection-row">
+          <span class="pill" id="state"><span class="dot"></span><span id="state-text">…</span></span>
+          <button class="primary" id="connect">Connect</button>
+        </div>
+        <p class="note" id="connect-text">Connect to your app to start using this browser.</p>
+        <p class="note error" id="connect-msg" role="status" aria-live="polite"></p>
+        <div class="access-controls">
+          <button id="access-stop">Stop access</button>
+          <button id="access-resume" class="primary" hidden>Resume connection</button>
+        </div>
+        <p class="note" id="access-note" role="status"></p>
+      </section>
+
+      <section class="card" id="phone-section" aria-label="Phone access">
+        <div class="phone-heading"><h2>Phone access</h2><button id="phone-open">Pair phone</button></div>
+        <p class="note">Connect your phone by scanning a QR code.</p>
+      </section>
+
+      <section class="card" id="clients-section">
+        <h2>App connections <span class="count" id="client-count"></span></h2>
+        <p class="note" id="client-help" hidden>Approve only an app you opened. Match the key shown in your app.</p>
+        <ul id="client-connections" class="access-list" aria-label="App connections"></ul>
+        <p class="note" id="client-note" role="status" aria-live="polite"></p>
+        <details class="access-help" id="client-limits" hidden>
+          <summary>About app access</summary>
+          <p class="note">Each entry is a separate connection. App names are supplied by the app. Access lasts 8 hours. Removing access stops new actions; an action already running may finish.</p>
+        </details>
+      </section>
+
+      <link rel="stylesheet" href="site-protection.css" />
+      <section class="card" id="site-protection"></section>
+      <section class="card blocked" id="blocked-section" hidden>
+        <h2>Website access <span class="count" id="blocked-count"></span></h2>
+        <p class="note">Allow lets approved apps read and act here, including sending, deleting and buying. Accept Chrome’s prompt if shown.</p>
+        <ul id="blocked" class="access-list" aria-label="Website access"></ul>
+      </section>
+
+      <section class="card" id="allowed-section" hidden>
+        <h2>Allowed sites <span class="count" id="allowed-count"></span></h2>
+        <p class="note">Approved apps can read and act on these sites. Remove stops new actions.</p>
+        <ul id="allowed" class="access-list" aria-label="Allowed sites"></ul>
+        <p class="note" id="allowed-note"></p>
+      </section>
+
+      <section class="card" id="activity-section">
+        <h2>Recent activity</h2>
+        <ul id="activity-list" class="activity-list access-list" aria-label="Recent activity"></ul>
+        <p class="note" id="activity-note" role="status"></p>
+        <div class="activity-actions">
+          <button id="activity-all">Open full history</button>
+          <button id="activity-clear" class="ghost">Clear history</button>
+        </div>
+        <details class="activity-help">
+          <summary>About this history</summary>
+          <p>MCP activity appears automatically. Opening and closing the same tab with the same app share one row. Select a row for the app, key and times.</p>
+          <p>Last 100 requests received by this extension, kept only for this Chrome session. Website names, app keys and results only; no page text or entered values. App names are supplied by the apps.</p>
+          <p>Requests refused by the server may not appear. Interrupted means the result was withheld or unavailable; an action may still have finished.</p>
+        </details>
+      </section>
+
+      <section class="card" id="extra-permissions" hidden>
+        <h2>Extra permissions</h2>
+        <ul id="extra-permissions-list"></ul>
+        <p class="note" id="extra-permissions-note" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="card" id="this-site" hidden>
+        <h2>This site</h2>
+        <div class="site">
+          <div class="avatar" id="site-avatar"></div>
+          <div class="site-main">
+            <div class="site-host" id="site-host"></div>
+            <span class="chip" id="site-state"></span>
+          </div>
+        </div>
+        <p class="note">Allow lets approved apps read and act here, including sending, deleting and buying.</p>
+        <button class="primary" id="site-allow" hidden>Allow the agent on this site</button>
+      </section>
+
+      <section class="card">
+        <label class="switch"><span>Outline the tabs the agent is working in</span><input id="tab-border" type="checkbox" /></label>
+      </section>
+    </main>
+
+    <footer>
+      <span id="version"></span>
+      <span id="update" hidden>
+        <span class="update-help" id="update-help">
+          <button class="footer-link" id="update-store" aria-label="Get automatic updates from Chrome Web Store" aria-describedby="update-text" hidden>Get automatic updates</button>
+          <span class="update-tooltip" id="update-text" role="tooltip"></span>
+        </span>
+      </span>
+      <button class="footer-link" id="settings">Settings <span aria-hidden="true">→</span></button>
+    </footer>
+    <dialog id="phone-dialog" aria-labelledby="phone-title" aria-describedby="phone-description">
+      <div class="phone-heading"><h2 id="phone-title">Pair your phone</h2><button id="phone-close" aria-label="Close phone pairing">Close</button></div>
+      <p class="note" id="phone-description">Scan with the MCP Browser Extension mobile app, then approve the phone here.</p>
+      <p class="note" id="phone-status" role="status" aria-live="polite"></p>
+      <p class="note" id="phone-error" role="alert" hidden></p>
+      <canvas id="phone-qr" role="img" aria-label="Temporary phone pairing QR code" hidden></canvas>
+      <p class="note" id="phone-expiry" hidden></p>
+      <div class="phone-actions"><button class="primary" id="phone-generate">Generate QR code</button><button id="phone-cancel" hidden>Cancel pairing</button></div>
+      <ul id="phone-devices" aria-label="Paired phones and pairing requests"></ul>
+      <p class="note">Phones can use only websites you allow in this browser. Access lasts 30 days. Keep your computer awake and Chrome open.</p>
+    </dialog>
+    <script src="popup.js"></script>
+  </body>
+</html>

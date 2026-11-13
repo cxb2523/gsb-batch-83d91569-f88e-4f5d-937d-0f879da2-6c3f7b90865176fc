@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>MCP Browser Extension — Settings</title>
+    <link rel="stylesheet" href="brand.css" />
+    <link rel="stylesheet" href="activity-dashboard.css" />
+    <style>
+      html { background: var(--bg); }
+      body { font: 14px/1.5 system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; padding: 0 1rem; color: var(--fg); background: var(--bg); }
+      a { color: var(--accent); }
+      h1 { font-size: 1.2rem; }
+      label { display: block; margin: 0.75rem 0 0.25rem; font-weight: 600; }
+      input, select { color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 0.4rem; }
+      input { width: 100%; padding: 0.5rem; box-sizing: border-box; font: inherit; }
+      button { margin-top: 1rem; padding: 0.5rem 1rem; font: inherit; cursor: pointer; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 0.5rem; }
+      button:hover { background: var(--panel); }
+      :is(input, select, button):focus-visible { outline: 2px solid var(--site-ring); outline-offset: 2px; }
+      .status { margin-top: 1rem; padding: 0.5rem 0.75rem; border-radius: 0.4rem; background: color-mix(in oklch, var(--site-primary) 7%, var(--card)); border: 1px solid color-mix(in oklch, var(--site-primary) 25%, var(--card)); }
+      code { background: var(--panel); padding: 0 0.25rem; border-radius: 0.25rem; }
+      .hint { color: var(--muted); font-size: 0.9rem; }
+      label.check { display: flex; gap: 0.5rem; align-items: center; font-weight: 600; margin-top: 1rem; }
+      label.check input { width: auto; }
+      h2 { font-size: 1.05rem; margin-top: 2rem; }
+      ul.sites { list-style: none; padding: 0; margin: 0.5rem 0; }
+      ul.sites li { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0; border-bottom: 1px solid var(--line); }
+      ul.sites li span { flex: 1; overflow-wrap: anywhere; }
+      ul.sites li button { margin: 0; padding: 0.25rem 0.75rem; }
+      ul.sites li .tag { flex: none; color: var(--muted); font-size: 0.85rem; }
+      .blocked li { background: var(--warn-soft); padding-left: 0.5rem; }
+      .row { display: flex; gap: 0.5rem; }
+      .row button { margin-top: 0; }
+      .quick { margin: 1rem 0 1.25rem; padding: 1rem; border-radius: 0.6rem; background: color-mix(in oklch, var(--site-primary) 7%, var(--card)); border: 1px solid color-mix(in oklch, var(--site-primary) 25%, var(--card)); }
+      .quick button.primary { margin-top: 0; width: 100%; padding: 0.7rem; font-weight: 600; color: var(--button-primary-fg); border: 1px solid var(--button-primary-line); border-radius: 0.5rem; background: var(--button-primary-bg); transition: background-color 150ms, box-shadow 150ms; }
+      .quick button.primary:hover { background: var(--button-primary-hover); }
+      .quick button.primary:focus-visible { outline: 2px solid var(--site-ring); outline-offset: 2px; }
+      #save { color: var(--button-primary-fg); background: var(--button-primary-bg); border: 1px solid var(--button-primary-line); border-radius: 0.5rem; }
+      #save:hover { background: var(--button-primary-hover); }
+      #save:focus-visible { outline: 2px solid var(--site-ring); outline-offset: 2px; }
+      .quick .hint { margin: 0.5rem 0 0; }
+      .quick .hint.error { color: var(--warn); }
+      select { width: 100%; padding: 0.5rem; font: inherit; }
+      .grid { display: grid; grid-template-columns: 1fr 7rem; gap: 0 0.5rem; }
+      #client-connections li { align-items: start; flex-wrap: wrap; gap: 0.75rem; }
+      #client-connections code { font-size: 0.8rem; }
+      #client-connections button { margin: 0.25rem 0.25rem 0 0; }
+      .client-info { flex: 1; min-width: 0; display: grid; justify-items: start; gap: 4px; overflow-wrap: anywhere; }
+      .client-status { font-size: 0.9rem; }
+      .client-details { flex-basis: 100%; min-width: 0; color: var(--muted); font-size: 0.85rem; overflow-wrap: anywhere; }
+      .client-details summary { width: fit-content; padding: 2px 0; cursor: pointer; }
+      .client-details summary:focus-visible { outline: 2px solid var(--site-ring); outline-offset: 3px; border-radius: 2px; }
+      .client-details p { margin: 4px 0; }
+      .client-details code { display: inline-block; margin-top: 4px; }
+      #extra-permissions-list li { display: block; padding: 0.75rem 0; }
+      #extra-permissions-list p { margin: 0.35rem 0; }
+      #extra-permissions-list button { margin-top: 0.25rem; }
+      .proxy-on { background: var(--ok-soft); }
+      .proxy-err { background: var(--warn-soft); }
+    </style>
+  </head>
+  <body>
+    <h1>MCP Browser Extension</h1>
+    <p class="hint">Pair this browser with the MCP Browser Extension server your AI client runs.</p>
+    <div class="quick" id="quick">
+      <button id="connect" class="primary">Connect</button>
+      <p class="hint" id="connect-msg">One click fetches the port and token from the server. Chrome asks once for permission.</p>
+      <div class="access-controls">
+        <button id="access-stop">Stop access</button>
+        <button id="access-resume" hidden>Resume connection</button>
+      </div>
+      <p class="hint" id="access-note" role="status"></p>
+    </div>
+    <section id="clients-section">
+      <h2>App connections</h2>
+      <p class="hint">Only approve a connection you just started. App names are supplied by the app:
+        compare the key below with the key shown in your app's tool result.</p>
+      <p class="hint">Each entry is a separate connection. Approval lasts eight hours in this Chrome profile. A new app session needs a new approval.
+        Revoking access blocks further commands; an action already running may finish.</p>
+      <ul class="sites" id="client-connections"></ul>
+      <p class="hint" id="client-note" role="status" aria-live="polite"></p>
+    </section>
+
+    <link rel="stylesheet" href="site-protection.css" />
+    <section id="site-protection"></section>
+    <section id="blocked-wrap" hidden>
+      <h2>Website access</h2>
+      <p class="hint">Allow lets approved apps read and act here, including sending, deleting and buying. Accept Chrome’s prompt if shown.</p>
+      <ul class="sites blocked" id="blocked"></ul>
+    </section>
+
+    <section id="sites-section">
+      <h2>Allowed sites</h2>
+      <p class="hint">
+        MCP Browser Extension only reads or acts on sites you allow. Allowing one here applies at once to every
+        approved app session, with no restart, and is remembered. Click Allow, then accept Chrome’s
+        website permission request if shown. Remove also removes Chrome’s website permission.
+      </p>
+      <p class="hint">Allowing a site lets approved apps read and take actions there, including sending, deleting and buying, without a separate approval for each action. Remove access whenever you want to stop new actions.</p>
+      <ul class="sites" id="allowed"></ul>
+      <p class="hint" id="sites-note"></p>
+      <label for="new-site">Allow a site</label>
+      <div class="row">
+        <input id="new-site" type="text" placeholder="example.com or *.example.com" />
+        <button id="add-site">Allow</button>
+      </div>
+    </section>
+
+    <section id="activity-section">
+      <h2>Recent activity</h2>
+      <label for="activity-filter">Show requests</label>
+      <select id="activity-filter">
+        <option value="all">All results</option>
+        <option value="running">Running</option>
+        <option value="done">Done</option>
+        <option value="blocked">Blocked</option>
+        <option value="failed">Failed</option>
+        <option value="interrupted">Interrupted</option>
+      </select>
+      <ul id="activity-list" class="activity-list" aria-label="Recent activity" tabindex="0"></ul>
+      <p class="hint" id="activity-note" role="status"></p>
+      <div class="activity-actions"><button id="activity-clear">Clear history</button></div>
+      <details class="activity-help">
+        <summary>About this history</summary>
+          <p>MCP activity appears automatically. Opening and closing the same tab with the same app share one row. Select a row for the app, key and times.</p>
+        <p>Last 100 requests received by this extension, kept only for this Chrome session. Website names, app keys and results only; no page text or entered values. App names are supplied by the apps.</p>
+        <p>Requests refused by the server may not appear. Interrupted means the result was withheld or unavailable; an action may still have finished. This is a convenience history, not a complete audit record.</p>
+      </details>
+    </section>
+
+    <section id="extra-permissions" hidden>
+      <h2>Extra permissions</h2>
+      <ul class="sites" id="extra-permissions-list"></ul>
+      <p class="hint" id="extra-permissions-note" role="status" aria-live="polite"></p>
+    </section>
+
+    <section id="appearance-section">
+      <h2>Appearance</h2>
+      <label class="check"><input id="tab-border" type="checkbox" checked /> Outline the tabs the agent is working in</label>
+      <p class="hint">
+        A border in the page's theme colour (blue when the site has none) marks every tab the
+        agent is driving. It never shows in screenshots or PDFs, and is removed when the server disconnects.
+      </p>
+    </section>
+
+    <section id="connection-settings">
+      <h2>Manual connection</h2>
+      <p class="hint" id="manual-intro">Use these fields to pair by hand:</p>
+      <p class="hint" id="source">Checking pairing source…</p>
+      <p class="hint">
+        Manual pairing: run <code>npx -y mcp-browser-extension@latest --print-pairing</code>,
+        open the printed <code>handshake.json</code>, and paste its <code>port</code>
+        and <code>token</code> below.
+      </p>
+      <label for="port">Port</label>
+      <input id="port" type="number" inputmode="numeric" placeholder="38017" />
+      <label for="token">Token</label>
+      <input id="token" type="password" placeholder="leave blank to keep the current token" />
+      <label for="profile">Profile</label>
+      <input id="profile" type="text" placeholder="automatic" />
+      <p class="hint">
+        Optional. Leave blank and the server names this browser for you — the first is
+        <code>default</code>, then <code>profile-2</code>, <code>profile-3</code>… — and
+        remembers it. Rename one with <code>profile_rename</code>, switch with
+        <code>profile_use</code>. Type a name here only to pin one yourself.
+      </p>
+      <p class="hint" id="paired-as"></p>
+      <button id="save">Save & connect</button>
+      <div class="status" id="status">Status: unknown</div>
+    </section>
+
+    <section id="proxy-section">
+      <h2>Proxy</h2>
+      <p class="hint">
+        Send this Chrome profile's traffic through a proxy, so the sites the agent opens see the proxy's IP.
+        Chrome applies a proxy to the whole profile, never one tab, so set it in a Chrome profile you keep for
+        agent work (one profile per IP), not the one you browse in. If the proxy goes down, pages fail to load
+        rather than fall back to your real IP. The agent can check the proxy with <code>proxy_status</code> but
+        cannot change it or see the password.
+      </p>
+      <label class="check"><input id="proxy-enabled" type="checkbox" /> Use a proxy in this Chrome profile</label>
+      <label for="proxy-scheme">Type</label>
+      <select id="proxy-scheme">
+        <option value="http">HTTP</option>
+        <option value="https">HTTPS</option>
+        <option value="socks5">SOCKS5</option>
+        <option value="socks4">SOCKS4</option>
+      </select>
+      <div class="grid">
+        <label for="proxy-host">Host</label>
+        <label for="proxy-port">Port</label>
+        <input id="proxy-host" type="text" placeholder="proxy.example.com or host:port:user:pass" />
+        <input id="proxy-port" type="number" inputmode="numeric" placeholder="8080" />
+      </div>
+      <label for="proxy-user">Username</label>
+      <input id="proxy-user" type="text" autocomplete="off" placeholder="optional" />
+      <label for="proxy-pass">Password</label>
+      <input id="proxy-pass" type="password" autocomplete="new-password" placeholder="leave blank to keep the current password" />
+      <p class="hint">Chrome cannot log in to a SOCKS proxy, so use HTTP or HTTPS when your proxy needs a username.</p>
+      <label class="check"><input id="proxy-webrtc" type="checkbox" /> Stop WebRTC from revealing the real IP</label>
+      <p class="hint">Video-call features can reach the internet around the proxy. Chrome asks once to let this extension change that privacy setting.</p>
+      <div class="row">
+        <button id="proxy-save">Save proxy</button>
+        <button id="proxy-check">Check IP</button>
+      </div>
+      <div class="status" id="proxy-status">Proxy: off</div>
+    </section>
+    <script src="options.js"></script>
+  </body>
+</html>

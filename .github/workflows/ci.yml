@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        node-version: [20, 24]
+        # Windows guards against POSIX-only assumptions (the 0600 mode check in
+        # bridge/auth.ts, `ps`, .cmd bin shims) regressing for native-Windows
+        # users. Not Node 20: it cannot expand the test script's
+        # dist/test/*.test.js on Windows, and finds no tests.
+        include:
+          - os: windows-latest
+            node-version: 22
+          - os: windows-latest
+            node-version: 24
+    name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck (server)
+        run: npm run typecheck
+
+      - name: Typecheck (extension)
+        run: npm run typecheck:ext
+
+      - name: Build (server)
+        run: npm run build
+
+      - name: Build (extension)
+        run: npm run build:ext
+
+      - name: Test
+        # The extension smoke test self-skips unless RUN_EXT_SMOKE is set (it
+        # needs a headed Chrome), so the default suite runs browser-free in CI.
+        run: npm test
+
+  e2e:
+    # The real extension in Playwright's headless Chromium, against fixture
+    # pages served by the test itself: no secrets, no network, no real profile.
+    # Pinned: ubuntu-latest moved to 26.04, which Playwright cannot install
+    # Chromium on yet.
+    runs-on: ubuntu-24.04
+    name: Browser E2E / Node 24
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser E2E
+        run: npm run test:e2e

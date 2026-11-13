@@ -1,0 +1,279 @@
+# MCP Browser Extension — agent setup instructions
+
+**You are an AI agent. Follow these steps to set up MCP Browser Extension end-to-end on this
+machine and prove it works.** MCP Browser Extension lets an MCP client drive the human's
+real Chrome browser: real logins, real cookies, no separate Chromium. It has two
+halves that must be paired: a stdio MCP server (npm package
+`mcp-browser-extension`) and a Manifest V3 extension that ships inside the
+same package. Work autonomously; pause only for the two actions that must happen
+inside Chrome's own UI (loading the extension, pasting the pairing token).
+
+## Ground rules
+
+- Verify each step's result before moving on. If a command fails, diagnose and
+  fix it. Do not proceed on a broken step.
+- The server is **deny-all by default**: no domains, no clicks, no eval, no
+  downloads, no uploads. Ask the human which domains they want to automate and
+  grant only those with `--allow-domain`, or let the person allow them from the
+  Chrome extension popup. All-site access is not supported. Remove
+  `--unsafe-all-domains` from older configurations; never replace it with a
+  catch-all pattern. Only enable `--unsafe-enable-eval` if the human asks by name.
+- Never print or log the pairing token. It lives in a 0600 file; show the human
+  its path, not its contents.
+- Requires Node 20 or newer (`node --version`) and Chrome 116 or newer.
+- On Windows, MCP hosts must launch the server through `cmd /c npx ...`. See
+  step 3.
+
+## Step 1 — Confirm the environment
+
+Run and record the output:
+
+```
+node --version
+npm --version
+```
+
+If Node is below 18, stop and tell the human to upgrade before anything else.
+
+## Step 2 — Install the extension folder
+
+No global install is needed. This one command fetches the package, copies the
+extension to a plain folder directly under the home directory, and prints its
+path:
+
+```
+npx -y mcp-browser-extension@latest --extension-path
+```
+
+It prints `~/mcp-browser-extension` (on Windows `%USERPROFILE%\mcp-browser-extension`).
+Verify with `ls` (or `dir`) that the folder holds `manifest.json` and
+`background.js`. Record the path; the human needs it in step 4. The install is
+small and downloads no browser: the server drives the Chrome the human already
+has. The server refreshes this folder on every boot and the loaded extension
+reloads itself when the version changes, so upgrades need nothing from the
+human.
+
+## Step 3 — Wire the server into this MCP client
+
+Ask the human which domains they want to automate. Build the argument list from
+their answer: one `--allow-domain <glob>` per domain, plus `--enable-mutations`
+if they want the agent to click, type, and navigate (almost always yes). Add
+`--persist-token` so the pairing survives restarts. Leave every other gate off
+unless they ask.
+
+Email verification stays enabled by default. Only if the human asks for a
+trusted local or unattended setup, add `--no-email-verification`. It skips the
+email prompt and Firebase access check, while the domain allowlist and other
+capability gates still apply. Do not combine it with `--tunnel` or use it when
+untrusted clients can reach the local server.
+
+**Claude Code** (registers for every project on this machine):
+
+```
+claude mcp add mcp-browser-extension -s user -- \
+  npx -y mcp-browser-extension@latest \
+  --allow-domain example.com --enable-mutations --persist-token
+```
+
+Everything before `--` belongs to Claude Code. Everything after it is the
+server's own command line. Keep the `--` or `--allow-domain` gets read as a
+Claude Code option. Verify with `claude mcp list`: mcp-browser-extension should be listed.
+It will show as connected once the server boots, even before the extension has
+paired.
+
+**Claude Desktop, Cursor, Windsurf, VS Code, and other JSON-configured hosts:**
+add this to the host's MCP config file (the exact path differs per client; VS
+Code uses a top-level `servers` key instead of `mcpServers`).
+
+```json
+{
+  "mcpServers": {
+    "mcp-browser-extension": {
+      "command": "npx",
+      "args": ["-y", "mcp-browser-extension@latest",
+               "--allow-domain", "example.com",
+               "--enable-mutations",
+               "--persist-token"]
+    }
+  }
+}
+```
+
+**Windows:** the command must be `cmd` with args `["/c", "npx", "-y",
+"mcp-browser-extension@latest", ...]`, or for Claude Code:
+`claude mcp add mcp-browser-extension -s user -- cmd /c npx -y mcp-browser-extension@latest --allow-domain example.com --enable-mutations --persist-token`.
+
+Tell the human to restart the client (or run `/mcp` in Claude Code) so the
+server loads. The first boot writes `~/.mcp-browser-extension/handshake.json` (mode 0600)
+holding the bridge port and the pairing token, and with `--persist-token` it
+also stores the token at `~/.mcp-browser-extension/token` for reuse.
+
+## Step 4 — Load the extension (human action inside Chrome)
+
+You cannot do this step yourself. Give the human these exact instructions:
+
+1. Open `chrome://extensions` in Chrome.
+2. Turn on **Developer mode** (top right).
+3. Click **Load unpacked** and choose the `mcp-browser-extension` folder in
+   their home directory (the path from step 2).
+4. Confirm an extension named **MCP Browser Extension** now appears in the list.
+
+Wait for the human to confirm before continuing.
+
+If the human would rather not enable Developer mode, they can install
+[MCP Browser Extension](https://chromewebstore.google.com/detail/mcp-browser-extension/jelfhdlkhbfmlpbghoeaepijllcnplgh)
+from the Chrome Web Store instead and skip steps 1–3. Prefer the unpacked
+folder when following this guide: it matches the package just installed, while
+the Web Store build passes review separately and can trail it by a version.
+
+## Step 5 — Verify email and pair Chrome
+
+The first browser tool call opens an email prompt in the MCP client. Ask the
+human to enter an email address. The website sends a Firebase sign-in link;
+the human opens it in their browser, clicks **Verify this device**, and returns
+to the MCP client. Do not ask
+them to copy or paste a verification code. The server detects the verified
+link automatically and reports the result to the waiting tool call. On success,
+the result includes **Email verified** and the requested browser action continues.
+The user does not need to send another chat message. Progress updates and status
+notifications are also sent to clients that display them.
+
+If the client suppresses or cannot display the prompt, or it is dismissed,
+the server automatically opens a temporary local browser form and returns
+`ACCESS_INPUT_REQUIRED` with its link. Show the link as a backup if the form
+did not appear on the computer running the server.
+Do not open that link again or ask for the email in chat while the browser form
+is active. An accepted chat email prompt does not open a browser input form;
+repeated tool calls reuse the active prompt or pending verification.
+The human enters their email, opens the sign-in link from their inbox, and clicks
+**Verify this device**. Do not fill
+the form or open their email for them. The form expires after 10 minutes.
+After they submit it, call `chrome_status` to wait for verification.
+YOLO/bypass permission mode does not skip email verification.
+
+Website access also needs Chrome permission. Relay the tool's one-line Allow
+instructions; the person clicks Allow in the popup and accepts Chrome's native
+prompt if shown. A server allow-domain flag does not supply this permission.
+For a blocked optional feature, relay the Extra permissions instructions. Never
+request or grant these permissions through browser automation.
+
+If the human explicitly configured `--no-email-verification`, there is no email
+step; continue to pairing and Chrome client approval. This option is intended only for trusted local
+clients and cannot be combined with a public tunnel.
+
+Each verification wait lasts up to 45 seconds. If the result says
+`ACCESS_PENDING`, call `chrome_status` again to continue waiting on the same
+link. Expired or denied verification returns a clear failure; browser actions
+remain blocked until access is confirmed. Cancellation stops the waiting action,
+while background verification can still activate the local installation.
+
+Click **Connect** in the extension if the result says Chrome is not already
+paired.
+
+The server also writes a `pairing.json` file for Load unpacked installs, which
+may connect automatically. For the Chrome Web Store copy, or whenever Chrome
+is still unpaired, the human clicks **Connect** in the extension popup after
+email verification. If Chrome reports no paired browser, follow that step and
+retry the tool.
+
+When the tool asks for Chrome approval, relay its friendly one-line steps with
+the app name and key fingerprint. They click the extension's toolbar icon, review **App
+connections**, compare the key, then click **Approve for 8 hours**. The same
+controls are in Settings. Never click
+Approve for them or attempt to change the extension's approval storage. Retry
+the tool after they approve. YOLO, bypass-permission mode and
+`--no-email-verification` do not disable this check.
+
+Approval belongs to one app session and one Chrome profile. A restarted MCP
+connection creates a new key; expired access requires approval again. The person
+can revoke one key from the popup or Settings without revoking the others. Update both the
+server and extension; old versions cannot silently bypass this gate.
+
+## Step 6 — Check the pairing
+
+Pairing needs no paste. Every time the server boots it writes `pairing.json`
+(mode 0600) into the same `mcp-browser-extension` folder the human loaded in step 4.
+The extension reads that file from its own folder and pairs itself. So make
+sure a server has booted at least once since step 2, in either of these ways:
+
+- the client started one in step 3 (a restart or `/mcp` reconnect is enough), or
+- start one yourself in pairing mode and leave it running in the background:
+
+  ```
+  npx -y mcp-browser-extension@latest --print-pairing --persist-token
+  ```
+
+Verify the file exists (do not print it):
+
+```
+ls "$(npx -y mcp-browser-extension@latest --extension-path)/pairing.json"
+```
+
+Then tell the human where to look. The status badge is on the extension's
+icon in Chrome's toolbar, not on the `chrome://extensions` page. Chrome hides
+new extensions behind the puzzle-piece button at the right of the address bar,
+so give them these exact steps:
+
+1. Click the puzzle-piece button at the right of the address bar.
+2. Find **MCP Browser Extension** in the list and click the pin icon next to it.
+   The extension icon now stays in the toolbar.
+3. Look at the small badge on that icon. Hovering it shows the status in words.
+
+Badge meanings: a green dot means paired and connected. Yellow dots mean
+connecting. A grey circle means not paired yet, usually because no server has
+run since the extension was loaded. A red exclamation mark means the token was
+rejected, which the extension fixes by itself within a few seconds by re-reading
+the pairing file.
+
+A green dot can take up to 30 seconds if the extension was loaded before the
+server first ran. Wait for the human to confirm the green dot.
+
+**Manual fallback**, only if the badge stays grey after a minute (a copied
+extension folder or a read-only global install): read the port without
+printing the token,
+
+```
+node -e "console.log(require(require('os').homedir()+'/.mcp-browser-extension/handshake.json').port)"
+```
+
+then have the human open **Details** on MCP Browser Extension, then **Extension
+options**, enter that **Port**, open `~/.mcp-browser-extension/handshake.json` in a text
+editor and paste its `token` into the **Token** field, leave **Profile** as
+`default`, and click **Save**. The status line should read **connected** within
+a few seconds. Values saved by hand take precedence over the bundled file.
+
+If you started a pairing-mode server in this step, stop it now with Ctrl-C. The
+client's own server takes the port over on its next boot, and with
+`--persist-token` the extension reconnects to it with no further pairing.
+
+## Step 7 — Prove the chain end-to-end
+
+From the restarted client session, call the MCP tools in this order and check
+each result:
+
+1. `chrome_status` — reports the backend as the extension and the session as
+   connected.
+2. `tabs_list` — returns at least one tab from the human's real Chrome.
+3. `navigate` to a URL on one of the allowlisted domains, then `snapshot` —
+   returns interactive elements with `ref` ids.
+4. `navigate` to a domain that is **not** allowlisted — must be refused with a
+   policy error. This confirms deny-all is working, which matters more than the
+   happy path.
+
+If `chrome_status` shows the extension disconnected, the pairing in step 5 did
+not stick. Re-check the port and token before anything else.
+
+## Step 8 — Report
+
+Summarize for the human:
+
+- Node and package versions installed.
+- The absolute `mcp-browser-extension` path they loaded.
+- Which MCP client was configured, at which scope, with which domains and gates.
+- Whether the badge went green, and whether `tabs_list`, an allowed
+  navigation, and a refused navigation each verified.
+- Anything still open on their side, such as restarting the client.
+
+For any failure, name the exact symptom, what you tried, and the matching
+section of the README's troubleshooting notes at
+`https://github.com/Mehmoodqureshi/mcp-browser-extension#readme`.

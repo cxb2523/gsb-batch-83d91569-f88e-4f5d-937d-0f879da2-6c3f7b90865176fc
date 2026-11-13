@@ -1,0 +1,120 @@
+/**
+ * src/security/policy.ts — the default-deny domain policy and capability gate.
+ *
+ * This is the real exfiltration firewall. Because this tool feeds untrusted page
+ * text to an LLM that can call `eval`, prompt-injection-to-exfil is a PRIMARY
+ * threat, so the policy:
+ *   - is ON by default with a SAFE default (empty allowlist, no eval, no
+ *     downloads, mutations disabled),
+ *   - gates READS as well as writes (reads are the exfil payload),
+ *   - is enforced at BOTH ends. The decision lives in `shared/policy.ts`
+ *     (`evaluatePolicy`); the server wraps it here (`assertUrlAllowed`) and the
+ *     extension router runs the SAME function against the policy delivered in the
+ *     `welcome` frame. Because both ends call one shared function, they cannot
+ *     drift, and a client that bypasses the server still hits the extension gate.
+ *     (The bridge token remains the PRIMARY trust boundary for the WebSocket;
+ *     the extension gate is defense-in-depth on top of it.)
+ *
+ * `assertUrlAllowed(url, method, policy)` is the single chokepoint. It throws an
+ * `ExecutorError('POLICY_DENIED', …)` which the never-throw dispatch firewall
+ * renders as a structured MCP error.
+ */
+
+import type { WireMethod, WirePolicy } from '../../shared/protocol';
+import { ExecutorError } from '../executor/types';
+import {
+  evaluatePolicy,
+  isReadMethod,
+  isMutatingMethod,
+  isUrlGated,
+  hostOf,
+  isDomainAllowed,
+  normalizeDomainPattern,
+} from '../../shared/policy';
+
+// Re-exported so existing server-side importers keep their entry point.
+export { isReadMethod, isMutatingMethod, isUrlGated, hostOf, isDomainAllowed };
+
+// ---------------------------------------------------------------------------
+// Policy shape + defaults
+// ---------------------------------------------------------------------------
+
+/** The full server-side policy: the wire-serializable {@link WirePolicy} plus the
+ *  server-only `uploadsDir` (a local path, never sent to the extension). */
+export interface Policy extends WirePolicy {
+  /** If set, `upload_file` may only read files inside this directory (absolute path). */
+  uploadsDir?: string;
+  /** Pattern-based secret redaction on content reads (`--redact`). Password
+   *  field values are suppressed regardless of this setting. */
+  redact?: boolean;
+  /** Extra redaction patterns (regex sources) supplied by the operator. */
+  redactPatterns?: string[];
+  /** `--fail-on-auth-wall`: every navigating tool and action fails with
+   *  `AUTH_REQUIRED` when the page it lands on is a high-confidence sign-in
+   *  wall, so an expired session is never scored as some other failure. */
+  failOnAuthWall?: boolean;
+  /** `--enable-cookie-values`: `get_cookies` returns each cookie's value. Off by
+   *  default, because a session cookie is the login itself: whoever holds it can
+   *  use the account from anywhere, with no password and no browser. */
+  allowCookieValues?: boolean;
+}
+
+/** The SAFE default: deny everything until the user opts in. */
+export const DEFAULT_POLICY: Readonly<Policy> = Object.freeze({
+  allowDomains: [],
+  allowEval: false,
+  allowDownloads: false,
+  allowUploads: false,
+  uploadsDir: undefined,
+  allowAllTabs: false,
+  enableMutations: false,
+  allowObservers: false,
+  redact: false,
+  redactPatterns: [],
+  failOnAuthWall: false,
+  allowCookieValues: false,
+});
+
+/** Merge a partial (from a policy file and/or CLI flags) over the safe default. */
+export function resolvePolicy(partial?: Partial<Policy>): Policy {
+  return {
+    allowDomains: (partial?.allowDomains ?? DEFAULT_POLICY.allowDomains).map(normalizeDomainPattern).filter(Boolean),
+    allowEval: partial?.allowEval ?? DEFAULT_POLICY.allowEval,
+    allowDownloads: partial?.allowDownloads ?? DEFAULT_POLICY.allowDownloads,
+    allowUploads: partial?.allowUploads ?? DEFAULT_POLICY.allowUploads,
+    uploadsDir: partial?.uploadsDir ?? DEFAULT_POLICY.uploadsDir,
+    allowAllTabs: partial?.allowAllTabs ?? DEFAULT_POLICY.allowAllTabs,
+    enableMutations: partial?.enableMutations ?? DEFAULT_POLICY.enableMutations,
+    allowObservers: partial?.allowObservers ?? DEFAULT_POLICY.allowObservers,
+    redact: partial?.redact ?? DEFAULT_POLICY.redact,
+    redactPatterns: partial?.redactPatterns ?? [...(DEFAULT_POLICY.redactPatterns ?? [])],
+    failOnAuthWall: partial?.failOnAuthWall ?? DEFAULT_POLICY.failOnAuthWall,
+    allowCookieValues: partial?.allowCookieValues ?? DEFAULT_POLICY.allowCookieValues,
+  };
+}
+
+/**
+ * The wire-serializable subset delivered to the extension in `welcome`, so it
+ * mirrors the server gate. `uploadsDir` (a local path) stays server-side.
+ * `allowDomains` is passed BY REFERENCE: sites allowed from the extension's
+ * Options are spliced into this same array, which the tool gate reads too.
+ */
+export function toWirePolicy(policy: Policy): WirePolicy {
+  const { allowDomains, allowEval, allowDownloads, allowUploads, allowAllTabs, enableMutations, allowObservers } = policy;
+  return { allowDomains, allowEval, allowDownloads, allowUploads, allowAllTabs, enableMutations, allowObservers };
+}
+
+// ---------------------------------------------------------------------------
+// The gate
+// ---------------------------------------------------------------------------
+
+/**
+ * Throw `POLICY_DENIED` unless `method` against `url` is permitted by `policy`.
+ * `url` is the DESTINATION for navigation, otherwise the current tab URL.
+ * Thin server-side wrapper over the shared, pure `evaluatePolicy` — the SAME
+ * function the extension router runs, so the two ends cannot drift.
+ */
+export function assertUrlAllowed(url: string, method: WireMethod, policy: Policy): void {
+  const verdict = evaluatePolicy(url, method, policy);
+  if (!verdict.ok) throw new ExecutorError('POLICY_DENIED', verdict.reason);
+}
