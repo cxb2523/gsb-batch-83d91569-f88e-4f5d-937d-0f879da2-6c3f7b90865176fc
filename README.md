@@ -23,7 +23,13 @@ and guests you give it.
 
 41 columns in all, the same in JSON and CSV. A `<out>.meta.json` beside the
 output records the query, the currency, and whether the site said the
-listing had ended.
+listing had ended. A `<out>.pages.json` records every page the run
+attempted — its final state, whether it counted as a success, a refusal's
+name (`akamai`, `akamai-reset`) or the API's error code where one applies,
+and the run's stop reason next to the exit code — so a run that "found
+nothing" says whether it was refused, genuinely empty, or a page the
+parser lost. It is written on every run, including one that wrote no
+output.
 
 Flights are a separate product on the site, and **this repo does not
 implement flights**: their results arrive as a server-sent event stream,

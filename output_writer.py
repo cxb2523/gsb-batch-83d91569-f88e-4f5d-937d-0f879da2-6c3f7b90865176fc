@@ -359,6 +359,40 @@ def write_run_meta(out_prefix: str, meta: dict) -> str:
     return path
 
 
+def write_page_log(out_prefix: str, records: List[dict], stop_reason: str,
+                   exit_code: int) -> str:
+    """Write the per-page fetch record beside the output, return its path.
+
+    `<out>.pages.json`: one record per page the run attempted, each saying
+    what the page's final state was, whether it counted as a success, and
+    the run's stop reason — so a run that "found nothing" can be told apart
+    as a refused exit, a genuinely empty listing, or a parser that lost a
+    served page, without re-running anything.
+
+    Unlike the sidecar this is written on EVERY run that reached the page
+    loop, including one that gathered nothing and wrote no output: "no
+    data" is exactly the case this file exists to explain. It holds no
+    product data, so it cannot be mistaken for the previous run's output
+    the way a "status": "failed" sidecar beside intact rows would be (see
+    finish_run), and a consumer keys on `exit_code`/`stop_reason` here only
+    when no `<out>.json` exists.
+
+    `exit_code` is recorded so the stop reason and the code the process
+    actually returned can be checked against each other from the file
+    alone.
+    """
+    path = f"{out_prefix}.pages.json"
+    payload = {"stop_reason": stop_reason,
+               "exit_code": exit_code,
+               "finished_at": datetime.now(timezone.utc).isoformat(),
+               "pages": records}
+    with _atomic(path) as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    print(f"[+] Wrote the per-page record -> {path} "
+          f"(stop_reason={stop_reason}, exit={exit_code})")
+    return path
+
+
 def run_meta(status: str, stop_reason: str, pages_requested: int,
              pages_completed: int, start_url: str, final_url: str,
              products: int, pages_failed: Optional[List[int]] = None,

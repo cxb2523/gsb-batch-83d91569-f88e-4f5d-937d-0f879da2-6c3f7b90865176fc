@@ -608,12 +608,15 @@ def _run(answers, pages=3, query=None, **extra):
         meta = json.load(open(meta_path)) if os.path.exists(meta_path) else None
         rows = (json.load(open(args.out + ".json"))
                 if os.path.exists(args.out + ".json") else None)
-    return rc, meta, rows, ops
+        plog_path = args.out + ".pages.json"
+        plog = (json.load(open(plog_path))
+                if os.path.exists(plog_path) else None)
+    return rc, meta, rows, ops, plog
 
 
 def check_the_shared_loop_end_to_end():
     ok = {1: [(200, fx("search_goa_p1"))], 2: [(200, fx("search_goa_p2"))]}
-    rc, meta, rows, ops = _run(ok, pages=2)
+    rc, meta, rows, ops, plog = _run(ok, pages=2)
     equal("two served pages: exit 0", rc, 0)
     equal("...complete, stopped because the plan was done",
           (meta["status"], meta["stop_reason"]), ("complete", "completed"))
@@ -627,7 +630,7 @@ def check_the_shared_loop_end_to_end():
     equal("the sidecar records the query", meta["query"]["city_code"], "CTGOI")
     equal("...and the currency the site stated", meta["currency"], "INR")
 
-    rc, meta, rows, ops = _run({1: [(200, fx("search_goa_p1"))],
+    rc, meta, rows, ops, plog = _run({1: [(200, fx("search_goa_p1"))],
                                 2: [(200, fx("search_lehra_nearby"))]}, pages=5)
     equal("the site saying 'no more' ends the run: exit 0", rc, 0)
     equal("...as complete, on the DATA", (meta["status"], meta["stop_reason"]),
@@ -635,58 +638,58 @@ def check_the_shared_loop_end_to_end():
     equal("...pages 3-5 never fetched", ops.fetches, [1, 2])
     equal("...and the substitutes are counted in the sidecar", meta["substitute_rows"], 3)
 
-    rc, meta, rows, ops = _run({1: [(200, fx("search_bad_sort"))]})
+    rc, meta, rows, ops, plog = _run({1: [(200, fx("search_bad_sort"))]})
     equal("a REJECTED page 1: exit 5, the data never arrived", rc, 5)
     equal("...fetched once, not retried", ops.fetches, [1])
     equal("...and no sidecar beside no output", meta, None)
 
-    rc, meta, rows, ops = _run({1: [(403, fx("akamai_denied_api"))]})
+    rc, meta, rows, ops, plog = _run({1: [(403, fx("akamai_denied_api"))]})
     equal("Akamai's Access Denied on the API: exit 3", rc, 3)
     equal("...tried again from a fresh browser, twice (no pool)", ops.relaunches, 2)
 
-    rc, meta, rows, ops = _run({1: ["TypeError: net::ERR_HTTP2_PROTOCOL_ERROR"]})
+    rc, meta, rows, ops, plog = _run({1: ["TypeError: net::ERR_HTTP2_PROTOCOL_ERROR"]})
     equal("a reset on the fetch: exit 3, a refusal and not a timeout", rc, 3)
 
-    rc, meta, rows, ops = _run({}, goto_error="net::ERR_HTTP2_PROTOCOL_ERROR at "
+    rc, meta, rows, ops, plog = _run({}, goto_error="net::ERR_HTTP2_PROTOCOL_ERROR at "
                                               "https://www.makemytrip.com/hotels/")
     equal("a reset LANDING (every datacentre run): exit 3", rc, 3)
     equal("...and nothing was fetched", ops.fetches, [])
 
-    rc, meta, rows, ops = _run({}, goto_error="Timeout 60000ms exceeded.")
+    rc, meta, rows, ops, plog = _run({}, goto_error="Timeout 60000ms exceeded.")
     equal("a landing that timed out: exit 5, not 3 and not 4", rc, 5)
 
-    rc, meta, rows, ops = _run({}, landing=fx("akamai_decoy"))
+    rc, meta, rows, ops, plog = _run({}, landing=fx("akamai_decoy"))
     equal("the 200-OK decoy on the landing: exit 3", rc, 3)
 
-    rc, meta, rows, ops = _run({1: [(200, fx("search_no_hotels"))]})
+    rc, meta, rows, ops, plog = _run({1: [(200, fx("search_no_hotels"))]})
     equal("'No Hotels Found': exit 4, and nothing written", (rc, rows), (4, None))
 
-    rc, meta, rows, ops = _run({1: [(429, ""), (200, fx("search_goa_p1"))]}, pages=1)
+    rc, meta, rows, ops, plog = _run({1: [(429, ""), (200, fx("search_goa_p1"))]}, pages=1)
     equal("a throttle, then the page: exit 0", rc, 0)
     equal("...at the SAME exit (no relaunch)", ops.relaunches, 0)
-    rc, meta, rows, ops = _run({1: [(429, ""), (200, fx("search_goa_p1"))]},
+    rc, meta, rows, ops, plog = _run({1: [(429, ""), (200, fx("search_goa_p1"))]},
                                pages=1, retries=1)
     equal("a throttle wait spends its OWN budget, not --retries: "
           "with --retries 1 the page still arrives", rc, 0)
 
     dup = {1: [(200, fx("search_goa_p1"))], 2: [(200, fx("search_goa_p1"))]}
-    rc, meta, rows, ops = _run(dup, pages=2)
+    rc, meta, rows, ops, plog = _run(dup, pages=2)
     equal("a property seen on two pages is kept once", len(rows), 4)
 
 
 def check_a_city_name_is_resolved_before_page_one():
     from product_parser import Query
     q = Query(city="Goa", checkin=date(2026, 10, 15), checkout=date(2026, 10, 16))
-    rc, meta, rows, ops = _run({1: [(200, fx("search_goa_p1"))]}, pages=1, query=q)
+    rc, meta, rows, ops, plog = _run({1: [(200, fx("search_goa_p1"))]}, pages=1, query=q)
     equal("the lookup, then page 1", ops.fetches, [0, 1])
     equal("...the code the site's box resolved", q.city_code, "CTGOI")
     equal("...and the run is exit 0", rc, 0)
     q = Query(city="Taj Mahal", checkin=date(2026, 10, 15), checkout=date(2026, 10, 16))
-    rc, meta, rows, ops = _run({}, query=q, suggest=fx("suggest_taj_mahal"))
+    rc, meta, rows, ops, plog = _run({}, query=q, suggest=fx("suggest_taj_mahal"))
     equal("a name that is no city: exit 2", rc, 2)
     equal("...before any listing page", ops.fetches, [0])
     q = Query(city="Goa", checkin=date(2026, 10, 15), checkout=date(2026, 10, 16))
-    rc, meta, rows, ops = _run({}, query=q, goto_error="net::ERR_HTTP2_PROTOCOL_ERROR")
+    rc, meta, rows, ops, plog = _run({}, query=q, goto_error="net::ERR_HTTP2_PROTOCOL_ERROR")
     equal("a lookup that Akamai refused: exit 3, not a usage error", rc, 3)
 
 
@@ -1622,18 +1625,108 @@ def check_a_served_page_that_parses_to_nothing_is_a_parser_failure():
     check("the broken page still states its properties (not vacuous)",
           P.count_rows(broken) > 0 and P.detect_page_state(broken, 200) == "content")
     equal("...and parses to nothing", len(P.parse_page(broken, _q(), 1)), 0)
-    rc, meta, rows, ops = _run({1: [(200, broken)]}, pages=1)
+    rc, meta, rows, ops, plog = _run({1: [(200, broken)]}, pages=1)
     equal("page 1 served and lost: exit 5, not 4 (an empty listing)", rc, 5)
-    rc, meta, rows, ops = _run({1: [(200, broken)]}, pages=3)
+    rc, meta, rows, ops, plog = _run({1: [(200, broken)]}, pages=3)
     equal("...also at --pages 3", rc, 5)
-    rc, meta, rows, ops = _run({1: [(200, fx("search_goa_p1"))],
+    rc, meta, rows, ops, plog = _run({1: [(200, fx("search_goa_p1"))],
                                 2: [(200, _renamed_ids("search_goa_p2"))]}, pages=3)
     equal("page 2 lost after a good page 1: exit 6, not a complete run", rc, 6)
     equal("...partial, named, with the page listed",
           (meta["status"], meta["stop_reason"], meta["pages_failed"]),
           ("partial", "parser_found_nothing", [2]))
-    rc, meta, rows, ops = _run({1: [(200, fx("search_no_hotels"))]})
+    rc, meta, rows, ops, plog = _run({1: [(200, fx("search_no_hotels"))]})
     equal("'No Hotels Found' is still exit 4", rc, 4)
+
+
+# ---------------------------------------------------------------------------
+# The per-page record: <out>.pages.json
+# ---------------------------------------------------------------------------
+
+PAGE_RECORD_FIELDS = ["blocked_by", "ended", "ok", "page", "parse_failed",
+                      "rejected", "rows", "state", "status", "stop_reason"]
+
+
+def check_the_page_log_explains_every_page():
+    """Every run that reaches the page loop writes <out>.pages.json, and its
+    stop reason agrees with the exit code the run actually returned."""
+    # Every page served, the site declares the listing over: exit 0.
+    rc, meta, rows, ops, plog = _run({1: [(200, fx("search_goa_p1"))],
+                                      2: [(200, fx("search_lehra_nearby"))]},
+                                     pages=5)
+    equal("all pages served and the site says it ends: exit 0", rc, 0)
+    equal("the record agrees on stop reason and exit code",
+          (plog["stop_reason"], plog["exit_code"]), ("end_of_listing", 0))
+    equal("one record per page fetched", [p["page"] for p in plog["pages"]], [1, 2])
+    check("every record carries the run's stop reason and counts as a success",
+          all(p["ok"] and p["stop_reason"] == "end_of_listing"
+              for p in plog["pages"]))
+    check("the last page records the site's own end-of-listing",
+          plog["pages"][-1]["ended"] is True)
+    equal("the record's fields are the stable contract",
+          sorted(plog["pages"][0]), PAGE_RECORD_FIELDS)
+
+    # The FIRST page refused: exit 3, and the page is named as refused.
+    rc, meta, rows, ops, plog = _run({1: [(403, fx("akamai_denied_api"))]})
+    equal("a refused first page: exit 3", rc, 3)
+    p1 = plog["pages"][0]
+    check("the record names the refusal", p1["blocked_by"] == "akamai")
+    check("...marks the page refused, not a success",
+          p1["status"] == "blocked" and p1["ok"] is False)
+    equal("the log's exit code is the run's", plog["exit_code"], 3)
+    check("the page log lands even though no output and no sidecar did",
+          plog is not None and meta is None and rows is None)
+
+    # A dropped connection is the same refusal under its own name.
+    rc, meta, rows, ops, plog = _run({1: ["TypeError: net::ERR_HTTP2_PROTOCOL_ERROR"]})
+    equal("a reset on page 1: exit 3", rc, 3)
+    equal("...named akamai-reset", plog["pages"][0]["blocked_by"], "akamai-reset")
+
+    # Refused before the city lookup: still page 1, still named.
+    from product_parser import Query
+    q = Query(city="Goa", checkin=date(2026, 10, 15), checkout=date(2026, 10, 16))
+    rc, meta, rows, ops, plog = _run({}, query=q,
+                                     goto_error="net::ERR_HTTP2_PROTOCOL_ERROR")
+    equal("refused before the lookup: exit 3", rc, 3)
+    equal("...and the one record names the refusal",
+          plog["pages"][0]["blocked_by"], "akamai-reset")
+
+    # The endpoint refusing the PARAMETERS: the record carries the code text.
+    rc, meta, rows, ops, plog = _run({1: [(200, fx("search_bad_sort"))]})
+    equal("a rejected page 1: exit 5", rc, 5)
+    p1 = plog["pages"][0]
+    check("the record carries the site's error code text",
+          "400108" in (p1["rejected"] or ""), repr(p1["rejected"]))
+    check("...and is not counted as a success",
+          p1["status"] == "rejected" and p1["ok"] is False)
+
+    # Served with properties, parsed to none: a parse failure, never an
+    # empty listing — exit 5 with nothing gathered, 6 after a good page.
+    rc, meta, rows, ops, plog = _run({1: [(200, _renamed_ids("search_goa_p1"))]},
+                                     pages=1)
+    equal("a served page the parser lost: exit 5, not 4", rc, 5)
+    p1 = plog["pages"][0]
+    check("marked parse_failed with the served state kept",
+          p1["parse_failed"] is True and p1["state"] == "content")
+    check("...and NOT recorded as an empty listing",
+          p1["status"] == "parse_failed" and p1["ok"] is False)
+    rc, meta, rows, ops, plog = _run(
+        {1: [(200, fx("search_goa_p1"))],
+         2: [(200, _renamed_ids("search_goa_p2"))]}, pages=3)
+    equal("a lost page 2 after a good page 1: exit 6, never 4", rc, 6)
+    check("page 1 counts, page 2 is the parse failure",
+          plog["pages"][0]["ok"] is True
+          and plog["pages"][1]["parse_failed"] is True)
+    equal("the stop reason is the parser's, not an empty listing",
+          plog["stop_reason"], "parser_found_nothing")
+
+    # A genuinely empty listing is exit 4 and is NOT a parse failure.
+    rc, meta, rows, ops, plog = _run({1: [(200, fx("search_no_hotels"))]})
+    equal("'No Hotels Found': exit 4", rc, 4)
+    p1 = plog["pages"][0]
+    check("...recorded as empty, a successful page, not a parse failure",
+          p1["status"] == "empty" and p1["ok"] is True
+          and p1["parse_failed"] is False)
 
 
 # ---------------------------------------------------------------------------

@@ -27,7 +27,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
-from output_writer import dedupe_by_key, finish_run, SOURCE_DEFAULT
+from output_writer import dedupe_by_key, finish_run, write_page_log, SOURCE_DEFAULT
 from proxy_pool import ROTATE_MODES
 from product_parser import (DEFAULT_SORT, MAX_PAGES, ORIGIN_URL, SORTS,
                             Cursor, Query, Room,
@@ -444,6 +444,68 @@ def query_summary(query: Query) -> dict:
             "sort": query.sort}
 
 
+def page_status(outcome) -> str:
+    """The one-word verdict on a page, for the per-page record.
+
+    Distinct from `state` (what the site answered) because the two
+    diverge exactly where it matters: a page the site SERVED, whose
+    properties the parser turned into nothing, has state "content" — and
+    recording that as the page's verdict would read as an empty listing,
+    which is the misdiagnosis this record exists to prevent.
+    """
+    if outcome.parse_failed:
+        return "parse_failed"
+    if outcome.blocked_by:
+        return "blocked"
+    if outcome.rejected:
+        return "rejected"
+    if outcome.load_failed:
+        return "load_failed"
+    if outcome.state == "empty":
+        return "empty"
+    if outcome.ok:
+        return "ok"
+    return outcome.state or "unknown"
+
+
+def page_records(outcomes: List, stop_reason: str) -> List[dict]:
+    """One record per page attempted, in page order, for `<out>.pages.json`.
+
+    The field names are the stable contract; every record carries every
+    field, with None where a fact does not apply:
+
+        page         the page number (1-based)
+        state        what the site answered (content, empty, blocked, ...)
+        status       the page's verdict (page_status)
+        ok           whether the page counts as a successful page
+        rows         rows parsed from this page
+        blocked_by   the refusal's name (akamai, akamai-reset, captcha)
+        rejected     the endpoint's error text when it refused the
+                     PARAMETERS (e.g. "code 400108: field name is not
+                     supported")
+        parse_failed the site served properties and the parser made none
+                     of them into a row — never recorded as an empty list
+        ended        the site said nothing follows this page
+        stop_reason  the RUN's stop reason, repeated on every record so a
+                     record read on its own still says why the run stopped
+    """
+    records = []
+    for o in sorted(outcomes, key=lambda x: x.page_num):
+        records.append({
+            "page": o.page_num,
+            "state": o.state,
+            "status": page_status(o),
+            "ok": o.ok,
+            "rows": len(o.products),
+            "blocked_by": o.blocked_by,
+            "rejected": o.rejected,
+            "parse_failed": o.parse_failed,
+            "ended": o.ended,
+            "stop_reason": stop_reason,
+        })
+    return records
+
+
 def finish(args, query: Query, outcomes: List, stop_reason: str,
            blocked: bool) -> int:
     """Merge the pages in PAGE order, write the output, return the exit code.
@@ -469,7 +531,7 @@ def finish(args, query: Query, outcomes: List, stop_reason: str,
                     "want the city only.", substitutes, len(rows),
                     query.city_name or query.city_code)
     first = next((o for o in outcomes if o.page_num == 1), None)
-    return finish_run(
+    rc = finish_run(
         rows, args.out, args.format, args.allow_empty,
         blocked=blocked, stop_reason=stop_reason,
         pages_requested=args.pages, pages_completed=len(ok_pages),
@@ -481,6 +543,11 @@ def finish(args, query: Query, outcomes: List, stop_reason: str,
                "end_of_listing": stop_reason == "end_of_listing",
                "substitute_rows": substitutes,
                "currency": getattr(first, "currency", None)})
+    # Written on every run, output or not: a run that gathered nothing is
+    # the one this record exists to explain.
+    write_page_log(args.out, page_records(outcomes, stop_reason),
+                   stop_reason, rc)
+    return rc
 
 
 # ---------------------------------------------------------------------------
