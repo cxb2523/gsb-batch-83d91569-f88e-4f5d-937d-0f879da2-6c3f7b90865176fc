@@ -583,3 +583,219 @@ button {
 .urls-empty[hidden] {
   display: none;
 }
+
+/* Per-candidate collection trace */
+.urls-trace-head {
+  margin-top: 6px;
+}
+
+.urls-trace-head[hidden] {
+  display: none;
+}
+
+.urls-trace-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: #f0f0f5;
+  color: #4b4b5e;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 5px 8px;
+  border-radius: 4px;
+  text-align: left;
+}
+
+.urls-trace-toggle:hover {
+  background: #e4e4ec;
+}
+
+.urls-trace-summary {
+  margin-left: auto;
+  font-weight: 400;
+  color: #9090a0;
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.urls-trace-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.urls-trace-chip {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: 9px;
+  border: 1px solid #e2e2e8;
+  background: #fff;
+  color: #6b6b80;
+}
+
+.urls-trace-chip.active {
+  color: #fff;
+  border-color: transparent;
+}
+
+.urls-trace-chip.urls-status-included.active {
+  background: #16a34a;
+}
+
+.urls-trace-chip.urls-status-duplicate.active {
+  background: #6366f1;
+}
+
+.urls-trace-chip.urls-status-parseFailed.active {
+  background: #ef4444;
+}
+
+.urls-trace-chip.urls-status-sourceDisabled.active {
+  background: #d97706;
+}
+
+.urls-trace-chip.urls-status-skipped.active {
+  background: #64748b;
+}
+
+.urls-trace-chip.urls-status-invisible.active {
+  background: #9333ea;
+}
+
+.urls-trace {
+  margin-top: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid #ececf1;
+  border-radius: 4px;
+  background: #f8f8fb;
+}
+
+.urls-trace[hidden] {
+  display: none;
+}
+
+.urls-trace-empty {
+  padding: 8px 10px;
+  font-size: 10.5px;
+}
+
+.urls-trace-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid #ececf1;
+  border-left: 3px solid transparent;
+}
+
+.urls-trace-row:last-child {
+  border-bottom: none;
+}
+
+.urls-trace-row.urls-status-included {
+  border-left-color: #16a34a;
+}
+
+.urls-trace-row.urls-status-duplicate {
+  border-left-color: #6366f1;
+}
+
+.urls-trace-row.urls-status-parseFailed {
+  border-left-color: #ef4444;
+}
+
+.urls-trace-row.urls-status-sourceDisabled {
+  border-left-color: #d97706;
+}
+
+.urls-trace-row.urls-status-skipped {
+  border-left-color: #64748b;
+}
+
+.urls-trace-row.urls-status-invisible {
+  border-left-color: #9333ea;
+}
+
+.urls-trace-badge {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: #e4e4ec;
+  color: #4b4b5e;
+  white-space: nowrap;
+}
+
+.urls-status-included .urls-trace-badge {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.urls-status-duplicate .urls-trace-badge {
+  background: #e0e7ff;
+  color: #4338ca;
+}
+
+.urls-status-parseFailed .urls-trace-badge {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.urls-status-sourceDisabled .urls-trace-badge {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.urls-status-skipped .urls-trace-badge {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.urls-status-invisible .urls-trace-badge {
+  background: #f3e8ff;
+  color: #7e22ce;
+}
+
+.urls-trace-source {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+  color: #9090a0;
+  padding-top: 1px;
+}
+
+.urls-trace-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.urls-trace-value {
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+  font-size: 10.5px;
+  color: #3b3b4f;
+  word-break: break-all;
+}
+
+.urls-trace-value a {
+  color: #3b3b4f;
+  text-decoration: none;
+}
+
+.urls-trace-value a:hover {
+  color: #6366f1;
+  text-decoration: underline;
+}
+
+.urls-trace-meta {
+  margin-top: 2px;
+  font-size: 10px;
+  color: #9090a0;
+  line-height: 1.4;
+}

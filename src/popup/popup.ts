@@ -31,6 +31,8 @@ import {
 } from "../lib/page-intelligence.ts";
 import type {
   EmailRecord,
+  UrlCandidateRecord,
+  UrlCandidateStatus,
   UrlRecord,
   UrlSettings,
   UrlSortMode,
@@ -537,13 +539,62 @@ const urlsExportSelect = document.getElementById(
 ) as HTMLSelectElement;
 const urlsListEl = document.getElementById("urls-list") as HTMLDivElement;
 const urlsEmptyEl = document.getElementById("urls-empty") as HTMLDivElement;
+const urlsTraceHeadEl = document.getElementById(
+  "urls-trace-head",
+) as HTMLDivElement;
+const urlsTraceToggleBtn = document.getElementById(
+  "urls-trace-toggle",
+) as HTMLButtonElement;
+const urlsTraceSummaryEl = document.getElementById(
+  "urls-trace-summary",
+) as HTMLSpanElement;
+const urlsTraceFiltersEl = document.getElementById(
+  "urls-trace-filters",
+) as HTMLDivElement;
+const urlsTraceEl = document.getElementById("urls-trace") as HTMLDivElement;
 
 let urlsLastResult: UrlRecord[] = [];
+let urlsLastCandidates: UrlCandidateRecord[] = [];
+let urlsHasRun = false;
+const urlsTraceStatusFilter = new Set<UrlCandidateStatus>();
+let urlsTraceOpen = false;
 let urlsCurrentSettings: UrlSettings = {
   visibilityMode: "visible",
   sourceMode: "comprehensive",
   sortMode: "alpha",
 };
+
+const URL_STATUS_META: Record<
+  UrlCandidateStatus,
+  { label: string; title: string }
+> = {
+  included: { label: "Included", title: "Collected into the result list" },
+  duplicate: { label: "Duplicate", title: "Repeated normalized URL" },
+  parseFailed: {
+    label: "Parse failed",
+    title: "Empty, unparseable or non-http(s)",
+  },
+  sourceDisabled: {
+    label: "Source disabled",
+    title: "Source not enabled by the current Sources mode",
+  },
+  skipped: {
+    label: "Skipped",
+    title: "Inside <head>; requires Everything mode",
+  },
+  invisible: { label: "Invisible", title: "Failed the visibility filter" },
+};
+
+const URL_SOURCE_LABELS: Record<UrlCandidateRecord["sourceCategory"], string> =
+  {
+    anchor: "anchor",
+    area: "area",
+    media: "media",
+    text: "text",
+    head: "head",
+    script: "script",
+    meta: "meta",
+  };
 
 function applySortButtonsActive(mode: UrlSortMode): void {
   urlsSortAlphaBtn.classList.toggle("active", mode === "alpha");
@@ -609,6 +660,151 @@ function renderUrlsHeader(): void {
     urlsLastResult.length > 0 ? String(urlsLastResult.length) : "";
 }
 
+function countCandidatesByStatus(): Map<UrlCandidateStatus, number> {
+  const counts = new Map<UrlCandidateStatus, number>();
+  for (const candidate of urlsLastCandidates) {
+    counts.set(candidate.status, (counts.get(candidate.status) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function renderUrlsTraceSummary(): void {
+  const counts = countCandidatesByStatus();
+  const parts: string[] = [];
+  for (const status of Object.keys(URL_STATUS_META) as UrlCandidateStatus[]) {
+    const n = counts.get(status);
+    if (n !== undefined) {
+      parts.push(`${n} ${URL_STATUS_META[status].label.toLowerCase()}`);
+    }
+  }
+  urlsTraceSummaryEl.textContent =
+    parts.length > 0 ? parts.join(" · ") : "No candidates";
+}
+
+function renderUrlsTraceFilters(): void {
+  const counts = countCandidatesByStatus();
+  urlsTraceFiltersEl.replaceChildren();
+  for (const status of Object.keys(URL_STATUS_META) as UrlCandidateStatus[]) {
+    const n = counts.get(status) ?? 0;
+    if (n === 0) {
+      continue;
+    }
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = `urls-trace-chip urls-status-${status}`;
+    chip.classList.toggle("active", urlsTraceStatusFilter.has(status));
+    chip.title = URL_STATUS_META[status].title;
+    chip.textContent = `${URL_STATUS_META[status].label} (${n})`;
+    chip.addEventListener("click", () => {
+      if (urlsTraceStatusFilter.has(status)) {
+        urlsTraceStatusFilter.delete(status);
+      } else {
+        urlsTraceStatusFilter.add(status);
+      }
+      renderUrlsTraceFilters();
+      renderUrlsTrace();
+    });
+    urlsTraceFiltersEl.append(chip);
+  }
+}
+
+function renderUrlsTrace(): void {
+  urlsTraceEl.replaceChildren();
+
+  if (urlsLastCandidates.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "urls-trace-empty empty";
+    empty.textContent =
+      "No URL candidates were found on this page for the current sources.";
+    urlsTraceEl.append(empty);
+    return;
+  }
+
+  const visible = urlsLastCandidates.filter(
+    (candidate) =>
+      urlsTraceStatusFilter.size === 0 ||
+      urlsTraceStatusFilter.has(candidate.status),
+  );
+
+  if (visible.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "urls-trace-empty empty";
+    empty.textContent = "No candidates match the selected status filters.";
+    urlsTraceEl.append(empty);
+    return;
+  }
+
+  // Candidates are already stored in page order.
+  for (const candidate of visible) {
+    const row = document.createElement("div");
+    row.className = `urls-trace-row urls-status-${candidate.status}`;
+
+    const badge = document.createElement("span");
+    badge.className = "urls-trace-badge";
+    badge.textContent = URL_STATUS_META[candidate.status].label;
+    row.append(badge);
+
+    const source = document.createElement("span");
+    source.className = "urls-trace-source";
+    source.textContent = URL_SOURCE_LABELS[candidate.sourceCategory];
+    source.title = "Source category";
+    row.append(source);
+
+    const body = document.createElement("div");
+    body.className = "urls-trace-body";
+
+    const valueLine = document.createElement("div");
+    valueLine.className = "urls-trace-value";
+    if (candidate.status === "included" && candidate.url !== null) {
+      const link = document.createElement("a");
+      link.href = candidate.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = candidate.url;
+      valueLine.append(link);
+    } else {
+      valueLine.textContent = candidate.rawValue || "(empty)";
+    }
+    body.append(valueLine);
+
+    const metaLine = document.createElement("div");
+    metaLine.className = "urls-trace-meta";
+    const metaParts = [candidate.reason];
+    if (candidate.occurrence > 1) {
+      metaParts.push(`occurrence #${candidate.occurrence}`);
+    }
+    metaLine.textContent = metaParts.join(" · ");
+    body.append(metaLine);
+
+    row.append(body);
+    urlsTraceEl.append(row);
+  }
+}
+
+function renderUrlsTracePanel(): void {
+  const hasRun = urlsHasRun;
+  urlsTraceHeadEl.hidden = !hasRun;
+  renderUrlsTraceSummary();
+  renderUrlsTraceFilters();
+  if (!hasRun) {
+    urlsTraceEl.hidden = true;
+    urlsTraceOpen = false;
+    urlsTraceToggleBtn.setAttribute("aria-expanded", "false");
+    return;
+  }
+  urlsTraceEl.hidden = !urlsTraceOpen;
+  urlsTraceToggleBtn.setAttribute(
+    "aria-expanded",
+    urlsTraceOpen ? "true" : "false",
+  );
+  renderUrlsTrace();
+}
+
+urlsTraceToggleBtn.addEventListener("click", () => {
+  urlsTraceOpen = !urlsTraceOpen;
+  renderUrlsTracePanel();
+});
+
 async function persistUrlSettings(): Promise<void> {
   const s = await getSettings();
   s.url = urlsCurrentSettings;
@@ -632,11 +828,17 @@ async function runUrlExtraction(): Promise<void> {
       type: "EXTRACT_URLS",
       visibilityMode: urlsCurrentSettings.visibilityMode,
       sourceMode: urlsCurrentSettings.sourceMode,
-    })) as { urls: UrlRecord[] } | undefined;
+    })) as { urls: UrlRecord[]; candidates?: UrlCandidateRecord[] } | undefined;
     urlsLastResult = response?.urls ?? [];
+    urlsLastCandidates = response?.candidates ?? [];
+    urlsHasRun = true;
+    urlsTraceStatusFilter.clear();
   } catch (err) {
     log.warn("URL extraction failed:", err);
     urlsLastResult = [];
+    urlsLastCandidates = [];
+    urlsHasRun = true;
+    urlsTraceStatusFilter.clear();
     urlsEmptyEl.hidden = false;
     urlsEmptyEl.textContent =
       "Cannot access this page. Reload the tab and try again.";
@@ -645,6 +847,7 @@ async function runUrlExtraction(): Promise<void> {
   urlsRunBtn.textContent = "Extract";
   renderUrlsHeader();
   renderUrlsList();
+  renderUrlsTracePanel();
 }
 
 urlsRunBtn.addEventListener("click", () => {
@@ -746,4 +949,6 @@ urlsExportSelect.addEventListener("change", () => {
   applySortButtonsActive(urlsCurrentSettings.sortMode);
   urlsEmptyEl.hidden = false;
   urlsListEl.hidden = true;
+  urlsTraceHeadEl.hidden = true;
+  urlsTraceEl.hidden = true;
 })().catch((err: unknown) => log.warn("Failed to load URL settings:", err));

@@ -58,6 +58,45 @@ export const UrlRecordSchema = z.object({
 });
 export type UrlRecord = z.infer<typeof UrlRecordSchema>;
 
+export const UrlCandidateStatusSchema = z.enum([
+  "included",
+  "duplicate",
+  "parseFailed",
+  "sourceDisabled",
+  "skipped",
+  "invisible",
+]);
+export type UrlCandidateStatus = z.infer<typeof UrlCandidateStatusSchema>;
+
+export const UrlSourceCategorySchema = z.enum([
+  "anchor",
+  "area",
+  "media",
+  "text",
+  "head",
+  "script",
+  "meta",
+]);
+export type UrlSourceCategory = z.infer<typeof UrlSourceCategorySchema>;
+
+export const UrlCandidateRecordSchema = z.object({
+  index: z.number().int().nonnegative(),
+  rawValue: z.string(),
+  sourceCategory: UrlSourceCategorySchema,
+  status: UrlCandidateStatusSchema,
+  url: z.string().url().nullable(),
+  domain: z.string().min(1).nullable(),
+  reason: z.string(),
+  occurrence: z.number().int().positive(),
+});
+export type UrlCandidateRecord = z.infer<typeof UrlCandidateRecordSchema>;
+
+export const UrlExtractionResultSchema = z.object({
+  urls: z.array(UrlRecordSchema),
+  candidates: z.array(UrlCandidateRecordSchema),
+});
+export type UrlExtractionResult = z.infer<typeof UrlExtractionResultSchema>;
+
 export const UrlSettingsSchema = z.object({
   visibilityMode: UrlVisibilityModeSchema.default("visible"),
   sourceMode: UrlSourceModeSchema.default("comprehensive"),

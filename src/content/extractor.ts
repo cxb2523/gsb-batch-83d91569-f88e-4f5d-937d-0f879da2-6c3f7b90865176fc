@@ -6,9 +6,9 @@ import {
   extractEmailsFromSelection,
   type ExtractedData,
 } from "../lib/extract.ts";
-import { extractVisibleUrls } from "../lib/url-extract.ts";
+import { extractUrlsWithTrace } from "../lib/url-extract.ts";
 import type {
-  UrlRecord,
+  UrlExtractionResult,
   UrlSourceMode,
   UrlVisibilityMode,
 } from "../lib/schemas.ts";
@@ -23,7 +23,7 @@ interface ExtractMessage {
 type ExtractResponse =
   | ExtractedData
   | { emails: string[] }
-  | { urls: UrlRecord[] };
+  | UrlExtractionResult;
 
 chrome.runtime.onMessage.addListener(
   (
@@ -52,12 +52,12 @@ chrome.runtime.onMessage.addListener(
     }
 
     if (message.type === "EXTRACT_URLS") {
-      const urls = extractVisibleUrls({
+      const result = extractUrlsWithTrace({
         root: document,
         visibilityMode: message.visibilityMode ?? "visible",
         sourceMode: message.sourceMode ?? "comprehensive",
       });
-      sendResponse({ urls });
+      sendResponse(result);
     }
 
     return false;
