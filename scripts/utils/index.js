@@ -56,6 +56,14 @@ const compareVersions = (a, b) => {
   return pa.pre < pb.pre ? -1 : 1
 }
 
+const patchFilePath = (packageName, version, codeTarget) => {
+  return resolve(getPatcherPackagePath(), `./patches/${packageName}/${version}/${codeTarget}.patch`)
+}
+
+const hasPatchFile = (packageName, version, codeTarget) => {
+  return existsSync(patchFilePath(packageName, version, codeTarget))
+}
+
 // List the versioned patch directories for a package, newest first.
 export const listPatchVersions = (packageName) => {
   const dir = resolve(getPatcherPackagePath(), `./patches/${packageName}`)
@@ -68,25 +76,69 @@ export const listPatchVersions = (packageName) => {
 
 // Pick the patch version directory to try for an installed package version, in order:
 // 1) exact match, 2) newest with the same major.minor, 3) newest overall.
-// Returns { version, path, exact } or null when there are no versioned patches.
+//
+// matchKind records which of those steps won:
+//   exact      - there is a patch directory for exactly this version
+//   same-minor - fallback level 1: newest patch with the same major.minor
+//   newest     - fallback level 2: newest patch overall
+//   none       - no patch file for this package/codeTarget at all
+//
+// The match kind and the selected version are derived from the patch directories on disk (see
+// listPatchVersions) and from whether that directory actually contains <codeTarget>.patch -- never hardcoded.
+// Returns a descriptor:
+//   { version, path, exact, matchKind, fallbackLevel, installedVersion, codeTarget }
+// matchKind is 'none' (and path/version are null) when there is no usable patch file at all.
 export const resolvePatchVersion = (packageName, installedVersion, codeTarget) => {
+  const installed = String(installedVersion)
   const versions = listPatchVersions(packageName)
-  if (versions.length === 0) return null
-  const has = (v) => existsSync(resolve(getPatcherPackagePath(), `./patches/${packageName}/${v}/${codeTarget}.patch`))
-  const pick = (v) => ({ version: v, path: resolve(getPatcherPackagePath(), `./patches/${packageName}/${v}/${codeTarget}.patch`), exact: v === installedVersion })
+  const has = (v) => hasPatchFile(packageName, v, codeTarget)
+  const pick = (version, matchKind, fallbackLevel) => ({
+    version,
+    path: patchFilePath(packageName, version, codeTarget),
+    exact: version === installed,
+    matchKind,
+    fallbackLevel,
+    installedVersion: installed,
+    codeTarget,
+  })
 
-  if (versions.includes(installedVersion) && has(installedVersion)) return pick(installedVersion)
+  if (versions.includes(installed) && has(installed)) return pick(installed, 'exact', 0)
 
-  const [maj, min] = String(installedVersion).split('.')
+  const [maj, min] = installed.split('.')
   const sameMinor = versions.filter((v) => {
     const [vMaj, vMin] = v.split('.')
     return vMaj === maj && vMin === min && has(v)
   })
-  if (sameMinor.length) return pick(sameMinor[0])
+  if (sameMinor.length) return pick(sameMinor[0], 'same-minor', 1)
 
   const anyWithTarget = versions.filter(has)
-  if (anyWithTarget.length) return pick(anyWithTarget[0])
-  return null
+  if (anyWithTarget.length) return pick(anyWithTarget[0], 'newest', 2)
+
+  return {
+    version: null,
+    path: null,
+    exact: false,
+    matchKind: 'none',
+    fallbackLevel: null,
+    installedVersion: installed,
+    codeTarget,
+  }
+}
+
+// Human-readable fallback level for the selected patch, derived from the match kind.
+export const describePatchMatch = (resolved) => {
+  switch (resolved?.matchKind) {
+    case 'exact':
+      return 'no fallback (exact version match)'
+    case 'same-minor':
+      return `fallback level 1: newest patch for the same major.minor (${resolved.installedVersion.split('.').slice(0, 2).join('.')}.x)`
+    case 'newest':
+      return 'fallback level 2: newest patch overall'
+    case 'none':
+      return 'no patch available'
+    default:
+      return 'unknown fallback'
+  }
 }
 
 export const isDebug = () => {

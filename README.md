@@ -171,6 +171,23 @@ npx rebrowser-patches@latest patch --packagePath /web/app/node_modules/puppeteer
 
 The patcher ships a separate patch set per upstream version (under `patches/<package>/<version>/`). It picks the patch that matches your installed version exactly; if there isn't one, it tries the newest patch for the same major.minor, then the newest overall, and warns that the version wasn't tested. If that closest patch doesn't apply cleanly it stops without touching your files and suggests the matching drop-in package. For the smoothest experience, keep your library on a version this repo lists as tested, or use the drop-in packages below.
 
+Every run reports the whole decision in its output:
+
+```
+Patch selection:
+  installed version = 25.15.0
+  selected version = 25.16.0
+  match kind = newest
+  codeTarget = lib
+  fallback level 2: newest patch overall
+Using patch version 25.16.0 (lib)
+⚠️  Warning: this patch was NOT tested on puppeteer-core@25.15.0; it was tested on version 25.16.0.
+Current patch status = 🟧 unpatched
+Result: 🟢 success
+```
+
+`match kind` is `exact`, `same-minor`, `newest` or `none`, and comes from an actual scan of the `patches/` directories. When it isn't `exact` the warning names the fallback level. The final `Result` is `success`, `nothing changed` (e.g. `patch` on an already patched package, or `unpatch` on an unpatched one; exit code 0) or `error` (exit code 1). A fallback patch that fails its dry run aborts with `error` before any file is touched, quoting the selected and installed versions and pointing at the drop-in package.
+
 You can see all command-line options by running `npx rebrowser-patches@latest --help`, but currently, there's just one patch for one library, so you don't need to configure anything.
 
 ⚠️ Be aware that after running `npm install` or `yarn install` in your project folder, it might override all the changes from the patches. You'll need to run the patcher again to keep the patches in place.
