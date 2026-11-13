@@ -204,4 +204,97 @@ describe("settleUrl waits for the URL to stop moving", () => {
       await browser.close();
     }
   }, 60_000);
+
+  it("a slow first hop followed by a rewrite still settles on the final URL", async () => {
+    const { launchTestBrowser } = await import("../helpers/browser.js");
+    const { settleUrl } = await import("../../src/recorder/session.js");
+    const browser = await launchTestBrowser();
+    try {
+      const page = await browser.newPage();
+      await page.route("http://paragent.test/**", (route) =>
+        route.fulfill({ contentType: "text/html", body: "<main>app</main>" }),
+      );
+      await page.goto("http://paragent.test/dashboard/new?orgId=1");
+      const before = page.url();
+      // The first hop lands late inside the settle budget — a slow XHR that
+      // routes only when it returns, not a fast redirect — and the address is
+      // rewritten once more after that. Neither intermediate URL may be taken.
+      await page.evaluate(`
+        setTimeout(() => history.pushState({}, "", "/d/slow/gate"), 600);
+        setTimeout(() => history.replaceState({}, "", "/d/slow/gate?orgId=1"), 800);
+      `);
+      const started = Date.now();
+      await settleUrl(page, before);
+      expect(page.url()).toBe("http://paragent.test/d/slow/gate?orgId=1");
+      // Still bounded: the quiet window closes ~QUIET_MS after the last rewrite.
+      expect(Date.now() - started).toBeLessThan(3_000);
+    } finally {
+      await browser.close();
+    }
+  }, 60_000);
+});
+
+/**
+ * The recorder-side half of the same contract: what actually lands in the
+ * emitted step when the page does not cooperate after the action.
+ */
+describe("post-action recording", () => {
+  const OPTIONS = {
+    trajectory_id: "traj-unit-post-action",
+    site_key: "paragent.test@fixture",
+    task_key: "post-action-observation",
+    base_url_template: "http://paragent.test/",
+    provenance: { recorder: "test", agent_model: "human", testbed_version: "fixture-v1" },
+  };
+
+  it("records the URL that is actually there when nothing navigates within the budget", async () => {
+    const browser = await launchTestBrowser();
+    try {
+      const page = await browser.newPage();
+      await page.route("http://paragent.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: '<main><button type="button">Stay</button></main>',
+        }),
+      );
+      await page.goto("http://paragent.test/stay?orgId=1");
+      const recorder = new TrajectoryRecorder(page, { ...OPTIONS });
+      await recorder.click(
+        page.getByRole("button", { name: "Stay" }),
+        "Click a control that navigates nowhere",
+      );
+      const step = recorder.toTrajectory().steps[0]!;
+      // "No change observed" is not a failure and not an invention: post_state
+      // carries the address the page was actually on, exactly as before.
+      expect(step.post_state.url_template).toBe("http://paragent.test/stay?orgId=1");
+      expect(step.post_state.url_template).toBe(step.pre_state.url_template);
+    } finally {
+      await browser.close();
+    }
+  }, 60_000);
+
+  it("omits post_action_target_visible when the visibility query throws — never records false", async () => {
+    const browser = await launchTestBrowser();
+    try {
+      const page = await browser.newPage();
+      // The click clones the button, so the locator that matched one control
+      // before the action matches two after it: isVisible() then throws a
+      // strict-mode violation. "Could not tell" must not become "disappeared" —
+      // the compiler promotes `false` into a strong hidden assertion.
+      await page.route("http://paragent.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<main><button type="button" onclick="const b=this.cloneNode(true);document.querySelector('main').appendChild(b);">Clone</button></main>`,
+        }),
+      );
+      await page.goto("http://paragent.test/clone");
+      const recorder = new TrajectoryRecorder(page, { ...OPTIONS });
+      await recorder.click(page.locator("button"), "Click the cloning button");
+      const step = recorder.toTrajectory().steps[0]!;
+      expect("post_action_target_visible" in step).toBe(false);
+      expect(step.post_action_target_visible).toBeUndefined();
+    } finally {
+      await browser.close();
+    }
+  }, 60_000);
 });
