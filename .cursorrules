@@ -1,0 +1,17 @@
+# pump.fun launcher on the TrenchyTools API — context for AI editors
+
+Read README.md first, then backend/src/services/trenchy.ts (the one API client; every chain call goes through it) and
+https://api.trenchy.tools/AGENTS.md (the API's rules for agents).
+
+Shape: backend/ = Express + TypeScript (port 3101), frontend/ = React + Vite + Tailwind (port 5183, proxies /api).
+Single user, no auth, no database: JSON files under backend/keys (encrypted vault, settings.json) and backend/data.
+
+Rules that must survive any change:
+- Wallet backup rule (AGENTS.md rule 3): a wallet is written to the backup folder (services/backup.ts) BEFORE it is
+  stored or funded; every route that moves SOL into a wallet calls assertBackedUp() and answers 409 not_backed_up.
+- Keys never leave this machine: the API gets unsigned transactions back signed; it never sees a private key.
+- Settings precedence: backend/keys/settings.json over backend/.env over the built-in default.
+- Never print or commit secrets. backend/.env, backend/keys and backend/data are gitignored.
+
+Run: npm run install:all, copy backend/.env.example to backend/.env, npm run dev, open http://localhost:5183.
+Check: npx tsc --noEmit -p backend/tsconfig.json; cd frontend && npm run build.

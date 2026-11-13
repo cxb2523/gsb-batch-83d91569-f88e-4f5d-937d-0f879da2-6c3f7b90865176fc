@@ -1,0 +1,22 @@
+node_modules/
+dist/
+.env
+.env.*
+
+# Wallet keys, launch data, trade history — all sensitive
+backend/keys/
+!backend/keys/.gitkeep
+backend/data/
+!backend/data/.gitkeep
+
+# IDE / OS
+.cursor/
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store
+
+# Build artifacts
+*.tsbuildinfo
+backend/public/
+!.env.example
