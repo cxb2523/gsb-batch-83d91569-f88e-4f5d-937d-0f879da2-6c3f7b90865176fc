@@ -20,7 +20,7 @@ from search_filters import (JobFilters, PeopleFilters, build_jobs_search_url,
 from storage import EventLog, open_store
 from utils import (
     human_delay, random_scroll, save_progress,
-    load_progress, setup_logging,
+    load_progress, setup_logging, save_json_atomic,
     save_session_health, save_session_health_live
 )
 
@@ -160,6 +160,24 @@ class LinkedInScraper:
         self.updated_records = 0
         self._warned = set()         # de-duplicate filter warnings across pages
         self._stop_reason = ""
+        # ── Per-page outcome ledger ("逐页结局") ──
+        # Every search page ends in exactly one status:
+        #   "ok"        — fetched normally
+        #   "recovered" — blocked, then fetched after a successful rotation
+        #   "abandoned" — given up because the recovery budget was exhausted
+        #   "aborted"   — given up because re-login/rotation failed
+        #   "error"     — given up after an unexpected page error
+        # The ledger is written to config.PAGE_OUTCOME_FILE at the end of the
+        # run so a silent stop is impossible: every skipped page is visible.
+        self.page_outcomes = []
+        # Whether the most recent search_*() call walked its pages to a
+        # natural end (True) or was cut short by an unrecoverable block/error
+        # (False). run() uses this to keep unfinished searches OUT of
+        # completed_keys so the next run retries them.
+        self.last_search_completed = True
+        # Why the last _recover_from_block() failed: "budget_exhausted" |
+        # "relogin_failed" | "rotation_error" ("" when it succeeded).
+        self._last_recovery_failure = ""
         # Proxy rotation state (see _next_proxy).
         self.current_proxy = None
         self._proxy_cursor = random.randrange(max(1, len(config.PROXY_LIST)))
@@ -624,6 +642,7 @@ class LinkedInScraper:
                 f"🛑 Blocked again during {context} ({reason}) but the recovery "
                 f"budget ({self.config.MAX_BLOCK_RECOVERIES}) is exhausted — stopping."
             )
+            self._last_recovery_failure = "budget_exhausted"
             self._telemetry_event("block", f"{reason}: budget exhausted")
             return False
 
@@ -643,16 +662,109 @@ class LinkedInScraper:
             rotated = await self._rotate_identity()
         except Exception as e:
             logger.error(f"❌ Identity rotation failed ({e.__class__.__name__}: {e}) — stopping.")
+            self._last_recovery_failure = "rotation_error"
             return False
 
         if not rotated:
             logger.error("❌ Could not re-authenticate after rotation — stopping.")
+            self._last_recovery_failure = "relogin_failed"
             return False
 
         self.consecutive_errors = 0
         self._block_reason = ""
+        self._last_recovery_failure = ""
         logger.info(f"✅ Recovered from '{reason}' — resuming {context}.")
         return True
+
+    # ─────────────────────────────────────────────
+    #  PER-PAGE OUTCOME LEDGER
+    # ─────────────────────────────────────────────
+
+    _PAGE_OUTCOME_ICONS = {
+        "ok": "✅", "recovered": "♻️", "abandoned": "⏸️",
+        "aborted": "🛑", "error": "⚠️",
+    }
+
+    def _record_page_outcome(self, key: str, page: int, status: str,
+                             reason: str = "", detail: str = "") -> None:
+        """Append one search page's fate to the ledger and the event log.
+
+        This is the anti-silent-stop mechanism: every page that is skipped or
+        abandoned shows up here (and in the PAGE_OUTCOME_FILE report) instead
+        of vanishing from the export without a trace.
+        """
+        entry = {
+            "key": key or None,
+            "mode": self.telemetry.get("mode") or (self.config.SEARCH_MODE or "").lower(),
+            "page": page,
+            "status": status,
+            "reason": reason,
+            "detail": detail,
+            "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self.page_outcomes.append(entry)
+        icon = self._PAGE_OUTCOME_ICONS.get(status, "•")
+        label = key or "search"
+        suffix = f" — {reason}" if reason else (f" — {detail}" if detail else "")
+        logger.info(f"   {icon} Page outcome: {label} p{page} → {status}{suffix}")
+        self._emit("page_outcome", f"{label} p{page}: {status}",
+                   key=key or "", page=page, status=status, reason=reason)
+
+    def _block_failure_status(self) -> str:
+        """Map the last recovery failure to a page outcome status."""
+        return "abandoned" if self._last_recovery_failure == "budget_exhausted" else "aborted"
+
+    def _page_outcome_totals(self) -> tuple:
+        """(status → count, sorted incomplete search keys) for the ledger."""
+        counts = {"ok": 0, "recovered": 0, "abandoned": 0, "aborted": 0, "error": 0}
+        incomplete = set()
+        for outcome in self.page_outcomes:
+            counts[outcome["status"]] = counts.get(outcome["status"], 0) + 1
+            if outcome["status"] in ("abandoned", "aborted", "error") and outcome.get("key"):
+                incomplete.add(outcome["key"])
+        return counts, sorted(incomplete)
+
+    def _log_page_outcomes(self) -> None:
+        """Human-readable per-page recap for the end-of-run summary."""
+        if not self.page_outcomes:
+            return
+        counts, incomplete = self._page_outcome_totals()
+        logger.info("\nPer-page outcomes:")
+        for outcome in self.page_outcomes:
+            icon = self._PAGE_OUTCOME_ICONS.get(outcome["status"], "•")
+            label = outcome["key"] or outcome["mode"]
+            extra = outcome["reason"] or outcome["detail"]
+            logger.info(f"   {icon} {label} p{outcome['page']}: {outcome['status']}"
+                        + (f" — {extra}" if extra else ""))
+        logger.info("   Totals: " + ", ".join(
+            f"{status}={count}" for status, count in counts.items() if count))
+        if incomplete:
+            logger.warning("   ⏸️  Incomplete searches (NOT in completed_keys, "
+                           "will be retried next run): " + ", ".join(incomplete))
+
+    def _write_page_outcome_report(self, mode: str) -> str:
+        """Persist the ledger as JSON so every run leaves a verifiable record
+        of which pages were fetched, recovered, abandoned or aborted."""
+        path = str(getattr(self.config, "PAGE_OUTCOME_FILE", "") or "")
+        if not path:
+            return ""
+        counts, incomplete = self._page_outcome_totals()
+        report = {
+            "run_id": self.run_id,
+            "mode": mode,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "summary": counts,
+            "incomplete_searches": incomplete,
+            "pages": self.page_outcomes,
+        }
+        try:
+            save_json_atomic(path, report)
+        except Exception as e:
+            logger.warning(f"⚠️  Could not write page-outcome report ({e.__class__.__name__}: {e}).")
+            return ""
+        logger.info(f"📄 Page-outcome report: {path} "
+                    f"({len(self.page_outcomes)} pages, {len(incomplete)} incomplete searches)")
+        return path
 
     # ─────────────────────────────────────────────
     #  AUTHENTICATION
@@ -835,13 +947,20 @@ class LinkedInScraper:
     #  SEARCH — JOBS (NEW)
     # ─────────────────────────────────────────────
 
-    async def search_jobs(self, keyword: str) -> list:
+    async def search_jobs(self, keyword: str, search_key: str = "") -> list:
         """
         Search LinkedIn for job listings by keyword.
         Returns a list of job dicts extracted from the search results page.
+
+        Every page's fate is recorded in the page-outcome ledger, and
+        self.last_search_completed tells the caller whether the search walked
+        all its pages to a natural end (False = cut short by an unrecoverable
+        block/error; the partial results are still returned and kept).
         """
         jobs = []
         page_num = 1
+        self.last_search_completed = True
+        recovered_page = False
 
         # Faceted job URL (v5.0): recency / experience / workplace / easy-apply
         # / sort are rendered by the shared builder, which validates every value
@@ -865,10 +984,15 @@ class LinkedInScraper:
                 await human_delay(3, 6)
                 
                 if await self._check_page_block_status():
-                    # Rotate + re-login and retry this page; stop only when the
-                    # recovery budget is exhausted or re-login failed.
+                    # Rotate + re-login and retry this page; give up on it only
+                    # when the recovery budget is exhausted or re-login failed.
                     if await self._recover_from_block(f"jobs search '{keyword}' page {page_num}"):
+                        recovered_page = True
                         continue
+                    self._record_page_outcome(
+                        search_key, page_num, self._block_failure_status(),
+                        reason=self._block_reason or self._last_recovery_failure)
+                    self.last_search_completed = False
                     break
                     
                 self.consecutive_errors = 0  # Reset errors on success
@@ -910,6 +1034,10 @@ class LinkedInScraper:
                         break
 
                 jobs.extend(new_jobs)
+                self._record_page_outcome(
+                    search_key, page_num, "recovered" if recovered_page else "ok",
+                    detail=f"+{len(new_jobs)} jobs")
+                recovered_page = False
                 logger.info(f"      Page {page_num}: +{len(new_jobs)} jobs extracted")
 
                 page_num += 1
@@ -918,7 +1046,7 @@ class LinkedInScraper:
                 self.session_count += 1
                 if self.session_count % self.config.BREAK_EVERY_N_REQUESTS == 0:
                     await self._take_session_break()
-                    
+
                 if self.config.ROTATE_USER_AGENT and self.session_count % self.config.UA_ROTATE_EVERY_N == 0:
                     await self._rotate_identity()
 
@@ -927,6 +1055,10 @@ class LinkedInScraper:
                 if await self._handle_potential_block():
                     pass # Handled by block detector
                 else:
+                    self._record_page_outcome(
+                        search_key, page_num, "error",
+                        reason=f"{e.__class__.__name__}: {str(e)[:160]}")
+                    self.last_search_completed = False
                     break
 
         return jobs
@@ -988,13 +1120,18 @@ class LinkedInScraper:
     #  SEARCH — CANDIDATES (NEW)
     # ─────────────────────────────────────────────
 
-    async def search_candidates(self, skill: str) -> list:
+    async def search_candidates(self, skill: str, search_key: str = "") -> list:
         """
         Search LinkedIn for people matching specific skills.
         Returns a list of profile URLs.
+
+        Page outcomes are recorded in the ledger; self.last_search_completed
+        is False when the search was cut short (partial URLs still returned).
         """
         profile_urls = []
         page_num = 1
+        self.last_search_completed = True
+        recovered_page = False
 
         # Skill + optional title filter, rendered through the same faceted
         # builder as people search (so network/seniority/location filters apply
@@ -1020,15 +1157,20 @@ class LinkedInScraper:
                 await human_delay(3, 6)
                 
                 if await self._check_page_block_status():
-                    # Rotate + re-login and retry this page; stop only when the
-                    # recovery budget is exhausted or re-login failed.
+                    # Rotate + re-login and retry this page; give up on it only
+                    # when the recovery budget is exhausted or re-login failed.
                     if await self._recover_from_block(f"search results page {page_num}"):
+                        recovered_page = True
                         continue
+                    self._record_page_outcome(
+                        search_key, page_num, self._block_failure_status(),
+                        reason=self._block_reason or self._last_recovery_failure)
+                    self.last_search_completed = False
                     break
-                    
+
                 self.consecutive_errors = 0
                 self._register_search()
-                
+
                 await random_scroll(self.page)
 
                 content = await self.page.content()
@@ -1040,6 +1182,10 @@ class LinkedInScraper:
                     break
 
                 profile_urls.extend(new_urls)
+                self._record_page_outcome(
+                    search_key, page_num, "recovered" if recovered_page else "ok",
+                    detail=f"+{len(new_urls)} profiles")
+                recovered_page = False
                 logger.info(f"      Page {page_num}: +{len(new_urls)} candidate profiles")
 
                 page_num += 1
@@ -1048,7 +1194,7 @@ class LinkedInScraper:
                 self.session_count += 1
                 if self.session_count % self.config.BREAK_EVERY_N_REQUESTS == 0:
                     await self._take_session_break()
-                    
+
                 if self.config.ROTATE_USER_AGENT and self.session_count % self.config.UA_ROTATE_EVERY_N == 0:
                     await self._rotate_identity()
 
@@ -1057,6 +1203,10 @@ class LinkedInScraper:
                 if await self._handle_potential_block():
                     pass
                 else:
+                    self._record_page_outcome(
+                        search_key, page_num, "error",
+                        reason=f"{e.__class__.__name__}: {str(e)[:160]}")
+                    self.last_search_completed = False
                     break
 
         return list(set(profile_urls))
@@ -1065,13 +1215,18 @@ class LinkedInScraper:
     #  SEARCH — PEOPLE (EXISTING, UPDATED with anti-block)
     # ─────────────────────────────────────────────
 
-    async def search_people(self, company: str, job_title: str) -> list:
+    async def search_people(self, company: str, job_title: str, search_key: str = "") -> list:
         """
         Search LinkedIn for people with a specific job title at a company.
         Returns a list of profile URLs.
+
+        Page outcomes are recorded in the ledger; self.last_search_completed
+        is False when the search was cut short (partial URLs still returned).
         """
         profile_urls = []
         page_num = 1
+        self.last_search_completed = True
+        recovered_page = False
 
         # Faceted search URL (v5.0). Title + company stay quoted, AND-ed terms;
         # configured facets (network, current/past company, school, industry,
@@ -1097,15 +1252,20 @@ class LinkedInScraper:
                 await human_delay(3, 6)
                 
                 if await self._check_page_block_status():
-                    # Rotate + re-login and retry this page; stop only when the
-                    # recovery budget is exhausted or re-login failed.
+                    # Rotate + re-login and retry this page; give up on it only
+                    # when the recovery budget is exhausted or re-login failed.
                     if await self._recover_from_block(f"search results page {page_num}"):
+                        recovered_page = True
                         continue
+                    self._record_page_outcome(
+                        search_key, page_num, self._block_failure_status(),
+                        reason=self._block_reason or self._last_recovery_failure)
+                    self.last_search_completed = False
                     break
-                    
+
                 self.consecutive_errors = 0
                 self._register_search()
-                
+
                 await random_scroll(self.page)
 
                 content = await self.page.content()
@@ -1117,6 +1277,10 @@ class LinkedInScraper:
                     break
 
                 profile_urls.extend(new_urls)
+                self._record_page_outcome(
+                    search_key, page_num, "recovered" if recovered_page else "ok",
+                    detail=f"+{len(new_urls)} profiles")
+                recovered_page = False
                 logger.info(f"      Page {page_num}: +{len(new_urls)} profiles")
 
                 page_num += 1
@@ -1125,7 +1289,7 @@ class LinkedInScraper:
                 self.session_count += 1
                 if self.session_count % self.config.BREAK_EVERY_N_REQUESTS == 0:
                     await self._take_session_break()
-                    
+
                 if self.config.ROTATE_USER_AGENT and self.session_count % self.config.UA_ROTATE_EVERY_N == 0:
                     await self._rotate_identity()
 
@@ -1134,6 +1298,10 @@ class LinkedInScraper:
                 if await self._handle_potential_block():
                     pass
                 else:
+                    self._record_page_outcome(
+                        search_key, page_num, "error",
+                        reason=f"{e.__class__.__name__}: {str(e)[:160]}")
+                    self.last_search_completed = False
                     break
 
         return list(set(profile_urls))
@@ -2363,6 +2531,32 @@ class LinkedInScraper:
                 pass
         self._emit("search_done", key)
 
+    def _finish_search_key(self, key: str, completed_keys: set) -> None:
+        """Decide whether a search may enter completed_keys.
+
+        Only a search that walked all its pages to a natural end (every page
+        "ok" or "recovered") is marked complete. A search cut short by an
+        unrecoverable block ("abandoned"/"aborted") or a page error keeps the
+        records it already produced — they are checkpointed to progress.json
+        and exported as usual — but the key stays OUT of completed_keys so
+        the next run retries it instead of silently skipping it.
+        """
+        if self.last_search_completed:
+            self._complete_search(key, completed_keys)
+            return
+        logger.warning(
+            f"   ⏸️  Search '{key}' did not finish — keeping the records collected "
+            f"so far, but NOT marking it complete; it will be retried next run."
+        )
+        self._emit("search_incomplete", key)
+        try:
+            save_progress(self.config.PROGRESS_FILE, {
+                "results": self.results,
+                "completed_keys": list(completed_keys),
+            })
+        except Exception as exc:
+            logger.warning(f"Could not save progress: {exc}")
+
     async def _scrape_profile_urls(self, urls, search_company: str, job_title: str,
                                    skill: str = "") -> int:
         """Scrape every not-yet-seen profile URL from one search result page."""
@@ -2439,6 +2633,7 @@ class LinkedInScraper:
                             written: Optional[dict] = None) -> dict:
         """Close out the run: export, summarize, persist, release the store."""
         written = written if written is not None else {}
+        outcome_counts, incomplete_searches = self._page_outcome_totals()
         summary = {
             "mode": mode,
             "records": len(self.results),
@@ -2451,6 +2646,8 @@ class LinkedInScraper:
             "run_id": self.run_id,
             "exports": written,
             "stop_reason": self._stop_reason,
+            "page_outcomes": outcome_counts,
+            "incomplete_searches": incomplete_searches,
         }
         if self.store is not None:
             try:
@@ -2526,9 +2723,9 @@ class LinkedInScraper:
                             logger.info(f"   Already done: '{job_title}' - skipping")
                             continue
 
-                        profile_urls = await self.search_people(company, job_title)
+                        profile_urls = await self.search_people(company, job_title, search_key=key)
                         await self._scrape_profile_urls(profile_urls, company, job_title)
-                        self._complete_search(key, completed_keys)
+                        self._finish_search_key(key, completed_keys)
                         await human_delay(4, 10)
 
             # --- JOB SEARCH MODE ---
@@ -2541,7 +2738,7 @@ class LinkedInScraper:
                         logger.info(f"   Already done: '{keyword}' - skipping")
                         continue
 
-                    jobs = await self.search_jobs(keyword)
+                    jobs = await self.search_jobs(keyword, search_key=key)
 
                     if not jobs:
                         logger.info("      No jobs found.")
@@ -2550,7 +2747,7 @@ class LinkedInScraper:
                             job["search_keyword"] = keyword
                         self.results.extend(jobs)
 
-                    self._complete_search(key, completed_keys)
+                    self._finish_search_key(key, completed_keys)
                     await human_delay(4, 10)
 
             # --- CANDIDATES SEARCH MODE ---
@@ -2565,10 +2762,10 @@ class LinkedInScraper:
                         logger.info(f"   Already done: '{skill}' - skipping")
                         continue
 
-                    profile_urls = await self.search_candidates(skill)
+                    profile_urls = await self.search_candidates(skill, search_key=key)
                     # search_company="N/A" because this is a pure skill search.
                     await self._scrape_profile_urls(profile_urls, "N/A", skill, skill=skill)
-                    self._complete_search(key, completed_keys)
+                    self._finish_search_key(key, completed_keys)
                     await human_delay(4, 10)
 
         except KeyboardInterrupt:
@@ -2630,8 +2827,15 @@ class LinkedInScraper:
             # Early warning for LinkedIn selector changes (see _log_section_coverage).
             self._log_section_coverage(len(self.results))
 
+            # Verifiable per-page outcome record: which search pages were
+            # fetched, recovered, abandoned or aborted — and which searches
+            # were left incomplete for the next run.
+            self._log_page_outcomes()
+            outcome_report = self._write_page_outcome_report(mode)
+
             self._finalize_telemetry(mode, recovered)
             summary = self._finish_power_stack(mode, recovered, written)
+            summary["page_outcome_report"] = outcome_report
             if self.store is not None:
                 try:
                     self.store.close()

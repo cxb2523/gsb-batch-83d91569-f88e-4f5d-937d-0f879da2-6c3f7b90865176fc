@@ -157,6 +157,11 @@ def _write_json_atomic(path: Path, data: dict) -> None:
     os.replace(tmp, path)
 
 
+def save_json_atomic(filepath: str, data: dict) -> None:
+    """Public atomic JSON write (see _write_json_atomic)."""
+    _write_json_atomic(Path(filepath), data)
+
+
 def save_session_health_live(filepath: str, entry: dict) -> None:
     """
     Persist an IN-PROGRESS run so consumers can watch it live.

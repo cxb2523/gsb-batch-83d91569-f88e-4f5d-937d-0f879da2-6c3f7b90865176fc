@@ -204,6 +204,10 @@ class Config:
     CANDIDATES_OUTPUT_FILE: str = "output/linkedin_candidates.xlsx"
     PROGRESS_FILE: str      = "output/progress.json"
     SESSION_HEALTH_FILE: str = "output/session_health.json"
+    # Per-page outcome report: every search page's fate (ok / recovered /
+    # abandoned / aborted) is written here at the end of each run, so a
+    # silently skipped page is always visible and verifiable.
+    PAGE_OUTCOME_FILE: str  = "output/page_outcomes.json"
     SESSION_DIR: str        = "session/"
     LOG_FILE: str           = "output/scraper.log"
 

@@ -317,6 +317,14 @@ identity (fresh proxy + fingerprint), logs back in, and resumes the page it was 
 this at most `MAX_BLOCK_RECOVERIES` times per run, so a hard block can't loop forever or
 burn your account.
 
+**Per-page outcomes:** every search page ends the run with a recorded fate — `ok`
+(fetched normally), `recovered` (fetched after a rotation), `abandoned` (recovery budget
+exhausted) or `aborted` (re-login failed) — written to `output/page_outcomes.json`
+(`PAGE_OUTCOME_FILE`) and recapped in the final log summary. Records collected before a
+failure are kept and exported as usual, but a search that didn't finish is **not** added
+to `completed_keys` in `progress.json`, so the next run retries it instead of silently
+skipping it.
+
 **Notifications:**
 
 ```python
