@@ -1,0 +1,58 @@
+{
+  "name": "amv-playwright",
+  "version": "2.0.0",
+  "description": "Production-grade Playwright & Chromium browser automation and stealth runtime optimizer for Android Termux",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "bin": {
+    "amv-playwright": "bin/cli.js",
+    "amv-playwright-install": "bin/cli.js",
+    "amv-playwright-doctor": "bin/cli.js",
+    "amv-playwright-reap": "bin/cli.js"
+  },
+  "files": [
+    "lib",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests_js/*.test.js",
+    "doctor": "node bin/cli.js doctor",
+    "reap": "node bin/cli.js reap"
+  },
+  "keywords": [
+    "termux",
+    "playwright",
+    "android",
+    "chromium",
+    "stealth",
+    "automation",
+    "crawler",
+    "web-scraping",
+    "cloudflare-evasion",
+    "headless-chrome",
+    "bionic-libc"
+  ],
+  "author": "uno-km (hosequelbo@gmail.com)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/uno-km/amv-playwright.git"
+  },
+  "bugs": {
+    "url": "https://github.com/uno-km/amv-playwright/issues"
+  },
+  "homepage": "https://uno-km.github.io/amv-playwright/",
+  "peerDependencies": {
+    "playwright-core": ">=1.40.0"
+  },
+  "peerDependenciesMeta": {
+    "playwright-core": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

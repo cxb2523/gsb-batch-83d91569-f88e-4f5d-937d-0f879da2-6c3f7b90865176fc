@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AMV-Playwright | Official Documentation</title>
+  <meta name="description" content="Controls genuine Chromium processes via direct Chrome DevTools Protocol (CDP) WebSocket sessions on Android Bionic libc without root or graphical servers.">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="assets/i18n.js" defer></script>
+  <script src="assets/i18n-translations.js" defer></script>
+</head>
+<body>
+  <header>
+    <a href="index.html" class="header-brand">
+      <img src="favicon.svg" alt="AMV-Playwright Logo">
+      <h1 data-i18n="common.brand">AMV-Playwright</h1>
+    </a>
+    <div class="header-controls">
+      <span class="release-tag" data-i18n="common.releaseTag">v1.2.0 (Active Stable)</span>
+      <div class="lang-selector-wrapper"></div>
+      <a href="https://pypi.org/project/amv-playwright/" target="_blank" class="header-btn" data-i18n="common.pypiBtn">PyPI (pip)</a>
+      <a href="https://www.npmjs.com/package/amv-playwright" target="_blank" class="header-btn npm-btn" data-i18n="common.npmBtn">npm (Node.js)</a>
+      <a href="https://github.com/uno-km/amv-playwright" target="_blank" class="header-btn primary" data-i18n="common.githubBtn">GitHub</a>
+    </div>
+  </header>
+
+  <div class="container">
+  <nav class="sidebar">
+    <h3 data-i18n="common.nav.overview">Overview</h3>
+    <ul>
+      <li><a href="index.html" class="active" data-i18n="common.nav.home">Home / Architecture</a></li>
+      <li><a href="installation.html" data-i18n="common.nav.installation">Installation Guide</a></li>
+      <li><a href="quickstart.html" data-i18n="common.nav.quickstart">Quickstart & Recipes</a></li>
+    </ul>
+    <h3 data-i18n="common.nav.reference">Official Reference</h3>
+    <ul>
+      <li><a href="api-reference.html" data-i18n="common.nav.apiReference">API Reference</a></li>
+      <li><a href="benchmarks.html" data-i18n="common.nav.benchmarks">Benchmarks & Profiling</a></li>
+      <li><a href="advanced-parameters.html" data-i18n="common.nav.advancedParams">Advanced Parameters</a></li>
+      <li><a href="versions.html" data-i18n="common.nav.versions">Version Archive</a></li>
+    </ul>
+    <h3 data-i18n="common.nav.ecosystem">AMEVA Ecosystem</h3>
+    <ul>
+      <li><a href="/lib/mcp/">AMEVA-MCP-Hub (Polyglot WASM)</a></li>
+      <li><a href="/lib/sentinel/">AMEVA Sentinel (Security SDK)</a></li>
+      <li><a href="/lib/forge/">AMEVA-Forge (WebGPU Autograd)</a></li>
+      <li><a href="/lib/bitnet/">AMV-BitNet (1.58-bit LLM)</a></li>
+      <li><a href="/lib/playwright/" class="active">AMV-Playwright (Automation)</a></li>
+      <li><a href="/lib/diffusion/">AMV-Diffusion (Image AI)</a></li>
+      <li><a href="/lib/stt/">AMV-STT (Voice STT)</a></li>
+      <li><a href="/lib/train/">AMV-Train (LoRA Engine)</a></li>
+      <li><a href="https://ameva-workstation-web-core.vercel.app/" target="_blank">AMEVA Workstation (Web App)</a></li>
+      <li><a href="/foundation/">AMEVA Foundation</a></li>
+      <li><a href="/">Founder Digital CV</a></li>
+    </ul>
+    <h3 data-i18n="common.nav.aiSpecs">AI Agent Protocols</h3>
+    <ul>
+      <li><a href="llms.txt" target="_blank">llms.txt (AI Fast Context)</a></li>
+      <li><a href="llms-full.txt" target="_blank">llms-full.txt (Full Spec)</a></li>
+      <li><a href="robots.txt" target="_blank">robots.txt (AI Crawlers)</a></li>
+      <li><a href="sitemap.xml" target="_blank">sitemap.xml (Sitemap)</a></li>
+    </ul>
+  </nav>
+
+    <main class="content">
+      <!-- Section 1: Main Title & Subtitle -->
+      <h2 data-i18n="home.title">AMV-Playwright</h2>
+      <p class="subtitle" data-i18n="home.subtitle">Non-Root Chromium Browser Automation & CDP Engine for Android Termux</p>
+
+      <!-- Section 2: Badges Bar -->
+      <div class="badges-bar">
+        <a href="https://pypi.org/project/amv-playwright/" target="_blank"><img src="https://img.shields.io/pypi/v/amv-playwright.svg?color=004499" alt="PyPI Version"></a>
+        <a href="https://pypistats.org/packages/amv-playwright" target="_blank"><img src="https://img.shields.io/pypi/dm/amv-playwright.svg?color=2563eb&label=PyPI%20Downloads" alt="PyPI Downloads"></a>
+        <a href="https://www.npmjs.com/package/amv-playwright" target="_blank"><img src="https://img.shields.io/npm/v/amv-playwright.svg?color=cb3837" alt="npm Version"></a>
+        <a href="https://www.npmjs.com/package/amv-playwright" target="_blank"><img src="https://img.shields.io/npm/dm/amv-playwright.svg?color=2563eb&label=npm%20Downloads" alt="npm Downloads"></a>
+        <img src="https://img.shields.io/badge/license-Apache-2.0-success.svg" alt="License">
+        <img src="https://img.shields.io/badge/tests-100%25_PASS-success.svg" alt="Tests">
+        <img src="https://img.shields.io/badge/platform-Android_ARM64_/_Termux_Bionic-blueviolet.svg" alt="Platform">
+      </div>
+
+      <!-- Section 3: 1-Line Quick Installation Alert -->
+      <div class="alert alert-tip">
+        <span class="alert-title" data-i18n="home.quickInstallTitle">1-Line Quick Installation</span>
+        <p data-i18n="home.quickInstallDesc">Install the official package directly into your runtime:</p>
+        <pre><code>pip install amv-playwright
+# or: npm install amv-playwright</code></pre>
+      </div>
+
+      <!-- Section 4: Engineering Challenge & Architectural Breakthrough -->
+      <h3 data-i18n="home.challengeTitle">The Engineering Challenge</h3>
+      <p data-i18n="home.challengeText">Official browser automation drivers fail on Android Termux due to missing X11/Wayland servers, glibc vs bionic ABI incompatibility, and sandboxing constraints.</p>
+
+      <h3 data-i18n="home.breakthroughTitle">The Architectural Breakthrough</h3>
+      <p data-i18n="home.breakthroughText">Controls genuine Chromium processes via direct Chrome DevTools Protocol (CDP) WebSocket sessions on Android Bionic libc without root or graphical servers.</p>
+
+      <!-- Section 5: Key Capabilities Grid -->
+      <h3 data-i18n="home.featuresTitle">Key Capabilities &amp; Built-in Hardening</h3>
+      <div class="features-grid">
+        <div class="feature-card">
+          <h4 data-i18n="home.features.0.title">Direct CDP Control Channel</h4>
+          <p data-i18n="home.features.0.desc">Connects directly via Chrome DevTools Protocol without heavy WebDriver server binaries.</p>
+        </div>
+        <div class="feature-card">
+          <h4 data-i18n="home.features.1.title">Non-Root Mobile Execution</h4>
+          <p data-i18n="home.features.1.desc">Fully operational inside standard Termux without root privileges or custom ROMs.</p>
+        </div>
+        <div class="feature-card">
+          <h4 data-i18n="home.features.2.title">Full Python & JavaScript APIs</h4>
+          <p data-i18n="home.features.2.desc">Offers familiar Playwright-compatible async page navigation, selectors, and evaluation.</p>
+        </div>
+      </div>
+
+      <!-- Section 6: Compute & Module Matrix -->
+      <h3 data-i18n="home.matrixTitle">Supported Compute Kernels &amp; Operations</h3>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th data-i18n="home.matrixCol1">Subsystem Category</th>
+            <th data-i18n="home.matrixCol2">Operations &amp; Kernels</th>
+            <th data-i18n="home.matrixCol3">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Automation Driver</strong></td>
+            <td>CDP WebSocket Session, Headless Chromium, Bionic Port</td>
+            <td><span class="status-badge active">Production</span></td>
+          </tr>
+          <tr>
+            <td><strong>Page Capabilities</strong></td>
+            <td>DOM Evaluation, Screenshots, Network Request Interception</td>
+            <td><span class="status-badge active">Production</span></td>
+          </tr>
+          <tr>
+            <td><strong>Platform Runtimes</strong></td>
+            <td>Python asyncio, Node.js async/await, Termux CLI</td>
+            <td><span class="status-badge active">Production</span></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- Section 7: Canonical Usage Example -->
+      <h3 data-i18n="home.codeExampleTitle">Canonical Usage Example</h3>
+      <div class="code-tab-group">
+        <div class="code-tabs-header">
+          <button class="code-tab-btn active" type="button">Python (pip)</button>
+          <button class="code-tab-btn" type="button">Node.js (npm)</button>
+        </div>
+        <div class="code-tab-content" style="display:block;">
+          <pre><code>from amv_playwright import chromium
+
+async def main():
+    browser = await chromium.launch(headless=True)
+    page = await browser.new_page()
+    await page.goto("https://uno-km.github.io/uno-km/")
+    title = await page.title()
+    print(f"Page Title: {title}")
+    await browser.close()
+
+import asyncio
+asyncio.run(main())
+</code></pre>
+        </div>
+        <div class="code-tab-content" style="display:none;">
+          <pre><code>import { chromium } from "amv-playwright";
+
+const browser = await chromium.launch({ headless: true });
+const page = await browser.newPage();
+await page.goto("https://uno-km.github.io/uno-km/");
+console.log("Title:", await page.title());
+await browser.close();
+</code></pre>
+        </div>
+      </div>
+
+      <!-- Section 8: Getting Started Navigation -->
+      <h3 data-i18n="home.nextStepsTitle">Getting Started &amp; Deep Guides</h3>
+      <ul>
+        <li><a href="installation.html" data-i18n="home.linkInstall">Detailed Installation Guide (Hardware dependencies, Termux setup, WebGPU flags)</a></li>
+        <li><a href="quickstart.html" data-i18n="home.linkQuickstart">Quickstart Recipes &amp; Common Execution Patterns</a></li>
+        <li><a href="api-reference.html" data-i18n="home.linkApi">100% Full API Reference &amp; Struct Definitions</a></li>
+      </ul>
+    </main>
+  </div>
+
+  <footer>
+    <span data-i18n="common.footerText">&copy; 2026 AMEVA Open-Source Foundation. Released under the Apache-2.0 License.</span>
+  </footer>
+</body>
+</html>

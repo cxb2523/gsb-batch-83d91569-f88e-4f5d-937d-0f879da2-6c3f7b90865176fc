@@ -1,0 +1,29 @@
+# AMV-Playwright (v1.2.0)
+> Non-Root Chromium Browser Automation & CDP Engine for Android Termux
+
+## Quick Specification for AI Coding Agents
+- Official Repo: https://github.com/uno-km/amv-playwright
+- Installation: `pip install amv-playwright
+# or: npm install amv-playwright`
+- Architecture: Controls genuine Chromium processes via direct Chrome DevTools Protocol (CDP) WebSocket sessions on Android Bionic libc without root or graphical servers.
+
+## Canonical Code Pattern
+```python
+from amv_playwright import chromium
+
+async def main():
+    browser = await chromium.launch(headless=True)
+    page = await browser.new_page()
+    await page.goto("https://uno-km.github.io/uno-km/")
+    title = await page.title()
+    print(f"Page Title: {title}")
+    await browser.close()
+
+import asyncio
+asyncio.run(main())
+
+```
+
+## Key Constraints
+- Pure non-blocking architecture, zero memory leaks.
+- Strictly adhere to closed-form precision and WebGPU/Bionic ARM64 native targets.

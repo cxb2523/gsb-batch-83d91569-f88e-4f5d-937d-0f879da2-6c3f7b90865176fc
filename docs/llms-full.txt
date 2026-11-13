@@ -1,0 +1,34 @@
+# AMV-Playwright Full Technical Specification (v1.2.0)
+Official Documentation & Deep Architecture Reference for Autonomous AI Agents.
+
+## 1. System Overview
+Non-Root Chromium Browser Automation & CDP Engine for Android Termux
+Controls genuine Chromium processes via direct Chrome DevTools Protocol (CDP) WebSocket sessions on Android Bionic libc without root or graphical servers.
+
+## 2. Package & Installation
+- PyPI: amv-playwright
+- Command: pip install amv-playwright
+# or: npm install amv-playwright
+- Repository: https://github.com/uno-km/amv-playwright
+
+## 3. Core Capabilities
+- **Direct CDP Control Channel**: Connects directly via Chrome DevTools Protocol without heavy WebDriver server binaries.
+- **Non-Root Mobile Execution**: Fully operational inside standard Termux without root privileges or custom ROMs.
+- **Full Python & JavaScript APIs**: Offers familiar Playwright-compatible async page navigation, selectors, and evaluation.
+
+## 4. Canonical Implementation
+```python
+from amv_playwright import chromium
+
+async def main():
+    browser = await chromium.launch(headless=True)
+    page = await browser.new_page()
+    await page.goto("https://uno-km.github.io/uno-km/")
+    title = await page.title()
+    print(f"Page Title: {title}")
+    await browser.close()
+
+import asyncio
+asyncio.run(main())
+
+```
