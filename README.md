@@ -22,6 +22,18 @@ pages show every visitor, into JSON and CSV:
 Every run writes a `<out>.meta.json` beside the output with the site's own
 total, so a file can say "90 of 8,920" rather than only "90".
 
+`http_scraper.py` also writes a `<out>.page_report.json`, one record per
+planned page: its ending (`success`, `rejected` for an HTTP 400 parameter
+refusal, `blocked` for a 403/451/WAF refusal, `transport_failed`, or
+`unattempted`), how many attempts it took, the masked proxy exit it finished
+on (host and port kept, username and password never written), and a short
+failure reason. It is written on every run, including an all-success one, and
+the run prints a one-line `Page report: N/M page(s) succeeded` summary. A page
+the site does not have (asking `--pages` past its total) is planned away and
+absent from the report, not recorded as a failure; a page that was never
+fetched — a dead worker, or an early stop — is recorded as `unattempted`
+rather than confused with a failed fetch.
+
 Binance's official API is for market data and your own account. Its
 announcement feed is an [API-key-authenticated WebSocket](https://developers.binance.com/docs/cms/general-info).
 This repo reads the public lists the site's own pages are built from.

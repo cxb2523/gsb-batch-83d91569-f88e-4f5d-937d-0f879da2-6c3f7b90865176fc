@@ -80,6 +80,7 @@ CREDENTIAL_ALLOWED = (
     "u:supersecret@", "login:supersecret@",   # the redaction fixtures
     "u:pass@h1", "u:pass@h2",       # the global-masking fixture
     "only:1",                       # a one-exit pool fixture
+    "user-a:secret-alpha@", "user-b:secret-beta@",  # the page-report masking fixtures
 )
 
 # A 2captcha API key is a 32-character hex string.

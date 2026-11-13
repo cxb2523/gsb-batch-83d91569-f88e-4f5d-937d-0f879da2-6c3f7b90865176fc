@@ -69,6 +69,11 @@ def skip(group, reason):
 FIXTURES_PATH = os.path.join(HERE, "fixtures_generated.json")
 FIXTURES = json.load(open(FIXTURES_PATH, encoding="utf-8"))
 
+# Imported once at module level so the page-report answer callbacks, which are
+# nested several functions deep, can branch on the landing URL without each
+# test re-importing it.
+from product_parser import ORIGIN_URL  # noqa: E402
+
 
 def fx(name) -> str:
     """A fixture as the text an endpoint returns."""
@@ -864,6 +869,411 @@ def check_the_http_engine_drives_the_shared_loop():
     rc, meta, calls, waits = _http_run(ann_pages, pages=1,
                                        query=Query("announcements"))
     equal("http: announcements, a GET listing, exit 0", rc, 0)
+
+
+# ---------------------------------------------------------------------------
+# The per-page outcome record (<out>.page_report.json)
+# ---------------------------------------------------------------------------
+
+# Fake exits used by the page-report checks. Two carry credentials, which is
+# the point: every assertion below also proves the secret never reaches the
+# report. Two of them share no host, so a record that mixed pages up could
+# not hide it.
+_REPORT_PROXIES = ["http://user-a:secret-alpha@exit-a.example:8001",
+                   "http://user-b:secret-beta@exit-b.example:8002",
+                   "http://exit-c.example:8003"]
+_REPORT_SECRETS = ("secret-alpha", "secret-beta", "user-a", "user-b")
+
+
+def _http_report_run(answer, pages=1, query=None, pool=None, concurrency=1,
+                     **extra):
+    """Drive the HTTP engine's full scrape path with requests stubbed and
+    return (rc, report_records, summary_line, out_prefix, calls,
+    report_exists, sidecar_exists).
+
+    Unlike `_http_run`, this goes through http_scraper.scrape's wiring of the
+    PageRunReport, so the file on disk and the printed summary are exercised
+    exactly as a live run produces them. `answer(method, url, body)` returns
+    a _FakeResponse or raises, as in `_http_run`. The two existence flags are
+    captured before the temp directory is torn down, so a check can stat the
+    report and the sidecar side by side without racing cleanup.
+    """
+    import contextlib
+    import io
+    import http_scraper
+    import requests
+    from product_parser import Query
+    calls = []
+    real_request, real_sleep = requests.Session.request, http_scraper.time.sleep
+
+    def fake_request(self, method, url, data=None, headers=None, timeout=None, **kw):
+        calls.append((method, url))
+        check("page-report: every request is bounded by a timeout",
+              timeout is not None)
+        return answer(method, url, data)
+
+    requests.Session.request = fake_request
+    http_scraper.time.sleep = lambda s: None
+    tmp = tempfile.mkdtemp()
+    try:
+        out = os.path.join(tmp, "out")
+        args = types.SimpleNamespace(
+            pages=pages, retries=2, retry_delay=0, delay=0,
+            proxy_block_retries=2, out=out, format="json",
+            allow_empty=False, dump_html=None, url=None, cdp_endpoint=None,
+            concurrency=concurrency, proxy=None, proxy_file=None,
+            proxy_rotate="per-run", proxy_shuffle=False,
+            query=query or Query("p2p", fiat="EUR"))
+        for k, v in extra.items():
+            setattr(args, k, v)
+        # scrape() builds its own pool from args; inject one directly by
+        # stubbing the factory when the test supplied a pool.
+        real_factory = http_scraper.proxy_pool_from_args
+        http_scraper.proxy_pool_from_args = lambda a: pool
+        stdout = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout):
+                rc = http_scraper.scrape(args)
+        finally:
+            http_scraper.proxy_pool_from_args = real_factory
+        path = out + ".page_report.json"
+        report_exists = os.path.exists(path)
+        records = (json.load(open(path, encoding="utf-8"))
+                   if report_exists else None)
+        summary = next((line for line in stdout.getvalue().splitlines()
+                        if line.startswith("Page report:")), None)
+        sidecar_exists = os.path.exists(out + ".meta.json")
+    finally:
+        requests.Session.request = real_request
+        http_scraper.time.sleep = real_sleep
+        # Best-effort cleanup. On Windows an open file handle can make
+        # rmtree raise (the same platform quirk the umask checks hit); the
+        # directory is in the OS temp area either way, so the failure is not
+        # the test's, but on every other platform this leaves nothing behind.
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+    return rc, records, summary, out, calls, report_exists, sidecar_exists
+
+
+def _report_landing(method, url, body):
+    return _FakeResponse(200, fx("ann_new_listings"))
+
+
+def _no_credentials(report_blob, where):
+    check("%s carries no proxy credential" % where,
+          not any(secret in report_blob for secret in _REPORT_SECRETS),
+          report_blob)
+
+
+def check_the_page_report_records_a_healthy_multi_page_run():
+    """Success case: every page one record, attempts 1, the summary line and
+    the sidecar file, and the report is still written when nothing failed."""
+    from product_parser import Query
+
+    def served(method, url, body):
+        if url == ORIGIN_URL:
+            return _report_landing(method, url, body)
+        return _FakeResponse(200, fx("copy_30d_roi"))
+
+    rc, records, summary, out, calls, report_exists, sidecar_exists = _http_report_run(
+        served, pages=4, query=Query("copytrading"), concurrency=2)
+    equal("report: a healthy concurrent run is exit 0", rc, 0)
+    check("report: written next to the .meta.json sidecar",
+          report_exists and sidecar_exists)
+    equal("report: one record per fetched page, in page order",
+          [r["page"] for r in records], [1, 2, 3, 4])
+    check("report: every page succeeded, each after one attempt",
+          all(r["outcome"] == "success" and r["attempts"] == 1
+              and r["reason"] is None for r in records))
+    equal("report: no pool means the (none) exit marker",
+          sorted({r["proxy_exit"] for r in records}), ["(none)"])
+    equal("report: the summary line gives success over total",
+          summary, "Page report: 4/4 page(s) succeeded -> %s.page_report.json" % out)
+    # Exactly the five documented keys, in the documented shape.
+    equal("report: each record has the five documented fields",
+          sorted(records[0].keys()),
+          ["attempts", "outcome", "page", "proxy_exit", "reason"])
+
+
+def check_the_page_report_distinguishes_a_403_block_from_a_400_refusal():
+    """403 is a BLOCK retried across other exits; 400 is a parameter REFUSAL
+    tried exactly once. The report's outcomes must not conflate them."""
+    import proxy_pool
+
+    def forbidden(method, url, body):
+        if url == ORIGIN_URL:
+            return _report_landing(method, url, body)
+        return _FakeResponse(403, "<html>403 Forbidden</html>")
+
+    pool = proxy_pool.ProxyPool(list(_REPORT_PROXIES))
+    rc, records, summary, out, calls, _re, _se = _http_report_run(forbidden, pool=pool)
+    equal("report: a 403 ends the run exit 3 (blocked)", rc, 3)
+    rec = records[0]
+    equal("report: 403 is recorded as blocked, not rejected",
+          rec["outcome"], "blocked")
+    # block_retries=2 against a 3-exit pool: the start exit plus two rotations.
+    equal("report: a 403 was retried from every exit (1 + 2 block retries)",
+          rec["attempts"], 3)
+    equal("report: the page records the exit it FINISHED on, masked",
+          rec["proxy_exit"], "http://exit-c.example:8003")
+    check("report: the blocked reason names http-403",
+          "http-403" in rec["reason"], rec["reason"])
+    _no_credentials(json.dumps(records), "a blocked page's record")
+    check("report: the summary counts the block",
+          summary == "Page report: 0/1 page(s) succeeded (1 blocked) "
+                     "-> %s.page_report.json" % out, summary)
+
+    def bad_request(method, url, body):
+        if url == ORIGIN_URL:
+            return _report_landing(method, url, body)
+        return _FakeResponse(400, "")
+
+    rc, records, summary, out, calls, _re, _se = _http_report_run(
+        bad_request, pages=3, retries=3)
+    rec = records[0]
+    equal("report: a 400 is recorded as rejected, not blocked",
+          rec["outcome"], "rejected")
+    equal("report: a refused parameter is tried once and never retried",
+          rec["attempts"], 1)
+    check("report: the refusal reason is the endpoint's own complaint",
+          rec["reason"] == "HTTP 400, empty body", rec["reason"])
+    # The run stopped on page 1: pages 2-3 were planned but never fetched.
+    equal("report: the refused run holds only the page it tried",
+          [r["page"] for r in records], [1])
+    check("report: the summary distinguishes a rejection",
+          summary == "Page report: 0/1 page(s) succeeded (1 rejected) "
+                     "-> %s.page_report.json" % out, summary)
+
+
+def check_the_page_report_records_a_transport_failure_masked():
+    """A request that never completes: transport_failed, the retry count,
+    and a reason whose credential is masked while the host survives."""
+    import requests as _requests
+    import proxy_pool
+
+    def dead(method, url, body):
+        # The landing succeeds; the data request itself fails. A failure ON
+        # the landing reads as a dead proxy and breaks straight to an exit
+        # rotation, but a single-exit pool cannot rotate, so to exercise the
+        # --retries transport path the error must come after the landing.
+        if url == ORIGIN_URL:
+            return _report_landing(method, url, body)
+        raise _requests.exceptions.ConnectionError(
+            "Unable to connect to proxy http://user-a:secret-alpha@exit-a.example:8001")
+
+    pool = proxy_pool.ProxyPool([_REPORT_PROXIES[0]])  # one exit: it cannot rotate
+    rc, records, summary, out, calls, _re, _se = _http_report_run(
+        dead, pages=1, retries=2, pool=pool)
+    equal("report: a dead exit is exit 5", rc, 5)
+    rec = records[0]
+    equal("report: a transport error is transport_failed, not blocked",
+          rec["outcome"], "transport_failed")
+    equal("report: both --retries attempts are counted", rec["attempts"], 2)
+    equal("report: the single exit is the masked one it kept failing on",
+          rec["proxy_exit"], "http://***:***@exit-a.example:8001")
+    check("report: the reason keeps the host but loses the password",
+          "exit-a.example:8001" in rec["reason"]
+          and "secret-alpha" not in rec["reason"], rec["reason"])
+    _no_credentials(json.dumps(records), "a transport-failed page's record")
+    check("report: the summary names the transport failure",
+          "1 transport_failed" in (summary or ""), summary)
+
+
+def check_the_page_report_covers_concurrent_pages_without_mixing_exits():
+    """Concurrency: N workers on N distinct exits. Each record must name its
+    own page's exit, pages must appear once and in order, and the totals on
+    the summary line must add up to the planned set."""
+    import proxy_pool
+    from product_parser import Query
+
+    seen_exits = []
+    seen_lock = threading.Lock()
+
+    def served(method, url, body):
+        if url == ORIGIN_URL:
+            return _report_landing(method, url, body)
+        return _FakeResponse(200, fx("copy_30d_roi"))
+
+    # Wrap _Ops.open to note each WORKER session's exit. Page 1 is fetched
+    # alone through the shared pool (not a worker_pool), so record only opens
+    # whose pool is a rotated worker view — those are the concurrent workers
+    # the check is about, and counting page 1 would double-count its exit.
+    import http_scraper
+    real_worker_pool = http_scraper.page_flow.worker_pool
+    real_open = http_scraper._Ops.open
+
+    def tracking_open(self):
+        real_open(self)
+        if self.pool and getattr(self.pool, "_is_report_worker", False):
+            with seen_lock:
+                seen_exits.append(self.pool.current)
+        return self
+
+    def tracking_worker_pool(pool, index):
+        worker_pool = real_worker_pool(pool, index)
+        worker_pool._is_report_worker = True
+        return worker_pool
+
+    pool = proxy_pool.ProxyPool(list(_REPORT_PROXIES))
+    http_scraper._Ops.open = tracking_open
+    http_scraper.page_flow.worker_pool = tracking_worker_pool
+    try:
+        rc, records, summary, out, calls, _re, _se = _http_report_run(
+            served, pages=3, query=Query("copytrading"), pool=pool,
+            concurrency=3)
+    finally:
+        http_scraper._Ops.open = real_open
+        http_scraper.page_flow.worker_pool = real_worker_pool
+    equal("report: concurrent run is exit 0", rc, 0)
+    equal("report: all three pages recorded once, ordered",
+          [r["page"] for r in records], [1, 2, 3])
+    check("report: every concurrent page names a real, masked pool exit",
+          all(r["proxy_exit"] in
+              {"http://***:***@exit-a.example:8001",
+               "http://***:***@exit-b.example:8002",
+               "http://exit-c.example:8003"} for r in records),
+          json.dumps(records))
+    _no_credentials(json.dumps(records), "the concurrent report")
+    equal("report: the summary counts all three",
+          summary, "Page report: 3/3 page(s) succeeded -> %s.page_report.json" % out)
+    # concurrency workers are built up front, each by worker_pool on a rotated
+    # VIEW of the same pool. Three workers must therefore open on the three
+    # distinct exits — the bug this guards against is every worker silently
+    # sharing one address. (One worker may then find the queue already empty.)
+    check("report: every concurrent worker opened its own distinct exit",
+          len(seen_exits) == 3 and len(set(seen_exits)) == 3,
+          repr(seen_exits))
+
+
+def check_the_page_report_treats_unplanned_and_unattempted_pages_right():
+    """Two boundaries. Asking for more pages than the site has must plan the
+    run down and record neither failures nor phantom pages; a page the loop
+    never reaches (a dead worker) is recorded as unattempted, not failed."""
+    import http_scraper
+    import page_flow
+
+    # (1) --pages beyond the site's own total (the P2P fixture totals 187 =
+    # 10 pages). Asking for 25 fetches 10 and must report 10 successes.
+    def served(method, url, body):
+        if url == ORIGIN_URL:
+            return _report_landing(method, url, body)
+        return _FakeResponse(200, fx("p2p_usdt_eur_buy"))
+
+    rc, records, summary, out, calls, _re, _se = _http_report_run(served, pages=25)
+    equal("report: an over-asked run still exits 0", rc, 0)
+    equal("report: only the pages the site has are recorded",
+          [r["page"] for r in records], list(range(1, 11)))
+    check("report: pages past the end are not failures",
+          all(r["outcome"] == "success" for r in records))
+
+    # (2) A worker that dies on its first page: its page is never fetched.
+    # Three workers share the queue; the one that takes page 2 dies, and the
+    # other two drain the rest. Driven through the real concurrent function
+    # with fetch_one_page stubbed, mirroring the dead-worker suite.
+    real_fetch = page_flow.fetch_one_page
+
+    def exploding(ops, args, pool, query, page_num, mask=None):
+        if page_num == 2:
+            raise RuntimeError("worker died")
+        o = page_flow.PageOutcome(page_num=page_num, url="u")
+        o.products = [object()]
+        o.state = "content"
+        o.attempts = 1
+        o.proxy_exit = pool.current if pool else None
+        return o
+
+    with tempfile.TemporaryDirectory() as tmp:
+        args = types.SimpleNamespace(delay=0, out=os.path.join(tmp, "out"))
+        page_flow.fetch_one_page = exploding
+        try:
+            more, unattempted, exhausted = http_scraper._fetch_pages_concurrently(
+                args, None, None, list(range(2, 6)), 3)
+        finally:
+            page_flow.fetch_one_page = real_fetch
+        report = http_scraper.PageRunReport(args.out)
+        report.add_outcomes(more)
+        report.add_unattempted(unattempted)
+        path = report.write()
+        records = json.load(open(path, encoding="utf-8"))
+        by_page = {r["page"]: r for r in records}
+        fetched = sorted(o.page_num for o in more)
+        equal("report: the dead worker's page is absent from the outcomes",
+              fetched, [3, 4, 5])
+        equal("report: the page that died comes back as unattempted",
+              unattempted, [2])
+        unrec = by_page[2]
+        equal("report: an un-fetched page is recorded unattempted, not failed",
+              unrec["outcome"], "unattempted")
+        equal("report: an unattempted page cost zero attempts",
+              unrec["attempts"], 0)
+        check("report: an unattempted record names no exit and no reason",
+              unrec["proxy_exit"] == "(none)" and unrec["reason"] is None)
+        check("report: the summary separates unattempted from failures",
+              "1 unattempted" in report.summary_line(),
+              report.summary_line())
+
+
+def check_the_page_report_module_maps_every_outcome():
+    """Unit-level pinning of the outcome mapping and the masking boundary,
+    so a future edit to the five endings is caught without a live run."""
+    import page_report
+    from page_report import (PageRunReport, SUCCESS, REJECTED,
+                             BLOCKED, TRANSPORT_FAILED, UNATTEMPTED, ALL_OUTCOMES)
+    import page_flow
+    import proxy_pool
+
+    equal("report: the five endings are the documented set",
+          sorted(ALL_OUTCOMES),
+          sorted(["success", "rejected", "blocked",
+                  "transport_failed", "unattempted"]))
+
+    def oc(**kw):
+        base = dict(page_num=1, url="u", attempts=2, proxy_exit=None, error=None)
+        base.update(kw)
+        return page_flow.PageOutcome(**base)
+
+    equal("report: a plain page maps to success",
+          page_report.outcome_for(oc(state="content")), SUCCESS)
+    equal("report: a rejected parameter maps to rejected",
+          page_report.outcome_for(oc(state="rejected",
+                                     rejected="code 2: bad")), REJECTED)
+    equal("report: a 403/451/WAF page maps to blocked",
+          page_report.outcome_for(oc(state="blocked", blocked_by="http-403")),
+          BLOCKED)
+    equal("report: a load failure maps to transport_failed",
+          page_report.outcome_for(oc(state="load_failed", load_failed=True,
+                                     error="timeout")), TRANSPORT_FAILED)
+    equal("report: an unreadable-but-served page is a transport failure, not "
+          "an empty listing",
+          page_report.outcome_for(oc(state="content", unread=True)),
+          TRANSPORT_FAILED)
+    equal("report: an unattempted record is its own ending",
+          page_report.unattempted_record(7).outcome, UNATTEMPTED)
+
+    rec = page_report.record_for(oc(
+        state="blocked", blocked_by="http-403",
+        proxy_exit="http://user-a:secret-alpha@exit-a.example:8001",
+        error="blocked by http-403"))
+    equal("report: record_for masks the exit at the boundary",
+          rec.proxy_exit, "http://***:***@exit-a.example:8001")
+    check("report: masking never raises on a malformed URL",
+          page_report.record_for(oc(proxy_exit="::::not a url")).proxy_exit
+          == proxy_pool.mask("::::not a url"))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        report = PageRunReport(os.path.join(tmp, "out"))
+        report.add_outcomes([oc(page_num=2, state="content"),
+                             oc(page_num=1, state="blocked", blocked_by="http-403",
+                                error="blocked by http-403")])
+        report.add_unattempted([3])
+        written = json.load(open(report.write(), encoding="utf-8"))
+        equal("report: records are sorted by page regardless of insert order",
+              [r["page"] for r in written], [1, 2, 3])
+        equal("report: success/total counts", (report.succeeded, report.total_pages),
+              (1, 3))
+        equal("report: per-outcome counts",
+              (report.count(BLOCKED), report.count(SUCCESS),
+               report.count(UNATTEMPTED)), (1, 1, 1))
 
 
 def check_a_moved_payload_shape_is_not_an_empty_listing():

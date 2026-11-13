@@ -305,11 +305,17 @@ def query_summary(query: Query) -> dict:
 
 
 def finish(args, query: Query, outcomes: List, stop_reason: str,
-           blocked: bool) -> int:
+           blocked: bool, unattempted: Optional[List[int]] = None,
+           page_reporter=None) -> int:
     """Merge the pages in PAGE order, write the output, return the exit code.
 
     One implementation for the three engines, so the merge order, the
     dedupe and the sidecar cannot differ between them.
+
+    `unattempted` are planned page numbers the loop never fetched (a dead
+    worker, or an empty page ending dispatch); `page_reporter`, when given,
+    is the engine's PageRunReport, which records those pages separately so
+    "not attempted" is never mistaken for a failed fetch.
     """
     rows, seen = [], set()
     for oc in sorted(outcomes, key=lambda o: o.page_num):
@@ -329,6 +335,9 @@ def finish(args, query: Query, outcomes: List, stop_reason: str,
         log.info("The site reports %d match(es); this run holds %d (%.1f%%).",
                  total, len(rows), 100.0 * len(rows) / total)
     last_ok = max([o.page_num for o in ok_pages] or [1])
+    if page_reporter is not None:
+        page_reporter.add_outcomes(outcomes)
+        page_reporter.add_unattempted(unattempted or [])
     return finish_run(
         rows, args.out, args.format, args.allow_empty,
         blocked=blocked, stop_reason=stop_reason,
@@ -438,6 +447,15 @@ class PageOutcome:
     # Core columns filled on fewer than CORE_FIELD_FLOOR% of this page's
     # rows, as {column: share}. Empty when the page looks as captured.
     field_shortfall: dict = field(default_factory=dict)
+    # Per-page facts for the page_report sidecar. `attempts` counts every
+    # fetch attempt the page got, across transport retries, throttle waits
+    # and block-retry rotations (at least 1 for any page that was fetched).
+    # `proxy_exit` is the pool exit the page FINISHED on — its own exit,
+    # not a sibling worker's — as a raw URL, masked only when the record is
+    # serialised. `error` holds the last masked failure summary, or None.
+    attempts: int = 0
+    proxy_exit: Optional[str] = None
+    error: Optional[str] = None
 
     @property
     def ok(self) -> bool:
@@ -603,6 +621,10 @@ def fetch_one_page(ops, args, pool, query: Query, page_num: int,
     state, text, last_error, exit_failed = "unknown", "", None, None
     # One allowance for the whole page, across every landing below.
     budget = SolveBudget()
+    # Every pass through the block loop is one request attempt: a transport
+    # retry repeats the pass inside it, a block retry begins another. The
+    # total is what the per-page report records as this page's attempt count.
+    total_attempts = 0
 
     for block_attempt in range(block_retries + 1):
         log.info("Fetching page %d/%d: %s", page_num, args.pages, req.label)
@@ -610,6 +632,7 @@ def fetch_one_page(ops, args, pool, query: Query, page_num: int,
         attempt = 0
         while attempt < args.retries:
             attempt += 1
+            total_attempts += 1
             text, last_error = "", None
             if not ops.landed:
                 state, last_error = land(ops, args, budget)
@@ -668,13 +691,21 @@ def fetch_one_page(ops, args, pool, query: Query, page_num: int,
         break
 
     outcome.state = state
+    # The exit the page actually finished on. With a pool this is the
+    # pool's current entry after any rotations; None serialises as "(none)"
+    # in the report. Read once, here, so rotations made by later pages can
+    # never rewrite what this page records.
+    outcome.attempts = total_attempts
+    outcome.proxy_exit = pool.current if pool else None
     if state == "load_failed" or exit_failed:
         outcome.load_failed = True
+        outcome.error = mask(last_error or "the request never completed")
         log.error("Gave up on page %d: %s", page_num,
                   mask(last_error or "the request never completed"))
         return outcome
     if state == "rejected":
         outcome.rejected = api_error(text) or "HTTP 400, empty body"
+        outcome.error = outcome.rejected
         log.error("The endpoint refused this request (%s). That is a statement "
                   "about the PARAMETERS, and the same request sent again gets "
                   "the same answer, so it is not retried. If the query looks "
@@ -684,6 +715,7 @@ def fetch_one_page(ops, args, pool, query: Query, page_num: int,
         return outcome
     if counts_as_blocked(state):
         outcome.blocked_by = refusal_name(state)
+        outcome.error = "blocked by %s" % outcome.blocked_by
         debug = _save_debug(args, page_num, text)
         log.error("Blocked by %s on page %d — saved to %s. This is exit 3, "
                   "distinct from an empty listing (exit 4). %s",
@@ -692,6 +724,8 @@ def fetch_one_page(ops, args, pool, query: Query, page_num: int,
     if not should_parse(state):
         # throttled past its budget, or never the endpoint's JSON at all
         outcome.load_failed = True
+        outcome.error = mask(last_error or "never came back as the endpoint's JSON: %s"
+                             % state)
         debug = _save_debug(args, page_num, text)
         log.error("Page %d never came back as the endpoint's JSON (%s) — saved "
                   "to %s. %s", page_num, state, debug,
@@ -711,6 +745,8 @@ def fetch_one_page(ops, args, pool, query: Query, page_num: int,
     outcome.field_shortfall = _core_field_shortfall(rows, query.mode, page_num)
     if _unread(rows, outcome.total_available, outcome.pages_available, page_num):
         outcome.unread = True
+        outcome.error = ("the site counts rows on this page but none were "
+                         "read — the payload's shape has moved")
         debug = _save_debug(args, page_num, text)
         log.error("Page %d was served, and the site counts %d match(es) that "
                   "put rows on it, but none were read — the payload's shape "
@@ -749,7 +785,8 @@ def check_pay_types(ops, args, query: Query) -> Optional[str]:
 
 def run_pages(open_ops, close_ops, run_concurrently, args, pool,
               query: Query, concurrency: int,
-              mask: Callable[[str], str] = lambda s: s) -> int:
+              mask: Callable[[str], str] = lambda s: s,
+              page_reporter=None) -> int:
     """The whole run after argument handling, shared by the three engines.
 
     `open_ops()` returns a ready ops object on `pool`, `close_ops(ops)`
@@ -757,8 +794,13 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
     (outcomes, unattempted, exhausted) for pages 2..N fetched by workers. The
     engines supply those three because a browser's lifecycle (and on
     Playwright, its thread) is the one thing that cannot be shared.
+
+    `page_reporter` is an optional PageRunReport the engine wants filled
+    with one record per planned page, including pages that were never
+    attempted. It is written by the engine itself after this returns.
     """
     outcomes: List[PageOutcome] = []
+    unattempted: List[int] = []
     blocked, stop_reason = False, "completed"
     ops = open_ops()
     try:
@@ -785,8 +827,14 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
                 ops = None
                 log.info("Fetching pages 2-%d across %d workers%s.", plan,
                          concurrency, f" over {len(pool)} exit(s)" if pool else "")
-                more, unattempted, exhausted = run_concurrently(rest)
+                more, queued_but_unfetched, exhausted = run_concurrently(rest)
                 outcomes.extend(more)
+                fetched = {o.page_num for o in more}
+                # Pages the queue still held when the run stopped: a worker
+                # died, or an empty page set the shared "listing ended"
+                # event. Planned but never fetched, so they are recorded as
+                # unattempted rather than counted as failures.
+                unattempted = sorted(n for n in rest if n not in fetched)
                 failed = [o for o in more if not o.ok]
                 if failed:
                     stop_reason = stop_reason_for(min(failed, key=lambda o: o.page_num))
@@ -796,6 +844,7 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
                 elif unattempted:
                     stop_reason = "pages_unattempted"
             else:
+                sequential_planned = list(rest)
                 for page_num in rest:
                     ops.wait_ms(int(args.delay * 1000))
                     if pool and pool.rotates_per_page():
@@ -806,6 +855,10 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
                     if not outcome.ok:
                         stop_reason = stop_reason_for(outcome)
                         blocked = outcome.blocked_by is not None
+                        # The loop stops at the first failure, so every later
+                        # planned page was never tried.
+                        unattempted = [n for n in sequential_planned
+                                       if n > page_num]
                         break
                     if not outcome.products:
                         # The live listing shrank below the plan made from
@@ -817,16 +870,24 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
     finally:
         if ops is not None:
             close_ops(ops)
-    return finish(args, query, outcomes, stop_reason, blocked)
+    return finish(args, query, outcomes, stop_reason, blocked,
+                  unattempted=unattempted, page_reporter=page_reporter)
 
 
 def worker_loop(ops, args, query: Query, work, results, results_lock,
-                exhausted, name: str, mask: Callable[[str], str] = lambda s: s):
+                exhausted, name: str, mask: Callable[[str], str] = lambda s: s,
+                in_flight: Optional[Callable[[int, bool], None]] = None):
     """One concurrent worker's page loop, after its engine opened `ops`.
 
     Takes pages until the queue is empty or a page comes back empty (the
     live listing ended before the plan did), which sets `exhausted` so the
     other workers stop taking work too.
+
+    `in_flight`, when given, is called as `in_flight(page_num, True)` right
+    after a page is dequeued and `in_flight(page_num, False)` once it has a
+    result. It lets an engine account for a page a worker died holding: such
+    a page is in neither the queue nor the results, and without the callback
+    the run could not report it.
     """
     first = True
     while not exhausted.is_set():
@@ -837,9 +898,13 @@ def worker_loop(ops, args, query: Query, work, results, results_lock,
         if not first:
             ops.wait_ms(int(args.delay * 1000))
         first = False
+        if in_flight is not None:
+            in_flight(page_num, True)
         outcome = fetch_one_page(ops, args, ops.pool, query, page_num, mask)
         with results_lock:
             results.append(outcome)
+        if in_flight is not None:
+            in_flight(page_num, False)
         if outcome.ok and not outcome.products:
             log.info("[%s] page %d returned no rows — the listing ended; "
                      "stopping dispatch.", name, page_num)

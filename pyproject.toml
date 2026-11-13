@@ -49,6 +49,7 @@ py-modules = [
     "http_scraper",
     "output_writer",
     "page_flow",
+    "page_report",
     "playwright_scraper",
     "product_parser",
     "proxy_pool",

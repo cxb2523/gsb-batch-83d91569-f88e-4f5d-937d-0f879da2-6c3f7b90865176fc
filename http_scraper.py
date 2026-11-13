@@ -56,6 +56,7 @@ import requests
 from product_parser import (ANN_CATALOGS, COPY_SORTS, COPY_TIME_RANGES,
                             DEFAULT_ANN_CATALOG, DEFAULT_COPY_SORT, P2P_SIDES)
 import page_flow
+from page_report import PageRunReport
 from proxy_pool import (from_args as proxy_pool_from_args, mask, ROTATE_MODES,
                         ProxyError)
 import env_config
@@ -183,6 +184,19 @@ def _fetch_pages_concurrently(args, pool, query, page_nums, concurrency: int):
         work.put(n)
     results, results_lock = [], threading.Lock()
     exhausted = threading.Event()
+    # Pages a worker has DEQUEUED but not yet turned into a result. Without
+    # this a worker that dies mid-page leaves that page in neither place —
+    # not in `results` (it never finished) and no longer in the queue (it was
+    # already taken) — so the run could not account for it at all. The set
+    # lets the dead worker's page be handed back and reported unattempted.
+    in_flight, in_flight_lock = set(), threading.Lock()
+
+    def mark_in_flight(page_num, active: bool):
+        with in_flight_lock:
+            if active:
+                in_flight.add(page_num)
+            else:
+                in_flight.discard(page_num)
 
     def worker(index: int):
         name = f"worker-{index + 1}"
@@ -190,9 +204,17 @@ def _fetch_pages_concurrently(args, pool, query, page_nums, concurrency: int):
         try:
             ops = _Ops(args, page_flow.worker_pool(pool, index)).open()
             page_flow.worker_loop(ops, args, query, work, results, results_lock,
-                                  exhausted, name, _mask_credentials)
+                                  exhausted, name, _mask_credentials,
+                                  in_flight=mark_in_flight)
         except Exception:  # noqa: BLE001 — a dead worker must not hang the run
             logger.exception("[%s] died; its pages will be reported as failed.", name)
+            # Requeue the page this worker died on, so it is reported as
+            # unattempted rather than silently disappearing from the run.
+            with in_flight_lock:
+                orphaned = sorted(in_flight)
+                in_flight.clear()
+            for page_num in orphaned:
+                work.put(page_num)
         finally:
             if ops is not None:
                 ops.close()
@@ -216,12 +238,22 @@ def _fetch_pages_concurrently(args, pool, query, page_nums, concurrency: int):
 def scrape(args) -> int:
     pool = proxy_pool_from_args(args)
     concurrency = page_flow.concurrency_for(args, pool)
-    return page_flow.run_pages(
+    # One record per planned page, written next to the .meta.json sidecar
+    # whatever the run's exit code: an all-success run still leaves the
+    # proof, and a failed run leaves the per-page reasons the exit code
+    # cannot carry.
+    report = PageRunReport(args.out)
+    rc = page_flow.run_pages(
         lambda: _Ops(args, pool).open(),
         lambda ops: ops.close(),
         lambda pages: _fetch_pages_concurrently(args, pool, args.query, pages,
                                                 concurrency),
-        args, pool, args.query, concurrency, _mask_credentials)
+        args, pool, args.query, concurrency, _mask_credentials,
+        page_reporter=report)
+    if report.total_pages:
+        report.write()
+        print(report.summary_line())
+    return rc
 
 
 def parse_args(argv=None):
