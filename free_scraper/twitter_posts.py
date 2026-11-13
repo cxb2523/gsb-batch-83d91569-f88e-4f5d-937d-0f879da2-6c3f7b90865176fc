@@ -1,7 +1,7 @@
 import requests
 import json
 from time import sleep
-from typing import Optional, Dict, List
+from typing import Callable, Dict, List, Optional, Tuple
 
 # Configuration
 COOKIES = {
@@ -79,16 +79,35 @@ TWEET_IDS = [
     "1885406586136383634",
 ]
 
+TWEET_URL = "https://api.x.com/graphql/_y7SZqeOFfgEivILXIy3tQ/TweetResultByRestId"
+REQUEST_TIMEOUT = 10
+REQUEST_INTERVAL = 1
+OUTPUT_PATH = "twitter_posts.json"
 
-def fetch_tweet_data(tweet_id: str) -> Optional[Dict]:
-    """
-    Fetch and extract essential data for a single tweet
+# Outcome categories recorded for tweets that could not be collected.
+OUTCOME_TIMEOUT = "timeout"
+OUTCOME_HTTP_ERROR = "http_error"
+OUTCOME_MISSING_TWEET_DATA = "missing_tweet_data"
+OUTCOME_NETWORK_ERROR = "network_error"
+OUTCOME_INVALID_JSON = "invalid_json"
+OUTCOME_UNEXPECTED_ERROR = "unexpected_error"
 
-    Args:
-        tweet_id: The ID of the tweet to fetch
 
-    Returns:
-        Dict containing tweet data if successful, None otherwise
+def _short_reason(message: str, limit: int = 200) -> str:
+    """Collapse whitespace and cap length so failure reasons stay readable."""
+    reason = " ".join(str(message).split())
+    if not reason:
+        reason = "unknown error"
+    if len(reason) > limit:
+        reason = reason[: limit - 3] + "..."
+    return reason
+
+
+def request_tweet(tweet_id: str):
+    """Perform the HTTP request for a single tweet.
+
+    Kept as a separate, replaceable function so tests can supply fake
+    responses without touching the real endpoint configuration below.
     """
     params = {
         "variables": json.dumps(
@@ -110,81 +129,164 @@ def fetch_tweet_data(tweet_id: str) -> Optional[Dict]:
         ),
     }
 
+    return requests.get(
+        TWEET_URL,
+        params=params,
+        cookies=COOKIES,
+        headers=HEADERS,
+        timeout=REQUEST_TIMEOUT,
+    )
+
+
+def _failure(tweet_id: str, outcome: str, reason: str) -> Dict:
+    return {"tweet_id": tweet_id, "outcome": outcome, "reason": _short_reason(reason)}
+
+
+def _get(node, *keys, default=None):
+    """Walk nested dict keys, tolerating missing or non-dict nodes."""
+    for key in keys:
+        if not isinstance(node, dict):
+            return default
+        node = node.get(key)
+    return node if node is not None else default
+
+
+def fetch_tweet_data(
+    tweet_id: str,
+    request_fn: Optional[Callable[[str], object]] = None,
+) -> Tuple[Optional[Dict], Optional[Dict]]:
+    """
+    Fetch and extract essential data for a single tweet
+
+    Args:
+        tweet_id: The ID of the tweet to fetch
+        request_fn: Callable performing the HTTP request. Defaults to
+            ``request_tweet`` resolved at call time, so it can be replaced
+            by tests or callers.
+
+    Returns:
+        A ``(tweet_data, failure)`` tuple. On success ``tweet_data`` holds the
+        tweet record and ``failure`` is ``None``; on failure ``tweet_data`` is
+        ``None`` and ``failure`` describes the outcome.
+    """
+    if request_fn is None:
+        request_fn = request_tweet
+
     try:
-        response = requests.get(
-            "https://api.x.com/graphql/_y7SZqeOFfgEivILXIy3tQ/TweetResultByRestId",
-            params=params,
-            cookies=COOKIES,
-            headers=HEADERS,
-            timeout=10,
-        )
+        response = request_fn(tweet_id)
 
         if response.status_code != 200:
-            print(f"Error: Status code {response.status_code} for tweet {tweet_id}")
-            return None
+            return None, _failure(
+                tweet_id,
+                OUTCOME_HTTP_ERROR,
+                f"HTTP status {response.status_code}",
+            )
 
         data = response.json()
-        result = data.get("data", {}).get("tweetResult", {}).get("result", {})
 
-        if not result:
-            print(f"No data found for tweet {tweet_id}")
-            return None
+        result = _get(data, "data", "tweetResult", "result", default={})
 
-        return {
-            "tweet_id": tweet_id,
-            "author": result.get("core", {})
-            .get("user_results", {})
-            .get("result", {})
-            .get("legacy", {})
-            .get("screen_name"),
-            "verified": result.get("core", {})
-            .get("user_results", {})
-            .get("result", {})
-            .get("is_blue_verified"),
-            "content": result.get("legacy", {}).get("full_text"),
-            "posted_at": result.get("legacy", {}).get("created_at"),
-            "engagement": {
-                "likes": result.get("legacy", {}).get("favorite_count"),
-                "retweets": result.get("legacy", {}).get("retweet_count"),
-                "views": result.get("views", {}).get("count"),
+        if not isinstance(result, dict) or not result:
+            return None, _failure(
+                tweet_id,
+                OUTCOME_MISSING_TWEET_DATA,
+                "response contained no tweet data",
+            )
+
+        user = _get(result, "core", "user_results", "result", default={})
+        legacy = _get(result, "legacy", default={})
+
+        return (
+            {
+                "tweet_id": tweet_id,
+                "author": _get(user, "legacy", "screen_name"),
+                "verified": user.get("is_blue_verified")
+                if isinstance(user, dict)
+                else None,
+                "content": _get(legacy, "full_text"),
+                "posted_at": _get(legacy, "created_at"),
+                "engagement": {
+                    "likes": _get(legacy, "favorite_count"),
+                    "retweets": _get(legacy, "retweet_count"),
+                    "views": _get(result, "views", "count"),
+                },
             },
-        }
+            None,
+        )
 
-    except requests.exceptions.Timeout:
-        print(f"Timeout while fetching tweet {tweet_id}")
+    except requests.exceptions.Timeout as e:
+        return None, _failure(
+            tweet_id,
+            OUTCOME_TIMEOUT,
+            f"request timed out after {REQUEST_TIMEOUT}s: {e}",
+        )
+    except requests.exceptions.JSONDecodeError as e:
+        # requests' JSONDecodeError also subclasses RequestException, so it
+        # must be handled before the generic network-error branch.
+        return None, _failure(tweet_id, OUTCOME_INVALID_JSON, f"invalid JSON: {e}")
     except requests.exceptions.RequestException as e:
-        print(f"Network error while fetching tweet {tweet_id}: {str(e)}")
-    except json.JSONDecodeError:
-        print(f"Invalid JSON response for tweet {tweet_id}")
+        return None, _failure(tweet_id, OUTCOME_NETWORK_ERROR, e)
+    except json.JSONDecodeError as e:
+        return None, _failure(tweet_id, OUTCOME_INVALID_JSON, f"invalid JSON: {e}")
     except Exception as e:
-        print(f"Unexpected error while fetching tweet {tweet_id}: {str(e)}")
+        return None, _failure(tweet_id, OUTCOME_UNEXPECTED_ERROR, e)
 
-    return None
+
+def collect_tweets(
+    tweet_ids: List[str],
+    request_fn: Optional[Callable[[str], object]] = None,
+    sleep_fn: Callable[[float], None] = sleep,
+    interval: float = REQUEST_INTERVAL,
+    output_path: str = OUTPUT_PATH,
+) -> Dict:
+    """Fetch every tweet ID and always write a result file.
+
+    The output file is a single object containing successful ``results``,
+    per-tweet ``failures`` and a ``summary`` with the success/failure counts.
+    It is written even when every request failed, so downstream consumers can
+    tell "nothing collected" apart from "the script never ran".
+    """
+    results: List[Dict] = []
+    failures: List[Dict] = []
+
+    if request_fn is None:
+        request_fn = request_tweet
+
+    for tweet_id in tweet_ids:
+        print(f"Processing tweet {tweet_id}...")
+        tweet_data, failure = fetch_tweet_data(tweet_id, request_fn=request_fn)
+
+        if tweet_data is not None:
+            results.append(tweet_data)
+        else:
+            failures.append(failure)
+            print(
+                f"Failed tweet {tweet_id}: {failure['outcome']} "
+                f"({failure['reason']})"
+            )
+
+        # Rate limiting protection (kept for every item, as before)
+        sleep_fn(interval)
+
+    payload = {
+        "results": results,
+        "failures": failures,
+        "summary": {"success": len(results), "failed": len(failures)},
+    }
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    print(
+        f"Summary: {len(results)} succeeded, {len(failures)} failed "
+        f"- saved to {output_path}"
+    )
+    return payload
 
 
 def main():
     """Main function to fetch and save tweet data"""
-    all_tweets: List[Dict] = []
-    successful_fetches = 0
-
-    for tweet_id in TWEET_IDS:
-        print(f"Processing tweet {tweet_id}...")
-        tweet_data = fetch_tweet_data(tweet_id)
-
-        if tweet_data:
-            all_tweets.append(tweet_data)
-            successful_fetches += 1
-
-        # Rate limiting protection
-        sleep(1)
-
-    # Save results
-    if all_tweets:
-        with open("twitter_posts.json", "w", encoding="utf-8") as f:
-            json.dump(all_tweets, f, indent=2, ensure_ascii=False)
-        print(f"Successfully saved {successful_fetches} tweets to twitter_posts.json")
-    else:
-        print("No tweets were successfully fetched")
+    collect_tweets(TWEET_IDS, request_fn=request_tweet)
 
 
 if __name__ == "__main__":
