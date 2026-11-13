@@ -1,0 +1,103 @@
+name: canary
+
+on:
+  schedule:
+    - cron: "47 8 * * 1"   # weekly, Mondays (every run bills a Scraping Browser session); avoid :00 so it doesn't pile up with everyone else's
+  workflow_dispatch: {}     # dispatch manually at least once before trusting the badge
+
+jobs:
+  # A real run over the 2Captcha Scraping Browser API — the only setup that
+  # scraped this site live (2026-09-30). There is no local-browser job:
+  # Cloudflare blocked every local browser tried, so such a job would be
+  # red every day and could never signal a regression.
+  #
+  # Two inputs, so one deleted article cannot turn the job red on its own:
+  #   1. `--discover top --max-results 5` — the live feed, always fresh;
+  #   2. one known classic Page (`vars.PERPLEXITY_CANARY_URL` overrides it).
+  # Blocked, empty, partial and remote-error outcomes are red. So is a run
+  # WITHOUT the PERPLEXITY_CDP_ENDPOINT secret: a canary that skips green
+  # tests nothing while its badge says the site works (13 of 13 scheduled
+  # runs from 2026-10-02 to 2026-10-14 skipped exactly that way).
+  canary-cdp:
+    runs-on: ubuntu-latest
+    env:
+      HAS_CDP: ${{ secrets.PERPLEXITY_CDP_ENDPOINT != '' }}
+      CANARY_URL: ${{ vars.PERPLEXITY_CANARY_URL || 'https://www.perplexity.ai/page/How-to-Generate-VzUTuvQVSIqru3QGvPihlg' }}
+      PERPLEXITY_CDP_ENDPOINT: ${{ secrets.PERPLEXITY_CDP_ENDPOINT }}
+      TWOCAPTCHA_KEY: ${{ secrets.TWOCAPTCHA_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail — no PERPLEXITY_CDP_ENDPOINT secret configured
+        if: env.HAS_CDP != 'true'
+        run: |
+          echo "::error::Missing repo secret PERPLEXITY_CDP_ENDPOINT (a 2Captcha Scraping \
+          Browser API ws:// endpoint). Cloudflare refuses every local browser on this site, \
+          so without it the canary cannot reach perplexity.ai and has tested nothing."
+          exit 1
+
+      - uses: actions/setup-python@v5
+        if: env.HAS_CDP == 'true'
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-playwright.txt
+        if: env.HAS_CDP == 'true'
+
+      # Credentials reach the scraper through the environment only, never
+      # argv (env_config.py reads PERPLEXITY_CDP_ENDPOINT / TWOCAPTCHA_KEY).
+      - name: Discover feed, 5 articles
+        if: env.HAS_CDP == 'true'
+        run: |
+          set +e
+          python3 playwright_scraper.py --discover top --max-results 5 \
+            --format json --out canary_discover.json --dump-html
+          echo "discover_exit=$?" >> "$GITHUB_ENV"
+
+      # One Browser API connection per profile: give the provider a moment
+      # to release the first session before the second run connects.
+      - name: One known Page
+        if: env.HAS_CDP == 'true'
+        run: |
+          set +e
+          sleep 20
+          python3 playwright_scraper.py --url "$CANARY_URL" \
+            --format json --out canary_page.json --dump-html
+          echo "page_exit=$?" >> "$GITHUB_ENV"
+
+      - name: Require complete runs with full API rows
+        if: env.HAS_CDP == 'true'
+        run: |
+          python3 -c "
+          import json, os
+
+          def check(name, out, minimum):
+              code = int(os.environ[name])
+              print(f'{out}: exit {code}')
+              if code != 0:
+                  raise SystemExit(f'{out}: canary requires EXIT_OK=0, got {code}')
+              meta = json.load(open(out + '.meta.json'))
+              print(json.dumps(meta, indent=2))
+              assert meta['status'] == 'complete', meta
+              rows = json.load(open(out))
+              assert len(rows) >= minimum, f'{out}: {len(rows)} rows, need >= {minimum}'
+              for r in rows:
+                  # Only the article API fills these; a regression to an
+                  # empty or HTML-shaped row shows up here first.
+                  assert r['sku'].startswith('perplexity-') and r['title'], r
+                  assert r['section_count'] and r['sources_json'] is not None, r
+                  assert r['published_at'], r
+
+          check('discover_exit', 'canary_discover.json', 3)
+          check('page_exit', 'canary_page.json', 1)
+          print('canary: OK')
+          "
+
+      - name: Upload artifacts on every non-skipped run
+        if: always() && env.HAS_CDP == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-cdp-${{ github.run_id }}
+          path: |
+            canary_*.json
+            canary_*_debug_*.html
+          retention-days: 14
