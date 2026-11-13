@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, unquote, urljoin, urlparse
 from playwright.sync_api import sync_playwright
 
 from .flight import has_flight
+from .outcomes import MIRROR_FAILED, SAVED, OutcomeBook
 from .util import UA, host_of
 
 REF = re.compile(
@@ -84,53 +85,68 @@ def refs(text, base, host):
     return {u for u in out if u.startswith("http") and host_of(u) == host and not BAD_URL.search(u)}
 
 
-def mirror(pages, assets, out_dir, log=print):
-    """Fetch pages and assets into out_dir. Returns (saved_pages, urls_tried, failures)."""
+def mirror(pages, assets, out_dir, log=print, outcomes=None):
+    """Fetch pages and assets into out_dir.
+
+    Returns (saved_pages, urls_tried, failures, outcomes). A page whose download or write
+    fails is recorded in `outcomes` as a mirror failure (asset failures stay in `failures`),
+    and its URL is returned in that category so the caller can keep it out of the manifest's
+    page list and the output folder.
+    """
     site = Path(out_dir)
     site.mkdir(parents=True, exist_ok=True)
     host = host_of(pages[0]["url"])
     page_paths = {urlparse(p["url"]).path.rstrip("/") or "/" for p in pages}
     todo, done, failures = set(assets), set(), []
     saved_pages = 0
+    outcomes = outcomes or OutcomeBook()
 
     with sync_playwright() as pw:
         req = pw.request.new_context(user_agent=UA)
 
         def fetch(url, headers=None, quiet=False):
+            """Returns (response_or_None, failure_record_or_None)."""
             try:
                 r = req.get(url, headers=headers, timeout=30000)
             except Exception as e:
+                failure = {"url": url, "error": str(e).splitlines()[0]}
                 if not quiet:
-                    failures.append({"url": url, "error": str(e).splitlines()[0]})
-                return None
+                    failures.append(failure)
+                return None, failure
             if not r.ok:
+                failure = {"url": url, "status": r.status}
                 if not quiet:
-                    failures.append({"url": url, "status": r.status})
-                return None
-            return r
+                    failures.append(failure)
+                return None, failure
+            return r, None
 
         for p in pages:
-            r = fetch(p["url"])
+            url = p["url"]
+            r, failure = fetch(url)
             if r is None:
+                reason = failure.get("error") or f"HTTP {failure.get('status')}"
+                outcomes.record(url, MIRROR_FAILED, reason)
                 continue
             body = r.text()
-            out = page_path(site, p["url"])
+            out = page_path(site, url)
             if out is None:
-                failures.append({"url": p["url"], "error": "path escapes the output folder"})
+                failures.append({"url": url, "error": "path escapes the output folder"})
+                outcomes.record(url, MIRROR_FAILED, "path escapes the output folder")
                 continue
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(body)
             saved_pages += 1
-            todo |= refs(body, p["url"], host)
+            outcomes.record(url, SAVED, "saved to site folder")
+            todo |= refs(body, url, host)
             if has_flight(body) and out.name == "index.html":
                 # Next.js navigates between pages by fetching this payload (?_rsc=...) instead
                 # of HTML; without it every client-side link 404s and falls back to a reload.
-                rsc = fetch(p["url"], headers={"RSC": "1"}, quiet=True)
+                rsc, _ = fetch(url, headers={"RSC": "1"}, quiet=True)
                 if rsc and "text/x-component" in rsc.headers.get("content-type", ""):
                     out.with_name("index.rsc").write_bytes(rsc.body())
 
         for path in EXTRAS:
-            r = fetch(urljoin(pages[0]["url"], path), quiet=True)
+            r, _ = fetch(urljoin(pages[0]["url"], path), quiet=True)
             out = asset_path(site, urljoin(pages[0]["url"], path))
             if r and out and not out.exists() and "text/html" not in r.headers.get("content-type", ""):
                 out.parent.mkdir(parents=True, exist_ok=True)
@@ -146,7 +162,7 @@ def mirror(pages, assets, out_dir, log=print):
             done.add(key)
             if "/cdn-cgi/" in parsed.path:                    # Cloudflare's own endpoints
                 continue
-            r = fetch(key)
+            r, _ = fetch(key)
             if r is None:
                 continue
             if "text/html" in r.headers.get("content-type", "") and not Path(parsed.path).suffix:
@@ -165,4 +181,4 @@ def mirror(pages, assets, out_dir, log=print):
         req.dispose()
 
     log(f"  mirrored {saved_pages} pages, {len(done) - len(failures)} assets")
-    return saved_pages, len(done), failures
+    return saved_pages, len(done), failures, outcomes

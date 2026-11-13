@@ -1,6 +1,7 @@
 """perfectclone command line."""
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
@@ -16,28 +17,40 @@ def cmd_clone(a):
     # Imported here so the editing commands don't pay for loading Playwright.
     from .crawl import crawl
     from .mirror import mirror
+    from .outcomes import CRAWL_ERROR, MIRROR_FAILED, NOT_VISITED, RESPONSE_REJECTED, ROBOTS_SKIPPED, SAVED, OutcomeBook
 
     out = Path(a.out)
     site = out / "site"
     print(f"Crawling {a.url}")
-    pages, assets, external, skipped = crawl(
+    book = OutcomeBook()
+    goto_timeout = int(os.environ.get("PERFECTCLONE_GOTO_TIMEOUT", "45000"))
+    pages, assets, external, skipped, book = crawl(
         a.url, max_pages=a.max_pages, respect_robots=not a.ignore_robots,
-        extract_dir=out / "extract" if a.extract else None,
+        extract_dir=out / "extract" if a.extract else None, outcomes=book,
+        goto_timeout=goto_timeout,
     )
     if not pages:
         sys.exit("No pages could be loaded." + (f" First problem: {skipped[0]}" if skipped else ""))
     print(f"Mirroring into {site}")
-    saved, fetched, failures = mirror(pages, assets, site)
+    saved, fetched, failures, book = mirror(pages, assets, site, outcomes=book)
+    # A page the mirror pass could not download must not look like a saved page: drop it from
+    # the manifest's page list (it was never written to the site folder either).
+    mirror_failures = set(book.urls(MIRROR_FAILED))
+    pages = [p for p in pages if p["url"] not in mirror_failures]
     localize(site, a.url)
     if a.strip_trackers:
         print("Removing trackers")
         strip(site)
     manifest = {
         "source": a.url, "pages": pages, "assets_fetched": fetched, "failures": failures,
-        "skipped": skipped, "external_hosts": external,
+        "skipped": skipped, "external_hosts": external, "page_outcomes": book.as_list(),
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     print(f"\nDone: {saved} pages, {fetched} assets → {site}")
+    print("  Page outcomes: " + ", ".join(
+        f"{len(book.urls(o))} {o}" for o in
+        (SAVED, ROBOTS_SKIPPED, CRAWL_ERROR, RESPONSE_REJECTED, MIRROR_FAILED, NOT_VISITED)
+        if book.urls(o)))
     if failures:
         print(f"  {len(failures)} URLs failed to download (see {out / 'manifest.json'})")
     if external:

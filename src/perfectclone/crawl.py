@@ -10,6 +10,7 @@ from urllib.parse import urldefrag, urljoin, urlparse
 
 from playwright.sync_api import sync_playwright
 
+from .outcomes import CRAWL_ERROR, NOT_VISITED, RESPONSE_REJECTED, ROBOTS_SKIPPED, SAVED, OutcomeBook
 from .util import UA, host_of
 
 NOT_PAGE = re.compile(
@@ -70,12 +71,19 @@ def launch(pw, log=print):
     return pw.chromium.launch()
 
 
-def crawl(start, max_pages=200, respect_robots=True, extract_dir=None, log=print):
-    """Visit same-site pages breadth-first. Returns (pages, asset_urls, external_hosts, skipped)."""
+def crawl(start, max_pages=200, respect_robots=True, extract_dir=None, log=print,
+          outcomes=None, goto_timeout=45000):
+    """Visit same-site pages breadth-first.
+
+    Returns (pages, asset_urls, external_hosts, skipped, outcomes). `outcomes` is an
+    OutcomeBook holding one per-URL ending for every candidate page; it may be passed in so
+    the mirror pass can extend the same book.
+    """
     host = host_of(start)
     first = page_key(start, host)
     queue, seen = deque([first]), {first}
     pages, assets, external, skipped = [], set(), set(), []
+    outcomes = outcomes or OutcomeBook()
     if extract_dir:
         Path(extract_dir).mkdir(parents=True, exist_ok=True)
 
@@ -120,10 +128,11 @@ def crawl(start, max_pages=200, respect_robots=True, extract_dir=None, log=print
             url = queue.popleft()
             if respect_robots and not robots.can_fetch("perfectclone", url):
                 skipped.append({"url": url, "reason": "robots.txt"})
+                outcomes.record(url, ROBOTS_SKIPPED, "blocked by robots.txt")
                 continue
             log(f"  [{len(pages) + 1}] {url}")
             try:
-                resp = page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                resp = page.goto(url, wait_until="domcontentloaded", timeout=goto_timeout)
                 # A slow third-party image, a video or a polling connection can hold off "load"
                 # and "networkidle" forever, so each gets a bounded wait.
                 for state, ms in (("load", 15000), ("networkidle", 8000)):
@@ -135,14 +144,22 @@ def crawl(start, max_pages=200, respect_robots=True, extract_dir=None, log=print
                 page.wait_for_timeout(400)
                 links = page.eval_on_selector_all("a[href]", "as => as.map(a => a.href)")
             except Exception as e:
-                skipped.append({"url": url, "reason": str(e).splitlines()[0]})
+                reason = str(e).splitlines()[0]
+                skipped.append({"url": url, "reason": reason})
+                outcomes.record(url, CRAWL_ERROR, reason)
                 continue
             status = resp.status if resp else None
             ctype = resp.headers.get("content-type", "") if resp else ""
             if (status and status >= 400) or "html" not in ctype:
-                skipped.append({"url": url, "reason": f"HTTP {status} {ctype}".strip()})
+                reason = f"HTTP {status} {ctype}".strip()
+                skipped.append({"url": url, "reason": reason})
+                outcomes.record(url, RESPONSE_REJECTED, reason)
                 continue
             pages.append({"url": url, "final_url": page.url, "status": status, "title": page.title()})
+            # Provisional success: the mirror pass upgrades it to MIRROR_FAILED if downloading
+            # the page's HTML later fails. Recording it here means every candidate has an
+            # ending even when crawl runs without a mirror pass.
+            outcomes.record(url, SAVED, "crawled successfully")
 
             if extract_dir:
                 data = page.evaluate(EXTRACT_JS)
@@ -157,5 +174,10 @@ def crawl(start, max_pages=200, respect_robots=True, extract_dir=None, log=print
                     seen.add(u)
                     queue.append(u)
 
+        # Candidates still queued when the --max-pages cap stopped the crawl never got an
+        # ending of their own; record one so every candidate URL is accounted for.
+        for url in queue:
+            outcomes.record(url, NOT_VISITED, "not visited: --max-pages limit reached")
+
         browser.close()
-    return pages, assets, sorted(external), skipped
+    return pages, assets, sorted(external), skipped, outcomes

@@ -82,7 +82,10 @@ perfectclone strip-trackers <site>
 ```
 
 - **clone** writes `out/site/` (the working copy) and `out/manifest.json` (pages, failures,
-  third-party hosts the site uses). `--extract` also saves each page's text, metadata
+  third-party hosts the site uses, and `page_outcomes`: one record per candidate page URL with
+  its ending — `saved`, `robots_skipped`, `crawl_error` (incl. timeouts), `response_rejected`
+  (non-HTML or 4xx/5xx), `mirror_failed`, or `not_visited` — plus a readable reason).
+  `--extract` also saves each page's text, metadata
   (headings, links, images, forms, JSON-LD) and a full-page screenshot to `out/extract/`.
   Trackers are stripped by default.
 - **replace** renames text everywhere: HTML, JS, CSS, JSON, SVG. It also handles the UPPER,

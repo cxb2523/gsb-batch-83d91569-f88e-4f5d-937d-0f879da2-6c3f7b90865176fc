@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+- `clone`: `manifest.json` gains `page_outcomes`, one record per candidate page URL giving its
+  ending (`saved`, `robots_skipped`, `crawl_error` including timeouts, `response_rejected` for
+  non-HTML or 4xx/5xx responses, `mirror_failed`, or `not_visited` when `--max-pages` stopped
+  the crawl) and a readable reason. A page that fails the mirror download is removed from
+  `pages` and no longer written to the site folder.
 - `clone`: mirror files scripts reference by path in any folder, including `./` and `?v=` paths
   and `.wasm`, `.riv`, `.bin`, `.glb`, `.gltf` files.
 
