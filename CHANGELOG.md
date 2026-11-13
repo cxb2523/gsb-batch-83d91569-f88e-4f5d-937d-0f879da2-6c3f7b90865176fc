@@ -1,0 +1,174 @@
+# Changelog
+
+Keep a Changelog format, and SemVer as closely as a CLI toolkit can manage:
+a patch release means fixes, not a promise that no default ever moves — a
+behaviour change in one is announced at the top of its notes.
+
+## [Unreleased]
+
+### Changed
+
+- CI only: the scheduled canary now starts at 05:27 UTC (Mondays) instead of 06:17, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.
+
+### Security
+
+- **certifi raised to 2026.10.23 in every lock** (from 2026.7.22, affected by
+  PYSEC-2026-4320, fixed in 2026.10.18). The CI-only tooling lock also takes
+  filelock 4.2.9 (Python 3.11+), msgpack 1.2.4 and setuptools 84.2.1 for newly
+  published advisories. Only these packages were upgraded; every other pin is
+  unchanged. On Python 3.9, urllib3 and requests (and, in the CI lock,
+  filelock, also on 3.10) stay at the last release that supports that Python;
+  those releases carry known advisories fixed only in releases that need a
+  newer Python. The weekly audit runs on 3.12 and does not report them.
+
+## [0.2.0] — 2026-10-16
+
+> **Behaviour changes.**
+> * **No 2Captcha key, or a `--max-solves` cap already spent, now ends with
+>   exit 5 (6 if some rows were gathered), not exit 3.** The site refused
+>   nothing in either case; `queries_failed` names `captcha_no_key` or
+>   `captcha_budget_exhausted`. A script that treated 3 as "add a key" should
+>   read that reason instead.
+> * **Output files are no longer created 0600.** A new JSON, CSV, sidecar or
+>   dump file gets the mode `open()` would give it (`0o666` minus the umask,
+>   so 0644 under the usual 022), and a file that already exists keeps its
+>   own mode. Before, every write left the file readable by its owner alone
+>   and narrowed an existing 0664 file to 0600.
+
+### Fixed
+
+- **A CSV cell beginning with a line feed was not neutralised.** `\n` joins
+  `=`, `+`, `-`, `@`, tab and CR as a formula lead, and the sidecar now
+  records `csv_cells_escaped`: how many CSV cells got the leading apostrophe
+  (the JSON keeps the site's text unchanged).
+- **The credential scan now reads renamed copies of `.env`** (`.env.bak`,
+  `.env.save`, `.env.old`, ...) even though `.gitignore` covers them, and
+  fails if it read no files at all. A working `.env` is still not read.
+- `.gitignore` covers `<out>.debug.html` / `.debug.png` and `dump/`.
+- The suite's summary counts the skipped engine modules it lists.
+- Public files no longer refer to an internal document the reader cannot
+  open; the rules are stated in place. A suite check keeps it that way.
+- The weekly dependency audit was red on two new urllib3 1.x advisories in
+  the pyppeteer lock (PYSEC-2026-4175, -4177). pyppeteer requires
+  `urllib3<2` and 1.26.20 is the last 1.x, so there is no compatible fix;
+  they are ignored by ID like the five before them, and the README now says
+  so under the pyppeteer engine.
+- **The canary runs weekly and fails, rather than skipping green, when
+  `ROSREESTR_CDP_ENDPOINT` or `TWOCAPTCHA_KEY` is missing.** It had been
+  dispatch-only partly because Scraping Browser credentials were said to
+  expire in about a day; that figure was never measured (0.1.1's notes
+  repeat it) and the 401 advice no longer states it.
+
+- **A timeout through a Russian exit was advised to "use a Russian exit".**
+  The advice now reads the exit country from the endpoint's or proxy's login
+  (never the password): an exit that is already `country-ru`/`-region-ru` is
+  told the exit is failing and to retry or switch transport. Measured
+  2026-09-29, when the Scraping Browser's `country-ru` exit timed out on the
+  site (16:32 and 16:36 UTC) while a `-region-ru` proxy reached it at 16:38.
+
+## [0.1.1] — 2026-09-29
+
+Fixes from a third-party audit of 0.1.0 (2026-09-29), each reproduced on
+`main` before it was changed, each pinned by a check that goes red when the
+old defect is planted back.
+
+> **Behaviour changes for an existing user:**
+>
+> - A malformed answer — an error object from the address search, a non-2xx
+>   status, records without a cadastral number — is now a **failure** (exit
+>   5, or 6 in a run that got other answers). 0.1.0 read it as "nothing
+>   found", and with `--allow-empty` wrote an empty table marked complete.
+> - `diff_runs.py` now refuses a run without the new `query_spec`, which
+>   includes every 0.1.0 output. Re-run both sides, or pass `--force`.
+> - `--proxy-rotate per-page` outside `--mode cadastral` is a usage error;
+>   it was silently ignored.
+
+### Fixed
+
+- **A malformed answer read as "not found".** The address search's answer
+  must be a JSON array and `/on`'s status must be 2xx; elements without a
+  cadastral number are counted in `malformed_rows` instead of vanishing, and
+  an answer holding nothing readable fails the query.
+- **`diff_runs.py` compared two different questions.** The sidecar records a
+  `query_spec` (service URL, mode, `--list-kind`, `--details`,
+  `--max-objects`), and a diff requires it to match — a PARCEL-only and a
+  FLAT-only run of one address are not a before and an after.
+- **The wheel could not decode anything.** The code dictionaries were a JSON
+  file beside the scripts, left out of the wheel (`FileNotFoundError` in any
+  installed copy). They are now the generated module `rosreestr_codes.py`,
+  and CI builds the wheel, installs it in a clean venv and decodes outside
+  the checkout.
+- **A list line could replace a paid full record.** When two addresses
+  overlap, the full record now wins, in the place the object first
+  appeared, and an object already fetched in full is not paid for again.
+- **What a query cost could vanish.** Solves counted before a driver error
+  are kept; a task 2Captcha refused to create is no longer counted as a
+  solve; the sidecar carries 2Captcha's own reported `captcha_cost`.
+- **`--mode scan` claimed "solved" on faith.** It now re-reads the page and
+  reports `solved` only when the challenge is gone (`token_injected` and
+  `site_verified` are separate fields).
+- **`--delay` did not apply between addresses**, nor between numbers under
+  `--proxy-rotate per-page`.
+- **`--dump-html` wrote the cadastral engineer's name and phone** into the
+  traffic dump (`queryN.net.json`); they are now scrubbed there as in the
+  fixtures.
+
+### Added
+
+- `status_code`: the site's raw status code beside the mapped `status`, so
+  a code nobody has seen is kept rather than folded into "cancelled".
+
+### Not changed, and why
+
+- **A scheduled canary.** GitHub runners are outside Russia and Scraping
+  Browser credentials expire in about a day, so a schedule would go red on
+  a stale secret rather than on the site; it stays dispatch-only.
+- **A landing page in this repository.** The landing page is for
+  2captcha.com and lives beside the repository, as in the rest of the family.
+- **An HTTP transport, a `Protocol` for the session, checkpoints.** Worth
+  doing, not fixes. A plain HTTP client through the Russian proxy did not
+  get through when tried during 0.1.0's development, so an HTTP transport
+  needs its own measurement before anything is claimed.
+
+## [0.1.0] — 2026-09-29
+
+First release.
+
+### What it does
+
+- Full records from Rosreestr's online reference service
+  (`lk.rosreestr.ru/eservices/real-estate-objects-online`) by cadastral
+  number: cadastral value, object kind, area and main characteristics,
+  status, registration and valuation dates, floor, purpose, permitted use,
+  land category, old numbers, rights and encumbrances.
+- The service's free address search (`--mode address`): every object at an
+  address as a list line, no captcha; `--details` adds full records.
+- The site's own code dictionaries (`--mode dictionaries`), shipped as a
+  snapshot in `rosreestr_codes.json`.
+- A captcha scan across the site's pages (`--mode scan`), with the Scraping
+  Browser's auto-solve given a turn on each.
+- Engines: Playwright (primary), pyppeteer, Selenium, and the 2Captcha
+  Scraper API for the free half. One lookup flow, one parser, one CLI.
+- Captchas: `Captcha.setAutoSolve` first, 2Captcha `ImageToTextTask` second,
+  `reportIncorrect` on a refused answer, a hard `--max-solves` cap.
+- `diff_runs.py` for monitoring a fixed list between runs.
+
+### Measured before release (2026-09-29)
+
+Thirteen engine runs through a Russian exit ended with exit 0: full records
+through Playwright and pyppeteer over both the Scraping Browser and a
+residential proxy, the address search through three engines (plus one run
+with `--details`), the dictionaries through two, and two captcha scans. 9
+paid image solves, 1 refused and re-solved. Selenium was not run against the
+site (it can use neither the Scraping Browser nor an authenticated proxy);
+it passes the end-to-end suite against `tests/mock_site.py`.
+
+### Deliberately not done
+
+- The page's other three search types (restriction-of-right number,
+  previously assigned number, right number): their request bodies were not
+  observed, and this repo does not guess one.
+- An object-kind filter on the site's side: the address search ignores every
+  `objType` value it is sent (measured), so `--list-kind` filters locally.
+- The cadastral engineer's name, phone and certificate number are never
+  read into a row.
