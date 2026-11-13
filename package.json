@@ -1,0 +1,86 @@
+{
+  "name": "papertrade-analytics",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Unofficial live protocol analytics dashboard and JSON API for Papertrade (papertrade.xyz), the 1000x synthetic perps exchange on HyperEVM: TVL, volume, LP, open interest, markets, PAPER economics and leaderboard insights. Includes a keyless read-only MCP server for Claude, Codex, ChatGPT, Gemini and Cursor.",
+  "license": "Apache-2.0",
+  "author": "nirholas",
+  "type": "module",
+  "mcpName": "io.github.nirholas/papertrade-analytics",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit && tsc --noEmit -p site/functions",
+    "test": "vitest run",
+    "test:live": "PAPERTRADE_LIVE=1 vitest run test/live.test.ts",
+    "build:site": "node scripts/build-discovery.mjs && esbuild site/app.ts --bundle --format=esm --minify --target=es2022 --sourcemap --outfile=site/public/app.js",
+    "dev:site": "npm run build:site && cd site && wrangler pages dev --port 8791 --kv SNAPSHOTS",
+    "deploy:site": "npm run build:site && cd site && wrangler pages deploy",
+    "build:docs": "node scripts/build-docs.mjs",
+    "build:discovery": "node scripts/build-discovery.mjs",
+    "mcp:inspect": "npx @modelcontextprotocol/inspector --cli https://papertrade-analytics.pages.dev/mcp --transport http --method tools/list"
+  },
+  "keywords": [
+    "papertrade",
+    "hyperliquid",
+    "hyperevm",
+    "analytics",
+    "dashboard",
+    "defi",
+    "perps",
+    "lightweight-charts",
+    "cloudflare-pages",
+    "tvl",
+    "open-interest",
+    "perpetuals",
+    "dune-alternative",
+    "defillama",
+    "json-api",
+    "typescript",
+    "crypto",
+    "web3",
+    "on-chain-analytics",
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "ai-agents",
+    "claude",
+    "codex",
+    "chatgpt",
+    "gemini",
+    "cursor",
+    "llms-txt",
+    "a2a"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nirholas/papertrade-analytics.git"
+  },
+  "homepage": "https://papertrade-analytics.pages.dev",
+  "bugs": {
+    "url": "https://github.com/nirholas/papertrade-analytics/issues"
+  },
+  "dependencies": {
+    "lightweight-charts": "^5.2.1",
+    "papertrade-sdk": "github:nirholas/papertrade-sdk",
+    "viem": "^2.57.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261027.1",
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
+    "marked": "^16.4.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3",
+    "wrangler": "^4.154.0"
+  },
+  "allowScripts": {
+    "workerd@1.20261006.1": true,
+    "esbuild@0.28.2": true
+  },
+  "overrides": {
+    "semver": "7.8.5",
+    "tslib": "2.8.1"
+  }
+}
