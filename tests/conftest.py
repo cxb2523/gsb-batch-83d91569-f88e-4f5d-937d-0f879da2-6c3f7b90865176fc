@@ -1,0 +1,211 @@
+import functools
+import gzip
+import hashlib
+import json
+import os
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import pytest
+import telegram_me_native as native
+import time_machine
+from fastapi.testclient import TestClient
+
+from telegram_me.app import create_app
+from telegram_me.services import channels as channels_module
+from telegram_me.settings import Settings
+from telegram_me.telegram.client import FetchResult, Method
+
+TESTS_DIR = Path(__file__).resolve().parent
+FIXTURES_DIR = TESTS_DIR / "fixtures" / "telegram"
+SNAPSHOTS_DIR = TESTS_DIR / "snapshots"
+RAW_DIGESTS = SNAPSHOTS_DIR / "raw_digests.json"
+MANIFEST: dict[str, Any] = json.loads((FIXTURES_DIR / "manifest.json").read_text("utf-8"))
+# Shortly after the fixtures were recorded; feed scoring depends on "now".
+FROZEN_NOW = "2026-10-23T00:00:00+00:00"
+
+type Snapshot = Callable[[str, Any], None]
+type RawSnapshot = Callable[[str, bytes], None]
+type ClientFactory = Callable[..., TestClient]
+
+
+def _normalize_path(path: str) -> str:
+    """Treat `/s/<channel>`, `/s/<channel>/0` and `/s/<channel>/None` as one page."""
+    for suffix in ("/None", "/0"):
+        if path.startswith("/s/") and path.endswith(suffix):
+            return path.removesuffix(suffix)
+    return path
+
+
+def _key(method: str, path: str, query: Mapping[str, Any] | None) -> tuple[Any, ...]:
+    params = tuple(sorted((name, str(value)) for name, value in (query or {}).items()))
+    return method, _normalize_path(path), params
+
+
+@functools.cache
+def _body(file: str) -> str:
+    # Decoded once: reading and gunzipping a fixture on every fetch blocks the
+    # event loop, which would distort load measurements (`tests/workload.py`).
+    return gzip.decompress((FIXTURES_DIR / file).read_bytes()).decode("utf-8")
+
+
+class FixtureFetcher:
+    """Serves recorded t.me responses; unrecorded requests fail the test."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, str]] = []
+        self._responses = {
+            _key(item["method"], item["path"], item["params"]): item
+            for item in MANIFEST["responses"]
+        }
+
+    async def fetch(
+        self,
+        method: Method,
+        path: str,
+        *,
+        query: Mapping[str, int] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> FetchResult:
+        self.requests.append((method, path))
+        item = self._responses.get(_key(method, path, query))
+        if item is None:
+            pytest.fail(f"Unexpected upstream request in tests: {method} {path} {query}")
+        return FetchResult(item["status"], _body(item["file"]))
+
+    async def close(self) -> None:
+        return None
+
+
+def make_settings(**overrides: Any) -> Settings:
+    """Settings isolated from the environment and `.env` files."""
+    defaults: dict[str, Any] = {
+        "enable_feed": True,
+        "enable_previews": True,
+        "feed_refresh_mode": "off",
+        "redis_url": None,
+    }
+    return Settings(_env_file=None, **(defaults | overrides))
+
+
+@pytest.fixture
+def fetcher() -> FixtureFetcher:
+    return FixtureFetcher()
+
+
+@pytest.fixture
+def make_client(fetcher: FixtureFetcher) -> Iterator[ClientFactory]:
+    """Create test clients for apps built with the given settings overrides."""
+    clients: list[TestClient] = []
+
+    def factory(**overrides: Any) -> TestClient:
+        client = TestClient(create_app(make_settings(**overrides), fetcher=fetcher))
+        client.__enter__()
+        clients.append(client)
+        return client
+
+    with time_machine.travel(FROZEN_NOW, tick=False):
+        yield factory
+        for client in clients:
+            client.__exit__(None, None, None)
+
+
+@pytest.fixture
+def client(make_client: ClientFactory) -> TestClient:
+    return make_client()
+
+
+@pytest.fixture
+def manifest() -> dict[str, Any]:
+    return MANIFEST
+
+
+@pytest.fixture
+def snapshot(request: pytest.FixtureRequest) -> Snapshot:
+    """Compare data with tests/snapshots/<name>.json (UPDATE_SNAPSHOTS=1 rewrites)."""
+    update = os.environ.get("UPDATE_SNAPSHOTS") == "1"
+
+    def check(name: str, data: Any) -> None:
+        path = SNAPSHOTS_DIR / f"{name}.json"
+        serialized = json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+        if update:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(serialized, encoding="utf-8")
+            return
+        if not path.exists():
+            pytest.fail(f"Missing snapshot {path.name}; run with UPDATE_SNAPSHOTS=1")
+        expected = json.loads(path.read_text(encoding="utf-8"))
+        assert expected == json.loads(serialized), (
+            f"Snapshot {path.name} differs (test: {request.node.name})"
+        )
+
+    return check
+
+
+@pytest.fixture(scope="session")
+def _raw_digests() -> Iterator[tuple[dict[str, str], dict[str, str]]]:
+    """(digests on disk, digests recorded by this run); rewritten with UPDATE_SNAPSHOTS=1."""
+    expected = json.loads(RAW_DIGESTS.read_text("utf-8")) if RAW_DIGESTS.exists() else {}
+    recorded: dict[str, str] = {}
+    yield expected, recorded
+    if os.environ.get("UPDATE_SNAPSHOTS") == "1" and recorded:
+        merged = dict(sorted((expected | recorded).items()))
+        RAW_DIGESTS.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+
+
+@pytest.fixture
+def raw_snapshot(_raw_digests: tuple[dict[str, str], dict[str, str]]) -> RawSnapshot:
+    """Compare the exact bytes of a response with tests/snapshots/raw_digests.json.
+
+    `snapshot` compares parsed JSON; this pins key order, number formatting
+    and string escaping too, i.e. the response byte for byte.
+    """
+    expected, recorded = _raw_digests
+    update = os.environ.get("UPDATE_SNAPSHOTS") == "1"
+
+    def check(name: str, content: bytes) -> None:
+        digest = hashlib.sha256(content).hexdigest()
+        recorded[name] = digest
+        if update:
+            return
+        if name not in expected:
+            pytest.fail(f"Missing raw digest for {name}; run with UPDATE_SNAPSHOTS=1")
+        assert expected[name] == digest, f"Response bytes of {name} changed"
+
+    return check
+
+
+@dataclass
+class Work:
+    """CPU-heavy steps performed, counted across all apps of a test."""
+
+    parsed: list[str] = field(default_factory=list)
+    rendered: list[int] = field(default_factory=list)
+    ranked: list[int] = field(default_factory=list)
+
+
+@pytest.fixture
+def work(monkeypatch: pytest.MonkeyPatch) -> Work:
+    counts = Work()
+    process_page = channels_module._process_page
+    render_body = channels_module._render_body
+    build_feed = native.build_feed
+
+    def counting_process_page(html: str, channel: str, **kwargs: Any) -> Any:
+        counts.parsed.append(channel)
+        return process_page(html, channel, **kwargs)
+
+    def counting_render_body(data: Any) -> bytes:
+        counts.rendered.append(1)
+        return render_body(data)
+
+    def counting_build_feed(*args: Any) -> Any:
+        counts.ranked.append(1)
+        return build_feed(*args)
+
+    monkeypatch.setattr(channels_module, "_process_page", counting_process_page)
+    monkeypatch.setattr(channels_module, "_render_body", counting_render_body)
+    monkeypatch.setattr(native, "build_feed", counting_build_feed)
+    return counts

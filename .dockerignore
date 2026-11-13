@@ -1,0 +1,21 @@
+# Only what the image build needs; everything else stays out of the context.
+*
+!src/
+!rust/
+rust/**/target
+rust/**/fuzz
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!NOTICE
+# The documentation stage (scripts/build_docs.py).
+!docs/
+!overrides/
+!zensical*.toml
+!CHANGELOG.md
+!scripts/build_docs.py
+!tests/snapshots/graphql/schema.graphql
+**/__pycache__
+**/*.py[cod]
+rust/**/*.so
