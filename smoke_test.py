@@ -4337,6 +4337,245 @@ def test_no_private_citations():
     return ok
 
 
+def test_page_audit():
+    group("per-page conclusions: <out>.meta.json's page-by-page audit and dedupe record")
+    ok = True
+    from output_writer import (build_page_audit, page_status_from_outcome,
+                               PAGE_OK, PAGE_BLOCKED, PAGE_LOAD_FAILED,
+                               PAGE_NOT_FOUND, PAGE_ZERO)
+
+    class Oc:
+        """A PageOutcome-shaped record (same field names every engine's
+        outcome object carries), built locally so this group needs no
+        browser engine and no network."""
+        def __init__(self, page_num, skus, url=None, final_url=None,
+                     load_failed=False, blocked_by=None, state="content"):
+            self.page_num = page_num
+            self.url = url or ("https://www.givenchybeauty.com/us/c/p%s" % page_num)
+            self.final_url = final_url or self.url
+            self.rows = [Product(sku=s) for s in skus]
+            self.load_failed = load_failed
+            self.blocked_by = blocked_by
+            self.state = state
+
+    # --- the status mapping itself: the five confusable outcomes ---------
+    ok &= check("a page with rows is 正常",
+                page_status_from_outcome(load_failed=False, blocked_by=None,
+                                         state="content", parsed_rows=3) == PAGE_OK)
+    ok &= check("HTTP 200 with zero rows is 零商品, NOT 被拦截",
+                page_status_from_outcome(load_failed=False, blocked_by=None,
+                                         state="empty", parsed_rows=0) == PAGE_ZERO)
+    ok &= check("a vendor/WAF interception is 被拦截 even with a state set",
+                page_status_from_outcome(load_failed=False, blocked_by="aws_waf",
+                                         state=None, parsed_rows=0) == PAGE_BLOCKED)
+    ok &= check("a navigation that never obtained a document is 加载失败",
+                page_status_from_outcome(load_failed=True, blocked_by=None,
+                                         state=None, parsed_rows=0) == PAGE_LOAD_FAILED)
+    ok &= check("load failure wins over every other signal -- a timeout must "
+                "not read as an empty category",
+                page_status_from_outcome(load_failed=True, blocked_by="x",
+                                         state="content", parsed_rows=2) == PAGE_LOAD_FAILED)
+    ok &= check("a served 404/410 error page is 页面不存在",
+                page_status_from_outcome(load_failed=False, blocked_by=None,
+                                         state="not_found", parsed_rows=0) == PAGE_NOT_FOUND)
+
+    # --- case 1: all normal, single page ----------------------------------
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "allgood")
+        outcomes = [Oc(1, ["P1", "P2", "P3"], url=US_LIPS, final_url=US_LIPS)]
+        audit = build_page_audit(outcomes)
+        rc = finish_run([Product(sku=s) for s in ("P1", "P2", "P3")], prefix,
+                        "json", False, blocked=False, stop_reason="single_page_mode",
+                        pages_requested=1, pages_completed=1, start_url=US_LIPS,
+                        final_url=US_LIPS, mode="category", page_audit=audit)
+        ok &= check("all-normal single page still exits 0", rc == 0)
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        # The pre-existing contract fields keep their names and meaning.
+        ok &= check("existing fields are untouched (status/stop_reason/"
+                    "pages_failed/products)",
+                    meta["status"] == "complete"
+                    and meta["stop_reason"] == "single_page_mode"
+                    and meta["pages_failed"] == [] and meta["products"] == 3)
+        pages = meta["pages"]
+        ok &= check("the audit is one entry in single-page mode", len(pages) == 1)
+        p = pages[0]
+        ok &= check("...carrying page, final_url, parsed/new rows, status and "
+                    "the drop list",
+                    p["page"] == 1 and p["final_url"] == US_LIPS
+                    and p["parsed_rows"] == 3 and p["new_rows"] == 3
+                    and p["status"] == PAGE_OK
+                    and p["dropped_duplicate_skus"] == [])
+
+    # --- case 2: one page intercepted; page 1's rows must survive --------
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "blocked")
+        outcomes = [
+            Oc(1, ["P1", "P2"], url=US_LIPS, final_url=US_LIPS),
+            Oc(2, [], load_failed=False, blocked_by="aws_waf", state=None),
+        ]
+        audit = build_page_audit(outcomes)
+        # The intercepted page adds nothing and loses nothing.
+        ok &= check("the blocked page is recorded as 被拦截 with zero rows",
+                    audit[1]["status"] == PAGE_BLOCKED
+                    and audit[1]["parsed_rows"] == 0
+                    and audit[1]["new_rows"] == 0
+                    and audit[1]["dropped_duplicate_skus"] == [])
+        ok &= check("the good page before it stays 正常 with both rows kept",
+                    audit[0]["status"] == PAGE_OK and audit[0]["new_rows"] == 2)
+        rc = finish_run([Product(sku="P1"), Product(sku="P2")], prefix, "json",
+                        False, blocked=True, stop_reason="blocked_aws_waf",
+                        pages_requested=2, pages_completed=1, pages_failed=[2],
+                        start_url=US_LIPS, final_url=US_LIPS, mode="category",
+                        page_audit=audit)
+        ok &= check("a run with rows then a block is EXIT_PARTIAL and keeps "
+                    "the good rows", rc == EXIT_PARTIAL)
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        ok &= check("meta.json names page 2 as failed AND carries the same "
+                    "two-entry page audit",
+                    meta["pages_failed"] == [2]
+                    and [q["page"] for q in meta["pages"]] == [1, 2])
+        saved = json.load(open(prefix + ".json", encoding="utf-8"))
+        ok &= check("the output still holds the rows gathered before the block",
+                    [r["sku"] for r in saved] == ["P1", "P2"])
+
+    # --- case 3: a served page with genuinely no products is 零商品 ------
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "zero")
+        # Real markup shape: a 200 listing document with no tile in it.
+        empty_html = _listing()
+        ok &= check("fixture sanity: the tile-less 200 page classifies as empty",
+                    detect_page_state(empty_html, 200, url=US_LIPS) == "empty")
+        outcomes = [Oc(1, [], url=US_LIPS, final_url=US_LIPS, state="empty")]
+        audit = build_page_audit(outcomes)
+        ok &= check("a 200 page with no tiles is 零商品, not 被拦截",
+                    audit[0]["status"] == PAGE_ZERO and audit[0]["parsed_rows"] == 0)
+        # allow_empty models the expected empty-result run; exit 4's meaning
+        # is unchanged.
+        rc = finish_run([], prefix, "json", True, blocked=False,
+                        stop_reason="single_page_mode", pages_requested=1,
+                        pages_completed=1, start_url=US_LIPS, final_url=US_LIPS,
+                        mode="category", page_audit=audit)
+        ok &= check("a genuinely empty served page still maps to "
+                    "EXIT_NO_PRODUCTS", rc == EXIT_NO_PRODUCTS)
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        ok &= check("...and the sidecar says 零商品 on its one page",
+                    meta["pages"][0]["status"] == PAGE_ZERO)
+        # A blocked page with the same zero row count must NOT look the same.
+        blocked_audit = build_page_audit(
+            [Oc(1, [], blocked_by="blocked", state="blocked")])
+        ok &= check("a zero-row intercepted page is 被拦截 instead",
+                    blocked_audit[0]["status"] == PAGE_BLOCKED)
+
+    # --- case 4: the same sku on two pages; first occurrence wins --------
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "dup")
+        outcomes = [
+            Oc(1, ["P1", "P2"], url=US_LIPS, final_url=US_LIPS),
+            # P2 repeats (cross-page), P3 is new, P2 repeats a second time.
+            Oc(2, ["P2", "P3", "P2"],
+               url=US_LIPS + "?page=2", final_url=US_LIPS + "?page=2"),
+            Oc(3, ["P3"], url=US_LIPS + "?page=3",
+               final_url=US_LIPS + "?page=3"),
+        ]
+        audit = build_page_audit(outcomes)
+        ok &= check("page 1 keeps both skus and drops nothing",
+                    audit[0]["new_rows"] == 2
+                    and audit[0]["dropped_duplicate_skus"] == [])
+        ok &= check("page 2 parses 3 but adds only the one new sku",
+                    audit[1]["parsed_rows"] == 3 and audit[1]["new_rows"] == 1)
+        ok &= check("page 2's drop list names the later P2 occurrences, in "
+                    "page order, and never the first-page P2",
+                    audit[1]["dropped_duplicate_skus"] == ["P2", "P2"])
+        ok &= check("page 3's only sku was already kept on page 2, so it is "
+                    "recorded as dropped there",
+                    audit[2]["new_rows"] == 0
+                    and audit[2]["dropped_duplicate_skus"] == ["P3"])
+        # The audit must agree with the real merge the engines perform.
+        merged_seen = set()
+        merged = []
+        for oc in outcomes:
+            merged.extend(dedupe_by_key(oc.rows, merged_seen, key="sku"))
+        ok &= check("the audit's new_rows total equals the deduped output "
+                    "length",
+                    sum(q["new_rows"] for q in audit) == len(merged)
+                    and [r.sku for r in merged] == ["P1", "P2", "P3"])
+        # Out-of-order inputs still come out page-ascending.
+        shuffled = build_page_audit([outcomes[2], outcomes[0], outcomes[1]])
+        ok &= check("the array is always ordered by ascending page number",
+                    [q["page"] for q in shuffled] == [1, 2, 3])
+        rc = finish_run(merged, prefix, "json", False, blocked=False,
+                        stop_reason="no_new_products", pages_requested=3,
+                        pages_completed=3, start_url=US_LIPS,
+                        final_url=US_LIPS + "?page=3", mode="category",
+                        page_audit=audit)
+        ok &= check("the deduped run still exits 0", rc == 0)
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        ok &= check("the sidecar preserves every drop list verbatim",
+                    [q["dropped_duplicate_skus"] for q in meta["pages"]]
+                    == [[], ["P2", "P2"], ["P3"]])
+
+    # --- case 5: showcase locales (int/en, ru) have no prices by design --
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "showcase")
+        showcase_html = _listing(TILE_INT_SHOWCASE, locale="int")
+        ok &= check("fixture sanity: the showcase page reads as content",
+                    detect_page_state(showcase_html, 200, url=INT_LIPS) == "content")
+        rows = parse_category(showcase_html, INT_LIPS)
+        ok &= check("the showcase tile parses to a row with NO price and NO "
+                    "currency",
+                    len(rows) == 1 and rows[0].price is None
+                    and rows[0].currency is None
+                    and is_showcase_locale(INT_LIPS))
+        outcomes = [Oc(1, [r.sku for r in rows], url=INT_LIPS,
+                       final_url=INT_LIPS)]
+        audit = build_page_audit(outcomes)
+        ok &= check("a priceless showcase page is still 正常 -- no price is "
+                    "the correct result there",
+                    audit[0]["status"] == PAGE_OK and audit[0]["new_rows"] == 1)
+        rc = finish_run(rows, prefix, "json", False, blocked=False,
+                        stop_reason="single_page_mode", pages_requested=1,
+                        pages_completed=1, start_url=INT_LIPS, final_url=INT_LIPS,
+                        mode="category", page_audit=audit)
+        ok &= check("the showcase run exits 0, not any warning/block code",
+                    rc == 0)
+        # The price-coverage guard the engines actually apply: showcase
+        # locales are excluded before the floor is consulted, so their
+        # correct 0% coverage can never trip the regression warning.
+        priced = sum(1 for r in rows if r.price is not None)
+        coverage = priced / len(rows)
+        ok &= check("0%% coverage on a showcase locale never reaches the %.0f%% "
+                    "floor alarm (the is_showcase_locale guard skips it)"
+                    % (page_flow.PRICE_COVERAGE_FLOOR * 100.0),
+                    is_showcase_locale(INT_LIPS)
+                    and (coverage < page_flow.PRICE_COVERAGE_FLOOR))
+        # And a priced locale with the same coverage WOULD be guarded --
+        # pinning both halves of the distinction.
+        ok &= check("the same 0% on a priced locale is below the floor and "
+                    "would warn",
+                    not is_showcase_locale(US_LIPS)
+                    and 0.0 < page_flow.PRICE_COVERAGE_FLOOR)
+
+    # --- every run, even one that writes NO meta.json, leaves the audit ---
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "nothing")
+        audit = build_page_audit(
+            [Oc(1, [], load_failed=True, state=None)])
+        rc = finish_run([], prefix, "json", False, blocked=False,
+                        stop_reason="page_load_timeout", pages_requested=1,
+                        pages_completed=0, start_url=US_LIPS, final_url=US_LIPS,
+                        mode="category", page_audit=audit)
+        ok &= check("a load failure still maps to EXIT_REMOTE_API_ERROR",
+                    rc == EXIT_REMOTE_API_ERROR)
+        ok &= check("a failed run writes no meta.json (the old contract "
+                    "stands)", not os.path.exists(prefix + ".meta.json"))
+        attempt = json.load(open(prefix + ".attempt.json", encoding="utf-8"))
+        ok &= check("...but the always-written attempt record carries the "
+                    "page audit, marked 加载失败",
+                    attempt["pages"][0]["status"] == PAGE_LOAD_FAILED
+                    and attempt["pages"][0]["page"] == 1)
+    return ok
+
+
 def main() -> int:
     ok = True
     # Checks that could not run because an optional engine library is absent.
@@ -4360,6 +4599,7 @@ def main() -> int:
     ok &= test_finish_run()
     ok &= test_output_modes_and_csv_guard()
     ok &= test_attempt_record()
+    ok &= test_page_audit()
     ok &= test_retry_floor()
     ok &= test_negative_counts_rejected()
     ok &= test_diff()

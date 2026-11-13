@@ -8,6 +8,23 @@ from a bill or an empty output file.
 
 ## [Unreleased]
 
+### Added
+
+- Every run now records a per-page conclusion in a `pages` array beside the
+  output. `<out>.meta.json` carries it whenever a dataset is written, and the
+  always-written `<out>.attempt.json` carries it on every run, including a
+  blocked or empty-handed one that writes no `meta.json`. Each page entry
+  holds the page number, requested and final URLs, rows parsed, rows added
+  after the run-wide sku dedupe, a five-way status (`正常`, `被拦截`,
+  `加载失败`, `页面不存在`, `零商品`) and the list of duplicate skus dropped
+  on that page. A served HTTP 200 page with no tiles is `零商品` rather than
+  a block; an interception or load failure is recorded on its own page
+  without discarding earlier pages' rows; a cross-page duplicate sku is kept
+  from its first page and named on the later page's drop list. The showcase
+  locales (`int/en`, `ru`) stay `正常` with no prices and never trip the
+  price-coverage warning. CLI usage, exit codes and the existing
+  `status` / `stop_reason` / `pages_failed` fields are unchanged.
+
 ### Changed
 
 - CI only: the scheduled canary now starts at 10:47 UTC (Mondays) instead of 07:37, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.

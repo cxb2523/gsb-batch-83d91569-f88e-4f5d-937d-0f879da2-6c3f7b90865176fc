@@ -361,6 +361,36 @@ Every run writes `<out>.meta.json` beside its output with `status`,
 sidecar and leaves the previous good output in place: a run that finds
 nothing writes nothing, unless you pass `--allow-empty`.
 
+### Per-page conclusions
+
+Both sidecars carry a `pages` array, ordered by ascending page number (one
+entry in single-page mode), so a run can be reviewed page by page afterwards
+instead of relying on log lines that scrolled past. Each entry holds:
+
+| field | meaning |
+|---|---|
+| `page` | the page number |
+| `url` / `final_url` | the requested URL and the URL the page actually ended on |
+| `parsed_rows` | how many rows the page's HTML parsed into, before dedupe |
+| `new_rows` | how many of those rows survived the run-wide sku dedupe and entered the output |
+| `status` | one of `正常` (ok), `被拦截` (blocked by a WAF/challenge), `加载失败` (the page never loaded), `页面不存在` (HTTP 404/410 or the site's error page), `零商品` (a served HTTP 200 page that genuinely lists nothing) |
+| `dropped_duplicate_skus` | skus this page contributed that an earlier page already provided; the first occurrence is always kept |
+
+The five statuses separate the outcomes that are easy to confuse: a 200 page
+with no tiles is `零商品`, never `被拦截`; an interception or a load failure is
+recorded on its own page without discarding rows earlier pages already
+contributed; and a sku repeated across pages is kept from its first page and
+listed on the later page's `dropped_duplicate_skus`. The showcase locales
+(`int/en`, `ru`) render no prices by design, so their pages are still `正常`
+and never trip the price-coverage regression warning.
+
+`<out>.meta.json` carries `pages` whenever a dataset is written, alongside
+the unchanged `status` / `stop_reason` / `pages_failed` fields. A run that
+writes no dataset (blocked, or empty-handed) still writes
+`<out>.attempt.json` on every attempt, and that record carries the same
+`pages` array — so even a run with no `meta.json` leaves a reviewable
+per-page conclusion.
+
 ## Comparing two runs
 
 ```bash

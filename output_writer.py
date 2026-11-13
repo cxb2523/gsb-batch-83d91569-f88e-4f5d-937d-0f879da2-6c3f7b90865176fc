@@ -149,6 +149,124 @@ def dedupe_by_sku(rows: Sequence[Any], seen: Set[str]) -> List[Any]:
     return dedupe_by_key(rows, seen, key="sku")
 
 
+# ---------------------------------------------------------------------------
+# Per-page audit conclusions (the `pages` array in <out>.meta.json)
+# ---------------------------------------------------------------------------
+# Five states a human reviewer needs to be able to tell apart afterwards.
+# They deliberately do NOT reuse product_parser.detect_page_state's raw
+# vocabulary one-to-one:
+#   - "captcha" and a vendor block are both an interception -> PAGE_BLOCKED
+#   - a parser state of "empty" (HTTP 200, genuinely no tiles) -> PAGE_ZERO
+#   - "not_found" is its own conclusion, distinct from a block and from an
+#     empty category
+#   - a navigation/load failure never reached a classifiable document ->
+#     PAGE_LOAD_FAILED
+PAGE_OK = "正常"
+PAGE_BLOCKED = "被拦截"
+PAGE_LOAD_FAILED = "加载失败"
+PAGE_NOT_FOUND = "页面不存在"
+PAGE_ZERO = "零商品"
+
+# Every status the sidecar may contain, in one place so a consumer can
+# validate against it. Chinese labels are the on-disk values; the code refers
+# to them only through these constants.
+PAGE_STATUSES = (PAGE_OK, PAGE_BLOCKED, PAGE_LOAD_FAILED, PAGE_NOT_FOUND,
+                 PAGE_ZERO)
+
+
+def page_status_from_outcome(*, load_failed: bool, blocked_by: Optional[str],
+                             state: Optional[str],
+                             parsed_rows: int) -> str:
+    """Map one fetched page's evidence onto the five audit statuses.
+
+    The inputs are exactly what an engine's `PageOutcome` already carries, so
+    all four fetch paths classify through this one function and cannot drift.
+
+    Order matters and mirrors the engine triage:
+
+    1. `load_failed` -- no document was ever obtained; nothing below can be
+       evaluated. A timeout must not masquerade as an empty category.
+    2. `blocked_by` -- a WAF/captcha/vendor interception recorded by the
+       engine, including a page whose raw classifier state never got set
+       because the challenge was detected just before parsing.
+    3. Raw parser state `not_found` -- a served error page / HTTP 404-410; a
+       wrong address, not a block (see page_flow.STATE_POLICY).
+    4. A served page that yielded zero rows -- the "zero products" answer.
+       This is the distinction the task is built around: HTTP 200 with no
+       tiles is a correct empty catalogue, not an interception, so it is
+       decided from `parsed_rows == 0` on an otherwise-ok page rather than
+       from the raw `empty` state alone (a content page whose tiles all fail
+       to parse is reported the same way a reviewer would read it).
+    5. Anything that actually produced rows is a normal page.
+    """
+    if load_failed:
+        return PAGE_LOAD_FAILED
+    if blocked_by is not None:
+        return PAGE_BLOCKED
+    if state == "not_found":
+        return PAGE_NOT_FOUND
+    if parsed_rows == 0:
+        return PAGE_ZERO
+    return PAGE_OK
+
+
+def build_page_audit(outcomes: Sequence[Any]) -> List[dict]:
+    """Build the per-page audit array written into <out>.meta.json.
+
+    `outcomes` are the engines' `PageOutcome`-like objects (anything carrying
+    `page_num`, `url`, `final_url`, `rows`, `blocked_by`, `load_failed` and
+    `state`), in any order -- they are sorted by page number here so the
+    sidecar is page-ascending in every engine, including a concurrent fetch
+    whose results arrive out of order.
+
+    Dedup is replayed exactly as the run's merge step performs it: one
+    run-wide `seen` set threaded through the pages in ascending order, first
+    occurrence kept, every later occurrence's sku recorded in THAT page's
+    `dropped_duplicate_skus`. Rows without a sku are never dropped (nothing
+    to compare against -- see `dedupe_by_key`), so they count as new rows and
+    never appear in a drop list.
+
+    A page that was intercepted or that never loaded contributes no rows to
+    the output and therefore no duplicates; its earlier successful pages keep
+    theirs untouched, which is what makes a mid-run block non-destructive.
+    """
+    seen: Set[str] = set()
+    pages: List[dict] = []
+    for oc in sorted(outcomes, key=lambda o: o.page_num):
+        rows = list(getattr(oc, "rows", None) or [])
+        parsed_rows = len(rows)
+        dropped: List[str] = []
+        new_rows = 0
+        for r in rows:
+            sku = getattr(r, "sku", None)
+            if sku is None:
+                # Kept, and counted as new: a keyless row cannot be a
+                # duplicate of anything.
+                new_rows += 1
+                continue
+            if sku in seen:
+                dropped.append(sku)
+                continue
+            seen.add(sku)
+            new_rows += 1
+
+        status = page_status_from_outcome(
+            load_failed=bool(getattr(oc, "load_failed", False)),
+            blocked_by=getattr(oc, "blocked_by", None),
+            state=getattr(oc, "state", None),
+            parsed_rows=parsed_rows)
+        pages.append({
+            "page": oc.page_num,
+            "url": oc.url,
+            "final_url": oc.final_url or oc.url,
+            "parsed_rows": parsed_rows,
+            "new_rows": new_rows,
+            "status": status,
+            "dropped_duplicate_skus": dropped,
+        })
+    return pages
+
+
 # CSV cannot hold a list (`shades`). Joining with " | " keeps the cell
 # readable in a spreadsheet and round-trippable by splitting on the same
 # separator; the JSON output keeps the real list.
@@ -389,12 +507,21 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
                start_url: str, final_url: str,
                pages_failed: Optional[List[int]] = None,
                mode: str = "category", source: str = SOURCE_DEFAULT,
-               extra: Optional[dict] = None) -> int:
+               extra: Optional[dict] = None,
+               page_audit: Optional[List[dict]] = None) -> int:
     """Write output + the run-metadata sidecar; return the exit code.
 
     Shared by all three browser engines so the status/exit-code mapping
     cannot drift between them. See mediamarkt-scraper's output_writer.py for
     the full rationale; the logic here is unchanged.
+
+    `page_audit` is the per-page conclusion array built by
+    `build_page_audit`. It is purely additive: every pre-existing field keeps
+    its name and meaning. It is written into BOTH sidecars -- meta.json when
+    a dataset is written (so the data and its page-by-page evidence live
+    together) and attempt.json on EVERY run, including a blocked or
+    empty-handed one that writes no meta.json at all, so every collection
+    leaves a reviewable per-page conclusion beside the output prefix.
     """
     # Decided by the reason AND the evidence: a run whose loop ended for a
     # complete reason while some page failed is not complete.
@@ -434,6 +561,10 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
         "source": source,
         "start_url": start_url,
         "final_url": final_url,
+        # The per-page conclusions are part of every ATTEMPT record even when
+        # no dataset (and therefore no meta.json) is written: a blocked or
+        # empty-handed run still has to be reviewable page by page.
+        "pages": page_audit or [],
         "finished_at": datetime.now(timezone.utc).isoformat(),
     })
 
@@ -451,6 +582,10 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
         merged = {**write_stats, **(extra or {})}
         for k, v in merged.items():
             meta.setdefault(k, v)
+        # Additive only: `status`, `stop_reason`, `pages_failed` and the rest
+        # are constructed exactly as before and keep their meaning.
+        if page_audit:
+            meta["pages"] = page_audit
         write_run_meta(out_prefix, meta)
 
     if not rows:

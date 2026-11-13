@@ -54,6 +54,7 @@ import logging
 import os
 import sys
 import time
+from dataclasses import dataclass, field
 from typing import List, Optional
 from urllib.parse import urljoin
 
@@ -67,7 +68,8 @@ from product_parser import (parse_category, parse_product,
                             site_host, is_supported_host, unsupported_reason,
                             HOSTS, BASE, LOCALES, is_showcase_locale,
                             locale_of, is_robots_allowed)
-from output_writer import finish_run, dedupe_by_key, EXIT_REMOTE_API_ERROR
+from output_writer import (finish_run, dedupe_by_key, EXIT_REMOTE_API_ERROR,
+                           build_page_audit)
 import page_flow
 import env_config
 
@@ -336,6 +338,23 @@ def _fetch_one_page(args, page_num: int, url: str):
     return rows, None, upstream_status, html
 
 
+@dataclass
+class ApiPageOutcome:
+    """What one Scraper API fetch produced. Same field names as the browser
+    engines' PageOutcome for the fields output_writer.build_page_audit reads,
+    so all four fetch paths build their per-page conclusions through that one
+    function. This transport has no browser-level load failure of its own:
+    a failed API call raises into main(), and every other failure comes back
+    as a classified page, so load_failed is always False here."""
+    page_num: int
+    url: str
+    final_url: Optional[str] = None
+    rows: List = field(default_factory=list)
+    blocked_by: Optional[str] = None
+    load_failed: bool = False
+    state: Optional[str] = None
+
+
 def scrape(args) -> int:
     all_rows: List = []
     seen_keys = set()
@@ -345,13 +364,24 @@ def scrape(args) -> int:
     pages_failed: List[int] = []
     final_url = args.url
 
+    # One record per fetched page, carrying the same fields the browser
+    # engines' PageOutcome carries, so output_writer.build_page_audit can
+    # build the per-page conclusions for all four fetch paths from one shape.
+    # This client never has a browser-level load failure distinct from a
+    # block (the API either answers or raises into main()), so load_failed
+    # stays False and transport failures surface through blocked_by.
+    outcomes: List["ApiPageOutcome"] = []
+
     rows, blocked_by, _status, page1_html = _fetch_one_page(args, 1, args.url)
+    page1_state = detect_page_state(page1_html, status=_status, url=args.url)
+    outcomes.append(ApiPageOutcome(
+        page_num=1, url=args.url, final_url=args.url, rows=rows,
+        blocked_by=blocked_by, state=page1_state))
     if blocked_by is not None:
         stop_reason = f"blocked_{blocked_by}"
         blocked = True
         pages_failed.append(1)
-    elif not rows and detect_page_state(page1_html, status=_status,
-                                        url=args.url) == "not_found":
+    elif not rows and page1_state == "not_found":
         stop_reason = "not_found"
     else:
         pages_completed = 1
@@ -404,7 +434,11 @@ def scrape(args) -> int:
         elif args.pages > 1:
             for page_num in range(2, args.pages + 1):
                 url = page_url(args.url, page_num)
-                page_rows, page_blocked_by, _status, _html = _fetch_one_page(args, page_num, url)
+                page_rows, page_blocked_by, status, html = _fetch_one_page(args, page_num, url)
+                outcomes.append(ApiPageOutcome(
+                    page_num=page_num, url=url, final_url=url, rows=page_rows,
+                    blocked_by=page_blocked_by,
+                    state=detect_page_state(html, status=status, url=url)))
                 if page_blocked_by is not None:
                     stop_reason = f"blocked_{page_blocked_by}"
                     blocked = True
@@ -440,12 +474,18 @@ def scrape(args) -> int:
                 if page_num < args.pages:
                     time.sleep(args.delay)
 
+    # Built from the same per-page records the merge above consumed, so the
+    # sidecar's per-page conclusions and the output rows cannot disagree
+    # about what each page parsed or lost to dedupe.
+    page_audit = build_page_audit(outcomes)
+
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       blocked=blocked, stop_reason=stop_reason,
                       pages_requested=args.pages, pages_completed=pages_completed,
                       pages_failed=pages_failed, mode=args.mode,
                       source=site_host(final_url) or "givenchybeauty.com",
-                      start_url=args.url, final_url=final_url)
+                      start_url=args.url, final_url=final_url,
+                      page_audit=page_audit)
 
 
 def main() -> int:

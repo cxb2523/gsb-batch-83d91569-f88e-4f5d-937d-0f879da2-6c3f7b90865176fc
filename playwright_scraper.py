@@ -87,7 +87,8 @@ from product_parser import (parse_category, parse_product,
                             HOSTS, BASE, LOCALES, DEFAULT_LOCALE,
                             is_showcase_locale, locale_of, is_robots_allowed,
                             is_self_clearing_challenge)
-from output_writer import dedupe_by_key, finish_run, RemoteAPIError, EXIT_REMOTE_API_ERROR
+from output_writer import (dedupe_by_key, finish_run, RemoteAPIError,
+                           EXIT_REMOTE_API_ERROR, build_page_audit)
 import page_flow
 import product_parser
 from proxy_pool import (from_args as proxy_pool_from_args, to_playwright, mask,
@@ -959,6 +960,12 @@ def scrape(args) -> int:
             if session is not None:
                 session.close()
 
+    # The per-page audit replays the same run-wide dedupe the merge below
+    # performs, and records the skus each page lost. Built from the outcomes
+    # BEFORE the merge so a reviewer sees both what each page parsed and what
+    # the run kept from it.
+    page_audit = build_page_audit(outcomes)
+
     all_rows = []
     merged_seen = set()
     for oc in sorted(outcomes, key=lambda o: o.page_num):
@@ -978,7 +985,8 @@ def scrape(args) -> int:
                       pages_requested=args.pages, pages_completed=len(ok_pages),
                       pages_failed=failed_pages, mode=args.mode,
                       source=site_host(final_url) or "givenchybeauty.com",
-                      start_url=args.url, final_url=final_url)
+                      start_url=args.url, final_url=final_url,
+                      page_audit=page_audit)
 
 
 def _non_negative_float(value):
