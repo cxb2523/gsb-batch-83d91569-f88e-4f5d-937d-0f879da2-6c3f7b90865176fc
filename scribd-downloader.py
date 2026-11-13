@@ -18,6 +18,7 @@ Key behaviors:
 
 import argparse
 import base64
+import json
 import os
 import re
 import sys
@@ -63,6 +64,8 @@ DEFAULT_DOCUMENT_READY_TIMEOUT_SECONDS = max(
 )
 SUPPORTED_FORMATS = ("pdf", "txt", "docx")
 INVALID_URL = "Invalid Scribd URL"
+# Machine-readable per-document report written into the output folder.
+REPORT_FILENAME = "scribd-report.json"
 # Characters that are not allowed in Windows filenames (plus control chars).
 UNSAFE_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -170,6 +173,11 @@ def convert_scribd_link(url):
 def redact_url(url):
     """Hide secret query values (e.g. secret_password) before printing a URL."""
     return re.sub(r"(secret_password=)[^&#]*", r"\1REDACTED", url or "")
+
+
+def redact_text(text):
+    """Redact secret query values in multi-line text, line by line."""
+    return "\n".join(redact_url(line) for line in (text or "").split("\n"))
 
 
 def sanitize_filename(name, fallback="scribd_document"):
@@ -3070,6 +3078,108 @@ def print_invalid_url_help(invalid_urls):
     )
 
 
+def error_reason_line(error):
+    """Return the first non-empty line of an error message, secrets redacted."""
+    text = str(error) if error is not None else ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    first_line = lines[0] if lines else type(error).__name__
+    return redact_url(first_line)
+
+
+def absolute_output_path(path, output_dir):
+    """
+    Normalise a saved path for reporting.
+
+    download_document already returns absolute paths of the files it wrote;
+    a relative path (e.g. from an injected downloader) is taken relative to
+    output_dir, never to some unrelated current directory.
+    """
+    if not path:
+        return path
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    return os.path.abspath(os.path.join(output_dir, path))
+
+
+def build_export_report(results, invalid_urls, output_dir, formats):
+    """
+    Build the machine-readable export report.
+
+    The report mirrors the terminal summary: one entry per document (in input
+    order) with either its real output paths or its failure reason, plus the
+    rejected links. Secret query values are redacted everywhere.
+    """
+    succeeded = sum(1 for result in results if result["status"] == "success")
+    failed = len(results) - succeeded
+
+    entries = []
+    for result in results:
+        entry = {
+            "doc_id": result["doc_id"],
+            "base_name": result["base_name"],
+            "status": result["status"],
+        }
+        if result["status"] == "success":
+            entry["files"] = {
+                fmt: absolute_output_path(path, output_dir)
+                for fmt, path in result["files"].items()
+            }
+        else:
+            entry["reason"] = result["reason"]
+        entries.append(entry)
+
+    return {
+        "output_dir": os.path.abspath(output_dir),
+        "formats": list(formats),
+        "summary": {
+            "documents": len(results),
+            "succeeded": succeeded,
+            "failed": failed,
+            "invalid_links": len(invalid_urls),
+        },
+        "results": entries,
+        "invalid_links": [redact_url(url) for url in invalid_urls],
+    }
+
+
+def write_export_report(report, output_dir, filename=None):
+    """Write the report as UTF-8 JSON into output_dir (atomically)."""
+    path = os.path.join(output_dir, filename or REPORT_FILENAME)
+    temp_name = f"{path}.part"
+    with open(temp_name, "w", encoding="utf-8", newline="\n") as handle:
+        json.dump(report, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    os.replace(temp_name, path)
+    return os.path.abspath(path)
+
+
+def print_batch_summary(results, invalid_urls, report_path=None):
+    """Print one line per document (with the real output paths) plus totals."""
+    succeeded = sum(1 for result in results if result["status"] == "success")
+    failed = len(results) - succeeded
+
+    print(
+        f"\nSummary: {succeeded} succeeded, {failed} failed"
+        + (f", {len(invalid_urls)} invalid link(s) skipped" if invalid_urls else "")
+        + "."
+    )
+
+    for result in results:
+        if result["status"] == "success":
+            print(f"  OK {result['doc_id']}: {result['base_name']}")
+            for fmt, path in result["files"].items():
+                print(f"    {fmt} -> {path}")
+        else:
+            # Keep the historical "FAILED <base>: <reason>" shape; append the id.
+            print(
+                f"  FAILED {result['base_name']}: {result['reason']}"
+                f" [doc id {result['doc_id']}]"
+            )
+
+    if report_path is not None:
+        print(f"Report: {report_path}")
+
+
 def main(argv=None):
     """Run the exporter from the command line or interactively."""
     parser = build_arg_parser()
@@ -3097,40 +3207,61 @@ def main(argv=None):
     if not jobs:
         if not invalid_urls:
             print("Error: Please provide a valid Scribd document URL")
+        else:
+            # Nothing can be downloaded, but the rejected links are still
+            # listed above and counted here.
+            print_batch_summary([], invalid_urls)
         raise SystemExit(1)
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    failures = []
-    successes = []
+    # A run counts as a batch when there is more than one document or when
+    # links were rejected: both cases get the per-document summary and report.
+    batch_mode = len(jobs) > 1 or bool(invalid_urls)
+    results = []
 
     for number, job in enumerate(jobs, start=1):
         if len(jobs) > 1:
             print(f"\n=== Document {number}/{len(jobs)}: {job['base_name']} ===")
         try:
-            download_document(job, args.formats, args.output_dir)
-            successes.append(job)
-        except (
-            RuntimeError,
-            WebDriverException,
-            OSError,
-        ) as error:
-            print(
-                f"Export failed: {error}"
+            saved = download_document(job, args.formats, args.output_dir)
+        except Exception as error:  # a bad document must not stop the batch
+            print(f"Export failed: {redact_text(str(error))}")
+            results.append(
+                {
+                    "doc_id": job["info"]["doc_id"],
+                    "base_name": job["base_name"],
+                    "status": "failed",
+                    "reason": error_reason_line(error),
+                }
             )
-            failures.append((job, error))
+            continue
 
-    if len(jobs) > 1:
-        print(
-            f"\nSummary: {len(successes)} succeeded, {len(failures)} failed"
-            + (f", {len(invalid_urls)} invalid link(s) skipped" if invalid_urls else "")
-            + "."
+        results.append(
+            {
+                "doc_id": job["info"]["doc_id"],
+                "base_name": job["base_name"],
+                "status": "success",
+                "files": {
+                    fmt: absolute_output_path(path, args.output_dir)
+                    for fmt, path in (saved or {}).items()
+                },
+            }
         )
-        for job, error in failures:
-            first_line = str(error).splitlines()[0] if str(error) else type(error).__name__
-            print(f"  FAILED {job['base_name']}: {first_line}")
 
-    if failures or invalid_urls:
+    if batch_mode:
+        report = build_export_report(
+            results, invalid_urls, args.output_dir, args.formats
+        )
+        try:
+            report_path = write_export_report(report, args.output_dir)
+        except OSError as error:
+            report_path = None
+            print(f"Warning: could not write {REPORT_FILENAME}: {error}")
+
+        print_batch_summary(results, invalid_urls, report_path)
+
+    if any(result["status"] != "success" for result in results) or invalid_urls:
         raise SystemExit(1)
 
 

@@ -40,6 +40,9 @@ Thumbs.db
 # PDF outputs (don't commit downloaded PDFs)
 *.pdf
 
+# Per-run batch report written next to the downloaded files
+scribd-report.json
+
 # Local runtime caches
 .selenium/
 .tmp-python/

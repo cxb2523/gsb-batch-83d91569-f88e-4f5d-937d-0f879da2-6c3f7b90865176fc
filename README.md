@@ -144,7 +144,49 @@ Bulk downloads run one document at a time (each Chrome instance can use 1.5-2.5 
 
 - Duplicate links (same document id) are downloaded once.
 - Two documents with the same title get the document id appended (`Report.pdf`, `Report-222.pdf`).
-- If one document fails, the others still download. A summary is printed at the end and the exit code is `1` if anything failed.
+- If one document fails, the others still download. A summary is printed at the end and the exit code is `1` if anything failed or any link was rejected.
+
+### Bulk run report
+
+When a run has more than one document (or any rejected link), the end-of-run summary answers the question "which input link produced which file?":
+
+```text
+Summary: 2 succeeded, 1 failed, 1 invalid link(s) skipped.
+  OK 111: Report
+    pdf -> C:\downloads\Report.pdf
+    txt -> C:\downloads\Report.txt
+  OK 222: Report-222
+    pdf -> C:\downloads\Report-222.pdf
+    txt -> C:\downloads\Report-222.txt
+  FAILED Report-333: The Scribd viewer did not load any pages. [doc id 333]
+Report: C:\downloads\scribd-report.json
+```
+
+- Successful documents: document id, the final base name (including the appended id when a title clashed) and the absolute path of every format written in this run.
+- Failed documents: document id, base name and the first line of the failure reason (the rest of the error message is not repeated; it is printed above under `Export failed:`).
+- Invalid links are listed where they are rejected and counted in the summary.
+- `secret_password` is printed as `REDACTED` in all of the above.
+
+The same per-document conclusions are written to `scribd-report.json` in the output folder, so scripts can consume them:
+
+```json
+{
+  "output_dir": "C:\\downloads",
+  "formats": ["pdf", "txt"],
+  "summary": {"documents": 3, "succeeded": 2, "failed": 1, "invalid_links": 1},
+  "results": [
+    {"doc_id": "111", "base_name": "Report", "status": "success",
+     "files": {"pdf": "C:\\downloads\\Report.pdf", "txt": "C:\\downloads\\Report.txt"}},
+    {"doc_id": "222", "base_name": "Report-222", "status": "success",
+     "files": {"pdf": "C:\\downloads\\Report-222.pdf", "txt": "C:\\downloads\\Report-222.txt"}},
+    {"doc_id": "333", "base_name": "Report-333", "status": "failed",
+     "reason": "The Scribd viewer did not load any pages."}
+  ],
+  "invalid_links": ["https://example.com/x"]
+}
+```
+
+`files` always points at files that really exist on disk; a failed document has no `files` key. Results keep the order of the input documents. A single-document run keeps its original output and does not write a report.
 
 ---
 
@@ -319,7 +361,7 @@ Useful variables:
 
 The project has two kinds of tests:
 
-- **Unit tests** (121) run offline in under a second. No Chrome, no internet: Selenium, the network and image downloads are replaced by small fakes.
+- **Unit tests** (126) run offline in under a second. No Chrome, no internet: Selenium, the network and image downloads are replaced by small fakes.
 - **End-to-end test** (1) downloads real documents from scribd.com in every format. It needs Chrome and internet, so it is skipped unless you turn it on.
 
 ### Run the tests
@@ -342,6 +384,7 @@ On Windows PowerShell, use `$env:SCRIBD_E2E="1"; python -m pytest -m e2e -v`. To
 |-----------|------:|----------------|
 | `tests/test_urls.py` | 36 | Accepts `www`, locale (`de.`/`es.`/`fr.`), no-`www`, no-scheme, `http`, uppercase, no-title, `/doc/` and `/embeds/` links. Rejects lookalike domains (`notscribd.com`, `evil-scribd.com`, `scribd.com.evil.com`) and non-document pages. Keeps and URL-encodes `secret_password`, redacts it in output. Safe filenames. |
 | `tests/test_cli.py` | 10 | Format parsing, default arguments match the old behaviour, links from arguments / files / stdin / prompt, duplicate removal, name clashes, bulk run continues after a failure with the right summary and exit code. |
+| `tests/test_batch_report.py` | 5 | Per-document bulk accounting with a fake downloader: two successes, one failure and one invalid link in a single run. Checks the success entries (document id, base name, real per-format paths), the failure reason line, the invalid-link count, exit code `1`, the JSON report matching the terminal summary, same-title renaming pointing at the renamed files, no `secret_password` leaks, and that a failed document leaves no `files` entry. |
 | `tests/test_diagnostics.py` | 13 | Waits until the page count is stable, survives script errors while loading, times out cleanly. Recognises Cloudflare checks, blocked access, missing documents (Scribd's real "Document Not Found" text), bad `secret_password`, private documents and login walls. Saves debug screenshot + HTML and never prints the password. |
 | `tests/test_layout.py` | 34 | Rebuilding text from positioned HTML: joining runs, spaces vs punctuation, non-breaking spaces, bullets drawn in tiny fonts or as tiny sprite images, column gaps to tabs, wrapped lines, hyphenation, list items, bold lead-ins, headings, centring, styles, reading order of text and images, colour parsing. |
 | `tests/test_export_files.py` | 6 | TXT output exactly. DOCX keeps fonts, sizes, bold/italic, colours, centring, right-aligned tab stops, enlarged bullets, one section per page size (portrait/landscape), cropped sprite images. DOCX is still written when images fail to download or are invalid. |
@@ -355,7 +398,7 @@ Run on Windows 11, Python 3.14, Chrome 156, Selenium 4.51:
 
 | Check | Result |
 |-------|--------|
-| Unit tests | **121 passed** in 1.1 s |
+| Unit tests | **126 passed** in 3 s |
 | End-to-end test | **1 passed** in 13 s (2 documents, PDF + TXT + DOCX) |
 | DOCX page count in Microsoft Word | **Same as Scribd**: 2 → 2, 8 → 8, 307 → 307 |
 | PDF regression vs. previous version | **Identical**: same page count, page sizes and text on every page (8-page and 2-page documents) |
