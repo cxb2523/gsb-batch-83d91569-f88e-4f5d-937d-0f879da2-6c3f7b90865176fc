@@ -68,7 +68,59 @@ The node requests the target URL through a proxy in the chosen location, scrapes
 
 <img src="docs/n8n-decodo-workflow.png" width="500px">
 
-If Decodo can't scrape the target, the node fails with the API's status code and message. To pass the error downstream instead, set the node's **On Error** setting to **Continue**.
+If Decodo can't scrape the target, the node records the API's status code and message on that item instead of failing the whole batch. See [Batch outcomes](#batch-outcomes) below.
+
+### Batch outcomes
+
+The node runs once per input item and always returns one record per input item, in the
+same order, even when some of them fail. Every record has a `status`:
+
+| `status` | Meaning | Fields |
+| --- | --- | --- |
+| `success` | The API returned a result | `response` holds the response body |
+| `failed` | The item could not be scraped | `error`, `errorSource`, and `statusCode` for API failures |
+| `skipped` | No request was made because the item was not in the retry list | `skipReason` |
+
+Every record also contains:
+
+- `index` – the zero-based position of the input item the record belongs to.
+- `target` – the scraping target used for the item (`universal`, `google_search`, …).
+- `retryList` – the indexes of the items that failed in this run. It is present on every
+  record, so any output item carries the full list. An empty list means nothing failed.
+- `pairedItem` – always points at the item of the current run that produced the record.
+
+A failure is reported with its source:
+
+- `errorSource: "validation"` – the parameters were rejected locally (for example a
+  Universal target without a URL, a Google Search target without a query, or a Results
+  Amount outside 1–100). No request was sent.
+- `errorSource: "api"` – the scraping API answered with a failure. The original status
+  code and message are kept, and `statusCode` is filled in.
+
+### Retrying only failed items
+
+To re-run just the items that failed, pass a previous run's output back into the node
+without changing it. When any input item carries a `retryList` array, the node only
+fetches the listed positions and marks every other item as `skipped` without calling the
+API. Records that still fail keep their position in the new `retryList`, so retries can be
+chained until the list is empty.
+
+The list is keyed by the position of the input item, so the inputs of the retry run must
+be the same items in the same order as the run that produced the list. There are two ways
+to arrange that:
+
+- **Keep the original items and attach `retryList` to them**, for example with a **Merge**
+  node or a **Code** node that copies `retryList` from the previous output onto each
+  original item. This keeps per-item expressions such as `{{ $json.url }}` working.
+- **Feed the full previous output back into the node**, when the node's parameters are
+  fixed values rather than per-item expressions. The output already has one record per
+  input item in the original order, and every record carries `retryList`.
+
+Entries that do not match an input position are ignored, so feeding only the failed
+records is not enough — they would land at the wrong positions and be skipped.
+
+The node no longer aborts the batch on the first failure, so the **On Error** setting is
+no longer needed to collect per-item errors.
 
 ### AI agent tool
 
