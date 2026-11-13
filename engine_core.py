@@ -53,6 +53,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import captcha_solver
 import env_config
+import output_writer
 import page_flow
 import product_parser as parser
 from output_writer import App, Review, finish_run, dedupe_by_key, EXIT_USAGE
@@ -290,6 +291,65 @@ class RunOutcome:
         self.blocked = False
         self.final_url = ""
         self.extra: Dict[str, Any] = {}
+        # reviews mode only: one entry per batchexecute page actually asked
+        # for, including a page whose answer was refused or never arrived.
+        # Surfaced through `extra["review_pages"]` into the .meta.json
+        # sidecar — never mixed into the review rows themselves.
+        self.review_pages: List[Dict[str, Any]] = []
+
+
+# The four ways a reviews run's page loop can stop, written into each page
+# log's `stop_reason` (null on every page but the last one). The run-level
+# `stop_reason` keeps its detailed, colon-shaped strings for backwards
+# compatibility; this is the controlled vocabulary a consumer can branch on
+# without parsing them.
+REVIEW_STOP_PAGES_LIMIT = "pages_limit"
+REVIEW_STOP_TOKEN_EXHAUSTED = "token_exhausted"
+REVIEW_STOP_REFUSED = "refused"
+REVIEW_STOP_TRANSPORT_FAILED = "transport_failed"
+
+
+def _review_page_log(page_num: int, args: argparse.Namespace) -> Dict[str, Any]:
+    """A fresh per-page record, pre-filled with the market the request used.
+
+    The market is constant within one run (the continuation token belongs to
+    the session that opened it), but it is recorded PER PAGE on purpose: a
+    sidecar is read page by page, and a reviews file missing pages is
+    indistinguishable from a complete one without the gl/hl each page was
+    asked under.
+    """
+    return {
+        "page": page_num,
+        "gl": args.gl,
+        "hl": args.hl,
+        "records_returned": 0,
+        "new_review_ids": 0,
+        "has_next_token": False,
+        "outcome": None,
+        "http_status": None,
+        "refusal_basis": None,
+        "stop_reason": None,
+    }
+
+
+def _refusal_basis(post_status: Optional[int], marker: Optional[str]) -> str:
+    """Why a `batchexecute` answer counts as a refusal.
+
+    The basis is stated rather than inferred:
+      * `http_status` — an actual status the driver exposed (403/429);
+      * `structure`    — no usable status, but the body carries a challenge
+                         marker or no reviews payload at all;
+      * `unknown`      — neither was available. Selenium-style drivers that
+                         expose no status land here: writing a number we were
+                         never given would manufacture evidence.
+    """
+    if post_status in (403, 429):
+        return "http_status"
+    if marker:
+        return "structure"
+    if post_status is None:
+        return "unknown"
+    return "structure"
 
 
 def _sleep(seconds: float) -> None:
@@ -657,12 +717,25 @@ def run_reviews(session: Session, url: str, args: argparse.Namespace) -> RunOutc
     token, so page 2 was requested without one, came back as the start of the
     list again, and was mostly eaten by dedupe — 20 / 1 / 19 rows over three
     pages in one reported run, and "end_of_listing" after one page in another.
+
+    Every batchexecute page leaves a record in `out.review_pages` — the gl/hl
+    it was asked under, how many records the wire answer held, how many of
+    their ids were genuinely new, whether another token came back, and why
+    the loop eventually stopped. A missing page and a complete file are
+    otherwise indistinguishable from the rows alone.
     """
     out = RunOutcome()
     package = parser.package_from_url(url)
     if not package:
         out.stop_reason = "no_app_id"
         return out
+
+    def stop(reason: str, page_reason: Optional[str] = None) -> None:
+        """End the loop: name the run-level reason and, when a page log
+        exists, the controlled-vocabulary reason on the page that ended it."""
+        out.stop_reason = reason
+        if page_reason is not None and out.review_pages:
+            out.review_pages[-1]["stop_reason"] = page_reason
 
     try:
         html, status, state, reason = fetch_page(session, url, "reviews", 1,
@@ -674,6 +747,9 @@ def run_reviews(session: Session, url: str, args: argparse.Namespace) -> RunOutc
         return out
     out.final_url = session.driver.current_url() if session.driver else url
     if not _handle_state(out, state, reason, 1):
+        # No batchexecute page was asked for, so there is no per-page record
+        # to attach: the run-level stop_reason (not_found / blocked:* / …)
+        # says what the app-page preflight answered.
         return out
 
     seen: set = set()
@@ -681,6 +757,8 @@ def run_reviews(session: Session, url: str, args: argparse.Namespace) -> RunOutc
     endpoint = parser.batchexecute_url(args.hl, args.gl)
     while out.pages_completed < args.pages:
         page_num = out.pages_completed + 1
+        log = _review_page_log(page_num, args)
+        out.review_pages.append(log)
         form = parser.build_reviews_request(
             package, count=args.reviews_per_call, token=token, sort=args.sort)
         try:
@@ -689,8 +767,11 @@ def run_reviews(session: Session, url: str, args: argparse.Namespace) -> RunOutc
             print(f"[error] reviews page {page_num}: {type(exc).__name__}: "
                   f"{_redact(str(exc))}", file=sys.stderr)
             out.pages_failed.append(page_num)
-            out.stop_reason = f"batchexecute_failed:{type(exc).__name__}"
+            log["outcome"] = "transport_failed"
+            stop(f"batchexecute_failed:{type(exc).__name__}",
+                 REVIEW_STOP_TRANSPORT_FAILED)
             break
+        log["http_status"] = post_status
         _dump(args, f"reviews_p{page_num}", body or "")
         payload = parser.parse_batchexecute(body or "")
         if payload is None or post_status not in (None, 200):
@@ -699,28 +780,50 @@ def run_reviews(session: Session, url: str, args: argparse.Namespace) -> RunOutc
             # reviews ran out", which is what an unread body used to report.
             out.pages_failed.append(page_num)
             marker = parser.challenge_marker(body or "")
+            log["outcome"] = "refused"
+            log["refusal_basis"] = _refusal_basis(post_status, marker)
             if marker or post_status in (403, 429):
                 out.blocked = True
-                out.stop_reason = (f"blocked:challenge_marker:{marker}" if marker
-                                   else f"blocked:http_{post_status}")
+                stop(f"blocked:challenge_marker:{marker}" if marker
+                     else f"blocked:http_{post_status}",
+                     REVIEW_STOP_REFUSED)
             else:
-                out.stop_reason = f"batchexecute_unreadable:http_{post_status}"
+                stop(f"batchexecute_unreadable:http_{post_status}",
+                     REVIEW_STOP_REFUSED)
             break
-        records, token = parser.reviews_from_payload(payload)
+        records, next_token = parser.reviews_from_payload(payload)
+        # What the WIRE held, before this run's dedupe: a page can answer
+        # twenty records and still add zero rows when every id was already
+        # seen, and that distinction is the whole reason this log exists.
+        log["records_returned"] = len(records)
+        log["has_next_token"] = bool(next_token)
         fresh = _review_rows(records, package, args, page_num=page_num,
                              offset=len(out.rows), seen=seen)
+        log["new_review_ids"] = len(fresh)
         if not fresh:
-            out.stop_reason = "end_of_listing"
+            log["outcome"] = "no_new_reviews"
+            # No id this page carried was new: the continuation has looped
+            # back over data the run already holds, so the catalogue is
+            # exhausted as far as this run can tell.
+            stop("end_of_listing", REVIEW_STOP_TOKEN_EXHAUSTED)
             break
         out.rows.extend(fresh)
         out.pages_completed += 1
-        if not token:
-            out.stop_reason = "end_of_listing"
+        log["outcome"] = "ok"
+        if not next_token:
+            stop("end_of_listing", REVIEW_STOP_TOKEN_EXHAUSTED)
+            break
+        token = next_token
+        if out.pages_completed >= args.pages:
+            # The requested budget, not the store: the last page's token is
+            # left in the log so a caller knows more pages exist.
+            stop("completed", REVIEW_STOP_PAGES_LIMIT)
             break
         _sleep(args.delay)
 
     out.extra["reviews_per_call"] = args.reviews_per_call
     out.extra["authors_included"] = not args.no_authors
+    out.extra["review_pages"] = out.review_pages
     return out
 
 
@@ -924,13 +1027,28 @@ def main(launch: Callable[[argparse.Namespace, Optional[str]], Any],
         extra["captcha_solves"] = session.solves_bought
     if pool:
         extra["proxy_rotations"] = pool.rotations
-    return finish_run(
+    rc = finish_run(
         out.rows, args.out, args.format, args.allow_empty,
         blocked=out.blocked, stop_reason=out.stop_reason,
         pages_requested=args.pages, pages_completed=out.pages_completed,
         start_url=url, final_url=out.final_url or url,
         pages_failed=out.pages_failed or None, mode=mode,
         extra=extra)
+    if (mode == "reviews" and out.blocked and not out.rows
+            and rc == output_writer.EXIT_BLOCKED):
+        # A refused reviews call on page 1, with not one review in hand, is
+        # "the content was never obtained": exit 5 and no output file, the
+        # same contract a transport failure on page 1 already has. The
+        # generic blocked exit (3) still applies to grid/app routes — and to
+        # a reviews run refused AFTER rows were gathered, which is exit 6
+        # with the gathered rows kept. `finish_run` wrote nothing on this
+        # branch (zero rows, no --allow-empty), so there is no file to undo.
+        print(f"[info] reviews run refused before any review was gathered: "
+              f"reporting exit {output_writer.EXIT_FETCH_FAILED} rather than "
+              f"{output_writer.EXIT_BLOCKED}, and no output file was written",
+              file=sys.stderr)
+        rc = output_writer.EXIT_FETCH_FAILED
+    return rc
 
 
 _SECRET_RE = None

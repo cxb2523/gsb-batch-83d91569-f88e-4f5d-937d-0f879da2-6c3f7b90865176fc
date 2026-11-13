@@ -229,6 +229,31 @@ eighteen columns are the family prefix, byte-identical and in order across
 every repo in this family; Play's own follow. See
 [`sample_output.json`](sample_output.json).
 
+A `--mode reviews` run additionally writes a **`review_pages`** array into the
+sidecar — one entry per `batchexecute` page actually requested, including a
+page whose answer was refused or never arrived. A missing page and a complete
+file are indistinguishable from the review rows alone, so each entry states:
+
+| field | meaning |
+|---|---|
+| `page` | 1-based page number within the run |
+| `gl` / `hl` | the market and language that page was requested under |
+| `records_returned` | review records the wire answer held, **before** this run's dedupe |
+| `new_review_ids` | how many carried a `review_id` not seen earlier in the run |
+| `has_next_token` | whether the answer carried another continuation token |
+| `outcome` | `ok`, `no_new_reviews`, `refused` or `transport_failed` |
+| `http_status` | the POST status the driver exposed, or `null` when it exposes none |
+| `refusal_basis` | `http_status`, `structure` or `unknown` — why a refused page counts as refused; `null` on a healthy page |
+| `stop_reason` | `null` on every page but the last: `pages_limit`, `token_exhausted`, `refused` or `transport_failed` |
+
+`records_returned` and `new_review_ids` differ on purpose: a page can answer
+twenty records and add zero rows when every id was already seen, which is how
+a looped continuation token ends the run. The refusal basis is evidence-based:
+it is `http_status` only when a 403/429 was actually exposed, `structure` when
+a challenge marker or an unreadable body is the signal, and `unknown` when the
+engine exposes neither (Selenium-style) — a status number is never invented.
+The per-page records live in the sidecar only, never on a review row.
+
 Exit codes: `0` ok · `1` crash · `2` bad usage · `3` blocked · `4` zero
 apps · `5` **the content was never obtained** · `6` partial.
 
@@ -244,7 +269,11 @@ category look the same to whatever reads the file. A run that gathered
 nothing and did not finish reports `5` and **writes no file at all**, so last
 night's good output is still there. A run that gathered rows and THEN failed
 (a timeout on page 2, a refused reviews call) reports `6` and writes what it
-has, with the failed pages named in the sidecar.
+has, with the failed pages named in the sidecar. For `--mode reviews` a
+refused `batchexecute` call on page 1 — before a single review is in hand — is
+the same fact as a page-1 transport failure: exit 5, no file. A refusal after
+page 1 delivered rows stays exit 6. The generic blocked exit 3 still applies
+to grid and app routes.
 
 Retries, per page: `--retries N` is EXTRA attempts after the first on a
 transport failure or a page nothing recognises (`0` means one attempt); a

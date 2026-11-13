@@ -11,6 +11,24 @@ discovered from a bill or a diff.
 
 ## [Unreleased]
 
+> **`--mode reviews` now records every fetched page in the sidecar, and a
+> first-page refusal no longer reports exit 3.**
+> - `<out>.meta.json` carries a `review_pages` array, one entry per
+>   `batchexecute` page requested: its `page`, the `gl`/`hl` requested,
+>   `records_returned` (wire count before dedupe), `new_review_ids`,
+>   `has_next_token`, the `outcome`, the exposed `http_status`, the
+>   `refusal_basis` (`http_status` / `structure` / `unknown`) and a
+>   `stop_reason` on the final page only (`pages_limit`, `token_exhausted`,
+>   `refused`, `transport_failed`). The records stay in the sidecar and are
+>   never added to review rows.
+> - A reviews run refused on page 1 with no review gathered now exits 5 and
+>   writes no output, matching a page-1 transport failure; it previously
+>   exited 3. Refusals after rows were gathered still exit 6 with the rows
+>   kept, and grid/app routes still use exit 3.
+> - A refused page whose engine exposes no HTTP status records
+>   `refusal_basis: "unknown"` and `http_status: null` rather than a
+>   fabricated status code.
+
 ## [0.3.0] — 2026-10-22
 
 > **Behaviour changes for existing callers.**

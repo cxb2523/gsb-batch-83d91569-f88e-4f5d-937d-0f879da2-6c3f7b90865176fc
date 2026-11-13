@@ -1504,6 +1504,245 @@ def _sent(form):
     return json.loads(json.loads(form["f.req"])[0][0][1])[2]
 
 
+# --------------------------------------------------------------------------
+# The reviews per-page log, driven with entirely SYNTHETIC wire responses.
+# These deliberately do not use the captures: the point is to construct exact
+# shapes the real store has not been observed sending (a page that repeats
+# the previous page's id, a 403 on page 1) and pin the bookkeeping. They
+# prove the log contract only — nothing here is evidence about the live site.
+# --------------------------------------------------------------------------
+
+def _synthetic_review_record(review_id):
+    """The 12-slot shape parse_review_record reads, every value made up."""
+    record = [None] * 12
+    record[0] = review_id
+    record[1] = ["Mock Reviewer",
+                 [None, 2, None,
+                  [None, None, "https://play-lh.example.invalid/avatar"]]]
+    record[2] = 5
+    record[4] = "synthetic fixture text"
+    record[5] = [1700000000, 0]
+    record[6] = 0
+    record[9] = ["999000111222333", "Mock Reviewer"]
+    record[10] = "1.2.3"
+    return record
+
+
+def _synthetic_batchexecute(review_ids, token):
+    """A made-up `)]}'` + wrb.fr envelope holding the given review ids."""
+    payload = [[_synthetic_review_record(r) for r in review_ids],
+               [token] if token else []]
+    return ")]}'\n" + json.dumps(
+        [["wrb.fr", "UsvDTd", json.dumps(payload, separators=(",", ":"))]],
+        separators=(",", ":"))
+
+
+def _synthetic_app_page(review_id):
+    """A made-up app page whose AF block carries a recognisable reviews node,
+    so the reviews preflight classifies it as content. The node needs at
+    least two records — embedded_reviews() only accepts a node of records —
+    so a fixed second fixture id rides along."""
+    # Nested as Play nests it: the AF block's data holds a node whose child
+    # is a list of full review records — embedded_reviews() walks for that
+    # shape, so a flat one-record block would not be recognised.
+    block = [[[_synthetic_review_record(review_id),
+               _synthetic_review_record(_MOCK_ID_B)]]]
+    return ("<html><head><title>mock app</title></head><body>"
+            "<a href=\"https://play.google.com/store/apps/details?"
+            "id=com.example.mock&hl=en&gl=US\">mock</a>"
+            # Play's own image host, enough to clear the structural floor:
+            # a page with zero store assets reads as a block even when its
+            # payload is otherwise recognisable.
+            "<img src=\"https://play-lh.googleusercontent.com/mock-1\">"
+            "<img src=\"https://play-lh.googleusercontent.com/mock-2\">"
+            "<script>AF_initDataCallback({key: 'ds:5', data: "
+            + json.dumps(block) + ", sideChannel: {}});</script></body></html>")
+
+
+_MOCK_ID_A = "aaaaaaaa-0000-1111-2222-333333333333"
+_MOCK_ID_B = "bbbbbbbb-0000-1111-2222-333333333333"
+_MOCK_TOKEN = "z" * 40
+
+
+def test_run_contract_reviews_per_page_log():
+    """The sidecar records every batchexecute page: market, counts, the
+    new-id count, the next token and why the loop stopped.
+
+    The headline case: a two-page token chain whose second page repeats
+    page 1's review_id must log new_review_ids == 0 on page 2 and stop for
+    token exhaustion rather than silently looking like a full second page.
+    """
+    ok = True
+    app = _synthetic_app_page(_MOCK_ID_A)
+    page1 = _synthetic_batchexecute([_MOCK_ID_A], _MOCK_TOKEN)
+    duplicate = _synthetic_batchexecute([_MOCK_ID_A], _MOCK_TOKEN)
+
+    rc, world, files = _run_main(
+        ["--mode", "reviews", "--app-id", "com.example.mock", "--pages", "3",
+         "--delay", "0"],
+        [(app, 200)], posts=[(page1, 200), (duplicate, 200)])
+    meta = json.loads(files.get(".meta.json", "{}"))
+    logs = meta.get("review_pages")
+    ok &= check("[review-log] the run completes", rc == 0, f"rc={rc}")
+    ok &= check("[review-log] one entry per batchexecute page",
+                isinstance(logs, list) and len(logs) == 2, str(logs))
+    if logs and len(logs) == 2:
+        first, second = logs
+        ok &= check("[review-log] each page names its gl/hl",
+                    first["gl"] == "US" and first["hl"] == "en"
+                    and second["gl"] == "US" and second["hl"] == "en",
+                    str(logs))
+        ok &= check("[review-log] page 1 returned one record and one new id",
+                    first["records_returned"] == 1
+                    and first["new_review_ids"] == 1, str(first))
+        ok &= check("[review-log] page 1 records the next token",
+                    first["has_next_token"] is True, str(first))
+        ok &= check("[review-log] a repeated page still reports what the wire "
+                    "returned", second["records_returned"] == 1, str(second))
+        ok &= check("[review-log] page 2 added ZERO new review ids",
+                    second["new_review_ids"] == 0, str(second))
+        ok &= check("[review-log] page 2 stopped on token exhaustion",
+                    second["stop_reason"] == "token_exhausted", str(second))
+        ok &= check("[review-log] only the last page carries a stop_reason",
+                    first["stop_reason"] is None
+                    and second["stop_reason"] is not None, str(logs))
+    ok &= check("[review-log] the run-level reason stays end_of_listing",
+                meta.get("stop_reason") == "end_of_listing", str(meta.get("stop_reason")))
+    # The log is sidecar data: the review rows keep their documented schema.
+    rows = json.loads(files.get(".json", "[]"))
+    ok &= check("[review-log] one unique row survived the duplicate page",
+                len(rows) == 1 and rows[0]["review_id"] == _MOCK_ID_A, str(len(rows)))
+    ok &= check("[review-log] page records never leak into review rows",
+                all("review_pages" not in row for row in rows))
+
+    # A healthy chain stopped by the --pages budget keeps the unconsumed
+    # token visible and names the budget as the reason.
+    page2 = _synthetic_batchexecute([_MOCK_ID_B], _MOCK_TOKEN)
+    rc, world, files = _run_main(
+        ["--mode", "reviews", "--app-id", "com.example.mock", "--pages", "2",
+         "--delay", "0"],
+        [(app, 200)], posts=[(page1, 200), (page2, 200)])
+    meta = json.loads(files.get(".meta.json", "{}"))
+    logs = meta.get("review_pages") or []
+    ok &= check("[review-log] a --pages stop is exit 0", rc == 0, f"rc={rc}")
+    ok &= check("[review-log] the budget stop is named pages_limit with the "
+                "next token still present",
+                len(logs) == 2 and logs[1]["stop_reason"] == "pages_limit"
+                and logs[1]["has_next_token"] is True, str(logs))
+    ok &= check("[review-log] both pages count as ok",
+                all(entry["outcome"] == "ok" for entry in logs), str(logs))
+
+    # A refusal AFTER rows: the failed page is logged with its HTTP basis and
+    # the run is partial (exit 6), keeping page 1.
+    rc, world, files = _run_main(
+        ["--mode", "reviews", "--app-id", "com.example.mock", "--pages", "3",
+         "--delay", "0", "--solve-captcha", "never"],
+        [(app, 200)], posts=[(page1, 200), ("<html>forbidden</html>", 403)])
+    meta = json.loads(files.get(".meta.json", "{}"))
+    logs = meta.get("review_pages") or []
+    ok &= check("[review-log] a later-page 403 is a partial run (exit 6)",
+                rc == 6, f"rc={rc}")
+    ok &= check("[review-log] the refused page names the HTTP basis",
+                len(logs) == 2 and logs[1]["outcome"] == "refused"
+                and logs[1]["refusal_basis"] == "http_status"
+                and logs[1]["http_status"] == 403
+                and logs[1]["stop_reason"] == "refused", str(logs))
+
+    # No status exposed (the Selenium shape) and no marker: the basis is
+    # unknown and the status stays null — never a fabricated number.
+    rc, world, files = _run_main(
+        ["--mode", "reviews", "--app-id", "com.example.mock", "--pages", "3",
+         "--delay", "0", "--solve-captcha", "never"],
+        [(app, 200)], posts=[(page1, 200), ("", None)])
+    meta = json.loads(files.get(".meta.json", "{}"))
+    logs = meta.get("review_pages") or []
+    ok &= check("[review-log] an unreadable body with no status reports basis "
+                "unknown and a null status",
+                len(logs) == 2 and logs[1]["refusal_basis"] == "unknown"
+                and logs[1]["http_status"] is None, str(logs))
+
+    # A transport failure is its own outcome, again with no invented status.
+    rc, world, files = _run_main(
+        ["--mode", "reviews", "--app-id", "com.example.mock", "--pages", "3",
+         "--delay", "0"],
+        [(app, 200)], posts=[(page1, 200), TimeoutError("reset")])
+    meta = json.loads(files.get(".meta.json", "{}"))
+    logs = meta.get("review_pages") or []
+    ok &= check("[review-log] a transport failure is logged as such",
+                rc == 6 and len(logs) == 2
+                and logs[1]["outcome"] == "transport_failed"
+                and logs[1]["stop_reason"] == "transport_failed"
+                and logs[1]["http_status"] is None, str((rc, logs)))
+    return ok
+
+
+def test_run_contract_reviews_first_page_failure_writes_nothing():
+    """A first batchexecute page that yields no review is exit 5 and leaves
+    no output file behind — whether the answer was refused or never arrived.
+
+    This is the zero-row branch of the partial-run contract: exit 6 only
+    applies once rows exist. A blocked run used to report exit 3 here; the
+    reviews route now treats "refused before the first review" the same as a
+    page-1 transport failure, because neither obtained any content.
+    """
+    ok = True
+    app = _synthetic_app_page(_MOCK_ID_A)
+    page1 = _synthetic_batchexecute([_MOCK_ID_A], _MOCK_TOKEN)
+
+    # HTTP 403 on page 1.
+    rc, world, files = _run_main(
+        ["--mode", "reviews", "--app-id", "com.example.mock", "--pages", "2",
+         "--delay", "0", "--solve-captcha", "never"],
+        [(app, 200)], posts=[("<html>forbidden</html>", 403)])
+    ok &= check("[review-log] a first-page 403 with no rows is exit 5",
+                rc == 5, f"rc={rc}")
+    ok &= check("[review-log] exit 5 writes no JSON, CSV or sidecar",
+                files == {}, str(sorted(files)))
+
+    # A challenge marker with NO status (Selenium): still exit 5, still no
+    # file, and the refusal basis is structural rather than a made-up status.
+    marker_page = ('<html><body><div class="g-recaptcha" data-sitekey="6Lx">'
+                   '</div>Our systems have detected unusual traffic.</body></html>')
+    rc, world, files = _run_main(
+        ["--mode", "reviews", "--app-id", "com.example.mock", "--pages", "2",
+         "--delay", "0", "--solve-captcha", "never"],
+        [(app, 200)], posts=[(marker_page, None)])
+    ok &= check("[review-log] a first-page marker refusal with no status is "
+                "exit 5", rc == 5, f"rc={rc}")
+    ok &= check("[review-log] and likewise writes nothing", files == {},
+                str(sorted(files)))
+
+    # A transport exception on page 1: same exit, same absence of files.
+    rc, world, files = _run_main(
+        ["--mode", "reviews", "--app-id", "com.example.mock", "--pages", "2",
+         "--delay", "0"],
+        [(app, 200)], posts=[TimeoutError("connection reset")])
+    ok &= check("[review-log] a first-page transport failure is exit 5",
+                rc == 5, f"rc={rc}")
+    ok &= check("[review-log] and writes nothing", files == {}, str(sorted(files)))
+
+    # The generic blocked exit 3 still holds for the OTHER modes, so the
+    # reviews-specific remap did not widen into a general policy change.
+    rc, world, files = _run_main(
+        ["--mode", "listing", "--category", "GAME", "--solve-captcha", "never"],
+        [(_BLOCKED_PAGE, 200)])
+    ok &= check("[review-log] a blocked grid run still reports exit 3",
+                rc == 3, f"rc={rc}")
+
+    # And a refusal AFTER a healthy review page remains exit 6 with the rows
+    # kept — the remap is strictly scoped to zero-row runs.
+    rc, world, files = _run_main(
+        ["--mode", "reviews", "--app-id", "com.example.mock", "--pages", "3",
+         "--delay", "0", "--solve-captcha", "never"],
+        [(app, 200)], posts=[(page1, 200), ("<html>forbidden</html>", 403)])
+    ok &= check("[review-log] a refusal after rows is still exit 6",
+                rc == 6, f"rc={rc}")
+    ok &= check("[review-log] and keeps the gathered row plus its sidecar",
+                len(json.loads(files.get(".json", "[]"))) == 1
+                and ".meta.json" in files, str(sorted(files)))
+    return ok
+
+
 def test_run_contract_reviews_pages_chain_on_the_token():
     """Page N+1 is asked for WITH page N's token, and every page is sorted.
 
@@ -2457,6 +2696,8 @@ def main():
         test_run_contract_exit_codes_per_state,
         test_run_contract_reviews_refusal_is_not_an_end,
         test_run_contract_reviews_pages_chain_on_the_token,
+        test_run_contract_reviews_per_page_log,
+        test_run_contract_reviews_first_page_failure_writes_nothing,
         test_recaptcha_variant_on_googles_demos,
         test_captures_are_committable,
         test_screenshot_count_on_both_routes,
