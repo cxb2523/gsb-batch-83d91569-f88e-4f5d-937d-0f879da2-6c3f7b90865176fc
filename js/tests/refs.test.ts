@@ -1,0 +1,209 @@
+import { describe, it, expect } from "vitest";
+import { RefRegistry, UNNAMED_RE } from "../src/refs.js";
+
+describe("RefRegistry.buildFromSnapshot", () => {
+  it("assigns refs to basic snapshot", () => {
+    const registry = new RefRegistry();
+    const result = registry.buildFromSnapshot('- link "About"\n- button "Submit"');
+    expect(result).toContain("[ref=e1]");
+    expect(result).toContain("[ref=e2]");
+    expect(registry.size).toBe(2);
+  });
+
+  it("assigns roles and names", () => {
+    const registry = new RefRegistry();
+    registry.buildFromSnapshot('- link "Home"\n- button "OK"');
+    const e1 = registry.resolve("e1");
+    expect(e1).toBeDefined();
+    expect(e1!.role).toBe("link");
+    expect(e1!.name).toBe("Home");
+    const e2 = registry.resolve("e2");
+    expect(e2).toBeDefined();
+    expect(e2!.role).toBe("button");
+    expect(e2!.name).toBe("OK");
+  });
+
+  it("handles unnamed elements", () => {
+    const registry = new RefRegistry();
+    registry.buildFromSnapshot("- img\n- link");
+    const e1 = registry.resolve("e1");
+    expect(e1).toBeDefined();
+    expect(e1!.role).toBe("img");
+    expect(e1!.name).toBe("");
+  });
+
+  it("decodes escaped quotes and backslashes in names", () => {
+    const registry = new RefRegistry();
+    registry.buildFromSnapshot('- button "Say \\"hi\\""\n- button "a\\\\b"');
+    expect(registry.resolve("e1")!.name).toBe('Say "hi"');
+    expect(registry.resolve("e2")!.name).toBe("a\\b");
+  });
+
+  it("handles single-quoted keys", () => {
+    // Playwright wraps keys containing ": " or " #" in YAML single quotes
+    const registry = new RefRegistry();
+    const aria = "- 'button \"Step 1: Sign in\"'\n  - 'link \"It''s #42\"':\n    - /url: /x";
+    const result = registry.buildFromSnapshot(aria, true);
+    expect(result).toContain("[ref=e1]");
+    expect(result).toContain("[ref=e2]");
+    expect(registry.resolve("e1")!.role).toBe("button");
+    expect(registry.resolve("e1")!.name).toBe("Step 1: Sign in");
+    expect(registry.resolve("e2")!.role).toBe("link");
+    expect(registry.resolve("e2")!.name).toBe("It's #42");
+  });
+
+  it("parses unquoted slash names", () => {
+    // Playwright writes a name that starts and ends with "/" without quotes
+    const registry = new RefRegistry();
+    const aria = "- link /about/:\n  - /url: /about/\n- button /a/b/ [disabled]\n"
+      + "- 'button /a: b/'\n- link /x/: /x/ text";
+    const result = registry.buildFromSnapshot(aria, true);
+    expect([1, 2, 3, 4].map((i) => registry.resolve(`e${i}`)!.name)).toEqual(["/about/", "/a/b/", "/a: b/", "/x/"]);
+    expect(result).toContain("- button /a/b/ [disabled] [ref=e2]");
+  });
+
+  it("parses a single slash name apart from an unnamed sibling", () => {
+    // A name of exactly "/" also starts and ends with "/", so Playwright
+    // writes it unquoted. It must not merge with an unnamed sibling.
+    const registry = new RefRegistry();
+    const aria = '- link /:\n  - /url: "#a"\n- link:\n  - /url: "#b"\n- button /abc/ [disabled]';
+    const result = registry.buildFromSnapshot(aria, true);
+    expect(registry.resolve("e1")).toEqual({ ref: "e1", role: "link", name: "/", nth: 0 });
+    expect(registry.resolve("e2")).toEqual({ ref: "e2", role: "link", name: "", nth: 0 });
+    expect(registry.resolve("e3")).toEqual({ ref: "e3", role: "button", name: "/abc/", nth: 0 });
+    expect(result).toContain("- link /: [ref=e1]");
+    expect(result).toContain("- button /abc/ [disabled] [ref=e3]");
+  });
+
+  it("UNNAMED_RE matches empty and omitted names", () => {
+    // Playwright omits names longer than 900 characters
+    expect(UNNAMED_RE.test("")).toBe(true);
+    expect(UNNAMED_RE.test("x".repeat(901))).toBe(true);
+    expect(UNNAMED_RE.test("x".repeat(900))).toBe(false);
+    expect(UNNAMED_RE.test("Submit")).toBe(false);
+  });
+
+  it("handles nested indentation", () => {
+    const registry = new RefRegistry();
+    const aria = '- list\n  - listitem\n    - link "Item 1"';
+    const result = registry.buildFromSnapshot(aria);
+    expect(result).toContain("[ref=e1]");
+    expect(result).toContain("[ref=e2]");
+    expect(result).toContain("[ref=e3]");
+  });
+
+  it("disambiguates duplicate role+name with nth", () => {
+    const registry = new RefRegistry();
+    registry.buildFromSnapshot('- link "Home"\n- link "Home"');
+    const e1 = registry.resolve("e1");
+    const e2 = registry.resolve("e2");
+    expect(e1).toBeDefined();
+    expect(e2).toBeDefined();
+    expect(e1!.nth).toBe(0);
+    expect(e2!.nth).toBe(1);
+    expect(e1!.role).toBe("link");
+    expect(e2!.role).toBe("link");
+    expect(e1!.name).toBe("Home");
+    expect(e2!.name).toBe("Home");
+  });
+
+  it("filters interactive-only", () => {
+    const registry = new RefRegistry();
+    const aria = '- heading "Title"\n- link "Click"\n- text: hello\n- button "OK"';
+    const result = registry.buildFromSnapshot(aria, true);
+    expect(result).not.toContain("Title");
+    expect(result).not.toContain("hello");
+    expect(result).toContain("Click");
+    expect(result).toContain("OK");
+    expect(registry.size).toBe(2);
+  });
+
+  it("clears previous entries", () => {
+    const registry = new RefRegistry();
+    registry.buildFromSnapshot('- link "A"');
+    expect(registry.size).toBe(1);
+    registry.buildFromSnapshot('- button "B"\n- button "C"');
+    expect(registry.size).toBe(2);
+    expect(registry.resolve("e1")!.role).toBe("button");
+  });
+
+  it("preserves non-matching lines", () => {
+    const registry = new RefRegistry();
+    const result = registry.buildFromSnapshot('plain text line\n- link "A"');
+    expect(result).toContain("plain text line");
+    expect(result).toContain("[ref=e1]");
+  });
+
+  it("records and resets the snapshot scope", () => {
+    const registry = new RefRegistry();
+    registry.buildFromSnapshot('- button "Delete"', false, "#list");
+    expect(registry.scope).toBe("#list");
+    registry.buildFromSnapshot('- button "Delete"');
+    expect(registry.scope).toBeUndefined();
+  });
+
+  it("handles empty snapshot", () => {
+    const registry = new RefRegistry();
+    const result = registry.buildFromSnapshot("");
+    expect(registry.size).toBe(0);
+  });
+
+  it("handles all interactive roles", () => {
+    const roles = [
+      "link", "button", "combobox", "textbox", "textarea",
+      "checkbox", "radio", "switch", "slider",
+      "tab", "tabpanel", "menuitem", "option",
+      "select", "listbox", "searchbox",
+    ];
+    const aria = roles.map(r => `- ${r} "test"`).join("\n");
+    const registry = new RefRegistry();
+    const result = registry.buildFromSnapshot(aria, true);
+    expect(registry.size).toBe(roles.length);
+  });
+
+  it("filters non-interactive roles in interactive mode", () => {
+    const nonInteractive = ["heading", "img", "list", "listitem", "paragraph", "region", "navigation"];
+    const aria = nonInteractive.map(r => `- ${r} "test"`).join("\n");
+    const registry = new RefRegistry();
+    registry.buildFromSnapshot(aria, true);
+    expect(registry.size).toBe(0);
+  });
+});
+
+describe("RefRegistry.resolve", () => {
+  it("resolves with @ prefix", () => {
+    const registry = new RefRegistry();
+    registry.buildFromSnapshot('- link "Test"');
+    expect(registry.resolve("@e1")).toBeDefined();
+  });
+
+  it("resolves without @ prefix", () => {
+    const registry = new RefRegistry();
+    registry.buildFromSnapshot('- link "Test"');
+    expect(registry.resolve("e1")).toBeDefined();
+  });
+
+  it("returns undefined for nonexistent ref", () => {
+    const registry = new RefRegistry();
+    registry.buildFromSnapshot('- link "Test"');
+    expect(registry.resolve("e999")).toBeUndefined();
+  });
+
+  it("returns undefined on empty registry", () => {
+    const registry = new RefRegistry();
+    expect(registry.resolve("e1")).toBeUndefined();
+  });
+});
+
+describe("RefRegistry.size", () => {
+  it("returns 0 for empty registry", () => {
+    const registry = new RefRegistry();
+    expect(registry.size).toBe(0);
+  });
+
+  it("returns correct count", () => {
+    const registry = new RefRegistry();
+    registry.buildFromSnapshot('- link "A"\n- button "B"\n- textbox "C"');
+    expect(registry.size).toBe(3);
+  });
+});
