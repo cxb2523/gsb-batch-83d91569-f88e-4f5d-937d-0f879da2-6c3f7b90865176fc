@@ -1,0 +1,147 @@
+{
+    "name": "@eurafaeldecarvalho/browser-scraper",
+    "version": "0.8.3",
+    "description": "Stealth browser for web scraping and AI agents: undetected Chrome over raw CDP, Cloudflare Turnstile, closed Shadow DOM & cross-origin iframes, HTML to Markdown, MCP server, LLM structured extraction (bring your own model). Puppeteer alternative.",
+    "author": "Rafael de Carvalho",
+    "license": "MIT",
+    "packageManager": "pnpm@10.28.1",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "default": "./dist/index.js"
+        },
+        "./ai": {
+            "types": "./dist/ai/index.d.ts",
+            "default": "./dist/ai/index.js"
+        },
+        "./package.json": "./package.json"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/eurafaeldecarvalho/browser-scraper.git"
+    },
+    "homepage": "https://github.com/eurafaeldecarvalho/browser-scraper#readme",
+    "bugs": {
+        "url": "https://github.com/eurafaeldecarvalho/browser-scraper/issues"
+    },
+    "publishConfig": {
+        "access": "public"
+    },
+    "keywords": [
+        "scraper",
+        "web-scraping",
+        "web-scraper",
+        "stealth",
+        "undetected-chrome",
+        "undetected-chromedriver",
+        "anti-bot",
+        "cloudflare-bypass",
+        "turnstile",
+        "puppeteer-alternative",
+        "playwright-alternative",
+        "headless-chrome",
+        "cdp",
+        "chrome-devtools-protocol",
+        "shadow-dom",
+        "closed-shadow-dom",
+        "fingerprint",
+        "human-like",
+        "ai-scraper",
+        "llm",
+        "llm-extraction",
+        "structured-data",
+        "zod",
+        "mcp",
+        "mcp-server",
+        "model-context-protocol",
+        "ai-agent",
+        "browser-agent",
+        "markdown",
+        "html-to-markdown",
+        "accessibility-tree",
+        "curl-impersonate",
+        "aws-lambda",
+        "typescript"
+    ],
+    "files": [
+        "dist",
+        "skills",
+        "server.json",
+        "LICENSE",
+        "README.md",
+        "CHANGELOG.md"
+    ],
+    "scripts": {
+        "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+        "build": "node -e \"const path = require('node:path'); require(path.join(path.dirname(process.env.npm_package_json), 'scripts/run-tsc.cjs'))('build')\"",
+        "check": "node -e \"const path = require('node:path'); require(path.join(path.dirname(process.env.npm_package_json), 'scripts/run-tsc.cjs'))('check')\"",
+        "prepack": "node -e \"const path = require('node:path'); require(path.join(path.dirname(process.env.npm_package_json), 'scripts/verify-dist.cjs'))\"",
+        "pack:check": "npm pack --dry-run",
+        "release:check": "npm publish --dry-run",
+        "example:basic": "tsx examples/basic.ts",
+        "example:stealth": "tsx examples/stealth-check.ts",
+        "example:keyboard": "tsx examples/keyboard-check.ts",
+        "example:api": "tsx examples/api-check.ts",
+        "example:webgl": "tsx examples/webgl-check.ts",
+        "example:detection": "tsx examples/detection-test.ts",
+        "example:cloudflare": "tsx examples/cloudflare-turnstile.ts",
+        "example:cloudflare-click": "tsx examples/cloudflare-turnstile-click.ts",
+        "example:smoke": "tsx examples/smoke-optionB.ts",
+        "test": "tsx --test test/unit/*.test.ts",
+        "test:e2e": "tsx --test --test-concurrency=1 test/e2e/*.test.ts",
+        "test:all": "pnpm run check && pnpm run test && pnpm run test:e2e",
+        "example:ai": "tsx examples/ai-extract.ts"
+    },
+    "engines": {
+        "node": ">=20.0.0"
+    },
+    "dependencies": {
+        "node-html-parser": "^9.0.4",
+        "ws": "^8.18.1"
+    },
+    "optionalDependencies": {
+        "@sparticuz/chromium": "^149.0.0",
+        "better-sqlite3": "^11.9.1"
+    },
+    "devDependencies": {
+        "@types/better-sqlite3": "^7.6.12",
+        "@types/node": "^22.15.17",
+        "@types/ws": "^8.18.1",
+        "ai": "^7.0.143",
+        "tsx": "^4.19.3",
+        "typescript": "^5.8.3",
+        "zod": "^4.6.7"
+    },
+    "pnpm": {
+        "onlyBuiltDependencies": [
+            "better-sqlite3",
+            "esbuild"
+        ]
+    },
+    "mcpName": "io.github.eurafaeldecarvalho/browser-scraper",
+    "bin": {
+        "browser-scraper": "dist/cli.js"
+    },
+    "typesVersions": {
+        "*": {
+            "ai": [
+                "dist/ai/index.d.ts"
+            ]
+        }
+    },
+    "peerDependencies": {
+        "ai": ">=4.2.0",
+        "zod": ">=3.23.0"
+    },
+    "peerDependenciesMeta": {
+        "ai": {
+            "optional": true
+        },
+        "zod": {
+            "optional": true
+        }
+    },
+    "funding": "https://github.com/sponsors/eurafaeldecarvalho"
+}

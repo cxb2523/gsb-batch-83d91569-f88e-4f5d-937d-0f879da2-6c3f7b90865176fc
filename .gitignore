@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.png
+
+# internal tooling / research (not part of the published library)
+.firecrawl/
+.agents/
+.claude/
