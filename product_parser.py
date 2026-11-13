@@ -347,9 +347,10 @@ def parse_search(payload: Any, region: str, scraped_at: str, page: int,
 
 def page_is_short(served_on_page: Optional[int], served_before: int,
                   total: Optional[int],
-                  page_size: int = ADS_PER_PAGE) -> bool:
+                  page_size: int = ADS_PER_PAGE,
+                  has_more: Optional[bool] = None) -> bool:
     """True when a page served fewer than a full page of records while
-    the response's own `total` says more remain.
+    the response's OWN envelope says more remain.
 
     The endpoint serves twelve per page: 45 of the 47 cursor pages in the
     canary's artifacts from 2026-10-09 to 2026-10-15 (then run daily) carried
@@ -360,15 +361,24 @@ def page_is_short(served_on_page: Optional[int], served_before: int,
     explain either, so a page like that is the listing being cut short,
     not its end: the run is incomplete.
 
-    A short page at the TRUE end — everything the total counts has now
-    been served — is not short. Without a total there is no evidence
-    either way, and the page is not flagged.
+    Two independent statements can say more remains, and either is enough:
+      * `total` counts more ads than have now been served, or
+      * `has_more` is explicitly True.
+    The France 2026-10-13 page said it both ways (`has_more: false` while
+    the total towered over the two served rows) — hence a rule keyed on
+    EITHER statement, not on the flag alone. When neither statement says
+    more remains — a short last page that reaches the total, or an
+    envelope that itself says the listing is over — the page is the real
+    end and is not flagged. Without evidence either way (no total, no
+    usable flag) there is nothing to prove a cut short, so the page is
+    not flagged.
     """
     if not served_on_page or served_on_page >= page_size:
         return False
-    if total is None:
-        return False
-    return total > served_before + served_on_page
+    more_per_total = (total is not None
+                      and total > served_before + served_on_page)
+    more_per_flag = has_more is True
+    return more_per_total or more_per_flag
 
 
 # ---------------------------------------------------------------------------

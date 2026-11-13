@@ -2807,7 +2807,7 @@ def check_a_short_page_under_a_large_total_is_an_incomplete_run():
         ("a short last page that reaches the total", 2, [end1, end2],
          ("completed", "has_more_false", 0, 0)),
         ("two full pages", 2, [payload("de_page1"), payload("de_page2")],
-         ("completed", None, 0, 0)),
+         ("completed", "cursor_exhausted", 0, 0)),
     )
     for name in ENGINES:
         engine = _import_engine(name)
@@ -2851,6 +2851,276 @@ def check_a_short_page_under_a_large_total_is_an_incomplete_run():
                       meta["short_pages"][0],
                       {"region": "DE", "page": 1, "served": 2,
                        "total": 17071905, "has_more": False})
+
+
+def _envelope(name, *, total=None, has_more=None, search_id=None,
+              keep=None):
+    """A captured page with only the pagination envelope overridden."""
+    page = copy.deepcopy(payload(name))
+    if keep is not None:
+        page["data"] = page["data"][:keep]
+    if total is not None:
+        page["total"] = total
+    if has_more is not None:
+        page["has_more"] = has_more
+    if search_id is not None:
+        page["search_id"] = search_id
+    return page
+
+
+def _cursor(next_cursor):
+    """The base64 `search_id` shape the parser decodes for its position."""
+    import base64
+    raw = json.dumps({"last_sort": [1790109992000],
+                      "next_cursor": next_cursor}).encode("utf-8")
+    return base64.b64encode(raw).decode("ascii")
+
+
+def check_a_short_page_that_promises_more_advances_the_cursor():
+    """A short page with `has_more: true` is NOT the end: the run records
+    the short page and follows the cursor to the next page instead of
+    stopping. Only when the envelope itself says the listing is over does
+    the region end `short_page`."""
+    # Unit-level: the flag alone, with no total, is enough evidence.
+    short = product_parser.page_is_short
+    check("has_more true with no total still flags a short page",
+          short(3, 0, None, has_more=True))
+    check("has_more false and no total is not flagged",
+          not short(3, 0, None, has_more=False))
+    check("a short page reaching the total, has_more false, is the real end",
+          not short(3, 0, 3, has_more=False))
+    check("has_more false beside a larger total is still short",
+          short(2, 0, 17071905, has_more=False))
+
+    for name in ENGINES:
+        engine = _import_engine(name)
+        if engine is None:
+            skip(name, "engine library absent")
+            continue
+        # Page 1: 2 ads, has_more TRUE, a cursor to page 2. Page 2: a full
+        # page that says the listing ends there (has_more false).
+        first = _envelope("de_page1", keep=2, total=17071905, has_more=True,
+                          search_id=_cursor(2))
+        second = _envelope("de_page2", total=17071905, has_more=False)
+        answers = [first, second]
+
+        def fetch(box, pw, args, pool, url, body, lbl, answers=answers):
+            return 200, answers.pop(0), product_parser.STATE_CONTENT, False
+
+        def body(FakeSession):
+            args = _fault_args(engine, region="DE", pages=2)
+            box = {"session": FakeSession(), "prime_url": "u"}
+            return engine._run_ads(box, None, args, None)
+
+        rows_, meta = _with_stubs(engine, fetch, body)
+        equal("%s: the short page was recorded" % name,
+              len(meta.get("short_pages") or []), 1)
+        equal("%s: ...with the envelope values it was served with" % name,
+              meta["short_pages"][0],
+              {"region": "DE", "page": 1, "served": 2,
+               "total": 17071905, "has_more": True})
+        equal("%s: the run followed the cursor to page 2 and ended on its "
+              "envelope" % name,
+              (meta.get("stop_reason"),
+               (meta.get("why_each_region_stopped") or {}).get("DE")),
+              ("short_page", "has_more_false"))
+        equal("%s: both pages' ads are kept" % name, len(rows_),
+              2 + len(payload("de_page2")["data"]))
+
+        # A short page that promises more yet hands back no cursor is
+        # still a cut-short listing, ending `short_page` rather than being
+        # mislabelled a clean cursor exhaustion.
+        no_cursor = _envelope("de_page1", keep=3, total=17071905,
+                              has_more=True, search_id="")
+        answers = [no_cursor]
+
+        def fetch3(box, pw, args, pool, url, body, lbl, answers=answers):
+            return 200, answers.pop(0), product_parser.STATE_CONTENT, False
+
+        def body3(FakeSession):
+            args = _fault_args(engine, region="DE", pages=2)
+            box = {"session": FakeSession(), "prime_url": "u"}
+            return engine._run_ads(box, None, args, None)
+
+        _rows, meta = _with_stubs(engine, fetch3, body3)
+        equal("%s: a short page with no cursor still ends short_page" % name,
+              (meta.get("stop_reason"),
+               (meta.get("why_each_region_stopped") or {}).get("DE")),
+              ("short_page", "short_page"))
+
+
+def check_a_cursor_that_stops_advancing_ends_the_region_without_looping():
+    """`has_more: true` must not be trusted on its own. When the cursor
+    comes back unchanged (either its decoded position or the raw string),
+    the region ends `cursor_stalled` rather than fetching the same page
+    until the page cap — or forever."""
+    for name in ENGINES:
+        engine = _import_engine(name)
+        if engine is None:
+            skip(name, "engine library absent")
+            continue
+        stalled_cursor = _cursor(12)
+        # Page 1 establishes the cursor; every later answer promises more
+        # but hands back the SAME cursor instead of advancing.
+        first = _envelope("de_page1", total=17071905, has_more=True,
+                          search_id=stalled_cursor)
+        echo = _envelope("de_page2", total=17071905, has_more=True,
+                         search_id=stalled_cursor)
+        answers = [first] + [echo for _ in range(4)]
+
+        def fetch(box, pw, args, pool, url, body, lbl, answers=answers):
+            return 200, answers.pop(0), product_parser.STATE_CONTENT, False
+
+        def body(FakeSession):
+            args = _fault_args(engine, region="DE", pages=5)
+            box = {"session": FakeSession(), "prime_url": "u"}
+            return engine._run_ads(box, None, args, None)
+
+        rows_, meta = _with_stubs(engine, fetch, body)
+        equal("%s: the region stops on a stalled cursor" % name,
+              (meta.get("why_each_region_stopped") or {}).get("DE"),
+              "cursor_stalled")
+        equal("%s: the stalled cursor is not treated as a short page" % name,
+              meta.get("short_pages"), None)
+        equal("%s: it fetched page 1, then one echo, then stopped — no loop"
+              % name, meta.get("pages_completed"), 2)
+
+        # Same guarantee when the cursor does not decode to the expected
+        # shape: the RAW string is the backstop.
+        opaque = "opaque-cursor-that-never-changes"
+        answers = [_envelope("de_page1", total=17071905, has_more=True,
+                             search_id=opaque)] + [
+            _envelope("de_page2", total=17071905, has_more=True,
+                      search_id=opaque) for _ in range(4)]
+
+        def fetch2(box, pw, args, pool, url, body, lbl, answers=answers):
+            return 200, answers.pop(0), product_parser.STATE_CONTENT, False
+
+        def body2(FakeSession):
+            args = _fault_args(engine, region="DE", pages=5)
+            box = {"session": FakeSession(), "prime_url": "u"}
+            return engine._run_ads(box, None, args, None)
+
+        _rows, meta = _with_stubs(engine, fetch2, body2)
+        equal("%s: an undecodable but repeating cursor still stalls" % name,
+              (meta.get("why_each_region_stopped") or {}).get("DE"),
+              "cursor_stalled")
+
+
+def check_every_region_records_one_of_the_five_stop_reasons():
+    """`why_each_region_stopped` must name exactly one of the documented
+    reasons for EVERY region, including one that simply used its whole
+    page cap with the listing still open."""
+    allowed = {"cursor_exhausted", "cursor_stalled", "has_more_false",
+               "short_page", "no_ads"}
+    for name in ENGINES:
+        engine = _import_engine(name)
+        if engine is None:
+            skip(name, "engine library absent")
+            continue
+        answers = [payload("de_page1"), payload("de_page2"),
+                   payload("de_page1"), payload("de_page2")]
+
+        def fetch(box, pw, args, pool, url, body, lbl, answers=answers):
+            return 200, answers.pop(0), product_parser.STATE_CONTENT, False
+
+        def body(FakeSession):
+            args = _fault_args(engine, region="DE,FR", pages=2)
+            box = {"session": FakeSession(), "prime_url": "u"}
+            return engine._run_ads(box, None, args, None)
+
+        _rows, meta = _with_stubs(engine, fetch, body)
+        why = meta.get("why_each_region_stopped") or {}
+        equal("%s: both regions left a reason" % name, sorted(why),
+              ["DE", "FR"])
+        check("%s: every reason is one of the five documented ones" % name,
+              all(v in allowed for v in why.values()),
+              "got %r" % why)
+
+
+def check_a_short_page_outranks_a_blocked_or_failed_region():
+    """Once ANY short page was seen, the run is `short_page`, partial and
+    exit 6 — even if a later region was blocked or failed. The short page
+    is the strongest evidence that the data is not a complete view."""
+    for name in ENGINES:
+        engine = _import_engine(name)
+        if engine is None:
+            skip(name, "engine library absent")
+            continue
+        cut = _short_envelope("de_page1", 2, 17071905, False)
+        blocked_state = next(
+            s for s in page_flow.STATE_POLICY
+            if page_flow.counts_as_blocked(s) and page_flow.should_retry(s))
+
+        def fetch(box, pw, args, pool, url, body, lbl):
+            if "region=FR" in url:
+                return 200, "<html></html>", blocked_state, True
+            return 200, cut, product_parser.STATE_CONTENT, False
+
+        def body(FakeSession):
+            args = _fault_args(engine, region="DE,FR", pages=1)
+            box = {"session": FakeSession(), "prime_url": "u"}
+            return engine._run_ads(box, None, args, None)
+
+        rows_, meta = _with_stubs(engine, fetch, body)
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = output_writer.finish_run(
+                rows_, os.path.join(tmp, "out"), "json", False,
+                blocked=bool(meta.get("blocked")),
+                stop_reason=meta.get("stop_reason"),
+                pages_requested=2,
+                pages_completed=int(meta.get("pages_completed") or 0),
+                pages_failed=meta.get("pages_failed") or None,
+                start_url="u", final_url="u", extra=meta)
+            with open(os.path.join(tmp, "out.meta.json")) as handle:
+                status = json.load(handle).get("status")
+        equal("%s: short_page outranks a later block" % name,
+              (meta.get("stop_reason"), status, rc),
+              ("short_page", "partial", output_writer.EXIT_PARTIAL))
+
+
+def check_a_stale_token_is_reminted_and_recovered_without_a_block():
+    """HTTP 421 is a stale `x-ccl-str`, not a block: the policy re-mints
+    the token in place and retries the SAME exit. A recovered 421 is not
+    counted as blocked and rotates nothing; only a 421 that survives every
+    retry ends the page refused."""
+    for name in ENGINES:
+        engine = _import_engine(name)
+        if engine is None:
+            skip(name, "engine library absent")
+            continue
+        minted = []
+        answers = [product_parser.STATE_TOKEN_REJECTED,
+                   product_parser.STATE_CONTENT]
+
+        class FakeBrowser:
+            proxy_url = None
+
+            def close(self):
+                pass
+
+        def fake_call(session, args, url, *rest):
+            return 200, payload("de_page1"), answers.pop(0)
+
+        def fake_prime(session, args, url):
+            minted.append(url)
+            return 200
+
+        saved = (engine._call, engine._open_session, engine._prime_session)
+        engine._call = fake_call
+        engine._open_session = lambda pw, args, pool: FakeBrowser()
+        engine._prime_session = fake_prime
+        try:
+            args = _fault_args(engine, region="DE", pages=1, retries=1)
+            box = {"session": FakeBrowser(), "prime_url": "u"}
+            status, _payload, state, was_blocked = engine._fetch_with_policy(
+                box, None, args, None, "u", {}, "label")
+        finally:
+            (engine._call, engine._open_session,
+             engine._prime_session) = saved
+        equal("%s: the rejected token was re-minted" % name, len(minted), 1)
+        equal("%s: the retried page ended as content" % name,
+              (state, was_blocked), (product_parser.STATE_CONTENT, False))
 
 
 # A real record from the 2026-10-15 canary (FR page 1): the library served

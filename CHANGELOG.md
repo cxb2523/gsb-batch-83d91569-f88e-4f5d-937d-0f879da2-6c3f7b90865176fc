@@ -13,6 +13,34 @@ a default changes in one, the note leads with it.
 - CI only: the canary now runs weekly (Mondays 06:39 UTC) instead of daily, and on a manual dispatch.
 - Docs: `.env.example` no longer says the canary runs every morning (it runs on Mondays), and the 2026-10-09 to 2026-10-15 page-size measurement in the README now reads as taken while the canary still ran daily.
 
+### Fixed
+
+- **A short page was treated as the end of the listing instead of a cut
+  short one.** When a page returned fewer than twelve ads while the
+  response's own envelope (`total` **or** `has_more`) said more remained,
+  the region could stop and the run still report `completed`. A short page
+  is now recorded under `short_pages` (with `region`, `page`, `served`,
+  `total` and `has_more`) and the run keeps following the `search_id`
+  cursor; only a short page whose envelope itself says nothing more
+  remains ends the region as `short_page`. If any short page occurs
+  anywhere in a run, that run ends `stop_reason: short_page`, status
+  `partial`, exit **6**, even when other regions completed or were later
+  blocked or failed.
+- **A non-advancing cursor can no longer loop on `has_more`.** A cursor
+  that comes back unchanged — by decoded position or by raw `search_id`
+  string — now ends the region as `cursor_stalled` instead of trusting a
+  `has_more: true` that would re-fetch the same page up to the page cap.
+- **Every region now records exactly one stop reason.**
+  `why_each_region_stopped` always holds one of `cursor_exhausted`,
+  `cursor_stalled`, `has_more_false`, `short_page` or `no_ads`; a region
+  that used its whole `--pages` cap with the listing still open is
+  `cursor_exhausted` rather than being left without a reason.
+- **HTTP 421 handling is stated end to end.** A 421 (stale `x-ccl-str`)
+  re-mints the token and retries in place; it is never counted as
+  `blocked` and never rotates a proxy. Only a 421 that survives every
+  retry leaves the page refused, and then the run fails (exit 5) rather
+  than looking like an empty region.
+
 ## [0.2.1] — 2026-10-16
 
 > **Behaviour change.** A page that serves fewer than twelve ads while the

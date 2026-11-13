@@ -948,10 +948,11 @@ def _run_ads(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
     totals: Dict[str, Optional[int]] = {}
     empty: List[str] = []
     stopped_early: Dict[str, str] = {}
-    # Pages that served less than a full page while the response's own
-    # total said more remained. Each makes the run incomplete (see
-    # `parser.page_is_short`); they are recorded rather than retried,
-    # because the next cursor page is what the server said does not exist.
+    # Pages that served less than a full page while the response's OWN
+    # envelope — its `total` or its `has_more` — said more remained. Each
+    # makes the run incomplete (see `parser.page_is_short`); they are
+    # recorded rather than retried, because the next cursor page is what
+    # the server said does not exist.
     short_pages: List[Dict[str, Any]] = []
 
     for index, region in enumerate(regions, start=1):
@@ -965,6 +966,13 @@ def _run_ads(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
         got_here = 0
         served_here = 0
         last_cursor_position = -1
+        # The raw cursor string, kept beside the decoded position. The
+        # position only exists when the base64 cursor decodes to the
+        # expected shape; a cursor that comes back byte-identical while
+        # `has_more` still says True is the same stall regardless of
+        # whether it decoded, and trusting `has_more` there would fetch
+        # the same page forever.
+        last_cursor = ""
 
         # Through the shared policy rather than recomputed here. The
         # library states no page count of its own — it states a TOTAL,
@@ -1026,19 +1034,23 @@ def _run_ads(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
             # appears under several regions, and deduping across them
             # collapsed France's twelve ads to two in testing.
             served = diag.get("served")
+            has_more = diag.get("has_more")
             short = parser.page_is_short(served, served_here,
-                                         diag.get("total"))
+                                         diag.get("total"),
+                                         has_more=has_more)
             served_here += served or 0
             if short:
                 logger.warning("%s page %d served %d of the %d ads a page "
-                               "holds while the response states %s exist: "
+                               "holds while the response's own envelope "
+                               "(total=%s, has_more=%s) states more remain: "
                                "the listing was cut short, so this run is "
                                "incomplete.", region, page, served,
-                               parser.ADS_PER_PAGE, diag.get("total"))
+                               parser.ADS_PER_PAGE, diag.get("total"),
+                               has_more)
                 short_pages.append({"region": region, "page": page,
                                     "served": served,
                                     "total": diag.get("total"),
-                                    "has_more": diag.get("has_more")})
+                                    "has_more": has_more})
 
             fresh = dedupe_by_key(page_rows, seen, key="row_key")
             overlap += len(page_rows) - len(fresh)
@@ -1054,28 +1066,50 @@ def _run_ads(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
             cursor = diag.get("cursor") or ""
             decoded = diag.get("cursor_decoded") or {}
             position = decoded.get("next_cursor")
-            if short and not diag.get("has_more"):
-                # The server ended the listing on a short page: the end of
-                # what it would serve, not the end of what it counts.
-                stopped_early[region] = "short_page"
-                break
+            if short:
+                # A short page is recorded however the envelope ends it:
+                # when the envelope itself says nothing more remains
+                # (`has_more` not true and the served count reached the
+                # total), this is the end of what the server will serve.
+                # A short page WITH more promised but no cursor to follow
+                # is still a cut-short listing, not a clean exhaustion.
+                if has_more is not True or not cursor:
+                    stopped_early[region] = "short_page"
+                    break
+                # More was promised AND a cursor was returned: keep
+                # advancing exactly like a full page rather than treating
+                # the short page as a normal end.
             if not cursor:
+                # No cursor to continue on: the listing is exhausted.
                 stopped_early[region] = "cursor_exhausted"
                 break
+            if cursor == last_cursor or (
+                    isinstance(position, int)
+                    and position <= last_cursor_position):
+                # The cursor stopped advancing while `has_more` still
+                # says True. That is the listing ending, and trusting
+                # `has_more` here would loop on one page forever. The raw
+                # string catches a stall the decoded position cannot
+                # describe when the cursor shape changes.
+                logger.info("%s: the cursor stopped advancing (position=%r) "
+                            "— end of listing, whatever has_more says.",
+                            region, position)
+                stopped_early[region] = "cursor_stalled"
+                break
+            last_cursor = cursor
             if isinstance(position, int):
-                if position <= last_cursor_position:
-                    # The cursor stopped advancing while `has_more` still
-                    # says True. That is the listing ending, and trusting
-                    # `has_more` here would loop on one page forever.
-                    logger.info("%s: the cursor stopped advancing at %d — "
-                                "end of listing, whatever has_more says.",
-                                region, position)
-                    stopped_early[region] = "cursor_stalled"
-                    break
                 last_cursor_position = position
-            if not diag.get("has_more"):
+            if not has_more:
                 stopped_early[region] = "has_more_false"
                 break
+        else:
+            # Every page the caller asked for was fetched, and the last
+            # response still pointed at a next page: the run stopped at
+            # its own cap, not at the listing's end. Named as cursor
+            # exhaustion from the caller's point of view — there is no
+            # cursor left inside the planned pages to follow — so every
+            # region records exactly one of the five documented reasons.
+            stopped_early.setdefault(region, "cursor_exhausted")
 
         per_region[region] = got_here
         # `failed` holds region NUMBERS (they become `pages_failed`), so the
@@ -1084,13 +1118,16 @@ def _run_ads(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
         if got_here == 0 and index not in failed:
             empty.append(region)
 
-    if blocked:
+    # A short page is evidence that the listing was cut short, and that
+    # outranks every other ending: even a run that was later blocked on
+    # another region, or that failed a page there, already held an
+    # incomplete region, so the run is partial with exit 6 and says so.
+    if short_pages:
+        stop_reason = "short_page"
+    elif blocked:
         stop_reason = "blocked"
     elif failed:
         stop_reason = "page_failed"
-    elif short_pages:
-        # Not a COMPLETE reason, so the run ends partial (exit 6).
-        stop_reason = "short_page"
     elif rows:
         stop_reason = "completed"
     else:

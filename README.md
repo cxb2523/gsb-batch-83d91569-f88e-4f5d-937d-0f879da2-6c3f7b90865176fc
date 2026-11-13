@@ -126,7 +126,9 @@ not exhaustive, and the two are different sentences.
 
 The sidecar also records `why_each_region_stopped` — `cursor_exhausted`,
 `cursor_stalled`, `has_more_false`, `short_page` or `no_ads` — so "we
-stopped" is never just a number.
+stopped" is never just a number. Every region records exactly one of those
+reasons, including a region that simply used its whole `--pages` cap while
+the listing was still open (recorded as `cursor_exhausted`).
 
 **A short page under a large total is an incomplete run, not the end.**
 The library serves twelve ads per page: 45 of the 47 cursor pages in the
@@ -135,11 +137,26 @@ carried exactly twelve. Both exceptions came from one run on 2026-10-13. France'
 carried two ads, with `has_more: false` beside `total: 17,071,905`, and
 Germany's second page carried eleven. The library documents no cap that
 would explain that, so a page with fewer than twelve ads, while the
-response's own total says more remain, is a listing cut short. The run
-keeps the ads it got, records each such page under `short_pages`, ends
-with `stop_reason: short_page` and status `partial`, and exits **6**. A
-short last page that brings the count up to the total is the real end of
-the listing, and the run is complete.
+response's own envelope — its `total` **or** its `has_more` — says more
+remain, is a listing cut short. The run keeps the ads it got, records each
+such page under `short_pages` (with `region`, `page`, `served`, `total`
+and `has_more`), and then **follows the cursor to the next page** rather
+than treating the short page as a normal end; only a short page whose own
+envelope says nothing more remains ends the region as `short_page`. If the
+cursor ever stops advancing while `has_more` still claims otherwise, the
+region ends `cursor_stalled` instead of looping on the same page forever.
+If any short page was seen anywhere in the run, the whole run ends with
+`stop_reason: short_page`, status `partial`, and exits **6** — even when
+other regions completed or were later blocked. A short last page that
+brings the count up to the total is the real end of the listing, and the
+run is complete.
+
+**A stale token is reminted, never treated as a block.** An HTTP 421 means
+the `x-ccl-str` token went stale. The engine mints a fresh token by
+re-priming the browser and retries the same exit in place: a 421 is not
+counted as `blocked` and never rotates a proxy. Only a 421 that survives
+every retry — the token still refused at the end — leaves the page
+refused, and then it is a failure (exit 5) rather than an empty result.
 
 ---
 
