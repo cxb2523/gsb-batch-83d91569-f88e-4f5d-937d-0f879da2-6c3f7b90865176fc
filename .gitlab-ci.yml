@@ -1,0 +1,36 @@
+stages:
+  - test
+  - deploy
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+test:
+  stage: test
+  image: python:3.13-slim
+  script:
+    - python -m pip install --upgrade pip
+    - python -m pip install -e ".[dev]"
+    - pytest
+
+pages:
+  stage: deploy
+  image: oven/bun:1.4.4
+  needs:
+    - test
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends python3 make g++
+  script:
+    - cd docs
+    - bun install --frozen-lockfile
+    - NUXT_APP_BASE_URL=/ NUXT_PUBLIC_SITE_URL=https://avherald-scraper-af5e68.gitlab.io bun run generate
+    - mkdir -p ../public
+    - cp -a .output/public/. ../public/
+  artifacts:
+    paths:
+      - public

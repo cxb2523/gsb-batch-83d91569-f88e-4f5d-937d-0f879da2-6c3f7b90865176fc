@@ -1,0 +1,23 @@
+{
+  "name": "the-aviation-herald-scraper-docs",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.4",
+  "scripts": {
+    "dev": "bun scripts/sync-content.mjs && nuxt dev",
+    "build": "bun scripts/sync-content.mjs && nuxt build",
+    "generate": "bun scripts/sync-content.mjs && nuxt generate",
+    "prepare": "nuxt prepare",
+    "preview": "nuxt preview"
+  },
+  "dependencies": {
+    "better-sqlite3": "13.0.3",
+    "docus": "latest",
+    "nuxt": "^4.2.2"
+  },
+  "trustedDependencies": [
+    "better-sqlite3",
+    "esbuild",
+    "vue-demi"
+  ]
+}
