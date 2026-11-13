@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>XMRig Proxy Dashboard</title>
+  <meta name="description" content="XMRig Proxy Dashboard - 无需后端的实时监控 Web UI。查看算力、矿工、Share、上游矿池和系统状态，Token 仅保存在浏览器。">
+  <meta name="keywords" content="XMRig Proxy, XMRig dashboard, XMRig Proxy web UI, mining dashboard, Monero mining, XMRig monitoring">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="XMRig Proxy Dashboard">
+  <meta property="og:description" content="Real-time XMRig Proxy monitoring with no backend. Your access token stays in your browser.">
+  <meta property="og:url" content="https://xmrig-proxy-dashboard.lrate.top/">
+  <meta property="og:image" content="https://xmrig-proxy-dashboard.lrate.top/panel.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="XMRig Proxy Dashboard">
+  <meta name="twitter:description" content="Real-time XMRig Proxy monitoring with no backend.">
+  <meta name="twitter:image" content="https://xmrig-proxy-dashboard.lrate.top/panel.png">
+  <meta name="theme-color" content="#0e0f1a">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="styles.css">
+  <!-- Meta CSP applies to document resources. Browsers ignore frame-ancestors in meta CSP; anti-framing is enforced only by HTTP response headers. Opening via file:// or serving without those headers does not provide anti-framing protection. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: https:; connect-src http: https:; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self';">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>
+        XMRig Proxy Dashboard
+        <span id="statusBadge" class="status-badge status-warning">加载中…</span>
+        <!-- Permanent view-only ribbon. Mirrors the project's "honest thin
+             client" identity: the dashboard is a viewer over XMRig-Proxy's
+             restricted HTTP API, never a controller. -->
+        <span id="viewModeBadge" class="view-mode-badge" role="button" tabindex="0" aria-haspopup="menu" aria-expanded="false" aria-label="只读视图"><span class="view-mode-dot" aria-hidden="true"></span><span id="viewModeBadgeText">只读视图</span><span class="view-mode-caret" aria-hidden="true">▾</span></span>
+      </h1>
+      <div class="subtitle">
+        <div class="header-meta">
+          <span id="workerId">初始化…</span>
+          <span class="refresh-time">最后更新: <span id="lastUpdate">--</span></span>
+        </div>
+        <div class="header-actions" aria-label="仪表盘操作">
+          <span class="header-action-slot" id="snapshotExportSlot"></span>
+          <span class="header-action-slot" id="manualRefreshSlot"></span>
+          <button type="button" class="edit-url btn btn-secondary btn-sm" id="editUrl" aria-label="设置">⚙ 设置</button>
+        </div>
+      </div>
+    </header>
+
+    <main id="dashboard" class="loading" role="main" aria-live="polite">
+      <p>正在初始化…</p>
+    </main>
+  </div>
+
+  <!-- Application entry point as ES Module -->
+  <script type="module" src="src/main.js"></script>
+  <script type="module" src="src/theme-color.js"></script>
+  <script type="module" src="src/keyboard-shortcuts.js"></script>
+</body>
+</html>

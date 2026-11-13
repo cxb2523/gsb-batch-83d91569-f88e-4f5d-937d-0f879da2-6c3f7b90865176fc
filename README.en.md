@@ -1,0 +1,264 @@
+# XMRig Proxy Dashboard
+
+> **A real-time XMRig Proxy web dashboard with no backend required.**
+>
+> Monitor hashrate, miners, upstream pools, shares, and system health from a clean web UI. Your browser connects directly to your XMRig Proxy, so **the Proxy URL and Access Token are never uploaded to the dashboard server**.
+
+[**Live Demo**](https://xmrig-proxy-dashboard.lrate.top/) · [**Quick Start**](#-quick-start) · [**中文**](README.md)
+
+![XMRig Proxy Dashboard real-time monitoring interface](panel.png)
+
+**⚡ Real-time monitoring · 🔒 Token stays in your browser · 🚀 Zero backend · 🖥 Multi-Proxy · 📦 < 50 KB gzip**
+
+Built for users looking for an **XMRig Proxy web UI, monitoring dashboard, or lightweight frontend**: no database, no Docker, no build step — just serve the static files.
+
+---
+
+## ✨ Core Features
+
+| Feature | Description |
+|---------|-------------|
+| **Multiple Proxy profiles** | Save multiple Proxy URLs / tokens locally and switch between them with one click |
+| **Real-time Monitoring** | Auto-refreshes every 10 seconds, showing hashrate, miners, upstream pools, system resources |
+| **Zero-Knowledge Architecture** | Server **only serves static files**, **knows nothing** about your Proxy address, Token, or any config |
+| **Local Auth** | Access Token stays in browser storage: `localStorage` persists across browser restarts, while `sessionStorage` is scoped to the current tab session |
+| **Remember Me** | Optional `localStorage` persistence, or `sessionStorage` for session-only |
+| **Modern UI** | Dark theme, responsive layout, Skeleton loading, Toast notifications, Loading animations |
+| **Optional Interactive Charts** | uPlot is bundled locally and loaded on demand; the lightweight SVG chart remains the default, with a time axis and hover values available on request |
+| **Security First** | CSP restrictions, escaped dynamic values, sanitized token logs; anti-framing requires HTTP response headers |
+| **No Framework Deps** | Native ES Modules, < 50 KB gzip, instant load |
+
+---
+
+## 🚀 Quick Start
+
+### 1️⃣ Run Locally (Static Server Required)
+
+This project uses native ES Modules. Most browsers restrict module loading from the `file://` protocol, so **do not open `index.html` directly**. Serve the files over local HTTP instead:
+
+```bash
+# Clone repository
+git clone https://github.com/wjc2821296948/XMRig-Proxy-Dashboard.git
+cd XMRig-Proxy-Dashboard
+
+# Start any static server
+python3 -m http.server 8000
+# Visit http://localhost:8000
+```
+
+You can also use the built-in server included in the npm package below.
+
+### 2️⃣ npm / GitHub Packages
+
+Install the complete Dashboard package from GitHub Packages:
+
+```bash
+npm config set @wjc2821296948:registry=https://npm.pkg.github.com
+npm install @wjc2821296948/xmrig-proxy-dashboard
+```
+
+If your GitHub Packages access requires authentication, log in with a GitHub Token that has package read access:
+
+```bash
+npm login --registry=https://npm.pkg.github.com
+```
+
+After installation, the package includes a zero-dependency Node.js static server:
+
+```bash
+npx @wjc2821296948/xmrig-proxy-dashboard
+```
+
+It listens on `127.0.0.1:8000` by default. Set `HOST` and `PORT` to change the bind address and port.
+
+### 3️⃣ Static Hosting Deployment (Recommended)
+
+Deploy to any static hosting platform, **no backend config needed**:
+
+| Platform | Deploy Method |
+|----------|---------------|
+| **GitHub Pages** | Push to `main` branch → Settings → Pages → Deploy from branch |
+| **Cloudflare Pages** | Connect repo → Build command: empty / Output: `/` |
+| **Netlify / Vercel** | Import repo → No build command → Direct deploy |
+| **Nginx / Caddy / Apache** | Serve folder as static site root |
+
+> ✅ **Zero Config** — just serve static files.
+
+---
+
+## ⚙️ Configure XMRig Proxy
+
+Enable HTTP API in your `config.json`:
+
+```json
+{
+  "http": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8080,
+    "access-token": "your-secure-token-here",
+    "restricted": true
+  }
+}
+```
+
+- `access-token`: Use a strong random string. Panel authenticates via `Authorization: Bearer <token>`.
+- `restricted: true`: Allows only `/1/summary` and other read-only endpoints, enhancing security.
+- Firewall only needs to allow this port, **no need to expose admin UI to public internet**.
+
+---
+
+## 🔐 Usage Flow
+
+1. **First Visit** → Connection form displayed
+2. Enter **API URL** (e.g. `http://192.168.1.100:8080/1/summary`) and **Access Token**
+3. Check **Remember Me** → uses `localStorage` (persistent); unchecked → `sessionStorage` (cleared on tab close)
+4. Click **Connect** → Frontend connects directly to your Proxy, validates Token
+5. Success → Dashboard loads, auto-refreshes every 10 seconds
+6. Click **⚙ Settings** (top-right) → Manage saved Proxy profiles, create/edit/delete profiles, and switch between them with one click
+
+---
+
+## 🏗️ Architecture Design
+
+```
+┌─────────────┐       HTTPS (Static Assets)        ┌─────────────┐
+│   Browser   │ ─────────────────────────────────▶ │ Static Server │
+│  (Frontend) │                                     │ (GitHub     │
+│             │                                     │  Pages,     │
+│  - index.html                    Serves files only, no backend logic
+│  - styles.css                    No database, no auth, no user system
+│  - src/*.js                      Zero Knowledge
+└──────┬──────┘
+       │
+       │  Direct Request (Authorization: Bearer <token>)
+       ▼
+┌─────────────────────┐
+│   Your XMRig Proxy  │
+│   (http://ip:8080)  │
+│   /1/summary endpoint│
+└─────────────────────┘
+```
+
+### Key Points
+
+- **Server is completely unaware**: No storage, no proxying, no logging of user data
+- **Token stays in browser only**: `localStorage` / `sessionStorage`, auto-cleared on browser close
+- **All requests connect directly to Proxy**: Bypasses deployment site, avoids CORS, MITM risks
+- **CSP + XSS Protection**: `Content-Security-Policy`, strict DOM operations, Token sanitized logs
+
+---
+
+## 📁 Project Structure
+
+```
+xmrig-proxy-dashboard/
+├── index.html          # Entry HTML
+├── styles.css          # Complete styles (CSS vars, responsive, animations)
+├── panel.png           # Preview image
+├── README.md           # Chinese version
+├── README.en.md        # English version (this file)
+├── CLAUDE.md           # Project memory (for AI collaboration)
+├── .gitignore
+└── src/
+    ├── main.js         # App entry, state machine, event bindings
+    ├── api.js          # Unified API wrapper (auth, timeout, error normalization)
+    ├── storage.js      # Config storage abstraction (localStorage / sessionStorage)
+    └── ui.js           # UI components (Skeleton, Toast, render utilities)
+```
+
+---
+
+## 🛡️ Security
+
+| Threat | Mitigation |
+|--------|------------|
+| **Token Leak** | Stored only in browser local storage, console logs sanitized `Bearer **********` |
+| **XSS** | Dynamic text in HTML templates is escaped with `escapeHtml()`, and CSP restricts script sources; dynamic rendering still needs ongoing review |
+| **Framing / Clickjacking** | Cloudflare Pages and the built-in server deny framing through HTTP CSP headers; `file://` or simple servers without these headers cannot provide this protection |
+| **MITM** | Recommend Proxy enables HTTPS (self-signed needs browser trust) or access via VPN/tunnel |
+| **CSRF** | Pure GET + Bearer Token, no Cookies, naturally immune to CSRF |
+| **Config Injection** | URL validated via `new URL()`, Token only sent as Header |
+
+---
+
+## ❓ FAQ
+
+**Q: Why no backend proxy?**  
+A: Violates Zero Knowledge principle. Once backend knows Proxy address/Token, it becomes an attack surface. Pure frontend direct connect is most secure.
+
+**Q: CORS errors?**  
+A: XMRig Proxy allows CORS by default. If blocked, verify `restricted: true` and `access-token` are correct in Proxy config; or reverse proxy `/1/summary` via Nginx on same origin.
+
+**Q: Forgot Token?**  
+A: Panel cannot recover it. Check `config.json` on your Proxy server for `access-token`.
+
+**Q: Deploy panel publicly without exposing Proxy?**  
+A: Panel on public (GitHub Pages, etc.), Proxy on internal network/cloud server. **Only the browser running the panel** connects directly to Proxy IP. Panel server knows nothing.
+
+**Q: How do I save and switch between multiple Proxies?**  
+A: Open "Settings" to manage Proxy profiles. Each profile stores its name, API URL, Access Token, refresh interval, and Remember Me preference locally. Select a saved profile to switch immediately.
+
+---
+
+### Interactive history chart
+
+The session hashrate trend uses a lightweight SVG by default. Select **Enable interactive chart** to load the locally bundled uPlot 1.6.32 (MIT) on demand. It does not contact a third-party CDN or add a chart script to the initial page load. The chart uses the current Proxy profile’s last 30 successful refresh samples and resets when you switch profiles or reconnect. You can switch back to the lightweight chart at any time.
+
+## 📋 Roadmap
+
+- [X] **Multi-Proxy Config List** — Save multiple Proxy configs, switch with one click
+- [ ] **PWA Support** — Offline cache last data, "Add to Home Screen"
+- [x] **Theme Toggle** — Dark and light themes are supported
+- [x] **More Chart Libraries** — Optional uPlot session hashrate chart, loaded on demand with the lightweight SVG kept as default
+- [ ] **Optional Backend Proxy Mode** — Users may deploy stateless forwarder on own server, only forwards `/1/summary`, no logs, no Token storage
+- [ ] **Alert/Notification System** — Hashrate anomalies, miner offline thresholds (browser notifications / Webhook)
+- [ ] **Multi-language Support** — i18n framework reserved, Chinese/English priority
+
+---
+
+## 🩺 Status Mapping & Production Semantics
+
+The dashboard header's status badge is computed by the state machine
+`getStatusInfo(data, tracker)` in `src/status.js`. It considers recent miner
+samples, Proxy uptime, and accepted/rejected share deltas rather than relying
+directly on the sticky lifetime peak:
+
+| Display | Main trigger | Real-world meaning (inferred) |
+|---|---|---|
+| **Waiting** (yellow) | A new Proxy has no miners during its first 60 seconds | The Proxy may have just started and miners have not connected yet |
+| **Restarting** (yellow) | Uptime decreases and no miners are currently present | The Proxy process is restarting or recovering |
+| **Offline** (red) | No miners for about 20 seconds, outside waiting/restart grace states | No miners are currently connected to this Proxy |
+| **Warning** (yellow) | Miner count falls well below the rolling 15-minute peak, or recent share acceptance health is low | Miner connections have dropped or the rejected-share ratio has risen |
+| **Online** (green) | No waiting, restart, offline, or health-warning condition is active | Current miner count and recent share health have not triggered a warning |
+
+### Current status state machine
+
+Status classification is handled by a time-aware state machine:
+
+- A rolling 15-minute sampled peak replaces Proxy's sticky lifetime `max` as the miner-count baseline.
+- The badge enters **Offline** only after 20 seconds with zero miners, so a short `now = 0` blip does not immediately flicker the UI.
+- A decrease in Proxy `uptime` detects a restart; when no miners are present, a short **Restarting** grace state is shown.
+- Recovery from restart/offline requires two consecutive positive samples before returning to the normal business state.
+- Recent acceptance health uses deltas between `results.accepted/rejected` samples and requires at least 20 shares before affecting the badge.
+- A new Proxy with no miners shows **Waiting** for the first 60 seconds instead of falsely appearing Online.
+
+### Ribbon vs. badge — don't confuse them
+
+The dashboard carries two parallel status indicators that answer
+different questions:
+
+| Element | Question it answers | Driven by |
+|---|---|---|
+| Header Ribbon (dot + "Read-only viewer") | **Login state**: am I successfully talking to a Proxy right now? | `setRibbonConnectState("connected" \| "disconnected")` |
+| Status badge (dot + Waiting / Restarting / Offline / Warning / Online) | **Business state**: miner connectivity and recent share health | `getStatusInfo(data, tracker)` |
+
+Ribbon green = the last `/1/summary` returned 2xx. Ribbon yellow =
+no config saved, or a 401 / connect failure happened. The badge
+text only updates after a successful `/1/summary`; if the Ribbon is
+yellow the badge text is whatever was last rendered and should not
+be trusted.
+
+## 📄 License
+
+Apache License 2.0 © 2025

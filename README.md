@@ -1,0 +1,258 @@
+# XMRig Proxy Dashboard
+
+> **XMRig Proxy Web Dashboard —— 无需后端的实时监控 Web UI。**
+>
+> 实时查看算力、矿工、上游矿池、Share 与系统状态。浏览器直接连接你的 XMRig Proxy，**Proxy URL 与 Access Token 不会上传到面板服务器**。
+
+[**在线体验**](https://xmrig-proxy-dashboard.lrate.top/) · [**快速开始**](#-快速开始) · [**English**](README.en.md)
+
+![XMRig Proxy Dashboard 实时监控界面](panel.png)
+
+**⚡ 实时监控 · 🔒 Token 仅留在浏览器 · 🚀 零后端 · 🖥 多 Proxy · 📦 < 50 KB gzip**
+
+适合正在寻找 **XMRig Proxy Web UI / Dashboard / Monitoring Frontend** 的用户：无需数据库、无需 Docker、无需构建流程，只要一个静态文件服务器即可部署。
+
+---
+
+## ✨ 核心特性
+
+| 特性 | 说明 |
+|------|------|
+| **实时监控** | 自动每 10 秒刷新一次，展示算力、矿工、上游矿池、系统资源等关键指标 |
+| **零知识架构** | 服务器**仅提供静态文件**，**不知晓**用户连接的 Proxy 地址、Token、任何配置 |
+| **本地认证** | Access Token 仅保存在浏览器本地：`localStorage` 会持续保存，直到用户清除；`sessionStorage` 通常随当前标签页会话结束而清除 |
+| **多 Proxy 配置** | 可保存多组 Proxy URL / Token，一键切换当前监控目标 |
+| **记住我** | 可选 `localStorage` 持久化，或 `sessionStorage` 仅会话保留 |
+| **现代 UI** | 深色主题、响应式布局、Skeleton 加载、Toast 通知、Loading 动画 |
+| **可选交互式图表** | uPlot 本地按需加载；默认保留轻量 SVG，点击后启用时间轴与悬停读数 |
+| **安全优先** | CSP 限制、动态数据转义、Token 脱敏日志；防嵌入依赖 HTTP 响应头 |
+| **无框架依赖** | 原生 ES Module，< 50 KB gzip，秒开 |
+
+---
+
+## 🚀 快速开始
+
+### 1️⃣ 本地运行（需要静态服务器）
+
+本项目使用原生 ES Module。多数浏览器在 `file://` 协议下会限制模块加载，因此**不要直接双击打开 `index.html`**；请通过本地 HTTP 静态服务器访问：
+
+```bash
+# 克隆仓库
+git clone https://github.com/wjc2821296948/XMRig-Proxy-Dashboard.git
+cd XMRig-Proxy-Dashboard
+
+# 启动任意静态服务器
+python3 -m http.server 8000
+# 浏览器访问 http://localhost:8000
+```
+
+也可以使用下方提供的 npm 包内置服务器。
+
+### 2️⃣ npm / GitHub Packages 安装
+
+如果希望把 Dashboard 作为一个完整的 npm package 管理，可以从 GitHub Packages 安装：
+
+```bash
+npm config set @wjc2821296948:registry=https://npm.pkg.github.com
+npm install @wjc2821296948/xmrig-proxy-dashboard
+```
+
+如果你的 GitHub Packages 访问需要认证，请先使用具有 package read 权限的 GitHub Token 登录 npm registry：
+
+```bash
+npm login --registry=https://npm.pkg.github.com
+```
+
+安装后可以直接使用内置的零依赖静态服务器：
+
+```bash
+npx @wjc2821296948/xmrig-proxy-dashboard
+```
+
+默认监听 `127.0.0.1:8000`。可通过 `HOST` 和 `PORT` 环境变量修改监听地址和端口。
+
+### 3️⃣ 静态托管部署（推荐）
+
+支持任意静态托管平台，**无需任何后端配置**：
+
+| 平台 | 部署方式 |
+|------|----------|
+| **GitHub Pages** | 推送到 `main` 分支 → Settings → Pages → Deploy from branch |
+| **Cloudflare Pages** | 连接仓库 → Build command: 留空 / Output: `/` |
+| **Netlify / Vercel** | 导入仓库 → 无需构建命令 → 直接部署 |
+| **Nginx / Caddy / Apache** | 将文件夹作为静态站点根目录 |
+
+> ✅ **零配置** —— 只要能服务静态文件即可。
+
+---
+
+## ⚙️ 配置 XMRig Proxy
+
+在你的 `config.json` 中开启 HTTP API：
+
+```json
+{
+  "http": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8080,
+    "access-token": "your-secure-token-here",
+    "restricted": true
+  }
+}
+```
+
+- `access-token`：建议设置一个强随机字符串，面板将通过 `Authorization: Bearer <token>` 访问。
+- `restricted: true`：仅允许 `/1/summary` 等只读端点，增强安全性。
+- 防火墙仅需放行该端口，**无需对公网开放管理界面**。
+
+---
+
+## 🔐 使用流程
+
+1. **首次访问** → 显示连接表单
+2. 填入 **API URL**（如 `http://192.168.1.100:8080/1/summary`）与 **Access Token**
+3. 可勾选 **记住我** → 使用 `localStorage` 持久化；不勾选 → `sessionStorage`，关闭标签页自动清除
+4. 点击 **连接** → 前端直连你的 Proxy，验证 Token
+5. 成功后进入 Dashboard，自动每 10 秒刷新
+6. 点击右上角 **⚙ 设置** → 管理多组 Proxy 配置，可新建、编辑、删除并一键切换
+
+---
+
+## 🏗️ 架构设计
+
+```
+┌─────────────┐       HTTPS (静态资源)        ┌─────────────┐
+│   浏览器     │ ────────────────────────────▶ │  静态服务器  │
+│  (前端应用)  │                                │  (GitHub    │
+│             │                                │   Pages,    │
+│  - index.html                     仅提供文件，无任何后端逻辑
+│  - styles.css                     无数据库、无认证、无用户系统
+│  - src/*.js                       Zero Knowledge
+└──────┬──────┘
+       │
+       │  直接请求 (Authorization: Bearer <token>)
+       ▼
+┌─────────────────────┐
+│   你的 XMRig Proxy  │
+│   (http://ip:8080)  │
+│   /1/summary 端点   │
+└─────────────────────┘
+```
+
+### 关键点
+
+- **服务器完全无感**：不存储、不代理、不记录任何用户数据
+- **Token 仅存在浏览器**：`localStorage` / `sessionStorage`，关闭浏览器可自动清除
+- **所有请求直连 Proxy**：绕过部署站点，避免 CORS、中间人风险
+- **CSP + XSS 防护**：`Content-Security-Policy`、严格的 DOM 操作、Token 脱敏日志
+
+---
+
+## 📁 项目结构
+
+```
+xmrig-proxy-dashboard/
+├── index.html          # 入口 HTML
+├── styles.css          # 完整样式（CSS 变量、响应式、动画）
+├── panel.png           # 预览图
+├── README.md           # 中文文档
+├── README.en.md        # 英文文档
+├── CLAUDE.md           # 项目记忆（供 AI 协作参考）
+├── .gitignore
+└── src/
+    ├── main.js         # 应用入口、状态机、事件绑定
+    ├── api.js          # 统一 API 请求封装（鉴权、超时、错误归一化）
+    ├── storage.js      # 配置存储抽象（localStorage / sessionStorage）
+    └── ui.js           # UI 组件（Skeleton、Toast、渲染工具函数）
+```
+
+---
+
+## 🛡️ 安全说明
+
+| 威胁 | 防护措施 |
+|------|----------|
+| **Token 泄露** | 仅存在浏览器本地存储，控制台日志自动脱敏 `Bearer **********` |
+| **XSS** | HTML 模板中的动态文本使用 `escapeHtml()` 转义，CSP 限制脚本来源；仍需持续审查动态渲染路径 |
+| **页面嵌入/点击劫持** | Cloudflare Pages 或内置服务器通过 HTTP CSP 响应头禁止页面被嵌入；`file://` 直开或不发送这些响应头的简易服务器无法提供此项保护 |
+| **中间人攻击** | 建议 Proxy 开启 HTTPS（自签证书需浏览器信任）或通过 VPN/隧道访问 |
+| **CSRF** | 纯 GET 请求 + Bearer Token，无 Cookie，天然免疫 CSRF |
+| **配置注入** | URL 经 `new URL()` 校验，Token 仅作 Header 传输 |
+
+---
+
+## ❓ 常见问题 (FAQ)
+
+**Q: 为什么不做后端代理？**  
+A: 违背 Zero Knowledge 原则。后端一旦知晓 Proxy 地址/Token，即成为攻击面。纯前端直连最安全。
+
+**Q: 遇到 CORS 报错怎么办？**  
+A: XMRig Proxy 默认允许跨域。若被拦截，请在 Proxy 配置中确认 `restricted: true` 且 `access-token` 正确；或在同源域名下通过 Nginx 反代 `/1/summary`。
+
+**Q: Token 忘了怎么找回？**  
+A: 面板无法找回。请到 Proxy 服务器的 `config.json` 查看 `access-token` 字段。
+
+**Q: 如何在公网部署面板又不暴露 Proxy？**  
+A: 面板部署在公网（GitHub Pages 等），Proxy 部署在内网/云服务器，**仅面板所在浏览器** 直连 Proxy IP。面板服务器完全不知情。
+
+**Q: 如何保存多个 Proxy 并快速切换？**  
+A: 打开「⚙ 设置」即可管理 Proxy 配置列表。每组配置包含名称、API URL、Access Token、刷新间隔和 Remember Me 设置；点击列表中的配置即可立即切换。配置仅保存在浏览器本地，不会上传到部署服务器。
+
+---
+
+### 交互式历史图表
+
+会话算力趋势默认使用轻量 SVG。点击「启用交互式图表」后才会加载随项目分发的 uPlot 1.6.32（MIT）；不请求第三方 CDN，也不会增加首次页面加载的图表脚本。图表使用当前 Proxy 最近 30 次成功刷新的会话数据，切换配置或重新连接后重置。可随时切回轻量图表。
+
+## 📋 下一步计划
+
+- [x] **多 Proxy 配置列表** —— 支持保存多组 Proxy 配置，一键切换
+- [ ] **PWA 支持** —— 离线缓存最近一次数据，支持"添加到主屏幕"
+- [x] **主题切换** —— 支持暗色 / 亮色主题
+- [x] **更多图表库集成** —— uPlot 交互式会话算力趋势按需加载，默认保留轻量 SVG
+- [ ] **可选服务端代理模式** —— 用户自愿在自己的服务器部署无状态转发层，仅转发 `/1/summary`，不记录日志、不存 Token
+- [ ] **告警/通知机制** —— 算力异常、矿工离线等阈值告警（本地浏览器通知 / Webhook）
+- [ ] **多语言支持** —— i18n 框架预留，中英双语优先
+
+---
+
+## 🩺 状态判断与生产环境类比
+
+Dashboard 顶部徽章的「离线 / 预警 / 在线」由 `src/status.js` 中的
+`getStatusInfo(data, tracker)` 状态机决定。它综合考虑近期矿工采样、Proxy 运行时间和接受 / 拒绝 share 的增量，而不是直接使用永久历史峰值：
+
+| 显示 | 主要判定依据 | 生产环境真实含义（推断） |
+|------|--------------|--------------------------|
+| **等待中**（黄） | 新 Proxy 启动后 60 秒内尚无矿工 | Proxy 可能刚启动，矿工还未接入 |
+| **重启中**（黄） | 检测到 uptime 回退且暂时没有矿工 | Proxy 进程正在重启或重启后恢复 |
+| **离线**（红） | 无矿工持续约 20 秒，且不处于等待 / 重启宽限状态 | 当前没有矿工连接此 Proxy |
+| **预警**（黄） | 当前矿工数明显低于最近 15 分钟采样峰值，或近期 share 接受率偏低 | 矿工连接数下降，或近期 share 被拒绝比例升高 |
+| **在线**（绿） | 未触发等待、重启、离线或健康预警条件 | 当前连接数和近期 share 接受情况未触发预警 |
+
+### 当前状态机
+
+状态判断已由时间感知状态机处理：
+
+- 使用最近 15 分钟采样峰值替代 Proxy 的永久历史 `max` 作为矿工数量基线。
+- 连续 20 秒无矿工才进入「离线」，短暂的 `now = 0` 不会立即导致状态闪烁。
+- Proxy `uptime` 回退会识别为重启；无矿工时进入「重启中」宽限状态。
+- 重启或离线后，恢复需要连续两个正向采样才回到正常业务状态。
+- 使用 `results.accepted/rejected` 的相邻采样增量判断近期接受率，并要求至少 20 个 share 才参与健康度判断。
+- 新 Proxy 在运行时间不足 60 秒且没有矿工时显示「等待中」，避免冷启动误报在线。
+
+### 与 Ribbon 状态的区别
+
+Dashboard 同时维护两套并行的状态指示，请勿混淆：
+
+| 元素 | 含义 | 控制函数 |
+|------|------|----------|
+| Header Ribbon（圆点 + 「只读视图」） | **登录态**：有没有成功连到 proxy | `setRibbonConnectState("connected" \| "disconnected")` |
+| 状态徽章（圆点 + 「等待中/重启中/离线/预警/在线」） | **业务态**：矿工连接与近期 share 健康度 | `getStatusInfo(data, tracker)` |
+
+Ribbon 绿色 = 上次 `/1/summary` 拿到 2xx；Ribbon 黄色 = 未登录 / 401 / 断开。
+徽章颜色仅在成功获取 `/1/summary` 之后才有意义——若 Ribbon 处于黄色，徽章文字不会更新。
+
+## 📄 许可证
+
+Apache License 2.0 © 2025

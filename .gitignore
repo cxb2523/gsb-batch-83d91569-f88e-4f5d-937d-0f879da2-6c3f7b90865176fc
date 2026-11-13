@@ -1,0 +1,12 @@
+node_modules/
+.dist/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+
+# Project memory & docs (not for version control)
+.claude/
+MEMORY.md
+REFRACTOR_PLAN.md

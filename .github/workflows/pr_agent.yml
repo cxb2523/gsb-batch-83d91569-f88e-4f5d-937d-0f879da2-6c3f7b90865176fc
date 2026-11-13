@@ -1,0 +1,79 @@
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, review_requested, synchronize]
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+
+jobs:
+  pr_agent_job:
+    # Ignore bot events and only allow read-only slash commands. Commands that commit changes are disabled.
+    if: >-
+      ${{
+        github.event.sender.type != 'Bot' &&
+        (
+          github.event_name != 'issue_comment' ||
+          (
+            github.event.issue.pull_request &&
+            (
+              github.event.comment.body == '/review' ||
+              startsWith(github.event.comment.body, '/review ') ||
+              github.event.comment.body == '/review_pr' ||
+              startsWith(github.event.comment.body, '/review_pr ') ||
+              github.event.comment.body == '/auto_review' ||
+              startsWith(github.event.comment.body, '/auto_review ') ||
+              github.event.comment.body == '/answer' ||
+              startsWith(github.event.comment.body, '/answer ') ||
+              github.event.comment.body == '/describe' ||
+              startsWith(github.event.comment.body, '/describe ') ||
+              github.event.comment.body == '/describe_pr' ||
+              startsWith(github.event.comment.body, '/describe_pr ') ||
+              github.event.comment.body == '/ask' ||
+              startsWith(github.event.comment.body, '/ask ') ||
+              github.event.comment.body == '/ask_question' ||
+              startsWith(github.event.comment.body, '/ask_question ') ||
+              github.event.comment.body == '/ask_line' ||
+              startsWith(github.event.comment.body, '/ask_line ') ||
+              github.event.comment.body == '/generate_labels' ||
+              startsWith(github.event.comment.body, '/generate_labels ') ||
+              github.event.comment.body == '/config' ||
+              startsWith(github.event.comment.body, '/config ') ||
+              github.event.comment.body == '/settings' ||
+              startsWith(github.event.comment.body, '/settings ') ||
+              github.event.comment.body == '/help' ||
+              startsWith(github.event.comment.body, '/help ') ||
+              github.event.comment.body == '/similar_issue' ||
+              startsWith(github.event.comment.body, '/similar_issue ')
+            )
+          )
+        )
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+      contents: read
+    name: Run PR Agent on pull requests, review events, and supported slash commands
+    steps:
+      - name: PR Agent action step
+        id: pragent
+        uses: the-pr-agent/pr-agent@1d01f24f455bb879c1d9c557ad7de3d72dcc7975
+    env:
+      OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Keep critical PR-Agent settings in the workflow so they are available
+      # even when .pr_agent.toml is introduced or changed by the current PR.
+      config.custom_model_max_tokens: "131072"
+      OPENAI.API_BASE: "https://litellm.lrate.top/v1"
+      github_action_config.auto_review: "true"
+      github_action_config.auto_describe: "false"
+      github_action_config.auto_improve: "false"
+      github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "review_requested"]'
+      github_action_config.handle_push_trigger: "true"
+      github_action_config.push_commands: '["/review"]'
+      github_action_config.push_trigger_ignore_merge_commits: "true"
+      github_action_config.push_trigger_ignore_bot_commits: "true"
+      github_action_config.review_states: '["changes_requested"]'
+      github_action_config.review_author_types: '["User"]'
+      github_action_config.review_commands: '[]'
