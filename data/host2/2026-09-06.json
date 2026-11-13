@@ -1,0 +1,63 @@
+{
+  "ccusageVersion": "20.0.20",
+  "collectedAt": "2026-09-08T13:00:14Z",
+  "date": "2026-09-06",
+  "host": "host2",
+  "sources": {
+    "claude": {
+      "cacheCreation": 329586,
+      "cacheRead": 6066211,
+      "costUSD": 6.284295,
+      "input": 122,
+      "models": {
+        "claude-opus-5": {
+          "cacheCreation": 184216,
+          "cacheRead": 5406305,
+          "costUSD": 5.464432,
+          "input": 74,
+          "output": 36750,
+          "total": 5627345
+        },
+        "claude-sonnet-5": {
+          "cacheCreation": 145370,
+          "cacheRead": 659906,
+          "costUSD": 0.819862,
+          "input": 48,
+          "output": 32436,
+          "total": 837760
+        }
+      },
+      "output": 69186,
+      "total": 6465105
+    },
+    "codex": {
+      "cacheCreation": 0,
+      "cacheRead": 2002560,
+      "costUSD": 1.022318,
+      "input": 125655,
+      "models": {
+        "gpt-5.6-sol": {
+          "cacheCreation": 0,
+          "cacheRead": 382848,
+          "input": 38881,
+          "output": 3547,
+          "reasoningOutput": 1390,
+          "total": 425276
+        },
+        "gpt-5.6-terra": {
+          "cacheCreation": 0,
+          "cacheRead": 1619712,
+          "input": 86774,
+          "output": 12102,
+          "reasoningOutput": 3965,
+          "total": 1718588
+        }
+      },
+      "output": 15649,
+      "reasoningOutput": 5355,
+      "total": 2143864
+    }
+  },
+  "status": "final",
+  "timezone": "Asia/Shanghai"
+}

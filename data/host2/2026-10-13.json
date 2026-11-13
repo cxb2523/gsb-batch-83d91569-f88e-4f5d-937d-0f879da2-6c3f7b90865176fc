@@ -1,0 +1,80 @@
+{
+  "ccusageVersion": "20.0.34",
+  "collectedAt": "2026-10-15T13:00:16Z",
+  "date": "2026-10-13",
+  "host": "host2",
+  "sources": {
+    "claude": {
+      "cacheCreation": 803745,
+      "cacheRead": 5254686,
+      "costUSD": 7.769068,
+      "input": 166,
+      "models": {
+        "claude-opus-5-5": {
+          "cacheCreation": 695886,
+          "cacheRead": 4706061,
+          "costUSD": 7.284052,
+          "input": 108,
+          "output": 38766,
+          "total": 5440821
+        },
+        "claude-sonnet-5-5": {
+          "cacheCreation": 107859,
+          "cacheRead": 548625,
+          "costUSD": 0.485016,
+          "input": 58,
+          "output": 16039,
+          "total": 672581
+        }
+      },
+      "output": 54805,
+      "total": 6113402
+    },
+    "codex": {
+      "cacheCreation": 0,
+      "cacheRead": 26208384,
+      "costUSD": 18.23314,
+      "input": 566180,
+      "models": {
+        "gpt-5.6-luna": {
+          "cacheCreation": 0,
+          "cacheRead": 98560,
+          "input": 40722,
+          "modelNameIsFallback": true,
+          "output": 922,
+          "reasoningOutput": 462,
+          "total": 140204
+        },
+        "gpt-5.6-sol": {
+          "cacheCreation": 0,
+          "cacheRead": 23690624,
+          "input": 376695,
+          "output": 52619,
+          "reasoningOutput": 19978,
+          "total": 24119938
+        },
+        "gpt-5.6-terra": {
+          "cacheCreation": 0,
+          "cacheRead": 1380864,
+          "input": 89887,
+          "output": 10506,
+          "reasoningOutput": 2761,
+          "total": 1481257
+        },
+        "gpt-6-astra": {
+          "cacheCreation": 0,
+          "cacheRead": 1038336,
+          "input": 58876,
+          "output": 4937,
+          "reasoningOutput": 565,
+          "total": 1102149
+        }
+      },
+      "output": 68984,
+      "reasoningOutput": 23766,
+      "total": 26843548
+    }
+  },
+  "status": "final",
+  "timezone": "Asia/Shanghai"
+}

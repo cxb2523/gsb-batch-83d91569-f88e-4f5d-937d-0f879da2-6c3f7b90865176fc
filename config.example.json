@@ -1,0 +1,25 @@
+{
+  "host": "mac-a",
+
+  "timezone": "Asia/Shanghai",
+
+  "sources": ["claude", "codex"],
+
+  "recall": {
+    "min_days": 3,
+    "max_days": 21,
+    "slack_days": 2,
+    "final_after_days": 7
+  },
+
+  "git": {
+    "enabled": true,
+    "remote": "origin",
+    "branch": "main",
+    "push_retries": 5
+  },
+
+  "ccusage": {
+    "spec": "ccusage@latest"
+  }
+}

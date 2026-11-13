@@ -1,0 +1,89 @@
+{
+  "ccusageVersion": "20.0.44",
+  "collectedAt": "2026-10-25T13:00:13Z",
+  "date": "2026-10-23",
+  "host": "mac-a",
+  "sources": {
+    "claude": {
+      "cacheCreation": 12546374,
+      "cacheRead": 434727982,
+      "costUSD": 157.207349,
+      "input": 4942,
+      "models": {
+        "claude-opus-5-5": {
+          "cacheCreation": 12327342,
+          "cacheRead": 432955772,
+          "costUSD": 156.474956,
+          "input": 4866,
+          "output": 278932,
+          "total": 445566912
+        },
+        "claude-sonnet-5-5": {
+          "cacheCreation": 219032,
+          "cacheRead": 1772210,
+          "costUSD": 0.732393,
+          "input": 76,
+          "output": 744,
+          "total": 1992062
+        }
+      },
+      "output": 279676,
+      "total": 447558974
+    },
+    "codex": {
+      "cacheCreation": 0,
+      "cacheRead": 202625783,
+      "costUSD": 69.547541,
+      "input": 8211918,
+      "models": {
+        "google/models/gemini-4-argon": {
+          "cacheCreation": 0,
+          "cacheRead": 186999,
+          "input": 557410,
+          "output": 3112,
+          "reasoningOutput": 0,
+          "total": 747521
+        },
+        "gpt-5.6-luna": {
+          "cacheCreation": 0,
+          "cacheRead": 16197376,
+          "input": 1670634,
+          "modelNameIsFallback": true,
+          "output": 34323,
+          "reasoningOutput": 13329,
+          "total": 17902333
+        },
+        "gpt-6-astra": {
+          "cacheCreation": 0,
+          "cacheRead": 14353664,
+          "input": 677424,
+          "output": 60025,
+          "reasoningOutput": 18006,
+          "total": 15091113
+        },
+        "gpt-6-luna": {
+          "cacheCreation": 0,
+          "cacheRead": 774656,
+          "input": 83713,
+          "output": 5136,
+          "reasoningOutput": 1841,
+          "total": 863505
+        },
+        "gpt-6.1-sol": {
+          "cacheCreation": 0,
+          "cacheRead": 171113088,
+          "input": 5222737,
+          "modelNameIsFallback": true,
+          "output": 587036,
+          "reasoningOutput": 204255,
+          "total": 176922861
+        }
+      },
+      "output": 689632,
+      "reasoningOutput": 237431,
+      "total": 211527333
+    }
+  },
+  "status": "final",
+  "timezone": "Asia/Shanghai"
+}

@@ -1,0 +1,80 @@
+{
+  "ccusageVersion": "20.0.19",
+  "collectedAt": "2026-08-10T13:00:09Z",
+  "date": "2026-08-08",
+  "host": "mac-a",
+  "sources": {
+    "claude": {
+      "cacheCreation": 2052313,
+      "cacheRead": 86636601,
+      "costUSD": 74.068621,
+      "input": 9200,
+      "models": {
+        "claude-fable-5": {
+          "cacheCreation": 122125,
+          "cacheRead": 3622828,
+          "costUSD": 9.416198,
+          "input": 57,
+          "output": 67006,
+          "total": 3812016
+        },
+        "claude-opus-5": {
+          "cacheCreation": 1477662,
+          "cacheRead": 75636430,
+          "costUSD": 61.208984,
+          "input": 6160,
+          "output": 356964,
+          "total": 77477216
+        },
+        "claude-sonnet-5": {
+          "cacheCreation": 452526,
+          "cacheRead": 7377343,
+          "costUSD": 3.44344,
+          "input": 2983,
+          "output": 83069,
+          "total": 7915921
+        }
+      },
+      "output": 507039,
+      "total": 89205153
+    },
+    "codex": {
+      "cacheCreation": 0,
+      "cacheRead": 168122880,
+      "costUSD": 113.281713,
+      "input": 8061200,
+      "models": {
+        "gpt-5.5": {
+          "cacheCreation": 0,
+          "cacheRead": 4087296,
+          "input": 2053979,
+          "modelNameIsFallback": true,
+          "output": 10846,
+          "reasoningOutput": 4717,
+          "total": 6152121
+        },
+        "gpt-5.6-sol": {
+          "cacheCreation": 0,
+          "cacheRead": 107414272,
+          "input": 4177058,
+          "output": 264540,
+          "reasoningOutput": 101854,
+          "total": 111855870
+        },
+        "gpt-5.6-terra": {
+          "cacheCreation": 0,
+          "cacheRead": 56621312,
+          "input": 1830163,
+          "output": 260798,
+          "reasoningOutput": 117980,
+          "total": 58712273
+        }
+      },
+      "output": 536184,
+      "reasoningOutput": 224551,
+      "total": 176720264
+    }
+  },
+  "status": "final",
+  "timezone": "Asia/Shanghai"
+}

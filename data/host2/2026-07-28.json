@@ -1,0 +1,37 @@
+{
+  "ccusageVersion": "20.0.19",
+  "collectedAt": "2026-08-05T16:33:12Z",
+  "date": "2026-07-28",
+  "host": "host2",
+  "sources": {
+    "codex": {
+      "cacheCreation": 0,
+      "cacheRead": 3645440,
+      "costUSD": 2.852103,
+      "input": 198646,
+      "models": {
+        "gpt-5.6-sol": {
+          "cacheCreation": 0,
+          "cacheRead": 1365760,
+          "input": 122277,
+          "output": 13974,
+          "reasoningOutput": 8607,
+          "total": 1502011
+        },
+        "gpt-5.6-terra": {
+          "cacheCreation": 0,
+          "cacheRead": 2279680,
+          "input": 76369,
+          "output": 11589,
+          "reasoningOutput": 4236,
+          "total": 2367638
+        }
+      },
+      "output": 25563,
+      "reasoningOutput": 12843,
+      "total": 3869649
+    }
+  },
+  "status": "final",
+  "timezone": "Asia/Shanghai"
+}

@@ -1,0 +1,72 @@
+{
+  "ccusageVersion": "20.0.44",
+  "collectedAt": "2026-10-26T13:00:13Z",
+  "date": "2026-10-24",
+  "host": "mac-a",
+  "sources": {
+    "claude": {
+      "cacheCreation": 3336433,
+      "cacheRead": 86598718,
+      "costUSD": 33.703196,
+      "input": 1332,
+      "models": {
+        "claude-opus-5-5": {
+          "cacheCreation": 2067563,
+          "cacheRead": 50672515,
+          "costUSD": 26.867281,
+          "input": 512,
+          "output": 87346,
+          "total": 52827936
+        },
+        "claude-sonnet-5-5": {
+          "cacheCreation": 1268870,
+          "cacheRead": 35926203,
+          "costUSD": 6.835915,
+          "input": 820,
+          "output": 6948,
+          "total": 37202841
+        }
+      },
+      "output": 94294,
+      "total": 90030777
+    },
+    "codex": {
+      "cacheCreation": 0,
+      "cacheRead": 121926935,
+      "costUSD": 23.549753,
+      "input": 4157347,
+      "models": {
+        "google/models/gemini-4-argon": {
+          "cacheCreation": 0,
+          "cacheRead": 11585303,
+          "input": 1375100,
+          "output": 65622,
+          "reasoningOutput": 0,
+          "total": 13026025
+        },
+        "gpt-5.6-luna": {
+          "cacheCreation": 0,
+          "cacheRead": 12900736,
+          "input": 960466,
+          "modelNameIsFallback": true,
+          "output": 22278,
+          "reasoningOutput": 9314,
+          "total": 13883480
+        },
+        "gpt-6.1-sol": {
+          "cacheCreation": 0,
+          "cacheRead": 97440896,
+          "input": 1821781,
+          "output": 386573,
+          "reasoningOutput": 164205,
+          "total": 99649250
+        }
+      },
+      "output": 474473,
+      "reasoningOutput": 173519,
+      "total": 126558755
+    }
+  },
+  "status": "final",
+  "timezone": "Asia/Shanghai"
+}

@@ -1,0 +1,405 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="396" viewBox="0 0 880 396" role="img" aria-label="Daily token usage, 8-bit pixel chart, OCT 15 - NOV 13, 2026">
+<style>
+svg{--f:Poppins,Arial,"Helvetica Neue",sans-serif;--fs:Lora,Georgia,"Iowan Old Style",serif;--fm:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--surface:#faf9f5; --primary:#141413; --secondary:#53524b; --muted:#8a887f; --grid:#e8e6dc; --axis:#cbc8bc; --claude:#d06a41; --codex:#4382c9; --ramp0:#edeae0; --ramp1:#f2cdb9; --ramp2:#e59a70; --ramp3:#d06a41; --ramp4:#9c4a26; --ink3:#141413; --ink4:#ffffff;}
+@media (prefers-color-scheme: dark){svg{--surface:#141413; --primary:#faf9f5; --secondary:#b0aea5; --muted:#85837a; --grid:#292824; --axis:#383630; --claude:#db7448; --codex:#5b95d6; --ramp0:#232221; --ramp1:#4b2b1b; --ramp2:#8a4526; --ramp3:#cf6a3e; --ramp4:#f0a37a; --ink3:#141413; --ink4:#141413;}}
+.bg{fill:var(--surface)}
+.grid{stroke:var(--grid);stroke-width:1;shape-rendering:crispEdges}
+.axis{stroke:var(--axis);stroke-width:1;shape-rendering:crispEdges}
+.t{font-family:var(--f);fill:var(--primary)}
+.t2{font-family:var(--f);fill:var(--secondary)}
+.tm{font-family:var(--f);fill:var(--muted);font-variant-numeric:tabular-nums}
+.ts{font-family:var(--fs);fill:var(--primary)}
+.tn{font-family:var(--fm);fill:var(--primary);font-variant-numeric:tabular-nums}
+.s-claude{fill:var(--claude)}.s-codex{fill:var(--codex)}
+.r0{fill:var(--ramp0)}.r1{fill:var(--ramp1)}.r2{fill:var(--ramp2)}.r3{fill:var(--ramp3)}.r4{fill:var(--ramp4)}
+.on3{fill:var(--ink3)}.on4{fill:var(--ink4)}
+.wip{opacity:.5}
+.px{shape-rendering:crispEdges}.tt{font-family:var(--fm);fill:var(--primary);font-weight:700;letter-spacing:3px}.sub{font-family:var(--fm);fill:var(--secondary);letter-spacing:1px}.ink{fill:var(--primary)}.gridp{stroke:var(--grid);stroke-width:1;shape-rendering:crispEdges;stroke-dasharray:4 4}.axp{stroke:var(--axis);stroke-width:2;shape-rendering:crispEdges}.col{animation:rise .5s steps(4,end) both}@keyframes rise{from{opacity:0;transform:translateY(14px)}}.blink{animation:blink 1.3s step-end infinite}@keyframes blink{0%,54%{opacity:1}55%,100%{opacity:.2}}
+@media (prefers-reduced-motion: reduce){*{animation:none !important}}
+</style>
+<rect class="bg" width="880" height="396"/>
+<text class="tt" x="28" y="36" font-size="17">DAILY TOKENS</text>
+<text class="sub" x="28" y="57" font-size="11">OCT 15 - NOV 13, 2026 / 12B TOKENS OVER 30 DAYS / 1PX = 50M</text>
+<rect class="px s-claude" x="28" y="68" width="8" height="8"/>
+<text class="t2" x="42" y="76" font-size="12" font-family="var(--fm)">Claude Code</text>
+<rect class="px s-codex" x="136" y="68" width="8" height="8"/>
+<text class="t2" x="150" y="76" font-size="12" font-family="var(--fm)">Codex</text>
+<g class="ink px">
+<rect x="823" y="24" width="4" height="4"/>
+<rect x="828" y="24" width="4" height="4"/>
+<rect x="838" y="24" width="4" height="4"/>
+<rect x="843" y="24" width="4" height="4"/>
+<rect x="818" y="29" width="4" height="4"/>
+<rect x="823" y="29" width="4" height="4"/>
+<rect x="828" y="29" width="4" height="4"/>
+<rect x="833" y="29" width="4" height="4"/>
+<rect x="838" y="29" width="4" height="4"/>
+<rect x="843" y="29" width="4" height="4"/>
+<rect x="848" y="29" width="4" height="4"/>
+<rect x="818" y="34" width="4" height="4"/>
+<rect x="823" y="34" width="4" height="4"/>
+<rect x="828" y="34" width="4" height="4"/>
+<rect x="833" y="34" width="4" height="4"/>
+<rect x="838" y="34" width="4" height="4"/>
+<rect x="843" y="34" width="4" height="4"/>
+<rect x="848" y="34" width="4" height="4"/>
+<rect x="823" y="39" width="4" height="4"/>
+<rect x="828" y="39" width="4" height="4"/>
+<rect x="833" y="39" width="4" height="4"/>
+<rect x="838" y="39" width="4" height="4"/>
+<rect x="843" y="39" width="4" height="4"/>
+<rect x="828" y="44" width="4" height="4"/>
+<rect x="833" y="44" width="4" height="4"/>
+<rect x="838" y="44" width="4" height="4"/>
+<rect x="833" y="49" width="4" height="4"/>
+</g>
+<text class="tm" x="66" y="344" font-size="10.5" text-anchor="end">0</text>
+<line class="gridp" x1="76" y1="290" x2="852" y2="290"/>
+<text class="tm" x="66" y="294" font-size="10.5" text-anchor="end">500M</text>
+<line class="gridp" x1="76" y1="240" x2="852" y2="240"/>
+<text class="tm" x="66" y="244" font-size="10.5" text-anchor="end">1.0B</text>
+<line class="gridp" x1="76" y1="190" x2="852" y2="190"/>
+<text class="tm" x="66" y="194" font-size="10.5" text-anchor="end">1.5B</text>
+<line class="gridp" x1="76" y1="140" x2="852" y2="140"/>
+<text class="tm" x="66" y="144" font-size="10.5" text-anchor="end">2.0B</text>
+<line class="axp" x1="76" y1="341" x2="852" y2="341"/>
+<g class="col" style="animation-delay:0ms">
+<rect class="px s-claude" x="80" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="90" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="80" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="90" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="80" y="312" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:18ms">
+<rect class="px s-claude" x="106" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="116" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="106" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="116" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="106" y="312" width="8" height="8"/>
+<rect class="px s-claude" x="116" y="312" width="8" height="8"/>
+<rect class="px s-claude" x="106" y="302" width="8" height="8"/>
+<rect class="px s-claude" x="116" y="302" width="8" height="8"/>
+<rect class="px s-claude" x="106" y="292" width="8" height="8"/>
+<rect class="px s-claude" x="116" y="292" width="8" height="8"/>
+<rect class="px s-claude" x="106" y="282" width="8" height="8"/>
+<rect class="px s-claude" x="116" y="282" width="8" height="8"/>
+<rect class="px s-claude" x="106" y="272" width="8" height="8"/>
+<rect class="px s-claude" x="116" y="272" width="8" height="8"/>
+<rect class="px s-claude" x="106" y="262" width="8" height="8"/>
+<rect class="px s-claude" x="116" y="262" width="8" height="8"/>
+<rect class="px s-codex" x="106" y="252" width="8" height="8"/>
+</g>
+<text class="tm" x="115" y="359" font-size="10.5" text-anchor="middle" font-family="var(--fm)">10/16</text>
+<g class="col" style="animation-delay:36ms">
+<rect class="px s-claude" x="132" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="142" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="132" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="142" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="132" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="142" y="312" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:54ms">
+<rect class="px s-claude" x="158" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="168" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="158" y="322" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:72ms">
+<rect class="px s-claude" x="183" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="193" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="183" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="193" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="183" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="193" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="183" y="302" width="8" height="8"/>
+<rect class="px s-codex" x="193" y="302" width="8" height="8"/>
+<rect class="px s-codex" x="183" y="292" width="8" height="8"/>
+<rect class="px s-codex" x="193" y="292" width="8" height="8"/>
+<rect class="px s-codex" x="183" y="282" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:90ms">
+<rect class="px s-claude" x="209" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="219" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="209" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="219" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="209" y="312" width="8" height="8"/>
+<rect class="px s-claude" x="219" y="312" width="8" height="8"/>
+<rect class="px s-claude" x="209" y="302" width="8" height="8"/>
+<rect class="px s-claude" x="219" y="302" width="8" height="8"/>
+<rect class="px s-claude" x="209" y="292" width="8" height="8"/>
+<rect class="px s-claude" x="219" y="292" width="8" height="8"/>
+<rect class="px s-codex" x="209" y="282" width="8" height="8"/>
+<rect class="px s-codex" x="219" y="282" width="8" height="8"/>
+</g>
+<text class="tm" x="218" y="359" font-size="10.5" text-anchor="middle" font-family="var(--fm)">10/20</text>
+<g class="col" style="animation-delay:108ms">
+<rect class="px s-claude" x="235" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="245" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="235" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="245" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="235" y="312" width="8" height="8"/>
+<rect class="px s-claude" x="245" y="312" width="8" height="8"/>
+<rect class="px s-claude" x="235" y="302" width="8" height="8"/>
+<rect class="px s-claude" x="245" y="302" width="8" height="8"/>
+<rect class="px s-claude" x="235" y="292" width="8" height="8"/>
+<rect class="px s-claude" x="245" y="292" width="8" height="8"/>
+<rect class="px s-claude" x="235" y="282" width="8" height="8"/>
+<rect class="px s-claude" x="245" y="282" width="8" height="8"/>
+<rect class="px s-claude" x="235" y="272" width="8" height="8"/>
+<rect class="px s-claude" x="245" y="272" width="8" height="8"/>
+<rect class="px s-claude" x="235" y="262" width="8" height="8"/>
+<rect class="px s-claude" x="245" y="262" width="8" height="8"/>
+<rect class="px s-claude" x="235" y="252" width="8" height="8"/>
+<rect class="px s-claude" x="245" y="252" width="8" height="8"/>
+<rect class="px s-claude" x="235" y="242" width="8" height="8"/>
+<rect class="px s-claude" x="245" y="242" width="8" height="8"/>
+<rect class="px s-codex" x="235" y="232" width="8" height="8"/>
+<rect class="px s-codex" x="245" y="232" width="8" height="8"/>
+<rect class="px s-codex" x="235" y="222" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:126ms">
+<rect class="px s-claude" x="261" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="271" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="261" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="271" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="261" y="312" width="8" height="8"/>
+<rect class="px s-claude" x="271" y="312" width="8" height="8"/>
+<rect class="px s-claude" x="261" y="302" width="8" height="8"/>
+<rect class="px s-claude" x="271" y="302" width="8" height="8"/>
+<rect class="px s-claude" x="261" y="292" width="8" height="8"/>
+<rect class="px s-claude" x="271" y="292" width="8" height="8"/>
+<rect class="px s-claude" x="261" y="282" width="8" height="8"/>
+<rect class="px s-claude" x="271" y="282" width="8" height="8"/>
+<rect class="px s-claude" x="261" y="272" width="8" height="8"/>
+<rect class="px s-claude" x="271" y="272" width="8" height="8"/>
+<rect class="px s-claude" x="261" y="262" width="8" height="8"/>
+<rect class="px s-claude" x="271" y="262" width="8" height="8"/>
+<rect class="px s-claude" x="261" y="252" width="8" height="8"/>
+<rect class="px s-claude" x="271" y="252" width="8" height="8"/>
+<rect class="px s-claude" x="261" y="242" width="8" height="8"/>
+<rect class="px s-claude" x="271" y="242" width="8" height="8"/>
+<rect class="px s-claude" x="261" y="232" width="8" height="8"/>
+<rect class="px s-codex" x="271" y="232" width="8" height="8"/>
+<rect class="px s-codex" x="261" y="222" width="8" height="8"/>
+<rect class="px s-codex" x="271" y="222" width="8" height="8"/>
+<rect class="px s-codex" x="261" y="212" width="8" height="8"/>
+<rect class="px s-codex" x="271" y="212" width="8" height="8"/>
+<rect class="px s-codex" x="261" y="202" width="8" height="8"/>
+<rect class="px s-codex" x="271" y="202" width="8" height="8"/>
+<rect class="px s-codex" x="261" y="192" width="8" height="8"/>
+<rect class="px s-codex" x="271" y="192" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:144ms">
+<rect class="px s-claude" x="287" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="297" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="287" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="297" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="287" y="312" width="8" height="8"/>
+<rect class="px s-claude" x="297" y="312" width="8" height="8"/>
+<rect class="px s-claude" x="287" y="302" width="8" height="8"/>
+<rect class="px s-claude" x="297" y="302" width="8" height="8"/>
+<rect class="px s-claude" x="287" y="292" width="8" height="8"/>
+<rect class="px s-claude" x="297" y="292" width="8" height="8"/>
+<rect class="px s-codex" x="287" y="282" width="8" height="8"/>
+<rect class="px s-codex" x="297" y="282" width="8" height="8"/>
+<rect class="px s-codex" x="287" y="272" width="8" height="8"/>
+<rect class="px s-codex" x="297" y="272" width="8" height="8"/>
+<rect class="px s-codex" x="287" y="262" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:162ms">
+<rect class="px s-claude" x="313" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="323" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="313" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="323" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="313" y="312" width="8" height="8"/>
+</g>
+<text class="tm" x="322" y="359" font-size="10.5" text-anchor="middle" font-family="var(--fm)">10/24</text>
+<g class="col" style="animation-delay:180ms">
+<rect class="px s-claude" x="339" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="349" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="339" y="322" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:198ms">
+<rect class="px s-claude" x="364" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="374" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="364" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="374" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="364" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="374" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="364" y="302" width="8" height="8"/>
+<rect class="px s-codex" x="374" y="302" width="8" height="8"/>
+<rect class="px s-codex" x="364" y="292" width="8" height="8"/>
+<rect class="px s-codex" x="374" y="292" width="8" height="8"/>
+<rect class="px s-codex" x="364" y="282" width="8" height="8"/>
+<rect class="px s-codex" x="374" y="282" width="8" height="8"/>
+<rect class="px s-codex" x="364" y="272" width="8" height="8"/>
+<rect class="px s-codex" x="374" y="272" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:216ms">
+<rect class="px s-claude" x="390" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="400" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="390" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="400" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="390" y="312" width="8" height="8"/>
+<rect class="px s-claude" x="400" y="312" width="8" height="8"/>
+<rect class="px s-claude" x="390" y="302" width="8" height="8"/>
+<rect class="px s-claude" x="400" y="302" width="8" height="8"/>
+<rect class="px s-claude" x="390" y="292" width="8" height="8"/>
+<rect class="px s-codex" x="400" y="292" width="8" height="8"/>
+<rect class="px s-codex" x="390" y="282" width="8" height="8"/>
+<rect class="px s-codex" x="400" y="282" width="8" height="8"/>
+<rect class="px s-codex" x="390" y="272" width="8" height="8"/>
+<rect class="px s-codex" x="400" y="272" width="8" height="8"/>
+<rect class="px s-codex" x="390" y="262" width="8" height="8"/>
+<rect class="px s-codex" x="400" y="262" width="8" height="8"/>
+<rect class="px s-codex" x="390" y="252" width="8" height="8"/>
+<rect class="px s-codex" x="400" y="252" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:234ms">
+<rect class="px s-claude" x="416" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="426" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="416" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="426" y="322" width="8" height="8"/>
+<rect class="px s-claude" x="416" y="312" width="8" height="8"/>
+<rect class="px s-claude" x="426" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="416" y="302" width="8" height="8"/>
+<rect class="px s-codex" x="426" y="302" width="8" height="8"/>
+<rect class="px s-codex" x="416" y="292" width="8" height="8"/>
+<rect class="px s-codex" x="426" y="292" width="8" height="8"/>
+</g>
+<text class="tm" x="425" y="359" font-size="10.5" text-anchor="middle" font-family="var(--fm)">10/28</text>
+<g class="col" style="animation-delay:252ms">
+<rect class="px s-claude" x="442" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="452" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="442" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="452" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="442" y="312" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:270ms">
+<rect class="px s-claude" x="468" y="332" width="8" height="8"/>
+<rect class="px s-claude" x="478" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="468" y="322" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:288ms">
+<rect class="px s-claude" x="494" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="504" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="494" y="322" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:306ms">
+<rect class="px s-claude" x="520" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="530" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="520" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="530" y="322" width="8" height="8"/>
+</g>
+<text class="tm" x="529" y="359" font-size="10.5" text-anchor="middle" font-family="var(--fm)">11/01</text>
+<g class="col" style="animation-delay:324ms">
+<rect class="px s-codex" x="546" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="556" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="546" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="556" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="546" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="556" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="546" y="302" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:342ms">
+<rect class="px s-codex" x="571" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="581" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="571" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="581" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="571" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="581" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="571" y="302" width="8" height="8"/>
+<rect class="px s-codex" x="581" y="302" width="8" height="8"/>
+<rect class="px s-codex" x="571" y="292" width="8" height="8"/>
+<rect class="px s-codex" x="581" y="292" width="8" height="8"/>
+<rect class="px s-codex" x="571" y="282" width="8" height="8"/>
+<rect class="px s-codex" x="581" y="282" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:360ms">
+<rect class="px s-claude" x="597" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="607" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="597" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="607" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="597" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="607" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="597" y="302" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:378ms">
+<rect class="px s-codex" x="623" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="633" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="623" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="633" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="623" y="312" width="8" height="8"/>
+</g>
+<text class="tm" x="632" y="359" font-size="10.5" text-anchor="middle" font-family="var(--fm)">11/05</text>
+<g class="col" style="animation-delay:396ms">
+<rect class="px s-codex" x="649" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="659" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="649" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="659" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="649" y="312" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:414ms">
+<rect class="px s-codex" x="675" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="685" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="675" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="685" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="675" y="312" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:432ms">
+<rect class="px s-codex" x="701" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="711" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="701" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="711" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="701" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="711" y="312" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:450ms">
+<rect class="px s-codex" x="727" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="737" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="727" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="737" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="727" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="737" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="727" y="302" width="8" height="8"/>
+<rect class="px s-codex" x="737" y="302" width="8" height="8"/>
+<rect class="px s-codex" x="727" y="292" width="8" height="8"/>
+<rect class="px s-codex" x="737" y="292" width="8" height="8"/>
+<rect class="px s-codex" x="727" y="282" width="8" height="8"/>
+<rect class="px s-codex" x="737" y="282" width="8" height="8"/>
+<rect class="px s-codex" x="727" y="272" width="8" height="8"/>
+<rect class="px s-codex" x="737" y="272" width="8" height="8"/>
+</g>
+<text class="tm" x="736" y="359" font-size="10.5" text-anchor="middle" font-family="var(--fm)">11/09</text>
+<g class="col" style="animation-delay:468ms">
+<rect class="px s-codex" x="752" y="332" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:486ms">
+<rect class="px s-codex" x="778" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="788" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="778" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="788" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="778" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="788" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="778" y="302" width="8" height="8"/>
+<rect class="px s-codex" x="788" y="302" width="8" height="8"/>
+<rect class="px s-codex" x="778" y="292" width="8" height="8"/>
+</g>
+<g class="col" style="animation-delay:504ms">
+<rect class="px s-codex" x="804" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="814" y="332" width="8" height="8"/>
+<rect class="px s-codex" x="804" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="814" y="322" width="8" height="8"/>
+<rect class="px s-codex" x="804" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="814" y="312" width="8" height="8"/>
+<rect class="px s-codex" x="804" y="302" width="8" height="8"/>
+<rect class="px s-codex" x="814" y="302" width="8" height="8"/>
+</g>
+<g class="col wip" style="animation-delay:522ms">
+<rect class="px s-codex" x="830" y="332" width="8" height="8"/>
+<rect class="px s-codex blink" x="840" y="332" width="8" height="8"/>
+</g>
+<text class="tm" x="839" y="359" font-size="10.5" text-anchor="middle" font-family="var(--fm)">11/13</text>
+<text class="tn" x="270" y="184" font-size="11" font-weight="700" text-anchor="middle">1.4B</text>
+<text class="tn" x="839" y="294" font-size="11" font-weight="700" text-anchor="middle">65M</text>
+<text class="tm" x="28" y="382" font-size="10.5">Generated 2026-11-13 04:00 UTC</text>
+</svg>

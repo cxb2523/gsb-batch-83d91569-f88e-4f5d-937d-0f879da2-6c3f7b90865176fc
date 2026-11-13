@@ -1,0 +1,80 @@
+{
+  "ccusageVersion": "20.0.20",
+  "collectedAt": "2026-08-23T13:00:17Z",
+  "date": "2026-08-21",
+  "host": "mac-a",
+  "sources": {
+    "claude": {
+      "cacheCreation": 4304405,
+      "cacheRead": 59988566,
+      "costUSD": 75.005608,
+      "input": 1110,
+      "models": {
+        "claude-opus-5": {
+          "cacheCreation": 3623320,
+          "cacheRead": 54782122,
+          "costUSD": 71.133782,
+          "input": 928,
+          "output": 669550,
+          "total": 59075920
+        },
+        "claude-sonnet-5": {
+          "cacheCreation": 681085,
+          "cacheRead": 5206444,
+          "costUSD": 3.871825,
+          "input": 182,
+          "output": 112746,
+          "total": 6000457
+        }
+      },
+      "output": 782296,
+      "total": 65076377
+    },
+    "codex": {
+      "cacheCreation": 0,
+      "cacheRead": 119047808,
+      "costUSD": 60.800992,
+      "input": 5041376,
+      "models": {
+        "gpt-5.5": {
+          "cacheCreation": 0,
+          "cacheRead": 1377536,
+          "input": 412822,
+          "modelNameIsFallback": true,
+          "output": 5266,
+          "reasoningOutput": 2803,
+          "total": 1795624
+        },
+        "gpt-5.6-luna": {
+          "cacheCreation": 0,
+          "cacheRead": 74653568,
+          "input": 2665057,
+          "output": 189165,
+          "reasoningOutput": 104040,
+          "total": 77507790
+        },
+        "gpt-5.6-sol": {
+          "cacheCreation": 0,
+          "cacheRead": 26575616,
+          "input": 1609013,
+          "output": 90261,
+          "reasoningOutput": 28460,
+          "total": 28274890
+        },
+        "gpt-5.6-terra": {
+          "cacheCreation": 0,
+          "cacheRead": 16441088,
+          "input": 354484,
+          "output": 56047,
+          "reasoningOutput": 25114,
+          "total": 16851619
+        }
+      },
+      "output": 340739,
+      "reasoningOutput": 160417,
+      "total": 124429923
+    }
+  },
+  "status": "final",
+  "timezone": "Asia/Shanghai"
+}

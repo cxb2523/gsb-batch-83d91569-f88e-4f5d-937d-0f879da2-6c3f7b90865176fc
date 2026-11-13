@@ -1,0 +1,16 @@
+[project]
+name = "token-history"
+version = "1.0.0"
+description = "Persist, merge and chart AI coding token usage (Claude Code + Codex)"
+readme = "README.md"
+license = { text = "MIT" }
+# The scripts stay 3.9-compatible so the no-uv `python3` fallback keeps working
+# on a stock macOS; the interpreter uv actually provisions is pinned by
+# .python-version (3.12).
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.uv]
+# A scripts repo, not an installable package: `uv sync` should build the
+# environment, never try to build/install the project itself.
+package = false

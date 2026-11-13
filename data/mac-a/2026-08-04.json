@@ -1,0 +1,80 @@
+{
+  "ccusageVersion": "20.0.19",
+  "collectedAt": "2026-08-06T13:00:13Z",
+  "date": "2026-08-04",
+  "host": "mac-a",
+  "sources": {
+    "claude": {
+      "cacheCreation": 2829605,
+      "cacheRead": 76486943,
+      "costUSD": 101.910223,
+      "input": 22160,
+      "models": {
+        "claude-fable-5": {
+          "cacheCreation": 967130,
+          "cacheRead": 22009652,
+          "costUSD": 52.770342,
+          "input": 290,
+          "output": 238739,
+          "total": 23215811
+        },
+        "claude-haiku-4-5-20251001": {
+          "cacheCreation": 53650,
+          "cacheRead": 248043,
+          "costUSD": 0.119704,
+          "input": 547,
+          "output": 5458,
+          "total": 307698
+        },
+        "claude-opus-5": {
+          "cacheCreation": 1637876,
+          "cacheRead": 47460908,
+          "costUSD": 46.97758,
+          "input": 21175,
+          "output": 506124,
+          "total": 49626083
+        },
+        "claude-sonnet-5": {
+          "cacheCreation": 170949,
+          "cacheRead": 6768340,
+          "costUSD": 2.042596,
+          "input": 148,
+          "output": 26126,
+          "total": 6965563
+        }
+      },
+      "output": 776447,
+      "total": 80115155
+    },
+    "codex": {
+      "cacheCreation": 0,
+      "cacheRead": 107837696,
+      "costUSD": 92.680898,
+      "input": 4800350,
+      "models": {
+        "gpt-5.5": {
+          "cacheCreation": 0,
+          "cacheRead": 5693696,
+          "input": 680294,
+          "modelNameIsFallback": true,
+          "output": 10825,
+          "reasoningOutput": 4143,
+          "total": 6384815
+        },
+        "gpt-5.6-sol": {
+          "cacheCreation": 0,
+          "cacheRead": 102144000,
+          "input": 4120056,
+          "output": 481185,
+          "reasoningOutput": 174434,
+          "total": 106745241
+        }
+      },
+      "output": 492010,
+      "reasoningOutput": 178577,
+      "total": 113130056
+    }
+  },
+  "status": "final",
+  "timezone": "Asia/Shanghai"
+}

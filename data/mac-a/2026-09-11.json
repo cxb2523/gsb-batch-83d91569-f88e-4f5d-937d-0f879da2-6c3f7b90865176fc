@@ -1,0 +1,80 @@
+{
+  "ccusageVersion": "20.0.20",
+  "collectedAt": "2026-09-13T13:00:15Z",
+  "date": "2026-09-11",
+  "host": "mac-a",
+  "sources": {
+    "claude": {
+      "cacheCreation": 1288285,
+      "cacheRead": 58043049,
+      "costUSD": 51.536302,
+      "input": 8794,
+      "models": {
+        "claude-fable-5-1": {
+          "cacheCreation": 1163602,
+          "cacheRead": 56688221,
+          "costUSD": 50.006523,
+          "input": 8734,
+          "output": 289056,
+          "total": 58149613
+        },
+        "claude-opus-5": {
+          "cacheCreation": 66765,
+          "cacheRead": 688220,
+          "costUSD": 1.202626,
+          "input": 32,
+          "output": 17643,
+          "total": 772660
+        },
+        "claude-sonnet-5": {
+          "cacheCreation": 57918,
+          "cacheRead": 666608,
+          "costUSD": 0.327153,
+          "input": 28,
+          "output": 4898,
+          "total": 729452
+        }
+      },
+      "output": 311597,
+      "total": 59651725
+    },
+    "codex": {
+      "cacheCreation": 0,
+      "cacheRead": 61958016,
+      "costUSD": 101.911989,
+      "input": 3618946,
+      "models": {
+        "gpt-5.5": {
+          "cacheCreation": 0,
+          "cacheRead": 4622464,
+          "input": 749443,
+          "modelNameIsFallback": true,
+          "output": 26373,
+          "reasoningOutput": 13314,
+          "total": 5398280
+        },
+        "gpt-5.6-sol": {
+          "cacheCreation": 0,
+          "cacheRead": 665600,
+          "input": 336037,
+          "output": 4136,
+          "reasoningOutput": 2547,
+          "total": 1005773
+        },
+        "gpt-6-astra": {
+          "cacheCreation": 0,
+          "cacheRead": 56669952,
+          "input": 2533466,
+          "output": 176913,
+          "reasoningOutput": 87769,
+          "total": 59380331
+        }
+      },
+      "output": 207422,
+      "reasoningOutput": 103630,
+      "total": 65784384
+    }
+  },
+  "status": "final",
+  "timezone": "Asia/Shanghai"
+}

@@ -1,0 +1,169 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="279" viewBox="0 0 560 279" role="img" aria-label="Token calendar">
+<style>
+svg{--f:Poppins,Arial,"Helvetica Neue",sans-serif;--fs:Lora,Georgia,"Iowan Old Style",serif;--fm:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--surface:#faf9f5; --primary:#141413; --secondary:#53524b; --muted:#8a887f; --grid:#e8e6dc; --axis:#cbc8bc; --claude:#d06a41; --codex:#4382c9; --ramp0:#edeae0; --ramp1:#f2cdb9; --ramp2:#e59a70; --ramp3:#d06a41; --ramp4:#9c4a26; --ink3:#141413; --ink4:#ffffff;}
+@media (prefers-color-scheme: dark){svg{--surface:#141413; --primary:#faf9f5; --secondary:#b0aea5; --muted:#85837a; --grid:#292824; --axis:#383630; --claude:#db7448; --codex:#5b95d6; --ramp0:#232221; --ramp1:#4b2b1b; --ramp2:#8a4526; --ramp3:#cf6a3e; --ramp4:#f0a37a; --ink3:#141413; --ink4:#141413;}}
+.bg{fill:var(--surface)}
+.grid{stroke:var(--grid);stroke-width:1;shape-rendering:crispEdges}
+.axis{stroke:var(--axis);stroke-width:1;shape-rendering:crispEdges}
+.t{font-family:var(--f);fill:var(--primary)}
+.t2{font-family:var(--f);fill:var(--secondary)}
+.tm{font-family:var(--f);fill:var(--muted);font-variant-numeric:tabular-nums}
+.ts{font-family:var(--fs);fill:var(--primary)}
+.tn{font-family:var(--fm);fill:var(--primary);font-variant-numeric:tabular-nums}
+.s-claude{fill:var(--claude)}.s-codex{fill:var(--codex)}
+.r0{fill:var(--ramp0)}.r1{fill:var(--ramp1)}.r2{fill:var(--ramp2)}.r3{fill:var(--ramp3)}.r4{fill:var(--ramp4)}
+.on3{fill:var(--ink3)}.on4{fill:var(--ink4)}
+.wip{opacity:.5}
+@media (prefers-reduced-motion: reduce){*{animation:none !important}}
+</style>
+<rect class="bg" width="560" height="279"/>
+<text class="t" x="28" y="30" font-size="17" font-weight="600">Token calendar</text>
+<text class="t2" x="28" y="50" font-size="12">Jul 07, 2026 – Nov 13, 2026 · 30B tokens · peak 1.4B on Oct 22</text>
+<text class="tm" x="64" y="88" font-size="10.5">Jul</text>
+<text class="tm" x="128" y="88" font-size="10.5">Aug</text>
+<text class="tm" x="208" y="88" font-size="10.5">Sep</text>
+<text class="tm" x="272" y="88" font-size="10.5">Oct</text>
+<text class="tm" x="336" y="88" font-size="10.5">Nov</text>
+<text class="tm" x="56" y="106" font-size="10" text-anchor="end">Mon</text>
+<text class="tm" x="56" y="138" font-size="10" text-anchor="end">Wed</text>
+<text class="tm" x="56" y="170" font-size="10" text-anchor="end">Fri</text>
+<rect class="r0" x="64" y="96" width="13" height="13" rx="3"/>
+<rect class="r2" x="64" y="112" width="13" height="13" rx="3"/>
+<rect class="r1" x="64" y="128" width="13" height="13" rx="3"/>
+<rect class="r1" x="64" y="144" width="13" height="13" rx="3"/>
+<rect class="r3" x="64" y="160" width="13" height="13" rx="3"/>
+<rect class="r3" x="64" y="176" width="13" height="13" rx="3"/>
+<rect class="r3" x="64" y="192" width="13" height="13" rx="3"/>
+<rect class="r2" x="80" y="96" width="13" height="13" rx="3"/>
+<rect class="r3" x="80" y="112" width="13" height="13" rx="3"/>
+<rect class="r3" x="80" y="128" width="13" height="13" rx="3"/>
+<rect class="r4" x="80" y="144" width="13" height="13" rx="3"/>
+<rect class="r3" x="80" y="160" width="13" height="13" rx="3"/>
+<rect class="r4" x="80" y="176" width="13" height="13" rx="3"/>
+<rect class="r3" x="80" y="192" width="13" height="13" rx="3"/>
+<rect class="r3" x="96" y="96" width="13" height="13" rx="3"/>
+<rect class="r3" x="96" y="112" width="13" height="13" rx="3"/>
+<rect class="r3" x="96" y="128" width="13" height="13" rx="3"/>
+<rect class="r2" x="96" y="144" width="13" height="13" rx="3"/>
+<rect class="r2" x="96" y="160" width="13" height="13" rx="3"/>
+<rect class="r1" x="96" y="176" width="13" height="13" rx="3"/>
+<rect class="r2" x="96" y="192" width="13" height="13" rx="3"/>
+<rect class="r1" x="112" y="96" width="13" height="13" rx="3"/>
+<rect class="r1" x="112" y="112" width="13" height="13" rx="3"/>
+<rect class="r2" x="112" y="128" width="13" height="13" rx="3"/>
+<rect class="r2" x="112" y="144" width="13" height="13" rx="3"/>
+<rect class="r2" x="112" y="160" width="13" height="13" rx="3"/>
+<rect class="r1" x="112" y="176" width="13" height="13" rx="3"/>
+<rect class="r3" x="112" y="192" width="13" height="13" rx="3"/>
+<rect class="r2" x="128" y="96" width="13" height="13" rx="3"/>
+<rect class="r3" x="128" y="112" width="13" height="13" rx="3"/>
+<rect class="r4" x="128" y="128" width="13" height="13" rx="3"/>
+<rect class="r4" x="128" y="144" width="13" height="13" rx="3"/>
+<rect class="r3" x="128" y="160" width="13" height="13" rx="3"/>
+<rect class="r3" x="128" y="176" width="13" height="13" rx="3"/>
+<rect class="r3" x="128" y="192" width="13" height="13" rx="3"/>
+<rect class="r1" x="144" y="96" width="13" height="13" rx="3"/>
+<rect class="r2" x="144" y="112" width="13" height="13" rx="3"/>
+<rect class="r4" x="144" y="128" width="13" height="13" rx="3"/>
+<rect class="r4" x="144" y="144" width="13" height="13" rx="3"/>
+<rect class="r4" x="144" y="160" width="13" height="13" rx="3"/>
+<rect class="r3" x="144" y="176" width="13" height="13" rx="3"/>
+<rect class="r2" x="144" y="192" width="13" height="13" rx="3"/>
+<rect class="r2" x="160" y="96" width="13" height="13" rx="3"/>
+<rect class="r1" x="160" y="112" width="13" height="13" rx="3"/>
+<rect class="r3" x="160" y="128" width="13" height="13" rx="3"/>
+<rect class="r2" x="160" y="144" width="13" height="13" rx="3"/>
+<rect class="r3" x="160" y="160" width="13" height="13" rx="3"/>
+<rect class="r0" x="160" y="176" width="13" height="13" rx="3"/>
+<rect class="r1" x="160" y="192" width="13" height="13" rx="3"/>
+<rect class="r1" x="176" y="96" width="13" height="13" rx="3"/>
+<rect class="r1" x="176" y="112" width="13" height="13" rx="3"/>
+<rect class="r3" x="176" y="128" width="13" height="13" rx="3"/>
+<rect class="r4" x="176" y="144" width="13" height="13" rx="3"/>
+<rect class="r3" x="176" y="160" width="13" height="13" rx="3"/>
+<rect class="r2" x="176" y="176" width="13" height="13" rx="3"/>
+<rect class="r3" x="176" y="192" width="13" height="13" rx="3"/>
+<rect class="r1" x="192" y="96" width="13" height="13" rx="3"/>
+<rect class="r2" x="192" y="112" width="13" height="13" rx="3"/>
+<rect class="r2" x="192" y="128" width="13" height="13" rx="3"/>
+<rect class="r3" x="192" y="144" width="13" height="13" rx="3"/>
+<rect class="r2" x="192" y="160" width="13" height="13" rx="3"/>
+<rect class="r1" x="192" y="176" width="13" height="13" rx="3"/>
+<rect class="r2" x="192" y="192" width="13" height="13" rx="3"/>
+<rect class="r2" x="208" y="96" width="13" height="13" rx="3"/>
+<rect class="r4" x="208" y="112" width="13" height="13" rx="3"/>
+<rect class="r4" x="208" y="128" width="13" height="13" rx="3"/>
+<rect class="r1" x="208" y="144" width="13" height="13" rx="3"/>
+<rect class="r2" x="208" y="160" width="13" height="13" rx="3"/>
+<rect class="r1" x="208" y="176" width="13" height="13" rx="3"/>
+<rect class="r2" x="208" y="192" width="13" height="13" rx="3"/>
+<rect class="r2" x="224" y="96" width="13" height="13" rx="3"/>
+<rect class="r2" x="224" y="112" width="13" height="13" rx="3"/>
+<rect class="r1" x="224" y="128" width="13" height="13" rx="3"/>
+<rect class="r1" x="224" y="144" width="13" height="13" rx="3"/>
+<rect class="r1" x="224" y="160" width="13" height="13" rx="3"/>
+<rect class="r1" x="224" y="176" width="13" height="13" rx="3"/>
+<rect class="r1" x="224" y="192" width="13" height="13" rx="3"/>
+<rect class="r2" x="240" y="96" width="13" height="13" rx="3"/>
+<rect class="r1" x="240" y="112" width="13" height="13" rx="3"/>
+<rect class="r3" x="240" y="128" width="13" height="13" rx="3"/>
+<rect class="r1" x="240" y="144" width="13" height="13" rx="3"/>
+<rect class="r1" x="240" y="160" width="13" height="13" rx="3"/>
+<rect class="r1" x="240" y="176" width="13" height="13" rx="3"/>
+<rect class="r1" x="240" y="192" width="13" height="13" rx="3"/>
+<rect class="r1" x="256" y="96" width="13" height="13" rx="3"/>
+<rect class="r1" x="256" y="112" width="13" height="13" rx="3"/>
+<rect class="r1" x="256" y="128" width="13" height="13" rx="3"/>
+<rect class="r1" x="256" y="144" width="13" height="13" rx="3"/>
+<rect class="r2" x="256" y="160" width="13" height="13" rx="3"/>
+<rect class="r1" x="256" y="176" width="13" height="13" rx="3"/>
+<rect class="r1" x="256" y="192" width="13" height="13" rx="3"/>
+<rect class="r4" x="272" y="96" width="13" height="13" rx="3"/>
+<rect class="r4" x="272" y="112" width="13" height="13" rx="3"/>
+<rect class="r4" x="272" y="128" width="13" height="13" rx="3"/>
+<rect class="r3" x="272" y="144" width="13" height="13" rx="3"/>
+<rect class="r4" x="272" y="160" width="13" height="13" rx="3"/>
+<rect class="r1" x="272" y="176" width="13" height="13" rx="3"/>
+<rect class="r4" x="272" y="192" width="13" height="13" rx="3"/>
+<rect class="r4" x="288" y="96" width="13" height="13" rx="3"/>
+<rect class="r4" x="288" y="112" width="13" height="13" rx="3"/>
+<rect class="r4" x="288" y="128" width="13" height="13" rx="3"/>
+<rect class="r3" x="288" y="144" width="13" height="13" rx="3"/>
+<rect class="r4" x="288" y="160" width="13" height="13" rx="3"/>
+<rect class="r3" x="288" y="176" width="13" height="13" rx="3"/>
+<rect class="r2" x="288" y="192" width="13" height="13" rx="3"/>
+<rect class="r4" x="304" y="96" width="13" height="13" rx="3"/>
+<rect class="r4" x="304" y="112" width="13" height="13" rx="3"/>
+<rect class="r4" x="304" y="128" width="13" height="13" rx="3"/>
+<rect class="r4" x="304" y="144" width="13" height="13" rx="3"/>
+<rect class="r4" x="304" y="160" width="13" height="13" rx="3"/>
+<rect class="r3" x="304" y="176" width="13" height="13" rx="3"/>
+<rect class="r2" x="304" y="192" width="13" height="13" rx="3"/>
+<rect class="r4" x="320" y="96" width="13" height="13" rx="3"/>
+<rect class="r4" x="320" y="112" width="13" height="13" rx="3"/>
+<rect class="r4" x="320" y="128" width="13" height="13" rx="3"/>
+<rect class="r2" x="320" y="144" width="13" height="13" rx="3"/>
+<rect class="r2" x="320" y="160" width="13" height="13" rx="3"/>
+<rect class="r2" x="320" y="176" width="13" height="13" rx="3"/>
+<rect class="r2" x="320" y="192" width="13" height="13" rx="3"/>
+<rect class="r4" x="336" y="96" width="13" height="13" rx="3"/>
+<rect class="r4" x="336" y="112" width="13" height="13" rx="3"/>
+<rect class="r3" x="336" y="128" width="13" height="13" rx="3"/>
+<rect class="r3" x="336" y="144" width="13" height="13" rx="3"/>
+<rect class="r3" x="336" y="160" width="13" height="13" rx="3"/>
+<rect class="r3" x="336" y="176" width="13" height="13" rx="3"/>
+<rect class="r3" x="336" y="192" width="13" height="13" rx="3"/>
+<rect class="r4" x="352" y="96" width="13" height="13" rx="3"/>
+<rect class="r1" x="352" y="112" width="13" height="13" rx="3"/>
+<rect class="r4" x="352" y="128" width="13" height="13" rx="3"/>
+<rect class="r4" x="352" y="144" width="13" height="13" rx="3"/>
+<rect class="r2 wip" x="352" y="160" width="13" height="13" rx="3"/>
+<text class="tm" x="416" y="231" font-size="10.5" text-anchor="end">Less</text>
+<rect class="r0" x="422" y="221" width="13" height="13" rx="3"/>
+<rect class="r1" x="438" y="221" width="13" height="13" rx="3"/>
+<rect class="r2" x="454" y="221" width="13" height="13" rx="3"/>
+<rect class="r3" x="470" y="221" width="13" height="13" rx="3"/>
+<rect class="r4" x="486" y="221" width="13" height="13" rx="3"/>
+<text class="tm" x="506" y="231" font-size="10.5">More</text>
+<text class="tm" x="28" y="265" font-size="10.5">Generated 2026-11-13 04:00 UTC</text>
+</svg>

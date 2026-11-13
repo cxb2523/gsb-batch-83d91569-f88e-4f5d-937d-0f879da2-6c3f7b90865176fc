@@ -1,0 +1,88 @@
+{
+  "ccusageVersion": "20.0.47",
+  "collectedAt": "2026-11-02T13:17:02Z",
+  "date": "2026-10-31",
+  "host": "mac-a",
+  "sources": {
+    "claude": {
+      "cacheCreation": 349073,
+      "cacheRead": 20048946,
+      "costUSD": 8.512509,
+      "input": 159,
+      "models": {
+        "claude-opus-5-5": {
+          "cacheCreation": 349073,
+          "cacheRead": 20048946,
+          "costUSD": 8.512509,
+          "input": 159,
+          "output": 85475,
+          "total": 20483653
+        }
+      },
+      "output": 85475,
+      "total": 20483653
+    },
+    "codex": {
+      "cacheCreation": 71450,
+      "cacheRead": 79806362,
+      "costUSD": 33.668048,
+      "input": 13975890,
+      "models": {
+        "copilot/claude-sonnet-5.5": {
+          "cacheCreation": 71450,
+          "cacheRead": 34656,
+          "input": 10,
+          "output": 1489,
+          "reasoningOutput": 0,
+          "total": 107605
+        },
+        "google/models/gemini-4-argon": {
+          "cacheCreation": 0,
+          "cacheRead": 27393978,
+          "input": 11741190,
+          "output": 83729,
+          "reasoningOutput": 0,
+          "total": 39218897
+        },
+        "gpt-5.6-luna": {
+          "cacheCreation": 0,
+          "cacheRead": 7961984,
+          "input": 388768,
+          "modelNameIsFallback": true,
+          "output": 10993,
+          "reasoningOutput": 4701,
+          "total": 8361745
+        },
+        "gpt-6-astra": {
+          "cacheCreation": 0,
+          "cacheRead": 143360,
+          "input": 128516,
+          "output": 1568,
+          "reasoningOutput": 186,
+          "total": 273444
+        },
+        "gpt-6.1-sol": {
+          "cacheCreation": 0,
+          "cacheRead": 1821696,
+          "input": 95586,
+          "output": 12298,
+          "reasoningOutput": 1765,
+          "total": 1929580
+        },
+        "gpt-6.1-terra": {
+          "cacheCreation": 0,
+          "cacheRead": 42450688,
+          "input": 1621820,
+          "output": 61255,
+          "reasoningOutput": 8596,
+          "total": 44133763
+        }
+      },
+      "output": 171332,
+      "reasoningOutput": 15248,
+      "total": 94025034
+    }
+  },
+  "status": "final",
+  "timezone": "Asia/Shanghai"
+}

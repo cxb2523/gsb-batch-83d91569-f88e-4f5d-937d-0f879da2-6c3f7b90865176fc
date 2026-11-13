@@ -1,0 +1,12 @@
+# Per-machine config. Each host sets its own alias here, so committing it would
+# make the two machines fight over one file — and the alias-to-real-machine
+# mapping is deliberately kept out of the public repo.
+config.json
+
+# Local run logs
+*.log
+
+.DS_Store
+__pycache__/
+*.pyc
+.venv/

@@ -1,0 +1,56 @@
+name: Render charts
+
+# Push-triggered, deliberately not cron. GitHub's own docs say scheduled
+# workflows "can be delayed during periods of high loads" and that "some queued
+# jobs may be dropped" — and scheduled workflows are auto-disabled after 60 days
+# of repository inactivity. Rendering on push has none of those failure modes and
+# updates the charts the moment new data lands.
+on:
+  push:
+    paths:
+      - 'data/**'
+      - 'scripts/render.py'
+      - 'scripts/styles/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/render.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  # Two machines can push within seconds of each other; only the last render matters.
+  group: render-charts
+  cancel-in-progress: true
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Render
+        run: uv run scripts/render.py
+
+      - name: Commit charts
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # SUMMARY.md too: render.py rewrites it on every run, and staging only
+          # charts/ silently threw that rewrite away — the table sat on its
+          # initial-commit numbers through 8 regenerates, under-reporting Codex
+          # by 390M tokens, while the charts beside it stayed correct.
+          git add charts SUMMARY.md
+          if git diff --cached --quiet; then
+            echo "charts unchanged"
+            exit 0
+          fi
+          git commit -m "charts: regenerate"
+          # No infinite loop: pushes made with the default GITHUB_TOKEN do not
+          # trigger workflows. Documented GitHub behaviour, not a trick.
+          git push
