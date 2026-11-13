@@ -534,6 +534,111 @@ def test_purge_stale_ephemeral_profiles(tmp_path, monkeypatch):
     assert active_dir.exists()
     assert other_dir.exists()
 
+def _make_profile(tmp_path, name, age_seconds=None):
+    import os
+    import time
+    profile = tmp_path / name
+    profile.mkdir()
+    (profile / "Cache").mkdir()
+    if age_seconds is not None:
+        stamp = time.time() - age_seconds
+        os.utime(str(profile), (stamp, stamp))
+    return profile
+
+def test_purge_removes_timed_out_profile(tmp_path, monkeypatch):
+    from amv_playwright.browser import _purge_stale_ephemeral_profiles
+    from amv_playwright.reaper import ProcessReaper
+
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(ProcessReaper, "discover_session_pids", lambda token: {4242})
+
+    timed_out = _make_profile(tmp_path, "tp_solo_timedout1", age_seconds=3600)
+
+    assert _purge_stale_ephemeral_profiles(max_age_seconds=60.0) == 1
+    assert not timed_out.exists()
+
+def test_purge_removes_recent_profile_without_live_process(tmp_path, monkeypatch):
+    from amv_playwright.browser import _purge_stale_ephemeral_profiles
+    from amv_playwright.reaper import ProcessReaper
+
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(ProcessReaper, "discover_session_pids", lambda token: set())
+
+    crashed = _make_profile(tmp_path, "tp_solo_crashed2", age_seconds=1)
+
+    assert _purge_stale_ephemeral_profiles(max_age_seconds=3600.0) == 1
+    assert not crashed.exists()
+
+def test_purge_keeps_recent_profile_with_live_process(tmp_path, monkeypatch):
+    from amv_playwright.browser import _purge_stale_ephemeral_profiles
+    from amv_playwright.reaper import ProcessReaper
+
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        ProcessReaper,
+        "discover_session_pids",
+        lambda token: {31337} if token == "alive3" else set(),
+    )
+
+    alive = _make_profile(tmp_path, "tp_solo_alive3", age_seconds=1)
+
+    assert _purge_stale_ephemeral_profiles(max_age_seconds=3600.0) == 0
+    assert alive.exists()
+
+def test_purge_skips_registered_session_profile(tmp_path, monkeypatch):
+    from amv_playwright.browser import _purge_stale_ephemeral_profiles
+    from amv_playwright.reaper import ProcessReaper
+
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(ProcessReaper, "_tracked_sessions", {"registered4"})
+    # Even if process discovery reports nothing, a registered session must never be purged.
+    monkeypatch.setattr(ProcessReaper, "discover_session_pids", lambda token: set())
+
+    registered = _make_profile(tmp_path, "tp_solo_registered4", age_seconds=7200)
+
+    assert _purge_stale_ephemeral_profiles(max_age_seconds=0.0) == 0
+    assert registered.exists()
+
+def test_purge_ignores_non_prefixed_directories(tmp_path, monkeypatch):
+    from amv_playwright.browser import _purge_stale_ephemeral_profiles
+    from amv_playwright.reaper import ProcessReaper
+
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(ProcessReaper, "discover_session_pids", lambda token: set())
+
+    unrelated = _make_profile(tmp_path, "tp_pool_keep", age_seconds=99999)
+    plain_file = tmp_path / "tp_solo_notadir"
+    plain_file.write_text("x")
+
+    assert _purge_stale_ephemeral_profiles(max_age_seconds=0.0) == 0
+    assert unrelated.exists()
+    assert plain_file.exists()
+
+def test_purge_continues_after_single_directory_failure(tmp_path, monkeypatch):
+    import os
+    import shutil as _shutil
+    from amv_playwright.browser import _purge_stale_ephemeral_profiles
+    from amv_playwright.reaper import ProcessReaper
+
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(ProcessReaper, "discover_session_pids", lambda token: set())
+
+    busy = _make_profile(tmp_path, "tp_solo_busy5", age_seconds=99999)
+    removable = _make_profile(tmp_path, "tp_solo_removable6", age_seconds=99999)
+
+    real_rmtree = _shutil.rmtree
+    def flaky_rmtree(path, *args, **kwargs):
+        if os.path.basename(str(path)) == "tp_solo_busy5":
+            raise OSError("Directory in use")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr("amv_playwright.browser.shutil.rmtree", flaky_rmtree)
+
+    purged = _purge_stale_ephemeral_profiles(max_age_seconds=3600.0)
+    assert purged == 1
+    assert busy.exists()
+    assert not removable.exists()
+
 def test_build_chromium_args_stealth_and_single_process():
     from amv_playwright.browser import build_chromium_args
     args = build_chromium_args(stealth=True, single_process=True)
@@ -611,8 +716,13 @@ async def test_launch_storage_exhaustion_auto_purge_rescue(monkeypatch):
             raise StorageExhaustionError("Low storage")
         return 100
 
+    purge_calls = []
+    def mock_purge(max_age_seconds=60.0):
+        purge_calls.append(max_age_seconds)
+        return 2
+
     monkeypatch.setattr("amv_playwright.browser.check_preflight_storage", mock_check_storage)
-    monkeypatch.setattr("amv_playwright.browser._purge_stale_ephemeral_profiles", lambda max_age_seconds: 2)
+    monkeypatch.setattr("amv_playwright.browser._purge_stale_ephemeral_profiles", mock_purge)
 
     mock_browser = MagicMock()
     mock_playwright = MagicMock()
@@ -621,5 +731,174 @@ async def test_launch_storage_exhaustion_auto_purge_rescue(monkeypatch):
     browser = await launch(mock_playwright)
     assert browser == mock_browser
     assert check_calls == 2
+    # Storage-exhaustion rescue must purge untracked profiles without an age floor.
+    assert purge_calls == [0.0]
+
+@pytest.mark.asyncio
+async def test_launch_raises_original_error_when_nothing_purged(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+    from amv_playwright.browser import launch
+    from amv_playwright.exceptions import StorageExhaustionError
+
+    monkeypatch.setattr("amv_playwright.browser.is_termux", lambda: True)
+    monkeypatch.setattr("amv_playwright.browser.find_chromium_binary", lambda: "/mock/chromium")
+
+    def mock_check_storage():
+        raise StorageExhaustionError("Low storage")
+
+    monkeypatch.setattr("amv_playwright.browser.check_preflight_storage", mock_check_storage)
+    monkeypatch.setattr("amv_playwright.browser._purge_stale_ephemeral_profiles", lambda max_age_seconds=60.0: 0)
+
+    mock_playwright = MagicMock()
+    mock_playwright.chromium.launch = AsyncMock()
+
+    with pytest.raises(StorageExhaustionError):
+        await launch(mock_playwright)
+    mock_playwright.chromium.launch.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_launch_raises_when_storage_still_low_after_purge(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+    from amv_playwright.browser import launch
+    from amv_playwright.exceptions import StorageExhaustionError
+
+    monkeypatch.setattr("amv_playwright.browser.is_termux", lambda: True)
+    monkeypatch.setattr("amv_playwright.browser.find_chromium_binary", lambda: "/mock/chromium")
+
+    def mock_check_storage():
+        raise StorageExhaustionError("Still low storage")
+
+    monkeypatch.setattr("amv_playwright.browser.check_preflight_storage", mock_check_storage)
+    monkeypatch.setattr("amv_playwright.browser._purge_stale_ephemeral_profiles", lambda max_age_seconds=60.0: 3)
+
+    mock_playwright = MagicMock()
+    mock_playwright.chromium.launch = AsyncMock()
+
+    with pytest.raises(StorageExhaustionError):
+        await launch(mock_playwright)
+    mock_playwright.chromium.launch.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_launch_purges_real_crash_profile_then_launches(tmp_path, monkeypatch):
+    """End-to-end rescue: real purge against a temp dir, stubbed process discovery."""
+    from unittest.mock import AsyncMock, MagicMock
+    from amv_playwright.browser import launch
+    from amv_playwright.exceptions import StorageExhaustionError
+    from amv_playwright.reaper import ProcessReaper
+
+    monkeypatch.setattr("amv_playwright.browser.is_termux", lambda: True)
+    monkeypatch.setattr("amv_playwright.browser.find_chromium_binary", lambda: "/mock/chromium")
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    # crash token has no live process, live token does.
+    monkeypatch.setattr(
+        ProcessReaper,
+        "discover_session_pids",
+        lambda token: {4242} if token == "live0001" else set(),
+    )
+
+    crash_dir = tmp_path / "tp_solo_crash0001"
+    crash_dir.mkdir()
+    (crash_dir / "bigcache.bin").write_bytes(b"\0" * 4096)
+    # max_age_seconds=0.0 treats every untracked profile as timed out, so a live-process profile
+    # is also reclaimed during an emergency storage rescue; only tracked/non-prefixed entries survive.
+    other_profile = tmp_path / "tp_solo_live0001"
+    other_profile.mkdir()
+    unrelated_dir = tmp_path / "some_other_dir"
+    unrelated_dir.mkdir()
+
+    check_calls = 0
+    def mock_check_storage():
+        nonlocal check_calls
+        check_calls += 1
+        if check_calls == 1:
+            raise StorageExhaustionError("Low storage")
+        return 100
+
+    monkeypatch.setattr("amv_playwright.browser.check_preflight_storage", mock_check_storage)
+
+    mock_browser = MagicMock()
+    mock_playwright = MagicMock()
+    mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+
+    browser = await launch(mock_playwright)
+    assert browser == mock_browser
+    assert check_calls == 2
+    assert not crash_dir.exists()
+    assert not other_profile.exists()
+    assert unrelated_dir.exists()
+
+def test_launch_sync_storage_exhaustion_auto_purge_rescue(tmp_path, monkeypatch):
+    """Sync path must mirror the async rescue, purging with max_age_seconds=0.0."""
+    from unittest.mock import MagicMock
+    from amv_playwright.browser import launch_sync
+    from amv_playwright.exceptions import StorageExhaustionError
+    from amv_playwright.reaper import ProcessReaper
+
+    monkeypatch.setattr("amv_playwright.browser.is_termux", lambda: True)
+    monkeypatch.setattr("amv_playwright.browser.find_chromium_binary", lambda: "/mock/chromium")
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(ProcessReaper, "discover_session_pids", lambda token: set())
+
+    crash_dir = tmp_path / "tp_solo_crash0002"
+    crash_dir.mkdir()
+
+    check_calls = 0
+    def mock_check_storage():
+        nonlocal check_calls
+        check_calls += 1
+        if check_calls == 1:
+            raise StorageExhaustionError("Low storage")
+        return 100
+
+    monkeypatch.setattr("amv_playwright.browser.check_preflight_storage", mock_check_storage)
+
+    mock_browser = MagicMock()
+    mock_playwright = MagicMock()
+    mock_playwright.chromium.launch = MagicMock(return_value=mock_browser)
+
+    browser = launch_sync(mock_playwright)
+    assert browser == mock_browser
+    assert check_calls == 2
+    assert not crash_dir.exists()
+
+def test_launch_sync_raises_original_error_when_nothing_purged(monkeypatch):
+    from unittest.mock import MagicMock
+    from amv_playwright.browser import launch_sync
+    from amv_playwright.exceptions import StorageExhaustionError
+
+    monkeypatch.setattr("amv_playwright.browser.is_termux", lambda: True)
+    monkeypatch.setattr("amv_playwright.browser.find_chromium_binary", lambda: "/mock/chromium")
+
+    def mock_check_storage():
+        raise StorageExhaustionError("Low storage")
+
+    monkeypatch.setattr("amv_playwright.browser.check_preflight_storage", mock_check_storage)
+    monkeypatch.setattr("amv_playwright.browser._purge_stale_ephemeral_profiles", lambda max_age_seconds=60.0: 0)
+
+    mock_playwright = MagicMock()
+    mock_playwright.chromium.launch = MagicMock()
+
+    with pytest.raises(StorageExhaustionError):
+        launch_sync(mock_playwright)
+    mock_playwright.chromium.launch.assert_not_called()
+
+def test_launch_non_termux_skips_storage_and_purge(monkeypatch):
+    from unittest.mock import MagicMock
+    from amv_playwright.browser import launch_sync
+
+    monkeypatch.setattr("amv_playwright.browser.is_termux", lambda: False)
+    mock_playwright = MagicMock()
+    mock_playwright.chromium.launch = MagicMock(return_value=MagicMock())
+
+    called = []
+    monkeypatch.setattr("amv_playwright.browser.check_preflight_storage", lambda: called.append("check"))
+    monkeypatch.setattr(
+        "amv_playwright.browser._purge_stale_ephemeral_profiles",
+        lambda max_age_seconds=60.0: called.append("purge"),
+    )
+
+    launch_sync(mock_playwright)
+    assert "check" not in called
+    assert "purge" not in called
 
 

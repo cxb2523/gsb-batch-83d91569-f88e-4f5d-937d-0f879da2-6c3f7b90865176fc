@@ -456,51 +456,109 @@ def sync_playwright_termux():
         finally:
             ProcessReaper.kill_all_tracked()
 
-def _purge_stale_ephemeral_profiles(max_age_seconds: float = 60.0, force_untracked: bool = False) -> int:
+EPHEMERAL_PROFILE_PREFIX: str = "tp_solo_"
+
+def _remove_ephemeral_profile(path: str) -> bool:
+    """Delete a single ephemeral profile directory, reporting whether it actually disappeared.
+
+    A locked/busy/permission-denied directory is logged and reported as not purged instead of
+    aborting the surrounding scan.
+    """
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return False
+    except Exception as e:
+        logger.debug("Failed to purge ephemeral profile '%s': %s", path, e)
+    return not os.path.exists(path)
+
+def _purge_stale_ephemeral_profiles(max_age_seconds: float = 60.0) -> int:
     """Purge orphaned tp_solo_* temporary profiles left behind by previous hard crashes (SIGKILL/OOM).
-    
-    Safe design:
-    1. Always skips directories currently registered in ProcessReaper._tracked_sessions.
-    2. If directory is older than max_age_seconds, purges immediately.
-    3. If directory is newer (< max_age_seconds) but has NO alive Chromium processes running for that
-       session token (verified via ProcessReaper.discover_session_pids(token)), it is an orphaned crash
-       leftover from a recent process and is purged immediately without waiting 60s!
-    
+
+    Safety & liveness rules, applied per directory found in tempfile.gettempdir():
+    1. Directories without the tp_solo_ prefix are never touched.
+    2. Directories whose session token is registered in ProcessReaper._tracked_sessions are skipped
+       (they belong to a live session in this process).
+    3. Directories whose mtime is older than max_age_seconds are deleted outright.
+    4. Newer directories are only deleted when ProcessReaper.discover_session_pids(token) finds no
+       alive process for that token, i.e. the owning session crashed before it could clean up.
+       Directories that still have a live process are preserved.
+
+    A single directory that cannot be removed (locked/busy) is skipped and the scan continues;
+    every directory is evaluated independently.
+
     Returns:
-        int: Number of stale profiles successfully purged.
+        int: Number of directories actually removed from disk.
     """
     tmp_root = tempfile.gettempdir()
     if not os.path.isdir(tmp_root):
         return 0
+
+    # Snapshot tracked sessions so concurrent registration/unregistration cannot race this scan.
+    try:
+        with ProcessReaper._lock:
+            tracked_tokens = set(ProcessReaper._tracked_sessions)
+    except Exception:
+        tracked_tokens = set(ProcessReaper._tracked_sessions)
 
     purged_count = 0
     now = time.time()
     try:
         with os.scandir(tmp_root) as entries:
             for entry in entries:
-                if entry.is_dir() and entry.name.startswith("tp_solo_"):
-                    token = entry.name[len("tp_solo_"):]
-                    if token in ProcessReaper._tracked_sessions:
+                try:
+                    name = entry.name
+                    if not name.startswith(EPHEMERAL_PROFILE_PREFIX):
                         continue
-                    try:
-                        stat_res = entry.stat()
-                        is_stale_by_age = (now - stat_res.st_mtime >= max_age_seconds)
-                        is_dead_session = False
-                        if not is_stale_by_age or force_untracked:
-                            alive_pids = ProcessReaper.discover_session_pids(token)
-                            if not alive_pids:
-                                is_dead_session = True
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
 
-                        if is_stale_by_age or is_dead_session:
-                            shutil.rmtree(entry.path, ignore_errors=True)
-                            purged_count += 1
-                            logger.debug("Purged stale ephemeral profile: %s (dead session: %s)", entry.path, is_dead_session)
-                    except Exception as e:
-                        logger.debug("Skipped active or locked ephemeral profile '%s': %s", entry.path, e)
+                    token = name[len(EPHEMERAL_PROFILE_PREFIX):]
+                    if token in tracked_tokens:
+                        continue
+
+                    stat_res = entry.stat(follow_symlinks=False)
+                    is_stale_by_age = (now - stat_res.st_mtime >= max_age_seconds)
+                    if is_stale_by_age:
+                        is_dead_session = False
+                        should_purge = True
+                    else:
+                        alive_pids = ProcessReaper.discover_session_pids(token)
+                        is_dead_session = not alive_pids
+                        should_purge = is_dead_session
+
+                    if not should_purge:
+                        continue
+
+                    if _remove_ephemeral_profile(entry.path):
+                        purged_count += 1
+                        logger.debug(
+                            "Purged stale ephemeral profile: %s (dead session: %s)",
+                            entry.path,
+                            is_dead_session,
+                        )
+                except Exception as e:
+                    # Contain failures to the offending directory; never abort the whole scan.
+                    logger.debug("Skipped ephemeral profile '%s': %s", entry.path, e)
     except Exception as e:
         logger.debug("Failed scanning for stale profiles in '%s': %s", tmp_root, e)
 
     return purged_count
+
+def _ensure_preflight_storage() -> None:
+    """Run the Termux storage preflight, reclaiming crash-residual profiles if the disk is full.
+
+    If the first check fails, purge untracked ephemeral profiles (max_age_seconds=0.0) and retry
+    the check once. When nothing could be reclaimed, the original StorageExhaustionError propagates;
+    when the retry still reports insufficient space, that error propagates.
+    """
+    try:
+        check_preflight_storage()
+    except StorageExhaustionError:
+        purged = _purge_stale_ephemeral_profiles(max_age_seconds=0.0)
+        if purged <= 0:
+            raise
+        check_preflight_storage()
 
 async def launch(
     playwright_instance: Any,
@@ -559,15 +617,7 @@ async def launch(
 
     # 3. Pre-flight storage health check (guarantees >= 50MB free in /tmp)
     if is_termux():
-        try:
-            check_preflight_storage()
-        except StorageExhaustionError:
-            # If low on disk, aggressively purge ALL untracked ephemeral profiles (max_age_seconds=0.0)
-            purged = _purge_stale_ephemeral_profiles(max_age_seconds=0.0)
-            if purged > 0:
-                check_preflight_storage()
-            else:
-                raise
+        _ensure_preflight_storage()
 
     executable_path = kwargs.pop("executable_path", None)
     if not executable_path and is_termux():
@@ -756,15 +806,7 @@ def launch_sync(
             )
 
     if is_termux():
-        try:
-            check_preflight_storage()
-        except StorageExhaustionError:
-            # If low on disk, aggressively purge ALL untracked ephemeral profiles (max_age_seconds=0.0)
-            purged = _purge_stale_ephemeral_profiles(max_age_seconds=0.0)
-            if purged > 0:
-                check_preflight_storage()
-            else:
-                raise
+        _ensure_preflight_storage()
 
     executable_path = kwargs.pop("executable_path", None)
     if not executable_path and is_termux():
