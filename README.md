@@ -400,7 +400,10 @@ Three things the code will tell you rather than guess:
   parse produced 0 rows, and the run read that as the end of the catalogue —
   reporting `status: complete` and exit 0 while holding a third of the data.
   A refused page is now a FAILED page, and the run exits **6** with the page
-  number in `pages_failed`.
+  number in `pages_failed` — and, on the Playwright engine, a per-page
+  [manifest](#the-per-page-manifest) that also says how many rows each page
+  yielded and which pages were never dispatched. A single unreadable page
+  no longer ends the loop: the pages after it are still fetched and reported.
 * **Page size is not constant.** Three consecutive cold fetches of one
   listing returned 48, 48 and 44 tiles, so nothing in this repo concludes
   completeness from a count.
@@ -519,6 +522,61 @@ never replaced by `[]`. `--allow-empty` is the opt-out. Every run writes
 `<out>.meta.json` with the status, the stop reason and **which** pages failed,
 by number — a failed run writes none, because a `"failed"` sidecar beside good
 data would contradict it.
+
+### The per-page manifest
+
+On a multi-page run, `pages_failed` alone says *that* a page failed, not
+*what happened to each page*. The Playwright engine therefore also writes a
+manifest: `pages` carries one record per page it **attempted**, and three
+summary arrays sit beside it.
+
+```json
+{
+  "pages": [
+    {"page": 1, "status": "content",  "rows": 48, "failed": false},
+    {"page": 2, "status": "blocked",  "rows": 0,  "failed": true, "blocked_by": "PerimeterX"},
+    {"page": 3, "status": "content",  "rows": 44, "failed": false}
+  ],
+  "pages_attempted":  [1, 2, 3],
+  "pages_succeeded":  [1, 3],
+  "pages_failed":     [2],
+  "pages_unattempted": []
+}
+```
+
+`status` is one of six values: `content`, `empty`, `blocked`, `challenge`,
+`parser_found_nothing`, `load_failed`. The distinction between the first two
+and the rest is the whole point:
+
+| status | rows | failed | means |
+|---|---|---|---|
+| `content` | > 0 | no | the grid was read |
+| `empty` | 0 | **no** | the site answered and its answer was nothing — the listing ended |
+| `blocked` | 0 | **yes** | the site refused; the page was never read |
+| `challenge` | 0 | **yes** | a solvable refusal that was not cleared |
+| `parser_found_nothing` | 0 | **yes** | the site served tiles and this repo's parser read none of them |
+| `load_failed` | 0 | **yes** | the page never loaded at all |
+
+A refused page and an empty page can both hold 0 rows, and they mean
+opposite things: an empty page is the end of the listing, a refusal is a
+hole in it. Reading a refusal as `empty` is exactly the bug that made a
+three-page run report `complete` while holding a third of the catalogue,
+so the manifest keeps them apart by `failed`, not by row count.
+
+`pages_unattempted` lists the requested page numbers that were **never
+dispatched** — the listing ran out before reaching them, or a worker exited
+first. They are deliberately *not* in `pages_failed`: nothing was tried.
+
+A run with any failed page never reports `stop_reason: completed` or
+`status: complete`; it ends exit **6** (or exit 3/5 when nothing was
+gathered at all). A run that merely ran out of listing stays complete, with
+the pages it never reached in `pages_unattempted`.
+
+The manifest is written in **page order**, and rows are merged in page order
+too — a `sku` that appears on two pages keeps the one from the **lower**
+page — so two runs of the same command produce the same rows in the same
+order whatever order the concurrent workers happened to finish in.
+
 
 ---
 

@@ -198,6 +198,63 @@ class PageOutcome:
         return (not self.load_failed and self.blocked_by is None
                 and not self.parser_failed)
 
+    @property
+    def page_status(self) -> str:
+        """The one-word status this page is recorded as in the sidecar.
+
+        Deliberately CLOSED, unlike `state`: `state` is page_flow's
+        vocabulary (it carries `shell` and an initial `ok`) and a consumer
+        branching on the sidecar should not have to know that vocabulary
+        or its history. The six values here are the ones the manifest
+        promises, and every page that was fetched at all lands in one of
+        them.
+
+        The mapping is not cosmetic. `blocked` and `challenge` are FAILED
+        pages that produced zero rows, and the whole point of the manifest
+        is that they must never be read as `empty` — an empty page is the
+        site's own answer that the listing ended, and a refusal is the
+        opposite. `parser_found_nothing` is a page the site served WITH
+        vendor tiles that this repo's parser could not read, which is a
+        defect here rather than a fact about the catalogue. `load_failed`
+        is a page that was never read at all.
+
+        `shell` maps to `content`: it is a page the site served, and
+        page_flow has already spent the readiness wait on it. It is never
+        reached on a foodpanda listing (the grid is server-rendered), and
+        the alternative — inventing a seventh status — would put a value
+        in the sidecar that no consumer has been told about.
+        """
+        if self.load_failed:
+            return "load_failed"
+        if self.parser_failed:
+            return "parser_found_nothing"
+        if self.blocked_by is not None:
+            # `state` at this point is what page_flow gave up on. It is
+            # "blocked" or "challenge" for the two refusal shapes, and
+            # anything else means the page was refused on a signal
+            # page_flow had already classified as non-content — report
+            # the weaker fact (`blocked`) rather than a state a consumer
+            # does not know.
+            return self.state if self.state in ("blocked", "challenge") \
+                else "blocked"
+        # Read from `state` alone for the two states that mean "a refusal":
+        # an outcome is failed by `blocked_by` today, but the record must
+        # not depend on THAT assignment having happened. A challenge page
+        # whose blocked_by was never set still must not read as content.
+        if self.state == "challenge":
+            return "challenge"
+        if self.state == "blocked":
+            return "blocked"
+        if self.state == "empty":
+            return "empty"
+        # A served page whose grid never painted and which parsed to nothing.
+        # The run's own dispatcher already treats "ok and no rows" as the end
+        # of the listing, so the record must say what the run did rather than
+        # claim `content` with 0 rows — which no consumer could reconcile.
+        if self.state == "shell" and not self.products:
+            return "empty"
+        return "content"
+
 
 ITEM_LINK_SELECTOR = page_flow.READY_SELECTOR_LISTING
 
@@ -1411,6 +1468,32 @@ def _worker_pool(pool, worker_index: int):
     return ProxyPool(proxies[offset:] + proxies[:offset], rotate="per-run")
 
 
+def _manifest_record(outcome: "PageOutcome") -> dict:
+    """One sidecar record for a page this run ACTUALLY attempted.
+
+    The four fields are the contract: `page`, `status`, `rows`, `failed`.
+    `blocked_by` rides along when the engine recorded a vendor, because
+    `stop_reason`'s existing spelling is `blocked_<vendor>` and the two
+    refusal shapes want opposite next moves — a sidecar that said only
+    "blocked" would send half its readers to buy a proxy they do not need.
+
+    `rows` is what the page's parse produced AFTER the readiness wait and
+    after every retry, not the merged count: the merge drops duplicates
+    across pages, and a per-page row count that had already been deduped
+    would not add up to the run's `products`. Duplicates are reported
+    separately in the log, and a `sku` seen twice keeps the lowest page.
+    """
+    record = {
+        "page": outcome.page_num,
+        "status": outcome.page_status,
+        "rows": len(outcome.products),
+        "failed": not outcome.ok,
+    }
+    if outcome.blocked_by is not None:
+        record["blocked_by"] = outcome.blocked_by
+    return record
+
+
 def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
     """Fetch `specs` [(page_num, url), ...] across `concurrency` workers.
 
@@ -1429,6 +1512,14 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
     # 45 empty ones. Workers check it before taking more work, so at most
     # (concurrency - 1) extra pages are in flight when it trips.
     exhausted = threading.Event()
+    # Pages a worker TOOK off the queue and never finished. A worker that
+    # dies holding one used to leave it neither in `results` nor in the
+    # queue: it silently vanished from every page list, which is exactly the
+    # "page that was never read" this run's manifest is meant to make
+    # visible. Recorded separately from `results` so the caller can report
+    # them as FAILED — unlike a page that was never dispatched, which is
+    # only unattempted.
+    in_flight = set()
 
     def worker(index: int):
         name = f"worker-{index + 1}"
@@ -1442,6 +1533,8 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
                             page_num, url = work.get_nowait()
                         except queue.Empty:
                             break
+                        with results_lock:
+                            in_flight.add(page_num)
                         if not first:
                             time.sleep(args.delay)
                         first = False
@@ -1449,6 +1542,7 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
                                                   page_num, url)
                         with results_lock:
                             results.append(outcome)
+                            in_flight.discard(page_num)
                         if outcome.ok and not outcome.products:
                             logger.info("[%s] page %d returned no rows — "
                                         "treating that as the end of the listing "
@@ -1475,6 +1569,30 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
             unattempted.append(work.get_nowait()[0])
         except queue.Empty:
             break
+    with results_lock:
+        abandoned = sorted(in_flight)
+    if abandoned:
+        logger.error(
+            "A worker took page(s) %s off the queue and exited before "
+            "finishing them — reporting them as FAILED pages (%d), not as "
+            "pages that were never tried and not as empty ones. A page whose "
+            "worker died mid-fetch was neither read nor left in the queue, "
+            "so without this it would appear in no list at all.",
+            ", ".join(str(n) for n in abandoned), len(abandoned))
+        for page_num in abandoned:
+            # A page that was already appended is not abandoned, only
+            # unfinished after its result landed; appending a second record
+            # for it would make the manifest depend on which thread reached
+            # this line first.
+            if any(o.page_num == page_num for o in results):
+                continue
+            # No vendor name and no HTML: the only honest status is
+            # `load_failed` — this page was started and never read. It is
+            # NOT `empty`, which is the misreading the manifest exists to
+            # prevent (a zero-row empty page means the listing ended).
+            results.append(PageOutcome(page_num=page_num,
+                                       url=f"unfinished:page={page_num}",
+                                       load_failed=True))
     return results, sorted(unattempted), exhausted.is_set()
 
 
@@ -1498,6 +1616,12 @@ def scrape(args) -> int:
     # made `--pages 2` fetch one page and report "complete", which is the
     # silent-success failure this family exists to avoid.
     stop_reason = "completed"
+    # Page numbers this run was ASKED for and never dispatched at all.
+    # Kept apart from the failed pages on purpose: a page the listing ran
+    # out before reaching is not damage, and a page a dead worker never
+    # picked up was not read. `pages_failed` used to be the only place a
+    # missing page could appear, which made those two indistinguishable.
+    unattempted_pages: List[int] = []
 
     pool = proxy_pool_from_args(args)
     if pool and args.cdp_endpoint:
@@ -1553,6 +1677,8 @@ def scrape(args) -> int:
             if not first.ok:
                 stop_reason = page_flow.failure_stop_reason(first)
                 blocked = first.blocked_by is not None
+                # Page 1 failed, so none of 2..N were even dispatched.
+                unattempted_pages = list(range(2, args.pages + 1))
             else:
                 seen_keys.update(p.sku for p in first.products if p.sku is not None)
                 planned = _plan_page_urls(session.page, args, first.final_url)
@@ -1579,6 +1705,7 @@ def scrape(args) -> int:
                     rest, unattempted, exhausted = _fetch_pages_concurrently(
                         args, pool, specs, concurrency)
                     outcomes.extend(rest)
+                    unattempted_pages = list(unattempted)
 
                     failed = [o for o in rest if not o.ok]
                     if failed:
@@ -1590,6 +1717,8 @@ def scrape(args) -> int:
                     elif unattempted:
                         # Should not happen without a failure or exhaustion,
                         # but say so rather than reporting a complete run.
+                        # The pages themselves go to `pages_unattempted`,
+                        # which is a separate list from `pages_failed`.
                         stop_reason = "pages_unattempted"
                     session = None  # already closed
                 else:
@@ -1611,32 +1740,63 @@ def scrape(args) -> int:
                         outcome = _fetch_one_page(session, args, pool, page_num, url)
                         outcomes.append(outcome)
                         if not outcome.ok:
-                            stop_reason = page_flow.failure_stop_reason(outcome)
-                            blocked = outcome.blocked_by is not None
-                            break
+                            # One page that could not be read is a GAP in
+                            # the catalogue, not the end of it. Stopping
+                            # here — which this loop used to do — is how a
+                            # three-page run holding page 1 and page 3 came
+                            # to report page 3 as never fetched, and how a
+                            # consumer ended up unable to tell "the listing
+                            # ended" from "we gave up". The remaining pages
+                            # are still cheap to fetch, every one of them is
+                            # separately addressable, and the run is already
+                            # partial: continuing can only add data.
+                            #
+                            # The FIRST failure's reason is kept rather than
+                            # the last, because `stop_reason` names why the
+                            # run is partial and a later, unrelated failure
+                            # would bury the one that started it.
+                            if stop_reason == "completed":
+                                stop_reason = page_flow.failure_stop_reason(
+                                    outcome)
+                            blocked = blocked or outcome.blocked_by is not None
+                        else:
+                            # Whether this page contributed anything not
+                            # already seen. Kept as a running check because
+                            # the condition is inherently sequential — "new"
+                            # only means anything relative to the pages
+                            # before it. The authoritative dedupe happens
+                            # once, after the loop, in page order.
+                            fresh_count = sum(
+                                1 for p in outcome.products
+                                if p.sku is None or p.sku not in seen_keys)
+                            seen_keys.update(p.sku for p in outcome.products
+                                             if p.sku is not None)
 
-                        # Whether this page contributed anything not already
-                        # seen. Kept as a running check because the condition is
-                        # inherently sequential — "new" only means anything
-                        # relative to the pages before it. The authoritative
-                        # dedupe happens once, after the loop, in page order.
-                        fresh_count = sum(1 for p in outcome.products
-                                          if p.sku is None or p.sku not in seen_keys)
-                        seen_keys.update(p.sku for p in outcome.products
-                                         if p.sku is not None)
-
-                        # A page past the first that contributes nothing new
-                        # means the end of the results — or that pagination is
-                        # looping back on itself. Either way there is nothing
-                        # further to fetch, and this is the honest terminating
-                        # condition: a property of the DATA, not of a CSS
-                        # selector that may have been renamed.
-                        if not fresh_count:
-                            logger.info("Page %d added no rows not already seen "
-                                        "— treating that as the end of the "
-                                        "listing.", page_num)
-                            stop_reason = "no_new_products"
-                            break
+                            # A page past the first that contributes nothing
+                            # new means the end of the results — or that
+                            # pagination is looping back on itself. Either
+                            # way there is nothing further to fetch, and
+                            # this is the honest terminating condition: a
+                            # property of the DATA, not of a CSS selector
+                            # that may have been renamed.
+                            if not fresh_count:
+                                logger.info("Page %d added no rows not "
+                                            "already seen — treating that as "
+                                            "the end of the listing.", page_num)
+                                # Only when nothing has failed: a completed
+                                # listing reached THROUGH a gap is still a
+                                # partial run, and its stop reason must say
+                                # so.
+                                if stop_reason == "completed":
+                                    stop_reason = "no_new_products"
+                                # The listing ran out: the pages beyond this
+                                # one were never tried, and they are
+                                # recorded as unattempted rather than as
+                                # failed — nothing went wrong, there was
+                                # nothing more to fetch.
+                                unattempted_pages = list(
+                                    range(page_num + 1, args.pages + 1))
+                                break
 
                         if page_num < args.pages:
                             url = (planned[page_num - 1] if planned else
@@ -1728,6 +1888,32 @@ def scrape(args) -> int:
     final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
                  if ok_pages else args.url)
 
+    # The per-page manifest: one record per page this run actually
+    # ATTEMPTED, in page order. Built from the outcomes AFTER the merge, so
+    # `rows` is the page's own parsed count and the records are ordered by
+    # page number rather than by the order concurrent workers happened to
+    # finish. That ordering is what makes two runs of the same command
+    # produce the same sidecar even when their arrival orders differ.
+    #
+    # An outcome repeated at the same page number cannot happen today (the
+    # dispatcher hands each page out once, and page 1 is fetched alone), but
+    # the manifest is a stable document a consumer can diff, so the
+    # lower-numbered record wins if one ever does — the same "duplicates
+    # keep the lowest page" rule the merged rows follow.
+    manifest_by_page = {}
+    for oc in outcomes:
+        if oc.page_num not in manifest_by_page:
+            manifest_by_page[oc.page_num] = _manifest_record(oc)
+    manifest = [manifest_by_page[n] for n in sorted(manifest_by_page)]
+
+    # The pages that were requested and never dispatched at all. Already
+    # `args.pages`-complete (2..N when page 1 failed, the tail of the loop
+    # when it stopped early), and filtered against the manifest so a page
+    # that WAS attempted can never be reported here as well — the two lists
+    # together must account for every requested page exactly once.
+    unattempted = [n for n in sorted(unattempted_pages)
+                   if n not in manifest_by_page]
+
     # One-per-run context, in the sidecar rather than repeated down a
     # column: the scroll trace where there was one, the names the page's own
     # JSON-LD published, and the run label from --category. All three say
@@ -1763,7 +1949,8 @@ def scrape(args) -> int:
                       pages_failed=failed_pages, mode=args.mode,
                       source=site_host(final_url),
                       start_url=args.url, final_url=final_url,
-                      extra=extra)
+                      extra=extra, pages=manifest,
+                      pages_unattempted=unattempted)
 
 
 def parse_args():

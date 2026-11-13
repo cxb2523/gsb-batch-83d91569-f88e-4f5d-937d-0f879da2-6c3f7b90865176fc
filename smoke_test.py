@@ -1112,6 +1112,134 @@ def test_scroll_loop():
 
 
 # ---------------------------------------------------------------------------
+def test_per_page_manifest(skips):
+    group("The per-page manifest in <out>.meta.json")
+    ok = True
+
+    # Driver-free half: the sidecar contract itself.
+    records = [
+        {"page": 1, "status": "content", "rows": 6, "failed": False},
+        {"page": 2, "status": "blocked", "rows": 0, "failed": True},
+        {"page": 3, "status": "content", "rows": 6, "failed": False},
+    ]
+    meta = run_meta("partial", "blocked_PerimeterX", 3, 2, "u", "u", 12,
+                    pages_failed=[], pages=records, pages_unattempted=[])
+    ok &= check("the manifest is one record per attempted page",
+                len(meta["pages"]) == 3)
+    ok &= check("...each carrying page, status, rows and failed",
+                all({"page", "status", "rows", "failed"} <= set(r)
+                    for r in meta["pages"]))
+    ok &= check("pages_attempted is the page-number array",
+                meta["pages_attempted"] == [1, 2, 3])
+    ok &= check("pages_succeeded excludes only the failed page",
+                meta["pages_succeeded"] == [1, 3])
+    ok &= check("pages_failed is DERIVED from the manifest",
+                meta["pages_failed"] == [2])
+
+    # A refused page and an empty page both hold 0 rows, and the manifest
+    # must keep them apart: only the empty one is a non-failure.
+    refused = run_meta("partial", "blocked", 1, 0, "u", "u", 0,
+                       pages=[{"page": 1, "status": "blocked", "rows": 0,
+                               "failed": True}])
+    empty = run_meta("complete", "completed", 1, 1, "u", "u", 0,
+                     pages=[{"page": 1, "status": "empty", "rows": 0,
+                             "failed": False}])
+    ok &= check("a refused page is a failed page even at 0 rows",
+                refused["pages"][0]["failed"] is True
+                and refused["pages"][0]["status"] == "blocked")
+    ok &= check("...and an empty page is NOT a failure",
+                empty["pages"][0]["failed"] is False
+                and empty["pages"][0]["status"] == "empty")
+
+    ok &= check("pages_unattempted is a page-number array, not failures",
+                set(meta.get("pages_unattempted", ())) <= {1, 2, 3}
+                and meta["pages_unattempted"] == [])
+
+    # A COMPLETE stop reason cannot stand beside a failed page: the sidecar
+    # would contradict itself, so finish_run rewrites it from the evidence.
+    with tempfile.TemporaryDirectory() as tmp:
+        prefix = os.path.join(tmp, "contradiction")
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = finish_run(rows_of("LISTING_PK_CITY"), prefix, "json",
+                              allow_empty=False, blocked=False,
+                              stop_reason="completed", pages_requested=3,
+                              pages_completed=1, start_url="u", final_url="u",
+                              pages=records)
+        written = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        ok &= check("a run with a failed page cannot keep 'completed'",
+                    written["stop_reason"] != "completed")
+        ok &= check("...and exits 6 with status partial",
+                    code == EXIT_PARTIAL and written["status"] == "partial")
+        ok &= check("...naming the page that failed",
+                    written["pages_failed"] == [2])
+
+    # Purely unattempted pages do NOT fail a complete run: the listing ran
+    # out, which is a complete answer and the distinction this repo keeps.
+    with tempfile.TemporaryDirectory() as tmp:
+        prefix = os.path.join(tmp, "ranout")
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = finish_run(rows_of("LISTING_PK_CITY"), prefix, "json",
+                              allow_empty=False, blocked=False,
+                              stop_reason="no_new_products",
+                              pages_requested=5, pages_completed=3,
+                              start_url="u", final_url="u",
+                              pages=[{"page": 1, "status": "content",
+                                      "rows": 6, "failed": False},
+                                     {"page": 2, "status": "content",
+                                      "rows": 6, "failed": False},
+                                     {"page": 3, "status": "empty",
+                                      "rows": 0, "failed": False}],
+                              pages_unattempted=[4, 5])
+        written = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        ok &= check("an exhausted listing stays complete with pages never tried",
+                    code == 0 and written["stop_reason"] == "no_new_products")
+        ok &= check("...recording the never-tried pages separately",
+                    written["pages_unattempted"] == [4, 5]
+                    and written["pages_failed"] == [])
+
+    # Behavioural half: the engine's own outcome -> record mapping. Skipped
+    # with the reason where Playwright is absent, like every engine check.
+    try:
+        engine = importlib.import_module("playwright_scraper")
+    except ImportError as exc:
+        skips.append(f"playwright_scraper (page manifest): {exc}")
+        return ok
+
+    def record(**kw):
+        return engine._manifest_record(engine.PageOutcome(page_num=2,
+                                                         url="u2", **kw))
+
+    ok &= check("a served page is 'content'",
+                record(state="content")["status"] == "content"
+                and record(state="content")["failed"] is False)
+    ok &= check("an empty page is 'empty' and NOT failed",
+                record(state="empty")["status"] == "empty"
+                and record(state="empty")["failed"] is False)
+    ok &= check("a blocked page is 'blocked' and failed",
+                record(state="blocked", blocked_by="PerimeterX")["status"]
+                == "blocked"
+                and record(state="blocked", blocked_by="PerimeterX")["failed"])
+    ok &= check("a challenge page is 'challenge' and failed",
+                record(state="challenge", blocked_by="challenge")["status"]
+                == "challenge"
+                and record(state="challenge",
+                           blocked_by="challenge")["failed"])
+    ok &= check("a parser failure is 'parser_found_nothing'",
+                record(state="content", parser_failed=True)["status"]
+                == "parser_found_nothing"
+                and record(state="content", parser_failed=True)["failed"])
+    ok &= check("a page that never loaded is 'load_failed', never 'empty'",
+                record(load_failed=True)["status"] == "load_failed"
+                and record(load_failed=True)["failed"])
+    ok &= check("rows is the page's own parsed count",
+                (lambda o: (o.products.extend([object()] * 4),
+                            engine._manifest_record(o)["rows"])[1])(
+                    engine.PageOutcome(page_num=2, url="u2", state="content"))
+                == 4)
+    return ok
+
+
+# ---------------------------------------------------------------------------
 def test_a_refused_page_is_not_an_empty_one():
     group("A refused page is not an exhausted listing (the live-run bug)")
     ok = True
@@ -2298,8 +2426,11 @@ def test_concurrency_machinery(skips):
     ok &= check("...in page order", unattempted == sorted(unattempted))
 
     # 4. A worker that RAISES neither hangs the run nor loses its siblings'
-    #    pages. Its own pages are simply absent from the results, which the
-    #    caller reports as failed rather than counting as empty.
+    #    pages. Its own page is reported as a FAILED page — not absent (it
+    #    was taken off the queue and started, so it must appear in the
+    #    manifest, or it would be indistinguishable from a page that was
+    #    never tried) and not EMPTY (a zero-row empty page is the site saying
+    #    the listing ended, which is the opposite fact).
     survived = []
     survived_lock = threading.Lock()
 
@@ -2314,8 +2445,13 @@ def test_concurrency_machinery(skips):
     results, unattempted, exhausted = run(specs, 3, exploding_fetch)
     ok &= check("a worker that raises does not hang the run", True)
     ok &= check("its siblings' pages still arrive", len(survived) >= 3)
-    ok &= check("the dead worker's page is absent, not empty",
-                4 not in [o.page_num for o in results])
+    dead = [o for o in results if o.page_num == 4]
+    ok &= check("the dead worker's page is reported, as a failed one",
+                len(dead) == 1 and not dead[0].ok
+                and dead[0].load_failed is True
+                and dead[0].page_status == "load_failed")
+    ok &= check("...and it is NOT reported as unattempted",
+                4 not in unattempted)
 
     # 5. Each worker gets its OWN pool, rotated to a different offset — which
     #    is what makes the concurrency lock-free by construction.
@@ -3027,6 +3163,7 @@ def main() -> int:
     ok &= test_the_challenge_is_enterprise_and_solvable()
     ok &= test_page_flow_policy()
     ok &= test_scroll_loop()
+    ok &= test_per_page_manifest(skips)
     ok &= test_a_refused_page_is_not_an_empty_one()
     ok &= test_output_contract()
     ok &= test_writers_and_finish_run()

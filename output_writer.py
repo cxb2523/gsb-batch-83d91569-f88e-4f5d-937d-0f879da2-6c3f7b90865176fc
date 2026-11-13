@@ -509,7 +509,9 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
              pages_completed: int, start_url: str, final_url: str,
              products: int, pages_failed: Optional[List[int]] = None,
              mode: str = "listing", source: str = SOURCE_DEFAULT,
-             extra: Optional[dict] = None) -> dict:
+             extra: Optional[dict] = None,
+             pages: Optional[List[dict]] = None,
+             pages_unattempted: Optional[List[int]] = None) -> dict:
     """Build the metadata dict for a finished run.
 
     `status` is the field a consumer branches on:
@@ -540,6 +542,24 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
     a description once pages can be fetched independently and page 3 can fail
     while 4 and 5 succeed. Recording the numbers keeps the sidecar honest
     about WHICH part of the catalogue is missing, not just how much.
+
+    `pages` is the per-page manifest an engine can supply: one record per
+    page it actually ATTEMPTED, each with `page`, `status`, `rows` and
+    `failed`. The browser engines that can paginate independently (this
+    repo's Playwright engine) pass it, and then three derived summaries ride
+    beside it: `pages_attempted`, `pages_succeeded` and `pages_failed`, all
+    page-number arrays. They are DERIVED from the manifest rather than
+    accepted separately, so a sidecar cannot say a page succeeded in one
+    field and failed in another.
+
+    The manifest exists because "which page failed" is not the whole
+    question. A refusal that was RETRIED and produced nothing, an empty page
+    the site genuinely served, and a page whose worker died before reading
+    it all used to look alike downstream — and the first two mean opposite
+    things. `pages_unattempted` completes the picture: pages that were
+    requested and never dispatched at all (the listing ran out, or a worker
+    exited). Those are NOT failures — they were never tried, and calling
+    them failed would overstate the damage.
     """
     meta = {
         "source": source,
@@ -554,6 +574,20 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
         "final_url": final_url,
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
+    if pages is not None:
+        # One record per attempted page, in the engine's page order. Copied
+        # shallowly so the caller's list cannot be mutated through us.
+        records = [dict(record) for record in pages]
+        meta["pages"] = records
+        meta["pages_attempted"] = [r["page"] for r in records]
+        meta["pages_succeeded"] = [r["page"] for r in records
+                                   if not r["failed"]]
+        # Derived, never passed separately: two descriptions of the same
+        # fact drift the moment one of them is updated without the other,
+        # and `status` is computed from `pages_failed` in finish_run.
+        meta["pages_failed"] = [r["page"] for r in records if r["failed"]]
+    if pages_unattempted is not None:
+        meta["pages_unattempted"] = list(pages_unattempted)
     if extra:
         # Merged rather than nested under a key, so a consumer reads
         # `pages_still_growing` at the top level beside `status`. Run fields win a
@@ -640,13 +674,42 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
 COMPLETE_STOP_REASONS = ("completed", "pagination_exhausted", "no_new_products")
 
 
+def _failure_reason_from_manifest(pages: Optional[List[dict]]) -> Optional[str]:
+    """The stop reason for the first failed page in a manifest, or None.
+
+    The manifest's `status` is a closed vocabulary that a consumer branches
+    on, and `stop_reason` is a DIFFERENT closed vocabulary the family already
+    ships. This maps one onto the other, earliest failed page first, so a
+    run whose loop believed it had completed still ends with the reason the
+    evidence supports.
+
+    Returns None when there is no manifest to read — the caller then falls
+    back to a reason of its own rather than inventing one here.
+    """
+    if not pages:
+        return None
+    failed = [r for r in pages if r.get("failed")]
+    if not failed:
+        return None
+    first = min(failed, key=lambda r: r.get("page", 0))
+    status = first.get("status")
+    if status == "load_failed":
+        return "page_load_timeout"
+    if status == "parser_found_nothing":
+        return "parser_found_nothing"
+    vendor = first.get("blocked_by")
+    return f"blocked_{vendor}" if vendor else "blocked_no-response"
+
+
 def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
                allow_empty: bool, *, blocked: bool, stop_reason: str,
                pages_requested: int, pages_completed: int,
                start_url: str, final_url: str,
                pages_failed: Optional[List[int]] = None,
                mode: str = "listing", source: str = SOURCE_DEFAULT,
-               extra: Optional[dict] = None) -> int:
+               extra: Optional[dict] = None,
+               pages: Optional[List[dict]] = None,
+               pages_unattempted: Optional[List[int]] = None) -> int:
     """Write output + the run-metadata sidecar; return the exit code.
 
     Shared by all three browser engines so the status/exit-code mapping
@@ -657,7 +720,17 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     the previous run's still-intact good output (which `save` deliberately
     does not overwrite) — the two files would contradict each other, and
     diff_runs.py would refuse to compare data that is in fact fine.
+
+    `pages` and `pages_unattempted` are the per-page manifest and the
+    never-dispatched page numbers (see `run_meta`). When a manifest is given
+    it is the AUTHORITY for `pages_failed`: the array is derived from the
+    records, so a caller cannot pass a manifest in which page 2 failed beside
+    a `pages_failed` that says it did not. That is the same rule as the one
+    below — one fact, one place — applied to the new field rather than bolted
+    beside it.
     """
+    if pages is not None:
+        pages_failed = [r["page"] for r in pages if r.get("failed")]
     # Completeness is decided by the reason AND by the evidence. A named
     # list of stop reasons cannot cover a failure recorded somewhere else,
     # and `pages_failed` is somewhere else: a run whose loop ended for a
@@ -671,6 +744,21 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     # fix: 28 of 32 repos behaved this way. Same shape as the exit-code
     # unification this file already carries — a rule keyed on a list of
     # names has a hole for every name nobody added to it.
+    #
+    # `stop_reason` is also held to the evidence: a run that says
+    # `completed` while holding a FAILED page is not completed, whatever the
+    # loop variable happened to end up as. That is enforced at the one point
+    # every engine passes through, so no engine can forget it.
+    #
+    # Deliberately NOT triggered by `pages_unattempted` alone. Pages left
+    # undispatched because the listing genuinely ran out are a COMPLETE
+    # result — that is the difference this repo exists to keep — and the
+    # manifest records them for transparency rather than to fail the run.
+    # The replacement comes from the EXISTING vocabulary (the same failure
+    # reasons `page_flow` produces); a new spelling here would be a value no
+    # consumer of this family has been told about.
+    if stop_reason in COMPLETE_STOP_REASONS and pages_failed:
+        stop_reason = _failure_reason_from_manifest(pages) or "blocked_no-response"
     complete = stop_reason in COMPLETE_STOP_REASONS and not pages_failed
     row_cls = ROW_CLASS_BY_MODE.get(mode, Product)
     write_stats: dict = {}
@@ -695,7 +783,7 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
             pages_requested=pages_requested, pages_completed=pages_completed,
             pages_failed=pages_failed, mode=mode, source=source,
             start_url=start_url, final_url=final_url, products=len(rows),
-            extra=extra))
+            extra=extra, pages=pages, pages_unattempted=pages_unattempted))
 
     if not rows:
         # Nothing gathered at all, and WHY decides the code. Exit 4 is a

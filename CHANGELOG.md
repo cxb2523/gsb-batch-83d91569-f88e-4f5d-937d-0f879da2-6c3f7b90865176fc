@@ -13,7 +13,41 @@ or from a half-empty output file.
 
 ## [Unreleased]
 
+### Added
+
+* **A per-page manifest in `<out>.meta.json` (Playwright engine).** Every
+  multi-page run now records, for each page it actually attempted, a record
+  with `page`, `status` (`content` / `empty` / `blocked` / `challenge` /
+  `parser_found_nothing` / `load_failed`), `rows` and `failed`. Three
+  summary arrays ride beside it — `pages_attempted`, `pages_succeeded`,
+  `pages_failed` — and a fourth, `pages_unattempted`, lists the requested
+  page numbers that were never dispatched (the listing ran out, or a
+  worker exited first). This answers what `pages_failed` alone could not:
+  how much each page yielded, and whether the loop stopped because the
+  listing ended or because a page could not be read. A page that was
+  refused and never read is `blocked` with `failed: true`; it is never a
+  0-row `empty` page, which is what a finished listing looks like.
+* The manifest is written in page order and the merged rows keep the
+  **lowest** page for a duplicated `sku`, so two runs of one command
+  produce the same output.
+
 ### Fixed
+
+* **One unreadable page no longer ends the page loop (Playwright
+  engine).** A page that came back refused stopped the sequential loop,
+  so the pages after it were never fetched — page 3 of a three-page run
+  was reported as though the listing had ended at page 2, and a refused
+  page 2 meant page 3 was not read at all. The loop now carries on past
+  the failure, records it, and ends exit 6 with the failed page named;
+  the pages it never reached go to `pages_unattempted`.
+* **A page whose worker died mid-fetch is reported as failed.** It used
+  to vanish from `results`, from the queue and from every page list at
+  once — indistinguishable from a page nobody asked for. It is now a
+  `load_failed` record.
+* **A run cannot keep `stop_reason: completed` beside a failed page.**
+  `finish_run` rewrites a COMPLETE stop reason from the manifest's first
+  failed page, so the sidecar cannot contradict itself whichever engine
+  produced it.
 
 * **A Scraping Browser solve is no longer abandoned.** With
   `--cdp-endpoint`, the remote browser can be solving a challenge while the
