@@ -483,13 +483,20 @@ export class CapMonsterCloudClient {
     await new Promise((resolve) => setTimeout(resolve, firstRequestDelay));
 
     let signalAborted = (cancellationController && cancellationController.signal.aborted) || false;
+    // Set only when the internal whole-timeout timer is what ends the polling. An abort coming
+    // from the caller's AbortController leaves this false, so caller cancellation is distinguishable
+    // from a real recognition timeout.
+    let wholeTimeoutExpired = false;
+    const isAborted = (): boolean => signalAborted || (!!cancellationController && cancellationController.signal.aborted);
     const wholeTimeoutId = setTimeout(() => {
+      // If the caller already aborted the shared signal, keep the cancellation outcome.
+      wholeTimeoutExpired = !(cancellationController && cancellationController.signal.aborted);
       signalAborted = true;
       cancellationController && cancellationController.abort();
       debugTask('cancellationController abort()');
     }, resultTimeouts.timeout);
 
-    while (signalAborted === false) {
+    while (isAborted() === false) {
       try {
         const result = await this.GetTaskResult(createdTask.taskId, cancellationController);
         switch (result.type) {
@@ -504,7 +511,7 @@ export class CapMonsterCloudClient {
             break;
         }
       } catch (err) {
-        if (signalAborted) {
+        if (isAborted()) {
           break;
         }
 
@@ -512,7 +519,7 @@ export class CapMonsterCloudClient {
         throw err;
       }
 
-      if (signalAborted) {
+      if (isAborted()) {
         break;
       }
       debugTask('requestsInterval', resultTimeouts.requestsInterval);
@@ -520,6 +527,8 @@ export class CapMonsterCloudClient {
     }
 
     clearTimeout(wholeTimeoutId);
-    return new CaptchaResult<TaskCompletedSolution>({ error: ErrorType.Timeout });
+    return new CaptchaResult<TaskCompletedSolution>({
+      error: wholeTimeoutExpired ? ErrorType.Timeout : ErrorType.Cancelled,
+    });
   }
 }

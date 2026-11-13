@@ -312,7 +312,7 @@ describe('Check integration tests for CapMonsterCloudClientFactory()', () => {
     );
     expect(task).toBeInstanceOf(CaptchaResult);
     expect(task.solution).toBeUndefined();
-    expect(task).toHaveProperty('error', ErrorType.Timeout);
+    expect(task).toHaveProperty('error', ErrorType.Cancelled);
 
     expect(await srv.destroy()).toBeUndefined();
   });
@@ -359,7 +359,7 @@ describe('Check integration tests for CapMonsterCloudClientFactory()', () => {
     );
     expect(task).toBeInstanceOf(CaptchaResult);
     expect(task.solution).toBeUndefined();
-    expect(task).toHaveProperty('error', ErrorType.Timeout);
+    expect(task).toHaveProperty('error', ErrorType.Cancelled);
 
     expect(await srv.destroy()).toBeUndefined();
   });
@@ -433,7 +433,7 @@ describe('Check integration tests for CapMonsterCloudClientFactory()', () => {
   });
 
   it('should terminate task while waiting for requestsInterval', async () => {
-    expect.assertions(3);
+    expect.assertions(6);
 
     const srv = await createServerMock({
       responses: [
@@ -453,24 +453,40 @@ describe('Check integration tests for CapMonsterCloudClientFactory()', () => {
     });
 
     const abortController = new AbortController();
-    // abort after 2sec while Solve should wait for 2sec requestsInterval
-    setTimeout(() => abortController.abort(), 1000 * 1);
 
-    try {
-      await cmcClient.Solve(
-        recaptchaV2Request,
-        {
-          firstRequestDelay: 0,
-          firstRequestNoCacheDelay: 0,
-          requestsInterval: 1000 * 2,
-          timeout: 1000 * 180,
-        },
-        abortController,
-      );
-    } catch (err) {
-      expect(err).toBeDefined();
-      expect(srv.caughtRequests.length).toBe(2);
-    }
+    const solvePromise = cmcClient.Solve(
+      recaptchaV2Request,
+      {
+        firstRequestDelay: 0,
+        firstRequestNoCacheDelay: 0,
+        requestsInterval: 1000 * 10,
+        timeout: 1000 * 180,
+      },
+      abortController,
+    );
+
+    // Abort only once the first getTaskResult (request #2) is in flight, so it lands while
+    // Solve is sleeping for the requestsInterval rather than racing the first poll.
+    await new Promise<void>((resolve) => {
+      const timer = setInterval(() => {
+        if (srv.caughtRequests.length >= 2) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 5);
+    });
+    abortController.abort();
+
+    const task = await solvePromise;
+
+    expect(task).toBeInstanceOf(CaptchaResult);
+    expect(task.solution).toBeUndefined();
+    expect(task).toHaveProperty('error', ErrorType.Cancelled);
+    // createTask + a single getTaskResult happened before the abort; no further polling
+    expect(srv.caughtRequests.length).toBe(2);
+    // give the cancelled Solve a chance to prove it does not poll again
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(srv.caughtRequests.length).toBe(2);
 
     expect(await srv.destroy()).toBeUndefined();
   });

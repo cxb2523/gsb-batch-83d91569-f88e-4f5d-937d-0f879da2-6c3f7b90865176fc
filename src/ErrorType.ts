@@ -7,6 +7,11 @@ export enum ErrorType {
    */
   Timeout = 'Timeout',
   /**
+   * Task was cancelled by the caller via the externally provided AbortController.
+   * Distinguishes a caller-side abort from an internal recognition {@link ErrorType.Timeout}.
+   */
+  Cancelled = 'Cancelled',
+  /**
    * Unknown error. Maybe client library is outdated
    */
   Unknown = 'Unknown',
