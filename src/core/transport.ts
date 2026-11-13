@@ -1,0 +1,382 @@
+import {
+    type Dispatcher,
+    Agent,
+    interceptors,
+    request as lib_request,
+    stream as lib_stream,
+} from 'undici';
+import type { UrlObject } from 'node:url';
+import {
+    DEFAULT_TIMEOUT,
+    DEFAULT_CONNECTIONS,
+    DEFAULT_KEEP_ALIVE_TIMEOUT,
+    DEFAULT_KEEP_ALIVE_MAX_TIMEOUT,
+    MAX_RETRIES,
+    RETRY_BACKOFF_FACTOR,
+    RETRY_STATUSES,
+    RETRY_METHODS,
+    RETRY_ERROR_CODES,
+} from '../utils/constants.js';
+import {
+    APIError,
+    AuthenticationError,
+    BRDError,
+    NetworkError,
+    NetworkTimeoutError,
+    ValidationError,
+} from '../utils/errors.js';
+import { getAuthHeaders } from '../utils/auth.js';
+import type { AuthSource } from '../utils/cli-credentials.js';
+import { getLogger, logRequest } from '../utils/logger.js';
+import { RateLimiter } from './rate-limiter.js';
+
+const { dns, retry } = interceptors;
+
+const TIMEOUT_ERROR_NAMES = new Set([
+    'HeadersTimeoutError',
+    'BodyTimeoutError',
+    'ConnectTimeoutError',
+]);
+
+function isAbortTimeout(err: Error): boolean {
+    return (
+        (err.name === 'TimeoutError' && !(err instanceof BRDError)) ||
+        (err.name === 'AbortError' && err.message?.includes('timeout'))
+    );
+}
+
+// A single shared `beforeExit` listener tracks every open Transport via a
+// counter, instead of one listener per instance. Registering a listener per
+// Transport tripped Node's MaxListenersExceededWarning once an app created
+// more than ~10 clients. The listener is installed lazily on the first open
+// Transport and removed again once the last one is closed.
+let openTransportCount = 0;
+let beforeExitListener: (() => void) | null = null;
+
+function warnUnclosedTransports(): void {
+    if (openTransportCount > 0) {
+        console.warn(
+            `[brightdata-sdk] ${openTransportCount} Transport(s) were not closed. ` +
+                'Call client.close() or use "await using client = new bdclient()" ' +
+                'to avoid keeping the process alive.',
+        );
+    }
+}
+
+function registerOpenTransport(): void {
+    openTransportCount++;
+    if (!beforeExitListener) {
+        beforeExitListener = warnUnclosedTransports;
+        process.on('beforeExit', beforeExitListener);
+    }
+}
+
+function unregisterOpenTransport(): void {
+    if (openTransportCount > 0) openTransportCount--;
+    if (openTransportCount === 0 && beforeExitListener) {
+        process.removeListener('beforeExit', beforeExitListener);
+        beforeExitListener = null;
+    }
+}
+
+export interface TransportOptions {
+    apiKey: string;
+    authSource?: AuthSource;
+    timeout?: number;
+    connections?: number;
+    rateLimit?: number;
+    ratePeriod?: number;
+}
+
+export interface TransportRequestOptions {
+    method?: Dispatcher.HttpMethod;
+    headers?: Record<string, string>;
+    body?: string;
+    query?: Record<string, unknown>;
+    timeout?: number;
+}
+
+export interface TransportStreamOptions {
+    method?: Dispatcher.HttpMethod;
+    headers?: Record<string, string>;
+    body?: string;
+    query?: Record<string, unknown>;
+    opaque?: unknown;
+}
+
+export class Transport {
+    private agent: Dispatcher;
+    private authHeaders: Record<string, string>;
+    private defaultTimeout: number;
+    private rateLimiter: RateLimiter | null;
+    private closed = false;
+    private logger = getLogger('transport');
+
+    constructor(opts: TransportOptions) {
+        this.authHeaders = getAuthHeaders(opts.apiKey, opts.authSource);
+        this.defaultTimeout = opts.timeout ?? DEFAULT_TIMEOUT;
+        this.rateLimiter =
+            opts.rateLimit && opts.rateLimit > 0
+                ? new RateLimiter(opts.rateLimit, opts.ratePeriod ?? 1000)
+                : null;
+        // Compose only the interceptors the runtime's undici actually provides.
+        // Bun's bundled undici ships a subset (redirect/retry/dump) and omits
+        // `dns`, so calling `dns()` there throws "dns is not a function" (#24).
+        // Detect by CAPABILITY (is it a function?), never by runtime name: this
+        // keeps `dns` on Node unchanged, skips it on Bun (undici falls back to
+        // platform DNS — requests still work), self-retires if Bun later ships
+        // `dns`, and degrades gracefully for any interceptor a future runtime
+        // omits, instead of crashing the constructor.
+        const interceptorChain = [
+            typeof dns === 'function' ? dns() : null,
+            typeof retry === 'function'
+                ? retry({
+                      maxRetries: MAX_RETRIES,
+                      timeoutFactor: RETRY_BACKOFF_FACTOR,
+                      statusCodes: RETRY_STATUSES,
+                      methods:
+                          RETRY_METHODS as unknown as Dispatcher.HttpMethod[],
+                      errorCodes: RETRY_ERROR_CODES,
+                  })
+                : null,
+        ].filter(
+            (i): i is Dispatcher.DispatcherComposeInterceptor => i !== null,
+        );
+
+        const rawAgent = new Agent({
+            connections: opts.connections ?? DEFAULT_CONNECTIONS,
+            keepAliveTimeout: DEFAULT_KEEP_ALIVE_TIMEOUT,
+            keepAliveMaxTimeout: DEFAULT_KEEP_ALIVE_MAX_TIMEOUT,
+            headersTimeout: this.defaultTimeout,
+            bodyTimeout: this.defaultTimeout,
+        });
+        // `.compose()` itself is missing on Bun's bundled undici (its `Agent` is a
+        // bare, largely-inert stub — no `dispatch`/`close`/`destroy` either; Bun's
+        // `request()`/`stream()` ignore the `dispatcher` option entirely and run
+        // through Bun's own native HTTP client regardless). Guard the call itself,
+        // not just the interceptors passed to it, so construction never throws.
+        // Under Bun this means requests still go out, but none of Transport's
+        // tuning (connections/timeouts/retry/DNS-cache) has any effect there.
+        this.agent =
+            typeof rawAgent.compose === 'function'
+                ? rawAgent.compose(...interceptorChain)
+                : rawAgent;
+        registerOpenTransport();
+    }
+
+    get headers(): Record<string, string> {
+        return { ...this.authHeaders };
+    }
+
+    async request(
+        url: string | URL | UrlObject,
+        opts: TransportRequestOptions = {},
+    ): Promise<Dispatcher.ResponseData> {
+        if (this.closed) {
+            throw new BRDError(
+                'Transport is closed — cannot make requests after close() has been called',
+            );
+        }
+        const { timeout, ...restOpts } = opts;
+        const mergedHeaders = { ...this.authHeaders, ...opts.headers };
+
+        const requestOpts: Record<string, unknown> = {
+            ...restOpts,
+            headers: mergedHeaders,
+            dispatcher: this.agent,
+        };
+
+        if (timeout) {
+            requestOpts.headersTimeout = timeout;
+            requestOpts.bodyTimeout = timeout;
+            requestOpts.signal = AbortSignal.timeout(timeout * 2);
+        }
+
+        if (this.rateLimiter) {
+            await this.rateLimiter.acquire();
+        }
+
+        this.log(opts.method, url, opts.query, opts.body);
+
+        const method = opts.method || 'GET';
+        const urlStr = typeof url === 'string' ? url : JSON.stringify(url);
+        const start = Date.now();
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-explicit-any
+            const response = await lib_request(url, requestOpts as any);
+            const durationMs = Date.now() - start;
+            this.logger.debug(
+                `${method} ${urlStr} → ${response.statusCode} (${durationMs}ms)`,
+                {
+                    method,
+                    url: urlStr,
+                    statusCode: response.statusCode,
+                    durationMs,
+                },
+            );
+            return response;
+        } catch (e: unknown) {
+            const durationMs = Date.now() - start;
+            this.logger.debug(
+                `${method} ${urlStr} → ERROR (${durationMs}ms): ${(e as Error).message}`,
+                {
+                    method,
+                    url: urlStr,
+                    durationMs,
+                    error: (e as Error).message,
+                },
+            );
+            this.classifyError(e);
+        }
+    }
+
+    async stream(
+        url: string | URL | UrlObject,
+        opts: TransportStreamOptions,
+        factory: Dispatcher.StreamFactory,
+    ): Promise<Dispatcher.StreamData> {
+        if (this.closed) {
+            throw new BRDError(
+                'Transport is closed — cannot make requests after close() has been called',
+            );
+        }
+        const mergedHeaders = { ...this.authHeaders, ...opts.headers };
+
+        if (this.rateLimiter) {
+            await this.rateLimiter.acquire();
+        }
+
+        this.log(opts.method, url, opts.query, opts.body);
+
+        const method = opts.method || 'GET';
+        const urlStr = typeof url === 'string' ? url : JSON.stringify(url);
+        const start = Date.now();
+        try {
+            /* eslint-disable @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-explicit-any */
+            const result = await lib_stream(
+                url,
+                {
+                    ...opts,
+                    headers: mergedHeaders,
+                    dispatcher: this.agent,
+                } as any,
+                factory as any,
+            );
+            /* eslint-enable @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-explicit-any */
+            const durationMs = Date.now() - start;
+            this.logger.debug(
+                `STREAM ${method} ${urlStr} → OK (${durationMs}ms)`,
+                { method, url: urlStr, durationMs },
+            );
+            return result;
+        } catch (e: unknown) {
+            const durationMs = Date.now() - start;
+            this.logger.debug(
+                `STREAM ${method} ${urlStr} → ERROR (${durationMs}ms): ${(e as Error).message}`,
+                {
+                    method,
+                    url: urlStr,
+                    durationMs,
+                    error: (e as Error).message,
+                },
+            );
+            this.classifyError(e);
+        }
+    }
+
+    async close(): Promise<void> {
+        if (this.closed) return;
+        this.closed = true;
+        unregisterOpenTransport();
+        this.rateLimiter?.destroy();
+        // Bun's stubbed Agent (see constructor) has no `close()` either — skip
+        // rather than throw when the runtime doesn't provide it.
+        const agent = this.agent as Partial<Agent>;
+        if (typeof agent.close === 'function') {
+            await agent.close();
+        }
+    }
+
+    private log(
+        method = 'GET',
+        url: string | URL | UrlObject,
+        query?: Record<string, unknown>,
+        body?: unknown,
+    ) {
+        let meta = '';
+
+        if (query) {
+            meta += ` query=${JSON.stringify(query)}`;
+        }
+
+        if (typeof body === 'string') {
+            if (meta) meta += ' ';
+            meta += `body=${body}`;
+        }
+
+        logRequest(method, JSON.stringify(url), meta);
+    }
+
+    private classifyError(err: unknown): never {
+        if (err instanceof BRDError) throw err;
+        const e = err as Error;
+        if (TIMEOUT_ERROR_NAMES.has(e.name) || isAbortTimeout(e)) {
+            throw new NetworkTimeoutError(`Request timed out: ${e.message}`, {
+                cause: e,
+            });
+        }
+        if (e.name === 'RequestRetryError' && 'statusCode' in e) {
+            throwInvalidStatus(
+                (e as Error & { statusCode: number }).statusCode,
+                `retries exhausted: ${e.message}`,
+            );
+        }
+        throw new NetworkError(`Network error: ${e.message}`, { cause: e });
+    }
+}
+
+export function throwInvalidStatus(status: number, responseTxt: string): never {
+    if (status === 401 || status === 403) {
+        throw new AuthenticationError(
+            'invalid API key or insufficient permissions',
+        );
+    }
+
+    if (status === 400) {
+        throw new ValidationError(`bad request: ${responseTxt}`);
+    }
+
+    throw new APIError(`request failed`, status, responseTxt);
+}
+
+export async function assertResponse(
+    response: Dispatcher.ResponseData,
+    parse?: true,
+): Promise<string>;
+export async function assertResponse(
+    response: Dispatcher.ResponseData,
+    parse: false,
+): Promise<Dispatcher.ResponseData['body']>;
+export async function assertResponse(
+    response: Dispatcher.ResponseData,
+    parse = true,
+): Promise<string | Dispatcher.ResponseData['body']> {
+    if (response.statusCode < 400) {
+        if (!parse) return response.body;
+        try {
+            return await response.body.text();
+        } catch (e) {
+            throw new NetworkError(
+                `Failed to read response body: ${(e as Error).message}`,
+                { cause: e as Error },
+            );
+        }
+    }
+    let bodyText: string;
+    try {
+        bodyText = await response.body.text();
+    } catch {
+        bodyText = '(response body unreadable)';
+    }
+    throwInvalidStatus(response.statusCode, bodyText);
+}

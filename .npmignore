@@ -1,0 +1,17 @@
+.github/
+.vscode/
+examples/
+node_modules/
+src/
+tests/
+.env*
+.prettierrc
+eslint.config.mjs
+.gitignore
+tsconfig.json
+
+*.log
+coverage/
+.nyc_output/
+.DS_Store
+*.tgz
