@@ -1,0 +1,1025 @@
+<!doctype html>
+<html lang="en">
+<head>
+<link rel="icon" id="fav" href="data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2097.1%20100%27%3E%3Cstyle%3E%40media%28prefers-color-scheme%3Adark%29%7B.i%7Bfill%3A%23e6e6e6%7D%7D%3C%2Fstyle%3E%3Cpath%20fill%3D%27%23F97703%27%20d%3D%27M41.26%201.87L44.48%200.56L47.60%200.03L50.76%200.16L54.12%201.06L93.41%2022.48L95.57%2024.31L96.84%2026.83L97.03%2029.65L96.26%2032.05L95.16%2033.59L93.68%2034.78L55.84%2055.55L52.31%2056.94L48.87%2057.41L45.09%2057.02L41.54%2055.70L3.69%2034.94L1.53%2033.11L0.25%2030.58L0.06%2027.76L0.84%2025.36L2.64%2023.18Z%27%2F%3E%3Cpath%20class%3D%27i%27%20fill%3D%27%23111%27%20d%3D%27M8.71%2045.48L6.65%2044.82L4.48%2044.96L2.63%2045.78L1.08%2047.29L0.18%2049.26L0.04%2051.43L0.70%2053.49L2.05%2055.18L41.54%2076.99L44.48%2078.15L47.60%2078.68L51.38%2078.44L55.28%2077.13L94.02%2055.89L96.18%2053.87L97.08%2051.14L96.59%2048.30L94.93%2046.12L92.33%2044.89L89.60%2044.99L54.99%2063.76L51.38%2064.93L47.60%2065.17L44.48%2064.65L41.82%2063.63ZM8.71%2066.77L6.65%2066.12L4.48%2066.25L2.63%2067.07L1.08%2068.58L0.18%2070.55L0.04%2072.72L0.70%2074.78L2.05%2076.48L41.54%2098.28L44.48%2099.44L47.60%2099.97L51.38%2099.73L55.28%2098.42L94.02%2077.18L96.18%2075.16L97.08%2072.43L96.59%2069.59L94.93%2067.42L92.33%2066.19L89.60%2066.29L54.99%2085.06L51.38%2086.23L47.60%2086.46L44.48%2085.94L41.82%2084.92Z%27%2F%3E%3C%2Fsvg%3E">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>whosup</title>
+<style>
+/* whosup — who's waiting on you? 흑백 에디토리얼. 색은 다음 1건(오렌지)과 실패(빨강)뿐. */
+:root{--font:Pretendard,"Pretendard Variable","Apple SD Gothic Neo","Malgun Gothic","Helvetica Neue",Helvetica,Arial,sans-serif;
+ --bg:#fff;--wash:#f8f8f8;--ink:#111;--ink2:#3b3b3b;--muted:#6b6b6b;--faint:#9a9a9a;--line:#e5e5e5;--line2:#cecece;--accent:#b85c00;--accent-soft:#e8850a;--fail:#d4382e;--fail-fill:#c0392b}
+:root[data-theme="dark"]{--bg:#1e1e1e;--wash:#262626;--ink:#e6e6e6;--ink2:#cccccc;--muted:#9d9d9d;--faint:#8c8c8c;--line:#2b2b2b;--line2:#555;--accent:#ffa657;--accent-soft:#ffa657;--fail:#f85149;--fail-fill:#b3302a}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1e1e1e;--wash:#262626;--ink:#e6e6e6;--ink2:#cccccc;--muted:#9d9d9d;--faint:#8c8c8c;--line:#2b2b2b;--line2:#555;--accent:#ffa657;--accent-soft:#ffa657;--fail:#f85149;--fail-fill:#b3302a}}
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:var(--font);-webkit-font-smoothing:antialiased}
+:root[data-theme="dark"] body{-webkit-font-smoothing:auto}@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) body{-webkit-font-smoothing:auto}}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+.caps{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:500}
+header{height:72px;display:flex;align-items:center;gap:40px;padding:0 32px;border-bottom:1px solid var(--ink)}
+.wordmark{display:flex;align-items:center;color:var(--ink)}.wordmark .mark{height:25.34px;width:auto;display:block}
+.tools{display:flex;gap:8px}.ib{width:40px;height:40px;display:grid;place-items:center;border:1px solid var(--line);color:var(--muted)}.ib svg{width:20px;height:20px;display:block}
+.ib:hover{border-color:var(--ink);color:var(--ink)}.ib.on{color:var(--ink)}
+.counts{display:flex;gap:28px}.counts b{color:var(--ink);margin-left:.5em;letter-spacing:0;font-size:13px}.counts .fail.on b{color:var(--fail)}.counts .zero b{color:var(--faint)}
+.spacer{flex:1}
+.nb{font-size:16px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--ink);border:1px solid var(--ink);padding:9px 18px}
+.nb:hover{background:var(--ink);color:var(--bg)}.nb.ghost{border-color:var(--line2);color:var(--ink2)}
+.nb.ghost:hover{color:var(--bg);border-color:var(--ink)}
+.setrow{display:grid;grid-template-columns:1fr 92px;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}.setrow label{font-size:14px;font-weight:600}.setrow small{display:block;color:var(--muted);font-size:12px;margin-top:4px;line-height:1.5;font-weight:400}.setrow small .rg{display:block;color:var(--faint);margin-top:2px}.setrow .in{text-align:right;font-variant-numeric:tabular-nums}.seterr{color:var(--fail);font-size:13px;margin-top:12px;line-height:1.5}
+.stamp{font-variant-numeric:tabular-nums}.stamp.off{color:var(--fail)}
+main{position:absolute;top:56px;bottom:0;left:0;right:0;display:grid;grid-template-rows:auto 1fr;min-height:0}
+.hero{display:grid;grid-template-columns:1fr 460px;padding:22px 32px 0;gap:40px;border-bottom:1px solid var(--ink)}
+.stats{display:grid;grid-template-columns:repeat(6,1fr)}
+.stat{padding:4px 16px 18px 0;border-right:1px solid var(--line);margin-right:16px;cursor:pointer}.stat:last-child{border-right:0}
+.stat .n{display:block;font-size:clamp(48px,7.5vh,88px);line-height:1;font-weight:300;letter-spacing:-.05em;margin-top:10px;font-variant-numeric:tabular-nums;color:var(--faint)}
+.stat.on .n{color:var(--ink);font-weight:600}.stat.idle.on .n{color:var(--muted);font-weight:300}.stat.all.on .n{font-weight:300}.stat.wait.on .n{font-weight:700}.stat.fail.on .n{color:var(--fail)}.stat.fail.on .caps{color:var(--fail)}
+.stat .sub{display:block;margin-top:8px;font-size:13px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nextline{grid-column:1/-1;display:grid;grid-template-columns:auto auto 1fr auto;gap:18px;align-items:baseline;border-top:1px solid var(--line);padding:12px 0 14px;cursor:pointer}
+.nextline:hover{background:var(--wash)}.nextline i{width:8px;height:8px;border-radius:50%;background:var(--accent-soft);display:inline-block;margin-right:10px;vertical-align:middle}
+.nextline.fail i{background:var(--fail)}.nextline.fail .lb,.nextline.fail .w{color:var(--fail)}
+.nextline .lb{font-weight:700;font-size:17px}.nextline .qq{font-size:17px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nextline .w{font-size:22px;font-weight:300;letter-spacing:-.04em;color:var(--accent);font-variant-numeric:tabular-nums}.nextline .w small{font-size:12px;letter-spacing:.04em;margin-left:.2em}
+.deskbtn{margin-left:auto;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);border:1px solid var(--line, currentColor);padding:1px 6px;background:none;cursor:pointer}.deskbtn:hover{color:var(--ink)}.nextline.quiet .deskbtn{margin-left:6px;cursor:pointer}.nextline.quiet{cursor:default}.nextline.quiet i{background:var(--faint)}.nextline.quiet .qq{color:var(--muted)}
+.hero .r{border-left:1px solid var(--line);padding-left:32px;display:flex;flex-direction:column}
+.r .lab{display:flex;justify-content:space-between;border-bottom:1px solid var(--ink);padding-bottom:10px}
+.r .lab i{width:8px;height:8px;border-radius:50%;background:var(--accent-soft);display:inline-block}
+.r .kpi{display:grid;grid-template-columns:1fr 1fr;margin-top:12px}.r .kpi div+div{border-left:1px solid var(--line);padding-left:16px}
+.r .kpi .n{display:block;font-size:34px;font-weight:300;letter-spacing:-.04em;line-height:1;margin-top:6px;font-variant-numeric:tabular-nums}.r .kpi .n small{font-size:12px;letter-spacing:.04em;color:var(--muted);margin-left:.2em}
+.r .kpi .hi .n{color:var(--accent)}
+.spark{margin-top:12px;height:40px;border-bottom:1px solid var(--line);color:var(--accent-soft)}
+.spark svg{width:100%;height:100%;display:block}
+.axis{display:flex;justify-content:space-between;font-size:12px;letter-spacing:.1em;color:var(--muted);margin-top:6px;padding-bottom:14px}
+.chip{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink);border:1px solid var(--ink);padding:6px 10px}
+.chip:hover{background:var(--ink);color:var(--bg)}.chip.ghost{color:var(--muted);border-color:var(--line)}.chip.ghost:hover{color:var(--ink);border-color:var(--ink);background:none}
+.strip{display:flex;flex-direction:column;overflow:auto;min-height:0}
+.strip{container:strip/inline-size}
+.deskrow{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
+.desk{display:flex;align-items:center;gap:14px;padding:10px 18px 6px;border-bottom:1px solid var(--line)}.desk em{font-style:normal;font-weight:700;color:var(--ink)}
+.cell{min-height:clamp(132px,16vh,180px);border-right:1px solid var(--line);border-bottom:1px solid var(--line);padding:18px 18px 16px;display:grid;grid-template-rows:auto 1fr;align-content:start;min-width:0;position:relative;cursor:pointer;text-align:left}
+.cell:hover{background:var(--wash)}
+/* 칸 라벨이 상태보다 먼저 자리를 갖는다 — 라벨이 상태·시간 옆에 다 들어가지 않으면 상태·시간이 다음 줄로 내려간다.
+   브랜치(.br)는 남는 폭만 쓰고(contain:inline-size) 줄바꿈 판단에 끼지 않는다. */
+.cell .top{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:500;white-space:nowrap;overflow:hidden}
+.cell .top em{font-style:normal;color:var(--ink);font-weight:700;font-size:13px}.cell .top .br{text-transform:none;letter-spacing:0}
+.cell .top .lb{flex:1 1 auto;min-width:0;overflow:hidden;display:flex;align-items:baseline;gap:.35em}.cell .top .lb em,.cell .top .lb .br{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.cell .top .lb em{flex:0 1 auto;min-width:0}.cell .top .lb .br{flex:1 1 0;min-width:0;contain:inline-size}.cell .top .lb .br::before{content:'· '}.cell .top .sx{flex:none;display:flex;align-items:baseline;gap:inherit}
+.cell .sum{font-size:15px;line-height:1.45;align-self:start;margin-top:12px;color:var(--ink);word-break:keep-all;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+/* 경과 시간은 윗줄 상태 뒤에 둔다 — 카드가 좁아져도 본문과 겹치지 않는다 */
+.cell .t{font-size:22px;font-weight:300;letter-spacing:-.04em;line-height:1;font-variant-numeric:tabular-nums;color:var(--ink);text-transform:none}
+.cell .t small{font-size:12px;letter-spacing:.04em;color:var(--muted);margin-left:.2em}
+.cell.next,.cell:has(.resume),.cell:has(.stale){padding-bottom:50px}
+.cell.run .sum,.cell.idle .sum{color:var(--muted)}.cell.run .t,.cell.idle .t{color:var(--muted)}
+.cell.idle .sum,.cell.shell .sum{color:var(--muted)}.cell .path{color:var(--muted)}.cell.fail .path{color:#fff;opacity:.85}.cell.idle .t,.cell.shell .t,.cell.idle .st,.cell.shell .st{color:var(--faint)}
+.cell .resume{position:absolute;right:14px;bottom:18px;font-size:12px;font-weight:600;letter-spacing:.04em;border:1px solid var(--ink);padding:3px 8px;color:var(--ink);background:var(--bg)}.cell .resume:hover{background:var(--ink);color:var(--bg)}
+.cell.done .top .st::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ink);margin-right:6px;vertical-align:middle}
+.cell.wait::before{content:"";position:absolute;left:0;right:0;top:-1px;height:2px;background:var(--ink)}.cell.wait .t{font-weight:700}.cell.wait .st{color:var(--ink);font-weight:700}.cell.wait .sum,.cell.done .sum{font-weight:500}
+
+.cell.next{background:var(--wash)}.cell.next::after{content:attr(data-next);position:absolute;right:14px;bottom:18px;font-size:12px;letter-spacing:.04em;border:1px solid var(--ink);padding:2px 6px;color:var(--ink)}
+/* fail: filled, declared after .next so it wins */
+.cell.fail,.cell.fail.next{background:var(--fail-fill);color:#fff}.cell.fail *{color:#fff}.cell.fail .st{font-weight:700}.cell.fail:hover{filter:brightness(1.06)}.cell.fail.next::after{border-color:#fff;color:#fff}.cell.fail .resume{background:transparent;border-color:#fff}
+.cell .stale{position:absolute;right:14px;bottom:18px;font-size:12px;letter-spacing:.04em;border:1px solid var(--line2);padding:3px 7px;color:var(--muted)}
+.cell.clock{display:flex;flex-direction:column;justify-content:space-between;cursor:default}.cell.clock:hover{background:none}
+.cell.clock .time{font-size:44px;font-weight:300;letter-spacing:-.04em;font-variant-numeric:tabular-nums}
+.cell.map{display:grid;grid-template-rows:auto 1fr;cursor:default}.cell.map:hover{background:none}
+.map .grid{display:grid;grid-template-columns:repeat(6,1fr);grid-auto-rows:1fr;gap:0;border:1px solid var(--line);margin-top:8px}
+.map .grid span{border:1px solid var(--line);font-size:11px;display:grid;place-items:center;color:var(--muted);min-height:28px}
+.map .grid span.on{background:var(--accent);color:#fff}.map .grid span.on.fail{background:var(--fail)}
+.map .grid span.hot{box-shadow:inset 0 2px 0 var(--ink)}
+.more{display:grid;place-items:center;color:var(--muted);font-size:13px;letter-spacing:.1em;cursor:default}
+.err{position:absolute;top:56px;left:0;right:0;padding:8px 32px;font-size:12px;color:var(--fail);border-bottom:1px solid var(--fail);background:var(--bg);z-index:5}
+/* 새 세션 패널 */
+.peek{position:fixed;top:0;right:0;bottom:0;width:min(420px,100%);z-index:30;background:var(--bg);border-left:1px solid var(--ink);display:flex;flex-direction:column;transform:translateX(100%);transition:transform .18s ease}
+.peek.on{transform:none}
+.ph{display:flex;align-items:center;height:56px;padding:0 24px;border-bottom:1px solid var(--ink)}
+.ph .x{margin-left:auto;font-size:18px;color:var(--muted)}.ph .x:hover{color:var(--ink)}
+.pb{flex:1;overflow:auto;padding:24px}
+.pt{font-size:22px;font-weight:700;letter-spacing:-.02em;margin:0 0 20px}
+.sec{margin:18px 0 8px}
+.in{width:100%;height:36px;background:none;color:var(--ink);border:0;border-bottom:1px solid var(--ink);padding:0;font:14px var(--font);outline:none}
+.frow{display:flex;gap:12px;align-items:flex-end}.frow .in{flex:1;min-width:0}
+.recent{display:flex;flex-direction:column;max-height:300px;overflow:auto;margin-top:6px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}.chips button{font-size:13px;border:1px solid var(--line2);padding:5px 10px;color:var(--ink2)}.chips button:hover,.chips button.on{border-color:var(--ink);color:var(--ink)}
+.crumbs{display:flex;flex-wrap:wrap;gap:2px;align-items:center;font-size:13px;color:var(--muted);margin-bottom:6px}.crumbs button{color:var(--ink2);padding:2px 3px}.crumbs button:hover{color:var(--ink);text-decoration:underline}
+.dirs{display:flex;flex-direction:column;max-height:260px;overflow:auto;border:1px solid var(--line)}.dirs button{display:flex;gap:10px;align-items:center;text-align:left;padding:7px 10px;font-size:13px;border-bottom:1px solid var(--line)}.dirs button:hover{background:var(--wash)}.dirs .upd{color:var(--muted)}
+.dirs .fi{width:14px;height:11px;border:1.5px solid var(--muted);border-radius:2px;flex:none}.chip.pick{margin-top:8px}.link{text-decoration:underline;color:var(--ink2);font-size:12px}
+.cmdrow{grid-template-columns:1fr}.setrow[hidden]{display:none}.presets{display:flex;flex-wrap:wrap;gap:6px}.presets button{font-size:13px;border:1px solid var(--line2);padding:5px 10px;color:var(--ink2)}.presets button.on{border-color:var(--ink);color:var(--ink);font-weight:600}.in.mono{font-family:ui-monospace,Menlo,monospace;text-align:left}
+.recent button{display:flex;gap:10px;align-items:baseline;padding:8px 0;border-bottom:1px solid var(--line);font-size:13px;text-align:left}
+.recent button:hover,.recent button.on{background:var(--wash)}.recent .p{min-width:0;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.seg{display:inline-flex;border:1px solid var(--ink)}.seg button{height:30px;padding:0 16px;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.seg button+button{border-left:1px solid var(--ink)}.seg button.on{background:var(--ink);color:var(--bg)}
+.hint{color:var(--muted);font-size:12px;margin-top:10px;line-height:1.5}
+.btn{margin-top:20px;height:36px;padding:0 16px;background:var(--ink);color:var(--bg);font-size:12px;letter-spacing:.17em;text-transform:uppercase}.btn[disabled]{opacity:.35;cursor:default}
+.toast{position:fixed;left:50%;bottom:240px;transform:translateX(-50%) translateY(12px);opacity:0;z-index:40;background:var(--ink);color:var(--bg);padding:10px 16px;font-size:13px;transition:all .18s;pointer-events:none;max-width:min(600px,92vw)}
+.toast.on{opacity:1;transform:translateX(-50%)}.toast.err{background:var(--fail);color:#fff}
+@media (max-width:1300px){.hero{grid-template-columns:1fr}.hero .r{display:none}.stats{grid-template-columns:repeat(3,1fr)}}
+/* 좁은 창(화면 나눠 쓰기로 보드를 한쪽에 붙였을 때): 헤더를 줄이고 칸은 두 줄로 */
+@media (max-width:760px){.stats{grid-template-columns:repeat(3,1fr)}.stat{padding:2px 8px 10px 0;margin-right:8px}.stat .n{font-size:30px;margin-top:4px}.stat .sub{display:none}.hero .caps{font-size:10px;letter-spacing:.08em}header{gap:10px;padding:0 12px}.tools{gap:4px}.ib{width:32px;height:32px}.ib svg{width:16px;height:16px}.nb{font-size:12px;padding:7px 10px;letter-spacing:.08em;white-space:nowrap}.counts{display:none}.hero{padding:14px 14px 0;gap:16px}.desk{padding:8px 12px 4px}.nextline{gap:10px}}
+/* 아주 좁은 화면(폰·좁은 창): 아이콘을 줄이고 '+ 새 세션'은 '+'만 남긴다 — 위쪽 바가 화면 밖으로 넘치지 않게 */
+@media (max-width:480px){header{gap:6px;padding:0 8px}.tools{gap:2px}.ib{width:28px;height:28px}.ib svg{width:15px;height:15px}.nb{font-size:0;padding:6px 10px;letter-spacing:0}.nb::before{content:'+';font-size:16px;line-height:1}}
+/* 낮은 창(높이 640px 이하): 상단 띠를 한 줄 숫자로 줄여 칸에 자리를 내준다 */
+@media (max-height:640px) and (min-width:761px){.hero{grid-template-columns:1fr;padding-top:12px}.hero .r{display:none}.stats{grid-template-columns:repeat(6,1fr)}.stat{padding:0 8px 8px 0;margin-right:8px}.stat .n{font-size:28px;margin-top:2px}.stat .sub{display:none}.nextline{padding:8px 0 9px}}
+/* 서버가 답하지 않으면 판을 흐리게 — 옛 숫자가 지금 상태처럼 보이지 않게 */
+body.offline main{opacity:.4}#stamp{max-width:46vw;overflow:hidden;text-overflow:ellipsis}
+/* 폭에 따라 다른 카드: 좁은 띠(화면 나눠 쓰기) = 한 줄 목록, 넓은 띠(27"·울트라와이드) = 칸 더 많이 + 요약 2줄 + 큰 시간 */
+@container strip (max-width:639px){.deskrow{grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}.cell,.cell.next,.cell:has(.resume),.cell:has(.stale){min-height:0;padding:10px 12px 10px}.cell .top{gap:8px;letter-spacing:.06em}.cell .top .st::before,.cell.done .top .st::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;margin-right:6px;vertical-align:middle}.cell.snooze .top .st::before{background:none}.cell .t{font-size:15px;font-weight:500;letter-spacing:0}.cell.wait .t{font-weight:700}.cell .sum{-webkit-line-clamp:1;margin-top:6px;font-size:14px}.cell .top{grid-column:1/-1}.cell .resume,.cell .stale,.cell.next::after{position:static;grid-column:1/-1;justify-self:end;margin-top:6px}.cell.wait .sum,.cell.fail .sum,.cell.done .sum{-webkit-line-clamp:2}.cell .acts{left:auto;bottom:auto;top:6px;right:6px}}
+@container strip (min-width:2200px){.deskrow{grid-template-columns:repeat(auto-fill,minmax(400px,1fr))}.cell{min-height:clamp(150px,15vh,200px);padding:20px 22px 18px}.cell .sum{-webkit-line-clamp:2;font-size:16px}.cell .t{font-size:30px}}
+/* 높이 맞춤: 칸이 화면 아래로 넘치면 ① 히어로를 줄이고(fit1) ② 그래도 넘치면 남은 높이를 카드 줄 수로 나눠 카드 높이를 맞춘다(--fit-h). 요약 글은 숨기지 않는다. render()마다 다시 잰다. */
+html.fit1 .stat .n{font-size:clamp(30px,4.2vh,46px);margin-top:6px}html.fit1 .stat .sub{margin-top:5px;font-size:12px}html.fit1 .stat{padding-bottom:12px}html.fit1 .hero .caps{font-size:10px}html.fit1 .spark{height:26px;margin-top:8px}html.fit1 .r .lab{padding-bottom:8px}html.fit1 .nextline{padding:10px 0 11px}html.fit1 .nextline .lb,html.fit1 .nextline .qq{font-size:15px}html.fit1 .nextline .w{font-size:19px}
+html.fit2 .cell,html.fit2 .cell.next,html.fit2 .cell:has(.resume),html.fit2 .cell:has(.stale){min-height:var(--fit-h);height:var(--fit-h);overflow:hidden;padding:14px 16px 12px}html.fit2 .cell .sum{margin-top:8px}html.fit2.tight .cell .sum{-webkit-line-clamp:2;font-size:14px}
+/* 눌러야 할 카드는 바탕색으로도 보이게: 입력 필요는 진한 회색, 답변 도착은 옅은 회색(흑백 디자인 유지). 깜빡임 한 번으로는 21칸 중에서 찾기 어려웠다(2026-11-09 데모 촬영). */
+.cell.wait{background:#e4e4e4}.cell.done{background:#f2f2f2}:root[data-theme="dark"] .cell.wait{background:#3a3a3a}:root[data-theme="dark"] .cell.done{background:#2c2c2c}@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .cell.wait{background:#3a3a3a}:root:not([data-theme="light"]) .cell.done{background:#2c2c2c}}.cell.wait:hover,.cell.done:hover{filter:brightness(.97)}
+/* header toggles: text + underline only (overrides .seg .on fill) */
+.seg.mini button.on{background:none;color:var(--ink);border-bottom:2px solid var(--ink)}
+.cell .acts{position:absolute;left:14px;bottom:14px;display:none;gap:4px;z-index:2}.cell:hover .acts,.cell:focus-within .acts{display:flex}
+.cell .acts button{font-size:12px;letter-spacing:.04em;text-transform:uppercase;border:1px solid var(--line2);background:var(--bg);color:var(--ink2);padding:3px 7px}.cell .acts button:hover{border-color:var(--ink);color:var(--ink)}
+.cell.fail .acts button{background:transparent;border-color:#fff}
+.cell .pinmark{color:var(--ink);margin-right:4px}.cell .tag{font-size:12px;letter-spacing:.04em;border:1px solid var(--line2);padding:1px 5px;margin-left:6px;color:var(--muted)}
+.cell.snooze .st{color:var(--accent)}.cell.snooze .sum{color:var(--ink2)}.cell.snooze .t{color:var(--muted)}
+.cell.snooze .top .st::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;border:1px solid var(--accent-soft);margin-right:6px;vertical-align:middle}
+.cell.dim{opacity:.22}.cell.dim:hover{opacity:.6}
+.stat.sel{box-shadow:inset 0 -3px 0 var(--accent-soft)}.stat:hover .caps{color:var(--ink)}
+.desk.pinned em{color:var(--accent)}
+.closedrow{border-top:1px solid var(--ink);margin-top:-1px}
+.closedrow summary{list-style:none;cursor:pointer;display:flex;gap:14px;align-items:center;padding:10px 18px}.closedrow summary::-webkit-details-marker{display:none}
+.closedrow summary em{font-style:normal;font-weight:700;color:var(--ink)}
+.closed{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));border-top:1px solid var(--line)}
+.closed .c{display:flex;align-items:center;gap:10px;padding:10px 18px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);font-size:13px;min-width:0}
+.closed .c .lb{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.closed .c .why{color:var(--muted);font-size:12px;letter-spacing:.04em;white-space:nowrap}
+.closed .c button{margin-left:auto;flex:none;font-size:12px;letter-spacing:.04em;border:1px solid var(--ink);padding:3px 7px}.closed .c button:hover{background:var(--ink);color:var(--bg)}
+.cell.ping{animation:ping 1.6s ease-out 1}@keyframes ping{0%{box-shadow:inset 0 0 0 3px var(--accent-soft)}100%{box-shadow:inset 0 0 0 3px transparent}}
+@media (prefers-reduced-motion:reduce){.cell.ping{animation:none;box-shadow:inset 0 0 0 3px var(--accent-soft)}}
+header *{white-space:nowrap}header{gap:16px}.stamp{font-size:13px;letter-spacing:.12em}
+.envsum{border:1px solid var(--line);padding:12px 14px;margin:0 0 16px;font-size:13px;line-height:1.7;color:var(--ink2)}.envsum p{margin:6px 0 0;white-space:normal}.envsum b{font-weight:600;color:var(--ink)}.envsum .at{text-transform:none;letter-spacing:0}.envsum .link{margin-top:6px}
+.setrow small .rg.src{color:var(--muted);overflow-wrap:anywhere}
+.firstrun{position:fixed;top:84px;left:50%;transform:translateX(-50%);width:min(640px,94vw);z-index:35;background:var(--bg);border:1px solid var(--ink);padding:18px 24px 22px;box-shadow:0 10px 32px rgba(0,0,0,.14)}.firstrun[hidden]{display:none}
+.firstrun .frh{display:flex;align-items:center;margin-bottom:12px}.firstrun .frh .x{margin-left:auto;font-size:18px;color:var(--muted)}.firstrun .frq{font-size:15px;font-weight:600;margin:4px 0 10px}.firstrun .frc button{white-space:nowrap}
+.setrow .seg.mini{justify-self:end}.seg.mini{display:inline-flex;border:1px solid var(--line)}.seg.mini button{height:32px;padding:0 12px;font-size:14px;color:var(--muted)}.seg.mini button+button{border-left:1px solid var(--line)}
+</style>
+</head>
+<body>
+<header>
+  <div class="wordmark" id="wordmark"><!--logo--><svg class="mark" viewBox="0 0 980.5 200.0" role="img" aria-label="whosup"><path fill="#F97703" d="M74.26 15.18L80.06 12.81L85.67 11.87L91.36 12.11L97.41 13.72L168.13 52.27L172.01 55.56L174.31 60.11L174.65 65.19L173.26 69.50L171.27 72.27L168.62 74.41L100.50 111.79L94.15 114.30L87.95 115.15L81.16 114.44L74.76 112.06L6.64 74.70L2.75 71.41L0.45 66.86L0.11 61.78L1.50 57.47L4.75 53.54Z"/><g fill="currentColor"><path d="M15.68 93.67L11.96 92.49L8.07 92.73L4.74 94.21L1.94 96.93L0.32 100.48L0.08 104.37L1.26 108.09L3.70 111.14L74.76 150.38L80.06 152.48L85.67 153.42L92.48 153.00L99.49 150.64L169.23 112.41L171.45 110.79L173.11 108.77L174.22 106.41L174.73 103.85L174.61 101.25L173.85 98.75L170.87 94.83L168.66 93.44L166.19 92.62L161.26 92.80L98.98 126.58L92.48 128.69L85.67 129.11L80.06 128.17L75.27 126.33ZM15.68 131.99L11.96 130.82L8.07 131.06L4.74 132.53L1.94 135.26L0.32 138.80L0.08 142.70L1.26 146.42L3.70 149.46L74.76 188.71L80.06 190.80L85.67 191.75L92.48 191.32L99.49 188.97L169.23 150.74L171.45 149.11L173.11 147.09L174.22 144.74L174.73 142.18L174.61 139.57L173.85 137.07L170.87 133.16L168.66 131.76L166.19 130.94L161.26 131.12L98.98 164.91L92.48 167.01L85.67 167.44L80.06 166.49L75.27 164.66Z"/><path transform="translate(242.762 151.807) scale(0.200803 -0.200803)" d="M698 0H533L435 310H433L337 0H172L0 498H177L263 183H266L355 498H520L612 183H614L701 498H871Z"/><path transform="translate(411.638 151.807) scale(0.200803 -0.200803)" d="M392 0V270Q392 291 389.0 310.0Q386 329 377.5 343.5Q369 358 355.0 366.5Q341 375 319 375Q276 375 253.0 344.5Q230 314 230 269V0H66V756H230V435H232Q249 465 286.0 488.5Q323 512 375 512Q426 512 460.5 494.0Q495 476 516.5 447.5Q538 419 547.5 382.0Q557 345 557 308V0Z"/><path transform="translate(529.509 151.807) scale(0.200803 -0.200803)" d="M592 251Q592 190 570.0 140.5Q548 91 510.0 56.5Q472 22 422.0 3.0Q372 -16 315 -16Q259 -16 208.5 3.0Q158 22 120.5 56.5Q83 91 61.0 140.5Q39 190 39 251Q39 312 61.0 361.0Q83 410 120.5 444.0Q158 478 208.5 496.0Q259 514 315 514Q372 514 422.0 496.0Q472 478 510.0 444.0Q548 410 570.0 361.0Q592 312 592 251ZM434 251Q434 275 426.0 298.0Q418 321 403.0 338.5Q388 356 366.0 367.0Q344 378 315 378Q286 378 264.0 367.0Q242 356 227.5 338.5Q213 321 205.5 298.0Q198 275 198 251Q198 227 205.5 204.0Q213 181 228.0 162.5Q243 144 265.0 133.0Q287 122 316 122Q345 122 367.0 133.0Q389 144 404.0 162.5Q419 181 426.5 204.0Q434 227 434 251Z"/><path transform="translate(650.393 151.807) scale(0.200803 -0.200803)" d="M357 351Q337 370 310.0 383.0Q283 396 253 396Q230 396 210.5 387.0Q191 378 191 356Q191 335 212.5 326.0Q234 317 282 306Q310 300 338.5 289.0Q367 278 390.0 260.0Q413 242 427.0 216.0Q441 190 441 154Q441 107 422.0 74.5Q403 42 372.5 22.0Q342 2 304.0 -7.0Q266 -16 228 -16Q167 -16 108.5 3.5Q50 23 11 61L103 158Q125 134 157.0 118.0Q189 102 225 102Q245 102 264.5 111.5Q284 121 284 145Q284 168 260.0 179.0Q236 190 185 202Q159 208 133.0 218.0Q107 228 86.5 245.0Q66 262 53.0 287.0Q40 312 40 347Q40 392 59.0 423.5Q78 455 108.0 475.0Q138 495 174.5 504.5Q211 514 247 514Q303 514 356.5 496.5Q410 479 447 444Z"/><path transform="translate(739.148 151.807) scale(0.200803 -0.200803)" d="M392 0V69H390Q381 52 366.5 37.0Q352 22 332.5 11.0Q313 0 289.5 -7.0Q266 -14 240 -14Q190 -14 155.5 4.0Q121 22 99.5 50.5Q78 79 68.5 115.5Q59 152 59 190V498H224V228Q224 207 227.0 188.0Q230 169 238.5 154.0Q247 139 261.0 130.5Q275 122 298 122Q341 122 363.5 154.0Q386 186 386 229V498H550V0Z"/><path transform="translate(856.417 151.807) scale(0.200803 -0.200803)" d="M618 251Q618 199 602.0 151.0Q586 103 555.5 66.5Q525 30 481.0 8.0Q437 -14 381 -14Q335 -14 294.0 4.5Q253 23 230 55H228V-240H64V498H220V437H223Q246 467 286.5 489.5Q327 512 382 512Q436 512 480.0 491.0Q524 470 554.5 434.0Q585 398 601.5 350.5Q618 303 618 251ZM459 251Q459 275 451.5 298.0Q444 321 429.5 338.5Q415 356 393.0 367.0Q371 378 342 378Q314 378 292.0 367.0Q270 356 254.5 338.0Q239 320 230.5 297.0Q222 274 222 250Q222 226 230.5 203.0Q239 180 254.5 162.0Q270 144 292.0 133.0Q314 122 342 122Q371 122 393.0 133.0Q415 144 429.5 162.0Q444 180 451.5 203.5Q459 227 459 251Z"/></g></svg><!--/logo--></div>
+  <div class="spacer"></div>
+  <div class="caps stamp off" id="stamp" hidden></div>
+  <div class="tools">
+    <button class="ib" data-sort-toggle></button>
+    <button class="ib" data-notify-toggle></button>
+    <button class="ib" data-theme-cycle></button>
+    <button class="ib" data-settings></button>
+  </div>
+  <button class="nb" data-new data-i18n="new">+ 새 세션</button>
+</header>
+<main>
+  <section class="hero" id="hero"></section>
+  <section class="strip" id="strip"></section>
+</main>
+<div class="err" id="err" hidden></div>
+<aside class="peek" id="peek"></aside>
+<div class="firstrun" id="firstrun" hidden></div>
+<div class="toast" id="toast"></div>
+<script>
+const I18N = {
+  ko: { roSettings: '읽기 전용 화면입니다. 언어만 이 브라우저에서 바꿀 수 있고, 서버 설정은 바꿀 수 없습니다.', appLabel: '터미널 앱', appHint: (d) => `whosup이 도는 컴퓨터에서 칸을 누르면 앞으로 올릴 터미널 앱입니다. 자동이면 지금 herdr를 띄워 둔 앱을 찾아 씁니다${d ? ` (지금: ${d})` : ''}. 떠 있는 창이 없으면 새 창을 엽니다. 새 창 열기는 Ghostty와 Terminal에서 되고, 다른 앱은 이미 떠 있는 창만 앞으로 올립니다.`, appHintWin: '칸을 누르면 whosup이 도는 윈도우 PC 화면에서 그 세션을 보여 주는 터미널 창을 앞으로 올립니다. 떠 있는 창이 없으면 새 창을 엽니다. 자동이면 자동 세팅이 고른 터미널로 엽니다(Windows Terminal이 있으면 그것, 없으면 PowerShell). PowerShell을 고르면 늘 PowerShell 창으로 열고, Windows Terminal을 고르면 새 창을 Windows Terminal로 열고, 끔을 고르면 창을 건드리지 않습니다. whosup은 사용자의 바탕화면 세션에서 띄워야 창이 보입니다(SSH로 띄우면 보이지 않습니다).', appOff: '끔', appPhWin: 'PowerShell · Windows Terminal · off', appAuto: '자동', appPh: '앱 이름을 직접 적어도 됩니다 (예: iTerm)', clickLabel: '칸을 누르면 열 곳 (이 브라우저만)', clickHint: '터미널 창은 whosup이 도는 컴퓨터 화면에서 그 칸의 터미널을 앞으로 올립니다. 웹 주소는 브라우저에서 herdr를 보는 웹 터미널의 새 탭으로 그 칸을 엽니다. 다른 기기에서 접속해 쓴다면 웹 주소를 고르세요.', clickTerminal: '터미널 창', clickWeb: '웹 주소', clickBoth: '둘 다', openUrlPerDesk: 'herdr 세션마다 주소가 다르면 아래에 따로 적습니다. 비워 둔 세션은 위 주소를 씁니다. Herdr 앱 줄은 여기 적은 주소가 있을 때만 웹으로 엽니다. 위의 웹 터미널 단추는 마지막으로 누른 칸에 주소를 넣습니다.', openUrlSame: '위 주소와 같음', openUrlCore: '비우면 Herdr 앱으로 엽니다', openUrlLabel: '칸을 열 주소 (이 브라우저만)', openUrlHint: '칸을 누를 때 이 주소를 새 탭으로 엽니다. {session} 자리에 herdr 세션 이름, {pane} 자리에 칸 번호가 들어갑니다. 예: 웹 클라이언트 주소/?pane={pane}. 비워 두면 열지 않습니다. 이 설정은 지금 보고 있는 브라우저에만 저장됩니다. 웹 터미널 이름 버튼을 누르면 그 제품의 기본 주소가 채워집니다. 포트가 다르면 숫자만 고치세요.', openUrlBad: '주소는 http:// 또는 https://로 시작해야 하고 {pane}이 들어가야 합니다', approveQ: '승인할까요?', trustQ: '이 폴더를 신뢰할까요? (Yes, I trust this folder)', offTag: '꺼짐', offHint: 'herdr 세션이 꺼져 있습니다 · 펼쳐서 칸을 누르면 다시 띄웁니다', again: '다시', collected: (s) => `수집 ${s}초 전`, stale_collect: (t) => `연결 끊김 · 마지막 수집 ${t}`, unknownWait: '확인할 수 없습니다. herdr에 닿지 않아 손 든 칸을 알 수 없습니다', blindHerdr: 'whosup이 herdr를 읽지 못하고 있습니다', blindServer: 'whosup 서버가 답하지 않습니다', blindBody: '그동안 손 든 칸 알림이 멈춥니다. 다시 연결되면 이 알림은 사라집니다.', resumeWhat: (p, t) => `${t} 전 대화를 엽니다${p ? ` · 마지막 요청: ${p}` : ''}`, resumeFresh: '이어 갈 대화가 없어 새로 시작합니다', errKind: { no_herdr: 'herdr 실행 파일을 찾지 못함', no_reply: 'herdr가 답하지 않음', failed: 'herdr 읽기 실패' }, forN: (t) => `${t}째`, failKind: { rate_limit: '사용량 한도', authentication_failed: '인증 실패', invalid_request: '요청 오류', server_error: '서버 오류', unknown: '오류로 끝남' }, codes: { read_only: '읽기 전용 화면입니다. 이 화면에서는 칸을 조작할 수 없습니다', resume_changed: '이어서 열 대화가 그사이 바뀌었습니다. 판을 새로 고쳤으니 확인하고 다시 눌러 주세요', cwd_missing: '그 폴더가 더 이상 없습니다. 지워진 작업 폴더라면 새 세션으로 여세요', focused: '그 칸으로 옮겼습니다', focused_started: 'herdr 세션을 띄우고 그 칸으로 옮겼습니다', focused_opened: '이 세션을 보여 주는 창이 없어 새 터미널 창을 열었습니다', resumed: '대화를 이어서 열었습니다', started: '새 대화를 시작했습니다', busy: '이미 여는 중입니다. 잠시 기다려 주세요', has_agent: '그 칸에는 이미 에이전트가 있습니다', no_session: '그 칸 기록을 찾지 못했습니다', closed: '닫힌 칸입니다. 최근 닫힘에서 이어서 열기를 눌러 주세요', bad_request: '요청이 올바르지 않습니다', herdr_error: (d) => `herdr가 실패했습니다: ${(d.message || '').slice(0, 120)}`, opened_new: '새 세션을 열었습니다', no_folder: '그 폴더가 없습니다', bad_folder: '홈 폴더 아래의 폴더만 열 수 있습니다', pane_gone: '이미 닫힌 칸이라 최근 닫힘으로 옮겼습니다', pane_closed: '칸을 닫았습니다', desk_stopped: '데스크를 껐습니다', desk_started: '데스크를 켰습니다', superseded: '' }, settingsBtn: '설정', setTitle: '설정', setSave: '저장', setSaved: '설정을 저장했습니다', oPanel: '출처: 설정 패널에서 정함 (칸을 비우고 저장하면 환경변수·자동·기본값으로 돌아갑니다)', oEnv: (n, f) => `출처: 환경변수 ${n} — 파일 ${f} (바꾸면 whosup을 stop 뒤 start)`, oEnvShell: (n) => `출처: 환경변수 ${n} — whosup을 띄운 셸·서비스의 환경 (바꾸면 whosup을 stop 뒤 start)`, oAuto: (r) => `출처: 자동 감지 — ${r} (여기서 바꾸면 그 값이 먼저입니다)`, oDefault: '출처: 기본값', oCard: '출처: 사람이 정함(첫 실행 카드) — 위 단추로 바꾸면 이 브라우저에만 적용됩니다', oBrowser: '출처: 이 브라우저에서 정함', envTitle: '감지한 환경', envUnknown: '확인 못 함', envNone: '없음', envOs: 'OS', envTerm: '터미널 앱', envHerdr: 'herdr 세션', envApp: 'Herdr 앱', envOvis: 'ovis', envRemote: '실행 위치', envLocal: '이 컴퓨터의 데스크톱', envRemoteYes: '원격(SSH 등) — 창 올리기·브라우저 열기 끔', envTermDef: (os) => os === 'win32' ? 'PowerShell(기본)' : os === 'darwin' ? 'Terminal(기본)' : '창 올리기 없음', envOff: '끔', envSessions: (n, l) => `${n}개${l ? ` (${l})` : ''}`, envAppYes: (on) => `있음 · 코어 ${on ? '실행 중' : '꺼짐'}`, envOvisCheck: '세션 확인 필요', envAt: (t) => `감지 시각 ${t}`, frTitle: '감지한 환경을 확인해 주세요', frQ: '칸을 누르면 어디로 열까요?', frTerminal: '터미널 창 (지금)', frOvis: 'ovis', frBoth: '둘 다', frOk: '이대로 쓰기', frClose: '닫기', frHint: '고른 값은 사람이 정한 설정으로 저장되고, 그 뒤로 자동 세팅이 바꾸지 않습니다. 설정 패널에서 언제든 다시 볼 수 있습니다.', frHintNoAsk: '고를 것이 없어 감지한 환경 그대로 씁니다. 이대로 쓰기를 누르면 이 카드는 다시 뜨지 않고, 설정 패널에서 언제든 다시 볼 수 있습니다.', frRo: '읽기 전용 화면이라 저장하지 않고 닫기만 합니다.', frSaved: '감지한 환경으로 시작합니다', frReopen: '감지한 환경 다시 보기', openUrlAuto: '회색 주소는 자동 감지한 ovis 주소입니다(자동 감지 — L7). 직접 적으면 그 값이 먼저입니다.', setHint: '이 컴퓨터의 whosup에만 적용됩니다. 칸을 비워 두면 기본값을 씁니다.', setRange: (r, u) => `${r.min}~${r.max}${u} 사이, 기본 ${r.def}${u}`, setItems: { seen_snooze_min: ['확인한 칸 다시 띄우기', '확인을 눌렀는데도 그 칸이 계속 기다리고 있으면, 이 시간이 지난 뒤 다시 앞으로 올립니다.', '분'], renotify_min: ['다시 알리는 간격', '답하지 않은 칸을 몇 분마다 다시 알릴지 정합니다.', '분'], renotify_max: ['다시 알리는 횟수', '같은 칸을 최대 몇 번까지 다시 알릴지 정합니다. 0이면 처음 한 번만 알립니다.', '번'], gone_misses: ['닫힌 칸으로 보는 기준', '칸이 이 횟수만큼 연달아 보이지 않으면 닫힌 것으로 보고 최근 닫힘으로 옮깁니다.', '번'], stale_collect_sec: ['연결 끊김 알림', 'herdr에서 이 시간이 넘도록 소식이 없으면 화면 위에 연결이 끊겼다고 띄웁니다.', '초'], closed_keep_days: ['최근 닫힘에 남겨 두는 기간', '닫힌 칸을 이 기간 동안 최근 닫힘 목록에 남겨 둡니다. 보관한 칸은 되돌릴 때까지 남습니다.', '일'], stale_days: ['오래 멈춘 칸 표시', '이 기간 동안 아무 움직임이 없는 칸에 보관 후보 표시를 붙입니다.', '일'], os_notify: ['macOS 알림', '브라우저 탭을 닫아 둬도 macOS 알림으로 알려 줍니다. 1이면 켜고, 0이면 끕니다.', ''], unreachable_ttl_h: ['확인 불가 칸을 내리는 시간', 'herdr에서 이 시간 넘게 확인하지 못한 칸은 손 든 칸·순번·알림에서 내립니다. 칸은 판에 남습니다.', '시간'], split_pct: ['화면 나눠 쓰기', '칸을 누르면 이 보드 창을 화면 왼쪽에, 터미널 창을 오른쪽에 붙입니다. 보드가 차지할 폭(%)을 적습니다. 노트북처럼 화면이 작을 때 33(보드 1 : 터미널 2)을 권합니다. 0이면 끕니다.', '%'] }, seenBtn: '확인함', unseenBtn: '확인 취소', pinBtn: '고정', unpinBtn: '고정 해제', stashBtn: '보관', unstashBtn: '되돌리기', pinnedDesk: '고정', closedTitle: '최근 닫힘', closedHint: (d) => `지난 ${d}일 · 사라지거나 보관한 칸`, gone: '닫힘', stashedWhy: '보관함', reopen: '이어서 열기', snoozed: (m) => `확인함 · ${m}분 뒤 다시`, unreach: '확인 불가', lastOk: (t) => `마지막 확인 ${t} 전`, filterOn: (l) => `${l}만 보는 중 · 숫자를 다시 누르면 해제`, sortLabel: '정렬', sDesk: '자리순', sNeglect: '방치순', sortedToast: '데스크마다 오래 방치된 칸을 앞으로 모았습니다', sortedDeskToast: '창에 놓인 원래 자리 순서로 돌렸습니다', sortTip: (m, n) => `정렬: ${m} · 누르면 ${n}`, notifLabel: '알림', nOn: '켬', nOff: '끔', notifTip: (on) => on ? '알림 켜짐 · 누르면 끔' : '알림 꺼짐 · 누르면 켬', themeTip: (m, n) => `모드: ${m} · 누르면 ${n}`, themeToast: (m) => `모드: ${m}`, collectedTip: (s) => `마지막 수집 ${s}초 전`, nDenied: '브라우저에서 알림이 막혀 있습니다. 주소창 왼쪽 자물쇠에서 허용해 주세요', nOnToast: '알림을 켰습니다. 칸이 손을 들면 알려 드립니다', nTest: 'whosup 알림이 켜졌습니다', langLabel: '언어', langHint: '화면 글자 언어', themeLabel: '모드', thAuto: '자동', thLight: '라이트', thDark: '다크', wait: '입력 필요', fail: '실패', done: '답변 도착', run: '진행 중', idle: '유휴', shell: '빈 칸', panes: '세션', new: '+ 새 세션', next: '다음', quiet: '조용', noWait: '기다리는 칸이 없습니다', noWaitShort: '기다리는 칸 없음', none: '없음', stale: '보관 후보', staleN: (n) => `보관 후보 ${n}`, resume: '이어서 열기', noAgent: '에이전트 없음', recent: (t) => `최근: ${t}`, noPrompt: '요청 기록 없음', today: '오늘 주의 사건', raised: '발생', within: '3분 내 처리', seen: '확인함', waiting: '승인 대기', needsInput: '입력 필요', over: (m) => `${m}분 넘김`, overLong: '한참 넘김', under: '3분 안', min: '분', hour: '시간', day: '일', cnt: '건', going: '그 칸으로 가는 중…', loading: '판을 불러오는 중입니다. 잠시 뒤 다시 해 주세요.', popupBlocked: '브라우저가 새 탭을 막았습니다. 이 페이지의 팝업을 허용해 주세요', opening: '새 세션을 여는 중…', resuming: '이어서 여는 중…', noReply: '응답 없음', off: '끊김', connErr: (m) => `whosup 서버에 연결하지 못했습니다: ${m}`, newTitle: '폴더를 골라 새 세션 열기', folder: '폴더', folderPh: '경로를 직접 붙여 넣어도 됩니다', recentFolders: '최근 폴더', browse: '폴더 찾아보기', up: '상위 폴더', pickHere: '이 폴더로', emptyDir: '하위 폴더가 없습니다', chosen: '고른 폴더', which: '어느 herdr 세션에', hint: (c) => `고른 세션에 새 탭을 열고 ${c} 를 실행합니다.`, changeCmd: '실행 명령 바꾸기', open: '열기 ↵', noFolders: '최근 폴더가 없습니다', cmdLabel: '세션을 열 때 실행할 명령', cmdHint: '새 세션과 이어서 열기에 씁니다. 자주 쓰는 것을 고르거나 직접 입력하세요. 이어서 열기는 이 명령 뒤에 --resume 을 붙입니다.', cmdPresets: [['Claude Code', 'claude'], ['권한 확인 건너뛰기', 'claude --dangerously-skip-permissions'], ['Codex', 'codex']], failNoSay: '실패 감지 · 마지막 말 없음', paneN: (n) => `${n}칸`, locale: 'ko-KR', raiseWarn: '손쉬운 사용 권한 필요 · 최소화한 창을 펼치지 못합니다', raiseWarnTip: '시스템 설정 → 개인정보 보호 및 보안 → 손쉬운 사용에서 whosup을 실행하는 node(또는 osascript)를 켠 뒤 whosup을 다시 시작해 주세요(이미 떠 있던 whosup은 권한을 새로 받지 못합니다). 권한이 없으면 터미널 앱만 앞으로 오고, 최소화한 창은 Dock에 남으며, 화면 나눠 쓰기도 되지 않습니다.', offDesks: (d) => `꺼진 데스크: ${d}`, deskOn: '켜기', deskOff: '끄기', closeBtn: '닫기', closeConfirm: (n) => `${n} 칸을 닫을까요? 그 칸에서 돌던 대화도 끝납니다(대화 기록은 남아 최근 닫힘에서 이어서 열 수 있습니다).`, deskOffConfirm: (d) => `${d} 데스크를 끌까요? 칸 안의 에이전트가 모두 끝나고 붙어 있던 터미널 창도 닫힙니다. 켜기를 누르면 칸 배치가 돌아옵니다.` },
+  en: { roSettings: 'Read-only view. You can change the language for this browser only; server settings cannot be changed.', appLabel: 'Terminal app', appHint: (d) => `The terminal app to bring forward on the computer running whosup when you click a pane. Auto uses the app that is showing herdr right now${d ? ` (now: ${d})` : ''}. If no window is open, a new one is opened. New windows work with Ghostty and Terminal; other apps only raise a window that is already open.`, appHintWin: 'Clicking a pane brings forward the terminal window that shows its session on the Windows PC running whosup. If none is open, a new one opens. Auto uses the terminal picked by auto setup (Windows Terminal if installed, otherwise PowerShell); PowerShell always opens a PowerShell window; Windows Terminal opens new windows there; off leaves windows alone. Start whosup from your desktop session for windows to show (not over SSH).', appOff: 'off', appPhWin: 'PowerShell · Windows Terminal · off', appAuto: 'auto', appPh: 'or type an app name (e.g. iTerm)', clickLabel: 'Clicking a pane opens (this browser only)', clickHint: 'Terminal window raises that pane in the terminal on the computer running whosup. Web address opens the pane in a browser tab of a web terminal for herdr. Pick web address when you use the board from another device.', clickTerminal: 'terminal window', clickWeb: 'web address', clickBoth: 'both', openUrlPerDesk: 'If each herdr session has its own address, set it below. A blank one uses the address above. A Herdr app row opens on the web only when it has an address here. The web terminal button above fills the field you clicked last.', openUrlSame: 'same as above', openUrlCore: 'blank = open in the Herdr app', openUrlLabel: 'Address to open a pane (this browser only)', openUrlHint: 'Clicking a pane opens this address in a tab. {session} becomes the herdr session name and {pane} the pane id. Example: your web client address/?pane={pane}. Leave blank to open nothing. Saved in this browser only. A web terminal button fills in the default address of that product. Change the port number if yours differs.', openUrlBad: 'The address must start with http:// or https:// and contain {pane}', approveQ: 'approve?', trustQ: 'Trust this folder? (Yes, I trust this folder)', offTag: 'off', offHint: 'herdr session is off · expand and click a pane to start it again', again: 'again', collected: (s) => `collected ${s}s ago`, stale_collect: (t) => `disconnected · last collect ${t}`, unknownWait: 'unknown. whosup cannot reach herdr', blindHerdr: 'whosup cannot read herdr', blindServer: 'the whosup server is not answering', blindBody: 'Pane alerts are paused until it reconnects. This alert closes when it does.', resumeWhat: (p, t) => `opens the conversation from ${t} ago${p ? ` · last request: ${p}` : ''}`, resumeFresh: 'no conversation to continue — starts fresh', errKind: { no_herdr: 'herdr executable not found', no_reply: 'herdr is not answering', failed: 'reading herdr failed' }, forN: (t) => `for ${t}`, failKind: { rate_limit: 'usage limit', authentication_failed: 'auth failed', invalid_request: 'bad request', server_error: 'server error', unknown: 'ended in error' }, codes: { read_only: 'this is a read-only view. Panes cannot be changed from here', resume_changed: 'the conversation to resume changed in the meantime. The board is refreshed — check it and click again', cwd_missing: 'that folder no longer exists. If the worktree was removed, open a new session instead', focused: 'moved to that pane', focused_started: 'started the herdr session and moved there', focused_opened: 'no window was showing that session, so a terminal window was opened', resumed: 'resumed the conversation', started: 'started a new conversation', busy: 'already opening. Give it a moment', has_agent: 'that pane already has an agent', no_session: 'no record of that pane', closed: 'that pane is closed. Use resume under recently closed', bad_request: 'bad request', herdr_error: (d) => `herdr failed: ${(d.message || '').slice(0, 120)}`, opened_new: 'opened a new pane', no_folder: 'that folder does not exist', bad_folder: 'only folders under home can be opened', pane_gone: 'that pane was already closed, moved to recently closed', pane_closed: 'pane closed', desk_stopped: 'desk stopped', desk_started: 'desk started', superseded: '' }, settingsBtn: 'settings', setTitle: 'settings', setSave: 'save', setSaved: 'settings saved', oPanel: 'source: set in this panel (clear the field and save to fall back to environment, auto or default)', oEnv: (n, f) => `source: environment variable ${n} — file ${f} (after changing it, stop then start whosup)`, oEnvShell: (n) => `source: environment variable ${n} — from the shell or service that started whosup (after changing it, stop then start whosup)`, oAuto: (r) => `source: auto-detected — ${r} (a value set here wins)`, oDefault: 'source: default', oCard: 'source: chosen by you (first-run card) — the buttons above change this browser only', oBrowser: 'source: set in this browser', envTitle: 'Detected environment', envUnknown: 'not detected', envNone: 'none', envOs: 'OS', envTerm: 'terminal app', envHerdr: 'herdr sessions', envApp: 'Herdr app', envOvis: 'ovis', envRemote: 'running on', envLocal: 'this computer’s desktop', envRemoteYes: 'remote (SSH etc.) — window raising and browser opening off', envTermDef: (os) => os === 'win32' ? 'PowerShell (default)' : os === 'darwin' ? 'Terminal (default)' : 'no window raising', envOff: 'off', envSessions: (n, l) => `${n}${l ? ` (${l})` : ''}`, envAppYes: (on) => `found · core ${on ? 'running' : 'stopped'}`, envOvisCheck: 'session needs checking', envAt: (t) => `detected at ${t}`, frTitle: 'Check the detected environment', frQ: 'Where should clicking a pane open it?', frTerminal: 'terminal window (now)', frOvis: 'ovis', frBoth: 'both', frOk: 'use as is', frClose: 'close', frHint: 'What you pick is saved as your own setting, and auto setup will not change it afterwards. You can see this again from settings.', frHintNoAsk: 'Nothing to choose here: whosup uses the detected environment as is. After use as is, this card will not show again; you can see it again from settings.', frRo: 'Read-only view: closing only, nothing is saved.', frSaved: 'Starting with the detected environment', frReopen: 'show detected environment again', openUrlAuto: 'Grey addresses are ovis addresses found by auto setup (auto-detected — L7). An address you type wins.', setHint: 'Applies to whosup on this computer only. Leave a field blank to use the default.', setRange: (r, u) => `${r.min} to ${r.max}${u}, default ${r.def}${u}`, setItems: { seen_snooze_min: ['Bring seen panes back', 'If a pane you marked as seen is still waiting, it moves back to the front after this long.', ' min'], renotify_min: ['Remind every', 'How often to remind you about a pane you have not answered.', ' min'], renotify_max: ['Reminders per pane', 'The most times one pane is reminded. 0 means only the first alert.', ''], gone_misses: ['Treat a pane as closed after', 'When a pane is missing this many checks in a row, it moves to recently closed.', ' checks'], stale_collect_sec: ['Disconnect warning', 'If nothing arrives from herdr for this long, the top of the board says the connection is lost.', ' s'], closed_keep_days: ['Keep recently closed for', 'Closed panes stay in the recently closed list this long. Stashed panes stay until you restore them.', ' days'], stale_days: ['Mark idle panes after', 'Panes with no activity for this long get a stale tag.', ' days'], os_notify: ['macOS alerts', 'Alert through macOS even when the browser tab is closed. 1 turns it on, 0 turns it off.', ''], unreachable_ttl_h: ['Drop unreachable panes after', 'Panes herdr could not confirm for this long leave the waiting count, order and alerts. They stay on the board.', ' h'], split_pct: ['Split screen', 'When you click a pane, this board snaps to the left of the screen and the terminal fills the rest. Board width in percent; 33 (board 1 : terminal 2) suits a laptop. 0 turns it off.', '%'] }, seenBtn: 'seen', unseenBtn: 'unsee', pinBtn: 'pin', unpinBtn: 'unpin', stashBtn: 'stash', unstashBtn: 'restore', pinnedDesk: 'pinned', closedTitle: 'recently closed', closedHint: (d) => `last ${d} days · closed or stashed panes`, gone: 'closed', stashedWhy: 'stashed', reopen: 'resume', snoozed: (m) => `seen · back in ${m} min`, unreach: 'unreachable', lastOk: (t) => `last checked ${t} ago`, filterOn: (l) => `showing ${l} only · click the number again to clear`, sortLabel: 'sort', sDesk: 'by desk', sNeglect: 'neglected first', sortedToast: 'Longest-neglected panes moved to the front of each desk', sortedDeskToast: 'Back to the order panes sit in their windows', sortTip: (m, n) => `sort: ${m} · click for ${n}`, notifLabel: 'alerts', nOn: 'on', nOff: 'off', notifTip: (on) => on ? 'alerts on · click to turn off' : 'alerts off · click to turn on', themeTip: (m, n) => `mode: ${m} · click for ${n}`, themeToast: (m) => `mode: ${m}`, collectedTip: (s) => `last collected ${s}s ago`, nDenied: 'Notifications are blocked. Allow them from the lock icon in the address bar', nOnToast: 'Alerts on. You will hear from any pane that raises its hand', nTest: 'whosup alerts are on', langLabel: 'language', langHint: 'interface language', themeLabel: 'mode', thAuto: 'auto', thLight: 'light', thDark: 'dark', wait: 'needs input', fail: 'failed', done: 'finished', run: 'running', idle: 'idle', shell: 'empty', panes: 'panes', new: '+ new pane', next: 'next', quiet: 'quiet', noWait: 'nothing is waiting on you', noWaitShort: 'nothing waiting', none: 'none', stale: 'stale', staleN: (n) => `stale ${n}`, resume: 'resume', noAgent: 'no agent', recent: (t) => `last: ${t}`, noPrompt: 'no history', today: 'attention today', raised: 'raised', within: 'handled in 3 min', seen: 'seen', waiting: 'waiting', needsInput: 'needs input', over: (m) => `${m} min over`, overLong: 'long over', under: 'under 3 min', min: 'min', hour: 'h', day: 'd', cnt: '', going: 'jumping to that pane…', loading: 'The board is still loading. Try again in a moment.', popupBlocked: 'The browser blocked the new tab. Allow pop-ups for this page', opening: 'opening a new pane…', resuming: 'resuming…', noReply: 'no reply', off: 'offline', connErr: (m) => `cannot reach the whosup server: ${m}`, newTitle: 'Open a new pane in a folder', folder: 'folder', folderPh: 'or paste a path', recentFolders: 'recent folders', browse: 'browse folders', up: 'up', pickHere: 'use this folder', emptyDir: 'no subfolders', chosen: 'chosen folder', which: 'in which herdr session', hint: (c) => `Opens a new tab in that session and runs ${c}.`, changeCmd: 'change the command', open: 'open ↵', noFolders: 'no recent folders', cmdLabel: 'Command to start a session', cmdHint: 'Used for new panes and resume. Pick a common one or type your own. Resume adds --resume after it.', cmdPresets: [['Claude Code', 'claude'], ['Skip permission prompts', 'claude --dangerously-skip-permissions'], ['Codex', 'codex']], failNoSay: 'failure detected · no last message', paneN: (n) => `${n} panes`, locale: 'en-US', raiseWarn: 'Accessibility permission needed · minimized windows cannot be restored', raiseWarnTip: 'System Settings → Privacy & Security → Accessibility: turn on the node (or osascript) that runs whosup, then restart whosup (a whosup that was already running does not pick up the new permission). Without it only the terminal app comes forward, minimized windows stay in the Dock, and split screen does not work.', offDesks: (d) => `desk off: ${d}`, deskOn: 'start', deskOff: 'stop', closeBtn: 'close', closeConfirm: (n) => `Close pane ${n}? The conversation running there ends (its history stays; resume it from recently closed).`, deskOffConfirm: (d) => `Stop desk ${d}? Every agent in it ends and its terminal windows close. Start brings the layout back.` },
+}
+// 화면 언어는 I18N에 있는 것(ko·en)만 받는다. 외부 링크의 ?lang=x 나 저장된 엉뚱한 값으로 판이 깨지지 않게 한다.
+const okLang = (v) => (v && Object.hasOwn(I18N, v) ? v : null)
+// 기본은 영어. 한국어는 설정 패널(또는 ?lang=ko)에서 고르면 이 브라우저에 저장된다 — 브라우저 언어로 추측하지 않는다.
+let lang = okLang(localStorage.getItem('whosup-lang')) || 'en'
+const T = new Proxy({}, { get: (_, k) => I18N[lang][k] ?? I18N.en[k] ?? k })
+const ST = { get snooze() { return T.seenBtn }, get wait() { return T.wait }, get fail() { return T.fail }, get done() { return T.done }, get run() { return T.run }, get idle() { return T.idle }, get shell() { return T.shell } }
+function applyChrome() {
+  document.documentElement.lang = lang
+  document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = T[el.dataset.i18n] })
+  document.querySelectorAll('[data-lang]').forEach((el) => el.classList.toggle('on', el.dataset.lang === lang))
+  const th = themeMode()
+  if (th === 'system') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = th
+  // 헤더 도구는 같은 크기 아이콘 하나씩: 누르면 다음 값으로 바뀌고, 지금 값은 툴팁으로 읽는다.
+  const sm = sortMode(), nOn = notifyOn(), thName = { system: T.thAuto, light: T.thLight, dark: T.thDark }
+  const ib = (sel, icon, tip, on) => { const el = document.querySelector(sel); if (!el) return; el.innerHTML = ICON[icon]; el.title = tip; el.setAttribute('aria-label', tip); el.classList.toggle('on', Boolean(on)) }
+  ib('[data-sort-toggle]', sm === 'neglect' ? 'neglect' : 'desk', T.sortTip(sm === 'neglect' ? T.sNeglect : T.sDesk, sm === 'neglect' ? T.sDesk : T.sNeglect), sm === 'neglect')
+  ib('[data-notify-toggle]', nOn ? 'bell' : 'bellOff', T.notifTip(nOn), nOn)
+  ib('[data-theme-cycle]', th, T.themeTip(thName[th], thName[NEXT_THEME[th]]), th !== 'system')
+  ib('[data-settings]', 'gear', T.settingsBtn, false)
+  document.querySelectorAll('[data-lang]').forEach((el) => el.classList.toggle('on', el.dataset.lang === lang))
+}
+function themeMode() { const t = localStorage.getItem('whosup-theme'); return t === 'light' || t === 'dark' ? t : 'system' }
+const NEXT_THEME = { system: 'light', light: 'dark', dark: 'system' }
+// 20×20 선 아이콘(두께 1.6). 모두 같은 상자·같은 굵기라 켬/끔·모드가 바뀌어도 크기가 같다.
+const SV = (d) => `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`
+const ICON = {
+  desk: SV('<rect x="3" y="3" width="5.5" height="5.5" rx="1"/><rect x="11.5" y="3" width="5.5" height="5.5" rx="1"/><rect x="3" y="11.5" width="5.5" height="5.5" rx="1"/><rect x="11.5" y="11.5" width="5.5" height="5.5" rx="1"/>'),
+  neglect: SV('<path d="M3 5h14M3 10h9.5M3 15h5"/><path d="M15 11.5v5.5M13 15l2 2 2-2"/>'),
+  bell: SV('<path d="M5.5 14V9a4.5 4.5 0 0 1 9 0v5l1.5 1.5h-12z"/><path d="M8.3 17.2a1.9 1.9 0 0 0 3.4 0"/>'),
+  bellOff: SV('<path d="M5.5 14V9a4.5 4.5 0 0 1 9 0v5l1.5 1.5h-12z"/><path d="M8.3 17.2a1.9 1.9 0 0 0 3.4 0"/><path d="M3 3l14 14"/>'),
+  system: SV('<circle cx="10" cy="10" r="6.5"/><path d="M10 3.5a6.5 6.5 0 0 1 0 13z" fill="currentColor"/>'),
+  light: SV('<circle cx="10" cy="10" r="3.4"/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M4.7 15.3l1.4-1.4M13.9 6.1l1.4-1.4"/>'),
+  dark: SV('<path d="M16.5 12.2A6.8 6.8 0 0 1 7.8 3.5a6.8 6.8 0 1 0 8.7 8.7z"/>'),
+  gear: SV('<path d="M3 5.5h8M15 5.5h2M3 10h2M9 10h8M3 14.5h6M13 14.5h4"/><circle cx="13" cy="5.5" r="1.8"/><circle cx="7" cy="10" r="1.8"/><circle cx="11" cy="14.5" r="1.8"/>'),
+}
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+const q = new URLSearchParams(location.search)
+if (q.get('theme')) localStorage.setItem('whosup-theme', q.get('theme'))
+if (okLang(q.get('lang'))) { lang = okLang(q.get('lang')); localStorage.setItem('whosup-lang', lang) }
+applyChrome()
+
+// 경과 시간: [값, 단위]
+function ago(iso, now) {
+  if (!iso) return null
+  const m = Math.max(0, Math.floor((now - new Date(iso)) / 60000))
+  return m >= 1440 ? [Math.floor(m / 1440), T.day] : m >= 60 ? [Math.floor(m / 60), T.hour] : [m, T.min]
+}
+const tnum = (iso, now) => { const a = ago(iso, now); return a ? `${a[0]}<small>${a[1]}</small>` : '<small>—</small>' }
+
+// 세션판 카드 → 띠 셀 상태
+function stateOf(c, b) {
+  if (b.columns.red.some((x) => x.id === c.id)) return c.failed ? 'fail' : 'wait'
+  if (b.columns.yellow.some((x) => x.id === c.id)) return 'done'
+  if ((b.columns.snoozed || []).some((x) => x.id === c.id)) return 'snooze'
+  if (c.status === 'shell') return 'shell'
+  if (c.status === 'working') return 'run'
+  return 'idle'
+}
+const sinceOf = (c, st) => (st === 'wait' || st === 'fail' || st === 'done' || st === 'snooze') ? c.attention_since : (c.last_prompt_at || c.last_user_msg_at || c.attention_since)
+const labelOf = (c) => c.label || c.project
+// 긴 이름 줄이기: 이름·명령은 끝을 '…'로, 경로는 앞(~ 또는 첫 마디)과 끝 폴더를 남기고 가운데를 '…'로. 전체는 title로 보여 준다.
+const clip = (s, n) => { const a = [...String(s ?? '')]; return a.length > n ? a.slice(0, n - 1).join('') + '…' : a.join('') }
+const clipPath = (p, n = 40) => {
+  p = String(p ?? ''); if ([...p].length <= n) return p
+  const sep = p.includes('\\') && !p.includes('/') ? '\\' : '/', segs = p.split(sep).filter((x, i) => x || i === 0)
+  let tail = segs.pop() || ''
+  if ([...tail].length > n - 4) return '…' + sep + clip(tail, n - 2)
+  while (segs.length > 1 && [...(segs[segs.length - 1] + sep + tail)].length <= n - 6) tail = segs.pop() + sep + tail
+  return (segs[0] || '') + sep + '…' + sep + tail
+}
+const titleOf = (c) => (c.title === `${c.project} · ${c.provider}` ? c.project : c.title)
+const nextSummary = (c, st) => { const s = summaryOf(c, st); return s === labelOf(c) || s === c.project ? (st === 'fail' ? T.failNoSay : st === 'done' ? T.done : c.ask_kind === 'approval' ? T.waiting : T.needsInput) : s }
+const locQ = (q) => q && q.replace(/ — 승인할까요\?$/, ` — ${T.approveQ}`).replace(/^승인할까요\?$/, T.approveQ).replace(/^이 폴더를 신뢰할까요\? \(Yes, I trust this folder\)$/, T.trustQ)
+const summaryOf = (c, st) => st === 'wait' || st === 'fail' || st === 'snooze' ? (locQ(c.question) || c.last_say || c.last_prompt || titleOf(c)) : st === 'done' ? (c.last_say || c.last_prompt || titleOf(c)) : st === 'shell' ? (c.recent_prompt ? T.recent(c.recent_prompt) : T.noAgent) : (c.last_prompt || titleOf(c))
+const deskRank = (c) => c.ref.localeCompare
+
+let board = null
+const drawn = { hero: null, skeleton: null, heads: [], cells: new Map(), closed: null } // 마지막으로 그린 글자(바뀐 곳만 고치려고)
+let filter = null // 상단 숫자 칸으로 고른 상태(null = 전부)
+let closedOpen = false
+let order = []
+let busy = false
+let timer = null
+const deskOrder = [] // 데스크 줄 순서(처음 본 순서로 고정, #4)
+
+function allCards(b) {
+  const seen = new Set()
+  const out = []
+  for (const k of ['red', 'yellow', 'snoozed', 'green', 'carry', 'grey']) for (const c of b.columns[k]) {
+    // 서버를 끈 herdr 세션·꺼 둔 Herdr 앱 줄(off)의 칸은 판에 올리지 않는다. 기록은 DB에 남아 세션을 다시 켜면 그대로 돌아온다.
+    if (c.kind === 'lane' || seen.has(c.id) || !c.caps || c.off) continue
+    seen.add(c.id); out.push(c)
+  }
+  return out.sort((a, b2) => a.ref.localeCompare(b2.ref, 'en', { numeric: true }))
+}
+
+// 데스크 끄기는 누르는 즉시 화면에 반영한다(낙관 표시). herdr 서버가 실제로 내려가는 데 3초 넘게 걸릴 수 있어서다
+// (실측: 에이전트 5개 데스크 3.17초). 서버가 꺼졌다고 알려 주거나 15초가 지나면 낙관 표시를 거둔다. 실패하면 바로 되돌린다.
+const pendingOff = new Map()
+function applyPendingOff(b) {
+  const now = Date.now()
+  for (const [desk, at] of pendingOff) if (now - at > 15000) pendingOff.delete(desk)
+  if (!pendingOff.size) return b
+  for (const k of ['red', 'yellow', 'snoozed', 'green', 'carry', 'grey']) for (const c of b.columns[k] || []) if (pendingOff.has(c.desk)) c.off = true
+  return b
+}
+// 칸이 있던 데스크 중 서버가 꺼진 것(원래 안 쓰는 default처럼 칸이 없던 세션은 빼고)
+function offDesksOf(b) {
+  const d = new Map()   // 줄 열쇠 → 보일 이름
+  for (const k of ['red', 'yellow', 'snoozed', 'green', 'carry', 'grey']) for (const c of b.columns[k] || []) if (c.off && c.caps?.includes('toggle')) d.set(c.desk, c.desk_label || c.desk)
+  return [...d]
+}
+
+function sparkline(hourly) {
+  if (!hourly || hourly.length < 2) return '<svg viewBox="0 0 400 54" preserveAspectRatio="none"></svg>'
+  const max = Math.max(1, ...hourly)
+  const pts = hourly.map((v, i) => `${(i / (hourly.length - 1)) * 400},${50 - (v / max) * 44}`).join(' ')
+  return `<svg viewBox="0 0 400 54" preserveAspectRatio="none"><polyline fill="none" stroke="currentColor" stroke-width="2" points="${pts}"/></svg>`
+}
+
+function render(b) {
+  board = b
+  if (settingsWaiting) { settingsWaiting = false; if (peekOn && document.querySelector('#peek [data-lang]') && !document.querySelector('#peek [data-save-settings]')) showSettings() }
+  const now = new Date(b.now).getTime()
+  const cards = allCards(b)
+  const states = new Map(cards.map((c) => [c.id, stateOf(c, b)]))
+  const count = (st) => cards.filter((c) => states.get(c.id) === st).length
+  // 순번은 서버가 정한 하나(b.order)를 그대로 쓴다 — 다음 1건·Enter·숫자키가 같다(약속 2). 옛 서버면 열 순서로 폴백.
+  const byId = new Map(cards.map((c) => [c.id, c]))
+  order = b.order ? b.order.map((id) => byId.get(id)).filter(Boolean) : [...b.columns.red, ...b.columns.yellow].filter((c) => c.caps)
+  const stale = cards.filter((c) => c.stale).length
+  // 헤더 글자는 연결이 끊겼을 때만 보인다. 날짜·시각은 OS 시계, 세션 수는 아래 큰 숫자와 겹쳐서 뺐다. 수집 경과는 로고 툴팁.
+  const el = document.getElementById('stamp'); const hl = b.health
+  el.hidden = !hl?.stale && !b.raise_warning
+  if (!hl?.stale && b.raise_warning) { el.title = T.raiseWarnTip; el.textContent = T.raiseWarn }
+  if (hl?.stale) {
+    // 끊긴 이유(#15)와 끊긴 지 얼마나 됐는지를 툴팁 밖에 보인다. 원문 오류는 툴팁.
+    const ag = hl.ok_at ? ago(hl.ok_at, now) : null
+    const since = ag && ag[0] > 0 ? ag.join('') : null // 1분 미만이면 '0분째'를 쓰지 않는다
+    el.title = hl.error || ''
+    el.textContent = [T.stale_collect(hl.ok_at ? new Date(hl.ok_at).toLocaleTimeString(T.locale, { hour: '2-digit', minute: '2-digit', hour12: false }) : '—'), hl.error_kind && T.errKind[hl.error_kind], since && T.forN(since)].filter(Boolean).join(' · ')
+  }
+  document.getElementById('wordmark').title = hl && hl.age_sec !== null && hl.age_sec !== undefined ? T.collectedTip(hl.age_sec) : ''
+
+  // 상단 띠: 전체 현황(상태별 큰 숫자) + 오늘 추이 + 다음 1건 한 줄
+  const nx = b.next && b.next.caps ? b.next : null
+  const nst = nx ? states.get(nx.id) : null
+  const hero = document.getElementById('hero')
+  const s = b.stats || {}
+  const rate = s.within_3min_rate === null || s.within_3min_rate === undefined ? '—' : `${Math.round(s.within_3min_rate * 100)}%`
+  const hours = (s.hourly || []).length
+  const axis = hours > 1 ? [...new Set([0, .25, .5, .75, 1].map((f) => Math.round(f * (hours - 1))))].map((h) => `<span>${String(h).padStart(2, '0')}:00</span>`).join('') : ''
+  const oldest = (st) => { const c = cards.filter((x) => states.get(x.id) === st).sort((p, q2) => (p.attention_since || '').localeCompare(q2.attention_since || ''))[0]; return c ? `${labelOf(c)} · ${(ago(c.attention_since, now) || ['', ''])[0]}${(ago(c.attention_since, now) || ['', ''])[1]}` : '' }
+  const SUB = { wait: () => oldest('wait') || T.noWaitShort, fail: () => oldest('fail') || T.none, done: () => oldest('done') || T.none, run: () => cards.filter((c) => states.get(c.id) === 'run').map(labelOf).slice(0, 3).join(' · ') || T.none, idle: () => T.staleN(stale), all: () => [...new Set(cards.map((c) => c.desk))].map((d) => [cards.find((c) => c.desk === d).desk_label || d, cards.filter((c) => c.desk === d).length]).sort((x, y) => y[1] - x[1]).map(([d, n]) => `${d} ${n}`).join(' · ') }
+  const statCell = (k, label, n) => `<div class="stat ${k}${n ? ' on' : ''}${filter === k ? ' sel' : ''}" data-filter="${k}" title="${filter === k ? esc(T.filterOn(label)) : ''}"><span class="caps">${label}</span><span class="n">${n}</span><span class="sub">${esc(SUB[k]())}</span></div>`
+  hero.className = 'hero'
+  const a = nx ? (ago(nx.attention_since, now) || [0, T.min]) : null
+  const heroHtml = `<div class="stats">${statCell('wait', T.wait, count('wait'))}${statCell('fail', T.fail, count('fail'))}${statCell('done', T.done, count('done'))}${statCell('run', T.run, count('run'))}${statCell('idle', T.idle, count('idle'))}${statCell('all', T.panes, cards.length)}</div>
+    <div class="r"><div class="lab caps"><span>${T.today}</span><i></i></div>
+      <div class="kpi caps"><div class="hi">${T.raised}<span class="n">${s.raised ?? 0}<small>${T.cnt}</small></span></div><div>${T.within}<span class="n">${rate}</span></div></div>
+      <div class="spark">${sparkline(s.hourly)}</div><div class="axis">${axis}</div></div>
+    ${nx
+      ? `<div class="nextline ${nst === 'fail' ? 'fail' : ''}" data-open="${nx.id}"><span class="caps"><i></i>${T.next}</span><span class="lb" title="${esc(labelOf(nx))}">${esc(clip(labelOf(nx), 24))}</span><span class="qq">${esc(nextSummary(nx, nst))} <span class="caps" style="text-transform:none">· ${[nx.desk_label || nx.desk, nx.branch].filter(Boolean).map((x) => esc(clip(x, 18))).join(' · ')}</span></span><span class="w">${a[0]}<small>${a[1]}</small> ${b.readonly ? '' : `<button class="chip ghost" data-seen="${nx.id}">${T.seen}</button>`}</span></div>`
+      : `<div class="nextline quiet"><span class="caps"><i></i>${T.next}</span><span class="lb" style="color:var(--muted)">${T.quiet}</span><span class="qq">${b.health?.stale ? T.unknownWait : offDesksOf(b).length ? T.offDesks(offDesksOf(b).map(([, l]) => esc(l)).join(', ')) + (b.readonly ? '' : ' ' + offDesksOf(b).map(([d, l]) => `<button class="deskbtn" data-desk-start="${esc(d)}">${T.deskOn} ${esc(l)}</button>`).join(' ')) : T.noWait}</span><span></span></div>`}`
+  // 글자가 그대로면 다시 그리지 않는다(3초마다 통째로 갈아 끼우면 포커스·글자 선택이 풀린다).
+  if (heroHtml !== drawn.hero) { hero.innerHTML = heroHtml; drawn.hero = heroHtml }
+
+  // 띠: 고정 줄 + 데스크별 칸 + 최근 닫힘
+  const strip = document.getElementById('strip')
+  const DESK_NAME = {}
+  const groups = []
+  // 핀 고정 칸은 정렬과 무관하게 맨 위 고정 줄에 둔다(고정한 순서대로).
+  const pinned = cards.filter((c) => c.pinned_at).sort((x, y) => x.pinned_at.localeCompare(y.pinned_at))
+  for (const c of cards) { if (c.pinned_at) continue; const g = groups.find((x) => x.desk === c.desk); g ? g.cards.push(c) : groups.push({ desk: c.desk, label: c.desk_label || c.desk, toggle: c.caps.includes('toggle'), cards: [c] }) }
+  // 칸이 많은 세션이 위로(사용자가 주로 보는 데스크), 같으면 이름순
+  const ordered = orderDesks(groups, deskOrder); groups.length = 0; groups.push(...ordered)
+  if (sortMode() === 'neglect') for (const g of groups) g.cards.sort((x, y) => neglectKey(x, states, now) - neglectKey(y, states, now))
+  if (pinned.length) groups.unshift({ desk: T.pinnedDesk, label: T.pinnedDesk, cards: pinned, pinned: true })
+  const matches = (st) => !filter || filter === 'all' || st === filter || (filter === 'idle' && (st === 'shell' || st === 'snooze'))
+  const ro = b.readonly
+  // 읽기 전용이면 머리의 '+ 새 세션'도 숨긴다(눌러도 403이지만 보이지 않는 편이 약속과 맞다).
+  document.querySelector('[data-new]').hidden = Boolean(ro)
+  const acts = (c, st) => ro ? '' : `<div class="acts">${['wait', 'fail', 'done'].includes(st) ? `<button data-act="seen" data-id="${c.id}">${T.seenBtn}</button>` : ''}${st === 'snooze' ? `<button data-act="unseen" data-id="${c.id}">${T.unseenBtn}</button>` : ''}<button data-act="${c.pinned_at ? 'unpin' : 'pin'}" data-id="${c.id}">${c.pinned_at ? T.unpinBtn : T.pinBtn}</button>${['idle', 'shell'].includes(st) ? `<button data-act="stash" data-id="${c.id}">${T.stashBtn}</button>` : ''}${c.caps.includes('close') ? `<button data-closepane="${c.id}" data-name="${esc(c.pane_label || c.project || c.ref)}">${T.closeBtn}</button>` : ''}</div>`
+  const stLabel = (c, st) => st === 'snooze' ? T.snoozed(Math.max(1, Math.ceil((Date.parse(c.snoozed_until) - now) / 60000))) : ST[st]
+  const before = flipFirst()
+  const closed = b.closed || []
+  const keep = b.settings?.closed_keep_days ?? 7
+  const headHtml = (g) => `<div class="desk caps${g.pinned ? ' pinned' : ''}"><em>${esc((g.label || g.desk || '').toUpperCase())}</em><span>${esc(DESK_NAME[g.desk] || '')}</span><span>${T.paneN(g.cards.length)}</span>${ro || g.pinned || !g.toggle ? '' : `<button class="deskbtn" data-desk-stop="${esc(g.desk)}" data-desk-label="${esc(g.label || g.desk)}">${T.deskOff}</button>`}</div>`
+  const cellHtml = (c) => {
+      const st = states.get(c.id)
+      const idx = order.findIndex((o) => o.id === c.id)
+      return `<div role="button" tabindex="0" class="cell ${st}${nx && c.id === nx.id ? ' next' : ''}${matches(st) ? '' : ' dim'}" data-next="${T.next}" data-open="${c.id}" title="${esc(c.title)} · ${esc(c.ref)}${c.branch ? ' · ' + esc(c.branch) : ''}${c.cwd ? ' · ' + esc(c.cwd) : ''}">${acts(c, st)}
+        <div class="top"><span class="lb">${c.pinned_at ? '<span class="pinmark">◆</span>' : ''}<em>${esc(clip(labelOf(c), 20))}</em><span class="br">${esc(clip(c.branch || c.desk_label || c.desk, 18))}</span>${c.fail_kind ? `<span class="tag" title="${esc(c.fail_kind)}">${esc(T.failKind[c.fail_kind] || c.fail_kind)}</span>` : ''}${c.unreachable ? `<span class="tag" title="${c.last_ok_at ? esc(T.lastOk(ago(c.last_ok_at, now).join(''))) : ''}">${T.unreach}${c.last_ok_at ? ` · ${ago(c.last_ok_at, now).join('')}` : ''}</span>` : ''}</span><span class="sx"><span class="st">${st === 'fail' ? '× ' : ''}${stLabel(c, st)}${idx >= 0 && idx < 9 ? ` ${idx + 1}` : ''}</span>${sinceOf(c, st) ? `<span class="t">${tnum(sinceOf(c, st), now)}</span>` : ''}</span></div>
+        <div class="sum">${summaryOf(c, st) === labelOf(c) || summaryOf(c, st) === c.project ? `<span class="path">${esc(c.cwd ? clipPath(c.cwd.replace(/^\/Users\/[^/]+/, '~'), 40) : T.noPrompt)}</span>` : esc(summaryOf(c, st))}</div>
+        ${st === 'shell' && !ro && c.caps.includes('resume') ? `<button class="resume" data-resume="${c.id}" data-sid="${esc(c.resume?.sid || '')}" title="${esc(c.resume ? T.resumeWhat(c.resume.prompt, (ago(c.resume.at, now) || []).join('')) : T.resumeFresh)}">${T.resume}</button>` : c.stale && !(nx && c.id === nx.id) ? `<span class="stale">${T.stale}</span>` : ''}</div>`
+  }
+  const closedHtml = (closed.length ? `<details class="closedrow"${closedOpen ? ' open' : ''}><summary class="caps"><em>${T.closedTitle}</em><span>${closed.length}</span><span>${T.closedHint(keep)}</span></summary><div class="closed">${closed.map((c) => `<div class="c"><span class="lb" title="${esc(c.pane_label || c.project)}">${esc(clip(c.pane_label || c.project, 28))}</span><span class="why">${esc(c.desk_label || c.desk)} · ${c.reason === 'stashed' ? T.stashedWhy : T.gone} · ${(ago(c.closed_at, now) || ['', ''])[0]}${(ago(c.closed_at, now) || ['', ''])[1]}</span>${ro ? '' : c.reason === 'stashed' ? `<button data-act="unstash" data-id="${c.id}">${T.unstashBtn}</button>` : `<button data-resume="${c.id}" data-sid="${esc(c.resume?.sid || '')}" title="${esc(c.resume ? T.resumeWhat(c.resume.prompt, (ago(c.resume.at, now) || []).join('')) : T.resumeFresh)}">${T.reopen}</button>`}</div>`).join('')}</div></details>` : '')
+  // 포커스가 있던 칸(또는 그 안의 버튼)을 기억했다가, 그 칸을 갈아 끼웠으면 돌려준다.
+  const ae = document.activeElement, fcell = ae?.closest?.('.cell[data-open]')
+  const fkey = fcell ? { id: fcell.dataset.open, sub: ae === fcell ? null : ae.dataset.act ? `[data-act="${ae.dataset.act}"]` : ae.dataset.resume ? '[data-resume]' : ae.dataset.closepane ? '[data-closepane]' : null } : null
+  const cellsNow = new Map(groups.flatMap((g) => g.cards.map((c) => [String(c.id), cellHtml(c)])))
+  const heads = groups.map(headHtml)
+  const skeleton = JSON.stringify(groups.map((g) => [g.desk, g.label, Boolean(g.pinned), g.cards.map((c) => c.id)]))
+  if (skeleton === drawn.skeleton && strip.querySelector('#closedwrap')) {
+    // 칸 배치가 그대로면 글자가 바뀐 칸·머리줄만 갈아 끼운다.
+    strip.querySelectorAll('.desk').forEach((el, i) => { if (heads[i] !== drawn.heads[i]) el.outerHTML = heads[i] })
+    for (const [id, html] of cellsNow) if (drawn.cells.get(id) !== html) { const el = strip.querySelector(`.cell[data-open="${id}"]`); if (el) el.outerHTML = html }
+    if (closedHtml !== drawn.closed) strip.querySelector('#closedwrap').innerHTML = closedHtml
+  } else {
+    strip.innerHTML = groups.map((g, i) => `${heads[i]}<div class="deskrow" style="--n:${Math.max(g.cards.length, 3)}">${g.cards.map((c) => cellsNow.get(String(c.id))).join('')}</div>`).join('') + `<div id="closedwrap">${closedHtml}</div>`
+  }
+  Object.assign(drawn, { skeleton, heads, cells: cellsNow, closed: closedHtml })
+  if (fkey && !document.activeElement?.closest?.('.cell[data-open]')) {
+    const el = strip.querySelector(`.cell[data-open="${fkey.id}"]`)
+    ;((fkey.sub && el?.querySelector(fkey.sub)) || el)?.focus({ preventScroll: true })
+  }
+  fitHeight()
+  flipPlay(before)
+  signal(cards, states)
+}
+
+// 칸이 보드 아래로 넘쳐 스크롤이 생기면 히어로를 줄이고, 그래도 넘치면 카드 높이를 남은 높이에 맞춘다. 좁은 화면(760px 이하)은 목록형이라 건드리지 않는다.
+function fitHeight() {
+  const root = document.documentElement, strip = document.getElementById('strip')
+  root.classList.remove('fit1', 'fit2', 'tight'); root.style.removeProperty('--fit-h')
+  if (innerWidth <= 760 || strip.scrollHeight <= strip.clientHeight + 1) return
+  root.classList.add('fit1')
+  if (strip.scrollHeight <= strip.clientHeight + 1) return
+  const cells = [...strip.querySelectorAll('.cell')]
+  if (!cells.length) return
+  const rows = new Set(cells.map((c) => c.offsetTop)).size
+  const cellsH = [...new Set(cells.map((c) => c.offsetTop))].reduce((sum, top) => sum + Math.max(...cells.filter((c) => c.offsetTop === top).map((c) => c.offsetHeight)), 0)
+  const other = strip.scrollHeight - cellsH
+  const h = Math.floor((strip.clientHeight - other) / rows) - 1
+  // 카드가 글자를 담지 못할 만큼 낮아지면(96px 미만) 누르지 않고 스크롤하게 둔다 — 눌린 카드는 요약과 버튼이 겹쳤다.
+  if (h < 96) return
+  root.style.setProperty('--fit-h', Math.max(h, 76) + 'px')
+  root.classList.add('fit2')
+  if (h < 112) root.classList.add('tight')
+}
+
+/* 방치순 정렬 + FLIP 모션 */
+// 기기별 설정(이 브라우저의 localStorage): 서버 화면 창 올리기, 칸을 열 주소 템플릿. 서버는 누가 어느 기기 앞에 있는지 모른다.
+// 설정 패널이 보여 주는 방식과 같은 판정을 쓴다: '웹 주소'만 고른 브라우저는 서버 화면의 창을 올리지 않는다.
+function raiseOn() { return clickMode() !== 'web' }
+// 칸을 누르면 열 주소(웹 터미널 등). 이 덩어리는 화면·저장소에 닿지 않는 순수 함수다 — test/weburl.test.mjs가 그대로 읽어 시험한다.
+// get = 저장소 읽기(key → 값 또는 null). 화면에서는 localStorage.getItem.
+/*weburl*/
+// 주소 꼴: http(s)로 시작하고, 공백이 없고, {pane}이 들어 있고, 자리를 채웠을 때 실제 주소로 읽혀야 한다(포트에 글자가 섞인 주소 등을 거른다).
+function validOpenUrl(t) {
+  if (typeof t !== 'string' || !/^https?:\/\/\S+$/i.test(t) || !t.includes('{pane}')) return false
+  try { const u = new URL(t.replace(/\{(?:session|pane)\}/g, 'x')); return (u.protocol === 'http:' || u.protocol === 'https:') && Boolean(u.hostname) } catch { return false }
+}
+// 주소는 기본 하나 + 줄(herdr 세션·Herdr 앱 공간)별 덮어쓰기(웹 터미널이 세션마다 따로 떠서 주소·포트가 다른 경우).
+// 기본 주소는 herdr 세션용이다. Herdr 앱 줄은 그 줄에 적어 둔 주소가 있을 때만 웹으로 연다(없으면 Herdr 앱으로 간다).
+// 줄에 적어 둔 주소의 꼴이 틀렸으면 그 줄은 웹으로 열지 않는다 — 기본 주소로 넘어가면 다른 세션의 웹 터미널에서
+// 번호만 같은 엉뚱한 칸이 열린다.
+function openUrlTemplateFor(c, get) {
+  const own = get(`whosup-open-url:${c.desk}`)
+  if (own) return validOpenUrl(own) ? own : ''
+  const base = c.runtime === 'herdr' ? get('whosup-open-url') : ''
+  return validOpenUrl(base) ? base : ''
+}
+// {session} = 줄 이름(herdr 세션 이름, Herdr 앱 공간 이름), {pane} = 칸 id(herdr 칸, herdr-core 터미널 주소). 주소로 못 여는 카드면 ''.
+function buildOpenUrl(c, template) {
+  if (!c || !c.caps?.includes('web') || !validOpenUrl(template)) return ''
+  const i = c.ref.indexOf('/'), pane = c.ref.slice(i + 1)
+  const url = template.replaceAll('{session}', encodeURIComponent(c.desk_label || c.desk || c.ref.slice(0, i))).replaceAll('{pane}', encodeURIComponent(pane))
+  try { new URL(url) } catch { return '' }   // 자리를 채운 결과가 주소가 아니면 열지 않는다
+  return url
+}
+// 이 카드를 누르면 열 주소. 웹 주소를 꺼 두었거나 맞는 주소가 없으면 '' — 그때는 터미널(또는 Herdr 앱) 이동만 한다.
+function openUrlOf(c, get) {
+  if (!c || get('whosup-open-url-on') === 'off') return ''
+  return buildOpenUrl(c, openUrlTemplateFor(c, get))
+}
+// 칸을 누르면 열 곳: terminal(서버 화면의 터미널 창·Herdr 앱) | web(주소를 새 탭으로) | both. keys = 저장된 열쇠 목록.
+function clickModeOf(get, keys) {
+  const any = keys.some((k) => (k === 'whosup-open-url' || k.startsWith('whosup-open-url:')) && validOpenUrl(get(k)))
+  const web = get('whosup-open-url-on') !== 'off' && any
+  return web ? (get('whosup-raise') !== 'off' ? 'both' : 'web') : 'terminal'
+}
+// 한 번의 클릭이 할 일: url = 새 탭으로 열 주소(없으면 ''), raise = 서버 화면의 창(터미널·Herdr 앱)을 올릴지.
+// 웹 주소만(web) 고른 브라우저는 창을 올리지 않는다. 다만 이 카드에 열 주소가 없으면 올린다(주소 없는 줄은 터미널·Herdr 앱으로 간다).
+function clickPlanOf(c, get, keys) {
+  const url = openUrlOf(c, get)
+  return { url, raise: !url || clickModeOf(get, keys) !== 'web' }
+}
+/*/weburl*/
+/*origin*/
+// 설정 값의 출처 한 줄과 "감지한 환경" 요약, 첫 실행 카드의 단추. 화면·저장소에 닿지 않는 순수 함수다 — test/firstrun.test.mjs가 그대로 읽어 시험한다.
+// o = 서버 settingOrigins의 한 항목: { source: 'panel' } | { source: 'env', name, file } | { source: 'auto', reason } | { source: 'default' }.
+function originText(o, T) {
+  if (!o) return ''
+  if (o.source === 'panel') return T.oPanel
+  if (o.source === 'env') return o.file ? T.oEnv(o.name, o.file) : T.oEnvShell(o.name)
+  if (o.source === 'auto') return T.oAuto(o.reason || '')
+  if (o.source === 'browser') return T.oBrowser
+  if (o.source === 'card') return T.oCard
+  return T.oDefault
+}
+// 요약 항목 [이름, 값]. 감지하지 못한 항목(값 없음)은 '확인 못 함'.
+function envSummaryParts(s, T) {
+  const U = T.envUnknown
+  if (!s) return [[T.envOs, U], [T.envTerm, U], [T.envHerdr, U], [T.envApp, U], [T.envOvis, U], [T.envRemote, U]]
+  const OS = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' }
+  const os = s.os ? (OS[s.os] || s.os) : U
+  const term = s.terminal === 'off' ? T.envOff : s.terminal ? s.terminal : s.os ? T.envTermDef(s.os) : U
+  const herdr = !s.herdr ? U : !s.herdr.found ? T.envNone : T.envSessions((s.herdr.sessions || []).length, (s.herdr.sessions || []).join(', '))
+  const app = !s.herdr_app && !s.herdr_core ? U : s.herdr_app?.found || s.herdr_core?.running ? T.envAppYes(Boolean(s.herdr_core?.running)) : T.envNone
+  const ovis = !Array.isArray(s.ovis) ? U : !s.ovis.length ? T.envNone : s.ovis.map((o) => `${o.port} ↔ ${o.confirmed && o.session ? o.session : T.envOvisCheck}`).join(', ')
+  const remote = s.desktop === true ? T.envLocal : s.desktop === false ? T.envRemoteYes : U
+  return [[T.envOs, os], [T.envTerm, term], [T.envHerdr, herdr], [T.envApp, app], [T.envOvis, ovis], [T.envRemote, remote]]
+}
+// 첫 실행 카드: 띄울지와 단추. force = 설정 패널에서 다시 보기. 읽기 전용이면 닫기만(저장 없음).
+// ovis를 세션과 맞췄을 때만(ask_click) 칸을 누르면 열 곳을 묻는다. 'web'은 화면에서 "ovis"로 보인다.
+function firstRunPlan(view, { readonly, force } = {}) {
+  const fr = view?.first_run
+  const show = Boolean(force || (fr?.show && !readonly))
+  if (!show) return { show: false, ask: false, actions: [] }
+  if (readonly) return { show, ask: false, actions: ['close'] }
+  const ask = Boolean(fr?.ask_click)
+  return { show, ask, actions: ask ? ['terminal', 'web', 'both', 'ok'] : ['ok'] }
+}
+// 카드 아래 안내 문장의 I18N 키. 읽기 전용=저장하지 않음, 고를 것이 있을 때만 '고른 값은 사람이 정한 설정으로 저장…',
+// ovis가 없어 고를 것이 없으면 그 문장을 내지 않고 '감지한 환경 그대로 씁니다'만(LOOP 2회차 회차 1 후보).
+function firstRunHintKey(plan) {
+  if (plan.actions.includes('close')) return 'frRo'
+  return plan.ask ? 'frHint' : 'frHintNoAsk'
+}
+/*/origin*/
+// 서버가 알려 준 브라우저 기본값(GET /api/autoconf client_defaults: 칸 열기 방식, 자동 감지한 ovis 주소).
+// 이 브라우저에 사람이 저장한 값이 있으면 그게 먼저이고, 없을 때만 이 값을 쓴다. 이 값을 브라우저에 옮겨 적지 않는다(자동 값을 사람 값으로 굳히지 않는다).
+let srvDefaults = {}
+const lsGet = (k) => localStorage.getItem(k) ?? (Object.hasOwn(srvDefaults, k) ? srvDefaults[k] : null)
+const lsKeys = () => [...new Set([...Object.keys(localStorage), ...Object.keys(srvDefaults)])]
+function clickMode() { return clickModeOf(lsGet, lsKeys()) }
+function setClickMode(m) {
+  localStorage.setItem('whosup-open-url-on', m === 'terminal' ? 'off' : 'on')
+  localStorage.setItem('whosup-raise', m === 'web' ? 'off' : 'on')
+}
+const clickPlan = (c) => clickPlanOf(c, lsGet, lsKeys())
+// 설정 패널에 줄별 주소 칸을 보일 줄: 줄이 둘 이상이면 전부. 하나뿐이면 Herdr 앱 줄(기본 주소를 쓰지 않아 여기 말고는 적을 곳이 없다)과
+// 이미 주소를 적어 둔 줄(칸이 없으면 고치거나 지울 수 없다).
+// 판에 지금 없는 줄(꺼 둔 줄, 닫은 공간)에 주소가 저장돼 있으면 그 칸도 보인다 — 그래야 고치거나 지울 수 있고, 그 주소 하나만 남았을 때도 설정을 저장할 수 있다.
+const urlDeskRows = () => {
+  const desks = desksOnBoard(), on = new Set(desks.map(([d]) => d))
+  const saved = lsKeys().filter((k) => k.startsWith('whosup-open-url:') && lsGet(k)).map((k) => k.slice('whosup-open-url:'.length)).filter((d) => !on.has(d)).sort()
+  return [...(desks.length > 1 ? desks : desks.filter(([d]) => d.startsWith('core:') || lsGet(`whosup-open-url:${d}`))), ...saved.map((d) => [d, d])]
+}
+// 판에 있는 줄: [열쇠, 보일 이름]
+const desksOnBoard = () => board ? [...new Map(allCards(board).map((c) => [c.desk, c.desk_label || c.desk]))].sort((a, b) => a[1].localeCompare(b[1])) : []
+function cardById(id) {
+  for (const k of ['red', 'yellow', 'snoozed', 'green', 'carry', 'grey']) for (const c of board?.columns?.[k] || []) if (c.id === id) return c
+  return null
+}
+function sortMode() { return localStorage.getItem('whosup-sort') === 'neglect' ? 'neglect' : 'desk' }
+// 손 든 칸(입력 필요·실패·답변 도착)이 먼저, 그 안에서 오래 기다린 순. 나머지는 마지막 활동이 오래된 순. 시각 없는 칸은 맨 뒤.
+function neglectKey(c, states, now) {
+  const st = states.get(c.id)
+  // 손 든 칸은 서버 순번(order) 그대로 — 방치순에서도 다음 1건과 숫자키 순서가 어긋나지 않는다(약속 2).
+  if (ATTN.includes(st)) { const i = order.findIndex((o) => o.id === c.id); return i < 0 ? 1e14 : i }
+  const t = Date.parse(sinceOf(c, st) || '') || now
+  return (st === 'snooze' ? 1e15 : 2e15) + t
+}
+function flipFirst() { const m = new Map(); document.querySelectorAll('.cell[data-open]').forEach((el) => m.set(el.dataset.open, el.getBoundingClientRect())); return m }
+function flipPlay(first) {
+  if (!first.size || matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  document.querySelectorAll('.cell[data-open]').forEach((el) => {
+    const a = first.get(el.dataset.open); if (!a) return
+    const b2 = el.getBoundingClientRect(); const dx = a.left - b2.left, dy = a.top - b2.top
+    if (!dx && !dy) return
+    el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], { duration: 520, easing: 'cubic-bezier(.2,.8,.2,1)' })
+  })
+}
+
+/* 알림: 탭 제목·파비콘·새로 손 든 칸 강조·브라우저 알림(선택) */
+const ATTN = ['wait', 'fail', 'done']
+let prevAttn = null
+const pinged = new Map()
+function notifyOn() { return localStorage.getItem('whosup-notify') === 'on' && 'Notification' in window && Notification.permission === 'granted' }
+/*fav*/const FAV_W = 97.1, FAV_O = 'M41.26 1.87L44.48 0.56L47.60 0.03L50.76 0.16L54.12 1.06L93.41 22.48L95.57 24.31L96.84 26.83L97.03 29.65L96.26 32.05L95.16 33.59L93.68 34.78L55.84 55.55L52.31 56.94L48.87 57.41L45.09 57.02L41.54 55.70L3.69 34.94L1.53 33.11L0.25 30.58L0.06 27.76L0.84 25.36L2.64 23.18Z', FAV_K = 'M8.71 45.48L6.65 44.82L4.48 44.96L2.63 45.78L1.08 47.29L0.18 49.26L0.04 51.43L0.70 53.49L2.05 55.18L41.54 76.99L44.48 78.15L47.60 78.68L51.38 78.44L55.28 77.13L94.02 55.89L96.18 53.87L97.08 51.14L96.59 48.30L94.93 46.12L92.33 44.89L89.60 44.99L54.99 63.76L51.38 64.93L47.60 65.17L44.48 64.65L41.82 63.63ZM8.71 66.77L6.65 66.12L4.48 66.25L2.63 67.07L1.08 68.58L0.18 70.55L0.04 72.72L0.70 74.78L2.05 76.48L41.54 98.28L44.48 99.44L47.60 99.97L51.38 99.73L55.28 98.42L94.02 77.18L96.18 75.16L97.08 72.43L96.59 69.59L94.93 67.42L92.33 66.19L89.60 66.29L54.99 85.06L51.38 86.23L47.60 86.46L44.48 85.94L41.82 84.92Z'/*/fav*/
+// 파비콘은 평소에도 브랜드 색(맨 위 주황). lit=손 든 칸 있음 → 오른쪽 위에 점, off=연결 끊김 → 전부 회색.
+const FAV = (lit) => { const off = lit === 'off'; lit = lit === true
+  const ink = off ? '#9a9a9a' : '#111', top = off ? '#9a9a9a' : '#F97703', cls = off ? '' : "class='i' "
+  const pad = lit ? 18 : 0, W = FAV_W + pad
+  const dot = lit ? `<circle cx='${W - 17.5}' cy='17.5' r='15' fill='#d4382e' stroke='#fff' stroke-width='5'/>` : ''
+  return 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 ${W} 100'><style>@media(prefers-color-scheme:dark){.i{fill:#e6e6e6}}</style><path fill='${top}' d='${FAV_O}'/><path ${cls}fill='${ink}' d='${FAV_K}'/>${dot}</svg>`) }
+/*pure:begin*/
+// 브라우저 알림 판단. DOM·Notification을 만지지 않는 순수 함수라 test/alerts.test.mjs가 그대로 꺼내 시험한다.
+// 사건 키는 herdr 상태와 대기 시작 시각이다(#3·I-1). 화면 판독(wait/fail)은 10초 문맥 캐시가 풀릴 때 흔들리므로 키에 넣지 않는다.
+function attnKey(c) { return `${c.status}:${c.attention_since || ''}` }
+// prev: 직전 관측 Map(id→키, null이면 첫 관측), attn: 지금 관측, alerts: id→{n 보낸 횟수, at, key}.
+// 돌려주는 값: send [{id, again}], drop(풀린 칸 id), 새 alerts.
+function planAlerts(prev, attn, alerts, { now, away, on, off, cfg }) {
+  const send = [], drop = [], next = new Map()
+  const can = on && away && !off // 수집이 끊긴 동안(off)에는 보내지 않는다(#7)
+  for (const [id, key] of attn) {
+    const rec = alerts.get(id)
+    if (!prev) { next.set(id, { n: 0, at: now, key }); continue }
+    if (prev.get(id) !== key || !rec || rec.key !== key) {
+      if (can) send.push({ id, again: false })
+      next.set(id, { n: can ? 1 : 0, at: now, key, fresh: true })
+    } else if (can && rec.n <= cfg.renotify_max && now - rec.at >= cfg.renotify_min * 60000) {
+      // 오래 방치된 손 든 칸은 다시 알린다(약속 4). "다시"는 실제로 한 번 보낸 뒤에만(#21).
+      send.push({ id, again: rec.n > 0 })
+      next.set(id, { n: rec.n + 1, at: now, key })
+    } else next.set(id, rec)
+  }
+  for (const id of alerts.keys()) if (!attn.has(id)) drop.push(id)
+  return { send, drop, alerts: next }
+}
+// 감시가 끊긴 것도 알린다(I-7). key: 끊김 에피소드(null이면 연결됨). 잠에서 깬 직후 한 번 늦은 응답으로는 울리지 않게
+// 연속 2회 관측이나 수집 오류가 함께 있을 때만, 에피소드당 한 번.
+function planBlind(b, key, { errored }) {
+  if (!key) return { key: null, streak: 0, sent: false, close: Boolean(b.sent) }
+  const same = b.key === key
+  const streak = same ? b.streak + 1 : 1
+  const sent = same && Boolean(b.sent)
+  return { key, streak, sent, due: !sent && (streak >= 2 || Boolean(errored)) }
+}
+// 데스크 줄 순서는 처음 본 순서로 고정한다(#4). 처음 한꺼번에 보인 데스크는 칸 많은 순·이름순, 그 뒤 새 데스크는 끝에.
+function orderDesks(groups, seen) {
+  const fresh = groups.filter((g) => !seen.includes(g.desk)).sort((a, b) => b.cards.length - a.cards.length || a.desk.localeCompare(b.desk))
+  for (const g of fresh) seen.push(g.desk)
+  return [...groups].sort((a, b) => seen.indexOf(a.desk) - seen.indexOf(b.desk))
+}
+/*pure:end*/
+let alerts = new Map()
+const openNt = new Map() // id → 열린 Notification
+let blind = {}
+let blindNt = null
+function sendAlert(c, st, again) {
+  const nt = new Notification(`${labelOf(c)} · ${ST[st]}${again ? ` · ${T.again}` : ''}`, { body: nextSummary(c, st), tag: `whosup-${c.id}`, icon: FAV(true), renotify: Boolean(again) })
+  nt.onclick = () => { window.focus(); if (can()) openCard(c.id); nt.close() }
+  return nt
+}
+function setChrome(n, off) {
+  document.title = off ? '(!) whosup' : n ? `(${n}) whosup` : 'whosup'
+  const fav = document.getElementById('fav'); const mode = off ? 'off' : String(n > 0)
+  if (fav.dataset.lit !== mode) { fav.href = FAV(off ? 'off' : n > 0); fav.dataset.lit = mode }
+}
+const isAway = () => document.visibilityState !== 'visible' || !document.hasFocus()
+// 끊김 알림: herdr를 못 읽거나(key herdr:<마지막 성공 시각>) 후즈업 서버가 답하지 않을 때(key server).
+function blindSignal(key, errored) {
+  blind = planBlind(blind, key, { errored })
+  if (blind.close) { blindNt?.close(); blindNt = null }
+  if (blind.due && notifyOn() && isAway()) {
+    blindNt = new Notification(key === 'server' ? T.blindServer : T.blindHerdr, { body: T.blindBody, tag: 'whosup-blind', icon: FAV('off') })
+    blind.sent = true
+  }
+}
+function signal(cards, states) {
+  const raisedCards = cards.filter((c) => ATTN.includes(states.get(c.id)))
+  const attn = new Map(raisedCards.map((c) => [c.id, attnKey(c)]))
+  const hl = board?.health
+  const off = Boolean(hl?.stale)
+  setChrome(attn.size, off)
+  blindSignal(off ? `herdr:${hl?.ok_at || ''}` : null, Boolean(hl?.error))
+  const cfg = board?.settings || { renotify_min: 15, renotify_max: 4 }
+  const r = planAlerts(prevAttn, attn, alerts, { now: Date.now(), away: isAway(), on: notifyOn(), off, cfg })
+  for (const [id, rec] of r.alerts) if (rec.fresh) { pinged.set(id, Date.now()); delete rec.fresh }
+  for (const { id, again } of r.send) {
+    const c = raisedCards.find((x) => x.id === id)
+    openNt.get(id)?.close()
+    openNt.set(id, sendAlert(c, states.get(id), again))
+  }
+  // 손 든 상태가 풀린 칸의 알림은 걷어 낸다(F13).
+  for (const id of r.drop) { openNt.get(id)?.close(); openNt.delete(id) }
+  alerts = r.alerts
+  prevAttn = attn
+  for (const [id, t] of pinged) if (Date.now() - t > 1600) pinged.delete(id)
+  // 칸을 통째로 다시 그리지 않으므로 강조 표시는 여기서 붙이고 뗀다.
+  document.querySelectorAll('.cell[data-open]').forEach((el) => el.classList.toggle('ping', pinged.has(Number(el.dataset.open))))
+}
+async function setNotify(v) {
+  if (v === 'on' && 'Notification' in window) {
+    const p = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission
+    if (p !== 'granted') { localStorage.setItem('whosup-notify', 'off'); applyChrome(); return toast(T.nDenied, true) }
+    localStorage.setItem('whosup-notify', 'on'); applyChrome(); toast(T.nOnToast)
+    return new Notification(T.nTest, { tag: 'whosup-test', icon: FAV(true) })
+  }
+  localStorage.setItem('whosup-notify', 'off'); applyChrome()
+}
+
+// 새로고침은 한 번에 하나만(#11). busy는 POST 동작 중에만 참이라 진행 중인 GET과 새 GET이 겹칠 수 있었다.
+let refreshing = false
+let pageBuild = null
+let refreshAgain = false
+async function refresh() {
+  if (busy || refreshing) { refreshAgain = true; return }
+  refreshing = true
+  try {
+    const p = new URLSearchParams()
+    if (q.get('all') === '1') p.set('all', '1')
+    if (document.visibilityState === 'visible') p.set('view', '1')
+    // 서버가 멈추면 fetch가 끝나지 않는다 — 8초에 끊고 끊김으로 표시한다.
+    const r = await fetch(`/api/board${p.size ? `?${p}` : ''}`, { cache: 'no-store', signal: AbortSignal.timeout(8000) })
+    if (!r.ok) throw new Error(`HTTP ${r.status}`)
+    const data = await r.json()
+    if (data.build && pageBuild && data.build !== pageBuild && !document.querySelector('.peek.on')) return location.reload()
+    pageBuild = data.build || pageBuild
+    render(applyPendingOff(data))
+    document.body.classList.remove('offline')
+    if (!acLoaded) loadAutoconf()
+  } catch (e) {
+    // 안내는 머리줄 한곳에(통계 라벨을 덮던 띠를 없앴다), 판은 흐리게.
+    const st = document.getElementById('stamp'); st.hidden = false; st.textContent = `${T.off} · ${T.connErr(e.message)}`; st.title = T.connErr(e.message)
+    document.body.classList.add('offline')
+    setChrome(0, true)
+    blindSignal('server', false)
+  } finally { refreshing = false; if (refreshAgain && !busy) { refreshAgain = false; refresh() } }
+}
+const post = async (path, body) => {
+  const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ raise: raiseOn(), ...body }) })
+  const data = await r.json().catch(() => ({ message: `HTTP ${r.status}` }))
+  return { ok: r.ok, data }
+}
+// 읽기 전용 게이트는 하나(I-10). 화면의 모든 동작(칸 클릭·Enter·숫자키·알림 클릭·버튼)은 아래 함수들을 거치고, 함수마다 이것부터 본다.
+// 판을 아직 못 받았으면(읽기 전용인지 모른다) 막는다.
+const can = () => board?.readonly === false
+// 막힌 이유를 그대로 말한다: 판을 아직 못 받은 것과 읽기 전용은 다르다.
+const denied = () => toast(board ? T.codes.read_only : T.loading, true)
+let settingsWaiting = false // 판을 받기 전에 연 설정 패널(언어만 보인다) — 판이 오면 다시 그린다
+// 클릭 순번: 서버가 도착 순서가 아니라 클릭 순서로 마지막 클릭을 고르게 한다(터널·네트워크에서 순서가 바뀜)
+let clickN = 0
+/*webtab*/
+// 줄마다 탭 하나(이름 붙인 탭). 누를 때마다 그 탭을 그 주소로 다시 보낸다 — 탭 안에서 다른 칸으로 옮겨 가 있을 수 있어서,
+// 마지막으로 보낸 주소가 같다고 건너뛰지 않는다.
+// 탭은 이 보드와 연결된 채로(opener) 연다. 연결을 끊으면 브라우저가 그 탭을 다시 보내지 못하게 막는다(다른 출처로 넘어간
+// 탭은 연 쪽만 옮길 수 있다 — 실제 브라우저에서 확인). 그래서 주소에는 자신이 믿는 웹 터미널만 적는다(README).
+// 돌려주는 값 { ok, win, fresh }: ok=false면 브라우저가 탭을 막았다. fresh=이번 클릭이 새로 연 탭.
+const openedTabs = new Map()
+function openTab(desk, url) {
+  try {
+    const prev = openedTabs.get(desk)
+    const fresh = !prev || prev.closed
+    const win = window.open(url, `whosup-${desk}`)
+    if (!win) return { ok: false }
+    try { win.focus() } catch {}
+    openedTabs.set(desk, win)
+    return { ok: true, win, fresh }
+  } catch { return { ok: false } }
+}
+/*/webtab*/
+async function openCard(id) {
+  if (!can()) return denied()
+  // 열 주소가 있으면 클릭 처리 안에서 바로 연다(await 뒤에 열면 브라우저가 팝업으로 막는다).
+  const c = cardById(id), plan = clickPlan(c)
+  const tab = plan.url ? openTab(c.desk, plan.url) : null
+  toast(T.going)
+  const seq = Date.now() * 1000 + (++clickN % 1000)
+  const { ok, data } = await post('/api/open', { id, seq, raise: plan.raise })
+  // 서버가 그 사이 읽기 전용이 됐다: 방금 새로 연 탭은 닫고, 이 화면도 다음 판을 기다리지 않고 읽기 전용으로 돌린다.
+  if (data.code === 'read_only') { if (board) board.readonly = true; if (tab?.fresh) { try { tab.win.close() } catch {} openedTabs.delete(c.desk) } }
+  if (data.code === 'superseded') return
+  // 탭이 막혔으면 서버 쪽 성공 문구로 덮지 않는다
+  if (tab && !tab.ok) toast(T.popupBlocked, true); else toast(msgOf(data), !ok)
+  refresh()
+}
+async function doAct(a, id) {
+  if (!can()) return denied()
+  const path = { seen: '/api/seen', unseen: '/api/unseen', pin: '/api/pin', unpin: '/api/pin', stash: '/api/stash', unstash: '/api/stash' }[a]
+  if (!path) return
+  busy = true
+  try {
+    const { ok, data } = await post(path, { id, on: !['unpin', 'unstash'].includes(a) })
+    if (!ok) toast(msgOf(data), true)
+  } finally { busy = false; refresh() }
+}
+async function resumeCard(id, sid) {
+  if (!can()) return denied()
+  toast(T.resuming)
+  const { ok, data } = await post('/api/resume', { id, sid })
+  toast(msgOf(data), !ok); refresh()
+}
+
+/* 새 세션 패널 */
+const peek = document.getElementById('peek')
+let peekOn = false
+let newState = { cwd: '', session: '', folders: [], targets: [], dir: null, cmd: '' }
+function closePeek() { peek.classList.remove('on'); peekOn = false }
+async function showNew() {
+  if (!can()) return denied()
+  peekOn = true
+  try {
+    const r = await (await fetch('/api/health')).json()
+    newState.targets = r.targets || (r.herdr || []).map((n) => ({ key: n, label: n }))
+    if (!newState.targets.some((t) => t.key === newState.session)) newState.session = newState.targets[0]?.key || ''
+  } catch {}
+  try { const f = await (await fetch('/api/folders')).json(); newState.folders = f.recent || []; if (!newState.dir) await browseTo(newState.cwd || f.home) } catch {}
+  newState.cmd = board?.settings?.agent_cmd || 'claude'
+  renderNew(); peek.classList.add('on')
+  setTimeout(() => document.getElementById('cwd')?.focus(), 50)
+}
+async function browseTo(path) {
+  try { const r = await (await fetch(`/api/dirs?path=${encodeURIComponent(path)}`)).json(); if (r.ok) newState.dir = r } catch {}
+}
+function renderNew() {
+  const d = newState.dir
+  const short = (p) => (d && p.startsWith(d.home) ? '~' + p.slice(d.home.length) : p)
+  const crumbs = d && d.sep === '\\' ? `<button data-browse="${esc(d.path)}">${esc(d.path)}</button>` : d ? short(d.path).split('/').map((part, i, all) => { const full = (d.path.startsWith(d.home) ? d.home : '') + all.slice(1, i + 1).map((x) => '/' + x).join(''); return `<button data-browse="${esc(i === 0 ? d.home : full)}" title="${esc(part)}">${esc(clip(part || '/', 20))}</button>` }).join('<span>/</span>') : ''
+  peek.innerHTML = `<div class="ph"><span class="caps">${T.new}</span><button class="x" data-close>✕</button></div>
+  <div class="pb"><h2 class="pt">${T.newTitle}</h2>
+  ${newState.folders.length ? `<div class="sec caps">${T.recentFolders}</div><div class="chips">${newState.folders.map((f) => `<button data-folder="${esc(f)}" class="${f === newState.cwd ? 'on' : ''}" title="${esc(f)}">${esc(clip(f.split(/[\\/]/).pop() || f, 24))}</button>`).join('')}</div>` : ''}
+  <div class="sec caps">${T.browse}</div>
+  ${d ? `<div class="crumbs">${crumbs}</div>
+  <div class="dirs">${d.parent ? `<button data-browse="${esc(d.parent)}" class="upd">↰ ${T.up}</button>` : ''}${d.dirs.map((n) => `<button data-browse="${esc(d.path + (d.sep || '/') + n)}"><span class="fi"></span>${esc(clip(n, 40))}</button>`).join('') || `<div class="hint">${T.emptyDir}</div>`}</div>
+  <button class="chip pick" data-folder="${esc(d.path)}">${T.pickHere}</button>` : ''}
+  <div class="sec caps">${T.chosen}</div>
+  <div class="frow"><input class="in" id="cwd" placeholder="${T.folderPh}" value="${esc(newState.cwd)}" autocomplete="off"></div>
+  <div class="sec caps">${T.which}</div>
+  <div class="seg">${newState.targets.map((t) => `<button data-target="${esc(t.key)}" class="${t.key === newState.session ? 'on' : ''}" title="${esc(t.label)}">${esc(clip(t.label, 24))}</button>`).join('')}</div>
+  <div class="hint" title="${esc(newState.cmd)}">${esc(T.hint(clip(newState.cmd, 48)))} <button class="link" data-settings>${T.changeCmd}</button></div>
+  <button class="btn" data-create ${newState.cwd.trim() && newState.session ? '' : 'disabled'}>${T.open}</button></div>`
+  const input = document.getElementById('cwd')
+  input.addEventListener('input', () => { newState.cwd = input.value; const b = document.querySelector('[data-create]'); if (b) b.disabled = !(newState.cwd.trim() && newState.session) })
+}
+// 웹 터미널 프리셋: 그 제품의 기본 주소 모양. 누르면 주소 칸에 채우고 포트 숫자를 골라 둔다(다르면 숫자만 고치면 된다).
+const URL_PRESETS = [['Ovis', 'http://127.0.0.1:7317/?pane={pane}']]
+let lastUrlInput = null // 설정 패널에서 마지막으로 만진 주소 칸
+document.addEventListener('focusin', (e) => { if (e.target?.matches?.('[data-local-open-url], [data-local-open-url-desk]')) lastUrlInput = e.target })
+let pendingMode = 'terminal' // 설정 패널에서 고른(아직 저장 전) 칸 열기 방식
+let loadedMode = 'terminal' // 설정 패널을 열 때의 칸 열기 방식
+/* 감지한 환경 요약 + 첫 실행 확인 카드 */
+let acView = null // 마지막으로 받은 GET /api/autoconf
+let acLoaded = false
+function envSummaryHtml(v, withReopen) {
+  const s = v?.summary || null
+  const at = v?.at ? new Date(v.at).toLocaleString(T.locale, { hour12: false }) : ''
+  return `<div class="envsum"><div class="caps">${T.envTitle}${at ? ` <span class="at">· ${esc(T.envAt(at))}</span>` : ''}</div><p>${envSummaryParts(s, T).map(([k, x]) => `<span><b>${esc(k)}</b> ${esc(x)}</span>`).join(' · ')}</p>${withReopen ? `<button class="link" data-firstrun-open>${T.frReopen}</button>` : ''}</div>`
+}
+function showFirstRun(v, force) {
+  const el = document.getElementById('firstrun')
+  const plan = firstRunPlan(v, { readonly: !can(), force })
+  if (!plan.show) { el.hidden = true; return }
+  const lb = { terminal: T.frTerminal, web: T.frOvis, both: T.frBoth }
+  el.innerHTML = `<div class="frh"><span class="caps">${T.frTitle}</span><button class="x" data-firstrun-close aria-label="${esc(T.frClose)}">✕</button></div>
+  ${envSummaryHtml(v, false)}
+  ${plan.ask ? `<div class="frq">${T.frQ}</div><div class="seg mini frc">${['terminal', 'web', 'both'].map((m) => `<button data-firstrun="${m}">${esc(lb[m])}</button>`).join('')}</div>` : ''}
+  <div class="hint">${T[firstRunHintKey(plan)]}</div>
+  ${plan.actions.includes('ok') ? `<button class="btn" data-firstrun-ok>${T.frOk}</button>` : `<button class="btn" data-firstrun-close>${T.frClose}</button>`}`
+  el.hidden = false
+}
+async function loadAutoconf() {
+  acLoaded = true
+  try {
+    const v = await (await fetch('/api/autoconf', { cache: 'no-store' })).json()
+    acView = v; srvDefaults = v.client_defaults || {}
+    showFirstRun(v, false)
+  } catch { acLoaded = false }
+}
+// 카드에서 고르면(또는 "이대로 쓰기") 서버에 사람이 정한 값으로 저장하고 다시 띄우지 않는다. choice 없음 = 지금 그대로.
+async function firstRunChoose(choice) {
+  if (!can()) return denied()
+  const { ok, data } = await post('/api/first-run', choice ? { choice } : {})
+  if (!ok) return toast((data.errors || [msgOf(data)]).join(' · '), true)
+  srvDefaults = data.client_defaults || srvDefaults
+  // 이 브라우저에 예전에 사람이 고른 칸 열기 방식이 있으면 방금 고른 것으로 맞춘다(없으면 서버 값을 그대로 따른다).
+  if (choice && (localStorage.getItem('whosup-open-url-on') != null || localStorage.getItem('whosup-raise') != null)) setClickMode(choice)
+  document.getElementById('firstrun').hidden = true
+  toast(T.frSaved); applyChrome()
+  if (acView) acView.first_run = { ...acView.first_run, show: false }
+}
+async function showSettings() {
+  peekOn = true
+  pendingMode = loadedMode = clickMode()
+  const langRow = `<div class="setrow"><label>${T.langLabel}<small>${T.langHint}</small></label><div class="seg mini"><button data-lang="en" class="${lang === 'en' ? 'on' : ''}">EN</button><button data-lang="ko" class="${lang === 'ko' ? 'on' : ''}">한</button></div></div>`
+  // 읽기 전용: 언어(이 브라우저에만 저장)만 바꿀 수 있고, 서버 설정 칸·저장 버튼은 내지 않는다.
+  if (!can()) {
+    peek.innerHTML = `<div class="ph"><span class="caps">${T.setTitle}</span><button class="x" data-close>✕</button></div>
+  <div class="pb"><h2 class="pt">${T.setTitle}</h2>${langRow}<div class="hint">${board ? T.roSettings : T.loading}</div>${board ? `<div id="env-summary"></div>` : ''}</div>`
+    settingsWaiting = !board
+    peek.classList.add('on')
+    if (board) { try { const v = await (await fetch('/api/autoconf')).json(); acView = v; const el = document.getElementById('env-summary'); if (el) el.innerHTML = envSummaryHtml(v, true) } catch {} }
+    return
+  }
+  let data = { settings: board?.settings || {}, ranges: {} }
+  try { data = await (await fetch('/api/settings')).json() } catch {}
+  if (data.autoconf) { acView = data.autoconf; srvDefaults = data.autoconf.client_defaults || srvDefaults; pendingMode = loadedMode = clickMode() }
+  const og = data.origins || {}
+  const orig = (k) => { const t = originText(og[k], T); return t ? `<span class="rg src" data-origin="${k}">${esc(t)}</span>` : '' }
+  // 칸 열기 방식은 이 브라우저 값이 먼저, 없으면 서버 click_target(첫 실행 카드·환경변수·기본값)이다.
+  const clickOrigin = localStorage.getItem('whosup-open-url-on') != null || localStorage.getItem('whosup-raise') != null ? { source: 'browser' } : og.click_target?.source === 'panel' ? { source: 'card' } : og.click_target
+  const autoUrls = Object.keys(srvDefaults).some((k) => k.startsWith('whosup-open-url:') && srvDefaults[k])
+  // 서버가 윈도우: 터미널 칸은 윈도우 선택지로, macOS 전용인 OS 알림 칸(os_notify)은 숨긴다(브라우저 알림은 헤더 토글로 된다).
+  const winSrv = data.detected?.platform === 'win32'
+  // 맥: 자동 세팅이 정한 터미널 앱은 '자동'으로 보인다(사람이 고른 값이 아니다 — 출처 줄에 근거가 나온다). '자동'을 다시 저장해도 사람 값이 생기지 않는다.
+  // 윈도우도 같다: 자동 값(예: Windows Terminal)은 '자동'으로 보이고, PowerShell은 'PowerShell' 값으로 따로 저장된다.
+  const frontVal = data.origins?.front_app?.source === 'auto' ? '' : (data.settings.front_app || '')
+  peek.innerHTML = `<div class="ph"><span class="caps">${T.setTitle}</span><button class="x" data-close>✕</button></div>
+  <div class="pb"><h2 class="pt">${T.setTitle}</h2>
+  ${envSummaryHtml(data.autoconf, true)}
+  ${langRow}
+  <div class="setrow cmdrow"><label>${T.clickLabel}<small>${T.clickHint}${clickOrigin ? `<span class="rg src" data-origin="click_target">${esc(originText(clickOrigin, T))}</span>` : ''}</small></label>
+    <div class="seg mini" style="justify-self:start">${[['terminal', T.clickTerminal], ['web', T.clickWeb], ['both', T.clickBoth]].map(([m, lb]) => `<button data-click-mode="${m}" class="${pendingMode === m ? 'on' : ''}">${lb}</button>`).join('')}</div></div>
+  ${data.detected?.supported ? `<div class="setrow cmdrow" id="front-app-row"${pendingMode === 'web' ? ' hidden' : ''}><label for="set-front_app">${T.appLabel}<small>${esc(winSrv ? T.appHintWin : T.appHint(data.detected.front_app))}${orig('front_app')}</small></label>
+    <div class="presets">${(winSrv ? (data.detected.choices || []).map(([n, a]) => [a === 'off' ? T.appOff : a === '' ? T.appAuto : n, a]) : [[T.appAuto, ''], ['Ghostty', 'Ghostty'], ['Terminal', 'Terminal']]).map(([n, a]) => `<button data-app-preset="${esc(a)}" class="${frontVal.toLowerCase() === a.toLowerCase() ? 'on' : ''}">${esc(n)}</button>`).join('')}</div>
+    <input class="in mono" id="set-front_app" data-setting-text="front_app" data-loaded="${esc(frontVal)}" value="${esc(frontVal)}" placeholder="${esc(winSrv ? T.appPhWin : T.appPh)}" autocomplete="off"></div>` : ''}
+  <div class="setrow cmdrow" id="open-url-row"${pendingMode === 'terminal' ? ' hidden' : ''}><label for="set-open-url">${T.openUrlLabel}<small>${T.openUrlHint}</small></label>
+    <div class="presets">${URL_PRESETS.map(([n, u]) => `<button data-url-preset="${esc(u)}">${esc(n)}</button>`).join('')}</div>
+    <input class="in mono" id="set-open-url" data-local-open-url value="${esc(localStorage.getItem('whosup-open-url') || '')}" placeholder="http://127.0.0.1:PORT/?pane={pane}">
+    ${urlDeskRows().length ? `<small style="display:block;margin-top:14px;color:var(--muted);font-size:12px;line-height:1.5">${T.openUrlPerDesk}</small>${urlDeskRows().map(([d, l]) => `<div style="display:grid;grid-template-columns:88px 1fr;gap:10px;align-items:center;margin-top:6px"><span class="caps" title="${esc(l)}" style="overflow:hidden;text-overflow:ellipsis">${esc(l)}</span><input class="in mono" data-local-open-url-desk="${esc(d)}" value="${esc(localStorage.getItem(`whosup-open-url:${d}`) || '')}" placeholder="${esc(srvDefaults[`whosup-open-url:${d}`] || (d.startsWith('core:') ? T.openUrlCore : T.openUrlSame))}"></div>`).join('')}${autoUrls ? `<small style="display:block;margin-top:8px;color:var(--muted);font-size:12px;line-height:1.5">${T.openUrlAuto}</small>` : ''}` : ''}</div>
+  <div class="setrow cmdrow"><label for="set-agent_cmd">${T.cmdLabel}<small>${T.cmdHint}${orig('agent_cmd')}</small></label>
+    <div class="presets">${T.cmdPresets.map(([n, c]) => `<button data-cmd-preset="${esc(c)}" class="${(data.settings.agent_cmd || 'claude') === c ? 'on' : ''}">${esc(n)}</button>`).join('')}</div>
+    <input class="in mono" id="set-agent_cmd" data-setting-text="agent_cmd" data-loaded="${esc(data.settings.agent_cmd || '')}" value="${esc(data.settings.agent_cmd || '')}" placeholder="claude"></div>
+  <div class="hint">${T.setHint}</div>
+  ${Object.entries(data.ranges || {}).filter(([k, r]) => !r.text && !(winSrv && k === 'os_notify')).map(([k, r]) => { const [lb, hint, unit] = T.setItems[k] || [k, '', '']; return `<div class="setrow"><label for="set-${k}">${lb}<small>${hint}${r.min !== undefined ? `<span class="rg">${T.setRange(r, unit || '')}</span>` : ''}${orig(k)}</small></label><input class="in" id="set-${k}" data-setting="${k}" data-loaded="${esc(data.settings[k] ?? '')}" type="number" min="${r.min ?? ''}" max="${r.max ?? ''}" value="${data.settings[k] ?? ''}" placeholder="${r.def ?? ''}"></div>` }).join('')}
+  <div class="seterr" id="seterr"></div>
+  <button class="btn" data-save-settings>${T.setSave}</button></div>`
+  peek.classList.add('on')
+}
+async function saveSettings() {
+  if (!can()) return denied()
+  const urlEl = document.querySelector('[data-local-open-url]')
+  if (urlEl) {
+    const v = urlEl.value.trim()
+    const per = [...document.querySelectorAll('[data-local-open-url-desk]')].map((el) => [el.dataset.localOpenUrlDesk, el.value.trim(), el])
+    // 적은 주소는 모두 형식이 맞아야 하고, 웹 주소로 열기를 골랐으면 하나는 있어야 한다. 터미널만이면 적어 둔 주소는 두고 쓰지 않는다.
+    const autoUrl = Object.keys(srvDefaults).some((k) => k.startsWith('whosup-open-url:') && validOpenUrl(srvDefaults[k]))
+    const bad = (v && !validOpenUrl(v) ? urlEl : null) || per.find(([, x]) => x && !validOpenUrl(x))?.[2] || (pendingMode !== 'terminal' && !v && !per.some(([, x]) => x) && !autoUrl ? urlEl : null)
+    if (bad) { document.getElementById('seterr').textContent = T.openUrlBad; document.getElementById('open-url-row').hidden = false; bad.focus(); return }
+    if (v) localStorage.setItem('whosup-open-url', v); else localStorage.removeItem('whosup-open-url')
+    for (const [d, x] of per) { if (x) localStorage.setItem(`whosup-open-url:${d}`, x); else localStorage.removeItem(`whosup-open-url:${d}`) }
+    // 칸 열기 방식은 사람이 바꿨을 때만 이 브라우저에 적는다 — 다른 설정만 저장해도 서버 기본값(click_target)을 브라우저 값으로 굳히지 않게.
+    if (pendingMode !== loadedMode) setClickMode(pendingMode)
+    applyChrome()
+  }
+  const patch = {}
+  // 불러온 값과 달라진 칸만 보낸다 — 손대지 않은 칸까지 보내면 환경변수·기본값이 DB에 굳어 나중에 기본값을 바꿔도 반영되지 않는다(I-11).
+  document.querySelectorAll('[data-setting]').forEach((el) => { if (el.value !== el.dataset.loaded) patch[el.dataset.setting] = el.value === '' ? null : Number(el.value) })
+  document.querySelectorAll('[data-setting-text]').forEach((el) => { if (el.value.trim() !== el.dataset.loaded) patch[el.dataset.settingText] = el.value.trim() === '' ? null : el.value.trim() })
+  const { ok, data } = await post('/api/settings', { settings: patch })
+  if (!ok) { document.getElementById('seterr').textContent = (data.errors || [msgOf(data)]).join(' · '); return }
+  toast(T.setSaved); closePeek(); refresh()
+}
+async function createSession() {
+  if (!can()) return denied()
+  const cwd = newState.cwd.trim()
+  if (!cwd) return
+  toast(T.opening)
+  const { ok, data } = await post('/api/new', { cwd, session: newState.session })
+  toast(msgOf(data), !ok)
+  if (ok) closePeek()
+  refresh()
+}
+
+document.addEventListener('click', async (e) => {
+  const t = e.target
+  if (t.closest('[data-close]')) return closePeek()
+  const frc = t.closest('[data-firstrun]')
+  if (frc) return firstRunChoose(frc.dataset.firstrun)
+  if (t.closest('[data-firstrun-ok]')) return firstRunChoose()
+  if (t.closest('[data-firstrun-close]')) { document.getElementById('firstrun').hidden = true; return }
+  if (t.closest('[data-firstrun-open]')) { closePeek(); let v = acView; if (!v) { try { v = await (await fetch('/api/autoconf')).json() } catch {} } return showFirstRun(v, true) }
+  const seen = t.closest('[data-seen]')
+  if (seen) { e.stopPropagation(); return doAct('seen', Number(seen.dataset.seen)) }
+  const rs = t.closest('[data-resume]')
+  if (rs) { e.stopPropagation(); return resumeCard(Number(rs.dataset.resume), rs.dataset.sid || null) }
+  const lg = t.closest('[data-lang]')
+  if (lg) { lang = okLang(lg.dataset.lang) || lang; localStorage.setItem('whosup-lang', lang); applyChrome(); if (board) render(board); return document.querySelector('.peek.on [data-lang]') && showSettings() }
+  const fl = t.closest('[data-filter]')
+  if (fl) { const k = fl.dataset.filter; filter = filter === k || k === 'all' ? null : k; return board && render(board) }
+  const cpn = t.closest('[data-closepane]')
+  if (cpn) { e.stopPropagation(); if (!confirm(T.closeConfirm(cpn.dataset.name))) return; return post('/api/close', { id: Number(cpn.dataset.closepane) }).then(({ ok, data }) => { toast(msgOf(data), !ok); refresh() }) }
+  const ds = t.closest('[data-desk-stop]')
+  if (ds) {
+    e.stopPropagation(); const desk = ds.dataset.deskStop
+    if (!confirm(T.deskOffConfirm(ds.dataset.deskLabel || desk))) return
+    pendingOff.set(desk, Date.now()); if (board) render(applyPendingOff(board))
+    return post('/api/desk', { session: desk, on: false }).then(({ ok, data }) => { if (!ok) pendingOff.delete(desk); toast(msgOf(data), !ok); refresh() })
+  }
+  const dn = t.closest('[data-desk-start]')
+  if (dn) { e.stopPropagation(); pendingOff.delete(dn.dataset.deskStart); toast(T.opening); return post('/api/desk', { session: dn.dataset.deskStart, on: true }).then(({ ok, data }) => { toast(msgOf(data), !ok); refresh() }) }
+  const act = t.closest('[data-act]')
+  if (act) { e.stopPropagation(); return doAct(act.dataset.act, Number(act.dataset.id)) }
+  if (t.closest('[data-sort-toggle]')) { const m = sortMode() === 'neglect' ? 'desk' : 'neglect'; localStorage.setItem('whosup-sort', m); applyChrome(); if (board) render(board); return toast(m === 'neglect' ? T.sortedToast : T.sortedDeskToast) }
+  if (t.closest('[data-notify-toggle]')) return setNotify(notifyOn() ? 'off' : 'on')
+  if (t.closest('[data-theme-cycle]')) { const m = NEXT_THEME[themeMode()]; localStorage.setItem('whosup-theme', m); applyChrome(); return toast(T.themeToast({ system: T.thAuto, light: T.thLight, dark: T.thDark }[m])) }
+  if (t.closest('[data-new]')) return showNew()
+  if (t.closest('[data-settings]')) return showSettings()
+  if (t.closest('[data-save-settings]')) return saveSettings()
+  const folder = t.closest('[data-folder]')
+  if (folder) { newState.cwd = folder.dataset.folder; await browseTo(newState.cwd); return renderNew() }
+  const br = t.closest('[data-browse]')
+  if (br) { await browseTo(br.dataset.browse); return renderNew() }
+  const cm = t.closest('[data-click-mode]')
+  if (cm) { pendingMode = cm.dataset.clickMode; document.querySelectorAll('[data-click-mode]').forEach((b) => b.classList.toggle('on', b === cm)); const row = document.getElementById('open-url-row'); row.hidden = pendingMode === 'terminal'; const ar = document.getElementById('front-app-row'); if (ar) ar.hidden = pendingMode === 'web'; if (!row.hidden) (lastUrlInput && row.contains(lastUrlInput) ? lastUrlInput : document.getElementById('set-open-url')).focus(); return }
+  const up = t.closest('[data-url-preset]')
+  // 웹 터미널 단추: 마지막으로 만진 주소 칸(기본 칸 또는 줄별 칸)에 그 제품의 기본 주소를 넣고 포트 숫자를 골라 둔다 — 세션마다 포트만 바꿔 적으면 된다.
+  if (up) { const el = (lastUrlInput && document.contains(lastUrlInput) ? lastUrlInput : null) || document.getElementById('set-open-url'); el.value = up.dataset.urlPreset; el.focus(); const i = el.value.indexOf('{pane}'); el.setSelectionRange(el.value.lastIndexOf(':', i) + 1, el.value.indexOf('/', el.value.lastIndexOf(':', i))); return }
+  const ap = t.closest('[data-app-preset]')
+  if (ap) { const el = document.getElementById('set-front_app'); el.value = ap.dataset.appPreset; document.querySelectorAll('[data-app-preset]').forEach((b) => b.classList.toggle('on', b === ap)); return }
+  const cp = t.closest('[data-cmd-preset]')
+  if (cp) { const el = document.getElementById('set-agent_cmd'); el.value = cp.dataset.cmdPreset; document.querySelectorAll('[data-cmd-preset]').forEach((b) => b.classList.toggle('on', b === cp)); return }
+  const target = t.closest('[data-target]')
+  if (target) { newState.session = target.dataset.target; return renderNew() }
+    if (t.closest('[data-create]')) return createSession()
+  const open = t.closest('[data-open]')
+  if (open) return openCard(Number(open.dataset.open))
+})
+document.addEventListener('toggle', (e) => {
+  if (e.target.classList?.contains('closedrow')) closedOpen = e.target.open
+}, true)
+document.addEventListener('keydown', (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return
+  const typing = e.target.closest?.('input,textarea')
+  if (e.key === 'Escape') return closePeek()
+  if (e.key === 'Enter' && peekOn) { e.preventDefault(); if (!can()) return; return document.querySelector('[data-save-settings]') ? saveSettings() : createSession() }
+  if (typing) return
+  if (e.key === 'Enter' || e.key === ' ') {
+    // 버튼에 포커스가 있으면 그 버튼만 눌린다(다음 1건으로 같이 뛰지 않는다). 칸에 포커스가 있으면 그 칸을 연다.
+    if (e.target.closest?.('button,a,summary')) return
+    const cell = e.target.closest?.('.cell[data-open]')
+    if (cell) { e.preventDefault(); return openCard(Number(cell.dataset.open)) }
+    if (e.key === 'Enter' && board?.next) return openCard(board.next.id)
+    return
+  }
+  if (e.key === 'n' || e.key === 'N' || e.key === 'ㅜ') { e.preventDefault(); return showNew() }
+  if (/^[1-9]$/.test(e.key) && order[Number(e.key) - 1]) return openCard(order[Number(e.key) - 1].id)
+})
+// 서버 응답 code를 사용자 언어 문장으로 바꾼다(F11). 모르는 code·원문 오류는 뒤에 붙인다.
+const msgOf = (data) => { const f = data?.code && T.codes[data.code]; if (f) return typeof f === 'function' ? f(data) : f; return data?.message || data?.error || T.noReply }
+function toast(msg, bad) {
+  const el = document.getElementById('toast')
+  el.textContent = msg; el.className = `toast on${bad ? ' err' : ''}`
+  clearTimeout(toast.t); toast.t = setTimeout(() => { el.className = 'toast' }, 4500)
+}
+addEventListener('resize', () => { clearTimeout(timer); timer = setTimeout(() => board && render(board), 150) })
+refresh()
+setInterval(refresh, 3000)
+// 서버가 상태 변화를 알려 주면(SSE) 3초 주기를 기다리지 않고 바로 읽는다. 연결이 끊겨도 위의 3초 주기가 그대로 돈다.
+if ('EventSource' in window) { const es = new EventSource('/api/events'); es.onmessage = () => refresh() }
+// 누르기 직전 준비: 마우스가 판 위에서 움직이거나 창에 돌아오면 서버가 창 올리기에 쓸 목록을 미리 읽어 둔다(3초에 한 번).
+let warmAt = 0
+const warm = () => { if (Date.now() - warmAt < 3000 || !can()) return; warmAt = Date.now(); fetch('/api/warm', { cache: 'no-store' }).catch(() => {}) }
+document.addEventListener('pointermove', warm, { passive: true }); addEventListener('focus', warm); document.addEventListener('keydown', warm)
+// 탭으로 돌아오거나 네트워크가 돌아오면 3초를 기다리지 않고 바로 새로 읽는다.
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh() })
+addEventListener('focus', refresh)
+addEventListener('online', refresh)
+</script>
+</body>
+</html>

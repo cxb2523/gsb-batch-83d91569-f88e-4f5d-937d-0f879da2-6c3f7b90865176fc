@@ -1,0 +1,9 @@
+node_modules/
+*.db
+*.db-*
+.env
+images/
+.imagen/
+.DS_Store
+*.log
+.whosup/

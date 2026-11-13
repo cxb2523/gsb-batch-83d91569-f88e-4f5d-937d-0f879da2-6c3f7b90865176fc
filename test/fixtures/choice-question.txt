@@ -1,0 +1,20 @@
+
+
+❯ Ask me a multiple-choice question about which color I prefer
+  (red, blue, green), then stop.
+────────────────────────────────────────────────────────────────
+ ☐ Color
+
+Which color do you prefer?
+
+❯ 1. Red
+     Red
+  2. Blue
+     Blue
+  3. Green
+     Green
+  4. Type something.
+────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

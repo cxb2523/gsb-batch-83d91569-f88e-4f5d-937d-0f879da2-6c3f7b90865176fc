@@ -1,0 +1,133 @@
+id = "fivetaku.whosup"
+name = "whosup"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Stop abandoning your agent sessions. One board for every herdr session: what needs input, what finished, what's running. Click to jump to that pane."
+# windows: herdr runs commands without a shell, so Windows uses the node entries below (scripts/launch.mjs).
+# Each item says where it runs; the sh items are for linux and macos exactly as before.
+platforms = ["linux", "macos", "windows"]
+
+# Node 22.13+ only (node:sqlite). No build step: preflight checks Node, then runs autoconf (scripts/autoconf.mjs),
+# which looks at this machine (OS, terminal app, herdr, Herdr app, ovis, agents) and writes auto.json in the state folder.
+[[build]]
+command = ["sh", "scripts/preflight.sh"]
+platforms = ["linux", "macos"]
+
+# Brings the board up when herdr starts (and opens the browser once, unless OPEN_BROWSER=0).
+[[startup]]
+command = ["sh", "scripts/plugin.sh", "start"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "start"
+title = "Start whosup"
+contexts = ["workspace"]
+command = ["sh", "scripts/plugin.sh", "start"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "stop"
+title = "Stop whosup"
+contexts = ["workspace"]
+command = ["sh", "scripts/plugin.sh", "stop"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "status"
+title = "whosup status"
+contexts = ["workspace"]
+command = ["sh", "scripts/plugin.sh", "status"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "desks-apply"
+title = "Create desks from desks.json"
+contexts = ["workspace"]
+command = ["sh", "-c", ". scripts/node-path.sh && exec node scripts/desks.mjs apply"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "desks-status"
+title = "Desks status"
+contexts = ["workspace"]
+command = ["sh", "-c", ". scripts/node-path.sh && exec node scripts/desks.mjs status"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "open"
+title = "Open whosup in browser"
+contexts = ["workspace"]
+command = ["sh", "scripts/plugin.sh", "open"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "autoconf"
+title = "whosup autoconf (check this machine, update auto settings)"
+contexts = ["workspace"]
+command = ["sh", "-c", ". scripts/node-path.sh && exec node scripts/autoconf.mjs"]
+platforms = ["linux", "macos"]
+
+# ── Windows (no sh): the same jobs through node. Action ids must be unique in a plugin, so these carry a win- prefix.
+[[build]]
+command = ["node", "scripts/launch.mjs", "preflight"]
+platforms = ["windows"]
+
+[[startup]]
+command = ["node", "scripts/launch.mjs", "start"]
+platforms = ["windows"]
+
+[[actions]]
+id = "win-start"
+title = "Start whosup"
+contexts = ["workspace"]
+command = ["node", "scripts/launch.mjs", "start"]
+platforms = ["windows"]
+
+[[actions]]
+id = "win-stop"
+title = "Stop whosup"
+contexts = ["workspace"]
+command = ["node", "scripts/launch.mjs", "stop"]
+platforms = ["windows"]
+
+[[actions]]
+id = "win-status"
+title = "whosup status"
+contexts = ["workspace"]
+command = ["node", "scripts/launch.mjs", "status"]
+platforms = ["windows"]
+
+[[actions]]
+id = "win-desks-apply"
+title = "Create desks from desks.json"
+contexts = ["workspace"]
+command = ["node", "scripts/desks.mjs", "apply"]
+platforms = ["windows"]
+
+[[actions]]
+id = "win-desks-status"
+title = "Desks status"
+contexts = ["workspace"]
+command = ["node", "scripts/desks.mjs", "status"]
+platforms = ["windows"]
+
+[[actions]]
+id = "win-open"
+title = "Open whosup in browser"
+contexts = ["workspace"]
+command = ["node", "scripts/launch.mjs", "open"]
+platforms = ["windows"]
+
+[[actions]]
+id = "win-doctor"
+title = "whosup doctor (read-only check)"
+contexts = ["workspace"]
+command = ["node", "scripts/doctor.mjs"]
+platforms = ["windows"]
+
+[[actions]]
+id = "win-autoconf"
+title = "whosup autoconf (check this machine, update auto settings)"
+contexts = ["workspace"]
+command = ["node", "scripts/autoconf.mjs"]
+platforms = ["windows"]

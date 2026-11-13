@@ -1,0 +1,48 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: node ${{ matrix.node }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ['22.13', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: preflight
+        run: sh scripts/preflight.sh
+      - name: unit tests
+        run: npm test
+
+  # 윈도우: 처음에는 실패를 허용하는 잡으로 넣어 실패 수를 기준선으로 잰다(REVIEW2 (c)(5)). 시험을 OS 중립으로 정리하고
+  # 윈도우 실기기에서 전체 시험이 통과해 필수 잡으로 바꿨다. 공개 레포라 GitHub 호스팅 러너만 쓴다.
+  windows:
+    name: node ${{ matrix.node }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+        node: ['22.13', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: doctor
+        run: node scripts/doctor.mjs --no-save
+      - name: unit tests
+        run: npm test
