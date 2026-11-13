@@ -21,7 +21,11 @@ export {
 	BestFirstDeepCrawlStrategy,
 	BFSDeepCrawlStrategy,
 	createDeepCrawlConfig,
+	createEmptyRobotsReport,
 	type DeepCrawlConfig,
+	type DeepCrawlReport,
 	DeepCrawlStrategy,
 	DFSDeepCrawlStrategy,
+	type RobotsCheckRecord,
+	type RobotsReport,
 } from "./strategy";

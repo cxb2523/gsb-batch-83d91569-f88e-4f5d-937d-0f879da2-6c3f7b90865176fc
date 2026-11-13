@@ -17,6 +17,40 @@ import type { FilterChain } from "./filters";
 import type { CompositeScorer, ScorerContext } from "./scorers";
 
 // ---------------------------------------------------------------------------
+// Robots report
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-candidate robots.txt admission record.
+ * One record per in-scope link that reached the robots check during discovery.
+ */
+export interface RobotsCheckRecord {
+	/** Normalized candidate URL that was checked. */
+	url: string;
+	/** Whether robots.txt permits crawling this URL. */
+	decision: "allowed" | "denied";
+	/** Why the URL was denied (e.g. "Disallow: /private"), or null when allowed. */
+	reason: string | null;
+	/** Crawl-delay for this URL's origin in milliseconds, or null if none declared. */
+	crawlDelayMs: number | null;
+}
+
+export interface RobotsReport {
+	records: RobotsCheckRecord[];
+	allowed: number;
+	denied: number;
+}
+
+export interface DeepCrawlReport {
+	results: CrawlResult[];
+	robotsReport: RobotsReport;
+}
+
+export function createEmptyRobotsReport(): RobotsReport {
+	return { records: [], allowed: 0, denied: 0 };
+}
+
+// ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
@@ -62,6 +96,8 @@ export function createDeepCrawlConfig(overrides: Partial<DeepCrawlConfig> = {}):
 
 export abstract class DeepCrawlStrategy {
 	readonly name: string;
+	/** Collector for robots.txt admission records; null when not reporting. */
+	private robotsRecords: RobotsCheckRecord[] | null = null;
 
 	constructor(name: string) {
 		this.name = name;
@@ -86,6 +122,33 @@ export abstract class DeepCrawlStrategy {
 		crawlConfig: CrawlerRunConfigOverrides,
 		deepConfig: DeepCrawlConfig,
 	): AsyncGenerator<CrawlResult, void, unknown>;
+
+	/**
+	 * Crawl starting from a URL, returning results plus a robots.txt report
+	 * describing the admission decision for every discovered candidate link.
+	 */
+	async runWithReport(
+		startUrl: string,
+		crawler: WebCrawler,
+		crawlConfig: CrawlerRunConfigOverrides,
+		deepConfig: DeepCrawlConfig,
+	): Promise<DeepCrawlReport> {
+		this.robotsRecords = [];
+		try {
+			const results = await this.run(startUrl, crawler, crawlConfig, deepConfig);
+			const records = this.robotsRecords;
+			return {
+				results,
+				robotsReport: {
+					records,
+					allowed: records.filter((r) => r.decision === "allowed").length,
+					denied: records.filter((r) => r.decision === "denied").length,
+				},
+			};
+		} finally {
+			this.robotsRecords = null;
+		}
+	}
 
 	/**
 	 * Extract links from a crawl result and filter them.
@@ -113,9 +176,20 @@ export abstract class DeepCrawlStrategy {
 			// Check robots.txt
 			if (config.robotsParser) {
 				const directives = await config.robotsParser.fetch(normalized);
-				if (!config.robotsParser.isAllowed(normalized, directives)) continue;
-				if (directives.crawlDelay !== null && config.rateLimiter) {
-					config.rateLimiter.setDelay(normalized, directives.crawlDelay * 1000);
+				const matchedRule = config.robotsParser.matchRule(normalized, directives);
+				const allowed = matchedRule ? matchedRule.allow : true;
+				const crawlDelayMs = directives.crawlDelay !== null ? directives.crawlDelay * 1000 : null;
+
+				this.robotsRecords?.push({
+					url: normalized,
+					decision: allowed ? "allowed" : "denied",
+					reason: allowed ? null : `Disallow: ${matchedRule?.source ?? ""}`,
+					crawlDelayMs,
+				});
+
+				if (!allowed) continue;
+				if (crawlDelayMs !== null && config.rateLimiter) {
+					config.rateLimiter.setDelay(normalized, crawlDelayMs);
 				}
 			}
 

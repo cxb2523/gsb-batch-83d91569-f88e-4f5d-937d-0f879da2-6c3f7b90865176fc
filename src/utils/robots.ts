@@ -9,6 +9,8 @@ export interface RobotsRule {
 	pattern: RegExp;
 	allow: boolean;
 	priority: number; // longer path = higher priority
+	/** Original path pattern from robots.txt (e.g. "/private"). */
+	source: string;
 }
 
 export interface RobotsDirectives {
@@ -109,12 +111,13 @@ export class RobotsParser {
 			if (key === "disallow") {
 				if (value === "") {
 					// Empty disallow = allow all
-					current.rules.push({ pattern: /^/, allow: true, priority: 0 });
+					current.rules.push({ pattern: /^/, allow: true, priority: 0, source: value });
 				} else {
 					current.rules.push({
 						pattern: pathToRegex(value),
 						allow: false,
 						priority: value.length,
+						source: value,
 					});
 				}
 			} else if (key === "allow") {
@@ -122,6 +125,7 @@ export class RobotsParser {
 					pattern: pathToRegex(value),
 					allow: true,
 					priority: value.length,
+					source: value,
 				});
 			} else if (key === "crawl-delay") {
 				const delay = parseFloat(value);
@@ -161,15 +165,25 @@ export class RobotsParser {
 	 * Check if a URL is allowed by robots.txt rules.
 	 */
 	isAllowed(url: string, directives: RobotsDirectives): boolean {
+		const match = this.matchRule(url, directives);
+		return match ? match.allow : true;
+	}
+
+	/**
+	 * Find the robots.txt rule that decides a URL's fate, if any.
+	 * Returns the highest-priority (longest path) matching rule, or null when
+	 * no rule matches (which means the URL is allowed by default).
+	 */
+	matchRule(url: string, directives: RobotsDirectives): RobotsRule | null {
 		let path: string;
 		try {
 			const parsed = new URL(url);
 			path = parsed.pathname + parsed.search;
 		} catch {
-			return true;
+			return null;
 		}
 
-		if (directives.rules.length === 0) return true;
+		if (directives.rules.length === 0) return null;
 
 		// Find all matching rules, pick the one with highest priority (longest path)
 		let bestMatch: RobotsRule | null = null;
@@ -182,7 +196,7 @@ export class RobotsParser {
 			}
 		}
 
-		return bestMatch ? bestMatch.allow : true;
+		return bestMatch;
 	}
 
 	clearCache(): void {

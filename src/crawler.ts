@@ -3,7 +3,7 @@ import { CrawlCache, contentHash } from "./cache/database";
 import { shouldReadCache, shouldWriteCache } from "./cache/mode";
 import type { BrowserConfig, CrawlerRunConfig, CrawlerRunConfigOverrides } from "./config";
 import { createBrowserConfig, createCrawlerRunConfig } from "./config";
-import type { DeepCrawlConfig, DeepCrawlStrategy } from "./deep-crawl/strategy";
+import type { DeepCrawlConfig, DeepCrawlReport, DeepCrawlStrategy } from "./deep-crawl/strategy";
 import {
 	BestFirstDeepCrawlStrategy,
 	BFSDeepCrawlStrategy,
@@ -612,6 +612,26 @@ export class WebCrawler {
 		});
 		const strategy = this.resolveDeepCrawlStrategy(config);
 		yield* strategy.stream(startUrl, this, crawlConfig ?? {}, config);
+	}
+
+	/**
+	 * Deep crawl that also reports the robots.txt admission decision for every
+	 * discovered candidate link (allowed / denied with reason / crawl-delay).
+	 */
+	async deepCrawlWithReport(
+		startUrl: string,
+		crawlConfig?: CrawlerRunConfigOverrides,
+		deepConfig?: Partial<DeepCrawlConfig>,
+	): Promise<DeepCrawlReport> {
+		validateUrl(startUrl);
+		if (!this.ready) await this.start();
+
+		const config = createDeepCrawlConfig({
+			logger: this.logger,
+			...deepConfig,
+		});
+		const strategy = this.resolveDeepCrawlStrategy(config);
+		return strategy.runWithReport(startUrl, this, crawlConfig ?? {}, config);
 	}
 
 	private resolveDeepCrawlStrategy(config: DeepCrawlConfig): DeepCrawlStrategy {
