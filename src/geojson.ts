@@ -38,6 +38,29 @@ export function validateCollection(value: unknown): Collection {
  });
  return { type: 'FeatureCollection', features };
 }
+export function countVertices(collection: Collection): number {
+ return collection.features.reduce((total, feature) => total + geometryVertices(feature.geometry), 0);
+}
+function geometryVertices(geometry: Geometry): number {
+ return geometry.type === 'Point' ? 1 : geometry.type === 'LineString' ? geometry.coordinates.length : geometry.coordinates.reduce((total, ring) => total + ring.length, 0);
+}
+/** 为与已有图层或同批次冲突的 id 重新分配唯一值，不改动要素内容。 */
+export function assignUniqueIds(collection: Collection, usedIds: Iterable<string>): Collection {
+ const used = new Set(usedIds);
+ return { type: 'FeatureCollection', features: collection.features.map((feature) => {
+  let id = feature.id;
+  if (used.has(id)) {
+   const base = id.slice(0, 77) || 'import';
+   let suffix = 2;
+   do {
+    const tail = `-${suffix++}`;
+    id = `${base.slice(0, 80 - tail.length)}${tail}`;
+   } while (used.has(id));
+  }
+  used.add(id);
+  return { ...feature, id };
+ }) };
+}
 export function demoFeatures(): Collection {
  return { type: 'FeatureCollection', features: [
   { type: 'Feature', id: 'library', properties: { name: '学习图书馆' }, geometry: { type: 'Point', coordinates: [121.4695, 31.233] } },

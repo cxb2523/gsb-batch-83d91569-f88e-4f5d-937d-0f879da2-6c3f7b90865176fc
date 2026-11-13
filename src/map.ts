@@ -13,6 +13,7 @@ import { click } from 'ol/events/condition.js';
 import { defaults as defaultControls, ScaleLine } from 'ol/control.js';
 import { getArea, getLength } from 'ol/sphere.js';
 import type Geometry from 'ol/geom/Geometry.js';
+import type SimpleGeometry from 'ol/geom/SimpleGeometry.js';
 import type { Collection } from './geojson';
 import { demoFeatures, validateCollection } from './geojson';
 
@@ -57,11 +58,15 @@ export function createMap(target: HTMLElement, events: { change: () => void; sel
   }
  }
  function replace(collection: Collection) { setTool('select'); selection.getFeatures().clear(); events.select(null); source.clear(); source.addFeatures(format.readFeatures(collection, { dataProjection: 'EPSG:4326', featureProjection: 'EPSG:3857' })); fit(); }
+ // 追加不清空选中和已有要素；调用方负责保证 id 唯一、容量受限。
+ function append(collection: Collection) { source.addFeatures(format.readFeatures(collection, { dataProjection: 'EPSG:4326', featureProjection: 'EPSG:3857' })); fit(); }
+ function verticesOf(geometry: Geometry): number { const simple = geometry as SimpleGeometry; return simple.getFlatCoordinates().length / simple.getStride(); }
+ function stats() { const current = source.getFeatures(); return { features: current.length, vertices: current.reduce((total, feature) => total + verticesOf(feature.getGeometry()!), 0) }; }
  function fit() { if (source.getFeatures().length) map.getView().fit(source.getExtent()!, { padding: [80, 60, 80, 60], maxZoom: 16, duration: 300 }); }
  function exportData(): Collection { return validateCollection(format.writeFeaturesObject(source.getFeatures(), { dataProjection: 'EPSG:4326', featureProjection: 'EPSG:3857', decimals: 6 })); }
  function selected(): Feature<Geometry> | null { return selection.getFeatures().item(0) ?? null; }
  function choose(id: string) { const feature = source.getFeatureById(id); if (!feature) return; setTool('select'); selection.getFeatures().clear(); selection.getFeatures().push(feature); events.select(feature); map.getView().fit(feature.getGeometry()!.getExtent(), { maxZoom: 17, duration: 250 }); }
  function measure(feature: Feature<Geometry>): string { const geometry = feature.getGeometry()!; if (geometry.getType() === 'Polygon') return `${(getArea(geometry) / 10000).toFixed(2)} 公顷`; if (geometry.getType() === 'LineString') return `${getLength(geometry).toFixed(1)} 米`; return '点要素 · WGS84'; }
  queueMicrotask(() => replace(demoFeatures()));
- return { map, source, setTool, fit, replace, exportData, selected, choose, measure, getMode: () => mode, toggleOnline: (enabled: boolean) => online.setVisible(enabled), removeSelected: () => { const f = selected(); if (f) source.removeFeature(f); selection.getFeatures().clear(); events.select(null); }, clear: () => { setTool('select'); source.clear(); selection.getFeatures().clear(); events.select(null); }, reset: () => replace(demoFeatures()) };
+ return { map, source, setTool, fit, replace, append, stats, exportData, selected, choose, measure, getMode: () => mode, toggleOnline: (enabled: boolean) => online.setVisible(enabled), removeSelected: () => { const f = selected(); if (f) source.removeFeature(f); selection.getFeatures().clear(); events.select(null); }, clear: () => { setTool('select'); source.clear(); selection.getFeatures().clear(); events.select(null); }, reset: () => replace(demoFeatures()) };
 }
