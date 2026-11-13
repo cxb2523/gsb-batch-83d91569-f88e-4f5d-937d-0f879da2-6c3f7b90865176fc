@@ -1,0 +1,62 @@
+========
+web-poet
+========
+
+.. include:: ../README.rst
+   :start-after: intro starts
+   :end-before: intro ends
+
+.. warning:: web-poet is in early stages of development; backward-incompatible
+             changes are possible.
+
+.. toctree::
+   :caption: Getting started
+   :maxdepth: 1
+
+   intro/overview
+   intro/install
+   intro/tutorial
+   intro/from-ground-up
+   intro/ai
+
+.. toctree::
+   :caption: Writing page objects
+   :maxdepth: 1
+
+   page-objects/index
+   page-objects/inputs
+   page-objects/items
+   page-objects/rules
+   page-objects/fields
+   page-objects/layouts
+   page-objects/additional-requests
+   page-objects/input-validation
+   page-objects/page-params
+   page-objects/stats
+   page-objects/testing
+   page-objects/frameworks
+
+.. toctree::
+   :caption: Using page objects
+   :maxdepth: 1
+
+   framework
+
+.. toctree::
+   :caption: Writing frameworks
+   :maxdepth: 1
+
+   frameworks/index
+   Rules <frameworks/rules>
+   Additional requests <frameworks/additional-requests>
+   Retries <frameworks/retries>
+   Frameworks <frameworks/stats>
+
+.. toctree::
+   :caption: Reference
+   :maxdepth: 1
+
+   api-reference
+   contributing
+   changelog
+   license

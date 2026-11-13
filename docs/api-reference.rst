@@ -1,0 +1,191 @@
+.. _api-reference:
+
+=============
+API reference
+=============
+
+.. _input:
+
+Page Inputs
+===========
+
+.. module:: web_poet.page_inputs
+
+.. automodule:: web_poet.page_inputs.browser
+    :members:
+    :undoc-members:
+    :inherited-members: str
+    :show-inheritance:
+
+.. automodule:: web_poet.page_inputs.client
+    :members:
+    :undoc-members:
+
+.. automodule:: web_poet.page_inputs.http
+    :members:
+    :undoc-members:
+    :inherited-members: str,bytes,MultiDict,CIMultiDict
+    :show-inheritance:
+
+.. automodule:: web_poet.page_inputs.url
+    :members:
+    :undoc-members:
+
+.. automodule:: web_poet.page_inputs.response
+    :members:
+    :undoc-members:
+    :inherited-members: str
+    :show-inheritance:
+
+.. automodule:: web_poet.page_inputs.page_params
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+.. automodule:: web_poet.page_inputs.stats
+    :members:
+    :show-inheritance:
+
+Pages
+=====
+
+.. automodule:: web_poet.pages
+
+.. autoclass:: Injectable
+    :show-inheritance:
+    :members:
+    :no-special-members:
+
+.. autofunction:: is_injectable
+
+.. autoclass:: ItemPage
+    :show-inheritance:
+    :members:
+    :no-special-members:
+
+.. autoclass:: WebPage
+    :show-inheritance:
+    :members:
+    :undoc-members:
+    :inherited-members:
+    :no-special-members:
+
+.. autoclass:: BrowserPage
+    :show-inheritance:
+    :members:
+    :undoc-members:
+    :inherited-members:
+    :no-special-members:
+
+.. autoclass:: Returns
+    :show-inheritance:
+    :members:
+
+.. autoclass:: Extractor
+    :show-inheritance:
+    :members:
+    :no-special-members:
+
+.. autoclass:: SelectorExtractor
+    :show-inheritance:
+    :members:
+    :no-special-members:
+
+Mixins
+======
+
+.. automodule:: web_poet.mixins
+
+.. autoclass:: web_poet.mixins.ResponseShortcutsMixin
+    :members:
+    :inherited-members:
+    :no-special-members:
+
+.. autoclass:: web_poet.mixins.SelectableMixin
+    :members:
+    :inherited-members:
+    :no-special-members:
+
+Requests
+========
+
+.. automodule:: web_poet.requests
+    :members:
+    :undoc-members:
+
+Exceptions
+==========
+
+.. automodule:: web_poet.exceptions.core
+    :members:
+
+.. automodule:: web_poet.exceptions.http
+    :show-inheritance:
+    :members:
+
+.. _api-rules:
+
+Apply Rules
+===========
+
+See :ref:`rules` for more context about its use cases and some examples.
+
+.. currentmodule:: web_poet
+
+.. data:: default_registry
+
+    Default :class:`~rules.RulesRegistry`.
+
+.. function:: handle_urls
+
+    :meth:`~rules.RulesRegistry.handle_urls` of the :data:`default_registry`.
+
+.. automodule:: web_poet.rules
+    :members:
+
+Fields
+======
+
+.. automodule:: web_poet.fields
+    :members:
+
+.. autofunction:: web_poet.css_get
+
+.. autofunction:: web_poet.css_getall
+
+.. autofunction:: web_poet.xpath_get
+
+.. autofunction:: web_poet.xpath_getall
+
+.. autoclass:: web_poet.SelectorGroup
+
+.. autofunction:: web_poet.preextract_selectors
+
+.. autoclass:: web_poet.html_metadata.HtmlMetadata
+
+.. autoclass:: web_poet.html_metadata.MetaRefresh
+
+Layouts
+=======
+
+.. autofunction:: web_poet.layout_switch
+
+Annotation support
+==================
+
+.. autofunction:: web_poet.annotation_encode
+.. autofunction:: web_poet.annotation_decode
+.. autoclass:: web_poet.AnnotatedInstance
+
+Utils
+=====
+
+.. automodule:: web_poet.utils
+    :members:
+
+
+Built-in framework
+==================
+
+.. automodule:: web_poet.framework
+    :members:

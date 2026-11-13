@@ -1,0 +1,10 @@
+.coverage
+/coverage.xml
+.mypy_cache/
+.tox/
+dist/
+htmlcov/
+docs/_build
+*.egg-info/
+__pycache__/
+.idea/

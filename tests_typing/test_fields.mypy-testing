@@ -1,0 +1,144 @@
+import pytest
+import attrs
+
+from web_poet import (
+    ItemPage,
+    field,
+    item_from_fields,
+    item_from_fields_sync,
+)
+
+
+class Page(ItemPage):
+    @field
+    def name(self):
+        return "hello"
+
+
+def process_price(value: float) -> float:
+    return max([0, value])
+
+
+class TypedPage(ItemPage):
+    @field
+    def description(self) -> str:
+        return "hello"
+
+    @field(out=[str.strip])
+    def name(self) -> str:
+        return "hello"
+
+    @field(out=[process_price, str])
+    def price(self) -> float:
+        return 123.0
+
+    @field()
+    def currency(self) -> str:
+        return "$"
+
+    @field
+    async def adescription(self) -> str:
+        return "hello"
+
+    @field(out=[str.strip])
+    async def aname(self) -> str:
+        return "hello"
+
+    @field(out=[process_price, str])
+    async def aprice(self) -> float:
+        return 123.0
+
+    @field()
+    async def acurrency(self) -> str:
+        return "$"
+
+
+@attrs.define
+class Item:
+    name: str
+
+
+@pytest.mark.mypy_testing
+def test_field_type_no_params() -> None:
+    page = TypedPage()
+    reveal_type(page.description)  # R: str
+
+
+@pytest.mark.mypy_testing
+def test_field_type() -> None:
+    page = TypedPage()
+    reveal_type(page.currency)  # R: str
+
+
+@pytest.mark.mypy_testing
+def test_field_type_out() -> None:
+    page = TypedPage()
+    reveal_type(page.name)  # R: str
+
+
+@pytest.mark.mypy_testing
+@pytest.mark.xfail(
+    reason="mypy does not infer @field(out=...) transformed return type"
+)
+def test_field_type_changed_type() -> None:
+    page = TypedPage()
+    reveal_type(page.price)  # R: str
+
+
+@pytest.mark.mypy_testing
+async def test_field_type_no_params_async() -> None:
+    page = TypedPage()
+    reveal_type(await page.adescription)  # R: str
+
+
+@pytest.mark.mypy_testing
+async def test_field_type_async() -> None:
+    page = TypedPage()
+    reveal_type(await page.acurrency)  # R: str
+
+
+@pytest.mark.mypy_testing
+async def test_field_type_out_async() -> None:
+    page = TypedPage()
+    reveal_type(await page.aname)  # R: str
+
+
+@pytest.mark.mypy_testing
+@pytest.mark.xfail(
+    reason="mypy does not infer async @field(out=...) transformed return type"
+)
+async def test_field_type_changed_type_async() -> None:
+    page = TypedPage()
+    reveal_type(await page.aprice)  # R: str
+
+
+@pytest.mark.mypy_testing
+async def test_item_from_fields() -> None:
+    page = Page()
+    item1 = await item_from_fields(page, item_cls=dict)
+    reveal_type(item1)  # R: dict[Any, Any]
+    item2 = await item_from_fields(page, item_cls=Item)
+    reveal_type(item2)  # R: __main__.Item
+
+
+@pytest.mark.mypy_testing
+def test_item_from_fields_sync() -> None:
+    page = Page()
+    item1 = item_from_fields_sync(page, item_cls=dict)
+    reveal_type(item1)  # R: dict[Any, Any]
+    item2 = item_from_fields_sync(page, item_cls=Item)
+    reveal_type(item2)  # R: __main__.Item
+
+
+@pytest.mark.mypy_testing
+async def test_item_from_fields_default_item_cls() -> None:
+    page = Page()
+    item1 = await item_from_fields(page)
+    reveal_type(item1)  # R: dict[str, Any]
+
+
+@pytest.mark.mypy_testing
+def test_item_from_fields_sync_default_item_cls() -> None:
+    page = Page()
+    item1 = item_from_fields_sync(page)
+    reveal_type(item1)  # R: dict[str, Any]

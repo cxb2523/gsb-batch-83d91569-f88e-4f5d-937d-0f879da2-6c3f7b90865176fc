@@ -1,0 +1,258 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "web-poet"
+version = "0.25.0"
+description = "Zyte's Page Object pattern for web scraping"
+readme = "README.rst"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Zyte Group Ltd", email = "opensource@zyte.com" },
+]
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: BSD License",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+]
+dependencies = [
+    "attrs >= 22.1.0",
+    "frostwork >= 0.2.2",
+    "parsel >= 1.5.0",
+    "url-matcher >= 0.4.0",
+    "multidict >= 0.5.0",
+    "w3lib >= 2.6.0",
+    "async-lru >= 1.0.3",
+    "itemadapter >= 0.8.0",
+    "andi >= 0.5.0",
+    "python-dateutil >= 2.7.0",
+    "time-machine >= 2.7.1",
+    "packaging >= 22.0",
+]
+
+[project.optional-dependencies]
+framework = [
+    "aiohttp >= 3.7.0",
+    "playwright >= 1.26.0",
+]
+
+[project.entry-points."pytest11"]
+"web-poet" = "web_poet.testing.pytest"
+
+[project.urls]
+Homepage = "https://github.com/scrapinghub/web-poet"
+Documentation = "https://web-poet.readthedocs.io/en/stable/"
+
+[dependency-groups]
+docs = ["sphinx-rtd-theme"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/web_poet",
+    "/tests",
+    "/docs",
+    "/CHANGELOG.rst",
+    "/tox.ini",
+    "/README.rst",
+]
+
+[tool.bumpversion]
+commit = true
+tag = true
+tag_name = "{new_version}"
+
+[[tool.bumpversion.files]]
+filename = 'CHANGELOG.rst'
+search = "\\(unreleased\\)$"
+replace = "({now:%Y-%m-%d})"
+regex = true
+
+[[tool.bumpversion.files]]
+filename = "docs/conf.py"
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+]
+
+[tool.mypy]
+ignore_missing_imports = false
+implicit_reexport = false
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+allow_untyped_defs = true
+allow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+module = "tests.po_lib_to_return.*"
+# Ignore mypy errors since the Page Objects contain arbitrary reference values
+# used for assertions which have varying types. This upsets mypy.
+ignore_errors = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    # The min env opts out of this, see tox.ini.
+    "error",
+    # The test rules mirror real-world page object hierarchies, where several
+    # rules for the same item class and URL pattern are the norm.
+    "ignore:The registry contains .* conflicting rules:UserWarning",
+]
+
+[tool.ruff.lint]
+extend-select = [
+    # flake8-bugbear
+    "B",
+    # flake8-comprehensions
+    "C4",
+    # pydocstyle
+    "D",
+    # flake8-future-annotations
+    "FA",
+    # flynt
+    "FLY",
+    # refurb
+    "FURB",
+    # isort
+    "I",
+    # flake8-implicit-str-concat
+    "ISC",
+    # flake8-logging
+    "LOG",
+    # Perflint
+    "PERF",
+    # pygrep-hooks
+    "PGH",
+    # flake8-pie
+    "PIE",
+    # pylint
+    "PL",
+    # flake8-pytest-style
+    "PT",
+    # flake8-use-pathlib
+    "PTH",
+    # flake8-pyi
+    "PYI",
+    # flake8-quotes
+    "Q",
+    # flake8-return
+    "RET",
+    # flake8-raise
+    "RSE",
+    # Ruff-specific rules
+    "RUF",
+    # flake8-bandit
+    "S",
+    # flake8-simplify
+    "SIM",
+    # flake8-slots
+    "SLOT",
+    # flake8-debugger
+    "T10",
+    # flake8-type-checking
+    "TC",
+    # pyupgrade
+    "UP",
+    # pycodestyle warnings
+    "W",
+    # flake8-2020
+    "YTT",
+]
+ignore = [
+    # Do not catch blind exception
+    "BLE001",
+    # Missing docstring in public module
+    "D100",
+    # Missing docstring in public class
+    "D101",
+    # Missing docstring in public function
+    "D103",
+    # Missing docstring in public package
+    "D104",
+    # Missing docstring in magic method
+    "D105",
+    # Missing docstring in __init__
+    "D107",
+    # One-line docstring should fit on one line with quotes
+    "D200",
+    # No blank lines allowed after function docstring
+    "D202",
+    # 1 blank line required between summary line and description
+    "D205",
+    # Multi-line docstring closing quotes should be on a separate line
+    "D209",
+    # First line should end with a period
+    "D400",
+    # First line should be in imperative mood; try rephrasing
+    "D401",
+    # First line should not be the function's "signature"
+    "D402",
+    # `datetime.datetime()` called without a `tzinfo` argument
+    "DTZ001",
+    # Too many return statements
+    "PLR0911",
+    # Too many branches
+    "PLR0912",
+    # Too many arguments in function definition
+    "PLR0913",
+    # Too many statements
+    "PLR0915",
+    # Too many positional arguments
+    "PLR0917",
+    # Magic value used in comparison
+    "PLR2004",
+    # Mutable class attributes should be annotated with `typing.ClassVar`
+    "RUF012",
+    # Use of `assert` detected
+    "S101",
+    # Move application import {} into a type-checking block
+    # (The fix can break singledispatch() and/or andi.)
+    "TC001",
+    # Add `from __future__ import annotations` to simplify
+    # (The fix can break singledispatch() and/or andi.)
+    "FA100",
+    # Create your own exception
+    "TRY002",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# F401: Ignore "imported but unused" errors in __init__ files, as those
+# imports are there to expose submodule functions so they can be imported
+# directly from that module
+# F403: Ignore * imports in these files
+# D102: Missing docstring in public method
+# S: flake8-bandit
+# B018: Found useless expression.
+# FURB171: Membership test against single-item container, which some tests do
+# on purpose, e.g. to check hashing.
+"web_poet/__init__.py" = ["F401", "F403"]
+"web_poet/exceptions/__init__.py" = ["F401", "F403"]
+"web_poet/page_inputs/__init__.py" = ["F401", "F403"]
+"web_poet/serialization/__init__.py" = ["F401", "F403"]
+"web_poet/testing/__init__.py" = ["F401", "F403"]
+"web_poet/testing/pytest.py" = ["D102"]
+"benchmarks/**" = ["B018", "D102", "S"]
+"tests/**" = ["B018", "D102", "FURB171", "S"]
+# Documentation examples may miss docstrings and include undefined, example
+# names.
+"docs/**" = ["D102", "F821"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.sphinx-scrapy]
+# Keep in sync with .github/workflows/tests-ubuntu.yml.
+python-version = "3.13"

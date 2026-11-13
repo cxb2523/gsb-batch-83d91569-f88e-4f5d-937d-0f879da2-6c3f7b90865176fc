@@ -1,0 +1,9 @@
+comment:
+  layout: "header, diff, tree"
+
+coverage:
+  status:
+    project: false
+
+ignore:
+  - "web_poet/example.py"
