@@ -1,0 +1,97 @@
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+import { describe, it, expect } from 'vitest';
+import { isMainModulePath, parseArgs } from '../src/cli.js';
+
+describe('parseArgs', () => {
+  it('parses search command', () => {
+    const args = parseArgs(['node', 'cli.ts', 'search', 'TypeScript MCP']);
+    expect(args.command).toBe('search');
+    expect(args.query).toBe('TypeScript MCP');
+  });
+
+  it('parses search with options', () => {
+    const args = parseArgs(['node', 'cli.ts', 'search', 'query', '--count', '5', '--engines', 'bing,baidu,youcom']);
+    expect(args.command).toBe('search');
+    expect(args.query).toBe('query');
+    expect(args.count).toBe(5);
+    expect(args.engines).toEqual(['bing', 'baidu', 'youcom']);
+  });
+
+  it('parses extract command', () => {
+    const args = parseArgs(['node', 'cli.ts', 'extract', 'https://example.com']);
+    expect(args.command).toBe('extract');
+    expect(args.url).toBe('https://example.com');
+  });
+
+  it('parses serve command', () => {
+    const args = parseArgs(['node', 'cli.ts', 'serve', '--port', '8080']);
+    expect(args.command).toBe('serve');
+    expect(args.port).toBe(8080);
+  });
+
+  it('defaults to search command', () => {
+    const args = parseArgs(['node', 'cli.ts', 'TypeScript MCP']);
+    expect(args.command).toBe('search');
+    expect(args.query).toBe('TypeScript MCP');
+  });
+
+  it('parses --json flag', () => {
+    const args = parseArgs(['node', 'cli.ts', 'search', 'query', '--json']);
+    expect(args.json).toBe(true);
+  });
+
+  it('parses --help flag', () => {
+    const args = parseArgs(['node', 'cli.ts', '--help']);
+    expect(args.help).toBe(true);
+  });
+
+  it('no args returns help=true', () => {
+    const args = parseArgs(['node', 'cli.ts']);
+    expect(args.help).toBe(true);
+  });
+
+  it('filters invalid engines', () => {
+    const args = parseArgs(['node', 'cli.ts', 'search', 'query', '--engines', 'bing,invalid,baidu,youcom']);
+    expect(args.engines).toEqual(['bing', 'baidu', 'youcom']);
+  });
+
+  it('accepts all additional zero-key engines', () => {
+    const args = parseArgs(['node', 'cli.ts', 'search', 'query', '--engines', 'wikipedia,startpage,yandex,mojeek']);
+    expect(args.engines).toEqual(['wikipedia', 'startpage', 'yandex', 'mojeek']);
+  });
+
+  it('parses --proxy flag', () => {
+    const args = parseArgs(['node', 'cli.ts', 'search', 'query', '--proxy', 'http://127.0.0.1:7890']);
+    expect(args.proxy).toBe('http://127.0.0.1:7890');
+  });
+
+  it('parses --version flag', () => {
+    const args = parseArgs(['node', 'cli.ts', '--version']);
+    expect(args.version).toBe(true);
+  });
+
+  it('parses doctor with stable JSON output', () => {
+    const args = parseArgs(['node', 'cli.ts', 'doctor', '--json']);
+    expect(args).toMatchObject({
+      command: 'doctor',
+      json: true,
+    });
+  });
+});
+
+describe('CLI entrypoint', () => {
+  it('recognizes the executable module by resolved path', () => {
+    const modulePath = join(process.cwd(), 'dist', 'cli.js');
+
+    expect(isMainModulePath(
+      modulePath,
+      pathToFileURL(modulePath).href,
+    )).toBe(true);
+    expect(isMainModulePath(
+      join(process.cwd(), 'dist', 'other.js'),
+      pathToFileURL(modulePath).href,
+    )).toBe(false);
+  });
+});

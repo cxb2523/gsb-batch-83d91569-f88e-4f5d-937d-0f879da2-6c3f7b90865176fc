@@ -1,0 +1,191 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20, 22]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify offline evidence demo
+        run: node benchmarks/evidence-demo.mjs
+
+      - name: Test
+        run: npm test
+
+      - name: Verify persistent exact-cache prototype
+        run: node benchmarks/exact-cache.mjs --check
+
+      - name: Verify advisory query classifier
+        run: node benchmarks/intent-routing.mjs --check
+
+  quality:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Lint
+        run: npm run lint
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: Verify distribution metadata
+        run: npm run distribution:check
+
+      - name: Verify frozen benchmark fixture
+        run: npm run benchmark:verify
+
+      - name: Verify quality metric fixture
+        run: npm run benchmark:quality:verify
+
+      - name: Verify reviewer pilot artifacts
+        run: npm run benchmark:reviewer-pilot:verify
+
+      - name: Verify public capability matrix
+        run: node scripts/generate-capability-matrix.mjs --check
+
+  windows-build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20, 22]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify offline evidence demo
+        run: node benchmarks/evidence-demo.mjs
+
+      - name: Verify persistent exact-cache prototype
+        run: node benchmarks/exact-cache.mjs --check
+
+      - name: Verify advisory query classifier
+        run: node benchmarks/intent-routing.mjs --check
+
+      - name: Verify doctor on Windows
+        shell: pwsh
+        run: |
+          $report = node dist/cli.js doctor --json | ConvertFrom-Json
+          if ($report.schema_version -ne 'doctor-report-v1') {
+            throw "Unexpected doctor schema: $($report.schema_version)"
+          }
+          if ($report.status -ne 'present') {
+            throw "Doctor did not validate zero-key startup: $($report.status)"
+          }
+
+  experimental-2026:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            experiments/mcp-2026/package-lock.json
+
+      - name: Install stable dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Install experimental dependencies
+        run: npm ci --prefix experiments/mcp-2026
+
+      - name: Test 2026 negotiation and stable fallback
+        run: npm run experimental:2026:test
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org/
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Check if version already published
+        id: check
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "${{ github.event.repository.name }}" "$VERSION" &>/dev/null; then
+            echo "already_published=true" >> $GITHUB_OUTPUT
+            echo "Version $VERSION already exists on npm, skipping publish."
+          else
+            echo "already_published=false" >> $GITHUB_OUTPUT
+            echo "Version $VERSION is new, proceeding with publish."
+          fi
+
+      - name: Publish to npm
+        if: steps.check.outputs.already_published == 'false'
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.already_published == 'false'
+        uses: softprops/action-gh-release@v3
+        with:
+          body_path: CHANGELOG.md
+          generate_release_notes: true

@@ -1,0 +1,341 @@
+# Agent Search MCP：免费优先的中英文网页搜索与可检查证据
+
+**无需 API Key 的中英文网页搜索 MCP，返回紧凑的多源证据。**
+
+Agent Search MCP 是 Node.js MCP Server 和 CLI。默认路径无需 API Key，直接搜索
+中英文来源，保留来源计数、停止原因和 Provider 失败记录。请求预算和证据预算
+限制调用量与响应体积；只有策略和凭证都允许时才运行付费渠道。
+
+[![npm version](https://img.shields.io/npm/v/agent-search-mcp)](https://www.npmjs.com/package/agent-search-mcp)
+[![npm downloads](https://img.shields.io/npm/dm/agent-search-mcp)](https://www.npmjs.com/package/agent-search-mcp)
+[![GitHub stars](https://img.shields.io/github/stars/lennney/agent-search-mcp)](https://github.com/lennney/agent-search-mcp/stargazers)
+[![CI](https://github.com/lennney/agent-search-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/lennney/agent-search-mcp/actions)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![Glama](https://glama.ai/mcp/servers/lennney/agent-search-mcp/badges/score.svg)](https://glama.ai/mcp/servers/lennney/agent-search-mcp)
+
+[English](README.md) · [产品页](https://take-a-deep-breath0.com/zh/agent-search-mcp) · [Benchmarks](./benchmarks/) · [架构](./docs/architecture.md) · [CHANGELOG](./CHANGELOG.md)
+
+---
+
+## 安装
+
+```bash
+npx -y agent-search-mcp
+```
+
+需要 Node.js >= 18.17。默认运行时不要求浏览器、数据库、Python 或搜索 API
+账号。
+
+### 连接 MCP 客户端
+
+Claude Desktop、Cursor、VS Code 和 Windsurf 等接受 `mcpServers` JSON 的
+客户端可以使用同一份 stdio 配置：
+
+```json
+{
+  "mcpServers": {
+    "agent-search": {
+      "command": "npx",
+      "args": ["-y", "agent-search-mcp"]
+    }
+  }
+}
+```
+
+Claude Code 和 Codex 也可以在各自的 MCP 设置中注册同一条
+`npx -y agent-search-mcp` stdio 命令。
+
+### 添加可选 Agent Skill
+
+连接 MCP Server 后，兼容 Agent Skills 的客户端可以安装仓库自带的路由指南：
+
+```bash
+npx skills add lennney/agent-search-mcp --skill agent-search
+```
+
+例如使用 `Use $agent-search to verify this claim with official sources.`
+显式调用。[Agent Search Skill](./skills/agent-search/SKILL.md) 会在快速发现、严格
+验证、中文来源搜索和选定 URL 提取四条有界路径中选择一条。它会先检查所需 MCP
+工具是否存在，并在安装或修改配置前征求同意。安装 Skill 不会启动或配置 MCP
+Server。
+
+### 示例：检查有界搜索结果
+
+构建本地包后，可以不配置 Provider API Key，直接运行 CLI 查询：
+
+```bash
+npm run build
+fasm search "不需要 API Key 的 MCP 搜索服务器" --json
+```
+
+返回合同会把结果证据、`meta.execution` 和 `partialFailures` 分开保留。
+Provider 超时或 challenge 会继续作为可见信息交给 Agent，而不是被转换成无法
+解释的空结果。这是合同示例，不是实时可用率或搜索质量基准。
+
+全局安装后，可以在不发起搜索请求的情况下检查本地配置：
+
+```bash
+npm install -g agent-search-mcp
+fasm doctor
+```
+
+## 为什么选择 Agent Search MCP
+
+| 需求 | 产品行为 |
+|---|---|
+| 免费网页搜索 | 零密钥来源无需搜索 API 账号 |
+| 渠道成本控制 | 只有显式路由策略才能调用付费渠道 |
+| Token 成本控制 | 紧凑输出和共享证据预算限制响应体积 |
+| 多源证据 | 结果保留来源、相关性、provider-family 数量和部分失败 |
+| 中文网页搜索 | 搜狗和百度直接处理中文查询，无需翻译层 |
+| 轻量自托管 | 纯 Node.js 运行时，支持 stdio、Streamable HTTP 和 CLI |
+
+### 与普通多引擎聚合器的区别
+
+| 普通多引擎聚合 | Agent Search MCP |
+|---|---|
+| 返回 N 条去重后的结果 | 返回结果 + **独立来源计数**（按 provider family，不是适配器数） |
+| Provider 失败时静默少几条 | 每个失败都保留在 `partialFailures`（超时、限流、challenge、权限、预算） |
+| 结果数够多就停止 | 只有质量门（数量、相关性、置信度、来源覆盖）达标才停止，并返回 `stop_reason` |
+| 固定长度输出 | 共享证据预算限制全响应 Token，紧凑文本保留来源 |
+| 一个适配器算一个"来源" | 同一上游经多个适配器不会虚增 `source_count` |
+
+一分钟离线 Demo 用生产证据评分器与格式化器重放这些差异：
+
+### 检查搜索证据
+
+每个 JSON 响应都包含一份 Search Evidence Packet，回答 Agent 使用结果前需要了解的
+路由问题：
+
+| 问题 | 响应字段 |
+|---|---|
+| 实际运行了哪些适配器？ | `meta.execution.searched_engines` |
+| 路由为什么停止？ | `meta.execution.stop_reason` 和 `meta.execution.quality_gate` |
+| 请求是否触及工作预算？ | `meta.execution.budget` |
+| 证据是否被截断？ | `meta.evidence_budget` |
+| 上游 Provider 是否失败？ | `partialFailures` |
+| 多个适配器是否代表独立来源？ | `results[].source_count` 按 provider family 而不是适配器名称计数 |
+
+运行一分钟离线合同 Demo：
+
+```bash
+npm run demo:evidence
+npm run demo:evidence -- --json
+```
+
+它使用三个合成场景，通过生产证据评分器、格式化器和 MCP 输出 helper 重放：
+同 family 适配器重叠、可见的 fallback 失败，以及有界的质量门停止。整个过程不联网，
+也不形成真实可用率或搜索质量声明。
+
+默认 `free_first` 策略不会消耗已经配置的 API 凭证。`free_only` 禁止付费渠道；
+`quality_escalation` 在免费证据未通过质量门时调用一个已配置付费渠道；
+`paid_first` 先尝试该渠道，再回退到免费来源。
+
+请求预算限制适配器尝试次数、总耗时和接纳结果数。证据预算限制整个响应内
+与查询相关的段落。Compact 模式保留前几条结果的完整内容，后续结果缩减为
+仍带来源信息的引用。
+
+### 可复现的 Token 节省
+
+仓库内的双语冻结 fixture 使用锁定的 tokenizer 测量格式化结果：
+
+| 输出 | 每次查询平均 Token | 相比 Normal |
+|---|---:|---:|
+| Normal | 2396.0 | |
+| Compact | 1650.1 | 节省 31.1% |
+| Compact+ | 1633.0 | 节省 31.8% |
+
+这组 fixture 只验证输出格式和证据包行为，不代表真实引擎可用率或搜索质量。
+具体方法与限制见[基准说明](./benchmarks/#reproducible-fixture-replay)。
+
+## 搜索路由如何工作
+
+```mermaid
+flowchart LR
+    A["AI Agent"] --> M["MCP 搜索工具"]
+    M --> P["渠道与请求策略"]
+    P --> F["零密钥来源"]
+    P --> O["可选付费渠道"]
+    F --> E["去重、排序、保留失败"]
+    O --> E
+    E --> B["证据与 Token 预算"]
+    B --> R["紧凑多源结果"]
+```
+
+路由器分别检查结果数、相关性、置信度和 provider-family 覆盖。证据通过这些门槛后，
+路由停止后续批次，并在 `meta.execution` 中公开决策。Provider 失败保留在
+`partialFailures` 中，空结果不会掩盖上游异常。
+
+[竞品格局调研（2026-08-07）](./docs/research/2026-08-07-competitive-landscape-and-product-gaps.md)
+梳理了已经拥挤的基础能力和当前产品缺口，并为容易变化的事实记录来源日期和固定
+commit。[2026-08-10 增量调研](./docs/research/2026-08-10-competitive-landscape-update.md)
+补充其后的竞品动态：直接本地竞品进入休眠，省 Token 的证据输出成为行业显式杠杆。
+更早的[源码级产品对比](./docs/research/2026-07-26-agent-search-product-architecture.md)
+保留架构层面的详细证据。
+
+---
+
+<!-- BEGIN GENERATED CAPABILITY MATRIX -->
+## 搜索引擎
+
+运行时注册了 17 个适配器：9 个零密钥适配器和 8 个可选 API 适配器。
+
+| 引擎 | 访问方式 | 语言 | 定位 |
+|---|---|---|---|
+| DuckDuckGo | 零密钥 | en | 通用网页搜索 |
+| Sogou Search | 零密钥 | zh | 中文网页搜索 |
+| Bing | 零密钥 | en, zh | 多语言网页搜索 |
+| Baidu | 零密钥 | zh | 中文网页搜索 |
+| Wikipedia | 零密钥 | en, zh, ja, de, fr, es, auto | 百科参考资料 |
+| Startpage | 零密钥 | en, auto | 隐私导向网页搜索 |
+| Yandex | 零密钥 | ru, en, auto | 俄语及国际网页搜索 |
+| Mojeek | 零密钥 | en, auto | 独立隐私导向索引 |
+| Wiby | 零密钥 | en | 独立小型网页索引 |
+| Brave Search | `BRAVE_API_KEY` | en, zh | 可选商业网页搜索 |
+| Tavily Search | `TAVILY_API_KEY` | en, zh | 可选 Agent 导向搜索 |
+| Exa Search | `EXA_API_KEY` | en, zh | 可选神经语义搜索 |
+| Keenable Search | `KEENABLE_API_KEY` | en, auto | 可选独立 Agent 导向搜索 |
+| You.com Search | `YDC_API_KEY` | en, zh | 可选商业网页搜索 |
+| Tencent Web Search API | `TENCENT_WSA_API_KEY` | zh | 可选官方中文联网搜索 |
+| Bocha Web Search | `BOCHA_API_KEY` | zh, en | 可选中文优先 AI 搜索 |
+| Serper Google Search | `SERPER_API_KEY` | en, zh, auto | 可选 Google SERP 搜索 |
+
+## 工具
+
+| 工具 | 说明 | 适用场景 |
+|---|---|---|
+| `free_search` | 多引擎网页搜索与有界回退 | 快速查事实和通用发现 |
+| `free_search_advanced` | 过滤、瀑布搜索和可选内容丰富化 | 域名策略和渐进验证 |
+| `free_extract` | 将网页提取为干净 Markdown | 读取完整来源页面 |
+| `fetch_github_readme` | 获取公开 GitHub 仓库 README | 项目文档查阅 |
+| `fetch_csdn_article` | 获取 CSDN 文章 | 中文技术文章 |
+| `fetch_juejin_article` | 获取掘金文章 | 中文开发者文章 |
+| `search_with_synthesis` | 搜索证据和 LLM 综合提示 | 基于引用证据生成回答 |
+
+### 能力控制
+
+| 环境变量 | 默认值 | 作用 |
+|---|---|---|
+| `ENABLED_TOOLS / DISABLED_TOOLS` | all / none | 工具注册允许列表和拒绝列表；拒绝优先 |
+| `ALLOWED_ENGINES / DENIED_ENGINES` | all / none | 引擎执行允许列表和拒绝列表；拒绝优先 |
+| `SEARCH_PROVIDER_MODE` | free_first | 默认路由：free_first、quality_escalation、paid_first 或 free_only |
+| `PAID_ENGINE_ORDER` | brave,exa,tavily,keenable,youcom,tencent_wsa,bocha,serper | 选择首个已配置可选渠道，不代表质量排名 |
+| `SEARCH_BUDGET_MAX_CALLS` | 16 | 适配器尝试次数预算 |
+| `SEARCH_BUDGET_MAX_ELAPSED_MS` | 30000 | 端到端耗时预算 |
+| `SEARCH_BUDGET_MAX_RESULTS` | 100 | 接纳原始结果数量预算 |
+| `EVIDENCE_BUDGET_CHARS` | 1200 | 证据字符预算 |
+<!-- END GENERATED CAPABILITY MATRIX -->
+
+`search_with_synthesis` 与主搜索工具复用同一份 canonical `structuredContent`
+证据包，并额外提供 `prompt_hint`；文本通道只保留紧凑兼容视图。执行元数据区分计划
+adapter 数量和包含 retry 的 adapter attempt；在所有 adapter transport 都能准确计数前，
+`http_requests` 保持 `null`，不输出伪精确数字。
+
+Wiby 使用官方 JSON API，是无需账号和 API Key 的真实零密钥来源，只在免费瀑布
+后段补充独立小型网页。可选 Provider 需要用户自带凭证；注册送额度或试用配额由
+上游控制，本项目不把它们宣传成永久免费的渠道。
+
+所有工具均为只读、幂等。取消信号会传递到限流等待、重试、Provider 请求和可选
+内容丰富化。内容丰富化只能改善摘要，不能提高来源置信度或独立来源数。
+
+`free_search_advanced.time_range` 仍保留在兼容 schema 中。通用网页 Provider
+没有统一且可验证的时间过滤合同，因此服务会在搜索前返回
+`UNSUPPORTED_FILTER`。
+
+---
+
+## 配置
+
+上面的能力表列出了默认请求预算。常用部署选项如下：
+
+| 目标 | 环境变量 |
+|---|---|
+| 增加可选渠道 | `BRAVE_API_KEY`、`TAVILY_API_KEY`、`KEENABLE_API_KEY`、`EXA_API_KEY`、`YDC_API_KEY`、`TENCENT_WSA_API_KEY`、`BOCHA_API_KEY` 或 `SERPER_API_KEY` |
+| 选择费用策略 | `SEARCH_PROVIDER_MODE`、`PAID_ENGINE_ORDER` |
+| 减少响应 Token | `OUTPUT_STYLE=compact`、`MAX_FULL_RESULTS`、`SNIPPET_LENGTH`、`EVIDENCE_BUDGET_CHARS` |
+| 限制工具或引擎 | `ENABLED_TOOLS`、`DISABLED_TOOLS`、`ALLOWED_ENGINES`、`DENIED_ENGINES` |
+| 使用显式代理 | `DUCKDUCKGO_PROXY_URL`、`SOGOU_PROXY_URL`、`MOJEEK_PROXY_URL`、`WIBY_PROXY_URL`，或 `USE_PROXY=true` 配合 `PROXY_URL` |
+| 使用用户自持代理池 | `DUCKDUCKGO_PROXY_URLS`、`SOGOU_PROXY_URLS`、`MOJEEK_PROXY_URLS` 或 `WIBY_PROXY_URLS`，JSON 数组 2-16 个 HTTP(S) 代理 URL |
+| 持久化精确结果缓存 | `SEARCH_CACHE_DIRECTORY`、`SEARCH_CACHE_TTL_MS`、`SEARCH_CACHE_MAX_ENTRIES` |
+| 开启可选语义处理 | `SEMANTIC_DEDUP`、`SEMANTIC_RERANK`、`DEDUP_THRESHOLD`、`RERANK_TOP_K` |
+
+添加 API Key 不会授权付费流量，路由策略决定是否调用。默认精确结果缓存只存在
+内存中，设置 `SEARCH_CACHE_DIRECTORY` 后才会写入本地。语义处理是唯一使用
+Python 和 Model2Vec 的可选功能。
+
+### HTTP 部署
+
+HTTP 模式要求 `HTTP_AUTH_TOKEN`，除非显式设置
+`HTTP_ALLOW_UNAUTHENTICATED=true`。带 `Origin` 请求头的浏览器请求必须命中
+`ALLOWED_ORIGINS`。TLS 终止、Token 轮换和反向代理示例见
+[HTTP 部署指南](./docs/http-deployment.md)。
+
+---
+
+## CLI
+
+发布包附带 `fasm` CLI：
+
+```bash
+fasm search "TypeScript MCP server"
+fasm search "关键词" --count 5 --engines bing,baidu,youcom --json
+fasm extract "https://example.com"
+fasm extract "https://example.com" --json
+fasm doctor
+fasm doctor --json
+HTTP_AUTH_TOKEN=change-me MODE=http npx agent-search-mcp
+```
+
+`fasm doctor` 只读取本地配置，不发网络探测，也不会输出凭证或代理值。
+
+---
+
+## 文档与证据
+
+| 文档 | 内容 |
+|---|---|
+| [系统架构](./docs/architecture.md) | 路由、证据、provider family 和配置 |
+| [竞品格局（2026-08-10）](./docs/research/2026-08-10-competitive-landscape-update.md) | 截至 2026-08-10 的竞品动态、定位与提升优先级 |
+| [竞品格局（2026-08-07）](./docs/research/2026-08-07-competitive-landscape-and-product-gaps.md) | 竞品基线、预期与产品缺口快照 |
+| [产品对比](./docs/research/2026-07-26-agent-search-product-architecture.md) | Agent 搜索产品的源码级调查 |
+| [基准测试](./benchmarks/) | Token fixture、真实运行边界和质量评测方法 |
+| [v3.2.0 发布说明](./docs/releases/v3.2.0.md) | 渠道策略、预算和迁移说明 |
+| [早期发布候选证据](./docs/evidence/2026-07-26-release-candidate-smoke.md) | 扩展适配器前的打包安装矩阵及限制 |
+| [MCP 2026 适配](./docs/plans/2026-07-25-mcp-ecosystem-and-2026-readiness.md) | 隔离实验和剩余门禁 |
+
+## 配套产品：Slim Guard
+
+Agent Search 控制检索工作并压缩搜索证据。
+[mcp-slim-guard](https://github.com/lennney/mcp-slim-guard) 位于 Agent 与
+MCP Server 之间，负责工具 Schema 压缩和安全策略。
+
+```bash
+npm install -g mcp-slim-guard
+```
+
+---
+
+## 开发
+
+```bash
+git clone https://github.com/lennney/agent-search-mcp.git
+cd agent-search-mcp
+npm install
+npm run build
+npm test
+npm run dev        # stdio 模式
+npm run dev:http   # HTTP 模式（端口 3000）
+```
+
+稳定包支持 Node.js 18、20 和 22。隔离的 MCP 2026 实验需要 Node.js 20 或更高版本。
+
+---
+
+## 许可证
+
+[Apache 2.0](LICENSE)
+
+基于 [open-websearch](https://github.com/Aas-ee/open-websearch) by Aas-ee。
+
+如果 Agent Search MCP 对你的 Agent 有帮助，可以[给仓库一个 Star](https://github.com/lennney/agent-search-mcp)，
+让其他开发者更容易找到项目。

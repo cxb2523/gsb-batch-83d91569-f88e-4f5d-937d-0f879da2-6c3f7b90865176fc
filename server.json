@@ -1,0 +1,92 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.lennney/agent-search-mcp",
+  "description": "Free-first Chinese and English web search MCP using zero-key sources and inspectable evidence.",
+  "repository": {
+    "url": "https://github.com/lennney/agent-search-mcp",
+    "source": "github"
+  },
+  "version": "3.2.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "agent-search-mcp",
+      "version": "3.2.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "description": "Brave Search API key (optional, enables Brave engine)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "BRAVE_API_KEY"
+        },
+        {
+          "description": "Tavily Search API key (optional, enables Tavily engine)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "TAVILY_API_KEY"
+        },
+        {
+          "description": "Exa Search API key (optional, enables Exa engine)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "EXA_API_KEY"
+        },
+        {
+          "description": "Keenable Search API key (optional, enables Keenable engine)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "KEENABLE_API_KEY"
+        },
+        {
+          "description": "You.com Search API key (optional, enables You.com engine)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "YDC_API_KEY"
+        },
+        {
+          "description": "Tencent Web Search API key (optional, enables Tencent WSA engine)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "TENCENT_WSA_API_KEY"
+        },
+        {
+          "description": "Bocha Web Search API key (optional, enables Bocha engine)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "BOCHA_API_KEY"
+        },
+        {
+          "description": "Serper API key (optional, enables Google SERP search)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "SERPER_API_KEY"
+        },
+        {
+          "description": "Provider policy: free_first, quality_escalation, paid_first, or free_only",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "SEARCH_PROVIDER_MODE"
+        },
+        {
+          "description": "Comma-separated optional-provider preference order",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "PAID_ENGINE_ORDER"
+        }
+      ]
+    }
+  ]
+}

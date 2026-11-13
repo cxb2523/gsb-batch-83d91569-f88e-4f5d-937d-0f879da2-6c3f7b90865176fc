@@ -1,0 +1,82 @@
+import { z } from 'zod';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { searchWithFallback } from './free-search.js';
+import type { SearchWithFallbackOptions } from './free-search.js';
+import { buildPromptHint } from '../synthesis/prompt-builder.js';
+import type { SynthesisResult } from '../synthesis/prompt-builder.js';
+import { logger } from '../infrastructure/logger.js';
+import {
+  type SearchRuntime,
+} from '../infrastructure/search-runtime.js';
+import {
+  createSynthesisToolResult,
+  searchWithSynthesisOutputSchema,
+} from './search-output.js';
+
+export function registerSearchWithSynthesis(
+  server: McpServer,
+  runtime?: SearchRuntime,
+) {
+  server.registerTool(
+    'search_with_synthesis',
+    {
+      description:
+        'Opt-in deep search with waterfall verification and content enrichment. Returns structured results plus a prompt_hint; it does not call an external LLM.\n\n' +
+        'Use when multi-source evidence needs a synthesis handoff. free_search is the default for discovery; this path uses more tokens and network time.\n\n' +
+        '@readOnly true @idempotent true — runs waterfall search across free+paid engines with content enrichment.',
+      inputSchema: {
+        query: z.string().describe('Search query'),
+        count: z.number().int().min(1).max(20).optional().default(10)
+          .describe('Number of search results to gather (1-20)'),
+        language: z.enum(['auto', 'en', 'zh']).optional().default('auto'),
+        min_confidence: z.number().min(0).max(3).optional().default(0)
+          .describe('Minimum source-reliability confidence (0-1). Legacy values 2-3 are treated as min_source_count.'),
+        min_source_count: z.number().int().min(1).max(12).optional().default(1)
+          .describe('Minimum independent upstream provider families; the input contract accepts 1-12 for compatibility.'),
+      },
+      outputSchema: searchWithSynthesisOutputSchema,
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async (input, extra) => {
+      try {
+        const legacySourceCount = input.min_confidence > 1 ? Math.ceil(input.min_confidence) : 1;
+        const options: SearchWithFallbackOptions = {
+          query: input.query,
+          count: input.count,
+          waterfall: true,
+          enrich: true,
+          minConfidence: input.min_confidence <= 1 ? input.min_confidence : 0,
+          minSourceCount: Math.max(input.min_source_count, legacySourceCount),
+          language: input.language,
+          signal: extra?.signal,
+        };
+        const response = runtime
+          ? await searchWithFallback(options, runtime)
+          : await searchWithFallback(options);
+
+        const rawResults = response.results || [];
+        const results: SynthesisResult[] = rawResults.map((r) => ({
+          title: r.title,
+          url: r.url,
+          snippet: r.snippet || '',
+          confidence: r.confidence ?? 0,
+          source: r.sources?.join(', ') || 'unknown',
+        }));
+
+        const promptHint = buildPromptHint(input.query, results);
+
+        return createSynthesisToolResult({
+          ...response,
+          prompt_hint: promptHint,
+        });
+      } catch (error) {
+        if (extra?.signal.aborted) throw error;
+        logger.error({ err: error instanceof Error ? error.message : String(error) }, 'search_with_synthesis failed');
+        return {
+          content: [{ type: 'text', text: `Search failed: ${error instanceof Error ? error.message : 'Unknown error'}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+}
