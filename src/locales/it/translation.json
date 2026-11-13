@@ -44,6 +44,7 @@
   "cpuGovernor": "CPU Governor",
   "sectionDevice": "📊 Dispositivo",
   "sensors": "Sensori",
+  "sensorLinkTitle": "Invio sensori (ultimo ciclo)",
   "sectionNotifications": "🔔 Notifiche",
   "notifications": "🔔 Notifiche",
   "sound": "Suono",

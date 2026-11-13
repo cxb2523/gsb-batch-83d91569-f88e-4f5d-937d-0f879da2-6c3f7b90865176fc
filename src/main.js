@@ -14,6 +14,7 @@ const crypto = require('crypto');
 const si = require('systeminformation');
 const auth = require('./auth');
 const { DisplayController } = require('./display');
+const { SensorReporter, OUTCOME } = require('./sensor-reporter');
 
 // ── Config ──
 const CONFIG_DIR = path.join(os.homedir(), '.config', 'ha-linux-companion');
@@ -143,24 +144,9 @@ class HAClient {
     }
   }
 
-  async updateSensors(sensors) {
-    if (!this.webhookId) return;
-
-    // FIX 13/10/2026 (Simone AI): registra i sensori UNA volta sola.
-    // Re-registrare a ogni ciclo rende le entità unavailable per ~5s
-    // (pattern: unavailable→valore ogni 60s = flapping sensor.system_battery_soc ecc.)
-    if (!this._sensorsRegistered) {
-      for (const sensor of sensors) {
-        await this.webhook('register_sensor', sensor);
-      }
-      this._sensorsRegistered = true;
-      log('[Sensors] Registration completed once (' + sensors.length + ' sensors)');
-    }
-
-    // Then update states (strip registration-only fields)
-    const states = sensors.map(s => ({ unique_id: s.unique_id, state: s.state, type: s.type }));
-    await this.webhook('update_sensor_states', states);
-  }
+  // Sensor registration/state bookkeeping lives in SensorReporter
+  // (src/sensor-reporter.js): per-sensor outcomes, retries and one-time
+  // registration are handled there instead of a single _sensorsRegistered flag.
 
   // Update push_url for an existing registration
   async updatePushUrl(pushUrl, pushToken) {
@@ -349,22 +335,100 @@ async function collectSensors() {
 }
 
 let sensorUpdateCount = 0;
+let sensorReporter = null;
+
+// Lazily build the reporter bound to the current HA client. Recreated after a
+// disconnect/reconnect so a new device registration starts from a clean slate.
+function getSensorReporter() {
+  if (!sensorReporter && haClient) {
+    sensorReporter = new SensorReporter({
+      webhookFn: (type, data) => haClient.webhook(type, data),
+      isReady: () => !!(haClient && haClient.webhookId),
+      logger: log,
+    });
+  }
+  return sensorReporter;
+}
+
+function resetSensorReporter() {
+  sensorReporter = null;
+  sensorUpdateCount = 0;
+}
+
+// Device registration must succeed (producing a webhookId) before any sensor
+// can be reported. Retried from the 60s loop when a previous attempt failed,
+// so a transient HA outage self-heals instead of leaving the panel dead.
+async function ensureDeviceRegistration() {
+  if (!haClient || haClient.webhookId) return;
+  log('[REG] no webhookId — retrying device registration');
+  const ok = await haClient.registerDevice((config && config.deviceName) || os.hostname());
+  if (ok && haClient.webhookId) {
+    config = loadConfig();
+    config.deviceId = haClient.deviceId;
+    config.webhookId = haClient.webhookId;
+    config.registered = true;
+    saveConfig(config);
+    log('[REG] device registration recovered, webhookId: ' + haClient.webhookId);
+  } else {
+    log('[REG] device registration still failing — will retry next cycle');
+  }
+}
+
 async function updateSensors() {
-  if (!haClient || !haClient.webhookId) { log('[Sensors] updateSensors skipped: no client'); return; }
+  const reporter = getSensorReporter();
+  if (!reporter) {
+    log('[Sensors] updateSensors skipped: no HA client');
+    return;
+  }
   try {
+    // Obtain a webhookId first; while missing, reportRound() records an
+    // explicit, visible "not_ready" outcome rather than silently skipping.
+    await ensureDeviceRegistration();
+
     const sensors = await collectSensors();
+    const round = await reporter.reportRound(sensors);
+
+    const failed = round.sensors.filter(s =>
+      s.lastOutcome === OUTCOME.REGISTER_FAILED || s.lastOutcome === OUTCOME.PUSH_FAILED);
+    log('[Sensors] round ' + round.round + ' — ' +
+      round.counts.success + ' ok, ' +
+      round.counts.register_failed + ' register_failed, ' +
+      round.counts.push_failed + ' push_failed, ' +
+      round.counts.not_collected + ' not_collected, ' +
+      round.counts.not_ready + ' not_ready' +
+      (round.ready ? '' : ' (' + round.notReadyReason + ')'));
     if (sensors.length > 0) {
-      await haClient.updateSensors(sensors);
-      log('[Sensors] ' + sensors.length + ' updated: ' + sensors.map(s => s.unique_id + '=' + s.state).join(', '));
+      log('[Sensors] readings: ' + sensors.map(s => s.unique_id + '=' + s.state).join(', '));
     }
-    // device_tracker: push fixed panel location every ~5 minutes
+    for (const f of failed) {
+      log('[Sensors] ✖ ' + f.unique_id + ' ' + f.lastOutcome +
+        ' (streak ' + f.consecutiveFailures + '): ' + f.lastReason);
+    }
+
+    // device_tracker: push fixed panel location every ~5 minutes.
+    // The cadence counter advances even when the device is not ready yet.
     sensorUpdateCount++;
     if (config && config.panelLat !== undefined && config.panelLon !== undefined && sensorUpdateCount % 5 === 1) {
-      await haClient.webhook('update_location', {
-        gps: [Number(config.panelLat), Number(config.panelLon)],
-        gps_accuracy: 0, battery: 100,
-      });
-      log('[Location] panel position pushed');
+      if (!haClient || !haClient.webhookId) {
+        reporter.recordLocationOutcome(null, 'webhookId missing — device registration pending');
+        log('[Location] skipped: no webhookId');
+      } else {
+        try {
+          const res = await haClient.webhook('update_location', {
+            gps: [Number(config.panelLat), Number(config.panelLon)],
+            gps_accuracy: 0, battery: 100,
+          });
+          reporter.recordLocationOutcome(res, null);
+          if (res && res.status >= 200 && res.status < 300) {
+            log('[Location] panel position pushed');
+          } else {
+            log('[Location] push failed: HTTP ' + (res ? res.status : 'n/a'));
+          }
+        } catch (e) {
+          reporter.recordLocationOutcome(null, e.message);
+          log('[Location] push error: ' + e.message);
+        }
+      }
     }
   } catch (err) {
     log('[Sensors] Error: ' + err.message);
@@ -386,6 +450,9 @@ function stopSensorUpdates() {
     clearInterval(sensorInterval);
     sensorInterval = null;
   }
+  // Drop per-sensor bookkeeping: the next startSensorUpdates() belongs to a
+  // (re)connected device and must re-register from a clean state.
+  resetSensorReporter();
 }
 
 // ── Window Management ──
@@ -1029,7 +1096,19 @@ async function healthCheckTick() {
       haClient = new HAClient(config.url, token);
       if (config.deviceId) haClient.deviceId = config.deviceId;
       if (config.webhookId) haClient.webhookId = config.webhookId;
+      // New client object: rebuild the reporter so it talks to the new client.
+      // When the same webhookId was restored, preserve registrations — the HA
+      // entities still exist, re-registering would flap them to unavailable.
+      const previouslyRegistered = sensorReporter ? sensorReporter.getStatus().registeredIds : [];
+      resetSensorReporter();
       startSensorUpdates();
+      if (haClient.webhookId && previouslyRegistered.length && sensorReporter) {
+        for (const id of previouslyRegistered) sensorReporter.registeredIds.add(id);
+        for (const id of previouslyRegistered) {
+          const st = sensorReporter.state.get(id);
+          if (st) st.registered = true;
+        }
+      }
     }
     
     // Reload dashboard in Electron
@@ -1636,8 +1715,13 @@ ipcMain.handle('connect', async (event, { url: haUrl, token, deviceName }) => {
 
     if (registered) {
       log('[AUTH] Device registered via token, webhookId:', client.webhookId);
-      startSensorUpdates();
+    } else {
+      // Registration failed but auth is valid: start the loop anyway so
+      // ensureDeviceRegistration() retries every cycle (visible as "not_ready"
+      // in the sensor status) instead of silently never reporting again.
+      log('[AUTH] Device registration failed — sensor loop will retry until a webhookId is obtained');
     }
+    startSensorUpdates();
 
     loadDashboard();
     return { success: true, registered };
@@ -1667,6 +1751,23 @@ ipcMain.handle('toggle-fullscreen', () => {
 
 ipcMain.handle('get-sensors', async () => {
   return collectSensors();
+});
+
+// Per-sensor delivery status of the latest reporting round: outcomes,
+// failure reasons, consecutive-failure streaks and location push health.
+ipcMain.handle('get-sensor-status', async () => {
+  if (!sensorReporter) {
+    return {
+      round: 0,
+      ready: !!(haClient && haClient.webhookId),
+      lastRound: null,
+      registeredIds: [],
+      sensors: [],
+      location: null,
+      note: 'no reporting round has run yet',
+    };
+  }
+  return sensorReporter.getStatus();
 });
 
 ipcMain.handle('get-version', () => APP_VERSION);
@@ -2090,8 +2191,10 @@ ipcMain.handle('login-with-credentials', async (event, { url: haUrl, username, p
 
     if (registered) {
       log('[AUTH] Device registered, webhookId:', client.webhookId);
-      startSensorUpdates();
+    } else {
+      log('[AUTH] Device registration failed — sensor loop will retry until a webhookId is obtained');
     }
+    startSensorUpdates();
     loadDashboard();
     return { success: true, registered };
   } catch (err) {
@@ -2118,6 +2221,12 @@ ipcMain.handle('submit-mfa', async (event, { url: haUrl, flowId, mfaCode }) => {
     saveConfig(config);
 
     haClient = client;
+    if (registered) {
+      log('[AUTH] Device registered after MFA, webhookId:', client.webhookId);
+    } else {
+      log('[AUTH] Device registration failed after MFA — sensor loop will retry until a webhookId is obtained');
+    }
+    startSensorUpdates();
     loadDashboard();
     return { success: true, registered };
   } catch (err) {

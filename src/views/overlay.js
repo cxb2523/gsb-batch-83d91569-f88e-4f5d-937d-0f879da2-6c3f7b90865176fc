@@ -252,6 +252,8 @@
 
     <h3>${t('sectionDevice')}</h3>
     <div class="comp-row"><div><div class="comp-label" id="comp-device-name">Panel</div><div class="comp-sub" id="comp-sensor-info">${t('sensors')}: --</div></div></div>
+    <div class="comp-section-desc" style="margin-top:8px">${t('sensorLinkTitle') || 'Sensor reporting'}</div>
+    <div id="comp-sensor-status" style="padding:6px 0"></div>
 
     <h3>${t('sectionNotifications')}</h3>
     <div class="comp-notif-row"><div class="comp-label">${t('notifications')}</div><button class="comp-toggle" id="comp-notif-enabled"></button></div>
@@ -347,7 +349,60 @@
     loadAudioOutputs();
     loadSchedule();
     loadUpdateInfo();
+    loadSensorStatus();
     ipc('getGovernor').then(function(g) { document.getElementById('comp-governor').value = g; });
+  }
+
+  // ── Sensor reporting (per-sensor outcomes of the latest round) ──
+  var SENSOR_OUTCOME_META = {
+    success:         { color: '#30D158', label: 'OK' },
+    register_failed: { color: '#FF453A', label: 'register failed' },
+    push_failed:     { color: '#FF9500', label: 'push failed' },
+    not_collected:   { color: '#8E8E93', label: 'not collected' },
+    not_ready:       { color: '#FFD60A', label: 'not ready' },
+  };
+  function loadSensorStatus() {
+    var el = document.getElementById('comp-sensor-status');
+    if (!el) return;
+    ipc('getSensorStatus').then(function(st) {
+      if (!st || !st.lastRound) {
+        el.innerHTML = '<div style="color:#636366;font-size:12px">' +
+          (st && st.ready ? 'Waiting for first reporting round…' : 'Device not registered yet (no webhookId).') +
+          '</div>';
+        return;
+      }
+      var html = '';
+      if (!st.ready) {
+        html += '<div style="color:#FFD60A;font-size:12px;margin-bottom:6px">⚠ ' +
+          (st.lastRound.notReadyReason || 'not ready') + '</div>';
+      }
+      html += '<div style="color:#636366;font-size:11px;margin-bottom:6px">round #' + st.lastRound.round +
+        ' — ' + st.lastRound.counts.success + ' ok / ' +
+        (st.lastRound.counts.register_failed + st.lastRound.counts.push_failed) + ' failed / ' +
+        st.lastRound.counts.not_collected + ' not collected</div>';
+      st.lastRound.sensors.forEach(function(s) {
+        var meta = SENSOR_OUTCOME_META[s.lastOutcome] || { color: '#8E8E93', label: s.lastOutcome || '—' };
+        var streak = s.consecutiveFailures > 0 ? ' ×' + s.consecutiveFailures : '';
+        var title = s.lastReason ? ' title="' + String(s.lastReason).replace(/"/g, '&quot;') + '"' : '';
+        html += '<div' + title + ' style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:3px 0;font-size:12px">' +
+          '<span style="color:#E5E5EA;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+          (s.name || s.unique_id) + '</span>' +
+          '<span style="color:' + meta.color + ';white-space:nowrap;font-weight:600">' + meta.label + streak + '</span>' +
+          '</div>';
+      });
+      if (st.location && st.location.lastOutcome) {
+        var locOk = st.location.lastOutcome === 'success';
+        var locTitle = st.location.lastReason ? ' title="' + String(st.location.lastReason).replace(/"/g, '&quot;') + '"' : '';
+        html += '<div' + locTitle + ' style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:3px 0;font-size:12px;border-top:1px solid #2C2C2E;margin-top:4px">' +
+          '<span style="color:#E5E5EA">Panel location (5 min)</span>' +
+          '<span style="color:' + (locOk ? '#30D158' : '#FF9500') + ';font-weight:600">' +
+          (locOk ? 'OK' : 'push failed' + (st.location.consecutiveFailures ? ' ×' + st.location.consecutiveFailures : '')) +
+          '</span></div>';
+      }
+      el.innerHTML = html;
+    }).catch(function() {
+      el.innerHTML = '<div style="color:#636366;font-size:12px">Status unavailable.</div>';
+    });
   }
 
   // ── Display Controls ──

@@ -98,6 +98,31 @@ Tap the ⚙ gear icon (top-right of dashboard) to access:
 | IP Address | sensor | — |
 | Display State | binary_sensor | on/off |
 
+### Sensor delivery health & self-healing
+
+Each 60-second cycle records an explicit **per-sensor outcome** and retries
+failures on later cycles instead of logging one line and giving up:
+
+| Outcome | Meaning |
+|---------|---------|
+| `success` | registered (once) and state pushed OK |
+| `register_failed` | `register_sensor` failed — retried next cycles until it succeeds |
+| `push_failed` | state push failed (network, HTTP error, or HA per-entity rejection) — retried next cycles |
+| `not_collected` | no reading was produced for this sensor in the current cycle |
+| `not_ready` | device registration has no `webhookId` yet, so reporting is not allowed |
+
+- A sensor is registered **only once**; it is never re-registered on success
+  (re-registering every cycle made HA entities flap to `unavailable`). If HA
+  later reports the entity as unknown (e.g. after an HA restart), that sensor
+  is re-registered automatically on the next cycle.
+- Consecutive failure counts and the latest failure reason are kept per
+  sensor; one sensor failing never interrupts the others.
+- The latest round's per-sensor outcomes, failure reasons, streak counts and
+  the ~5-minute location-push health are visible in **Settings → Device →
+  Sensor reporting** and via the `get-sensor-status` IPC channel.
+- The pipeline lives in `src/sensor-reporter.js` and takes its request
+  function by injection, so it is fully testable without a live HA instance.
+
 ## Configuration
 
 Stored in `~/.config/ha-linux-companion/config.json`:
@@ -210,14 +235,31 @@ data:
 
 ```
 src/
-├── main.js       # Electron main process: HA client, auth, sensors, notifications, system controls
-├── auth.js        # OAuth2 token management with proactive refresh
-├── preload.js     # IPC bridge (haCompanion API)
+├── main.js           # Electron main process: HA client, auth, sensors, notifications, system controls
+├── sensor-reporter.js # Self-healing sensor pipeline: per-sensor outcomes, retries, one-time registration
+├── auth.js            # OAuth2 token management with proactive refresh
+├── preload.js         # IPC bridge (haCompanion API)
 └── views/
     ├── login.html # Login UI with on-screen keyboard
     ├── overlay.js # Settings overlay with notification/channel config
     ├── toast.css  # Toast notification styles (priority colors, animations)
     └── toast.js   # Toast overlay injected into HA dashboard
+
+test/
+└── sensor-reporter.test.js # node:test suite — no Home Assistant required (injectable fake webhook)
+```
+
+## Testing
+
+The sensor pipeline is covered by local tests using Node's built-in test
+runner — no Electron, no Home Assistant, and no extra dependencies. The
+mobile_app webhook is replaced by an injectable request function that scripts
+registration failures, push failures and recovery, and asserts per-sensor
+outcomes, retry counts and that registered sensors are never re-registered:
+
+```bash
+npm test
+# equivalent to: node --test test/sensor-reporter.test.js
 ```
 
 ## Building

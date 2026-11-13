@@ -7,6 +7,7 @@
   "homepage": "https://github.com/SimoneB79/ha-linux-companion",
   "scripts": {
     "start": "electron .",
+    "test": "node --test test/sensor-reporter.test.js",
     "build": "electron-builder --linux",
     "build:arm64": "electron-builder --linux --arm64",
     "build:deb": "electron-builder --linux deb",

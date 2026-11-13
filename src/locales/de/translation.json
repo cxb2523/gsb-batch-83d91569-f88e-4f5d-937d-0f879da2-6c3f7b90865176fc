@@ -44,6 +44,7 @@
   "cpuGovernor": "CPU-Governor",
   "sectionDevice": "📊 Gerät",
   "sensors": "Sensoren",
+  "sensorLinkTitle": "Sensor-Meldung (letzter Zyklus)",
   "sectionNotifications": "🔔 Benachrichtigungen",
   "notifications": "🔔 Benachrichtigungen",
   "sound": "Ton",
