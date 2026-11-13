@@ -1,0 +1,16 @@
+{
+  "regionId": "africa",
+  "regionName": "非洲市场（演示采集失败）",
+  "map": {
+    "lat": 5,
+    "lng": 20,
+    "zoom": 3,
+    "address": "非洲地区客户分布（演示数据源）"
+  },
+  "totalCustomers": 4860,
+  "activeCustomers": 2140,
+  "growthRate": 12.5,
+  "topCountries": ["埃及", "南非", "尼日利亚", "摩洛哥", "肯尼亚"],
+  "collectedAt": "2026-11-10T02:21:00.000Z",
+  "simulateCollectionFailure": "上游数据源限流（HTTP 429），本次采集未返回结果"
+}

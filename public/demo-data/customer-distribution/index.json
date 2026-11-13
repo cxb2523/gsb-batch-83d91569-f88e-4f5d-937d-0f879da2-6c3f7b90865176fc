@@ -1,0 +1,12 @@
+{
+  "sourceId": "demo-customer-distribution",
+  "sourceName": "探客演示数据源（本地样例）",
+  "updatedAt": "2026-11-10T02:30:00.000Z",
+  "regions": [
+    { "id": "global", "name": "全球视图" },
+    { "id": "asia", "name": "亚洲市场" },
+    { "id": "europe", "name": "欧洲市场" },
+    { "id": "america", "name": "美洲市场" },
+    { "id": "africa", "name": "非洲市场（演示采集失败）" }
+  ]
+}

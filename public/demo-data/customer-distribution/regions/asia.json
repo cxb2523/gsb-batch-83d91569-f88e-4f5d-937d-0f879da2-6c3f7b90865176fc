@@ -1,0 +1,15 @@
+{
+  "regionId": "asia",
+  "regionName": "亚洲市场",
+  "map": {
+    "lat": 35,
+    "lng": 105,
+    "zoom": 4,
+    "address": "亚洲地区客户分布（演示数据源）"
+  },
+  "totalCustomers": 18640,
+  "activeCustomers": 12730,
+  "growthRate": 34.8,
+  "topCountries": ["中国", "日本", "韩国", "新加坡", "印度"],
+  "collectedAt": "2026-11-10T02:16:30.000Z"
+}

@@ -1,0 +1,15 @@
+{
+  "regionId": "global",
+  "regionName": "全球视图",
+  "map": {
+    "lat": 20,
+    "lng": 0,
+    "zoom": 2,
+    "address": "全球客户分布（演示数据源）"
+  },
+  "totalCustomers": 52780,
+  "activeCustomers": 36120,
+  "growthRate": 25.4,
+  "topCountries": ["美国", "德国", "英国", "日本", "澳大利亚"],
+  "collectedAt": "2026-11-10T02:15:00.000Z"
+}

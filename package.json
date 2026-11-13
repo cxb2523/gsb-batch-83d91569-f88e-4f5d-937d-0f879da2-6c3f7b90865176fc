@@ -6,7 +6,10 @@
     "dev": "vite --config vite.config.dev.ts",
     "build": "vite build",
     "preview": "vite preview --port 5174",
-    "lint": "tsgo -p tsconfig.check.json; npx biome lint; rules/check.sh"
+    "lint": "tsgo -p tsconfig.check.json; npx biome lint; rules/check.sh",
+    "verify:demo": "node scripts/demo-collection/verify.ts",
+    "verify:demo:http": "node scripts/demo-collection/verify-http.ts",
+    "verify:demo:browser": "node scripts/demo-collection/browser-e2e.mjs"
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.2.8",

@@ -1,0 +1,14 @@
+{
+  "regionId": "america",
+  "regionName": "美洲市场",
+  "map": {
+    "lat": 40,
+    "lng": -100,
+    "zoom": 4,
+    "address": "美洲地区客户分布（演示数据源，字段异常样例）"
+  },
+  "totalCustomers": 12040,
+  "growthRate": "22%",
+  "topCountries": ["美国", "加拿大", "墨西哥", "巴西", "阿根廷"],
+  "collectedAt": "2026-11-10T02:19:30.000Z"
+}

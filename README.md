@@ -11,8 +11,7 @@
 
 ## 目录结构
 
-```
-├── README.md # 说明文档
+```├── README.md # 说明文档
 ├── components.json # 组件库配置
 ├── index.html # 入口文件
 ├── package.json # 包管理
@@ -62,6 +61,18 @@ pnpm dev
 ```
 pnpm build
 pnpm preview  # 预览地址：http://localhost:5174/
+```
+
+## 在线演示页的客户分布采集链路
+
+“在线演示”页按区域抓取客户分布，地图中心、统计卡与国家标签来自同一次采集结果。
+数据源为 `public/demo-data/customer-distribution/`（目录 `index.json` + 每区域 `regions/{id}.json`），
+字段、校验规则、样例覆盖与手动复现步骤见 [docs/demo-collection.md](docs/demo-collection.md)。
+
+```
+pnpm verify:demo          # 服务层验收（无需服务器）
+pnpm verify:demo:http     # HTTP 数据源验收（需先 pnpm dev）
+pnpm verify:demo:browser  # 浏览器交互验收（需先 pnpm dev，且本机有 Chrome/Edge）
 ```
 
 ## 本地开发与推送步骤
