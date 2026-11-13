@@ -568,6 +568,39 @@ COMPLETE_STOP_REASONS = ("completed", "pagination_exhausted", "no_new_products",
                          "single_page_mode", "site_result_cap", "no_results")
 
 
+# The three per-page outcomes a search run can attribute to every page it
+# planned, in one stable vocabulary. Kept here rather than in any one engine
+# so every engine that grows a concurrent path reports the same three names.
+#
+#   completed      the page was requested and the search API answered with a
+#                  usable payload (the rows on it, if any, were parsed).
+#   fetch_failed   the page was requested but the search API refused or
+#                  answered with something unusable.
+#   unattempted    no worker ever claimed the page (e.g. every worker failed
+#                  to open a browser session), so no request was made at all.
+#
+# These are deliberately the ONLY three values: every planned page lands in
+# exactly one of them, and the counts derived from the list must equal the
+# run's pages_completed / pages_failed / pages_unattempted arithmetic.
+PAGE_STATUS_COMPLETED = "completed"
+PAGE_STATUS_FETCH_FAILED = "fetch_failed"
+PAGE_STATUS_UNATTEMPTED = "unattempted"
+PAGE_STATUSES = (PAGE_STATUS_COMPLETED, PAGE_STATUS_FETCH_FAILED,
+                 PAGE_STATUS_UNATTEMPTED)
+
+
+def page_status_records(statuses: dict) -> List[dict]:
+    """Build the sidecar's per-page list, sorted by page number ascending.
+
+    `statuses` maps a 1-based page number to one of PAGE_STATUSES. Each page
+    appears exactly once, so a page can never be counted as both done and
+    missing. The list shape (one object per page with stable `page` and
+    `status` keys) is the sidecar contract; do not change the key names.
+    """
+    return [{"page": page_num, "status": statuses[page_num]}
+            for page_num in sorted(statuses)]
+
+
 def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
                allow_empty: bool, *, blocked: bool, stop_reason: str,
                pages_requested: int, pages_completed: int,
@@ -579,6 +612,9 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
                pages_available: Optional[int] = None,
                capped_by_site: Optional[bool] = None,
                reachable_max: Optional[int] = None,
+               rows_fetched: Optional[int] = None,
+               rows_written: Optional[int] = None,
+               page_statuses: Optional[dict] = None,
                extra: Optional[dict] = None) -> int:
     """Write output + the run-metadata sidecar; return the exit code.
 
@@ -605,7 +641,28 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
               stats=write_stats)
     wrote_output = bool(rows) or allow_empty
 
-    if wrote_output:
+    # The sidecar is the run's own accounting, separate from the data file.
+    # A run that FETCHED rows but filtered every one out (e.g.
+    # --platform indiegogo over an all-gamefound page) is a real, completed
+    # fetch: the empty-result rule still withholds the DATA file, but a
+    # sidecar here lets a consumer see rows_fetched > 0 and prove the empty
+    # file was a filter result, not a dead run. A run that never obtained
+    # anything still writes no sidecar, so yesterday's good sidecar survives.
+    write_sidecar = wrote_output or (rows_fetched or 0) > 0
+
+    # Engine-supplied accounting first, housekeeping second: a key collision
+    # must never silently drop something an engine chose to record. The
+    # per-page list and the before/after-filter counts are the search path's
+    # own evidence; single-page modes pass neither and stay free of the list.
+    accounting: dict = {}
+    if page_statuses:
+        accounting["page_statuses"] = page_status_records(page_statuses)
+    if rows_fetched is not None:
+        accounting["rows_fetched"] = rows_fetched
+    if rows_written is not None:
+        accounting["rows_written"] = rows_written
+
+    if write_sidecar:
         status = "complete" if (rows and complete) else (
             "partial" if rows else "failed")
         write_run_meta(out_prefix, run_meta(
@@ -615,9 +672,7 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
             total_results=total_results, pages_available=pages_available,
             capped_by_site=capped_by_site, reachable_max=reachable_max,
             start_url=start_url, final_url=final_url, products=len(rows),
-            # Housekeeping merged UNDER the caller's `extra`: a key collision
-            # must never silently drop something an engine chose to record.
-            extra={**write_stats, **(extra or {})}))
+            extra={**accounting, **write_stats, **(extra or {})}))
 
     if not rows:
         # Nothing gathered at all, and WHY decides the code. The three

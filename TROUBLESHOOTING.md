@@ -57,8 +57,37 @@ With a browser engine, check `stop_reason`:
 * `page_failed` — the search API refused a page mid-run; `pages_failed`
   names which.
 * `pages_unattempted` — with `--concurrency`, no worker could open a session
-  for some planned pages; they are listed in `pages_failed` and in the
-  sidecar's `pages_unattempted`, and the run is `partial` (exit 6).
+  for some planned pages; they are listed in the sidecar's
+  `pages_unattempted`. The two failure lists are disjoint: a page the API
+  refused is `fetch_failed` and stays in `pages_failed`, while a page no
+  worker ever claimed is `unattempted` and never appears there. The run is
+  `partial` (exit 6).
+
+## "Which pages actually got fetched?"
+
+The sidecar's `page_statuses` gives one entry per planned page, sorted by
+page number, each carrying a stable `page` and `status`:
+
+* `completed` — the page was requested and the search API answered with a
+  usable payload (an answer with no rows still counts, since it marks the end
+  of the listing).
+* `fetch_failed` — the page was requested but the search API refused or
+  answered unusably. These are exactly the pages in `pages_failed`.
+* `unattempted` — no worker ever claimed the page, so no request was made.
+  These are exactly the pages in `pages_unattempted`.
+
+Each page appears exactly once, and the three counts reconcile with
+`pages_completed`, `pages_failed` and `pages_unattempted`. Single-page modes
+(`campaign`, `rewards`) produce no `page_statuses` list.
+
+`rows_fetched` and `rows_written` reconcile the data file with the page
+counts. The `--platform` filter (and any future post-parse filter) runs
+after fetching, so the page counts describe what was fetched while the file
+holds what survived the filter: `rows_fetched` is the parsed, de-duplicated
+row count before filtering and `rows_written` is what was written after. When
+a filter removes every row, the empty-result rule still withholds the data
+file, but the sidecar is written and `rows_fetched > 0` proves the fetch was
+real rather than dead.
 
 ## "The numbers changed between two runs but nothing happened on the site"
 

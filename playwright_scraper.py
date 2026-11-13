@@ -91,7 +91,9 @@ from product_parser import (parse_search_api, parse_search_html,
                             SEARCH_API_PATH, SORT_TYPES, PAGE_SIZE,
                             CANONICAL_HOST, DEFAULT_SORT)
 from output_writer import (dedupe_by_key, finish_run, RemoteAPIError,
-                           EXIT_REMOTE_API_ERROR, Campaign)
+                           EXIT_REMOTE_API_ERROR, Campaign,
+                           PAGE_STATUS_COMPLETED, PAGE_STATUS_FETCH_FAILED,
+                           PAGE_STATUS_UNATTEMPTED, PAGE_STATUSES)
 import page_flow
 from proxy_pool import (from_args as proxy_pool_from_args, to_playwright, mask,
                         ROTATE_MODES, ProxyError, ProxyPool)
@@ -133,6 +135,26 @@ class PageOutcome:
     @property
     def ok(self) -> bool:
         return not self.load_failed and self.blocked_by is None
+
+
+def _record_page_status(page_statuses: Dict[int, str], page_num: int,
+                        status: str) -> None:
+    """Attribute exactly one terminal state to one planned page.
+
+    A page number is only ever assigned once: the three categories are
+    mutually exclusive by construction, so a page can never be both
+    `completed` and missing. Raising on a repeat (rather than overwriting)
+    turns a double-bookkeeping bug into a crash instead of a sidecar that
+    contradicts its own counts.
+    """
+    if status not in PAGE_STATUSES:
+        raise ValueError(f"unknown page status {status!r} for page {page_num}")
+    previous = page_statuses.get(page_num)
+    if previous is not None:
+        raise RuntimeError(
+            f"page {page_num} already recorded as {previous!r}; cannot also "
+            f"record {status!r} — each planned page has exactly one outcome")
+    page_statuses[page_num] = status
 
 
 def _driver(page):
@@ -882,6 +904,11 @@ def scrape(args) -> int:
     rows: List = []
     pages_failed: List[int] = []
     pages_unattempted: List[int] = []
+    # One terminal status per planned search page, keyed by 1-based page
+    # number. This is the single attribution source for the sidecar's
+    # per-page list; the three counters are reconciled against it at the end.
+    # Search mode only — campaign/rewards read one page and never populate it.
+    page_statuses: Dict[int, str] = {}
     pages_completed = 0
     stop_reason = "completed"
     blocked = False
@@ -912,6 +939,9 @@ def scrape(args) -> int:
                 # answer is empty (exit 4); only a page that was never
                 # obtained or was refused counts as failed.
                 served_empty = state == "empty"
+                if served_empty and args.mode == "search":
+                    _record_page_status(page_statuses, 1,
+                                        PAGE_STATUS_COMPLETED)
                 return finish_run(
                     [], args.out, args.format, args.allow_empty,
                     blocked=blocked, stop_reason=stop_reason,
@@ -919,7 +949,9 @@ def scrape(args) -> int:
                     pages_completed=1 if served_empty else 0,
                     start_url=args.url, final_url=final_url,
                     pages_failed=[] if served_empty else [1],
-                    mode=args.mode, sort=sort)
+                    mode=args.mode, sort=sort,
+                    rows_fetched=0, rows_written=0,
+                    page_statuses=page_statuses or None)
 
             # ---- single-page modes -------------------------------------
             if args.mode == "campaign":
@@ -959,6 +991,8 @@ def scrape(args) -> int:
                     if dom_rows:
                         rows = dom_rows
                         pages_completed = 1
+                        _record_page_status(page_statuses, 1,
+                                            PAGE_STATUS_COMPLETED)
                         stop_reason = "payload_missing_dom_fallback"
                     else:
                         stop_reason = "parser_found_nothing"
@@ -969,6 +1003,10 @@ def scrape(args) -> int:
                     total_results, total_pages, capped = (
                         sp.total_results, sp.total_pages, sp.capped)
                     pages_completed = 1
+                    # Page 1 was fetched and parsed: the API answered, so it
+                    # is `completed` even if a filter later drops every row.
+                    _record_page_status(page_statuses, 1,
+                                        PAGE_STATUS_COMPLETED)
                     logger.info("Page 1: %d rows. Site reports %s results "
                                 "across %s pages (capped=%s).", len(sp.rows),
                                 total_results, total_pages, capped)
@@ -1005,21 +1043,43 @@ def scrape(args) -> int:
                         # iterating `outcomes` alone reported such a run as
                         # complete with exit 0.
                         for idx in wanted:
+                            page_num = idx + 1
                             o = outcomes.get(idx)
                             if o is None:
-                                pages_failed.append(idx + 1)
-                                pages_unattempted.append(idx + 1)
+                                # No worker ever claimed this page: it was
+                                # never requested. That is a different fact
+                                # from a page the API refused, so it lands in
+                                # pages_unattempted ONLY, never pages_failed.
+                                pages_unattempted.append(page_num)
+                                _record_page_status(
+                                    page_statuses, page_num,
+                                    PAGE_STATUS_UNATTEMPTED)
                                 continue
                             if o.load_failed:
-                                pages_failed.append(idx + 1)
+                                # A worker claimed the page and the search API
+                                # answered unusably: requested, not obtained.
+                                pages_failed.append(page_num)
+                                _record_page_status(
+                                    page_statuses, page_num,
+                                    PAGE_STATUS_FETCH_FAILED)
                                 continue
+                            # The API answered a usable payload. A payload
+                            # with no rows is a successful fetch that marks
+                            # the end of the listing, not a failure.
+                            _record_page_status(page_statuses, page_num,
+                                                PAGE_STATUS_COMPLETED)
+                            pages_completed += 1
                             if not o.rows:
                                 stop_reason = ("site_result_cap" if capped
                                                else "pagination_exhausted")
                                 break
                             rows.extend(o.rows)
-                            pages_completed += 1
-                        if pages_failed and stop_reason in ("completed",):
+                        if stop_reason == "completed" and (
+                                pages_failed or pages_unattempted):
+                            # A planned page was not completed: the run cannot
+                            # keep its initial "completed" reason. Name WHICH
+                            # class of gap it was so the sidecar and exit code
+                            # reflect the same fact.
                             stop_reason = ("pages_unattempted"
                                            if pages_unattempted
                                            else "page_failed")
@@ -1031,18 +1091,26 @@ def scrape(args) -> int:
                     elif wanted:
                         seen_ids = {r.sku for r in rows if r.sku}
                         for idx in wanted:
+                            page_num = idx + 1
                             body = dict(body_template)
                             body["pageIndex"] = idx
                             try:
                                 payload = fetch_search_page(page, body)
                             except SearchAPIError as e:
                                 logger.warning("pageIndex %d: %s", idx, e)
-                                pages_failed.append(idx + 1)
+                                pages_failed.append(page_num)
+                                _record_page_status(page_statuses, page_num,
+                                                    PAGE_STATUS_FETCH_FAILED)
                                 stop_reason = "page_failed"
                                 break
                             sp = parse_search_api(
                                 payload, page_index=idx, sort=sort,
                                 url=args.url, category=category)
+                            # A usable payload is a completed fetch regardless
+                            # of what the data inside it does to the run.
+                            _record_page_status(page_statuses, page_num,
+                                                PAGE_STATUS_COMPLETED)
+                            pages_completed += 1
                             fresh = [r for r in sp.rows
                                      if r.sku and r.sku not in seen_ids]
                             if not sp.rows:
@@ -1061,7 +1129,6 @@ def scrape(args) -> int:
                                 break
                             seen_ids.update(r.sku for r in fresh if r.sku)
                             rows.extend(sp.rows)
-                            pages_completed += 1
                             if page_flow.is_thin_page(len(sp.rows)):
                                 logger.info("pageIndex %d returned only %d "
                                             "rows.", idx, len(sp.rows))
@@ -1070,6 +1137,17 @@ def scrape(args) -> int:
                         else:
                             if pages_completed >= args.pages:
                                 stop_reason = "completed"
+                    # Planned pages a merge/loop never reached because a page
+                    # above ended the run (or, with --concurrency, every worker
+                    # died before the queue drained). They were never
+                    # requested, so they are unattempted: the attribution must
+                    # still name them rather than silently dropping them.
+                    for idx in wanted:
+                        page_num = idx + 1
+                        if page_num not in page_statuses:
+                            pages_unattempted.append(page_num)
+                            _record_page_status(page_statuses, page_num,
+                                                PAGE_STATUS_UNATTEMPTED)
         except RemoteAPIError as e:
             logger.error("%s", _mask_credentials(str(e)))
             return EXIT_REMOTE_API_ERROR
@@ -1081,13 +1159,38 @@ def scrape(args) -> int:
     # leaving position restarting at 1 per page would have 24 rows claiming
     # a position another row already held.
     rows = dedupe_by_key(rows, set(), key="sku")
+    # rows_fetched is the count AFTER parsing/dedup but BEFORE the platform
+    # filter — what the run actually fetched. rows_written is what survives
+    # the filter and reaches the data file. The filter runs after parsing (the
+    # site has no platform filter of its own), so the sidecar's page counts
+    # describe the fetch and these two let a reader reconcile the smaller file.
+    rows_fetched = len(rows)
     before = len(rows)
     rows = _filter_platform(rows, args.platform)
     if len(rows) != before:
         logger.info("--platform %s kept %d of %d rows.",
                     args.platform, len(rows), before)
+    rows_written = len(rows)
     for i, r in enumerate(rows, start=1):
         r.position = i
+
+    if args.mode == "search":
+        # Reconcile the three counters against the per-page attribution, so
+        # the sidecar can never contradict itself: every planned page appears
+        # exactly once, and the three derived counts equal the counters.
+        # Single-page modes build no attribution and skip this entirely.
+        derived_completed = sum(
+            1 for st in page_statuses.values()
+            if st == PAGE_STATUS_COMPLETED)
+        derived_failed = [
+            pn for pn, st in sorted(page_statuses.items())
+            if st == PAGE_STATUS_FETCH_FAILED]
+        derived_unattempted = [
+            pn for pn, st in sorted(page_statuses.items())
+            if st == PAGE_STATUS_UNATTEMPTED]
+        pages_failed = derived_failed
+        pages_unattempted = derived_unattempted
+        pages_completed = derived_completed
 
     return finish_run(
         rows, args.out, args.format, args.allow_empty,
@@ -1097,6 +1200,8 @@ def scrape(args) -> int:
         mode=args.mode, sort=sort, total_results=total_results,
         pages_available=total_pages, capped_by_site=capped,
         reachable_max=page_flow.reachable_max(total_pages),
+        rows_fetched=rows_fetched, rows_written=rows_written,
+        page_statuses=page_statuses or None,
         extra={"pages_unattempted": pages_unattempted} if pages_unattempted
         else None)
 

@@ -15,9 +15,12 @@ the release notes rather than left to be discovered from a bill or a diff.
 
 - CI only: the scheduled canary now starts at 10:07 UTC (Mondays) instead of 07:37, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.
 - CI only: the canary now runs weekly (Mondays 07:37 UTC) and on a manual dispatch, with its optional secrets `INDIEGOGO_CDP_ENDPOINT`, `INDIEGOGO_PROXY` passed on every run; the daily schedule is removed.
+- The Playwright search run's sidecar now carries a per-page `page_statuses` list (one object per planned page, sorted by page number, each with a stable `page` and `status` of `completed`, `fetch_failed` or `unattempted`). It also records `rows_fetched` (rows parsed and de-duplicated before the platform filter) and `rows_written` (rows that survive the filter and reach the data file), so the fetch-time page counts and the filtered data file can be reconciled. Single-page modes (`campaign`, `rewards`) produce no `page_statuses` list.
+- When a post-parse filter (e.g. `--platform indiegogo` over an all-gamefound result set) removes every fetched row, the empty-result rule still withholds the data file, but the sidecar is now written with `rows_fetched > 0` and `rows_written: 0`, proving the run fetched data rather than never reaching the site.
 
 ### Fixed
 
+- With `--concurrency`, a page no worker ever claimed was added to BOTH `pages_failed` and `pages_unattempted`, so the same page read as both "requested and refused" and "never requested", and the two lists overlapped. The failure classes are now disjoint: a page the search API refused is `fetch_failed` (`pages_failed` only); a page no worker claimed is `unattempted` (`pages_unattempted` only). The per-page `page_statuses` list and the three counters are reconciled at the end of every search run so a page can never count as both completed and missing. A run whose pages were all unattempted now correctly ends partial (exit 6) instead of keeping its initial `completed` reason and exiting 0.
 - Tests only: the offline smoke test no longer depends on today's date. The search fixtures were captured on 2026-09-17 and their campaigns ended in October 2026; parsed against the real clock, `days_left` was null on every row, so the "no column is null on every row" check failed on unchanged code. The fixtures are now parsed against their capture time, and the computed `days_left` values are asserted. Scraper behaviour is unchanged.
 
 ## [0.2.0] — 2026-10-15

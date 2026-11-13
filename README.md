@@ -161,7 +161,22 @@ The mix depends heavily on the sort. Measured over 5 pages (120 rows) each:
 
 There is no platform filter in the site's own API — `source`,
 `userCommunitySearchTypes` and `retailerOfferTypes` were each measured to
-leave the mix unchanged.
+leave the mix unchanged. The filter therefore runs **after** fetching, so the
+sidecar's page counts describe what was fetched while the data file holds
+what survived the filter: `rows_fetched` is the parsed, de-duplicated count
+before filtering and `rows_written` the count after. If a filter removes
+every row, the data file is still withheld by the empty-result rule, but the
+sidecar is written with `rows_fetched > 0` and `rows_written: 0`, so an empty
+file is never mistaken for a dead run.
+
+For `--mode search`, the sidecar also carries **`page_statuses`**: one object
+per planned page, sorted by page number, each with a stable `page` and
+`status` of `completed` (the search API answered with a usable payload),
+`fetch_failed` (requested but the API refused or answered unusably) or
+`unattempted` (no worker ever claimed it under `--concurrency`). Every page
+appears exactly once and the three totals reconcile with `pages_completed`,
+`pages_failed` and `pages_unattempted`. Single-page modes (`campaign`,
+`rewards`) produce no `page_statuses` list.
 
 ### `?page=2` silently returns page 1
 

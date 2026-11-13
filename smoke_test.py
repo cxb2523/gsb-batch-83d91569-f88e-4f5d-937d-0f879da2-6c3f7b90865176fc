@@ -1370,6 +1370,70 @@ def test_sidecar_names_failed_pages():
     assert meta["sort"] == "default"
 
 
+@check("the sidecar's per-page statuses are sorted, unique and self-consistent")
+def test_sidecar_page_status_records():
+    statuses = {4: ow.PAGE_STATUS_UNATTEMPTED, 2: ow.PAGE_STATUS_FETCH_FAILED,
+                1: ow.PAGE_STATUS_COMPLETED, 3: ow.PAGE_STATUS_COMPLETED}
+    records = ow.page_status_records(statuses)
+    assert [r["page"] for r in records] == [1, 2, 3, 4]
+    assert [r["status"] for r in records] == [
+        "completed", "fetch_failed", "completed", "unattempted"]
+    # The vocabulary is fixed: no engine may invent a fourth label.
+    assert set(ow.PAGE_STATUSES) == {
+        "completed", "fetch_failed", "unattempted"}
+    for rec in records:
+        assert rec["status"] in ow.PAGE_STATUSES
+
+    # finish_run threads the list and the before/after-filter row counts into
+    # the sidecar, and writes the sidecar on a filter-to-empty run even though
+    # the data file is withheld.
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "m")
+        rc = ow.finish_run([], prefix, "json", False, blocked=False,
+                           stop_reason="completed", pages_requested=4,
+                           pages_completed=2, start_url="u", final_url="u",
+                           pages_failed=[2], mode="search",
+                           rows_fetched=6, rows_written=0,
+                           page_statuses=statuses)
+        # A fetch failure on one page makes the run incomplete, so this is
+        # exit 5 even though rows were fetched.
+        assert rc == ow.EXIT_FETCH_FAILED
+        assert not os.path.exists(prefix + ".json"), (
+            "a filtered-to-empty run must not write a data file")
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        assert meta["rows_fetched"] == 6 and meta["rows_written"] == 0
+        assert meta["page_statuses"] == records
+        # Counts derived from the list match the run's own counters.
+        n_completed = sum(r["status"] == "completed" for r in records)
+        assert n_completed == meta["pages_completed"] == 2
+        assert [r["page"] for r in records
+                if r["status"] == "fetch_failed"] == meta["pages_failed"]
+        assert [r["page"] for r in records
+                if r["status"] == "unattempted"] == [4]
+
+        # A fully-completed run whose rows were all filtered away is an empty
+        # RESULT (exit 4), still with a sidecar proving the fetch was real.
+        ok_statuses = {1: ow.PAGE_STATUS_COMPLETED, 2: ow.PAGE_STATUS_COMPLETED}
+        ok_prefix = os.path.join(d, "ok")
+        rc = ow.finish_run([], ok_prefix, "json", False, blocked=False,
+                           stop_reason="completed", pages_requested=2,
+                           pages_completed=2, start_url="u", final_url="u",
+                           pages_failed=[], mode="search",
+                           rows_fetched=4, rows_written=0,
+                           page_statuses=ok_statuses)
+        assert rc == ow.EXIT_NO_PRODUCTS, rc
+        assert not os.path.exists(ok_prefix + ".json")
+        ok_meta = json.load(open(ok_prefix + ".meta.json", encoding="utf-8"))
+        assert ok_meta["rows_fetched"] == 4 and ok_meta["rows_written"] == 0
+        # A run that never fetched anything still writes no sidecar at all.
+        empty_prefix = os.path.join(d, "n")
+        ow.finish_run([], empty_prefix, "json", False, blocked=True,
+                      stop_reason="blocked", pages_requested=2,
+                      pages_completed=0, start_url="u", final_url="u",
+                      mode="search", rows_fetched=0, rows_written=0)
+        assert not os.path.exists(empty_prefix + ".meta.json")
+
+
 @check("dedupe keeps a keyless row rather than losing it silently")
 def test_dedupe():
     a = ow.Campaign(sku="1")
@@ -2671,6 +2735,102 @@ def test_playwright_solve_budget_behaviour():
     assert solver.n == 1, f"{solver.n} solves bought for one page"
 
 
+class _StubSession:
+    def __init__(self, *a, **k):
+        self.page = types.SimpleNamespace(url=URL)
+
+    def open(self):
+        return self
+
+    def close(self):
+        pass
+
+
+def _search_payload(page_index, n=2, platform_code=1, project_id_base=None):
+    """A minimal valid searchProjectsForCards payload for one fake page.
+
+    Built on the same SHAPE as the real capture (which is what
+    parse_search_api validates), but synthesised so the offline suite can
+    produce as many distinct pages as a scenario needs without a network.
+    `platform_code` 1 -> indiegogo, 0 -> gamefound (see
+    product_parser.PLATFORM_BY_CODE).
+    """
+    if project_id_base is None:
+        project_id_base = 100000 + page_index * 100
+    items = []
+    for j in range(n):
+        pid = project_id_base + j
+        host = ("www.indiegogo.com" if platform_code == 1
+                else "gamefound.com")
+        items.append({
+            "projectID": pid,
+            "name": f"synthetic project {pid}",
+            "url": f"https://{host}/en/projects/creator/slug-{pid}",
+            "relativeUrl": f"/en/projects/creator/slug-{pid}",
+            "imageUrl": None,
+            "platform": platform_code,
+            "currencySymbol": "$",
+            "fundsGathered": 100.0,
+            "campaignGoal": None,
+            "backersCount": 1,
+            "followerCount": 1,
+            "phaseLabel": "Crowdfunding",
+            "phase": 10,
+            "campaignOutcome": 0,
+            "fundedInSeconds": 0,
+            "campaignStart": "2026-09-01T00:00:00Z",
+            "campaignEnd": "2026-12-01T00:00:00Z",
+            "creator": {"name": "Creator", "homeUrl": f"https://{host}/creators/creator"},
+            "coCreators": [],
+            "projectTags": [],
+            "catalogCategory": {"projectCategory": 11, "name": "Board & card games"},
+            "projectProperties": {},
+            "projectUrlName": f"slug-{pid}",
+            "type": 1,
+            "originalType": 1,
+            "version": 1,
+            "visibility": 0,
+        })
+    return {
+        "projects": {
+            "pagedItems": items,
+            "order": 0,
+            "availableOrder": {},
+            "pageSize": 24,
+            "pageIndex": page_index,
+            "totalItemCount": 1000,
+            "totalPageCount": 50,
+            "firstItemNumber": page_index * 24 + 1,
+            "lastItemNumber": page_index * 24 + n,
+        },
+        "searchResultQuery": "",
+        "hasCappedResults": False,
+    }
+
+
+def _served_search_html_from_payload(payload):
+    """A page-1 document that inlines `payload` exactly like the real page."""
+    body = json.dumps({"props": {"params": {"sortType": 0},
+                                 "result": payload}})
+    return ("<html><head></head><body><script>App.registerComponent('v-1', "
+            "'App.Components.Search.SearchProjectsResults', Ctor, "
+            + body + ");</script></body></html>")
+
+
+def _page_outcome(idx, rows, load_failed=False):
+    pw = _engine("playwright_scraper")
+    o = pw.PageOutcome(page_num=idx + 1, url=URL)
+    if load_failed:
+        o.load_failed = True
+    else:
+        o.rows = rows
+        o.state = "content" if rows else "empty"
+        o.total_results = 1000
+        o.total_pages = 50
+        o.capped = False
+    return o
+
+
 @check("Playwright: pages no worker fetched make a run partial, never complete")
 def test_playwright_concurrency_missing_pages():
     pw = _engine("playwright_scraper")
@@ -2678,29 +2838,180 @@ def test_playwright_concurrency_missing_pages():
         return
     html = _served_search_html()
 
-    class Session:
-        def __init__(self, *a, **k):
-            self.page = types.SimpleNamespace(url=URL)
-
-        def open(self):
-            return self
-
-        def close(self):
-            pass
-
     with tempfile.TemporaryDirectory() as d:
         args = pw.parse_args(["--url", URL, "--pages", "4", "--concurrency",
                               "2", "--out", os.path.join(d, "c")])
         with _patched(pw, sync_playwright=contextlib.nullcontext,
-                      _BrowserSession=Session,
-                      _open_first_page=lambda *a: (Session().page, html, "content"),
+                      _BrowserSession=_StubSession,
+                      _open_first_page=lambda *a: (_StubSession().page, html, "content"),
                       _fetch_pages_concurrently=lambda *a, **k: {}):
             rc = pw.scrape(args)
         meta = json.load(open(os.path.join(d, "c.meta.json")))
     assert rc == ow.EXIT_PARTIAL, f"exit {rc}, expected 6"
     assert meta["status"] == "partial", meta["status"]
-    assert meta["pages_failed"] == [2, 3, 4], meta["pages_failed"]
-    assert meta["pages_unattempted"] == [2, 3, 4]
+    # A page no worker claimed is unattempted: it must NOT also be counted as
+    # a fetch failure. The two lists are disjoint by construction.
+    assert meta["pages_failed"] == [], meta["pages_failed"]
+    assert meta["pages_unattempted"] == [2, 3, 4], meta["pages_unattempted"]
+    by_page = {rec["page"]: rec["status"] for rec in meta["page_statuses"]}
+    assert by_page == {1: "completed", 2: "unattempted", 3: "unattempted",
+                       4: "unattempted"}, by_page
+    assert [rec["page"] for rec in meta["page_statuses"]] == sorted(by_page)
+
+
+@check("Playwright: per-page statuses attribute completed/fetch_failed/unattempted")
+def test_playwright_per_page_status_attribution():
+    # Offline, no browser and no network: fake search responses for pages 1..5
+    # where one page errors (fetch_failed), one is never claimed by a worker
+    # (unattempted) and the rest return rows (completed). Drives the real
+    # scrape() search path and reconciles the sidecar against the counters.
+    pw = _engine("playwright_scraper")
+    if pw is None:
+        return
+    page1 = _search_payload(0)
+    html = _served_search_html_from_payload(page1)
+
+    def fake_concurrent(args, pool, page_indices, body_template, sort,
+                        category, concurrency):
+        # pageIndex 2 (page 3) -> search API error; pageIndex 3 (page 4) ->
+        # never claimed; the other planned pages return rows.
+        outcomes = {}
+        for idx in page_indices:
+            if idx == 2:
+                outcomes[idx] = _page_outcome(idx, [], load_failed=True)
+            elif idx == 3:
+                continue
+            else:
+                outcomes[idx] = _page_outcome(
+                    idx, pp.parse_search_api(
+                        _search_payload(idx), page_index=idx,
+                        sort="default", url=URL).rows)
+        return outcomes
+
+    with tempfile.TemporaryDirectory() as d:
+        args = pw.parse_args(["--url", URL, "--pages", "5", "--concurrency",
+                              "3", "--out", os.path.join(d, "s")])
+        with _patched(pw, sync_playwright=contextlib.nullcontext,
+                      _BrowserSession=_StubSession,
+                      _open_first_page=lambda *a: (_StubSession().page, html, "content"),
+                      _fetch_pages_concurrently=fake_concurrent):
+            rc = pw.scrape(args)
+        meta = json.load(open(os.path.join(d, "s.meta.json")))
+
+    assert rc == ow.EXIT_PARTIAL, rc
+    records = meta["page_statuses"]
+    # Sorted ascending, one entry per planned page, no page repeated.
+    pages = [rec["page"] for rec in records]
+    assert pages == [1, 2, 3, 4, 5], pages
+    assert len(pages) == len(set(pages))
+    statuses = {rec["page"]: rec["status"] for rec in records}
+    assert statuses == {
+        1: "completed", 2: "completed", 3: "fetch_failed",
+        4: "unattempted", 5: "completed"}, statuses
+
+    # The three categories are mutually exclusive and jointly exhaustive.
+    completed = [p for p, st in statuses.items() if st == "completed"]
+    failed = [p for p, st in statuses.items() if st == "fetch_failed"]
+    unattempted = [p for p, st in statuses.items() if st == "unattempted"]
+    assert not (set(completed) & set(failed))
+    assert not (set(completed) & set(unattempted))
+    assert not (set(failed) & set(unattempted))
+
+    # The per-page counts must agree with the run's own counters.
+    assert meta["pages_completed"] == len(completed) == 3, meta["pages_completed"]
+    assert meta["pages_failed"] == failed == [3], meta["pages_failed"]
+    assert meta["pages_unattempted"] == unattempted == [4], \
+        meta["pages_unattempted"]
+    assert (meta["pages_completed"] + len(meta["pages_failed"])
+            + len(meta["pages_unattempted"]) == meta["pages_requested"] == 5)
+    # rows_fetched/rows_written coincide when no platform filter is applied.
+    assert meta["rows_fetched"] == meta["rows_written"]
+    assert meta["rows_fetched"] > 0
+
+
+@check("Playwright: a platform filter to zero rows keeps the data file and records both counts")
+def test_playwright_platform_filter_to_empty():
+    # Every fetched row is hosted on gamefound; --platform indiegogo filters
+    # them all out. rows_fetched must stay > 0 while rows_written is 0, the
+    # empty-result rule must still withhold the DATA file, and the sidecar is
+    # what proves rows really were fetched.
+    pw = _engine("playwright_scraper")
+    if pw is None:
+        return
+    page1 = _search_payload(0, platform_code=0)
+    html = _served_search_html_from_payload(page1)
+
+    def fake_concurrent(args, pool, page_indices, body_template, sort,
+                        category, concurrency):
+        return {idx: _page_outcome(
+            idx, pp.parse_search_api(
+                _search_payload(idx, platform_code=0), page_index=idx,
+                sort="default", url=URL).rows)
+            for idx in page_indices}
+
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "g")
+        # Plant a previous good data file: the empty result must not clobber it.
+        with open(prefix + ".json", "w", encoding="utf-8") as f:
+            json.dump([{"previous": "good run"}], f)
+        args = pw.parse_args(["--url", URL, "--pages", "3", "--concurrency",
+                              "2", "--platform", "indiegogo",
+                              "--out", prefix])
+        with _patched(pw, sync_playwright=contextlib.nullcontext,
+                      _BrowserSession=_StubSession,
+                      _open_first_page=lambda *a: (_StubSession().page, html, "content"),
+                      _fetch_pages_concurrently=fake_concurrent):
+            rc = pw.scrape(args)
+        # Exit 4: the empty-result rule, not a fetch failure.
+        assert rc == ow.EXIT_NO_PRODUCTS, rc
+        # The data file is untouched: no empty overwrite.
+        assert json.load(open(prefix + ".json", encoding="utf-8")) == \
+            [{"previous": "good run"}]
+        assert not os.path.exists(prefix + ".csv")
+        # The sidecar exists and proves the fetch was non-empty.
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        assert meta["rows_fetched"] > 0, meta["rows_fetched"]
+        assert meta["rows_written"] == 0, meta["rows_written"]
+        assert meta["products"] == 0
+        # Every planned page was still fetched, so the per-page list is intact.
+        statuses = {rec["page"]: rec["status"]
+                    for rec in meta["page_statuses"]}
+        assert statuses == {1: "completed", 2: "completed", 3: "completed"}, \
+            statuses
+
+
+@check("Playwright: single-page modes carry no per-page status list")
+def test_playwright_single_page_modes_have_no_page_statuses():
+    pw = _engine("playwright_scraper")
+    if pw is None:
+        return
+    for mode in ("campaign", "rewards"):
+        with tempfile.TemporaryDirectory() as d:
+            prefix = os.path.join(d, mode[0])
+            row = ow.Campaign(sku="1", platform="indiegogo")
+            args = pw.parse_args(["--mode", mode,
+                                  "--url", "https://www.indiegogo.com/en/projects/a/b",
+                                  "--out", prefix])
+
+            def fake_open_first(session, a, pool):
+                page = types.SimpleNamespace(url=a.url)
+                return page, "<html>content</html>", "content"
+
+            if mode == "campaign":
+                parse_one = lambda *a, **k: row
+                parse_kw = {"parse_campaign": parse_one}
+            else:
+                parse_one = lambda *a, **k: [ow.Reward(sku="r1")]
+                parse_kw = {"parse_rewards": parse_one}
+            with _patched(pw, sync_playwright=contextlib.nullcontext,
+                          _BrowserSession=_StubSession,
+                          _open_first_page=fake_open_first, **parse_kw):
+                rc = pw.scrape(args)
+            assert rc == 0, (mode, rc)
+            meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+            assert "page_statuses" not in meta, (mode, meta.get("page_statuses"))
+            # The row counts are still present for the single data row.
+            assert meta["rows_fetched"] == 1 and meta["rows_written"] == 1
 
 
 class _FakeSeleniumDriver:
