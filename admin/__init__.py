@@ -1,0 +1,269 @@
+"""Admin panel — starlette-admin setup."""
+from __future__ import annotations
+
+from fastapi import FastAPI
+from loguru import logger
+from starlette.middleware import Middleware
+from starlette.middleware.sessions import SessionMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
+from starlette_admin import CustomView, DropDown
+from starlette_admin.auth import AdminUser, AuthProvider
+from starlette_admin.contrib.sqla import Admin
+from starlette_admin.exceptions import FormValidationError
+
+import models.alert_source  # noqa: F401  — registers AlertSource in Base.metadata
+import models.api_job  # noqa: F401  — registers ApiJob, ApiJobItem in Base.metadata
+import models.api_key  # noqa: F401  — registers ApiKey in Base.metadata
+import models.parse_target  # noqa: F401 — registers ParseTarget in Base.metadata
+import models.parsed_product  # noqa: F401  — registers ParseSession, ParsedProduct in Base.metadata
+import models.price_snapshot  # noqa: F401  — registers PriceSnapshot, PriceAlert in Base.metadata
+
+# ---------------------------------------------------------------------------
+# Auth — credentials from data/settings.yml
+# ---------------------------------------------------------------------------
+
+class SettingsAuthProvider(AuthProvider):
+    async def login(
+        self,
+        username: str,
+        password: str,
+        remember_me: bool,
+        request: Request,
+        response: Response,
+    ) -> Response:
+        from config import settings  # noqa: PLC0415
+        admin_cfg = settings.get("admin", {})
+        expected_user = admin_cfg.get("username", "admin")
+        expected_pass = admin_cfg.get("password", "admin")
+
+        if username == expected_user and password == expected_pass:
+            request.session.update({"username": username})
+            return response
+        raise FormValidationError({"password": "Invalid credentials"})
+
+    async def is_authenticated(self, request: Request) -> bool:
+        return "username" in request.session
+
+    def get_admin_user(self, request: Request) -> AdminUser:
+        return AdminUser(username=request.session.get("username", ""))
+
+    async def logout(self, request: Request, response: Response) -> Response:
+        request.session.clear()
+        return response
+
+
+# ---------------------------------------------------------------------------
+# Views
+# ---------------------------------------------------------------------------
+
+
+class DashboardView(CustomView):
+    async def render(self, request: Request, templates) -> Response:  # type: ignore[override]
+        return templates.TemplateResponse("dashboard.html", {
+            "request": request,
+        })
+
+
+class JobsView(CustomView):
+    async def render(self, request: Request, templates) -> Response:  # type: ignore[override]
+        return templates.TemplateResponse("jobs.html", {"request": request})
+
+
+class ProxiesView(CustomView):
+    async def render(self, request: Request, templates) -> Response:  # type: ignore[override]
+        return templates.TemplateResponse("proxies.html", {"request": request})
+
+
+class TargetsView(CustomView):
+    async def render(self, request: Request, templates) -> Response:  # type: ignore[override]
+        return templates.TemplateResponse("targets.html", {"request": request})
+
+
+class LinksView(CustomView):
+    async def render(self, request: Request, templates) -> Response:  # type: ignore[override]
+        return templates.TemplateResponse("links.html", {"request": request})
+
+
+class ProductsView(CustomView):
+    async def render(self, request: Request, templates) -> Response:  # type: ignore[override]
+        return templates.TemplateResponse("products.html", {"request": request})
+
+
+class MonitoringView(CustomView):
+    async def render(self, request: Request, templates) -> Response:  # type: ignore[override]
+        return templates.TemplateResponse("monitors.html", {"request": request})
+
+
+class MonitoringParametersView(CustomView):
+    async def render(self, request: Request, templates) -> Response:  # type: ignore[override]
+        return templates.TemplateResponse("monitoring_parameters.html", {"request": request})
+
+
+class UsersView(CustomView):
+    async def render(self, request: Request, templates) -> Response:  # type: ignore[override]
+        return templates.TemplateResponse("users.html", {"request": request})
+
+
+class ApiKeysView(CustomView):
+    async def render(self, request: Request, templates) -> Response:  # type: ignore[override]
+        return templates.TemplateResponse("api_keys.html", {"request": request})
+
+
+class ThanksView(CustomView):
+    async def render(self, request: Request, templates) -> Response:  # type: ignore[override]
+        return templates.TemplateResponse("thanks.html", {"request": request})
+
+
+# ---------------------------------------------------------------------------
+# Setup / teardown
+# ---------------------------------------------------------------------------
+
+async def setup_admin(app: FastAPI) -> None:
+    import os  # noqa: PLC0415
+
+    from config import settings  # noqa: PLC0415
+    from models.job import init_db  # noqa: PLC0415
+
+    db_url: str = settings.get("admin", {}).get("db_url", "sqlite:///data/admin.db")
+    secret_key: str = settings.get("admin", {}).get("secret_key", "change-me")
+
+    await init_db(db_url)
+
+    from models.job import engine  # noqa: PLC0415
+
+    assert engine is not None, "Database engine was not initialised by init_db"
+
+    from services.api_keys import import_legacy_key, warn_if_default_key_active  # noqa: PLC0415
+
+    await import_legacy_key(settings.get("security", {}).get("api_key"))
+    await warn_if_default_key_active()
+
+    templates_dir = os.path.join(os.path.dirname(__file__), "templates")
+
+    admin = Admin(
+        engine,
+        title="Grex Parser",
+        auth_provider=SettingsAuthProvider(),
+        templates_dir=templates_dir,
+        middlewares=[Middleware(SessionMiddleware, secret_key=secret_key)],
+        index_view=DashboardView(
+            "Главная", icon="fa fa-home",
+            path="/", template_path="dashboard.html", name="index",
+        ),
+    )
+
+    admin.add_view(TargetsView(
+        "Цели", icon="fa fa-crosshairs",
+        path="/targets", template_path="targets.html", name="targets",
+    ))
+    admin.add_view(LinksView(
+        "Извлечение ссылок", icon="fa fa-link",
+        path="/links", template_path="links.html", name="links",
+    ))
+    admin.add_view(ProductsView(
+        "Товары", icon="fa fa-shopping-cart",
+        path="/products", template_path="products.html", name="products",
+    ))
+    admin.add_view(MonitoringView(
+        "Мониторинг", icon="fa fa-bell",
+        path="/monitors", template_path="monitors.html", name="monitors",
+    ))
+    admin.add_view(JobsView(
+        "История задач", icon="fa fa-list",
+        path="/jobs", template_path="jobs.html", name="jobs",
+    ))
+    # Outside «Настройки»: thanking the author is not a setting.
+    admin.add_view(ThanksView(
+        "Поблагодарить автора", icon="fa fa-heart",
+        path="/thanks", template_path="thanks.html", name="thanks",
+    ))
+    admin.add_view(DropDown(
+        "Настройки",
+        icon="fa fa-sliders",
+        views=[
+            MonitoringParametersView(
+                "Параметры мониторинга", icon="fa fa-paper-plane",
+                path="/monitoring-parameters", template_path="monitoring_parameters.html",
+                name="monitoring_parameters",
+            ),
+            ProxiesView(
+                "Прокси", icon="fa fa-shield",
+                path="/proxies", template_path="proxies.html", name="proxies",
+            ),
+            UsersView(
+                "Пользователи", icon="fa fa-users",
+                path="/users", template_path="users.html", name="users",
+            ),
+            ApiKeysView(
+                "API-ключи", icon="fa fa-key",
+                path="/api-keys", template_path="api_keys.html", name="api_keys",
+            ),
+        ],
+    ))
+
+    # Register all auxiliary API routes BEFORE mounting starlette-admin so that
+    # FastAPI's exact Route entries take priority over the admin Mount prefix.
+    from admin.resources.alert_sources import register_alert_sources_routes  # noqa: PLC0415
+    from admin.resources.api_keys import register_api_keys_routes  # noqa: PLC0415
+    from admin.resources.jobs import register_jobs_routes  # noqa: PLC0415
+    from admin.resources.links import register_links_routes  # noqa: PLC0415
+    from admin.resources.monitors import register_monitors_routes  # noqa: PLC0415
+    from admin.resources.products import register_products_routes  # noqa: PLC0415
+    from admin.resources.proxies import register_proxies_routes  # noqa: PLC0415
+    from admin.resources.targets import register_targets_routes  # noqa: PLC0415
+    from admin.resources.users import register_users_routes  # noqa: PLC0415
+
+    register_proxies_routes(app)
+    register_jobs_routes(app)
+    register_targets_routes(app)
+    register_links_routes(app)
+    register_products_routes(app)
+    register_users_routes(app)
+    register_monitors_routes(app)
+    register_alert_sources_routes(app)
+    register_api_keys_routes(app)
+
+    # Stats reset endpoint
+    from fastapi import Depends  # noqa: PLC0415
+    from fastapi.responses import JSONResponse  # noqa: PLC0415
+
+    from admin.resources.auth import require_admin  # noqa: PLC0415
+
+    async def stats_reset() -> JSONResponse:
+        try:
+            from services.stats import StatsCollector  # noqa: PLC0415
+            await StatsCollector.reset()
+            return JSONResponse({"ok": True})
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+    app.add_api_route(
+        "/admin/api/stats/reset", stats_reset,
+        methods=["POST"], tags=["admin"], dependencies=[Depends(require_admin)],
+        response_model=None,
+    )
+
+    logger.info("Admin API routes registered")
+
+    # Mount starlette-admin AFTER registering all FastAPI routes so the Mount's
+    # prefix match does not shadow them.
+    admin.mount_to(app)
+    logger.info("starlette-admin mounted at /admin")
+
+    # Log all /admin routes for diagnostics
+    admin_routes = [
+        f"{getattr(r, 'methods', {'*'})} {getattr(r, 'path', '?')}"
+        for r in app.routes
+        if getattr(r, "path", "").startswith("/admin")
+    ]
+    logger.debug(f"Registered admin routes: {admin_routes}")
+
+
+async def teardown_admin() -> None:
+    try:
+        from models.job import close_db  # noqa: PLC0415
+        await close_db()
+        logger.info("DB connections closed")
+    except Exception:  # noqa: BLE001
+        pass

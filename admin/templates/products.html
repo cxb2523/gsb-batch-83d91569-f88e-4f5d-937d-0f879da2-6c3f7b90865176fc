@@ -1,0 +1,406 @@
+{% extends "layout.html" %}
+
+{% block header %}
+<div class="d-flex justify-content-between align-items-center">
+  <h1 class="mb-0">Товары</h1>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="container-xl">
+
+  <!-- Filters -->
+  <div class="card mb-3">
+    <div class="card-body">
+      <div class="row g-3 align-items-end mb-2">
+        <div class="col-12 col-md-5">
+          <label class="form-label">Поиск по названию</label>
+          <input id="filterSearch" type="text" class="form-control" placeholder="Введите название…" oninput="applySearch()">
+        </div>
+        <div class="col-12 col-md-4">
+          <label class="form-label">Маркетплейс</label>
+          <select id="filterMp" class="form-select" onchange="loadProducts()">
+            <option value="">Все</option>
+          </select>
+        </div>
+        <div class="col-auto">
+          <button class="btn btn-outline-secondary" onclick="loadProducts()">Обновить</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Table -->
+  <div class="card">
+    <div class="card-header">
+      <h3 class="card-title">Результаты парсинга</h3>
+      <div class="card-options d-flex align-items-center gap-2">
+        <span class="text-muted small" id="productsCount"></span>
+        <span id="selectionCount" class="text-muted small"></span>
+        <select class="form-select form-select-sm w-auto" id="productsPerPage" onchange="setPerPage(this.value)">
+          <option value="10">10</option>
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
+        <div class="dropdown">
+          <button class="btn btn-sm btn-outline-success dropdown-toggle" type="button" data-bs-toggle="dropdown">
+            Экспорт
+          </button>
+          <div class="dropdown-menu dropdown-menu-end">
+            <a class="dropdown-item" href="#" onclick="exportProducts('csv');return false;">CSV (Excel)</a>
+            <a class="dropdown-item" href="#" onclick="exportProducts('xlsx');return false;">XLSX</a>
+            <a class="dropdown-item" href="#" onclick="exportProducts('json');return false;">JSON</a>
+          </div>
+        </div>
+        <button class="btn btn-sm btn-outline-danger" onclick="clearAll()">Очистить всё</button>
+      </div>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-vcenter card-table">
+        <thead>
+          <tr>
+            <th style="width:36px">
+              <input type="checkbox" class="form-check-input" id="selectAll" onchange="toggleSelectAll(this)">
+            </th>
+            <th style="width:56px;min-width:56px"></th>
+            <th>Название</th>
+            <th>Маркетплейс</th>
+            <th>Артикул</th>
+            <th>Старая цена</th>
+            <th>Текущая цена</th>
+            <th>Описание</th>
+            <th>Характеристики</th>
+            <th>Дата</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="productsBody">
+          <tr><td colspan="9" class="text-muted text-center py-3">Загрузка…</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card-footer d-flex align-items-center" id="productsPager"></div>
+  </div>
+
+  <!-- spacer so the sticky action bar never hides the last rows -->
+  <div id="prodBulkSpacer" style="height:0"></div>
+</div>
+
+<!-- Sticky bulk-action bar — shown when one or more products are selected -->
+<div id="prodBulkBar" class="position-fixed bottom-0 start-0 end-0 border-top bg-white shadow-sm py-2"
+     style="display:none; z-index:1030;">
+  <div class="container-xl d-flex align-items-center gap-2 flex-wrap">
+    <span class="fw-medium me-1" id="prodBulkCount"></span>
+    <button class="btn btn-sm btn-outline-primary" onclick="bulkRefetchProducts(this)">Перевыгрузить выбранные</button>
+    <button class="btn btn-sm btn-outline-danger" onclick="bulkDeleteProducts(this)">Удалить выбранные</button>
+    <button class="btn btn-sm btn-link ms-auto text-muted" onclick="clearProductSelection()">Снять выделение</button>
+  </div>
+</div>
+
+<script>
+var _allProducts = [];
+var _filteredProducts = [];
+var _currentPage = 1;
+var _perPage = 25;
+
+async function loadProducts() {
+  var mp = document.getElementById('filterMp').value;
+  var url = '/admin/products/api' + (mp ? '?marketplace=' + encodeURIComponent(mp) : '');
+  try {
+    var res = await fetch(url);
+    var data = await res.json();
+    _allProducts = data.products || [];
+
+    var sel = document.getElementById('filterMp');
+    var cur = sel.value;
+    sel.innerHTML = '<option value="">Все</option>'
+      + (data.marketplaces || []).map(function(m) {
+          return '<option value="' + esc(m) + '"' + (m === cur ? ' selected' : '') + '>' + esc(m) + '</option>';
+        }).join('');
+
+    applySearch();
+  } catch(e) {
+    console.error('loadProducts error:', e);
+  }
+}
+
+function applySearch() {
+  var q = (document.getElementById('filterSearch').value || '').toLowerCase();
+  _filteredProducts = q
+    ? _allProducts.filter(function(p) { return (p.title || '').toLowerCase().includes(q); })
+    : _allProducts.slice();
+  _currentPage = 1;
+  renderProducts();
+}
+
+function setPerPage(val) {
+  _perPage = parseInt(val) || 25;
+  _currentPage = 1;
+  renderProducts();
+}
+
+function goToProductPage(p) {
+  var totalPages = Math.max(1, Math.ceil(_filteredProducts.length / _perPage));
+  _currentPage = Math.max(1, Math.min(p, totalPages));
+  renderProducts();
+}
+
+function renderProducts() {
+  var total = _filteredProducts.length;
+  var totalPages = Math.max(1, Math.ceil(total / _perPage));
+  var start = (_currentPage - 1) * _perPage;
+  var page  = _filteredProducts.slice(start, start + _perPage);
+
+  document.getElementById('productsCount').textContent = total + ' товаров';
+  var tbody = document.getElementById('productsBody');
+
+  if (!page.length) {
+    tbody.innerHTML = '<tr><td colspan="11" class="text-muted text-center py-3">Пока нет товаров.</td></tr>';
+    document.getElementById('productsPager').innerHTML = '';
+    updateSelectionCount();
+    return;
+  }
+
+  tbody.innerHTML = page.map(function(p) {
+    var localImg = '/admin/products/image?marketplace=' + encodeURIComponent(p.marketplace || '')
+      + '&sku=' + encodeURIComponent(p.sku || '') + '&n=1';
+    var img = (p.images && p.images.length)
+      ? '<img src="' + esc(p.images[0]) + '" style="width:48px;height:48px;min-width:48px;min-height:48px;object-fit:contain;border-radius:4px;flex-shrink:0"'
+        + ' onerror="if(!this.dataset.f){this.dataset.f=1;this.src=\'' + localImg + '\'}else{this.style.display=\'none\'}">'
+      : '<span class="text-muted">—</span>';
+
+    var title = p.title
+      ? '<a href="' + esc(p.url) + '" target="_blank" class="text-truncate d-block" style="max-width:260px" title="' + esc(p.title) + '">' + esc(p.title) + '</a>'
+      : '<a href="' + esc(p.url) + '" target="_blank" class="text-muted text-truncate d-block" style="max-width:260px">' + esc(p.url) + '</a>';
+
+    var origPrice = p.original_price != null ? p.original_price.toLocaleString('ru-RU') + ' ₽' : '—';
+    var curPrice  = p.current_price  != null ? '<strong>' + p.current_price.toLocaleString('ru-RU') + ' ₽</strong>' : '—';
+    var parsedAt  = p.parsed_at ? p.parsed_at.replace('T', ' ').slice(0, 16) : '—';
+
+    var descLink = p.description
+      ? '<a href="#" class="text-primary small" onclick="showModal(\'desc\',\'' + esc(p.id) + '\');return false;">Посмотреть описание</a>'
+      : '<span class="text-muted small">—</span>';
+
+    var charsLink = p.characteristics && Object.keys(p.characteristics).length
+      ? '<a href="#" class="text-primary small" onclick="showModal(\'chars\',\'' + esc(p.id) + '\');return false;">Посмотреть характеристики</a>'
+      : '<span class="text-muted small">—</span>';
+
+    return '<tr>'
+      + '<td><input type="checkbox" class="form-check-input product-cb" data-id="' + esc(p.id) + '" onchange="updateSelectionCount()"></td>'
+      + '<td>' + img + '</td>'
+      + '<td>' + title + '</td>'
+      + '<td><span class="badge bg-azure text-white">' + esc(p.marketplace || '') + '</span></td>'
+      + '<td class="text-muted">' + esc(p.sku || '—') + '</td>'
+      + '<td class="text-muted text-decoration-line-through">' + origPrice + '</td>'
+      + '<td>' + curPrice + '</td>'
+      + '<td>' + descLink + '</td>'
+      + '<td>' + charsLink + '</td>'
+      + '<td class="text-muted small">' + parsedAt + '</td>'
+      + '<td class="text-end">'
+      + '<button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteProduct(\'' + p.id + '\')">✕</button>'
+      + '</td></tr>';
+  }).join('');
+  updateSelectionCount();
+
+  var from = total ? start + 1 : 0;
+  var to   = Math.min(start + _perPage, total);
+  document.getElementById('productsPager').innerHTML =
+    '<p class="m-0 text-secondary">Показаны ' + from + '–' + to + ' из ' + total + '</p>'
+    + buildPagination(_currentPage, totalPages, 'goToProductPage');
+}
+
+async function deleteProduct(id) {
+  if (!confirm('Удалить этот товар?')) return;
+  await fetch('/admin/products/delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: id}),
+  });
+  await loadProducts();
+}
+
+function getSelectedIds() {
+  return Array.from(document.querySelectorAll('.product-cb:checked'))
+    .map(function(c) { return c.dataset.id; });
+}
+
+function toggleSelectAll(cb) {
+  document.querySelectorAll('.product-cb').forEach(function(c) { c.checked = cb.checked; });
+  updateSelectionCount();
+}
+
+function updateSelectionCount() {
+  var checked = document.querySelectorAll('.product-cb:checked').length;
+  var total   = document.querySelectorAll('.product-cb').length;
+  var countEl = document.getElementById('selectionCount');
+  var saEl    = document.getElementById('selectAll');
+  countEl.textContent = checked ? 'Выбрано: ' + checked : '';
+  if (saEl) saEl.checked = total > 0 && checked === total;
+
+  var bar = document.getElementById('prodBulkBar');
+  document.getElementById('prodBulkCount').textContent = 'Выбрано: ' + checked;
+  if (checked > 0) {
+    bar.style.display = '';
+    document.getElementById('prodBulkSpacer').style.height = '64px';
+  } else {
+    bar.style.display = 'none';
+    document.getElementById('prodBulkSpacer').style.height = '0';
+  }
+}
+
+function clearProductSelection() {
+  document.querySelectorAll('.product-cb').forEach(function(c){ c.checked = false; });
+  var sa = document.getElementById('selectAll'); if (sa) sa.checked = false;
+  updateSelectionCount();
+}
+
+async function bulkDeleteProducts(btn) {
+  var ids = getSelectedIds();
+  if (!ids.length) return;
+  if (!confirm('Удалить выбранные товары (' + ids.length + ')?')) return;
+  setBtnLoading(btn, true);
+  try {
+    var res = await fetch('/admin/products/delete_many', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ids: ids}),
+    });
+    var d = await res.json().catch(function(){ return {}; });
+    if (!res.ok) alert(d.error || 'Ошибка удаления (HTTP ' + res.status + ')');
+  } catch (e) { alert('Ошибка удаления'); }
+  setBtnLoading(btn, false);
+  await loadProducts();
+}
+
+async function bulkRefetchProducts(btn) {
+  var ids = getSelectedIds();
+  if (!ids.length) return;
+  setBtnLoading(btn, true);
+  try {
+    var res = await fetch('/admin/products/refetch', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ids: ids}),
+    });
+    var d = await res.json().catch(function(){ return {}; });
+    if (res.ok) alert('Перевыгрузка запущена для ' + (d.queued || ids.length) + ' товаров. Обновите страницу через некоторое время.');
+    else alert(d.error || 'Ошибка перевыгрузки (HTTP ' + res.status + ')');
+  } catch (e) { alert('Ошибка перевыгрузки'); }
+  setBtnLoading(btn, false);
+}
+
+function setBtnLoading(btn, loading) {
+  if (loading) { btn.disabled = true; btn.dataset.orig = btn.innerHTML; btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>'; }
+  else { btn.disabled = false; btn.innerHTML = btn.dataset.orig || btn.innerHTML; }
+}
+
+async function exportProducts(fmt) {
+  var mp  = document.getElementById('filterMp').value;
+  var ids = getSelectedIds();
+  var body = {format: fmt};
+  if (ids.length) body.ids = ids;
+  else if (mp) body.marketplace = mp;
+
+  try {
+    var res = await fetch('/admin/products/export', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) { alert('Ошибка экспорта: ' + res.status); return; }
+    var blob = await res.blob();
+    var ext  = fmt === 'xlsx' ? 'xlsx' : (fmt === 'json' ? 'json' : 'csv');
+    var name = 'products_' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '.' + ext;
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } catch(e) {
+    alert('Ошибка экспорта: ' + e);
+  }
+}
+
+async function clearAll() {
+  if (!confirm('Удалить все товары?')) return;
+  await fetch('/admin/products/clear', {method: 'POST'});
+  await loadProducts();
+}
+
+function buildPagination(current, totalPages, goFn) {
+  if (totalPages <= 1) return '';
+  var items = [];
+  var s = Math.max(1, current - 2), e = Math.min(totalPages, current + 2);
+  if (s > 1) { items.push(1); if (s > 2) items.push('…'); }
+  for (var i = s; i <= e; i++) items.push(i);
+  if (e < totalPages) { if (e < totalPages - 1) items.push('…'); items.push(totalPages); }
+  var html = '<ul class="pagination m-0 ms-auto">';
+  html += '<li class="page-item' + (current === 1 ? ' disabled' : '') + '">'
+    + '<a class="page-link" href="#" onclick="' + goFn + '(' + (current - 1) + ');return false;">‹</a></li>';
+  items.forEach(function(p) {
+    if (p === '…') {
+      html += '<li class="page-item disabled"><span class="page-link">…</span></li>';
+    } else {
+      html += '<li class="page-item' + (p === current ? ' active' : '') + '">'
+        + '<a class="page-link" href="#" onclick="' + goFn + '(' + p + ');return false;">' + p + '</a></li>';
+    }
+  });
+  html += '<li class="page-item' + (current === totalPages ? ' disabled' : '') + '">'
+    + '<a class="page-link" href="#" onclick="' + goFn + '(' + (current + 1) + ');return false;">›</a></li>';
+  return html + '</ul>';
+}
+
+function showModal(type, productId) {
+  var product = _filteredProducts.find(function(p) { return p.id === productId; })
+    || _allProducts.find(function(p) { return p.id === productId; });
+  if (!product) return;
+
+  var title, body;
+  if (type === 'desc') {
+    title = 'Описание — ' + esc(product.title || product.url);
+    var text = product.description || '';
+    body = '<div style="white-space:pre-wrap;word-break:break-word;max-height:60vh;overflow-y:auto">' + esc(text) + '</div>';
+  } else {
+    title = 'Характеристики — ' + esc(product.title || product.url);
+    var chars = product.characteristics || {};
+    var keys = Object.keys(chars);
+    if (!keys.length) {
+      body = '<p class="text-muted">Нет данных</p>';
+    } else {
+      body = '<table class="table table-sm table-striped"><tbody>'
+        + keys.map(function(k) {
+            return '<tr><td class="text-muted fw-semibold" style="width:45%;word-break:break-word">' + esc(k) + '</td>'
+              + '<td style="word-break:break-word">' + esc(String(chars[k])) + '</td></tr>';
+          }).join('')
+        + '</tbody></table>';
+    }
+  }
+
+  document.getElementById('productModalLabel').textContent = title;
+  document.getElementById('productModalBody').innerHTML = body;
+  var modal = new bootstrap.Modal(document.getElementById('productModal'));
+  modal.show();
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+loadProducts();
+</script>
+
+<div class="modal modal-blur fade" id="productModal" tabindex="-1" role="dialog">
+  <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="productModalLabel"></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="productModalBody"></div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Закрыть</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

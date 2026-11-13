@@ -1,0 +1,87 @@
+{% extends "layout.html" %}
+
+{% block header %}
+<div class="d-flex justify-content-between align-items-center">
+  <h1 class="mb-0">Пользователи</h1>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="container-xl">
+
+  <div class="row justify-content-center">
+    <div class="col-12 col-md-6">
+      <div class="card">
+        <div class="card-header"><h3 class="card-title">Учётные данные администратора</h3></div>
+        <div class="card-body">
+          <div id="alertEl" class="alert mb-3" style="display:none;"></div>
+          <div class="mb-3">
+            <label class="form-label">Логин</label>
+            <input id="username" type="text" class="form-control" placeholder="admin">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Новый пароль</label>
+            <input id="password" type="password" class="form-control" placeholder="Оставьте пустым, чтобы не менять">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Повторите пароль</label>
+            <input id="password2" type="password" class="form-control" placeholder="Повторите новый пароль">
+          </div>
+          <button class="btn btn-primary" onclick="saveUser()">Сохранить</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+async function loadUser() {
+  try {
+    var res = await fetch('/admin/users/api');
+    var data = await res.json();
+    document.getElementById('username').value = data.username || '';
+  } catch(e) {
+    console.warn('loadUser error:', e);
+  }
+}
+
+async function saveUser() {
+  var username = document.getElementById('username').value.trim();
+  var password = document.getElementById('password').value;
+  var password2 = document.getElementById('password2').value;
+
+  if (!username) { showAlert('danger', 'Логин обязателен.'); return; }
+  if (password !== password2) { showAlert('danger', 'Пароли не совпадают.'); return; }
+
+  var body = {username: username};
+  if (password) body.password = password;
+
+  try {
+    var res = await fetch('/admin/users/update', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    var data = await res.json();
+    if (!res.ok || data.error) {
+      showAlert('danger', data.error || 'Error ' + res.status);
+    } else {
+      showAlert('success', 'Сохранено. Потребуется повторный вход, если данные изменились.');
+      document.getElementById('password').value = '';
+      document.getElementById('password2').value = '';
+    }
+  } catch(e) {
+    showAlert('danger', String(e));
+  }
+}
+
+function showAlert(type, msg) {
+  var el = document.getElementById('alertEl');
+  el.className = 'alert alert-' + type + ' mb-3';
+  el.textContent = msg;
+  el.style.display = '';
+}
+
+loadUser();
+</script>
+{% endblock %}

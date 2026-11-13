@@ -1,0 +1,351 @@
+{% extends "layout.html" %}
+
+{% block header %}
+<div class="d-flex justify-content-between align-items-center">
+  <h1 class="mb-0">Прокси</h1>
+  <div class="d-flex align-items-center gap-3">
+    <input id="proxyFileInput" type="file" accept=".txt,text/plain" style="display:none" onchange="onProxyFileSelected(this)">
+    <button class="btn btn-outline-secondary" onclick="document.getElementById('proxyFileInput').click()">Загрузить из файла</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="container-xl">
+
+  <div class="card mb-3">
+    <div class="card-header"><h3 class="card-title">Использование прокси</h3></div>
+    <div class="card-body">
+      <div class="d-flex align-items-center justify-content-between mb-3 pb-3 border-bottom">
+        <span class="text-body fw-medium">Использовать прокси</span>
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="proxyActive"
+                 style="width:2.5em;height:1.4em;cursor:pointer;"
+                 onchange="setProxyActive(this.checked)">
+        </div>
+      </div>
+      <div class="d-flex align-items-center gap-4">
+        <span class="text-body fw-medium">Протокол</span>
+        <div class="d-flex gap-3">
+          <label class="form-check mb-0">
+            <input class="form-check-input" type="radio" name="proxyType" value="http" onchange="setProxyType('http')">
+            <span class="form-check-label">HTTP</span>
+          </label>
+          <label class="form-check mb-0">
+            <input class="form-check-input" type="radio" name="proxyType" value="socks5" onchange="setProxyType('socks5')">
+            <span class="form-check-label">SOCKS5</span>
+          </label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-header"><h3 class="card-title">Добавить прокси</h3></div>
+    <div class="card-body">
+      <div class="row g-2">
+        <div class="col-12 col-sm-5">
+          <input id="proxyHost" type="text" class="form-control" placeholder="Хост">
+        </div>
+        <div class="col-6 col-sm-2">
+          <input id="proxyPort" type="text" class="form-control" placeholder="Порт">
+        </div>
+        <div class="col-6 col-sm-2">
+          <input id="proxyLogin" type="text" class="form-control" placeholder="Логин (опц.)">
+        </div>
+        <div class="col-10 col-sm-2">
+          <input id="proxyPassword" type="password" class="form-control" placeholder="Пароль (опц.)">
+        </div>
+        <div class="col-2 col-sm-1 d-flex">
+          <button id="addBtn" class="btn btn-primary w-100" onclick="addProxy()">Добавить</button>
+        </div>
+      </div>
+      <div id="proxyError" class="text-danger mt-1" style="display:none;"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h3 class="card-title">Пул прокси</h3>
+      <div class="card-options d-flex align-items-center gap-2">
+        <span class="text-muted small" id="proxyCount"></span>
+        <span id="proxySelectionCount" class="text-muted small"></span>
+        <select class="form-select form-select-sm w-auto" id="proxyPerPage" onchange="setProxyPerPage(this.value)">
+          <option value="10">10</option>
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
+        <button class="btn btn-sm btn-outline-danger" id="proxyDeleteSelected" onclick="deleteSelectedProxies(this)" disabled>Удалить выбранные</button>
+      </div>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-vcenter card-table">
+        <thead>
+          <tr>
+            <th style="width:36px">
+              <input type="checkbox" class="form-check-input" id="proxySelectAll" onchange="toggleSelectAllProxies(this)">
+            </th>
+            <th style="width:56px">#</th>
+            <th>Прокси</th>
+          </tr>
+        </thead>
+        <tbody id="proxyTableBody">
+          <tr><td colspan="3" class="text-center text-muted py-3">
+            <span class="spinner-border spinner-border-sm me-2"></span>Загрузка...
+          </td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card-footer d-flex align-items-center" id="proxyPager"></div>
+  </div>
+</div>
+
+<script>
+var _allProxies = [];
+var _proxyPage = 1;
+var _proxyPerPage = 25;
+
+async function loadProxies() {
+  const tbody = document.getElementById('proxyTableBody');
+  let res;
+  try {
+    res = await fetch('/admin/proxies/api');
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="3" class="text-danger text-center py-3">Не удалось загрузить прокси.</td></tr>';
+    return;
+  }
+  if (!res.ok) {
+    tbody.innerHTML = '<tr><td colspan="3" class="text-danger text-center py-3">Не удалось загрузить прокси.</td></tr>';
+    return;
+  }
+  const data = await res.json();
+  _allProxies = data.proxies || [];
+  _proxyPage = 1;
+  renderProxies();
+}
+
+function setProxyPerPage(val) {
+  _proxyPerPage = parseInt(val) || 25;
+  _proxyPage = 1;
+  renderProxies();
+}
+
+function goToProxyPage(p) {
+  const totalPages = Math.max(1, Math.ceil(_allProxies.length / _proxyPerPage));
+  _proxyPage = Math.max(1, Math.min(p, totalPages));
+  renderProxies();
+}
+
+function renderProxies() {
+  const total = _allProxies.length;
+  const totalPages = Math.max(1, Math.ceil(total / _proxyPerPage));
+  const start = (_proxyPage - 1) * _proxyPerPage;
+  const pageRows = _allProxies.slice(start, start + _proxyPerPage);
+  const tbody = document.getElementById('proxyTableBody');
+
+  document.getElementById('proxyCount').textContent = total + ' прокси';
+
+  if (!pageRows.length) {
+    tbody.innerHTML = '<tr><td colspan="3" class="text-muted text-center py-3">Пул прокси пуст.</td></tr>';
+    document.getElementById('proxyPager').innerHTML = '';
+    updateProxySelection();
+    return;
+  }
+
+  tbody.innerHTML = pageRows.map(function(p) {
+    return '<tr>'
+      + '<td><input type="checkbox" class="form-check-input proxy-cb" data-index="' + p.index + '" onchange="updateProxySelection()"></td>'
+      + '<td class="text-muted">' + p.index + '</td>'
+      + '<td><code>' + esc(p.proxy) + '</code></td>'
+      + '</tr>';
+  }).join('');
+  updateProxySelection();
+
+  const from = total ? start + 1 : 0;
+  const to = Math.min(start + _proxyPerPage, total);
+  document.getElementById('proxyPager').innerHTML =
+    '<p class="m-0 text-secondary">Показаны ' + from + '–' + to + ' из ' + total + '</p>'
+    + buildPagination(_proxyPage, totalPages, 'goToProxyPage');
+}
+
+function getSelectedProxyIndexes() {
+  return Array.from(document.querySelectorAll('.proxy-cb:checked'))
+    .map(function(c) { return parseInt(c.dataset.index); });
+}
+
+function toggleSelectAllProxies(cb) {
+  document.querySelectorAll('.proxy-cb').forEach(function(c) { c.checked = cb.checked; });
+  updateProxySelection();
+}
+
+function updateProxySelection() {
+  const checked = document.querySelectorAll('.proxy-cb:checked').length;
+  const total = document.querySelectorAll('.proxy-cb').length;
+  const countEl = document.getElementById('proxySelectionCount');
+  const saEl = document.getElementById('proxySelectAll');
+  const delBtn = document.getElementById('proxyDeleteSelected');
+  countEl.textContent = checked ? 'Выбрано: ' + checked : '';
+  if (saEl) saEl.checked = total > 0 && checked === total;
+  if (delBtn) delBtn.disabled = checked === 0;
+}
+
+async function deleteSelectedProxies(btn) {
+  const indexes = getSelectedProxyIndexes();
+  if (!indexes.length) return;
+  if (!confirm('Удалить ' + indexes.length + ' выбранн' + (indexes.length === 1 ? 'ый прокси' : 'ых прокси') + '?')) return;
+  setLoading(btn, true);
+  try {
+    const res = await fetch('/admin/proxies/remove_many', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({indexes: indexes})
+    });
+    const data = await res.json().catch(function() { return {}; });
+    if (!res.ok) { alert(data.error || 'Ошибка удаления (HTTP ' + res.status + ')'); return; }
+    await loadProxies();
+  } finally {
+    setLoading(btn, false);
+  }
+}
+
+function buildPagination(current, totalPages, goFn) {
+  if (totalPages <= 1) return '';
+  var items = [];
+  var s = Math.max(1, current - 2), e = Math.min(totalPages, current + 2);
+  if (s > 1) { items.push(1); if (s > 2) items.push('…'); }
+  for (var i = s; i <= e; i++) items.push(i);
+  if (e < totalPages) { if (e < totalPages - 1) items.push('…'); items.push(totalPages); }
+  var html = '<ul class="pagination m-0 ms-auto">';
+  html += '<li class="page-item' + (current === 1 ? ' disabled' : '') + '">'
+    + '<a class="page-link" href="#" onclick="' + goFn + '(' + (current - 1) + ');return false;">‹</a></li>';
+  items.forEach(function(p) {
+    if (p === '…') {
+      html += '<li class="page-item disabled"><span class="page-link">…</span></li>';
+    } else {
+      html += '<li class="page-item' + (p === current ? ' active' : '') + '">'
+        + '<a class="page-link" href="#" onclick="' + goFn + '(' + p + ');return false;">' + p + '</a></li>';
+    }
+  });
+  html += '<li class="page-item' + (current === totalPages ? ' disabled' : '') + '">'
+    + '<a class="page-link" href="#" onclick="' + goFn + '(' + (current + 1) + ');return false;">›</a></li>';
+  return html + '</ul>';
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+(async function initSettings() {
+  const res = await fetch('/admin/proxies/settings');
+  if (!res.ok) { loadProxies(); return; }
+  const data = await res.json();
+
+  const type = data.type || 'http';
+  const radio = document.querySelector(`input[name="proxyType"][value="${type}"]`);
+  if (radio) radio.checked = true;
+
+  const activeEl = document.getElementById('proxyActive');
+  if (activeEl) activeEl.checked = !!data.active;
+
+  loadProxies();
+})();
+
+async function setProxyType(type) {
+  await fetch('/admin/proxies/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({type})
+  });
+}
+
+async function setProxyActive(value) {
+  await fetch('/admin/proxies/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({active: value})
+  });
+}
+
+function setLoading(btn, loading) {
+  if (loading) {
+    btn.disabled = true;
+    btn.dataset.orig = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  } else {
+    btn.disabled = false;
+    btn.innerHTML = btn.dataset.orig;
+  }
+}
+
+async function addProxy() {
+  const host = document.getElementById('proxyHost').value.trim();
+  const port = document.getElementById('proxyPort').value.trim();
+  const login = document.getElementById('proxyLogin').value.trim();
+  const password = document.getElementById('proxyPassword').value.trim();
+  const errEl = document.getElementById('proxyError');
+  const btn = document.getElementById('addBtn');
+  errEl.style.display = 'none';
+
+  if (!host || !port) {
+    errEl.textContent = 'Хост и порт обязательны';
+    errEl.style.display = '';
+    return;
+  }
+
+  let proxy = login && password
+    ? `${login}:${password}@${host}:${port}`
+    : `${host}:${port}`;
+
+  setLoading(btn, true);
+  try {
+    const res = await fetch('/admin/proxies/add', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({proxy})
+    });
+    const data = await res.json().catch(function() { return {}; });
+    if (!res.ok) {
+      errEl.textContent = data.error || 'Ошибка ' + res.status;
+      errEl.style.display = '';
+      setLoading(btn, false);
+    } else {
+      document.getElementById('proxyHost').value = '';
+      document.getElementById('proxyPort').value = '';
+      document.getElementById('proxyLogin').value = '';
+      document.getElementById('proxyPassword').value = '';
+      setLoading(btn, false);
+      loadProxies();
+    }
+  } catch(e) {
+    errEl.textContent = 'Ошибка запроса: ' + e;
+    errEl.style.display = '';
+    setLoading(btn, false);
+  }
+}
+
+async function onProxyFileSelected(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const res = await fetch('/admin/proxies/reload', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({proxies: text})
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert(data.error || `Ошибка загрузки (HTTP ${res.status})`);
+      return;
+    }
+    await loadProxies();
+    alert(`Загружено ${data.reloaded} прокси из ${file.name}`);
+  } finally {
+    input.value = '';  // reset so selecting the same file again re-fires change
+  }
+}
+</script>
+{% endblock %}

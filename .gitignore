@@ -1,0 +1,42 @@
+# IDE
+.idea/
+.vscode/
+
+# Claude Code
+.claude/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Logs
+logs/
+
+# Runtime data (auto-generated, may contain sensitive session data)
+data/*
+!data/settings.yml.example
+
+# macOS
+.DS_Store
+
+tasks
+
+# Backups
+backups/
+
+# PyArmor build output
+dist/
+/resources
+
+# Large media — keep videos out of git (host externally)
+landing/src/video/*.mp4
