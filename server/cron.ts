@@ -10,6 +10,7 @@ import { HttpClient, nativeHttp } from './http';
 const COMMIT_SINCE = '2014-05-01T14:49:25Z';
 const DEFAULT_BATCH_SIZE = 8;
 const DEFAULT_CONCURRENCY = 6;
+export const PUBLIC_NODE_TIMEOUT_MS = 2500;
 const EVENT_TYPES = [
   'PullRequestEvent',
   'IssueCommentEvent',
@@ -49,6 +50,23 @@ export interface RefreshedRepo {
   description: string | null;
 }
 
+export interface PublicNodeConfig {
+  endpoint: string;
+  website?: string;
+  websocket?: string;
+}
+
+export interface PublicNodeStatus {
+  endpoint: string;
+  website: string | null;
+  websocket: string | null;
+  up: number;
+  respTime: number;
+  version: string | null;
+  error: string | null;
+  deprecated: number | null;
+}
+
 interface StagedCommit {
   sha: string;
   repoOrder: number;
@@ -65,6 +83,27 @@ function chunkArray<T>(array: T[], chunkSize: number): T[][] {
     chunks.push(array.slice(i, i + chunkSize));
   }
   return chunks;
+}
+
+/**
+ * drizzle-orm's bun-sqlite `transaction()` wraps bun:sqlite's synchronous native
+ * transaction and does not await the callback, so statements performed after an
+ * `await` run after the native transaction has already committed. Explicit
+ * BEGIN/COMMIT/ROLLBACK keeps the whole async write atomic.
+ */
+async function asyncTransaction<T>(
+  database: typeof db,
+  callback: (tx: typeof db) => Promise<T>
+): Promise<T> {
+  await database.run(sql`BEGIN`);
+  try {
+    const result = await callback(database);
+    await database.run(sql`COMMIT`);
+    return result;
+  } catch (error) {
+    await database.run(sql`ROLLBACK`);
+    throw error;
+  }
 }
 
 async function mapLimit<T, R>(
@@ -568,48 +607,67 @@ export class CronJobs {
     return events;
   }
 
-  async checkPublicNodes() {
+  async probePublicNode(node: PublicNodeConfig): Promise<PublicNodeStatus> {
+    const start = Date.now();
+    const elapsed = () => Math.max(0, Math.trunc(Date.now() - start));
+    const base = {
+      endpoint: node.endpoint,
+      website: node.website ?? null,
+      websocket: node.websocket ?? null,
+      deprecated: null,
+    };
+    const failed = (up: 0 | 1, error: string): PublicNodeStatus => ({
+      ...base,
+      up,
+      respTime: elapsed(),
+      version: null,
+      error: JSON.stringify({ error }),
+    });
+
+    try {
+      const res = await this.httpPost(node.endpoint, { action: 'version' }, {
+        timeout: PUBLIC_NODE_TIMEOUT_MS,
+      });
+      return {
+        ...base,
+        up: 1,
+        respTime: elapsed(),
+        version: res.data?.node_vendor ?? null,
+        error: null,
+      };
+    } catch (error: any) {
+      if (error?.code === 'ECONNABORTED') {
+        return failed(0, 'Timeout');
+      }
+      const status = error?.response?.status;
+      if (typeof status === 'number') {
+        const message = `Failed with status code ${status}`;
+        return failed(status < 500 ? 1 : 0, message);
+      }
+      console.log(`Public node ${node.endpoint} probe failed: ${error?.message || error}`);
+      return failed(0, error?.message || 'Unexpected request error');
+    }
+  }
+
+  async checkPublicNodes(nodes: PublicNodeConfig[] = REPOS.public_nodes): Promise<PublicNodeStatus[]> {
     console.time('refreshed_public_nodes');
+    const uniqueNodes = new Map<string, PublicNodeConfig>();
+    for (const node of nodes) {
+      if (!uniqueNodes.has(node.endpoint)) uniqueNodes.set(node.endpoint, node);
+    }
+
     const endpointStatuses = await Promise.all(
-      REPOS.public_nodes.map(async (node) => {
-        const start = Date.now();
-        try {
-          const res = await this.httpPost(node.endpoint, { action: 'version' }, { timeout: 2500 });
-          return {
-            endpoint: node.endpoint,
-            website: node.website ?? null,
-            websocket: node.websocket ?? null,
-            up: 1,
-            respTime: Date.now() - start,
-            version: res.data.node_vendor,
-            error: null,
-          };
-        } catch (error: any) {
-          const errorMsg =
-            error.code === 'ECONNABORTED'
-              ? 'Timeout'
-              : error.response?.data?.error || `Failed with status code ${error.response?.status}`;
-          console.log(error.response?.data);
-          return {
-            endpoint: node.endpoint,
-            website: node.website ?? null,
-            websocket: node.websocket ?? null,
-            up: (error.response?.status || 0) < 500 ? 1 : 0,
-            respTime: Date.now() - start,
-            version: null,
-            error: JSON.stringify({ error: errorMsg }),
-          };
-        }
-      })
+      [...uniqueNodes.values()].map((node) => this.probePublicNode(node))
     );
 
-    await this.database.transaction(async (tx) => {
+    await asyncTransaction(this.database, async (tx) => {
       await tx.delete(schema.publicNodes);
       for (const chunk of chunkArray(endpointStatuses, 100)) {
         await tx.insert(schema.publicNodes).values(chunk);
       }
     });
     console.timeEnd('refreshed_public_nodes');
+    return endpointStatuses;
   }
 
   async getDevFundHistory() {

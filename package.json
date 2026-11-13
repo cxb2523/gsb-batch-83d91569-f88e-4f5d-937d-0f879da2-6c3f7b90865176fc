@@ -15,6 +15,7 @@
     "deploy:client": "bash deploy.sh --client",
     "deploy:both": "bash deploy.sh --both",
     "benchmark:cron": "bun run server/cron.benchmark.ts",
+    "test": "bun test server/",
     "db:migrate": "bunx drizzle-kit migrate",
     "db:generate": "bunx drizzle-kit generate"
   },
