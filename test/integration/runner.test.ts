@@ -1,0 +1,584 @@
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { startHarness, type Harness } from './harness.ts';
+import { observePage } from '../../src/core/perception/model.ts';
+import { Task, type TabPort, type Model } from '../../src/core/runner/task.ts';
+import { taskSpecSchema } from '../../src/core/runner/types.ts';
+import { TraceStore } from '../../src/core/trace/store.ts';
+import { parseConfig } from '../../src/core/config/store.ts';
+import { createScriptedClient } from '../../src/core/jev/fake.ts';
+import { MemoryStore } from '../../src/core/memory/store.ts';
+import { DatabaseSync } from '../../src/core/trace/sqlite.ts';
+import type { PageSession } from '../../src/core/cdp/page.ts';
+import type { Answer, EvaluateRequest, JevClient } from '../../src/core/jev/types.ts';
+
+let h: Harness;
+let dir: string;
+let trace: TraceStore;
+beforeAll(async () => { h = await startHarness(); dir = mkdtempSync(join(tmpdir(), 'jevr-')); trace = TraceStore.open(join(dir, 'db.sqlite'), join(dir, 'blobs')); });
+afterAll(async () => { trace.close(); await h.close(); rmSync(dir, { recursive: true, force: true }); });
+
+function port(page: PageSession): TabPort {
+  let model: Model | undefined;
+  return {
+    tabId: 't1',
+    page: async () => page,
+    observe: async (o) => { if (o?.settle !== false) await page.waitForSettle(); model = await observePage(page, model); return model; },
+    lastModel: () => model,
+    release: () => {},
+  };
+}
+
+interface Script {
+  pageKind: (req: EvaluateRequest) => string;
+  /** [intent target pattern, element description pattern, confidence] */
+  targets: Array<[RegExp, RegExp, number?]>;
+  /** [intent target pattern, [element pattern, probability][]]: a spread answer (checked before `targets`). */
+  ranks?: Array<[RegExp, Array<[RegExp, number]>]>;
+  goalReached?: (req: EvaluateRequest) => number;
+  actionClass?: string;
+  /** Fixed answers for noul questions by id (e.g. `same`). */
+  nouls?: Record<string, number>;
+  /** [question id pattern, choice, probability]: fixed answers for other choice questions (e.g. overlay kinds). */
+  choices?: Array<[RegExp, string, number?]>;
+  /** Option pattern for "which option fits the goal" picks. */
+  option?: RegExp;
+  /** Noul answers that depend on the request (checked before `nouls`). */
+  noulFn?: (id: string, req: EvaluateRequest) => number | undefined;
+  /** Score answers (the level, given with probability 0.95), e.g. progress by page address. */
+  scores?: (id: string, req: EvaluateRequest) => number | undefined;
+}
+
+/** Scripted JEV: answers by question id with deterministic rules; records every request. */
+function scripted(s: Script): JevClient & { requests: EvaluateRequest[] } {
+  return createScriptedClient((req) => {
+    const state = req.state as any;
+    const out: Record<string, Answer> = {};
+    for (const [id, q] of Object.entries(req.questions)) {
+      if (id === 'page_kind') {
+        const kind = s.pageKind(req);
+        out[id] = { type: 'choice', choice: kind, probabilities: { [kind]: 0.97, other: 0.03 }, confidence: 0.95 };
+      } else if (id === 'pick' && q.type === 'choice' && s.option && state.options) {
+        const k = Object.keys(q.criteria).find((x) => s.option!.test(String(state.options[x] ?? ''))) ?? 'none';
+        out[id] = { type: 'choice', choice: k, probabilities: { [k]: 0.95 }, confidence: 0.95 };
+      } else if (id === 'pick' && q.type === 'choice') {
+        const target = String(state.intent?.target ?? JSON.stringify(state.params ?? {}));
+        const pool = { ...(state.page?.elements ?? {}), ...(state.candidates ?? {}), ...(state.options ?? {}) } as Record<string, string>;
+        const keys = Object.keys(q.criteria).filter((k) => k !== 'none');
+        const rank = s.ranks?.find(([t]) => t.test(target));
+        if (rank) {
+          const probs: Record<string, number> = {};
+          let used = 0;
+          for (const k of keys) {
+            const m = rank[1].find(([re]) => re.test((pool[k] ?? '').split('\n')[0]));
+            if (m) { probs[k] = m[1]; used += m[1]; }
+          }
+          if (!used) {
+            out[id] = { type: 'choice', choice: 'none', probabilities: { none: 0.9, ...Object.fromEntries(keys.map((k) => [k, 0.1 / keys.length])) }, confidence: 0.9 };
+            continue;
+          }
+          const rest = keys.filter((k) => !(k in probs));
+          const share = (1 - used) / (rest.length + 1);
+          for (const k of rest) probs[k] = share;
+          probs.none = share;
+          const [best, p] = Object.entries(probs).sort((a, b) => b[1] - a[1])[0];
+          out[id] = { type: 'choice', choice: best, probabilities: probs, confidence: p };
+          continue;
+        }
+        const rule = s.targets.find(([t]) => t.test(target));
+        const hit = rule ? keys.find((k) => rule[2] !== undefined || true ? rule[1].test(pool[k] ?? '') : false) : undefined;
+        const conf = rule?.[2] ?? 0.95;
+        if (hit) {
+          const others = keys.filter((k) => k !== hit);
+          const rest = (1 - conf) / Math.max(1, others.length + 1);
+          out[id] = { type: 'choice', choice: hit, probabilities: { [hit]: conf, ...Object.fromEntries(others.map((k) => [k, rest])), none: rest }, confidence: conf };
+        } else {
+          out[id] = { type: 'choice', choice: 'none', probabilities: { none: 0.9, ...Object.fromEntries(keys.map((k) => [k, 0.1 / keys.length])) }, confidence: 0.9 };
+        }
+      } else if (id === 'action_class') {
+        const c = s.actionClass ?? 'search_submit';
+        out[id] = { type: 'choice', choice: c, probabilities: { [c]: 1 }, confidence: 1 };
+      } else if (q.type === 'choice') {
+        const rule = s.choices?.find(([re]) => re.test(id));
+        const k = rule?.[1] ?? Object.keys(q.criteria)[0];
+        const p = rule?.[2] ?? 1;
+        const others = Object.keys(q.criteria).filter((x) => x !== k);
+        out[id] = { type: 'choice', choice: k, probabilities: { [k]: p, ...Object.fromEntries(others.map((x) => [x, (1 - p) / others.length])) }, confidence: p };
+      } else if (q.type === 'score') {
+        const level = s.scores?.(id, req);
+        if (level === undefined) continue;
+        const probabilities = Object.fromEntries(q.criteria.map((_, i) => [String(i), i === level ? 0.95 : 0.05 / (q.criteria.length - 1)]));
+        out[id] = { type: 'score', score: level, probabilities, legend: Object.fromEntries(q.criteria.map((c, i) => [String(i), String(c)])), confidence: 0.9 };
+      } else if (q.type === 'noul') {
+        let v = 0.05;
+        if (id === 'exists' || id.startsWith('fit_') || id === 'effect' || id === 'same' || id === 'goal_is_search' || id === 'leads' || id.startsWith('goes_on') || id.startsWith('param_here_')) v = 0.95;
+        if (id === 'goal_reached') v = s.goalReached?.(req) ?? 0.05;
+        if (s.nouls?.[id] !== undefined) v = s.nouls[id];
+        const fn = s.noulFn?.(id, req);
+        if (fn !== undefined) v = fn;
+        out[id] = { type: 'noul', noul: v };
+      }
+    }
+    return out;
+  });
+}
+
+function makeTask(spec: unknown, page: PageSession, jev: JevClient, memory?: MemoryStore) {
+  return new Task(taskSpecSchema.parse(spec), {
+    sessionId: 's1', getConfig: () => parseConfig({ trace: { screenshots: false } }), jev, trace, port: port(page), memory,
+  });
+}
+
+describe('Task runner (scripted JEV, real browser)', () => {
+  it('fills a login form with a secret password that JEV never sees', async () => {
+    const page = await h.open('login.html');
+    const jev = scripted({
+      pageKind: () => 'login',
+      targets: [[/email/i, /Email address/], [/password/i, /Password/], [/submit/i, /Sign in/]],
+      goalReached: (req) => (JSON.stringify(req.state).includes('Welcome back') ? 0.95 : 0.05),
+    });
+    const task = makeTask({
+      goal: 'Sign in to the site', params: { email: { value: 'ann@example.com', about: 'account email' }, password: { value: 'Hunter2-secret', about: 'account password', secret: true } },
+    }, page, jev);
+    const questions: any[] = [];
+    task.on('escalation', (q) => { questions.push(q); task.answer(q.question_id, { type: 'abort' }); });
+    await task.start();
+    expect(questions).toEqual([]);
+    expect(task.state).toBe('done');
+    expect(await page.evaluate('document.getElementById("password").value')).toBe('Hunter2-secret');
+    expect(await page.evaluate('document.getElementById("msg").textContent')).toBe('Welcome back');
+    expect(JSON.stringify(jev.requests)).not.toContain('Hunter2-secret');
+    const stored = JSON.stringify([trace.getTask(task.id), trace.getSteps(task.id), trace.getJevCalls({ taskId: task.id })]);
+    expect(stored).not.toContain('Hunter2-secret');
+    for (const f of readdirSync(join(dir, 'blobs')).flatMap((d) => readdirSync(join(dir, 'blobs', d)).map((x) => join(dir, 'blobs', d, x)))) {
+      expect(readFileSync(f).toString('latin1')).not.toContain('Hunter2-secret');
+    }
+    // The password field was searched for while the page after the email was assessed, and only once.
+    const grounds = trace.getJevCalls({ taskId: task.id, template: 'ground.element' });
+    const targets = grounds.map((c) => String((c.state as any)?.intent?.target ?? ''));
+    expect(targets.filter((t) => /password/i.test(t))).toHaveLength(1);
+    const steps = trace.getSteps(task.id);
+    const pwStep = steps.find((st) => st.subintent === 'fill_param(password)')!;
+    const pwCall = grounds.find((c) => /password/i.test(String((c.state as any)?.intent?.target ?? '')))!;
+    const assessOfPw = trace.getJevCalls({ taskId: task.id, template: 'assess' }).find((c) => c.stepId === pwStep.id)!;
+    expect(pwCall.stepId).toBe(pwStep.id);
+    expect(pwCall.at).toBeLessThanOrEqual(assessOfPw.at + 50);
+  });
+
+  it('escalates an uncertain grounding with candidates and resumes on pick', async () => {
+    const page = await h.open('login.html');
+    const jev = scripted({
+      pageKind: () => 'login',
+      targets: [[/email/i, /Email address/, 0.3], [/password/i, /Password/], [/submit/i, /Sign in/]],
+      goalReached: (req) => (JSON.stringify(req.state).includes('Welcome back') ? 0.95 : 0.05),
+    });
+    const task = makeTask({
+      goal: 'Sign in', params: { email: { value: 'bob@example.com', about: 'account email' }, password: { value: 'pw12345', secret: true } },
+      policy: { confidence: { trial: { enabled: false } } },
+    }, page, jev);
+    const questions: any[] = [];
+    task.on('escalation', (q) => {
+      questions.push(q);
+      const pick = q.decision?.candidates?.find((c: any) => /Email address/.test(c.desc));
+      setTimeout(() => task.answer(q.question_id, pick ? { type: 'pick', ref: pick.ref } : { type: 'abort' }), 10);
+    });
+    await task.start();
+    expect(questions[0]).toMatchObject({ kind: 'ground' });
+    expect(questions[0].decision.candidates.length).toBeGreaterThan(0);
+    expect(task.state).toBe('done');
+    expect(await page.evaluate('document.getElementById("email").value')).toBe('bob@example.com');
+  });
+
+  it('tries a low-confidence leader for a reversible step instead of asking', async () => {
+    const page = await h.open('login.html');
+    const jev = scripted({
+      pageKind: () => 'login',
+      targets: [[/email/i, /Email address/, 0.3], [/password/i, /Password/], [/submit/i, /Sign in/]],
+      goalReached: (req) => (JSON.stringify(req.state).includes('Welcome back') ? 0.95 : 0.05),
+    });
+    const task = makeTask({ goal: 'Sign in', params: { email: { value: 'bob@example.com', about: 'account email' }, password: { value: 'pw12345', secret: true } } }, page, jev);
+    const questions: any[] = [];
+    task.on('escalation', (q) => { questions.push(q); task.answer(q.question_id, { type: 'abort' }); });
+    await task.start();
+    expect(questions).toEqual([]);
+    expect(task.state).toBe('done');
+    expect(await page.evaluate('document.getElementById("email").value')).toBe('bob@example.com');
+  });
+
+  it('tells the agent how to show a background tab that needs the person', async () => {
+    const page = await h.open('login.html');
+    const jev = scripted({ pageKind: () => 'captcha', targets: [] });
+    const task = new Task(taskSpecSchema.parse({ goal: 'Sign in' }), {
+      sessionId: 's1', getConfig: () => parseConfig({ trace: { screenshots: false } }), jev, trace, port: { ...port(page), background: () => true },
+    });
+    const questions: any[] = [];
+    task.on('escalation', (q) => { questions.push(q); task.answer(q.question_id, { type: 'abort' }); });
+    await task.start();
+    expect(questions[0].kind).toBe('blocker');
+    expect(questions[0].summary).toContain('jev_tabs select tab:"t1" show:true');
+  });
+
+  it('rolls back a failed trial and tries the next candidate', async () => {
+    const page = await h.open('filters.html');
+    const jev = scripted({
+      pageKind: () => 'search_form',
+      targets: [],
+      // The city opener leads for the brand, the Toyota chip is second: the city list lacks Toyota, so the trial fails.
+      ranks: [[/car brand/i, [[/"Город"/, 0.35], [/"Toyota"/, 0.3]]]],
+      goalReached: (req) => (JSON.stringify(req.state).includes('Выбрано: Toyota') ? 0.95 : 0.05),
+    });
+    const task = makeTask({ goal: 'Show Toyota cars', params: { brand: { value: 'Toyota', about: 'car brand' } } }, page, jev);
+    const questions: any[] = [];
+    const steps: string[] = [];
+    task.on('escalation', (q) => { questions.push(q); task.answer(q.question_id, { type: 'abort' }); });
+    task.on('step', (st) => steps.push(st.note));
+    await task.start();
+    expect(questions).toEqual([]);
+    expect(task.state).toBe('done');
+    expect(steps.some((n) => /Город.*rolled back/.test(n))).toBe(true);
+    expect(await page.evaluate('document.querySelector(".popup") === null')).toBe(true);
+    expect(await page.evaluate('[...document.querySelectorAll("button[aria-pressed=true]")].map((b) => b.textContent).join()')).toBe('Toyota');
+  });
+
+  it('counts a filter link that navigates to the value as setting it', async () => {
+    const page = await h.open('filters.html');
+    const jev = scripted({
+      pageKind: () => 'search_form',
+      targets: [],
+      ranks: [[/car model/i, [[/link "Toyota Camry"/, 0.9]]]],
+      goalReached: (req) => (JSON.stringify(req.state).includes('Выбрано: Toyota, Camry') ? 0.95 : 0.05),
+      // JEV does not take "Toyota Camry" for the value itself: the navigation has to show it.
+      nouls: { same: 0.1 },
+    });
+    const task = makeTask({ goal: 'Show Toyota Camry cars', params: { model: { value: 'Camry', about: 'car model' } } }, page, jev);
+    const questions: any[] = [];
+    const steps: string[] = [];
+    task.on('escalation', (q) => { questions.push(q); task.answer(q.question_id, { type: 'abort' }); });
+    task.on('step', (st) => steps.push(st.note));
+    await task.start();
+    expect(questions).toEqual([]);
+    expect(task.state).toBe('done');
+    expect(steps.some((n) => /followed .*Toyota Camry.*now shows "Camry"/.test(n))).toBe(true);
+    expect(await page.evaluate('location.search')).toContain('model=Camry');
+  });
+
+  it('presses a value button whose label is the value in another language', async () => {
+    const page = await h.open('filters.html');
+    const jev = scripted({
+      pageKind: () => 'search_form',
+      targets: [],
+      ranks: [[/city/i, [[/button "Павлодар"/, 0.9]]]],
+      goalReached: (req) => (JSON.stringify(req.state).includes('Выбрано: Павлодар') ? 0.95 : 0.05),
+    });
+    const task = makeTask({ goal: 'Show cars in Pavlodar', params: { city: { value: 'Pavlodar', about: 'city where the car is sold' } } }, page, jev);
+    const questions: any[] = [];
+    task.on('escalation', (q) => { questions.push(q); task.answer(q.question_id, { type: 'abort' }); });
+    await task.start();
+    expect(questions).toEqual([]);
+    expect(task.state).toBe('done');
+    expect(jev.requests.some((r) => 'same' in r.questions)).toBe(true);
+    expect(await page.evaluate('[...document.querySelectorAll("button[aria-pressed=true]")].map((b) => b.textContent).join()')).toBe('Павлодар');
+  });
+
+  it('searches first when a filter exists only next to the results', async () => {
+    const page = await h.open('filters.html');
+    const jev = scripted({
+      pageKind: (req) => (JSON.stringify(req.state).includes('Результаты поиска') ? 'results_list' : 'search_form'),
+      targets: [[/submit/i, /Показать/]],
+      ranks: [[/car brand/i, [[/button "Toyota"/, 0.9]]], [/condition/i, [[/button "Новые"/, 0.9]]]],
+      goalReached: (req) => (JSON.stringify(req.state).includes('Состояние: Новые') ? 0.95 : 0.05),
+    });
+    const task = makeTask({
+      goal: 'Show new Toyota cars', params: { brand: { value: 'Toyota', about: 'car brand' }, condition: { value: 'Новые', about: 'item condition' } },
+    }, page, jev);
+    const questions: any[] = [];
+    const steps: string[] = [];
+    task.on('escalation', (q) => { questions.push(q); task.answer(q.question_id, { type: 'abort' }); });
+    task.on('step', (st) => steps.push(`${st.subintent}: ${st.note}`));
+    await task.start();
+    expect(questions).toEqual([]);
+    expect(task.state).toBe('done');
+    const order = steps.map((x) => x.split(':')[0]);
+    expect(order.indexOf('submit')).toBeGreaterThan(-1);
+    expect(order.indexOf('submit')).toBeLessThan(order.lastIndexOf('fill_param(condition)'));
+    expect(order).not.toContain('reveal(condition)');
+    expect(await page.evaluate('location.search')).toContain('condition=new');
+  });
+
+  it('asks for confirmation before an irreversible click even when JEV calls it harmless', async () => {
+    const page = await h.open('checkout.html?price=41230');
+    const jev = scripted({
+      pageKind: () => 'search_form',
+      targets: [[/first name|given/i, /Имя/], [/last name|family/i, /Фамилия/], [/submit/i, /Оплатить/]],
+      actionClass: 'navigation',
+    });
+    const task = makeTask({ goal: 'Fill in the passenger and continue', params: { first: { value: 'ANNA', about: 'first name' }, last: { value: 'LEE', about: 'last name' } } }, page, jev);
+    const questions: any[] = [];
+    task.on('escalation', (q) => { questions.push(q); setTimeout(() => task.answer(q.question_id, { type: 'abort' }), 10); });
+    await task.start();
+    expect(questions[0]).toMatchObject({ kind: 'risk_confirm' });
+    expect(questions[0].summary).toMatch(/Оплатить/);
+    expect(task.state).toBe('cancelled');
+    expect(await page.evaluate('document.getElementById("done").textContent')).toBe('');
+  });
+  it('works through a payment dialog that is part of the goal instead of closing it', async () => {
+    const page = await h.open('post.html');
+    await page.evaluate("s.brand='Toyota'; s.model='Camry'; s.year='2015'; s.body='Седан'; go(5)");
+    const jev = scripted({
+      pageKind: () => 'other',
+      targets: [[/submits the form/i, /Опубликовать|Оплатить/]],
+      choices: [[/^overlay_kind_/, 'goal_step']],
+      option: /Сохранённая/,
+      goalReached: (req) => (JSON.stringify(req.state).includes('оплачено') ? 0.95 : 0.05),
+    });
+    // Site memory keeps the "Опубликовать" button as this site's submit: under the dialog it must not be reused.
+    const task = makeTask({ goal: 'Publish the ad and pay for it with the saved bank card', policy: { fill_required: 'any' } }, page, jev, new MemoryStore(new DatabaseSync(':memory:')));
+    const questions: any[] = [];
+    task.on('escalation', (q) => { questions.push(q); setTimeout(() => task.answer(q.question_id, { type: 'continue' }), 10); });
+    await task.start();
+    expect(questions.map((q) => q.kind)).toEqual(['risk_confirm', 'risk_confirm']);
+    expect(questions[1].summary).toMatch(/Оплатить/);
+    expect(await page.evaluate('document.getElementById("done").textContent')).toMatch(/оплачено сохранённой картой/);
+    expect(task.state).toBe('done');
+  });
+  it('opens the goal\'s part of the site from a page without a form, through a menu, and never clicks the opener twice', async () => {
+    const page = await h.open('account.html');
+    const jev = scripted({
+      pageKind: () => 'other',
+      targets: [[/leads toward doing/i, /Кабинет/], [/menu item that leads/i, /Мои объявления/]],
+      goalReached: (req) => (String((req.state as any).page?.url ?? '').includes('view=ads') ? 0.95 : 0.05),
+    });
+    const task = makeTask({ goal: 'Open the list of my ads in the account', params: { phone: { value: '7000000000', about: 'phone number used to sign in' } } }, page, jev);
+    const questions: any[] = [];
+    task.on('escalation', (q) => { questions.push(q); setTimeout(() => task.answer(q.question_id, { type: 'abort' }), 10); });
+    await task.start();
+    expect(questions).toEqual([]);
+    expect(task.state).toBe('done');
+    expect(await page.evaluate('location.search')).toBe('?view=ads');
+    const notes = trace.getSteps(task.id).map((st) => (st.notes as { note?: string } | null)?.note ?? '').join(' | ');
+    expect(notes).toMatch(/opened e\d+ "Кабинет ▾" and chose "Мои объявления"/);
+  });
+  it('rolls back a way in that opens a page for something else and takes the next one', async () => {
+    const page = await h.open('account.html');
+    const url = (req: EvaluateRequest) => String((req.state as any).page?.url ?? '');
+    const jev = scripted({
+      pageKind: () => 'other',
+      targets: [[/menu item that leads/i, /Мои объявления/]],
+      // JEV's first pick is the posting button; the page it opens is a new-ad form, not the goal.
+      ranks: [[/leads toward doing/i, [[/Подать объявление/, 0.6], [/Кабинет/, 0.3]]]],
+      noulFn: (id, req) => (id === 'leads' ? (url(req).includes('post.html') ? 0.05 : 0.95) : undefined),
+      goalReached: (req) => (url(req).includes('view=ads') ? 0.95 : 0.05),
+    });
+    const task = makeTask({ goal: 'Open the list of my ads in the account' }, page, jev);
+    const questions: any[] = [];
+    task.on('escalation', (q) => { questions.push(q); setTimeout(() => task.answer(q.question_id, { type: 'abort' }), 10); });
+    await task.start();
+    const notes = trace.getSteps(task.id).map((st) => (st.notes as { note?: string } | null)?.note ?? '').join(' | ');
+    expect(questions.map((q) => `${q.kind}: ${q.summary}`), notes).toEqual([]);
+    expect(task.state).toBe('done');
+    expect(notes).toMatch(/does not lead to the goal/);
+    expect(notes).toMatch(/"Кабинет ▾" and chose "Мои объявления"/);
+    expect(await page.evaluate('location.search')).toBe('?view=ads');
+  });
+  it('keeps a dialog its own click opened even when JEV calls it "other", and goes on inside it', async () => {
+    const page = await h.open('account.html?view=ads&tab=unpaid&notice=1');
+    const jev = scripted({
+      pageKind: () => 'other',
+      targets: [[/leads toward doing/i, /Размещение на 7 дней/], [/submits the form/i, /Продолжить с оплатой|Оплатить 1 500/]],
+      choices: [[/^overlay_kind_/, 'other']],
+      option: /Сохранённая/,
+      goalReached: (req) => (JSON.stringify(req.state).includes('оплачено') ? 0.95 : 0.05),
+    });
+    const task = makeTask({ goal: 'Pay for the placement of my unpaid ad with the saved bank card', policy: { fill_required: 'any' } }, page, jev);
+    const questions: any[] = [];
+    task.on('escalation', (q) => { questions.push(q); setTimeout(() => task.answer(q.question_id, { type: q.kind === 'risk_confirm' ? 'continue' : 'abort' }), 10); });
+    await task.start();
+    const steps = trace.getSteps(task.id);
+    expect(questions.every((q) => q.kind === 'risk_confirm')).toBe(true);
+    expect(steps.some((st) => /dismiss_overlay/.test(st.subintent ?? ''))).toBe(false);
+    // The notice's buttons are a choice of action, never "filled" as a value.
+    const note = (st: { notes?: unknown }) => (st.notes as { note?: string } | null)?.note ?? '';
+    expect(steps.some((st) => st.subintent === 'fill_any' && /скидкой|оплатой/.test(note(st)))).toBe(false);
+    // Going on to the payment is not the payment: only "Pay" itself is confirmed.
+    expect(questions.map((q) => q.summary)).toEqual([expect.stringMatching(/Оплатить 1 500/)]);
+    expect(await page.evaluate('document.getElementById("done").textContent')).toMatch(/оплачено сохранённой картой/);
+    expect(task.state).toBe('done');
+  });
+  it('drops sign-in params once a page shows the user signed in, and never looks for their fields again', async () => {
+    const page = await h.open('account.html');
+    const jev = scripted({
+      pageKind: () => 'other',
+      targets: [[/leads toward doing/i, /Кабинет/], [/menu item that leads/i, /Мои объявления/]],
+      nouls: { signed_in: 0.95 },
+      goalReached: (req) => (String((req.state as any).page?.url ?? '').includes('view=ads') ? 0.95 : 0.05),
+    });
+    const task = makeTask({
+      goal: 'Open the list of my ads in the account',
+      params: { phone: { value: '7000000000', about: 'phone number used to sign in' }, password: { value: 'pw-secret-1', about: 'account password', secret: true } },
+    }, page, jev);
+    const questions: any[] = [];
+    task.on('escalation', (q) => { questions.push(q); setTimeout(() => task.answer(q.question_id, { type: 'abort' }), 10); });
+    await task.start();
+    const steps = trace.getSteps(task.id).map((st) => st.subintent ?? '');
+    expect(questions).toEqual([]);
+    expect(task.state).toBe('done');
+    expect(steps.some((st) => /phone|password/.test(st))).toBe(false);
+    expect(task.statusView().progress).toEqual({ phone: 'not_needed', password: 'not_needed' });
+  });
+  it('rolls back a way in that lowers the progress toward the goal', async () => {
+    const page = await h.open('account.html');
+    const url = (req: EvaluateRequest) => String((req.state as any).page?.url ?? '');
+    const jev = scripted({
+      pageKind: () => 'other',
+      targets: [[/menu item that leads/i, /Мои объявления/]],
+      ranks: [[/leads toward doing/i, [[/Подать объявление/, 0.6], [/Кабинет/, 0.3]]]],
+      // The new-ad form "leads toward" the goal for the entry check, but it is further from it than the start page.
+      scores: (id, req) => (id !== 'progress' ? undefined : url(req).includes('post.html') ? 0 : url(req).includes('view=ads') ? 2 : 1),
+      goalReached: (req) => (url(req).includes('view=ads') ? 0.95 : 0.05),
+    });
+    const task = makeTask({ goal: 'Open the list of my ads in the account' }, page, jev);
+    const questions: any[] = [];
+    task.on('escalation', (q) => { questions.push(q); setTimeout(() => task.answer(q.question_id, { type: 'abort' }), 10); });
+    await task.start();
+    const notes = trace.getSteps(task.id).map((st) => (st.notes as { note?: string } | null)?.note ?? '').join(' | ');
+    expect(questions.map((q) => q.summary), notes).toEqual([]);
+    expect(notes).toMatch(/further from the goal \(level 1 → 0\)/);
+    expect(task.state).toBe('done');
+    expect(await page.evaluate('location.search')).toBe('?view=ads');
+  });
+
+  it('opens a collapsed section when JEV sees that what the goal needs is behind it', async () => {
+    const page = await h.open('menus.html');
+    const url = (req: EvaluateRequest) => String((req.state as any).page?.url ?? '');
+    const jev = scripted({
+      pageKind: () => 'other',
+      targets: [[/opens a menu, tab or collapsed section/i, /Ещё/], [/leads toward doing/i, /Архив заказов/]],
+      choices: [[/^situation$/, 'behind_menu']],
+      goalReached: (req) => (url(req).includes('page=archive') ? 0.95 : 0.05),
+    });
+    const task = makeTask({ goal: 'Open my order archive' }, page, jev);
+    const questions: any[] = [];
+    task.on('escalation', (q) => { questions.push(q); setTimeout(() => task.answer(q.question_id, { type: 'abort' }), 10); });
+    await task.start();
+    const steps = trace.getSteps(task.id);
+    const notes = steps.map((st) => `${st.subintent}: ${(st.notes as { note?: string } | null)?.note ?? ''}`).join(' | ');
+    expect(questions.map((q) => `${q.kind}: ${q.summary}`), notes).toEqual([]);
+    expect(steps.map((st) => st.subintent).slice(0, 2)).toEqual(['explore', 'enter']);
+    expect(task.state).toBe('done');
+    expect(await page.evaluate('location.search')).toBe('?page=archive');
+  });
+  it('follows the agent\'s plan milestone by milestone', async () => {
+    const page = await h.open('account.html');
+    const url = (req: EvaluateRequest) => String((req.state as any).page?.url ?? '');
+    const jev = scripted({
+      pageKind: () => 'other',
+      targets: [[/this step: "open my ads/i, /Кабинет/], [/menu item that leads/i, /Мои объявления/], [/this step: "open the unpaid/i, /Неоплаченные/]],
+      noulFn: (id, req) => {
+        const at = url(req);
+        if (id === 'milestone_done' || id === 'next_milestone_done') {
+          const text = JSON.stringify(req.questions[id]);
+          if (/lists my ads/.test(text)) return at.includes('view=ads') ? 0.95 : 0.05;
+          if (/unpaid ads/.test(text)) return at.includes('tab=unpaid') ? 0.95 : 0.05;
+        }
+        return undefined;
+      },
+      goalReached: (req) => (url(req).includes('tab=unpaid') ? 0.5 : 0.05),
+    });
+    const task = makeTask({
+      goal: 'Show my unpaid ads',
+      plan: [{ do: 'open my ads in the account', done_when: 'the page lists my ads' }, { do: 'open the unpaid ads', done_when: 'the page lists my unpaid ads' }],
+    }, page, jev);
+    const questions: any[] = [];
+    task.on('escalation', (q) => { questions.push(q); setTimeout(() => task.answer(q.question_id, { type: 'abort' }), 10); });
+    await task.start();
+    const notes = trace.getSteps(task.id).map((st) => (st.notes as { note?: string } | null)?.note ?? '').join(' | ');
+    expect(questions.map((q) => q.summary), notes).toEqual([]);
+    expect(task.state).toBe('done');
+    expect(await page.evaluate('location.search')).toContain('tab=unpaid');
+    expect((task.statusView() as any).plan.index).toBe(2);
+  });
+
+  it('asks the agent without stopping, explores meanwhile and applies the answer at the next step', async () => {
+    const page = await h.open('menus.html');
+    const url = (req: EvaluateRequest) => String((req.state as any).page?.url ?? '');
+    const jev = scripted({
+      pageKind: () => 'other',
+      targets: [],
+      choices: [[/^next$/, 'scroll', 0.4]],
+      goalReached: (req) => (url(req).includes('page=archive') ? 0.95 : 0.5),
+    });
+    const task = makeTask({ goal: 'Open my order archive' }, page, jev);
+    const archive = (await page.url()).replace(/menus\.html.*/, 'menus.html?page=archive');
+    const questions: any[] = [];
+    let stepsAfterQuestion = 0;
+    task.on('step', () => { if (questions.length) stepsAfterQuestion++; });
+    task.on('escalation', (q) => {
+      questions.push(q);
+      // Answer only after the task went on by itself for a step.
+      const tick = setInterval(() => {
+        if (stepsAfterQuestion < 1) return;
+        clearInterval(tick);
+        task.answer(q.question_id, q.kind === 'consult' ? { type: 'goto', url: archive } : { type: 'abort' });
+      }, 5);
+    });
+    await task.start();
+    const steps = trace.getSteps(task.id).map((st) => `${st.subintent}: ${(st.notes as { note?: string } | null)?.note ?? ''}`);
+    expect(questions.map((q) => q.kind), steps.join(' | ')).toEqual(['consult']);
+    expect(questions[0].context.page).toMatch(/Регионы|r\d/);
+    expect(stepsAfterQuestion).toBeGreaterThanOrEqual(1);
+    expect(steps.some((st) => st.startsWith('goto'))).toBe(true);
+    expect(task.state).toBe('done');
+  });
+
+  it('withdraws the question to the agent when the task finds its way meanwhile', async () => {
+    const page = await h.open('account.html');
+    const url = (req: EvaluateRequest) => String((req.state as any).page?.url ?? '');
+    const jev = scripted({
+      pageKind: () => 'other',
+      targets: [[/leads toward doing/i, /Кабинет/], [/menu item that leads/i, /Мои объявления/]],
+      choices: [[/^next$/, 'enter', 0.4]],
+      scores: (id, req) => (id === 'progress' ? (url(req).includes('view=ads') ? 2 : 1) : undefined),
+      goalReached: (req) => (url(req).includes('view=ads') ? 0.95 : 0.5),
+    });
+    const task = makeTask({ goal: 'Open the list of my ads in the account' }, page, jev);
+    const questions: any[] = [];
+    const withdrawn: any[] = [];
+    task.on('withdrawn', (w) => withdrawn.push(w));
+    task.on('escalation', (q) => { questions.push(q); });
+    await task.start();
+    expect(questions.map((q) => q.kind)).toEqual(['consult']);
+    expect(withdrawn.map((w) => w.question_id)).toEqual([questions[0].question_id]);
+    expect(task.openQuestions).toEqual([]);
+    expect(task.state).toBe('done');
+  });
+  it('saves the way that worked and follows it on the next run of the same kind of task', async () => {
+    const memory = new MemoryStore(new DatabaseSync(':memory:'));
+    const url = (req: EvaluateRequest) => String((req.state as any).page?.url ?? '');
+    const script = () => scripted({
+      pageKind: () => 'other',
+      targets: [[/leads toward doing/i, /Кабинет/], [/menu item that leads/i, /Мои объявления/]],
+      goalReached: (req) => (url(req).includes('view=ads') ? 0.95 : 0.05),
+    });
+    const run = async () => {
+      const page = await h.open('account.html');
+      const jev = script();
+      const task = makeTask({ goal: 'Open the list of my ads in the account' }, page, jev, memory);
+      const questions: any[] = [];
+      task.on('escalation', (q) => { questions.push(q); setTimeout(() => task.answer(q.question_id, { type: 'abort' }), 10); });
+      await task.start();
+      expect(questions).toEqual([]);
+      expect(task.state).toBe('done');
+      const grounds = trace.getJevCalls({ taskId: task.id, template: 'ground.element' }).length;
+      const notes = trace.getSteps(task.id).map((st) => (st.notes as { note?: string } | null)?.note ?? '').join(' | ');
+      return { grounds, notes, recent: (task.statusView() as any).recent_steps as string[] };
+    };
+    const first = await run();
+    expect(memory.list().routes.map((r) => r.steps.map((st) => st.name))).toEqual([['Кабинет ▾', 'Мои объявления']]);
+    const second = await run();
+    expect(second.grounds).toBeLessThan(first.grounds);
+    expect(second.grounds).toBe(0);
+    expect(memory.list().routes[0].ok).toBe(3);
+  });
+});

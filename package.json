@@ -1,0 +1,68 @@
+{
+  "name": "jev-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that lets Claude Code, Codex and other AI agents drive a real Chrome browser with JEV, TypeSafe's fast System One decision model: calibrated confidence, ~100 ms decisions, typed page understanding, human-in-the-loop questions and a debug UI.",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "browser-automation",
+    "ai-agent",
+    "claude-code",
+    "codex",
+    "chrome",
+    "chrome-extension",
+    "chrome-devtools-protocol",
+    "cdp",
+    "headless-chrome",
+    "web-automation",
+    "web-scraping",
+    "jev",
+    "typesafe",
+    "system-one",
+    "openrouter",
+    "llm-tools",
+    "agentic-ai"
+  ],
+  "homepage": "https://github.com/legostin/jev-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/legostin/jev-mcp/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/legostin/jev-mcp.git"
+  },
+  "license": "MIT",
+  "author": "legostin",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "jev": "bin/jev.mjs"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:live": "JEV_LIVE=1 vitest run test/live",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.web.json",
+    "build:web": "node scripts/build-web.mjs",
+    "eval": "JEV_LIVE=1 node evals/run.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "lz-string": "^1.5.0",
+    "preact": "^10.29.8",
+    "ws": "^8.21.3",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@puppeteer/browsers": "^3.2.3",
+    "@types/chrome": "^0.3.0",
+    "@types/node": "^26.6.2",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  }
+}

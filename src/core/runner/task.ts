@@ -1,0 +1,2553 @@
+import type { PageSession } from '../cdp/page.ts';
+import type { Config } from '../config/schema.ts';
+import type { Thresholds } from '../config/thresholds.ts';
+import type { JevClient, Json } from '../jev/types.ts';
+import type { TraceStore } from '../trace/store.ts';
+import type { PageModel, ElementNode, Region } from '../perception/types.ts';
+import type { ModelState } from '../perception/model.ts';
+import { diffModels } from '../perception/diff.ts';
+import { describeElement, renderCandidate, renderDiff, renderOverview } from '../perception/render.ts';
+import { parseCalendarCells } from '../perception/calendar.ts';
+import { candidateElements, groundByIntent, regionAndDescendants, type GroundResult, type Intent } from '../questions/templates/ground.ts';
+import { buildAssess, readAssess, type AssessOutput } from '../questions/templates/assess.ts';
+import { buildDecide, readDecide, type SubintentOption } from '../questions/templates/decide.ts';
+import { buildSuggestionPick, buildOptionPick, buildGoalPrefs } from '../questions/templates/widget.ts';
+import { buildActionClass, readActionClass } from '../questions/templates/safety.ts';
+import { buildVerify, readVerify } from '../questions/templates/verify.ts';
+import { runQuestions, choiceOf, noulOf, type QuestionContext } from '../questions/run.ts';
+import { buildState } from '../questions/state.ts';
+import { aboutOf, hintsFor, paramCard, paramIntent, stepCard, type Hint, type StepCard } from '../questions/step.ts';
+import { hadEffect, rollbackPlan } from './rollback.ts';
+import { gateChoice, gateNoul, topCandidates } from '../decide/gating.ts';
+import { extractResults, applySelect, findResultsList, type ExtractOutput } from '../extract/extract.ts';
+import { listItems, type HandoffItem } from '../extract/handoff.ts';
+import { estimateTokens } from '../util/tokens.ts';
+import { inRange } from '../extract/dates.ts';
+import { deterministicRisk, domainAllowed } from '../safety/rules.ts';
+import { maskSecrets, secretValues } from '../safety/secrets.ts';
+import { isSignInParam, Journal, type JournalData } from './journal.ts';
+import { cleanText } from '../perception/naming.ts';
+import { Plan } from './plan.ts';
+import { consultReport, CONSULT_ANSWERS } from './consult.ts';
+import { buildRoutePick, routeElement, routeStep } from './routes.ts';
+import type { RouteStep, SiteRoute } from '../memory/store.ts';
+import { thresholdsFor, hostOf } from './thresholds.ts';
+import { dateRange, fieldHoldsValue, isEmptyField, isValueLabel, normalizeText, paramKind, requiredEmptyFields, showsValue } from './progress.ts';
+import { Emitter } from '../util/events.ts';
+import { newId } from '../util/ids.ts';
+import { logger } from '../util/log.ts';
+import type { ConfidenceConfig, DecisionKind } from '../config/schema.ts';
+import type {
+  AnswerInput, Escalation, EscalationKind, ParamStatus, PlanStep, StepSummary, TaskResult, TaskSpec, TaskState,
+} from './types.ts';
+import { FINAL_STATES, taskSpecSchema } from './types.ts';
+import type { TaskRecord } from '../trace/store.ts';
+import type { ParamSpec } from '../questions/state.ts';
+import type { MemoryStore } from '../memory/store.ts';
+
+const log = logger('task');
+
+export type Model = PageModel & ModelState;
+
+/** What a task needs from the browser side (implemented by the daemon's tab registry). */
+export interface TabPort {
+  readonly tabId: string;
+  page(): Promise<PageSession>;
+  observe(opts?: { settle?: boolean }): Promise<Model>;
+  lastModel(): Model | undefined;
+  release(): void;
+  /** Drops and re-creates the CDP session for the tab (recovery from a hung renderer connection). */
+  reset?(): Promise<void>;
+  /** Tabs this task's tab opened since a time (results opened in a new tab). */
+  popupsSince?(since: number): { id: string; url: string; title: string }[];
+  /** Observes another tab without switching to it. */
+  peek?(tabId: string): Promise<Model>;
+  /** Moves the task to another tab (it takes the lease). */
+  switchTo?(tabId: string): void;
+  /** False for browsers nobody can see (headless): user takeover detection is skipped. */
+  interactive?(): boolean;
+  /** True when the tab is kept in the background (driver.background): the person has to be shown it. */
+  background?(): boolean;
+}
+
+export interface TaskDeps {
+  sessionId: string;
+  getConfig(): Config;
+  jev: JevClient;
+  trace: TraceStore;
+  port: TabPort;
+  memory?: MemoryStore;
+  now?: () => number;
+}
+
+type Subintent =
+  | { type: 'dismiss_overlay'; region: string; overlayKind: string }
+  | { type: 'fill_param'; key: string }
+  | { type: 'pick_suggestion'; key: string }
+  | { type: 'pick_date'; key: string }
+  | { type: 'submit' }
+  | { type: 'reveal'; key: string }
+  | { type: 'apply_sort' }
+  | { type: 'extract' }
+  | { type: 'load_more' }
+  | { type: 'close_popup' }
+  | { type: 'scroll' }
+  | { type: 'go_back' }
+  | { type: 'reload' }
+  | { type: 'enter' }
+  | { type: 'explore' }
+  | { type: 'goto'; url: string }
+  | { type: 'await_agent' }
+  | { type: 'fill_any'; ref: string; group: string }
+  | { type: 'wait' }
+  | { type: 'done'; reason: string }
+  | { type: 'blocker'; kind: string; summary: string };
+
+interface Outcome { outcome: 'ok' | 'failed' | 'skipped' | 'retry' | 'finished'; note: string; action?: Record<string, unknown> }
+
+class Cancelled extends Error { constructor(reason = 'cancelled') { super(reason); this.name = 'Cancelled'; } }
+class Interrupted extends Error { constructor(reason: string) { super(reason); this.name = 'Interrupted'; } }
+
+const label = (s: Subintent): string => ('key' in s ? `${s.type}(${s.key})` : 'region' in s ? `${s.type}(${s.region})` : s.type);
+
+interface PendingQuestion { q: Escalation; resolve: (a: AnswerInput) => void; reject: (e: Error) => void }
+
+/** What a task needs to go on after the daemon restarts (saved after every step; secrets stay masked). */
+export interface TaskCheckpoint {
+  v: 1;
+  stepIdx: number; startedAt: number; cost: number; jevCalls: number; escalations: number;
+  status: Record<string, ParamStatus>;
+  hints: Hint[];
+  submitsDone: number; dirty: boolean; sortTried: boolean; sortedBy: string | null;
+  url: string | null; driver: string | null;
+  liveConfidence?: ConfidenceConfig;
+  /** Limits the agent already extended, idle time so far and when the checkpoint was saved (added later: optional). */
+  maxStepsBonus?: number; budgetBonus?: number; idleMs?: number; savedAt?: number;
+  journal?: JournalData;
+  plan?: { steps: PlanStep[]; index: number } | null;
+  routeLog?: Array<RouteStep & { step: number }>;
+}
+
+type TaskEvents = {
+  state: { state: TaskState; reason?: string };
+  step: StepSummary;
+  escalation: Escalation;
+  /** An open question (consult) is no longer needed: the task found its way meanwhile. */
+  withdrawn: { question_id: string; reason: string };
+  done: TaskResult;
+};
+
+/** Does the page's address or title carry the value (a filter applied by navigation)? */
+function pageShowsValue(model: PageModel, want: string): boolean {
+  let url = model.url;
+  try { url = decodeURIComponent(url); } catch { /* keep raw */ }
+  const hay = normalizeText(`${url.replace(/[-_+/?=&.]+/g, ' ')} ${model.title}`);
+  return want.length >= 2 && hay.includes(want);
+}
+
+/**
+ * A JEV-driven browser task. Code owns the loop and the rules; JEV answers narrow questions (page kind,
+ * which element, which suggestion, did it work); the main agent is asked only when JEV is not confident.
+ */
+/** A page's address without the fragment, for comparing where links lead. */
+function pageAddress(href: string, base: string): string {
+  try { const u = new URL(href, base); u.hash = ''; return u.toString(); } catch { return href; }
+}
+
+export class Task extends Emitter<TaskEvents> {
+  readonly id: string;
+  readonly sessionId: string;
+  spec: TaskSpec;
+  state: TaskState = 'queued';
+  stateReason?: string;
+  private deps: TaskDeps;
+  private hints: Hint[];
+  private params: Record<string, ParamSpec>;
+  private status: Record<string, ParamStatus> = {};
+  private absentOn: Record<string, string> = {};
+  private paramRefs: Record<string, string> = {};
+  private recent: string[] = [];
+  private stepIdx = 0;
+  private stepId = '';
+  private startedAt = 0;
+  private cost = 0;
+  private jevCalls = 0;
+  private escalations = 0;
+  private liveConfidence: ConfidenceConfig | undefined;
+  private seen = new Map<string, number>();
+  private failures = new Map<string, number>();
+  private forcedRef: { sub: string; ref: string } | null = null;
+  private approved = new Set<string>();
+  private pending: PendingQuestion | null = null;
+  private pausedWaiter: { promise: Promise<void>; resolve: () => void } | null = null;
+  private abort = new AbortController();
+  private lastSub: Subintent | null = null;
+  private lastTypedKey: string | null = null;
+  private loadMoreCount = 0;
+  private extractPrev = -1;
+  private prefs: { lowestPrice: number; earliest: number } | null = null;
+  private extraDomains: string[] = [];
+  private finalResult: TaskResult | null = null;
+  private maxStepsBonus = 0;
+  private budgetBonus = 0;
+  private idleMs = 0;
+  private idleSince: number | null = null;
+  private lastInputCheck = 0;
+  private model: Model | undefined;
+  private assessCache: { sig: string; out: AssessOutput; plan: number } | null = null;
+  private dismissed = new Set<string>();
+  private submitsDone = 0;
+  private revealTried = new Set<string>();
+  /** Error pages already reloaded once (by URL). */
+  private reloaded = new Set<string>();
+  private noResultsOn: string | null = null;
+  /** Page states where the way into the goal's section was already looked for. */
+  private entered = new Set<string>();
+  /** Elements the task took to get where the goal is done (never clicked again for that). */
+  private enteredVia = new Set<string>();
+  /** Pages a way in was taken from: links back to them lead away from the goal. */
+  private enteredFrom = new Set<string>();
+  /** Dialogs that opened on the same page in answer to the task's own click (signatures). */
+  private openedByUs = new Set<string>();
+  /** Whether the goal can go on from such a dialog (by signature). */
+  private goesOn = new Map<string, boolean>();
+  /** Choice groups already given "any" value. */
+  private anyGroups = new Set<string>();
+  /** The step in which an irreversible action was approved (nothing to roll back after it). */
+  private riskApprovedAt = -1;
+  /** Page states already given a moment to load, or explored for menus and collapsed sections. */
+  private waitedOn = new Set<string>();
+  private explored = new Set<string>();
+  /** Menus and sections the task opened (never toggled closed again by exploring). */
+  private exploredVia = new Set<string>();
+  /** A way that worked on this site before (chosen at the start), whether it misled us, and the way taken now. */
+  private route: SiteRoute | null = null;
+  private routeMissed = false;
+  private routeLog: Array<RouteStep & { step: number }> = [];
+  /** The agent's milestones, if it gave any (in the spec or in an answer). */
+  private plan: Plan | null = null;
+  /** A consult asked without stopping: the task explores safe steps until the answer comes or the budget ends. */
+  private consultQ: { q: Escalation; level: number; milestone: number; explored: number; answer?: AnswerInput } | null = null;
+  /** The last step with progress (a higher level, a param, a form step, a milestone) and what progress looked like. */
+  private lastProgressStep = 0;
+  private bestLevel = -1;
+  private progressKey = '';
+  /** Working memory: facts, pages passed, ways that did not work. */
+  private journal = new Journal();
+  /** A field search started ahead (see startPrefetch). */
+  private prefetch: { key: string; promise: Promise<GroundResult | null> } | null = null;
+  /** The risk question for the one obvious submit button, asked while the button is being grounded. */
+  private guardPrefetch: { key: string; promise: Promise<ReturnType<typeof readActionClass> | null> } | null = null;
+  private errorPages = 0;
+  /** Address right after the last submit: a later change means the site applied filters itself. */
+  private lastSubmitUrl: string | null = null;
+  /** Params changed since the last submit: filters on list pages apply only after "Show N results". */
+  private dirty = false;
+  private sortTried = false;
+  private sortedBy: string | null = null;
+  private collected = new Map<string, { item: Record<string, unknown>; snippets: string[]; url: string; relevant: boolean }>();
+  /** Per step: elements tried and rolled back (by signature), so the next grounding skips them. */
+  private rejected = new Map<string, { sig: string; desc: string }[]>();
+  /** Set when a step ended in a rollback: the retry is progress, not a loop. */
+  private trialRolledBack = false;
+
+  constructor(spec: TaskSpec, deps: TaskDeps, id = newId('t')) {
+    super();
+    this.id = id;
+    this.sessionId = deps.sessionId;
+    this.spec = spec;
+    this.deps = deps;
+    this.hints = spec.hints.map((text) => ({ text, source: 'task' as const }));
+    this.params = structuredClone(spec.params);
+    for (const k of Object.keys(this.params)) this.status[k] = 'pending';
+    this.plan = spec.plan?.length ? new Plan(spec.plan) : null;
+  }
+
+  // ---------------------------------------------------------------- public API
+
+  get tabId(): string { return this.deps.port.tabId; }
+  get finished(): boolean { return FINAL_STATES.has(this.state); }
+  get pendingQuestion(): Escalation | null { return this.openQuestions[0] ?? null; }
+
+  /** The blocking question, and a consult the task asked while exploring on (not answered yet). */
+  get openQuestions(): Escalation[] {
+    const out: Escalation[] = [];
+    if (this.pending) out.push(this.pending.q);
+    if (this.consultQ && !this.consultQ.answer && this.consultQ.q !== this.pending?.q) out.push(this.consultQ.q);
+    return out;
+  }
+
+  start(): Promise<void> {
+    this.startedAt = this.now();
+    this.deps.trace.recordTask({
+      id: this.id, session: this.sessionId, createdAt: this.startedAt, updatedAt: this.startedAt, state: 'running',
+      goal: this.spec.goal, spec: this.maskedSpec(),
+    });
+    return this.run();
+  }
+
+  statusView() {
+    return {
+      task_id: this.id, state: this.state, reason: this.stateReason, goal: this.spec.goal, tab: this.tabId,
+      step: this.stepIdx, subintent: this.lastSub ? label(this.lastSub) : null, url: this.model?.url ?? null,
+      progress: { ...this.status }, pending_question: this.pendingQuestion, recent_steps: this.recent.slice(-5),
+      ...(this.openQuestions.length > 1 ? { open_questions: this.openQuestions.map((q) => ({ question_id: q.question_id, kind: q.kind, summary: q.summary })) } : {}),
+      ...(this.plan ? { plan: this.plan.toJSON() } : {}),
+      stats: this.stats(),
+    };
+  }
+
+  result(): TaskResult | null { return this.finalResult; }
+
+  answer(questionId: string, input: AnswerInput): { accepted: boolean; message: string } {
+    const c = this.consultQ;
+    if (c && c.q.question_id === questionId && this.pending?.q !== c.q) {
+      // Answered while the task explores on: applied at its next step.
+      if (c.answer) return { accepted: false, message: `Question ${questionId} is already answered.` };
+      c.answer = input;
+      this.deps.trace.recordEscalation({ id: c.q.question_id, taskId: this.id, createdAt: c.q.created_at, kind: c.q.kind, payload: c.q, answer: this.mask(input), answeredAt: this.now() });
+      return { accepted: true, message: 'Answer accepted; the task applies it at its next step.' };
+    }
+    if (!this.pending || this.pending.q.question_id !== questionId) {
+      return { accepted: false, message: `Question ${questionId} is not pending for task ${this.id}.` };
+    }
+    const p = this.pending;
+    this.pending = null;
+    this.deps.trace.recordEscalation({ id: p.q.question_id, taskId: this.id, createdAt: p.q.created_at, kind: p.q.kind, payload: p.q, answer: this.mask(input), answeredAt: this.now() });
+    p.resolve(input);
+    return { accepted: true, message: 'Answer accepted; the task continues.' };
+  }
+
+  pause(reason = 'paused by request'): void {
+    if (this.finished || this.state === 'paused') return;
+    if (!this.pausedWaiter) {
+      let resolve!: () => void;
+      const promise = new Promise<void>((r) => { resolve = r; });
+      this.pausedWaiter = { promise, resolve };
+    }
+    this.setState('paused', reason);
+  }
+
+  resume(): void {
+    // The person may have filled in some fields while in control: check the values on the page again.
+    if (this.stateReason === 'user_takeover') {
+      const model = this.model;
+      for (const [k, st] of Object.entries(this.status)) {
+        if (st === 'done' && !this.params[k].secret && this.paramRefs[k] && model?.elements.has(this.paramRefs[k])) this.status[k] = 'typed';
+      }
+    }
+    if (this.pausedWaiter) { const w = this.pausedWaiter; this.pausedWaiter = null; w.resolve(); }
+    if (this.state === 'paused') this.setState(this.pending ? 'awaiting_input' : 'running');
+    if (this.state === 'interrupted') { void this.run(); }
+  }
+
+  cancel(reason = 'cancelled by request'): void {
+    if (this.finished) return;
+    this.abort.abort();
+    this.pending?.reject(new Cancelled(reason));
+    this.pending = null;
+    this.pausedWaiter?.resolve();
+    this.pausedWaiter = null;
+    if (this.state === 'interrupted' || this.state === 'queued') this.finish('cancelled', undefined, reason);
+  }
+
+  /** The daemon is stopping: stop working but stay resumable (state "interrupted", checkpoint kept). */
+  suspend(reason = 'the daemon stopped'): void {
+    if (this.finished) return;
+    this.suspended = true;
+    this.abort.abort();
+    this.pending?.reject(new Interrupted(reason));
+    this.pending = null;
+    this.pausedWaiter?.resolve();
+    this.pausedWaiter = null;
+    this.setState('interrupted', reason);
+  }
+
+  private suspended = false;
+
+  update(patch: { params?: Record<string, ParamSpec>; hints?: string[]; confidence?: ConfidenceConfig; policy?: Partial<TaskSpec['policy']> }): void {
+    if (patch.params) for (const [k, v] of Object.entries(patch.params)) { this.params[k] = v; this.status[k] = 'pending'; delete this.absentOn[k]; }
+    if (patch.hints) this.hints.push(...patch.hints.map((text) => ({ text, source: 'task' as const })));
+    if (patch.confidence) this.liveConfidence = patch.confidence;
+    if (patch.policy) this.spec = { ...this.spec, policy: { ...this.spec.policy, ...patch.policy } };
+  }
+
+  // ---------------------------------------------------------------- loop
+
+  private now(): number { return (this.deps.now ?? Date.now)(); }
+
+  private setState(state: TaskState, reason?: string): void {
+    // Time spent waiting for an answer, paused or interrupted does not count towards the time limit.
+    const idle = state === 'awaiting_input' || state === 'paused' || state === 'interrupted';
+    if (idle && this.idleSince === null) this.idleSince = this.now();
+    if (!idle && this.idleSince !== null) { this.idleMs += this.now() - this.idleSince; this.idleSince = null; }
+    this.state = state;
+    this.stateReason = reason;
+    this.deps.trace.updateTask(this.id, { state });
+    this.emit('state', { state, reason });
+  }
+
+  private qctx(): QuestionContext {
+    return {
+      jev: this.deps.jev, trace: this.deps.trace, taskId: this.id, stepId: this.stepId, signal: this.abort.signal,
+      onCall: (rec) => { this.jevCalls++; this.cost += rec.costUsd ?? 0; },
+    };
+  }
+
+  private th(url = this.model?.url ?? ''): Thresholds {
+    return thresholdsFor(this.deps.getConfig(), url, this.spec.policy.confidence, this.liveConfidence);
+  }
+
+  private budget(): number { return this.deps.getConfig().limits.stateTokenTarget; }
+
+  private async run(): Promise<void> {
+    this.setState('running');
+    try {
+      if (this.stepIdx === 0) await this.prepare();
+      else await this.recoverAfterInterrupt();
+      while (!this.finished) {
+        await this.checkpoint();
+        await this.step();
+      }
+    } catch (e) {
+      if (this.suspended) { this.setState('interrupted', 'the daemon stopped'); return; }
+      if (e instanceof Cancelled || this.abort.signal.aborted) this.finish('cancelled', undefined, (e as Error).message);
+      else if (e instanceof Interrupted) { this.setState('interrupted', e.message); log.warn(`task ${this.id} interrupted: ${e.message}`); }
+      else {
+        log.error(`task ${this.id} failed`, e);
+        this.finish('failed', undefined, (e as Error).message);
+      }
+    }
+  }
+
+  private async prepare(): Promise<void> {
+    const page = await this.page();
+    if (this.spec.site) {
+      const current = this.deps.port.lastModel()?.url ?? '';
+      if (!current.startsWith(this.spec.site)) {
+        await page.navigate(this.spec.site);
+        this.note(`opened ${this.spec.site}`);
+      }
+    }
+    if (this.deps.memory && this.deps.getConfig().memory.enabled) {
+      const host = hostOf(this.spec.site ?? (await page.url()));
+      for (const h of this.deps.memory.hints(host)) if (!this.hints.some((x) => x.text === h.text)) this.hints.push(h);
+      await this.pickRoute(host);
+    }
+    this.lastInputCheck = this.now();
+  }
+
+  /** Where a task restored after a daemon restart left off. */
+  private resumeUrl: string | null = null;
+
+  /** Rebuilds a task from its trace record after a daemon restart; null when it cannot go on safely. */
+  static restore(rec: TaskRecord, deps: TaskDeps): Task | null {
+    const cp = rec.checkpoint as TaskCheckpoint | undefined;
+    const parsed = taskSpecSchema.safeParse(rec.spec);
+    if (!cp || cp.v !== 1 || !parsed.success) return null;
+    const spec = parsed.data;
+    // Secret values are never stored. One not used yet is dropped: the path may not need it (already signed in),
+    // and a page that does asks for it again (missing_param) like any field no param covers.
+    const lost = Object.keys(spec.params).filter((k) => spec.params[k].secret && cp.status[k] !== 'done');
+    for (const k of lost) delete spec.params[k];
+    const t = new Task(spec, deps, rec.id);
+    Object.assign(t.status, cp.status);
+    for (const k of lost) delete t.status[k];
+    // The page may have moved on or back without us (state that lives in the page, not in the address): values
+    // recorded as set are checked again on the page before they are trusted.
+    for (const [k, st] of Object.entries(t.status)) if (st === 'done' && !spec.params[k].secret) t.status[k] = 'typed';
+    t.hints = cp.hints;
+    t.stepIdx = cp.stepIdx;
+    t.startedAt = cp.startedAt;
+    t.cost = cp.cost;
+    t.jevCalls = cp.jevCalls;
+    t.escalations = cp.escalations;
+    t.submitsDone = cp.submitsDone;
+    t.dirty = cp.dirty;
+    t.sortTried = cp.sortTried;
+    t.sortedBy = cp.sortedBy;
+    t.liveConfidence = cp.liveConfidence;
+    t.resumeUrl = cp.url;
+    t.maxStepsBonus = cp.maxStepsBonus ?? 0;
+    t.budgetBonus = cp.budgetBonus ?? 0;
+    t.idleMs = cp.idleMs ?? 0;
+    t.journal = Journal.from(cp.journal);
+    t.plan = Plan.from(cp.plan) ?? t.plan;
+    t.routeLog = cp.routeLog ?? [];
+    // The daemon was down since the last checkpoint: that time is idle too, until the task is resumed.
+    t.idleSince = cp.savedAt ?? Date.now();
+    t.state = 'interrupted';
+    t.stateReason = lost.length
+      ? `the daemon restarted; resume the task to continue. Secret params were not kept (${lost.join(', ')}): give them again with an update, or when the task asks`
+      : 'the daemon restarted; resume the task to continue';
+    return t;
+  }
+
+  private checkpointData(): TaskCheckpoint {
+    return {
+      v: 1, stepIdx: this.stepIdx, startedAt: this.startedAt, cost: this.cost, jevCalls: this.jevCalls, escalations: this.escalations,
+      status: { ...this.status }, hints: this.hints, submitsDone: this.submitsDone, dirty: this.dirty, sortTried: this.sortTried,
+      sortedBy: this.sortedBy, url: this.model?.url ?? this.resumeUrl, driver: this.spec.driver ?? null, liveConfidence: this.liveConfidence,
+      maxStepsBonus: this.maxStepsBonus, budgetBonus: this.budgetBonus, idleMs: this.idleMs, savedAt: this.now(),
+      journal: this.journal.toJSON(),
+      plan: this.plan?.toJSON() ?? null,
+      routeLog: this.routeLog,
+    };
+  }
+
+  private async recoverAfterInterrupt(): Promise<void> {
+    const url = this.model?.url ?? this.resumeUrl;
+    const page = await this.page();
+    if (url && (await page.url()) !== url) await page.navigate(url);
+    // Input the page recorded before the restart (jev's own clicks included) is not the person taking over.
+    this.lastInputCheck = this.now();
+  }
+
+  private async page(): Promise<PageSession> {
+    try { return await this.deps.port.page(); } catch (e) { throw new Interrupted(`browser tab unavailable: ${(e as Error).message}`); }
+  }
+
+  private async observe(settle = true): Promise<Model> {
+    try {
+      this.model = await this.deps.port.observe({ settle });
+      return this.model;
+    } catch (e) {
+      if (this.deps.port.reset) {
+        log.warn(`task ${this.id}: observation failed (${(e as Error).message}); re-attaching to the tab`);
+        try {
+          await this.deps.port.reset();
+          this.model = await this.deps.port.observe({ settle });
+          return this.model;
+        } catch { /* fall through */ }
+      }
+      throw new Interrupted(`could not read the page: ${(e as Error).message}`);
+    }
+  }
+
+  private async checkpoint(): Promise<void> {
+    if (this.abort.signal.aborted) throw new Cancelled();
+    if (this.pausedWaiter) await this.pausedWaiter.promise;
+    if (this.abort.signal.aborted) throw new Cancelled();
+    const cfg = this.deps.getConfig();
+    const maxSteps = (this.spec.policy.max_steps ?? cfg.limits.maxSteps) + this.maxStepsBonus;
+    if (this.stepIdx >= maxSteps) {
+      const a = await this.escalate('stuck', `Reached the step limit (${maxSteps}) without finishing.`, { answer_with: ['continue', 'hint', 'abort'] });
+      if (a.type === 'continue' || a.type === 'hint') this.maxStepsBonus += 20;
+    }
+    const maxMinutes = this.spec.policy.max_minutes ?? cfg.limits.maxMinutes;
+    const idleNow = this.idleSince === null ? 0 : this.now() - this.idleSince;
+    if (this.now() - this.startedAt - this.idleMs - idleNow > maxMinutes * 60_000 * (1 + this.maxStepsBonus / 20)) {
+      const a = await this.escalate('stuck', `The task has run longer than ${maxMinutes} minutes.`, { answer_with: ['continue', 'abort'] });
+      if (a.type === 'continue') this.maxStepsBonus += 20;
+    }
+    const budget = (this.spec.policy.budget_usd ?? cfg.budgets.perTaskUsd) + this.budgetBonus;
+    if (this.cost > budget) {
+      const a = await this.escalate('budget', `JEV spend $${this.cost.toFixed(4)} exceeded the task budget $${budget.toFixed(2)}.`, { answer_with: ['continue', 'abort'] });
+      if (a.type === 'continue') this.budgetBonus += budget;
+    }
+    // A person using the tab takes over: pause until resumed (only where a person can see the browser).
+    const page = await this.page();
+    if (this.state === 'running' && this.deps.port.interactive?.() !== false && await page.userInputSince(this.lastInputCheck)) {
+      this.note('paused: user interacted with the tab');
+      this.pause('user_takeover');
+      this.lastInputCheck = this.now();
+      await this.checkpoint();
+    }
+    this.lastInputCheck = this.now();
+  }
+
+  private note(s: string): void {
+    this.recent.push(this.mask(s));
+    if (this.recent.length > 30) this.recent.shift();
+  }
+
+  private mask<T>(v: T): T { return maskSecrets(v, secretValues(this.params)); }
+
+  /** Secret param values of this task (the daemon masks them in everything it sends out). */
+  secretValues(): string[] { return secretValues(this.params); }
+
+  private maskedSpec(): unknown {
+    return this.mask({ ...this.spec, params: Object.fromEntries(Object.entries(this.spec.params).map(([k, p]) => [k, p.secret ? { ...p, value: '[secret]' } : p])) });
+  }
+
+  private stats() {
+    return { steps: this.stepIdx, jev_calls: this.jevCalls, escalations: this.escalations, cost_usd: Number(this.cost.toFixed(6)), duration_s: Math.round((this.now() - (this.startedAt || this.now())) / 1000) };
+  }
+
+  private finish(status: TaskState, out?: Partial<TaskResult>, error?: string): void {
+    if (this.finished) return;
+    this.rememberRoute(status);
+    const result: TaskResult = { status, ...out, error, stats: this.stats() };
+    this.finalResult = this.mask(result);
+    this.deps.trace.updateTask(this.id, { state: status, result: this.finalResult, stats: result.stats });
+    this.setState(status, error);
+    this.deps.port.release();
+    this.emit('done', this.finalResult);
+  }
+
+  // ---------------------------------------------------------------- escalation
+
+  private async escalate(kind: EscalationKind, summary: string, extra: Partial<Escalation> = {}): Promise<AnswerInput> {
+    const q = await this.makeQuestion(kind, summary, extra);
+    const answer = await this.waitAnswer(q);
+    this.applyAnswer(kind, answer);
+    return answer;
+  }
+
+  /** A question for the agent, recorded in the trace (not yet published). */
+  private async makeQuestion(kind: EscalationKind, summary: string, extra: Partial<Escalation> = {}): Promise<Escalation> {
+    const model = this.model;
+    const q: Escalation = {
+      question_id: newId('q'), task_id: this.id, kind, summary: this.mask(summary), created_at: this.now(),
+      page: {
+        url: model?.url ?? '', title: model?.title ?? '',
+        page_kind: this.assessCache?.out.pageKindProbabilities,
+        regions: (model?.regions ?? []).filter((r) => r.id !== 'r0').slice(0, 16).map((r) => `${r.id} ${r.kind}${r.label ? ` "${r.label}"` : ''}${r.blocking ? ' [BLOCKING]' : ''}`),
+      },
+      recent_steps: this.recent.slice(-8),
+      answer_with: ['pick', 'set_param', 'hint', 'continue', 'thresholds', 'skip', 'abort'],
+      ...this.mask(extra),
+    };
+    if (this.deps.getConfig().trace.screenshots) {
+      try {
+        const png = await (await this.page()).screenshot();
+        q.screenshot = this.deps.trace.saveBlob(this.id, `${q.question_id}.png`, png);
+      } catch { /* screenshot is optional */ }
+    }
+    this.escalations++;
+    this.deps.trace.recordEscalation({ id: q.question_id, taskId: this.id, createdAt: q.created_at, kind, payload: q });
+    return q;
+  }
+
+  /** Waits for the answer to a question (published now, or already published by a consult). */
+  private async waitAnswer(q: Escalation, publish = true): Promise<AnswerInput> {
+    const answer = await new Promise<AnswerInput>((resolve, reject) => {
+      this.pending = { q, resolve, reject };
+      this.setState('awaiting_input', q.kind);
+      if (publish) this.emit('escalation', q);
+      const pauseMs = this.deps.getConfig().limits.awaitInputPauseMinutes * 60_000;
+      const timer = setTimeout(() => { if (this.pending?.q === q) this.setState('paused', 'waiting for an answer'); }, pauseMs);
+      timer.unref?.();
+    });
+    this.setState('running');
+    this.note(`answer to ${q.kind}: ${answer.type}${answer.type === 'pick' ? ` ${answer.ref}` : answer.type === 'hint' ? ` "${answer.text}"` : ''}`);
+    return answer;
+  }
+
+  /** What any answer changes in the task: abort, hints, thresholds, params. */
+  private applyAnswer(kind: EscalationKind, answer: AnswerInput): void {
+    const model = this.model;
+    if (answer.type === 'abort') throw new Cancelled(answer.reason ?? 'aborted by the agent');
+    if (answer.type === 'hint') {
+      // A hint given to a question about one step belongs to that step and its param; others apply to the whole task.
+      const bind = kind === 'ground' ? this.hintBinding() : {};
+      this.hints.push({ text: answer.text, source: kind === 'ground' ? 'answer' : 'task', ...bind });
+      if (answer.scope === 'domain' && this.deps.memory && model) this.deps.memory.addHint(hostOf(model.url), answer.text, bind);
+      // With new knowledge the way in may be found on pages already looked at.
+      this.entered.clear();
+      this.explored.clear();
+    }
+    if (answer.type === 'thresholds') this.liveConfidence = answer.value;
+    if (answer.type === 'set_param') {
+      this.params[answer.key] = { value: answer.value, about: answer.about ?? this.params[answer.key]?.about, secret: answer.secret };
+      this.status[answer.key] = 'pending';
+      delete this.absentOn[answer.key];
+    }
+    if (answer.type === 'plan') {
+      if (this.plan) this.plan.replace(answer.steps);
+      else this.plan = new Plan(answer.steps);
+      this.entered.clear();
+      this.explored.clear();
+      this.note(`new plan: ${answer.steps.map((st) => st.do).join(' → ')}`);
+    }
+  }
+
+  private hintBinding(): { step?: string; key?: string; about?: string } {
+    const sub = this.lastSub;
+    if (!sub) return {};
+    const key = 'key' in sub ? sub.key.split(':')[0] : undefined;
+    const p = key ? this.params[key] : undefined;
+    return { step: sub.type, ...(key && p ? { key, about: aboutOf(key, p) } : {}) };
+  }
+
+  private sortOrder(): string {
+    const m = (this.spec.result?.select ?? '').match(/^(min|max)\((\w+)\)$/);
+    if (!m) return 'as the goal asks';
+    const fieldSpec = this.spec.result!.schema?.[m[2]];
+    const about = (typeof fieldSpec === 'object' && fieldSpec.about) || m[2].replace(/_/g, ' ');
+    return m[1] === 'min' ? `by ${about}, lowest first (ascending, cheapest first)` : `by ${about}, highest first (descending)`;
+  }
+
+  /**
+   * Memory keys for a step: a remembered value button ("Павлодар") only serves the same value, a remembered field
+   * serves any value. Lookups try the value key first.
+   */
+  private memKeys(sub: Subintent, memoryKey: string): string[] {
+    const p = sub.type === 'fill_param' ? this.params[sub.key] : undefined;
+    if (!p || p.secret || typeof p.value === 'boolean') return [memoryKey];
+    return [`${memoryKey}=${normalizeText(String(p.value))}`, memoryKey];
+  }
+
+  private memKeyFor(sub: Subintent, memoryKey: string, el: ElementNode): string {
+    const [valueKey, fieldKey] = this.memKeys(sub, memoryKey);
+    if (!fieldKey) return valueKey;
+    const want = normalizeText(String((this.params as Record<string, ParamSpec>)[(sub as { key: string }).key].value));
+    return isValueLabel(el.name, want) || isValueLabel(el.text ?? '', want) ? valueKey : fieldKey;
+  }
+
+  /** What the step does, for JEV: the param and its value, or the step's purpose. */
+  private card(sub: Subintent): StepCard {
+    const key = 'key' in sub ? sub.key.split(':')[0] : undefined;
+    const p = key ? this.params[key] : undefined;
+    switch (sub.type) {
+      case 'fill_param': case 'pick_suggestion': case 'pick_date':
+        return p ? paramCard(sub.type, key!, p) : stepCard(sub.type, label(sub));
+      case 'reveal':
+        return p ? paramCard('reveal', key!, p, `find where the ${aboutOf(key!, p)} can be set`) : stepCard('reveal', 'show more search filters');
+      case 'apply_sort': return stepCard('apply_sort', `sort the results ${this.sortOrder()}`);
+      case 'submit': return stepCard('submit', 'submit the search form');
+      case 'dismiss_overlay': return stepCard('dismiss_overlay', `close the ${sub.overlayKind.replace(/_/g, ' ')} overlay`);
+      case 'enter': return stepCard('enter', this.plan?.current ? `get to where this is done: ${this.plan.current.do}` : 'open the part of the site where the goal is done');
+      case 'explore': return stepCard('explore', this.plan?.current ? `open the menu, tab or section that may lead to: ${this.plan.current.do}` : 'open the menu, tab or section of this page that may hold what the goal needs next');
+      case 'fill_any': return stepCard('fill_any', 'choose a value for a required field that no param covers');
+      default: return stepCard(sub.type, label(sub));
+    }
+  }
+
+  /**
+   * Sign-in details are only needed until the user is signed in: once a page shows that, they stop being pending
+   * (no more looking for a phone field on every page). A sign-in form later brings them back.
+   */
+  private noteSignIn(a: AssessOutput): void {
+    const th = this.th();
+    const keys = Object.keys(this.params).filter((k) => isSignInParam(k, this.params[k].about));
+    if (!keys.length) return;
+    if (a.pageKind === 'login' && a.pageKindConfidence >= th.assess.choice.act) {
+      for (const k of keys) if (this.status[k] === 'not_needed') this.status[k] = 'pending';
+      this.journal.dropFact('signed_in');
+      return;
+    }
+    if (a.signedIn !== undefined && gateNoul(a.signedIn, th.assess.noul) === 'yes') {
+      for (const k of keys) if (this.status[k] === 'pending') this.status[k] = 'not_needed';
+      this.journal.addFact('signed_in', 'The user is already signed in: sign-in details are not needed.', this.stepIdx);
+      this.note(`already signed in: ${keys.join(', ')} not needed`);
+    }
+  }
+
+  /** A route that worked on this site for the same kind of task: its plan, and its elements tried first. */
+  private async pickRoute(host: string): Promise<void> {
+    const routes = this.deps.memory?.routes(host) ?? [];
+    if (!routes.length) return;
+    const res = await runQuestions(this.qctx(), buildRoutePick(this.spec.goal, routes, this.budget()));
+    const pick = choiceOf(res.answers, 'route');
+    if (pick.choice === 'none' || gateChoice(pick, this.th().assess.choice) !== 'act') return;
+    this.route = routes[Number(pick.choice.slice(1))] ?? null;
+    if (!this.route) return;
+    if (!this.plan && this.route.plan?.length) this.plan = new Plan(this.route.plan);
+    this.note(`following a route that worked on this site before: "${this.route.goal}"`);
+  }
+
+  /** The route's element on this page (never one already taken or rolled back here). */
+  private routeElementFor(model: Model, sub: 'enter' | 'explore', regionId?: string): ElementNode | undefined {
+    if (!this.route || this.routeMissed) return undefined;
+    const rejected = new Set((this.rejected.get(sub) ?? []).map((r) => r.sig));
+    const skip = (sig: string) => rejected.has(sig) || this.enteredVia.has(sig) || this.exploredVia.has(sig);
+    return routeElement(model, this.route.steps, skip, regionId ? regionAndDescendants(model, regionId) : undefined);
+  }
+
+  private recordRoute(model: Model, el: ElementNode, sub: string): void {
+    this.routeLog.push({ ...routeStep(model, el, sub), step: this.stepIdx });
+  }
+
+  /** On success the way taken is saved for the site; a route that was followed gets its outcome counted. */
+  private rememberRoute(status: TaskState): void {
+    const memory = this.deps.memory;
+    if (!memory || !this.deps.getConfig().memory.enabled) return;
+    const host = hostOf(this.spec.site ?? this.model?.url ?? '');
+    if (this.route) memory.routeResult(this.route.id, status === 'done' && !this.routeMissed);
+    if (status === 'done' && this.routeLog.length) {
+      memory.saveRoute(host, this.spec.goal, this.plan?.steps ?? null, this.routeLog.map(({ step: _, ...st }) => st));
+    }
+  }
+
+  /** Working memory and the plan, for questions about where to go. */
+  private contextFor(): Record<string, Json> | undefined {
+    const mem = this.journal.forQuestion();
+    const plan = this.plan?.forState();
+    if (!mem && !plan) return undefined;
+    return { ...(mem ?? {}), ...(plan ? { plan } : {}) };
+  }
+
+  /** Milestones whose done_when the page shows are done (the next one too, when it is already true). */
+  private advancePlan(a: AssessOutput): void {
+    const plan = this.plan;
+    if (!plan || plan.finished || a.milestoneDone === undefined) return;
+    const yes = (v?: number) => v !== undefined && gateNoul(v, this.th().assess.noul) === 'yes';
+    if (!yes(a.milestoneDone)) return;
+    const done = [plan.current!.do];
+    const skip = yes(a.nextMilestoneDone) && !!plan.next;
+    if (skip) done.push(plan.next!.do);
+    plan.advance(skip ? 2 : 1);
+    this.entered.clear();
+    this.explored.clear();
+    this.note(`milestone done: ${done.join('; ')}${plan.current ? `; now: ${plan.current.do}` : '; plan complete'}`);
+  }
+
+  /** Progress: a higher level, a param or form step done, a milestone. Without it for a while, the agent is asked. */
+  private trackProgress(a: AssessOutput): void {
+    const level = a.progress?.level ?? -1;
+    const key = JSON.stringify([this.status, this.anyGroups.size, this.submitsDone, this.plan?.index ?? -1]);
+    if (level > this.bestLevel || key !== this.progressKey) {
+      this.bestLevel = Math.max(this.bestLevel, level);
+      this.progressKey = key;
+      this.lastProgressStep = this.stepIdx;
+    }
+  }
+
+  /**
+   * At the start of a step: apply the agent's answer to an open consult, withdraw it when the task found its way
+   * meanwhile, or open one when there has been no progress for a while. Returns a step the answer asks for.
+   */
+  private async consultBoundary(model: Model, a: AssessOutput): Promise<Subintent | null> {
+    const c = this.consultQ;
+    if (!c) {
+      if (this.stepIdx - this.lastProgressStep >= this.deps.getConfig().limits.stallSteps) {
+        await this.openConsult(`no progress toward the goal for ${this.stepIdx - this.lastProgressStep} steps`, model, a);
+      }
+      return null;
+    }
+    if (c.answer) {
+      this.consultQ = null;
+      this.lastProgressStep = this.stepIdx;
+      const ans = c.answer;
+      if (!this.pending) this.note(`answer to consult: ${ans.type}`);
+      this.applyAnswer('consult', ans);
+      if (ans.type === 'goto') {
+        if (domainAllowed(ans.url, [...(this.spec.policy.allowed_domains ?? []), ...this.extraDomains]) || !this.spec.policy.allowed_domains?.length) return { type: 'goto', url: ans.url };
+        this.note(`not opening ${ans.url}: outside the allowed domains`);
+      }
+      if (ans.type === 'pick' && model.elements.has(ans.ref)) {
+        this.forcedRef = { sub: 'enter', ref: ans.ref };
+        return { type: 'enter' };
+      }
+      return null;
+    }
+    // The task found its way meanwhile: the question is withdrawn so the agent is not bothered.
+    if ((a.progress?.level ?? -1) > c.level || (this.plan?.index ?? 0) > c.milestone || this.stepIdx === this.lastProgressStep) {
+      this.consultQ = null;
+      this.emit('withdrawn', { question_id: c.q.question_id, reason: 'the task found its way meanwhile' });
+      this.note(`withdrew the question to the agent: the task found its way`);
+    }
+    return null;
+  }
+
+  /** Asks the agent for help without stopping: published now, answered whenever the agent gets to it. */
+  private async openConsult(reason: string, model: Model, a?: AssessOutput): Promise<void> {
+    if (this.consultQ || this.finished) return;
+    const assess = a ?? this.assessCache?.out;
+    const exploreSteps = this.deps.getConfig().limits.consultExploreSteps;
+    const report = consultReport({
+      reason, goal: this.spec.goal, plan: this.plan?.forState(), progress: assess?.progress, situation: assess?.situation,
+      memory: this.journal.forQuestion(), overview: renderOverview(model, 1500), exploreSteps,
+    });
+    const q = await this.makeQuestion('consult', `Stuck: ${reason}. Send a plan (milestones with done_when), a hint, a URL to open (goto) or an element to click (pick); the task keeps exploring safe steps meanwhile.`, {
+      context: report, answer_with: CONSULT_ANSWERS,
+    });
+    this.consultQ = { q, level: assess?.progress?.level ?? -1, milestone: this.plan?.index ?? 0, explored: 0 };
+    this.lastProgressStep = this.stepIdx;
+    this.emit('escalation', q);
+    this.note(`asked the agent for help: ${reason}`);
+  }
+
+  /** Steps that can be undone and give nothing away: allowed while the agent is being asked. */
+  private safeWhileAsking(sub: Subintent): boolean {
+    if (sub.type === 'submit' || sub.type === 'await_agent') return false;
+    if (sub.type === 'fill_param' && this.params[sub.key]?.secret) return false;
+    return true;
+  }
+
+  /**
+   * What JEV recognises about the page (loading, content further down, a closed menu, the wrong part of the site),
+   * mapped to the step that handles it. Only a confident recognition; each handler once per page state.
+   */
+  private fromSituation(model: Model, a: AssessOutput): Subintent | null {
+    const sit = a.situation;
+    const th = this.th();
+    if (!sit || sit.confidence < th.assess.choice.act || (a.progress?.level ?? 0) >= 4) return null;
+    const sig = model.signature;
+    switch (sit.kind) {
+      case 'loading':
+        if (this.waitedOn.has(sig)) return null;
+        this.waitedOn.add(sig);
+        return { type: 'wait' };
+      case 'below_fold':
+        return model.scroll.y < model.scroll.maxY - 20 ? { type: 'scroll' } : null;
+      case 'behind_menu':
+        if (!this.explored.has(sig) && this.openers(model).length) return { type: 'explore' };
+        return this.entered.has(sig) ? null : { type: 'enter' };
+      case 'wrong_place':
+        return this.entered.has(sig) ? null : { type: 'enter' };
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * A way in or a submit that led further from the goal (the progress level dropped, both levels confidently) is
+   * rolled back like a failed trial, unless an irreversible action was approved in this step.
+   */
+  private async checkProgress(sub: Subintent, model: Model, before: AssessOutput, out: Outcome): Promise<Outcome> {
+    if ((sub.type !== 'enter' && sub.type !== 'submit') || this.riskApprovedAt === this.stepIdx || !before.progress) return out;
+    const ref = (out.action as { ref?: string } | undefined)?.ref;
+    const el = ref ? model.elements.get(ref) : undefined;
+    if (!el) return out;
+    const now = await this.observe(false);
+    if (now.signature === model.signature) return out;
+    // Assessed now and cached: the next step uses the same assessment.
+    const after = await this.assess(now);
+    const act = this.th().assess.choice.act;
+    if (!after.progress || before.progress.p < act || after.progress.p < act || after.progress.level >= before.progress.level) return out;
+    if (sub.type === 'enter') this.entered.delete(model.signature);
+    if (sub.type === 'submit') this.dirty = true;
+    const back = await this.trialFailed(sub, el, model, `the page it opened is further from the goal (level ${before.progress.level} → ${after.progress.level})`);
+    return { ...back, note: `${out.note}; ${back.note}` };
+  }
+
+  /** Everything a grounding question depends on, and a key that is equal only for the same question. */
+  private groundArgs(sub: Subintent, intent: Intent, model: Model) {
+    const th = this.th();
+    const tried = this.rejected.get(label(sub)) ?? [];
+    const trial = !!intent.trial && th.trial.enabled && tried.length < th.trial.tries;
+    const full: Intent = { ...intent, trial, exclude: [...(intent.exclude ?? []), ...tried.map((t) => t.sig)] };
+    const card = this.card(sub);
+    // Where to go is decided with the working memory; one field is found without it.
+    const memory = sub.type === 'enter' || sub.type === 'explore' ? this.contextFor() : undefined;
+    const gctx = { goal: this.spec.goal, step: card, hints: hintsFor(this.hints, card), memory, budgetTokens: this.budget() };
+    return { th, tried, trial, card, intent: full, gctx, key: JSON.stringify([model.signature, full, gctx.hints, memory, th.ground]) };
+  }
+
+  /**
+   * In a run of fields, the next step is almost always the next pending param: its field search starts while the
+   * page is being assessed (same question, so the same answer), and the step uses it if that is indeed the step.
+   */
+  private startPrefetch(model: Model): void {
+    this.prefetch = null;
+    const prev = this.lastSub;
+    if (!prev || (prev.type !== 'fill_param' && prev.type !== 'pick_suggestion')) return;
+    if (model.regions.some((r) => (r.kind === 'overlay' || r.kind === 'dialog') && r.blocking) || this.popupOptions(model).length) return;
+    const k = Object.keys(this.params).find((x) => (this.status[x] === 'pending' || this.status[x] === 'typed') && this.absentOn[x] !== model.signature);
+    if (!k || this.status[k] !== 'pending' || paramKind(this.params[k]) === 'date' || this.forcedRef) return;
+    const sub: Subintent = { type: 'fill_param', key: k };
+    const intent = paramIntent(k, this.params[k]);
+    // A remembered element answers without the search.
+    if (this.deps.memory && this.deps.getConfig().memory.enabled
+      && this.memKeys(sub, `param:${k}`).some((key) => this.deps.memory!.lookup(hostOf(model.url), this.assessCache?.out.pageKind ?? 'other', key))) return;
+    const args = this.groundArgs(sub, intent, model);
+    this.prefetch = { key: args.key, promise: groundByIntent(this.qctx(), model, args.intent, args.th, args.gctx).catch(() => null) };
+  }
+
+  /**
+   * Grounding with memory fast path, forced refs from answers, trials and escalation when unsure. `trial` in the
+   * result means the step is reversible and has tries left: the caller verifies the effect and calls `trialFailed`
+   * (roll back, try the next candidate) when it did not work. Low-confidence leaders are only returned as trials.
+   */
+  /** `quiet`: when unsure, return no element instead of asking (the caller has another way to go on). */
+  private async ground(sub: Subintent, intent: Intent, memoryKey?: string, opts: { quiet?: boolean } = {}): Promise<{ el: ElementNode | null; res?: GroundResult; answer?: AnswerInput; trial?: boolean }> {
+    const model = this.model!;
+    const subLabel = label(sub);
+    if (this.forcedRef && this.forcedRef.sub === subLabel) {
+      const el = model.elements.get(this.forcedRef.ref) ?? null;
+      this.forcedRef = null;
+      if (el) return { el };
+    }
+    const args = this.groundArgs(sub, intent, model);
+    const { th, tried, trial, card } = args;
+    intent = args.intent;
+    const host = hostOf(model.url);
+    const pageKind = this.assessCache?.out.pageKind ?? 'other';
+    if (memoryKey && this.deps.memory && this.deps.getConfig().memory.enabled) {
+      let hit = null;
+      let el: ElementNode | undefined;
+      // The remembered element must still be a valid candidate here: in the step's region (a dialog on top) and
+      // not covered by it.
+      const pool = candidateElements(model, intent).filter((e) => !e.occluded);
+      for (const key of this.memKeys(sub, memoryKey)) {
+        hit = this.deps.memory.lookup(host, pageKind, key);
+        el = hit ? pool.find((e) => e.sig === hit!.sig) : undefined;
+        if (hit && el) break;
+      }
+      if (hit && el) {
+        // A remembered element for a reversible step is simply tried first: the effect check confirms it.
+        if (trial) {
+          this.memoryUse = { id: hit.id, host, pageKind, key: hit.key };
+          return { el, trial: true };
+        }
+        const res = await runQuestions(this.qctx(), {
+          template: 'ground.memory_confirm',
+          state: buildState({ goal: this.spec.goal, step: card, intent: { target: intent.target }, extra: { element: renderCandidate(model, el.ref) } }, this.budget()),
+          questions: { same: { type: 'noul', instructions: 'Is `element` `intent.target`?' } },
+        });
+        // The agent or a verified step confirmed this element before: keep it unless JEV clearly disagrees.
+        if (gateNoul(noulOf(res.answers, 'same'), th.ground.noul) !== 'no') {
+          this.memoryUse = { id: hit.id, host, pageKind, key: hit.key };
+          return { el };
+        }
+        this.deps.memory.recordFailure(hit.id);
+      }
+    }
+    // A search started in parallel with this step's page assessment, for exactly this question, is used as is.
+    const pre = this.prefetch?.key === args.key ? await this.prefetch.promise : null;
+    this.prefetch = null;
+    const res = pre ?? await groundByIntent(this.qctx(), model, intent, th, args.gctx);
+    if ((res.decision === 'act' || res.decision === 'try') && res.ref) {
+      const el = model.elements.get(res.ref)!;
+      if (memoryKey) this.memoryUse = { id: null, host, pageKind, key: this.memKeyFor(sub, memoryKey, el), sig: el.sig };
+      this.groundCalls = res.callIds;
+      // Reversible steps verify and roll back whatever the confidence: a confident pick can still be the wrong list.
+      return { el, res, trial };
+    }
+    // While the agent is being asked about the way, navigation picks do not ask again.
+    const consulting = !!this.consultQ && !this.consultQ.answer && (sub.type === 'enter' || sub.type === 'explore');
+    if (res.decision === 'none' || opts.quiet || consulting) return { el: null, res };
+    const thc = th.ground.choice;
+    const triedNote = tried.length ? ` Already tried and rolled back: ${tried.map((t) => t.desc).join('; ')}.` : '';
+    const answer = await this.escalate('ground', `Unsure which element is ${intent.target}.${triedNote}`, {
+      decision: { template: 'ground.element', asked: `Which element is ${intent.target}?`, candidates: res.candidates, confidence: res.confidence, thresholds: { act: thc.act, escalate: thc.escalate } },
+      answer_with: ['pick', 'none', 'hint', 'skip', 'thresholds', 'set_param', 'abort'],
+    });
+    if (answer.type === 'none') {
+      // The agent says the target is not on this page: behave as if JEV had said so.
+      for (const id of res.callIds) this.deps.trace.labelCall(id, false, 'agent: not on page');
+      return { el: null, res: { ...res, ref: null, decision: 'none' }, answer };
+    }
+    if (answer.type === 'pick') {
+      const fresh = await this.observe(false);
+      const el = fresh.elements.get(answer.ref) ?? null;
+      if (el && answer.remember && memoryKey && this.deps.memory) this.deps.memory.recordSuccess(host, pageKind, this.memKeyFor(sub, memoryKey, el), el.sig);
+      // The agent's pick is ground truth for the trace (calibration labels).
+      for (const id of res.callIds) this.deps.trace.labelCall(id, res.ref === answer.ref, 'agent pick');
+      return { el, res, answer };
+    }
+    return { el: null, res, answer };
+  }
+
+  /**
+   * A trial did not have the expected effect: undo it (back, Escape, restore the value, re-click a toggle), remember
+   * the element as rejected for this step and let the next iteration ground again without it.
+   */
+  private async trialFailed(sub: Subintent, el: ElementNode, before: Model, why: string): Promise<Outcome> {
+    this.journal.deadEnd(before.url, cleanText(el.name || el.text || el.ref, 60), why);
+    this.routeLog = this.routeLog.filter((r) => r.step !== this.stepIdx);
+    if (this.route?.steps.some((st) => st.sig === el.sig)) this.routeMissed = true;
+    const page = await this.page();
+    let wentBack = false;
+    for (let i = 0; i < 3; i++) {
+      const now = await this.observe(false);
+      const [act] = rollbackPlan(before, now, el);
+      if (!act) break;
+      const cur = now.elements.get(el.ref);
+      if (act === 'back') {
+        // One step back at most; if that does not land on the old address, open it directly (never walk further back).
+        if (wentBack || !(await page.back())) { await page.navigate(before.url); await this.settle(); break; }
+        wentBack = true;
+      }
+      else if (act === 'escape') await page.press('Escape');
+      else if (act === 'restore' && cur) await page.type(cur.backendNodeId, el.value ?? '', { mode: 'insert', clear: true, sessionId: cur.frameSessionId });
+      else if (act === 'reclick' && cur) await this.click(cur);
+      await this.settle();
+    }
+    const key = label(sub);
+    this.rejected.set(key, [...(this.rejected.get(key) ?? []), { sig: el.sig, desc: `${el.ref} ${describeElement(el)}` }]);
+    if ('key' in sub && this.status[sub.key] === 'typed') this.status[sub.key] = 'pending';
+    this.lastTypedKey = null;
+    this.settleGrounding(false);
+    this.trialRolledBack = true;
+    return { outcome: 'retry', note: `tried ${el.ref} "${el.name}" for ${key}: ${why}; rolled back` };
+  }
+
+  private memoryUse: { id: string | null; host: string; pageKind: string; key: string; sig?: string } | null = null;
+  private groundCalls: string[] = [];
+
+  /** Records the outcome of a grounding for memory and calibration once the step is verified. */
+  private settleGrounding(ok: boolean): void {
+    const mu = this.memoryUse;
+    this.memoryUse = null;
+    for (const id of this.groundCalls) this.deps.trace.labelCall(id, ok, ok ? 'verified' : 'verify failed');
+    this.groundCalls = [];
+    if (!mu || !this.deps.memory) return;
+    if (ok) this.deps.memory.recordSuccess(mu.host, mu.pageKind, mu.key, mu.sig ?? this.deps.memory.get(mu.id!)?.sig ?? '');
+    else if (mu.id) this.deps.memory.recordFailure(mu.id);
+  }
+
+  /** Safety gate before clicks that might commit something. */
+  private async guard(el: ElementNode, purpose: string, askJev: boolean): Promise<'ok' | 'skip'> {
+    const model = this.model!;
+    const risk = deterministicRisk(el, model);
+    let irreversible = risk.irreversible;
+    const reasons = [...risk.reasons];
+    if (!irreversible && askJev) {
+      const pre = this.guardPrefetch?.key === `${model.signature}|${el.sig}` ? await this.guardPrefetch.promise : null;
+      this.guardPrefetch = null;
+      const cls = pre ?? readActionClass((await runQuestions(this.qctx(), buildActionClass(el, model, this.spec.goal, this.budget()))).answers);
+      // Code rules catch payments, orders, publishing and deletion; JEV alone must be sure (sign-in and "next" are not).
+      if (cls.pIrreversible >= 0.8) { irreversible = true; reasons.push(`JEV rates it irreversible (p=${cls.pIrreversible.toFixed(2)})`); }
+    }
+    if (!irreversible) return 'ok';
+    const host = hostOf(model.url);
+    const domainPolicy = Object.entries(this.deps.getConfig().domains).find(([d]) => host === d || host.endsWith(`.${d}`))?.[1]?.irreversible;
+    const policy = this.spec.policy.irreversible ?? domainPolicy ?? 'ask';
+    const key = `${model.url}|${el.sig}`;
+    if (policy === 'allow' || this.approved.has(key)) return 'ok';
+    const a = await this.escalate('risk_confirm', `About to ${purpose}: ${describeElement(el)} — this looks irreversible (${reasons.join('; ')}). Confirm to continue.`, {
+      context: { element: `${el.ref} ${describeElement(el, { pageUrl: model.url })}`, reasons },
+      answer_with: ['continue', 'skip', 'abort'],
+    });
+    if (a.type === 'continue') { this.approved.add(key); this.riskApprovedAt = this.stepIdx; return 'ok'; }
+    return 'skip';
+  }
+
+  // ---------------------------------------------------------------- one step
+
+  private async step(): Promise<void> {
+    const started = this.now();
+    this.stepIdx++;
+    this.stepId = newId('st');
+    const before = this.deps.port.lastModel();
+    const model = await this.observe();
+    const timings: Record<string, number> = { observe: this.now() - started };
+    const page = await this.page();
+
+    if (!domainAllowed(model.url, [...(this.spec.policy.allowed_domains ?? []), ...this.extraDomains]) && this.spec.policy.allowed_domains?.length) {
+      const a = await this.escalate('off_domain', `The page moved to ${hostOf(model.url)}, outside the allowed domains.`, { answer_with: ['continue', 'abort'] });
+      if (a.type === 'continue') this.extraDomains.push(hostOf(model.url));
+      else if (!(await page.back())) throw new Cancelled('left the allowed domains');
+      return;
+    }
+
+    this.journal.visit(model.url, model.title);
+    this.startPrefetch(model);
+    const t1 = this.now();
+    const assess = await this.assess(model);
+    timings.assess = this.now() - t1;
+    if (assess.progress) this.journal.setProgress(assess.progress.level);
+    this.advancePlan(assess);
+    this.trackProgress(assess);
+    const pre = await this.consultBoundary(model, assess);
+    let sub = pre ?? await this.chooseSubintent(model, assess);
+    // While the agent is being asked, only safe steps go on; anything else (a submit, a secret) waits for the answer.
+    const c = this.consultQ;
+    if (c && !c.answer && !pre && sub.type !== 'done' && sub.type !== 'blocker') {
+      if (!this.safeWhileAsking(sub) || c.explored >= this.deps.getConfig().limits.consultExploreSteps) sub = { type: 'await_agent' };
+      else c.explored++;
+    }
+    let subLabel = label(sub);
+    const loopKey = `${model.signature}|${subLabel}`;
+    const seen = (this.seen.get(loopKey) ?? 0) + 1;
+    this.seen.set(loopKey, seen);
+    if (seen >= 3 && !['extract', 'load_more', 'done', 'wait', 'await_agent'].includes(sub.type)) {
+      // Going in circles: ask the agent (with the whole picture) and wait for the answer.
+      this.seen.set(loopKey, 0);
+      await this.openConsult(`repeating "${subLabel}" on the same page state without progress`, model, assess);
+      sub = { type: 'await_agent' };
+      subLabel = label(sub);
+    }
+    this.lastSub = sub;
+
+    const t2 = this.now();
+    let out: Outcome;
+    try {
+      out = await this.execute(sub, model, assess);
+    } catch (e) {
+      if (e instanceof Cancelled || e instanceof Interrupted) throw e;
+      const err = e as Error & { reason?: string; detail?: string };
+      out = { outcome: 'failed', note: `${subLabel} failed: ${err.message}${err.detail ? ` (${err.detail})` : ''}` };
+    }
+    timings.execute = this.now() - t2;
+    if (out.outcome === 'ok' && !this.finished) out = await this.checkProgress(sub, model, assess, out);
+    // Any click of ours that opened a dialog on the same page (a choice that shows a payment step) is noted.
+    const act = (out.action as { type?: string } | undefined)?.type;
+    if (out.outcome === 'ok' && (act === 'click' || act === 'choose') && sub.type !== 'dismiss_overlay' && !this.finished) {
+      this.noteOpened(model, await this.observe(false));
+    }
+    if (this.trialRolledBack) {
+      // The page is back where it was, but one candidate fewer remains: that is progress, not a loop.
+      this.trialRolledBack = false;
+      this.seen.set(loopKey, Math.max(0, seen - 1));
+    }
+    if (out.outcome === 'ok') this.rejected.delete(subLabel);
+    if (out.outcome === 'failed') {
+      const n = (this.failures.get(subLabel) ?? 0) + 1;
+      this.failures.set(subLabel, n);
+      if (n >= 2) {
+        this.failures.set(subLabel, 0);
+        const a = await this.escalate('stuck', `Step "${subLabel}" failed twice: ${out.note}`, { answer_with: ['hint', 'set_param', 'skip', 'continue', 'abort'] });
+        if (a.type === 'skip' && 'key' in sub) this.status[sub.key] = 'skipped';
+      }
+    } else if (out.outcome === 'ok') this.failures.set(subLabel, 0);
+    this.note(out.note);
+    const after = this.deps.port.lastModel();
+    const ref = (out.action as { ref?: string } | undefined)?.ref;
+    if (after && after.url !== model.url) this.journal.visit(after.url, after.title, ref ? cleanText(model.elements.get(ref)?.name ?? '', 60) || undefined : undefined);
+    let screenshot: string | undefined;
+    if (this.deps.getConfig().trace.screenshots) {
+      try { screenshot = this.deps.trace.saveBlob(this.id, `step-${this.stepIdx}.png`, await page.screenshot()); } catch { /* optional */ }
+    }
+    this.deps.trace.recordStep({
+      id: this.stepId, taskId: this.id, idx: this.stepIdx, startedAt: started, endedAt: this.now(), subintent: subLabel,
+      action: this.mask(out.action), outcome: out.outcome, url: model.url, pageSig: model.signature,
+      diff: after && before ? this.mask(renderDiff(diffModels(model, after), after, 10)) : undefined,
+      timings: { ...timings, total: this.now() - started }, screenshot,
+      notes: this.mask({
+        note: out.note, progress: this.status,
+        assess: {
+          pageKind: assess.pageKind, goalReached: assess.goalReached, resultsMatch: assess.resultsMatch,
+          wayProgress: assess.progress, situation: assess.situation ? { kind: assess.situation.kind, confidence: assess.situation.confidence } : undefined,
+        },
+      }),
+    });
+    this.emit('step', { idx: this.stepIdx, subintent: subLabel, outcome: out.outcome, note: this.mask(out.note), url: model.url });
+    if (!this.finished) this.deps.trace.saveCheckpoint(this.id, this.mask(this.checkpointData()));
+  }
+
+  private async assess(model: Model, opts: { leads?: boolean } = {}): Promise<AssessOutput> {
+    // Dialogs our own click opened get "can the goal go on from here?" in the same call.
+    const goesOnRegions = model.regions.filter((r) => (r.kind === 'overlay' || r.kind === 'dialog') && r.blocking
+      && this.openedByUs.has(r.sig) && !this.goesOn.has(r.sig)).map((r) => r.id);
+    const signInPending = Object.keys(this.params).some((k) => this.status[k] === 'pending' && isSignInParam(k, this.params[k].about));
+    const cached = this.assessCache?.sig === model.signature ? this.assessCache.out : null;
+    if (cached && this.assessCache?.plan === (this.plan?.index ?? -1) && (!opts.leads || cached.leads !== undefined) && (!signInPending || cached.signedIn !== undefined)
+      && goesOnRegions.every((id) => cached.goesOn[id] !== undefined)) return cached;
+    const overlays = [
+      ...model.regions.filter((r) => (r.kind === 'overlay' || r.kind === 'dialog') && r.blocking),
+      ...model.regions.filter((r) => r.kind === 'overlay' && !r.blocking && !this.dismissed.has(r.sig) && this.regionVisible(model, r)).slice(0, 2),
+    ];
+    const allDone = Object.values(this.status).every((s) => s !== 'pending' && s !== 'typed');
+    const input = {
+      model, goal: this.spec.goal, params: this.params, progress: this.status, hints: hintsFor(this.hints),
+      uncertainParams: Object.keys(this.status).filter((k) => this.status[k] === 'typed' && !this.params[k].secret),
+      overlays, requiredEmpty: allDone ? requiredEmptyFields(model) : [], hasResultSchema: !!this.spec.result, budgetTokens: this.budget(),
+      // With several params left, one batched look tells which have a control on this page (wizards show a few per step).
+      pendingParams: (() => {
+        const left = Object.keys(this.status).filter((k) => this.status[k] === 'pending' && paramKind(this.params[k]) !== 'date');
+        return left.length >= 2 ? left : [];
+      })(),
+      checkFormFit: Object.values(this.status).some((s) => s === 'pending')
+        && [...model.elements.values()].some((e) => e.visible && e.interactive && ['textbox', 'combobox', 'select', 'radio'].includes(e.kind)),
+      checkLeads: opts.leads,
+      goesOnRegions,
+      checkSignedIn: signInPending,
+      plan: this.plan?.forState(),
+      milestoneDoneWhen: this.plan?.current?.done_when,
+      nextMilestoneDoneWhen: this.plan?.next?.done_when,
+      facts: this.journal.facts.map((f) => f.text),
+    };
+    const res = await runQuestions(this.qctx(), buildAssess(input));
+    const out = readAssess(res.answers, input);
+    this.assessCache = { sig: model.signature, out, plan: this.plan?.index ?? -1 };
+    return out;
+  }
+
+  /**
+   * Options of popups that belong to a field: popups near it (below or beside, as autocompletes render), or all
+   * popups when no field is given. Unrelated floating layers (ads, chat widgets) are ignored.
+   */
+  private popupOptions(model: Model, near?: ElementNode): ElementNode[] {
+    const popups = model.regions.filter((r) => r.kind === 'popup' || (r.kind === 'list' && r.parentId && model.regions.find((p) => p.id === r.parentId)?.kind === 'popup'));
+    const close = near ? popups.filter((r) => {
+      const f = near.rect;
+      const verticalGap = r.rect.y - (f.y + f.h);
+      const horizontalOverlap = Math.min(r.rect.x + r.rect.w, f.x + f.w) - Math.max(r.rect.x, f.x);
+      return verticalGap > -f.h - 20 && verticalGap < 420 && horizontalOverlap > -40;
+    }) : popups;
+    const ids = new Set(close.map((r) => r.id));
+    for (const r of model.regions) if (r.parentId && ids.has(r.parentId)) ids.add(r.id);
+    return [...model.elements.values()].filter((e) => e.visible && e.interactive && ids.has(e.regionId)
+      && ['option', 'menuitem', 'link', 'button', 'clickable'].includes(e.kind));
+  }
+
+  /** Options that appeared after clicking a trigger: a popup near it, or new controls from the diff. */
+  private revealedOptions(before: Model, after: Model, trigger?: ElementNode): ElementNode[] {
+    const near = this.popupOptions(after, trigger);
+    if (near.length) return near;
+    const diff = diffModels(before, after);
+    const kinds = new Set(['option', 'menuitem', 'checkbox', 'radio', 'button', 'clickable', 'link']);
+    return diff.added.map((r) => after.elements.get(r)).filter((e): e is ElementNode => !!e && e.visible && e.interactive && kinds.has(e.kind)
+      && (!trigger || Math.abs(e.rect.y - trigger.rect.y) < 700));
+  }
+
+  private fieldOf(model: Model, key: string): ElementNode | undefined {
+    const ref = this.paramRefs[key];
+    return ref ? model.elements.get(ref) : undefined;
+  }
+
+  private async chooseSubintent(model: Model, a: AssessOutput): Promise<Subintent> {
+    const th = this.th();
+    const yes = (v: number, kind: DecisionKind = 'assess') => gateNoul(v, th[kind].noul) === 'yes';
+    this.noteSignIn(a);
+    // Results reached without our submit (an autocomplete pick or a filter link started the search) count as one.
+    if (a.pageKind === 'results_list' && this.submitsDone === 0) {
+      this.submitsDone = 1;
+      this.lastSubmitUrl = model.url;
+    }
+    // A server error is often transient: reload once, then go back. "Nothing found" is a question for the agent.
+    if (a.pageKind === 'error' && a.pageKindConfidence >= th.assess.choice.escalate) {
+      this.errorPages++;
+      if (this.errorPages >= 3) {
+        // Errors that survive a reload and a step back usually mean the site limits automated browsing.
+        this.errorPages = 0;
+        return {
+          type: 'blocker', kind: 'site_error',
+          summary: 'The site keeps showing error pages (a reload and going back did not help); it may be limiting automated browsing. Try later, or rerun with driver "extension" (your Chrome); answer "continue" to retry now, or abort.',
+        };
+      }
+      return this.reloaded.has(model.url) ? { type: 'go_back' } : { type: 'reload' };
+    }
+    if (a.pageKind === 'no_results' && a.pageKindConfidence >= th.assess.choice.act && this.spec.result && this.noResultsOn !== model.signature) {
+      // Asked once per page state; after the answer (a new param, a hint, or "continue") the usual rules apply.
+      this.noResultsOn = model.signature;
+      await this.escalate('assess', 'The search found nothing for these params. Change a param (set_param), give a hint, answer "continue" to read the page anyway, or abort.', {
+        answer_with: ['set_param', 'hint', 'continue', 'abort'],
+      });
+    }
+    if (a.pageKind === 'captcha' && a.pageKindConfidence >= th.assess.choice.escalate) {
+      return { type: 'blocker', kind: 'captcha', summary: 'The page shows a CAPTCHA or bot check. Solve it in the browser (or ask the user), then answer "continue".' };
+    }
+    const blocking = model.regions.filter((r) => (r.kind === 'overlay' || r.kind === 'dialog') && r.blocking);
+    for (const r of blocking) {
+      const kind = a.overlays[r.id]?.kind ?? 'other';
+      // A dialog that is part of the goal (pay, choose a plan or card, confirm) is worked through, not closed.
+      if (await this.checkGoalStep(model, r, a)) continue;
+      if (kind === 'captcha') {
+        return { type: 'blocker', kind: 'captcha', summary: 'The site shows a CAPTCHA / bot check. Solve it in the browser (or ask the user to), then answer "continue".' };
+      }
+      return { type: 'dismiss_overlay', region: r.id, overlayKind: kind };
+    }
+    // Non-blocking cookie notices are dismissed once, proactively (they tend to cover results and buttons).
+    for (const r of model.regions) {
+      const o = a.overlays[r.id];
+      if (r.kind === 'overlay' && !r.blocking && !this.dismissed.has(r.sig) && o?.kind === 'cookie_consent' && o.confidence >= th.assess.choice.act) {
+        return { type: 'dismiss_overlay', region: r.id, overlayKind: 'cookie_consent' };
+      }
+    }
+    // Suggestions right after typing a param.
+    if (this.lastTypedKey && this.lastSub?.type === 'fill_param' && this.status[this.lastTypedKey] !== 'skipped'
+      && this.popupOptions(model, this.fieldOf(model, this.lastTypedKey)).length) {
+      return { type: 'pick_suggestion', key: this.lastTypedKey };
+    }
+    // An open calendar with a pending date param.
+    const pendingDate = Object.keys(this.params).find((k) => paramKind(this.params[k]) === 'date' && this.status[k] === 'pending');
+    if (pendingDate && this.popupCalendar(model).length >= 7) return { type: 'pick_date', key: pendingDate };
+    // A form that does not lead to the goal (a site search when the goal is to post something): find the way in first.
+    if (a.formServesGoal <= th.assess.noul.actNo && !this.entered.has(model.signature) && Object.values(this.status).some((s) => s === 'pending')) {
+      return { type: 'enter' };
+    }
+    // Params come first while the page still has a form for them (sites often preview results before the search).
+    // A param counts as pending while it can still be filled here, or revealed behind "more filters".
+    const pendingKeys = Object.keys(this.params).filter((k) => (this.status[k] === 'pending' || this.status[k] === 'typed')
+      && (this.absentOn[k] !== model.signature || !this.revealTried.has(k)));
+    const goalDialog = model.regions.some((r) => (r.kind === 'dialog' || r.kind === 'overlay') && r.blocking && this.goalStep(r, a));
+    const hasForm = model.regions.some((r) => r.kind === 'form') || goalDialog;
+    // After a search, filters that moved the page to a new address were applied by the site: no second submit.
+    if (this.dirty && this.submitsDone > 0 && this.lastSubmitUrl && model.url !== this.lastSubmitUrl) this.dirty = false;
+    if (this.spec.result && this.dirty && hasForm && !pendingKeys.length) return { type: 'submit' };
+    // Params first while one of them can still be looked for here (filters are often dropdown buttons outside any form).
+    if (this.spec.result && !pendingKeys.length && (a.pageKind === 'results_list' || (yes(a.resultsMatch) && model.regions.some((r) => r.kind === 'list')))) {
+      // For min/max, let the site sort first: then the first page holds the answer instead of every page.
+      if (!this.sortTried && /^(min|max)\(/.test(this.spec.result.select ?? '')) return { type: 'apply_sort' };
+      return { type: 'extract' };
+    }
+    // Params the path never needed (sign-in details when already signed in) do not hold back a reached goal.
+    // A step of the goal still open on top (the payment dialog) means it is not reached yet.
+    // Done when JEV says so, or when the page is at the last level of progress and the goal check does not object.
+    const doneByProgress = !!a.progress && a.progress.level === 4 && a.progress.p >= th.assess.choice.act && gateNoul(a.goalReached, th.assess.noul) !== 'no';
+    // With a plan, the last milestone's condition decides; the goal check only must not object.
+    const planDone = !!this.plan && this.plan.finished && gateNoul(a.goalReached, th.assess.noul) !== 'no';
+    const reached = this.plan ? planDone || (yes(a.goalReached) && doneByProgress) : yes(a.goalReached) || doneByProgress;
+    if (!this.spec.result && reached && !goalDialog && Object.entries(this.status).every(([k, s]) => s !== 'pending' || this.absentOn[k] !== undefined)) {
+      return { type: 'done', reason: 'goal reached' };
+    }
+    // A dialog of the goal is worked through whatever the page under it is (a list, a results page).
+    const onForm = ['search_form', 'login', 'other', 'item_details', 'checkout'].includes(a.pageKind) || pendingKeys.length > 0 || goalDialog;
+    if (onForm) {
+      for (const k of Object.keys(this.params)) {
+        const s = this.status[k];
+        if (s !== 'pending' && s !== 'typed') continue;
+        if (this.absentOn[k] === model.signature) continue;
+        if (s === 'pending' && a.paramHere[k] !== undefined && a.paramHere[k] <= th.assess.noul.actNo) {
+          this.absentOn[k] = model.signature;
+          continue;
+        }
+        if (s === 'typed') {
+          const reflected = a.paramReflected[k];
+          if (reflected !== undefined && yes(reflected)) { this.status[k] = 'done'; continue; }
+        }
+        return paramKind(this.params[k]) === 'date' ? { type: 'pick_date', key: k } : { type: 'fill_param', key: k };
+      }
+      // A param with no field here usually lives on the results page (filters come with results): search first.
+      // Only then look behind "advanced search" / "more filters", once.
+      const anyFilled = Object.values(this.status).some((s) => s === 'done');
+      // Not on a sign-in page: its params come on later pages, there is nothing to reveal there.
+      if ((this.submitsDone > 0 || !anyFilled) && a.pageKind !== 'login') {
+        for (const k of Object.keys(this.params)) {
+          // Sign-in details are entered on a sign-in page, never hidden behind "more filters".
+          if ((this.status[k] === 'pending' || this.status[k] === 'typed') && this.absentOn[k] === model.signature && !this.revealTried.has(k)
+            && !isSignInParam(k, this.params[k].about)) {
+            return { type: 'reveal', key: k };
+          }
+        }
+      }
+      const anyOk = this.spec.policy.fill_required === 'any';
+      if (anyOk) {
+        const choice = this.emptyChoice(model);
+        if (choice) return { type: 'fill_any', ref: choice.ref, group: choice.group };
+      }
+      const choiceKinds = new Set(['select', 'combobox', 'radio']);
+      const missing = Object.entries(a.requiredUncovered).filter(([ref, p]) => yes(p) && !(anyOk && choiceKinds.has(model.elements.get(ref)?.kind ?? '')));
+      if (missing.length) {
+        const [ref] = missing[0];
+        const el = model.elements.get(ref);
+        const ans = await this.escalate('missing_param', `The form requires ${el ? describeElement(el) : ref}, but no param provides it.`, {
+          context: { field: el ? `${ref} ${describeElement(el, { pageUrl: model.url })}` : ref },
+          answer_with: ['set_param', 'skip', 'hint', 'abort'],
+        });
+        if (ans.type === 'set_param' || ans.type === 'hint') return this.chooseSubintent(await this.observe(false), a);
+      }
+      // A value chosen for a required field no param covers (the saved card) is progress on the form too.
+      const anyDone = Object.values(this.status).some((s) => s === 'done') || this.anyGroups.size > 0;
+      // Submit a fresh form, or go on to the next step of a multi-step form once this step changed something.
+      if ((a.pageKind === 'search_form' || (hasForm && (this.submitsDone === 0 || this.dirty) && anyDone)) && (anyDone || Object.keys(this.params).length === 0)) return { type: 'submit' };
+      // A step of a multi-step form (or a dialog of the goal) with nothing left to fill here, and the goal not
+      // reached yet: go on.
+      if (!this.spec.result && ((hasForm && anyDone) || goalDialog) && !yes(a.goalReached)) return { type: 'submit' };
+    }
+    // What JEV recognises about the page (a closed menu, content further down, still loading) comes first.
+    const fast = this.fromSituation(model, a);
+    if (fast) return fast;
+    // Nothing to fill here and no form to work through (a home page when already signed in, an account page with
+    // only a search box of its own): open the part of the site where the goal is done, once per page state.
+    const workForm = model.regions.some((r) => r.kind === 'form' && !this.searchBox(model, r));
+    if (!goalDialog && !workForm && gateNoul(a.goalReached, th.assess.noul) === 'no' && !this.entered.has(model.signature)
+      && !(this.spec.result && a.pageKind === 'results_list') && pendingKeys.every((k) => this.absentOn[k] === model.signature)) {
+      return { type: 'enter' };
+    }
+    return this.decideFallback(model, a);
+  }
+
+  private async decideFallback(model: Model, a: AssessOutput): Promise<Subintent> {
+    const fast = this.fromSituation(model, a);
+    if (fast) return fast;
+    const options: SubintentOption[] = [];
+    const pendingKeys = Object.keys(this.params).filter((k) => this.status[k] === 'pending' || this.status[k] === 'typed');
+    for (const k of pendingKeys) options.push({ id: `fill_${k}`, description: `Enter \`params.${k}.value\` (${this.params[k].about ?? k}) into its field.` });
+    options.push({ id: 'submit', description: 'Submit the form or start the search.' });
+    if (this.spec.result) options.push({ id: 'extract', description: 'Read the results listed on the page.' });
+    if (!this.entered.has(model.signature)) options.push({ id: 'enter', description: 'Open the part of the site where the goal is done (the account, a section, or a button that starts it).' });
+    if (!this.explored.has(model.signature) && this.openers(model).length) options.push({ id: 'explore', description: 'Open a menu, tab or collapsed section of this page that may hold what the goal needs.' });
+    if (this.popupOptions(model).length || model.regions.some((r) => r.kind === 'popup')) options.push({ id: 'close_popup', description: 'Close the open popup or menu.' });
+    options.push({ id: 'scroll', description: 'Scroll down to see more of the page.' });
+    options.push({ id: 'go_back', description: 'Go back to the previous page.' });
+    options.push({ id: 'wait', description: 'Wait for the page to finish loading or updating.' });
+    if (!this.spec.result) options.push({ id: 'done', description: 'The goal is already achieved; stop.' });
+    const res = await runQuestions(this.qctx(), buildDecide({ model, goal: this.spec.goal, params: this.params, progress: this.status, hints: hintsFor(this.hints), recent: this.recent, memory: this.contextFor(), options, budgetTokens: this.budget() }));
+    const choice = readDecide(res.answers);
+    let pick = choice.choice;
+    if (gateChoice(choice, this.th().subintent.choice) !== 'act') {
+      // Unsure: ask the agent without stopping, and meanwhile take JEV's best step that can be undone.
+      await this.openConsult('unsure what to do next on this page', model, a);
+      const safe = topCandidates(choice, options.length).map((c) => c.key)
+        .find((k) => k !== 'done' && k !== 'submit' && !(k.startsWith('fill_') && this.params[k.slice(5)]?.secret));
+      pick = safe ?? 'wait';
+    }
+    if (pick.startsWith('fill_')) {
+      const k = pick.slice(5);
+      return paramKind(this.params[k]) === 'date' ? { type: 'pick_date', key: k } : { type: 'fill_param', key: k };
+    }
+    switch (pick) {
+      case 'submit': return { type: 'submit' };
+      case 'extract': return { type: 'extract' };
+      case 'enter': return { type: 'enter' };
+      case 'explore': return { type: 'explore' };
+      case 'close_popup': return { type: 'close_popup' };
+      case 'scroll': return { type: 'scroll' };
+      case 'go_back': return { type: 'go_back' };
+      case 'done': return { type: 'done', reason: 'JEV judged the goal achieved' };
+      default: return { type: 'wait' };
+    }
+  }
+
+  private refDate(): { year: number; month: number } {
+    const d = new Date(this.startedAt || this.now());
+    return { year: d.getFullYear(), month: d.getMonth() + 1 };
+  }
+
+  // ---------------------------------------------------------------- executors
+
+  private async execute(sub: Subintent, model: Model, a: AssessOutput): Promise<Outcome> {
+    switch (sub.type) {
+      case 'blocker': {
+        const headless = this.deps.port.interactive?.() === false;
+        const background = !headless && this.deps.port.background?.() === true;
+        const summary = headless
+          ? `${sub.summary} This tab runs in a headless browser nobody can see: restart the task with driver "extension" (your Chrome) or set driver.chromium.headless=false, or abort.`
+          : background
+            ? `${sub.summary} The tab is in the background (driver.background): bring it to the front with jev_tabs select tab:"${this.deps.port.tabId}" show:true when the person is ready.`
+            : sub.summary;
+        const ans = await this.escalate('blocker', summary, { answer_with: ['continue', 'hint', 'abort'], context: { headless } });
+        return { outcome: 'retry', note: `blocker (${sub.kind}): ${ans.type}` };
+      }
+      case 'dismiss_overlay': return this.dismissOverlay(sub, model);
+      case 'fill_param': return this.fillParam(sub, model);
+      case 'pick_suggestion': return this.pickSuggestion(sub.key, model);
+      case 'pick_date': return this.pickDate(sub, model);
+      case 'submit': return this.submit(sub, model, a);
+      case 'reveal': return this.reveal(sub, model);
+      case 'apply_sort': return this.applySort(sub, model);
+      case 'extract': return this.extract(model);
+      case 'load_more': return { outcome: 'retry', note: 'load more handled by extract' };
+      case 'close_popup': {
+        await (await this.page()).press('Escape');
+        await this.settle();
+        return { outcome: 'ok', note: 'pressed Escape to close the popup', action: { type: 'press', key: 'Escape' } };
+      }
+      case 'scroll': {
+        await (await this.page()).scroll(model.viewport.h * 0.8);
+        await this.settle();
+        return { outcome: 'ok', note: 'scrolled down', action: { type: 'scroll' } };
+      }
+      case 'enter': return this.enter(sub, model);
+      case 'explore': return this.explore(sub, model);
+      case 'goto': {
+        await (await this.page()).navigate(sub.url);
+        await this.settle();
+        return { outcome: 'ok', note: `opened ${sub.url} (the agent's answer)`, action: { type: 'navigate', url: sub.url } };
+      }
+      case 'await_agent': {
+        const q = this.consultQ;
+        if (!q || q.answer) return { outcome: 'ok', note: 'the agent already answered' };
+        q.answer = await this.waitAnswer(q.q, false);
+        return { outcome: 'ok', note: `waited for the agent's answer (${q.answer.type})` };
+      }
+      case 'fill_any': return this.fillAny(sub, model);
+      case 'reload': {
+        this.reloaded.add(model.url);
+        await (await this.page()).navigate(model.url);
+        await this.settle();
+        this.recheckParams();
+        return { outcome: 'ok', note: 'the page showed an error; reloaded it', action: { type: 'reload' } };
+      }
+      case 'go_back': {
+        const ok = await (await this.page()).back();
+        await this.settle();
+        this.recheckParams();
+        return { outcome: ok ? 'ok' : 'failed', note: ok ? 'went back' : 'no page to go back to', action: { type: 'back' } };
+      }
+      case 'wait': {
+        await new Promise((r) => setTimeout(r, 1000));
+        await this.settle();
+        return { outcome: 'ok', note: 'waited for the page', action: { type: 'wait' } };
+      }
+      case 'done': {
+        this.finish('done', { result: { goal_reached: true }, evidence: { url: model.url, refs: [], snippets: [model.title] } });
+        return { outcome: 'finished', note: `done: ${sub.reason}` };
+      }
+    }
+  }
+
+  /** After going back or reloading, typed values may be gone: let the next assess check them again. */
+  private recheckParams(): void {
+    for (const [k, st] of Object.entries(this.status)) {
+      if (st === 'done' && paramKind(this.params[k]) === 'text' && !this.params[k].secret) this.status[k] = 'typed';
+    }
+  }
+
+  private async settle(): Promise<void> {
+    await (await this.page()).waitForSettle({ maxMs: this.deps.getConfig().limits.settleMaxMs });
+  }
+
+  private async click(el: ElementNode): Promise<void> {
+    const page = await this.page();
+    try {
+      await page.click(el.backendNodeId, { sessionId: el.frameSessionId });
+    } catch (e) {
+      // Something we did not see as a layer covers the target (tutorial dimmers, tooltips): Escape usually closes it.
+      if ((e as { reason?: string }).reason !== 'occluded') throw e;
+      await page.press('Escape');
+      await this.settle();
+      await page.click(el.backendNodeId, { sessionId: el.frameSessionId });
+    }
+  }
+
+  private regionVisible(model: Model, r: Region): boolean {
+    return r.refs.some((ref) => { const e = model.elements.get(ref); return !!e && e.visible && e.inViewport; });
+  }
+
+  private async dismissOverlay(sub: Extract<Subintent, { type: 'dismiss_overlay' }>, model: Model): Promise<Outcome> {
+    const region = model.regions.find((r) => r.id === sub.region) as Region;
+    if (region) this.dismissed.add(region.sig);
+    const what = sub.overlayKind === 'cookie_consent' ? 'the button that accepts the cookie notice (or closes it)'
+      : sub.overlayKind === 'login_wall' ? 'the button that closes the sign-in prompt without signing in'
+      : `the button that closes or dismisses this ${sub.overlayKind === 'promo' ? 'promotion' : 'overlay'} without signing up or buying`;
+    const g = await this.ground(sub, { target: `${what}${region?.label ? ` ("${region.label}")` : ''}`, kinds: ['button', 'link', 'clickable', 'menuitem'], regionId: sub.region, action: 'click', trial: true }, `dismiss:${sub.overlayKind}`);
+    const page = await this.page();
+    const before = this.model!;
+    if (!g.el) {
+      if (g.answer?.type === 'skip') return { outcome: 'skipped', note: 'overlay left in place (agent said skip)' };
+      await page.press('Escape');
+      await this.settle();
+      const after = await this.observe(false);
+      const still = after.regions.find((r) => r.id === sub.region && r.blocking);
+      if (still) {
+        const ans = await this.escalate('blocker', `Cannot dismiss the overlay ${sub.region} "${region?.label ?? ''}" (${sub.overlayKind}).`, { answer_with: ['pick', 'continue', 'hint', 'abort'] });
+        if (ans.type === 'pick') this.forcedRef = { sub: label(sub), ref: ans.ref };
+        return { outcome: 'retry', note: `overlay ${sub.region} still blocking` };
+      }
+      return { outcome: 'ok', note: `closed overlay ${sub.region} with Escape`, action: { type: 'press', key: 'Escape' } };
+    }
+    if (await this.guard(g.el, 'dismiss an overlay', false) === 'skip') return { outcome: 'skipped', note: 'overlay button not clicked (not approved)' };
+    await this.click(g.el);
+    await this.settle();
+    const after = await this.observe(false);
+    const ok = !after.regions.some((r) => r.id === sub.region && (r.blocking || this.regionVisible(after, r)));
+    if (!ok && g.trial) {
+      if (region) this.dismissed.delete(region.sig);
+      return this.trialFailed(sub, g.el, before, 'the overlay is still there');
+    }
+    this.settleGrounding(ok);
+    return { outcome: ok ? 'ok' : 'failed', note: `${ok ? 'dismissed' : 'tried to dismiss'} ${sub.overlayKind} overlay via ${g.el.ref} "${g.el.name}"`, action: { type: 'click', ref: g.el.ref } };
+  }
+
+  private async fillParam(sub: Extract<Subintent, { type: 'fill_param' }>, model: Model): Promise<Outcome> {
+    const k = sub.key;
+    const p = this.params[k];
+    const about = p.about ?? k.replace(/_/g, ' ');
+    const kind = paramKind(p);
+    const g = await this.ground(sub, paramIntent(k, p), `param:${k}`);
+    if (!g.el) {
+      if (g.answer?.type === 'skip') { this.status[k] = 'skipped'; return { outcome: 'skipped', note: `skipped param ${k}` }; }
+      if (g.res?.decision === 'none') { this.absentOn[k] = model.signature; return { outcome: 'skipped', note: `no field for ${k} on this page` }; }
+      return { outcome: 'retry', note: `no field chosen for ${k}` };
+    }
+    const el = g.el;
+    const before = this.model!;
+    const trial = !!g.trial;
+    this.paramRefs[k] = el.ref;
+    const page = await this.page();
+    if (kind === 'boolean') {
+      const want = p.value === true;
+      const on = (e: ElementNode) => (e.states.checked ?? e.states.selected ?? false) === true;
+      if (on(el) !== want) await this.click(el);
+      await this.settle();
+      if (trial) {
+        const cur = (await this.observe(false)).elements.get(el.ref);
+        if (!cur || on(cur) !== want) return this.trialFailed(sub, el, before, 'the switch did not change');
+      }
+      this.status[k] = 'done';
+      this.dirty = true;
+      this.settleGrounding(true);
+      return { outcome: 'ok', note: `${want ? 'checked' : 'unchecked'} ${el.ref} "${el.name}" for ${k}`, action: { type: 'check', ref: el.ref, value: want } };
+    }
+    if (el.kind === 'select') {
+      const opts = el.options ?? [];
+      const res = await runQuestions(this.qctx(), buildOptionPick(opts, this.params, k, this.budget()));
+      const pick = choiceOf(res.answers, 'pick');
+      if (pick.choice === 'none' && trial) return this.trialFailed(sub, el, before, `none of its options matches "${String(p.value)}"`);
+      if (pick.choice === 'none' || gateChoice(pick, this.th().ground.choice) === 'escalate') {
+        const ans = await this.escalate('ground', `Unsure which option of ${describeElement(el)} matches ${k}.`, {
+          decision: { template: 'widget.option_pick', asked: `Which option matches params.${k}?`, confidence: pick.confidence,
+            candidates: topCandidates(pick, 5, ['none']).map((c) => ({ ref: opts[Number(c.key.slice(1))]?.value ?? c.key, p: c.p, desc: opts[Number(c.key.slice(1))]?.label ?? '' })) },
+          answer_with: ['pick', 'set_param', 'skip', 'abort'],
+        });
+        if (ans.type !== 'pick') return { outcome: 'retry', note: `option for ${k} not chosen` };
+        await page.selectOption(el.backendNodeId, ans.ref, el.frameSessionId);
+      } else {
+        await page.selectOption(el.backendNodeId, opts[Number(pick.choice.slice(1))].value, el.frameSessionId);
+      }
+      this.status[k] = 'done';
+      this.dirty = true;
+      await this.settle();
+      this.settleGrounding(true);
+      return { outcome: 'ok', note: `selected ${k} in ${el.ref} "${el.name}"`, action: { type: 'select', ref: el.ref } };
+    }
+    // Anything clickable is either the value itself (a chip, option, filter link) or the trigger of a list of values.
+    // A combobox that is not a text input (a div or button with role combobox) is a dropdown, not a field to type in.
+    const typable = el.tag === 'input' || el.tag === 'textarea' || el.attrs.contenteditable === 'true';
+    if (['clickable', 'button', 'option', 'menuitem', 'radio', 'checkbox', 'link', 'tab'].includes(el.kind) || (el.kind === 'combobox' && !typable)) {
+      return this.pickFromDropdown(sub, el, before, trial);
+    }
+    if (fieldHoldsValue(el, p)) {
+      this.status[k] = 'done';
+      return { outcome: 'ok', note: `${k} already filled in ${el.ref}` };
+    }
+    const value = String(p.value);
+    const mode = value.length <= 40 && !p.secret ? 'keys' : 'insert';
+    await page.type(el.backendNodeId, value, { mode, clear: true, sessionId: el.frameSessionId });
+    await this.settle();
+    const after = await this.observe(false);
+    // Frameworks often re-render a field while it is typed into: find it by signature when the ref is gone.
+    const field = after.elements.get(el.ref) ?? [...after.elements.values()].find((e) => e.sig === el.sig && e.visible);
+    this.status[k] = 'typed';
+    this.lastTypedKey = k;
+    const typedOk = p.secret || fieldHoldsValue(field, p) || !!field?.value;
+    if (!typedOk && trial) return this.trialFailed(sub, el, before, 'the field did not take the value');
+    this.settleGrounding(typedOk);
+    const note = `typed ${p.secret ? '[secret]' : `"${value}"`} into ${el.ref} "${el.name}" for ${k}`;
+    if (this.popupOptions(after, field).length) {
+      const picked = await this.pickSuggestion(k, after);
+      return { outcome: picked.outcome, note: `${note}; ${picked.note}`, action: { type: 'type', ref: el.ref, param: k, then: picked.action } };
+    }
+    // No suggestions appeared after the page settled: the value is in. (Late suggestions or validation errors
+    // bring the param back: see the pick_suggestion rule and submit's validation handling.)
+    if (typedOk) { this.status[k] = 'done'; this.dirty = true; }
+    return { outcome: typedOk ? 'ok' : 'failed', note, action: { type: 'type', ref: el.ref, param: k } };
+  }
+
+  /**
+   * Does a control whose label is not literally the value stand for it anyway ("Новый" for "New", "Almaty" for
+   * "Алматы")? Sites pick their UI language themselves; the agent cannot know it. Dropdown openers are not asked.
+   */
+  private async standsForValue(sub: Extract<Subintent, { type: 'fill_param' }>, el: ElementNode): Promise<boolean> {
+    const label = (el.name || el.text || '').trim();
+    if (!label || label.length > 40 || el.states.expanded !== undefined || el.attrs['aria-haspopup']) return false;
+    if (el.hints?.some((h) => /dropdown|toggle|select|picker/.test(h))) return false;
+    const res = await runQuestions(this.qctx(), {
+      template: 'widget.same_value',
+      state: buildState({ step: this.card(sub), extra: { element: renderCandidate(this.model!, el.ref) } }, this.budget()),
+      questions: { same: { type: 'noul', instructions: 'Does `element` show the value `step.value` itself (the same value, possibly translated or abbreviated), rather than a field or list for choosing it?' } },
+    });
+    // A wrong "yes" only costs a verified, rolled-back trial: the bar is lower than for acting blind.
+    return noulOf(res.answers, 'same') >= 0.5;
+  }
+
+  /** Custom dropdowns (div-based selects, multi-select checkboxes): open, pick the option matching the value, close. */
+  private async pickFromDropdown(sub: Extract<Subintent, { type: 'fill_param' }>, trigger: ElementNode, model: Model, trial: boolean): Promise<Outcome> {
+    const k = sub.key;
+    const p = this.params[k];
+    const want = normalizeText(String(p.value));
+    const opensList = trigger.kind === 'combobox' || trigger.states.expanded !== undefined || !!trigger.attrs['aria-haspopup']
+      || !!trigger.hints?.some((h) => /dropdown|select/.test(h));
+    if (opensList && (isValueLabel(trigger.name, want) || showsValue(trigger, want))) {
+      // A dropdown that already shows the value ("Stories ▾" for type = Stories): nothing to do.
+      this.status[k] = 'done';
+      this.settleGrounding(true);
+      return { outcome: 'ok', note: `${k} already set in ${trigger.ref} "${trigger.name}"` };
+    }
+    if (isValueLabel(trigger.name, want) || isValueLabel(trigger.text ?? '', want) || await this.standsForValue(sub, trigger)) {
+      // A quick-select button that IS the value ("Павлодар", "Toyota"): press it unless it is already on.
+      if (!trigger.states.selected && !trigger.states.checked) {
+        await this.click(trigger);
+        await this.settle();
+        if (trial && !hadEffect(model, await this.observe(false), trigger)) return this.trialFailed(sub, trigger, model, 'pressing it changed nothing');
+      }
+      this.status[k] = 'done';
+      this.dirty = true;
+      this.settleGrounding(true);
+      return { outcome: 'ok', note: `pressed ${trigger.ref} "${trigger.name}" for ${k}`, action: { type: 'click', ref: trigger.ref, param: k } };
+    }
+    // A dropdown trigger that already shows the value ("Караганда ▾" instead of "Город ▾").
+    if ((trigger.kind === 'button' || trigger.kind === 'clickable') && showsValue(trigger, want)) {
+      this.status[k] = 'done';
+      return { outcome: 'ok', note: `${k} already set in ${trigger.ref} "${trigger.name}"` };
+    }
+    await this.click(trigger);
+    await this.settle();
+    const opened = await this.observe(false);
+    if (opened.url !== model.url) {
+      // A filter link ("Toyota Camry" → /cars/toyota/camry/): the navigation itself applies the value.
+      if (pageShowsValue(opened, want)) {
+        this.status[k] = 'done';
+        this.dirty = true;
+        this.settleGrounding(true);
+        return { outcome: 'ok', note: `followed ${trigger.ref} "${trigger.name}" for ${k}; the page now shows "${String(p.value)}"`, action: { type: 'click', ref: trigger.ref, param: k } };
+      }
+      if (trial) return this.trialFailed(sub, trigger, model, 'it opened a page without the value');
+    }
+    const options = this.revealedOptions(model, opened, opened.elements.get(trigger.ref) ?? trigger).slice(0, 60);
+    if (!options.length) {
+      if (trial) return this.trialFailed(sub, trigger, model, 'no options appeared');
+      return { outcome: 'failed', note: `clicked ${trigger.ref} "${trigger.name}" but no options appeared` };
+    }
+    const res = await runQuestions(this.qctx(), buildSuggestionPick(opened, options.map((o) => o.ref), this.params, k, this.budget()));
+    const pick = choiceOf(res.answers, 'pick');
+    let ref = pick.choice;
+    if (ref === 'none' && trial) {
+      // Wrong list (a city list for a brand): close it and try the next control.
+      await (await this.page()).press('Escape');
+      await this.settle();
+      return this.trialFailed(sub, trigger, model, `its options do not include "${String(p.value)}"`);
+    }
+    if (ref === 'none' || gateChoice(pick, this.th().ground.choice) !== 'act') {
+      const ans = await this.escalate('ground', `Unsure which option of "${trigger.name}" matches ${k} = "${String(p.value)}".`, {
+        decision: { template: 'widget.suggestion_pick', asked: `Which option matches params.${k}?`, confidence: pick.confidence,
+          candidates: topCandidates(pick, 5, ['none']).map((c) => ({ ref: c.key, p: c.p, desc: describeElement(opened.elements.get(c.key)!) })) },
+        answer_with: ['pick', 'none', 'set_param', 'skip', 'abort'],
+      });
+      if (ans.type !== 'pick') {
+        await (await this.page()).press('Escape');
+        if (ans.type === 'skip') this.status[k] = 'skipped';
+        return { outcome: ans.type === 'skip' ? 'skipped' : 'retry', note: `no option chosen for ${k}` };
+      }
+      ref = ans.ref;
+    }
+    const opt = opened.elements.get(ref);
+    if (!opt) return { outcome: 'failed', note: `option ${ref} vanished` };
+    await this.click(opt);
+    await this.settle();
+    // Multi-select dropdowns stay open: close them so they do not cover the form.
+    const after = await this.observe(false);
+    if (after.elements.get(ref)?.visible && after.elements.get(ref)?.inViewport) {
+      await (await this.page()).press('Escape');
+      await this.settle();
+    }
+    this.status[k] = 'done';
+    this.dirty = true;
+    this.lastTypedKey = null;
+    this.deps.trace.labelCall(res.callId, true, 'dropdown pick');
+    this.settleGrounding(true);
+    return { outcome: 'ok', note: `opened ${trigger.ref} "${trigger.name}" and picked ${ref} "${opt.name}" for ${k}`, action: { type: 'click', ref, param: k } };
+  }
+
+  private async pickSuggestion(k: string, model: Model): Promise<Outcome> {
+    const options = this.popupOptions(model, this.fieldOf(model, k));
+    if (!options.length) { this.status[k] = 'done'; return { outcome: 'ok', note: `no suggestions for ${k}` }; }
+    const refs = options.slice(0, 60).map((e) => e.ref);
+    const res = await runQuestions(this.qctx(), buildSuggestionPick(model, refs, this.params, k, this.budget()));
+    const pick = choiceOf(res.answers, 'pick');
+    let ref = pick.choice;
+    const gate = gateChoice(pick, this.th().ground.choice);
+    if (ref === 'none' || gate !== 'act') {
+      const candidates = topCandidates(pick, 5, ['none']).map((c) => ({ ref: c.key, p: c.p, desc: describeElement(model.elements.get(c.key)!) }));
+      if (ref !== 'none' && gate === 'uncertain' && candidates[0] && candidates[0].p >= 0.5 && candidates.length === 1) {
+        // Single plausible suggestion: accept.
+      } else {
+        const ans = await this.escalate('ground', `Unsure which suggestion matches ${k} = "${String(this.params[k].value)}".`, {
+          decision: { template: 'widget.suggestion_pick', asked: `Which suggestion matches params.${k}?`, candidates, confidence: pick.confidence },
+          answer_with: ['pick', 'set_param', 'skip', 'abort'],
+        });
+        if (ans.type === 'skip') { this.status[k] = 'done'; return { outcome: 'skipped', note: `suggestion for ${k} skipped` }; }
+        if (ans.type !== 'pick') return { outcome: 'retry', note: `suggestion for ${k} not chosen` };
+        ref = ans.ref;
+      }
+    }
+    const el = model.elements.get(ref);
+    if (!el) return { outcome: 'failed', note: `suggestion ${ref} vanished` };
+    await this.click(el);
+    await this.settle();
+    const after = await this.observe(false);
+    const stillOpen = this.popupOptions(after, this.fieldOf(after, k)).some((o) => o.ref === ref);
+    this.deps.trace.labelCall(res.callId, !stillOpen, 'suggestion click');
+    this.status[k] = stillOpen ? 'typed' : 'done';
+    if (!stillOpen) this.dirty = true;
+    this.lastTypedKey = null;
+    return { outcome: stillOpen ? 'failed' : 'ok', note: `picked suggestion ${ref} "${el.name}" for ${k}`, action: { type: 'click', ref, param: k } };
+  }
+
+  private async goalPrefs(): Promise<{ lowestPrice: number; earliest: number }> {
+    if (this.prefs) return this.prefs;
+    const res = await runQuestions(this.qctx(), buildGoalPrefs(this.spec.goal, this.budget()));
+    this.prefs = { lowestPrice: noulOf(res.answers, 'lowest_price'), earliest: noulOf(res.answers, 'earliest') };
+    return this.prefs;
+  }
+
+  private async pickDate(sub: Extract<Subintent, { type: 'pick_date' }>, model: Model): Promise<Outcome> {
+    const k = sub.key;
+    const p = this.params[k];
+    const range = dateRange(p);
+    if (!range) { this.status[k] = 'skipped'; return { outcome: 'skipped', note: `param ${k} is not a date` }; }
+    const about = p.about ?? k.replace(/_/g, ' ');
+    const page = await this.page();
+    let current = model;
+    // Only an open picker counts before we click the date field (pages also list prices by date elsewhere).
+    let cells = this.popupCalendar(current);
+    if (cells.length < 7) {
+      const g = await this.ground(sub, { target: `the field or button that opens the date picker for the ${about}`, kinds: ['textbox', 'combobox', 'button', 'clickable', 'link'], action: 'click', trial: true }, `date:${k}`);
+      if (!g.el) {
+        if (g.res?.decision === 'none') { this.absentOn[k] = model.signature; return { outcome: 'skipped', note: `no date field for ${k}` }; }
+        return { outcome: 'retry', note: `no date field chosen for ${k}` };
+      }
+      if (g.el.kind === 'textbox' && g.el.inputType === 'date') {
+        await page.type(g.el.backendNodeId, range.from, { mode: 'insert', sessionId: g.el.frameSessionId });
+        this.status[k] = 'done';
+        this.settleGrounding(true);
+        return { outcome: 'ok', note: `typed ${range.from} into date input ${g.el.ref}`, action: { type: 'type', ref: g.el.ref } };
+      }
+      const before = this.model!;
+      await this.click(g.el);
+      await this.settle();
+      current = await this.observe(false);
+      cells = parseCalendarCells(current, this.refDate());
+      if (cells.length < 7 && g.trial) return this.trialFailed(sub, g.el, before, 'no calendar appeared');
+      this.settleGrounding(cells.length >= 7);
+      if (cells.length < 7) return { outcome: 'failed', note: `clicked ${g.el.ref} "${g.el.name}" but no calendar appeared` };
+    }
+    for (let nav = 0; nav < 14; nav++) {
+      let candidates = cells.filter((c) => inRange(c.date, range) && !c.disabled);
+      if (candidates.length) {
+        const prefs = await this.goalPrefs();
+        // Fares often arrive after the grid: while some days in range have a price and others not yet, wait a little.
+        for (let wait = 0; wait < 4 && prefs.lowestPrice >= 0.5; wait++) {
+          const missing = candidates.filter((c) => c.price === undefined).length;
+          if (!missing || missing === candidates.length) break;
+          await new Promise((r) => setTimeout(r, 600));
+          current = await this.observe(false);
+          cells = this.popupCalendar(current);
+          candidates = cells.filter((c) => inRange(c.date, range) && !c.disabled);
+        }
+        const priced = candidates.filter((c) => c.price !== undefined);
+        let chosen = candidates.sort((x, y) => x.date.localeCompare(y.date))[0];
+        let why = 'earliest date in range';
+        if (priced.length && prefs.lowestPrice >= 0.5) {
+          chosen = priced.sort((x, y) => x.price! - y.price! || x.date.localeCompare(y.date))[0];
+          why = `cheapest day in range (${chosen.price})`;
+        }
+        const el = current.elements.get(chosen.ref)!;
+        await this.click(el);
+        await this.settle();
+        this.status[k] = 'done';
+        this.dirty = true;
+        const closed = await this.finishDatePicker(sub, k);
+        return { outcome: 'ok', note: `picked ${chosen.date} for ${k}: ${why}${closed}`, action: { type: 'click', ref: chosen.ref, date: chosen.date } };
+      }
+      const dates = cells.map((c) => c.date).sort();
+      const forward = dates[dates.length - 1] < range.from;
+      const calRegion = this.layerRegion(current, cells[0].regionId);
+      const g = await this.ground({ type: 'pick_date', key: `${k}:nav` }, {
+        target: forward ? 'the button that shows the next month in the calendar' : 'the button that shows the previous month in the calendar',
+        kinds: ['button', 'clickable', 'link'], regionId: calRegion, action: 'click',
+      }, forward ? 'calendar:next' : 'calendar:prev');
+      if (!g.el) return { outcome: 'failed', note: `no ${forward ? 'next' : 'previous'} month button in the calendar` };
+      await this.click(g.el);
+      await this.settle();
+      current = await this.observe(false);
+      const newCells = parseCalendarCells(current, this.refDate());
+      this.settleGrounding(newCells.length >= 7 && newCells[0]?.date !== cells[0]?.date);
+      cells = newCells;
+      if (cells.length < 7) return { outcome: 'failed', note: 'the calendar closed while navigating months' };
+    }
+    return { outcome: 'failed', note: `no selectable date for ${k} within 14 months` };
+  }
+
+  /** Controls that open something on this page and were not opened yet: closed menus, collapsed sections, tabs. */
+  private openers(model: Model): ElementNode[] {
+    return [...model.elements.values()].filter((e) => e.visible && e.interactive && !e.states.disabled && !this.exploredVia.has(e.sig)
+      && (e.states.expanded === false || (!!e.attrs['aria-haspopup'] && e.states.expanded !== true) || (e.kind === 'tab' && !e.states.selected)));
+  }
+
+  /** A closed menu, tab or collapsed section may hold what the goal needs next: open the most promising one. */
+  private async explore(sub: Subintent, model: Model): Promise<Outcome> {
+    this.explored.add(model.signature);
+    const openers = this.openers(model);
+    const others = [...model.elements.values()].filter((e) => !openers.includes(e)).map((e) => e.sig);
+    const fromRoute = this.routeElementFor(model, 'explore');
+    if (fromRoute && openers.includes(fromRoute)) this.forcedRef = { sub: 'explore', ref: fromRoute.ref };
+    const g = await this.ground(sub, {
+      target: 'the control that opens a menu, tab or collapsed section of this page where what `goal` needs next may be (a menu button, a tab, "Show more")',
+      kinds: ['button', 'clickable', 'tab', 'link', 'menuitem'], action: 'click', trial: true, exclude: others,
+    }, 'explore');
+    if (!g.el) return { outcome: 'skipped', note: 'no menu or section to open here' };
+    const before = this.model!;
+    if (!(g.el.kind === 'link' && g.el.href) && await this.guard(g.el, 'open a menu or section', false) === 'skip') {
+      return { outcome: 'skipped', note: 'opening not approved' };
+    }
+    await this.click(g.el);
+    await this.settle();
+    const after = await this.observe(false);
+    this.noteOpened(before, after);
+    if (g.trial && !hadEffect(before, after, g.el)) {
+      this.explored.delete(model.signature);
+      return this.trialFailed(sub, g.el, before, 'nothing opened');
+    }
+    this.settleGrounding(true);
+    this.exploredVia.add(g.el.sig);
+    this.recordRoute(model, g.el, 'explore');
+    return { outcome: 'ok', note: `opened ${g.el.ref} "${g.el.name}" to look for what the goal needs next`, action: { type: 'click', ref: g.el.ref } };
+  }
+
+  /** The page has no way to the goal here: open the section where it is done ("Post an ad", "Sell", the account). */
+  private async enter(sub: Subintent, model: Model): Promise<Outcome> {
+    this.entered.add(model.signature);
+    // No examples in the target: "Post an ad" among them drew JEV to posting when the goal was about an existing ad.
+    // With a plan, the current milestone is the target, spelled out (a pointer to it would be one more hop).
+    const m = this.plan?.current;
+    const target = m
+      ? `the button or link that leads toward this step: "${m.do}" (it starts it, or opens the section or account area where it is done); not a search`
+      : 'the button or link that leads toward doing `goal`: it starts it, or opens the section or account area where it is done; not a search';
+    // With closed menus or sections on the page, an unsure pick is not asked about: exploring them comes first.
+    const canExplore = !this.explored.has(model.signature) && this.openers(model).length > 0;
+    // A route that worked here before names the element: it is tried first (the usual checks still apply).
+    const fromRoute = this.routeElementFor(model, 'enter');
+    if (fromRoute) this.forcedRef = { sub: 'enter', ref: fromRoute.ref };
+    // Ways in already taken lead here (an opener clicked again would only close its menu); links back to pages the
+    // task came through lead away, and links to this very page (the current tab) lead nowhere.
+    const here = pageAddress(model.url, model.url);
+    // Fragment ("#") links are scripted actions or anchors, not other addresses.
+    const back = [...model.elements.values()].filter((e) => e.kind === 'link' && e.href && !e.href.includes('#')
+      && (this.enteredFrom.has(pageAddress(e.href, model.url)) || pageAddress(e.href, model.url) === here)).map((e) => e.sig);
+    const g = await this.ground(sub, {
+      target, kinds: ['link', 'button', 'clickable', 'menuitem', 'tab'], action: 'click', trial: true, exclude: [...this.enteredVia, ...back],
+    }, 'enter', { quiet: canExplore });
+    if (!g.el) {
+      // No sure way in: what the goal needs may sit in a closed menu or collapsed section of this page.
+      if (canExplore) return this.explore({ type: 'explore' }, model);
+      await this.openConsult('this page has no way to the goal, and no way into the right part of the site was found', model);
+      return { outcome: 'skipped', note: 'no way into the goal\'s section here; asked the agent' };
+    }
+    const before = this.model!;
+    // A wrong way in is rolled back and this page may be tried again, without it.
+    const failed = (el: ElementNode, why: string) => { this.entered.delete(model.signature); return this.trialFailed(sub, el, before, why); };
+    // Links only navigate; buttons get the usual safety check.
+    if (!(g.el.kind === 'link' && g.el.href) && await this.guard(g.el, 'open the section for the goal', false) === 'skip') {
+      return { outcome: 'skipped', note: 'entry not approved' };
+    }
+    await this.click(g.el);
+    await this.settle();
+    const after = await this.observe(false);
+    this.noteOpened(before, after);
+    if (g.trial && !hadEffect(before, after, g.el)) return failed(g.el, 'nothing opened');
+    const opened = `opened ${g.el.ref} "${g.el.name}"`;
+    // An opener ("Account ▾") shows a menu: the way in is one of its items.
+    const menu = diffModels(before, after).newRegions.map((id) => after.regions.find((r) => r.id === id))
+      .find((r) => r && (r.kind === 'popup' || (r.kind === 'nav' && after.elements.get(g.el!.ref)?.states.expanded === true)));
+    if (!menu) {
+      if (!(await this.leadsToGoal(after))) return failed(g.el, 'the page it opened does not lead to the goal');
+      this.enteredVia.add(g.el.sig);
+      this.recordRoute(model, g.el, 'enter');
+      if (after.url !== model.url) this.enteredFrom.add(pageAddress(model.url, model.url));
+      this.settleGrounding(true);
+      return { outcome: 'ok', note: `${opened} to get where the goal is done`, action: { type: 'click', ref: g.el.ref } };
+    }
+    const routeItem = this.routeElementFor(after, 'enter', menu.id);
+    const item = routeItem ? { el: routeItem, trial: false } : await this.ground(sub, {
+      target: 'the menu item that leads to the part of the site where the goal is done',
+      kinds: ['link', 'button', 'clickable', 'menuitem'], regionId: menu.id, action: 'click', trial: true,
+    }, 'enter:menu');
+    if (!item.el) {
+      await (await this.page()).press('Escape');
+      await this.settle();
+      this.enteredVia.add(g.el.sig);
+      return { outcome: 'ok', note: `${opened}; nothing in its menu leads to the goal, closed it` };
+    }
+    if (!(item.el.kind === 'link' && item.el.href) && await this.guard(item.el, 'open the section for the goal', false) === 'skip') {
+      return { outcome: 'skipped', note: 'entry not approved' };
+    }
+    await this.click(item.el);
+    await this.settle();
+    const landed = await this.observe(false);
+    this.noteOpened(after, landed);
+    if (item.trial && !hadEffect(after, landed, item.el)) return failed(item.el, 'the menu item did nothing');
+    if (!(await this.leadsToGoal(landed))) return failed(item.el, 'the page it opened does not lead to the goal');
+    this.enteredVia.add(g.el.sig);
+    this.enteredVia.add(item.el.sig);
+    this.recordRoute(model, g.el, 'enter');
+    this.recordRoute(after, item.el, 'enter');
+    if (landed.url !== model.url) this.enteredFrom.add(pageAddress(model.url, model.url));
+    this.settleGrounding(true);
+    return { outcome: 'ok', note: `${opened} and chose "${item.el.name}" to get where the goal is done`, action: { type: 'click', ref: item.el.ref } };
+  }
+
+  /** A dialog that is a step of the goal: JEV names it so, or `checkGoalStep` found the goal goes on from it. */
+  private goalStep(r: Region, a: AssessOutput): boolean {
+    return a.overlays[r.id]?.kind === 'goal_step' || this.goesOn.get(r.sig) === true;
+  }
+
+  /**
+   * A dialog the task's own click opened on the same page and JEV read as "other" or "promo" (a "free limit
+   * reached, pay to publish" notice) gets one more look: can the goal go on from it? Asked once per dialog.
+   */
+  private async checkGoalStep(model: Model, r: Region, a: AssessOutput): Promise<boolean> {
+    const kind = a.overlays[r.id]?.kind;
+    if (kind === 'goal_step') return true;
+    if (!this.openedByUs.has(r.sig) || (kind !== undefined && kind !== 'other' && kind !== 'promo')) return false;
+    if (!this.goesOn.has(r.sig)) {
+      // Asked in the page assessment (one call); a cached assessment from before the dialog was noted asks again.
+      const v = a.goesOn[r.id] ?? (await this.assess(model)).goesOn[r.id];
+      this.goesOn.set(r.sig, v !== undefined && gateNoul(v, this.th().assess.noul) !== 'no');
+    }
+    return this.goesOn.get(r.sig)!;
+  }
+
+  /** Remembers blocking dialogs the click between two page states opened without leaving the page. */
+  private noteOpened(before: Model, after: Model): void {
+    if (after.url !== before.url) return;
+    for (const id of diffModels(before, after).newRegions) {
+      const r = after.regions.find((x) => x.id === id);
+      if (r && (r.kind === 'dialog' || r.kind === 'overlay') && r.blocking) this.openedByUs.add(r.sig);
+    }
+  }
+
+  /** A one-field search box (the site's or a list's search): not a form a goal is worked through. */
+  private searchBox(model: Model, r: Region): boolean {
+    const ids = regionAndDescendants(model, r.id);
+    const els = [...model.elements.values()].filter((e) => ids.has(e.regionId) && e.interactive);
+    const fields = els.filter((e) => e.kind === 'textbox' || e.kind === 'combobox');
+    if (els.length > 3 || fields.length !== 1) return false;
+    return /search|find|поиск|найти|искать/i.test(r.label ?? '') || fields[0].attrs.type === 'search'
+      || els.some((e) => e.hints?.includes('search') || (e.kind === 'button' && /search|find|поиск|найти|искать/i.test(e.name)));
+  }
+
+  /**
+   * False only when JEV is sure the page does not lead toward the goal. Asked in the page assessment, which the
+   * next step then reuses instead of assessing the same page again.
+   */
+  private async leadsToGoal(model: Model): Promise<boolean> {
+    const leads = (await this.assess(model, { leads: true })).leads;
+    return leads === undefined || gateNoul(leads, this.th().assess.noul) !== 'no';
+  }
+
+  /**
+   * A required choice no param covers: an empty required list, or a radio group in a form with nothing chosen.
+   * Groups are keyed by name (or region and label) so each is filled once.
+   */
+  private emptyChoice(model: Model): { ref: string; group: string } | null {
+    const formIds = new Set(model.regions.filter((r) => r.kind === 'form' || ((r.kind === 'dialog' || r.kind === 'overlay') && r.blocking)).flatMap((r) => {
+      const ids = [r.id];
+      for (let grew = true; grew;) { grew = false; for (const x of model.regions) if (x.parentId && ids.includes(x.parentId) && !ids.includes(x.id)) { ids.push(x.id); grew = true; } }
+      return ids;
+    }));
+    const paramRefs = new Set(Object.values(this.paramRefs));
+    // A section where a param's own field sits (a year list next to quick year buttons) is answered already.
+    const paramRegions = new Set([...paramRefs].map((ref) => model.elements.get(ref)?.regionId).filter(Boolean));
+    const els = [...model.elements.values()].filter((e) => e.visible && !e.states.disabled);
+    for (const e of els) {
+      if ((e.kind === 'select' || e.kind === 'combobox') && e.states.required && isEmptyField(e) && !paramRefs.has(e.ref)) {
+        const group = `${e.kind}:${e.sig}`;
+        if (!this.anyGroups.has(group)) return { ref: e.ref, group };
+      }
+    }
+    const groups = new Map<string, ElementNode[]>();
+    for (const e of els) {
+      if (e.kind !== 'radio' || !formIds.has(e.regionId)) continue;
+      const key = `radio:${e.attrs.name || `${e.regionId}:${e.context ?? e.label ?? ''}`}`;
+      groups.set(key, [...(groups.get(key) ?? []), e]);
+    }
+    for (const [group, radios] of groups) {
+      // A group a param already answered (its radio is the param's field) is not "empty".
+      if (this.anyGroups.has(group) || radios.some((r) => r.states.checked || paramRefs.has(r.ref) || paramRegions.has(r.regionId))) continue;
+      return { ref: radios[0].ref, group };
+    }
+    // Option buttons under a heading ("Двигатель: [Бензиновый] [Гибридный]"), none chosen: a choice group too.
+    for (const r of model.regions) {
+      if (r.kind !== 'section' || !r.label || !formIds.has(r.id) || paramRegions.has(r.id)) continue;
+      const group = `chips:${r.sig}`;
+      if (this.anyGroups.has(group)) continue;
+      const own = r.refs.map((ref) => model.elements.get(ref)).filter((e): e is ElementNode => !!e && e.visible);
+      const chips = own.filter((e) => (e.kind === 'button' || e.kind === 'clickable') && !e.states.disabled && (e.name || '').length > 0 && (e.name || '').length <= 30);
+      if (chips.length < 2 || chips.length > 20 || chips.length !== own.filter((e) => e.interactive).length) continue;
+      if (chips.some((c) => c.states.selected || c.states.checked || paramRefs.has(c.ref))) continue;
+      // Buttons that pay, publish or delete are a choice of action ("Pay 750", "Post with a discount"), not a value.
+      if (chips.some((c) => deterministicRisk(c, model).irreversible)) continue;
+      return { ref: chips[0].ref, group };
+    }
+    return null;
+  }
+
+  /** policy.fill_required "any": JEV picks the option that fits the goal and hints best, else the first one. */
+  private async fillAny(sub: Extract<Subintent, { type: 'fill_any' }>, model: Model): Promise<Outcome> {
+    const el = model.elements.get(sub.ref);
+    if (!el) return { outcome: 'retry', note: 'the field is gone' };
+    const page = await this.page();
+    const options: { key: string; label: string; el?: ElementNode; value?: string }[] = [];
+    if (el.kind === 'select') {
+      (el.options ?? []).forEach((o, i) => { if (o.value && !/^(выберите|select|choose|—|-)/i.test(o.label.trim())) options.push({ key: `o${i}`, label: o.label, value: o.value }); });
+    } else if (sub.group.startsWith('chips:')) {
+      const region = model.regions.find((r) => r.sig === sub.group.slice(6));
+      (region?.refs ?? []).map((ref) => model.elements.get(ref)).filter((e): e is ElementNode => !!e && e.visible && e.interactive)
+        .forEach((e, i) => options.push({ key: `o${i}`, label: e.name || e.text || '', el: e }));
+    } else if (el.kind === 'radio') {
+      const radios = [...model.elements.values()].filter((r) => r.kind === 'radio' && r.visible && !r.states.disabled
+        && (el.attrs.name ? r.attrs.name === el.attrs.name : r.regionId === el.regionId));
+      radios.forEach((r, i) => options.push({ key: `o${i}`, label: r.name || r.text || '', el: r }));
+    }
+    if (!options.length) {
+      // A custom dropdown: open it and let the next steps see its options.
+      await this.click(el);
+      await this.settle();
+      return { outcome: 'ok', note: `opened ${el.ref} "${el.name}" to choose any value` };
+    }
+    const criteria: Record<string, null> = Object.fromEntries(options.map((o) => [o.key, null]));
+    const section = model.regions.find((r) => r.id === el.regionId)?.label ?? el.context ?? '';
+    const res = await runQuestions(this.qctx(), {
+      template: 'widget.any_option',
+      state: buildState({
+        goal: this.spec.goal, params: this.params, hints: hintsFor(this.hints),
+        extra: { field: `${section ? `${section}: ` : ''}${describeElement(el, { pageUrl: model.url })}`, options: Object.fromEntries(options.map((o) => [o.key, o.label])) },
+      }, this.budget()),
+      questions: {
+        pick: { type: 'choice', instructions: 'Which option in `options` fits `goal` and `hints` best? If nothing in them decides it, the first option.', criteria },
+        // A param may already answer this field in another control (a year list next to quick year buttons).
+        covered: { type: 'noul', instructions: 'Does `field` ask for the same thing as one of `params` (for example the year, price or city)?' },
+      },
+    });
+    if (noulOf(res.answers, 'covered') >= 0.5) {
+      this.anyGroups.add(sub.group);
+      return { outcome: 'ok', note: `left ${describeElement(el)} alone: a param already covers it` };
+    }
+    const picked = options.find((o) => o.key === choiceOf(res.answers, 'pick').choice) ?? options[0];
+    if (picked.el && await this.guard(picked.el, 'choose a value for a required field', false) === 'skip') {
+      this.anyGroups.add(sub.group);
+      return { outcome: 'skipped', note: `choosing "${picked.label}" not approved` };
+    }
+    if (picked.value !== undefined) await page.selectOption(el.backendNodeId, picked.value, el.frameSessionId);
+    else if (picked.el) await this.click(picked.el);
+    await this.settle();
+    // Only a group that was actually answered is skipped from now on (a failed click can be retried).
+    this.anyGroups.add(sub.group);
+    this.dirty = true;
+    return { outcome: 'ok', note: `chose "${picked.label}" for ${describeElement(el)} (required, no param)`, action: { type: 'choose', ref: picked.el?.ref ?? el.ref } };
+  }
+
+  /**
+   * Range pickers stay open after the first date, waiting for a return date or a confirmation. When no other date
+   * param is pending, confirm the choice with the picker's own button ("One way", "Done", "Apply"), else Escape.
+   */
+  private async finishDatePicker(sub: Subintent, key: string): Promise<string> {
+    const after = await this.observe(false);
+    const open = this.popupCalendar(after);
+    if (open.length < 7) return '';
+    const otherDate = Object.keys(this.params).some((x) => x !== key && paramKind(this.params[x]) === 'date' && this.status[x] === 'pending');
+    if (otherDate) return '';
+    const layer = this.layerRegion(after, open[0].regionId);
+    const g = await groundByIntent(this.qctx(), after, {
+      target: 'the button that confirms the chosen date as a one-way trip or finishes the date choice (such as "One way", "Done" or "Apply"), not a date or a month button',
+      kinds: ['button', 'clickable', 'link'], regionId: layer, action: 'click',
+    }, this.th(), { goal: this.spec.goal, step: this.card(sub), budgetTokens: this.budget() });
+    const btn = g.decision === 'act' && g.ref ? after.elements.get(g.ref) : undefined;
+    if (btn && !open.some((c) => c.ref === btn.ref)) {
+      await this.click(btn);
+      await this.settle();
+      if (this.popupCalendar(await this.observe(false)).length < 7) return `; confirmed with "${btn.name}"`;
+    }
+    await (await this.page()).press('Escape');
+    await this.settle();
+    return this.popupCalendar(await this.observe(false)).length < 7 ? '; closed the date picker' : '; the date picker stayed open';
+  }
+
+  /**
+   * Sites often open results in a new tab (and send the old tab elsewhere). If our tab opened tabs, JEV picks the
+   * tab that continues the goal and the task moves there.
+   */
+  private async followPopups(since: number, what: string): Promise<string | null> {
+    const port = this.deps.port;
+    if (!port.popupsSince || !port.peek || !port.switchTo) return null;
+    await new Promise((r) => setTimeout(r, 600));
+    const popups = port.popupsSince(since);
+    if (!popups.length) return null;
+    const current = await this.observe(false);
+    const tabs: Record<string, string> = { current: `"${current.title}" ${current.url}` };
+    const ids: Record<string, string> = {};
+    for (const [i, p] of popups.slice(0, 5).entries()) {
+      const m = await port.peek(p.id).catch(() => null);
+      tabs[`new_${i}`] = m ? `"${m.title}" ${m.url}` : `${p.title} ${p.url}`;
+      ids[`new_${i}`] = p.id;
+    }
+    const criteria = Object.fromEntries(Object.keys(tabs).map((k) => [k, null]));
+    const res = await runQuestions(this.qctx(), {
+      template: 'tabs.follow',
+      state: buildState({ goal: this.spec.goal, extra: { tabs, expected: what } }, this.budget()),
+      questions: { tab: { type: 'choice', instructions: 'Which tab in `tabs` shows `expected` for `goal`?', criteria } },
+    });
+    const pick = choiceOf(res.answers, 'tab');
+    if (pick.choice === 'current' || !ids[pick.choice]) return null;
+    port.switchTo(ids[pick.choice]);
+    this.note(`followed a new tab: ${tabs[pick.choice]}`);
+    await this.observe();
+    return `continued in the new tab ${tabs[pick.choice]}`;
+  }
+
+  /** Calendar cells inside an open popup, overlay or dialog. */
+  private popupCalendar(model: Model) {
+    return parseCalendarCells(model, this.refDate()).filter((c) => this.layerRegion(model, c.regionId) !== undefined);
+  }
+
+  /** Opens "advanced search" / "more filters" (or a tab) that may hold the field for a param. */
+  private async reveal(sub: Extract<Subintent, { type: 'reveal' }>, model: Model): Promise<Outcome> {
+    const k = sub.key;
+    this.revealTried.add(k);
+    const about = this.params[k].about ?? k.replace(/_/g, ' ');
+    const g = await this.ground(sub, {
+      target: `the button, link or tab that shows more search filters (such as advanced search or "more filters") where the ${about} can be set`,
+      kinds: ['button', 'link', 'clickable', 'tab'], action: 'click', trial: true,
+    }, `reveal:${k}`);
+    if (!g.el) return { outcome: 'skipped', note: `no control reveals a field for ${k}; continuing without it` };
+    const before = this.model!;
+    await this.click(g.el);
+    await this.settle();
+    if (g.trial) {
+      const after = await this.observe(false);
+      const added = diffModels(before, after).added.filter((r) => after.elements.get(r)?.interactive && after.elements.get(r)?.visible).length;
+      if (after.url === before.url && added < 2) {
+        this.revealTried.delete(k);
+        return this.trialFailed(sub, g.el, before, 'no new filters appeared');
+      }
+    }
+    delete this.absentOn[k];
+    this.settleGrounding(true);
+    return { outcome: 'ok', note: `opened ${g.el.ref} "${g.el.name}" to look for the ${about} field`, action: { type: 'click', ref: g.el.ref } };
+  }
+
+  /** Uses the site's own sorting so the extreme value is on the first page. */
+  private async applySort(sub: Extract<Subintent, { type: 'apply_sort' }>, model: Model): Promise<Outcome> {
+    this.sortTried = true;
+    const select = this.spec.result!.select!;
+    const order = this.sortOrder();
+    const g = await this.ground(sub, {
+      target: `the control that sorts the result list ${order}, or the sort menu that offers this order`,
+      kinds: ['select', 'combobox', 'button', 'link', 'tab', 'clickable', 'option', 'radio'], action: 'click', trial: true,
+    }, `sort:${select}`);
+    if (!g.el) return { outcome: 'skipped', note: 'no sort control found; reading results as listed' };
+    const page = await this.page();
+    const start = this.model!;
+    const before = start.url;
+    const failTrial = (why: string) => { this.sortTried = false; return this.trialFailed(sub, g.el!, start, why); };
+    if (g.el.kind === 'select') {
+      const opts = g.el.options ?? [];
+      const res = await runQuestions(this.qctx(), buildOptionPick(opts, { sort: { value: `sort ${order}`, about: 'sort order' } }, 'sort', this.budget()));
+      const pick = choiceOf(res.answers, 'pick');
+      if (pick.choice === 'none' && g.trial) return failTrial('none of its options sorts that way');
+      if (pick.choice === 'none' || gateChoice(pick, this.th().ground.choice) === 'escalate') return { outcome: 'skipped', note: 'no matching sort option' };
+      await page.selectOption(g.el.backendNodeId, opts[Number(pick.choice.slice(1))].value, g.el.frameSessionId);
+    } else {
+      await this.click(g.el);
+      await this.settle();
+      const opened = await this.observe(false);
+      const options = this.revealedOptions(model, opened, opened.elements.get(g.el.ref) ?? g.el);
+      if (options.length) {
+        const restricted = new Set(options.map((o) => o.ref));
+        const view = { ...opened, elements: new Map([...opened.elements].filter(([r]) => restricted.has(r))) } as Model;
+        const res = await groundByIntent(this.qctx(), view, { target: `the option that sorts ${order}`, kinds: ['option', 'menuitem', 'link', 'button', 'clickable', 'radio'], action: 'click' },
+          this.th(), { goal: this.spec.goal, step: this.card(sub), budgetTokens: this.budget() });
+        if (res.decision !== 'act' || !res.ref) {
+          if (g.trial && res.decision === 'none') return failTrial('its menu has no such order');
+          await page.press('Escape');
+          await this.settle();
+          return { outcome: 'skipped', note: 'sort menu opened but no matching order' };
+        }
+        const opt = opened.elements.get(res.ref)!;
+        await this.click(opt);
+      } else if (g.trial && !hadEffect(start, opened, g.el)) {
+        return failTrial('clicking it changed nothing');
+      }
+    }
+    await this.settle();
+    const after = await this.observe(false);
+    this.sortedBy = select;
+    this.settleGrounding(true);
+    return { outcome: 'ok', note: `sorted results ${order} via ${g.el.ref} "${g.el.name}"${after.url !== before ? ` (${after.url})` : ''}`, action: { type: 'sort', ref: g.el.ref } };
+  }
+
+  /** The popup/overlay/dialog layer that contains a region (calendar grids are lists inside a popup). */
+  private layerRegion(model: Model, regionId: string): string | undefined {
+    let r = model.regions.find((x) => x.id === regionId);
+    while (r) {
+      if (r.kind === 'popup' || r.kind === 'overlay' || r.kind === 'dialog') return r.id;
+      r = model.regions.find((x) => x.id === r!.parentId);
+    }
+    return undefined;
+  }
+
+  private async submit(sub: Extract<Subintent, { type: 'submit' }>, model: Model, a: AssessOutput): Promise<Outcome> {
+    const refs = Object.values(this.paramRefs).map((r) => model.elements.get(r)).filter(Boolean) as ElementNode[];
+    const regionCounts = new Map<string, number>();
+    for (const e of refs) regionCounts.set(e.regionId, (regionCounts.get(e.regionId) ?? 0) + 1);
+    // Search in the whole form around the fields: the fields often sit in a sub-region, the button does not.
+    const fieldRegion = [...regionCounts.entries()].sort((x, y) => y[1] - x[1])[0]?.[0];
+    let formRegion: string | undefined;
+    for (let r = model.regions.find((x) => x.id === fieldRegion); r; r = model.regions.find((x) => x.id === r!.parentId)) {
+      if (r.kind === 'form') { formRegion = r.id; break; }
+    }
+    // No param field on this step (a wizard's last page): the page's only form with controls is where to go on.
+    if (!formRegion) {
+      const forms = model.regions.filter((r) => r.kind === 'form' && r.refs.some((ref) => { const e = model.elements.get(ref); return !!e?.interactive && !e.occluded; }));
+      if (forms.length === 1) formRegion = forms[0].id;
+    }
+    // A modal on top (a payment or plan step of the goal) holds the button that goes on. Non-blocking widgets
+    // (chat, app banners) never do.
+    // A backdrop often holds no controls itself: they sit in the dialog nested in it.
+    const usable = (r: Region) => {
+      const ids = regionAndDescendants(model, r.id);
+      return [...model.elements.values()].some((e) => ids.has(e.regionId) && e.visible && e.inViewport && e.interactive && !e.occluded && !e.states.disabled);
+    };
+    const dialog = model.regions.find((r) => (r.kind === 'dialog' || r.kind === 'overlay')
+      && (r.blocking || this.goalStep(r, a)) && usable(r));
+    // The form's one submit button is nearly always the pick: its risk question runs while it is being grounded.
+    const scope = regionAndDescendants(model, dialog?.id ?? formRegion ?? 'r0');
+    const submits = [...model.elements.values()].filter((e) => e.attrs.type === 'submit' && e.visible && !e.occluded && !e.states.disabled
+      && (!(dialog?.id ?? formRegion) || scope.has(e.regionId)));
+    this.guardPrefetch = null;
+    if (submits.length === 1 && !deterministicRisk(submits[0], model).irreversible) {
+      const el = submits[0];
+      this.guardPrefetch = {
+        key: `${model.signature}|${el.sig}`,
+        promise: runQuestions(this.qctx(), buildActionClass(el, model, this.spec.goal, this.budget())).then((r) => readActionClass(r.answers)).catch(() => null),
+      };
+    }
+    // Skipping is asked separately: as one more example in the main target it made JEV unsure about both.
+    const g = await this.ground(sub, {
+      target: 'the button that submits the form or goes on to its next step (such as Search, Show results, Next, Continue, Submit, Publish, Post or Pay)',
+      fallback: 'the button that skips this step and goes on without it (such as Skip, Later or Not now)',
+      kinds: ['button', 'clickable', 'link'], regionId: dialog?.id ?? formRegion, action: 'click',
+    }, 'submit');
+    if (!g.el) {
+      if (g.res?.decision === 'none') {
+        await (await this.page()).press('Enter');
+        await this.settle();
+        return { outcome: 'ok', note: 'no submit button found; pressed Enter', action: { type: 'press', key: 'Enter' } };
+      }
+      return { outcome: 'retry', note: 'submit button not chosen' };
+    }
+    if (await this.guard(g.el, 'submit the form', true) === 'skip') return { outcome: 'skipped', note: 'submit not approved' };
+    const beforeUrl = model.url;
+    this.submitsDone++;
+    this.dirty = false;
+    const clickedAt = this.now();
+    await this.click(g.el);
+    await this.settle();
+    const switched = await this.followPopups(clickedAt, 'the search results');
+    if (switched) {
+      this.lastSubmitUrl = this.model?.url ?? null;
+      this.settleGrounding(true);
+      return { outcome: 'ok', note: `clicked submit ${g.el.ref} "${g.el.name}"; ${switched}`, action: { type: 'click', ref: g.el.ref } };
+    }
+    const after = await this.observe(false);
+    this.noteOpened(model, after);
+    this.lastSubmitUrl = after.url;
+    const diff = diffModels(model, after);
+    const newRegions = diff.newRegions.map((id) => after.regions.find((r) => r.id === id)).filter(Boolean) as Region[];
+    // A multi-step form swaps its controls in place: count that as progress too.
+    const swapped = diff.added.filter((r) => after.elements.get(r)?.interactive).length + diff.removed.length;
+    const progressed = after.url !== beforeUrl || newRegions.some((r) => r.kind === 'list')
+      || newRegions.filter((r) => r.kind !== 'popup' && r.kind !== 'overlay' && r.kind !== 'dialog').length >= 2 || swapped >= 4;
+    // The form may answer a submit by opening its date picker: the date is missing or was not taken.
+    const dateKey = Object.keys(this.params).find((k) => paramKind(this.params[k]) === 'date');
+    if (!progressed && dateKey && this.popupCalendar(after).length >= 7) {
+      this.status[dateKey] = 'pending';
+      this.settleGrounding(true);
+      return { outcome: 'retry', note: 'submit opened the date picker; picking the date again', action: { type: 'click', ref: g.el.ref } };
+    }
+    let ok = progressed;
+    if (!progressed) {
+      const res = await runQuestions(this.qctx(), buildVerify('clicked the search/submit button', 'the search started or results appeared', renderDiff(diff, after, 10), after, this.budget()));
+      ok = gateNoul(readVerify(res.answers), this.th().verify.noul) === 'yes';
+    }
+    this.settleGrounding(ok);
+    if (!ok) {
+      const errors = [...after.elements.values()].filter((e) => e.visible && !e.interactive && /ошиб|выберите|укажите|error|required|invalid|please/i.test(e.name)).map((e) => e.name).slice(0, 3);
+      if (errors.length || a.validationError >= 0.5) {
+        // Validation complaints usually mean a suggestion was not picked: retry params that are only typed.
+        for (const [k, s] of Object.entries(this.status)) if (s === 'done' && paramKind(this.params[k]) === 'text') this.status[k] = 'typed';
+        return { outcome: 'failed', note: `submit showed validation errors: ${errors.join(' | ') || 'unknown'}`, action: { type: 'click', ref: g.el.ref } };
+      }
+    }
+    return { outcome: ok ? 'ok' : 'failed', note: `clicked submit ${g.el.ref} "${g.el.name}"${ok ? '' : ' (no visible effect)'}`, action: { type: 'click', ref: g.el.ref } };
+  }
+
+  private handoffItems: HandoffItem[] = [];
+  private handoffSeen = new Set<string>();
+  private handoffPages = 0;
+
+  /**
+   * extract "agent": JEV brought the task to the results; the main agent reads them and picks the answer. The list
+   * goes over as one line per item (site-sorted when select is min/max), within a token budget.
+   */
+  private async handoff(model: Model): Promise<Outcome> {
+    const spec = this.spec.result!;
+    const budget = 4000;
+    const found = await findResultsList(this.qctx(), model, this.spec.goal, this.budget());
+    let fresh: HandoffItem[] = [];
+    if (found.list) {
+      const used = estimateTokens(this.handoffItems);
+      fresh = listItems(model, found.list, budget - used, this.handoffItems.length)
+        // Items seen on an earlier load: same link and same text (several items may share a link).
+        .filter((it) => { const key = `${it.url ?? ''}|${it.text}`; if (this.handoffSeen.has(key)) return false; this.handoffSeen.add(key); return true; })
+        .map((it, j) => ({ ...it, i: this.handoffItems.length + j }));
+      this.handoffItems.push(...fresh);
+    }
+    this.handoffPages++;
+    const room = estimateTokens(this.handoffItems) < budget * 0.9;
+    if (found.list && fresh.length && room && this.handoffPages < spec.pages) {
+      const g = await this.groundLoadMore(model, found.list.id);
+      if (g) {
+        await this.click(g);
+        await this.settle();
+        this.loadMoreCount++;
+        return { outcome: 'ok', note: `read ${this.handoffItems.length} results; loading more via ${g.ref} "${g.name}"`, action: { type: 'click', ref: g.ref, purpose: 'load_more' } };
+      }
+    }
+    const total = found.list?.items?.length ?? 0;
+    const warnings: string[] = [];
+    if (!found.list) warnings.push('No results list was recognised on this page: see page.overview, or look with jev_observe on the task tab.');
+    this.finish('done', {
+      result: { handoff: true, items_count: this.handoffItems.length },
+      page: {
+        url: model.url, title: model.title, sorted_by: this.sortedBy ? this.sortOrder() : null, items: this.handoffItems,
+        more: fresh.length < total,
+        ...(found.list ? {} : { overview: renderOverview(model, 1200) }),
+      },
+      items: this.handoffItems as unknown as Record<string, unknown>[],
+      evidence: { url: model.url, refs: [], snippets: [] },
+      warnings,
+    });
+    return { outcome: 'finished', note: `handed ${this.handoffItems.length} results to the agent` };
+  }
+
+  private async extract(model: Model): Promise<Outcome> {
+    if (this.spec.result!.extract !== 'code') return this.handoff(model);
+    const spec = { schema: this.spec.result!.schema!, select: this.spec.result!.select };
+    const out: ExtractOutput | null = await extractResults(this.qctx(), model, spec, this.th(), { goal: this.spec.goal, budgetTokens: this.budget(), refDate: this.refDate() });
+    if (!out || !out.items.length) {
+      const ans = await this.escalate('assess', 'Expected a list of results but could not find one on this page.', { answer_with: ['hint', 'continue', 'abort'] });
+      return { outcome: 'retry', note: `no result list found (${ans.type})` };
+    }
+    // Accumulate across "show more" and page-by-page pagination (items are keyed by link or content).
+    out.items.forEach((item, i) => {
+      const key = String(item.url ?? '') || JSON.stringify(item);
+      const snippets = out.itemRefs[i].map((r) => model.elements.get(r)).filter(Boolean).map((e) => e!.text || e!.name).filter(Boolean).slice(0, 8);
+      if (!this.collected.has(key)) this.collected.set(key, { item, snippets, url: model.url, relevant: out.relevant[i] !== false });
+    });
+    const maxItems = this.spec.policy.max_items ?? 200;
+    const sorted = !!spec.select && this.sortedBy === spec.select;
+    const anyRelevant = [...this.collected.values()].some((c) => c.relevant);
+    // A sorted page answers min/max only if it holds a matching item (price-sorted pages often start with accessories).
+    const needsAll = !spec.select || spec.select === 'all' || (/^(min|max)\(/.test(spec.select) && (!sorted || !anyRelevant));
+    const grew = this.collected.size > this.extractPrev;
+    this.extractPrev = this.collected.size;
+    if (needsAll && this.collected.size < maxItems && grew && this.loadMoreCount < 30) {
+      const g = await this.groundLoadMore(model, out.listRegionId);
+      if (g) {
+        await this.click(g);
+        await this.settle();
+        this.loadMoreCount++;
+        return { outcome: 'ok', note: `read ${this.collected.size} results; loading more via ${g.ref} "${g.name}"`, action: { type: 'click', ref: g.ref, purpose: 'load_more' } };
+      }
+    }
+    const collected = [...this.collected.values()];
+    // Items that clearly do not match the goal (accessories, parts) are left out, unless nothing matched at all.
+    const all = collected.some((c) => c.relevant) ? collected.filter((c) => c.relevant) : collected;
+    const excluded = collected.length - all.length;
+    const items = all.map((c) => c.item);
+    const idx = applySelect(items, spec.select);
+    const chosen = idx !== undefined ? all[idx] : undefined;
+    this.finish('done', {
+      result: { selected: chosen?.item, items_count: items.length },
+      items,
+      evidence: { url: chosen?.url ?? model.url, refs: chosen && out.items.includes(chosen.item) ? out.itemRefs[out.items.indexOf(chosen.item)] : [], snippets: chosen?.snippets ?? [] },
+      warnings: [
+        ...out.warnings,
+        ...(sorted ? [`Results were sorted on the site (${spec.select}); the answer comes from the first page${this.loadMoreCount ? 's' : ''} read.`] : []),
+        ...(excluded ? [`${excluded} item(s) did not match the goal (accessories, parts or other products) and were left out.`] : []),
+      ],
+    });
+    return { outcome: 'finished', note: `extracted ${items.length} results${chosen ? '; selected one' : ''}${sorted ? ' (site-sorted)' : ''}` };
+  }
+
+  private async groundLoadMore(model: Model, listRegionId: string): Promise<ElementNode | null> {
+    const intent: Intent = { target: 'the button or link that loads or shows more results of the list (not a page of another section)', kinds: ['button', 'link', 'clickable'], action: 'click' };
+    const res = await groundByIntent(this.qctx(), model, intent, this.th(), { goal: this.spec.goal, budgetTokens: this.budget() });
+    if (res.decision !== 'act' || !res.ref) return null;
+    const el = model.elements.get(res.ref)!;
+    if (deterministicRisk(el, model).irreversible) return null;
+    void listRegionId;
+    return el;
+  }
+}
+
+export { Cancelled, Interrupted };

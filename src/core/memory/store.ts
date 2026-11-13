@@ -1,0 +1,137 @@
+import type { Database } from '../trace/sqlite.ts';
+import { newId } from '../util/ids.ts';
+import type { Hint } from '../questions/step.ts';
+import type { PlanStep } from '../runner/types.ts';
+
+/** One step of a way that worked: on a page (URL pattern), the element that led on. */
+export interface RouteStep { url: string; title: string; sig: string; name: string; kind: string; sub: string }
+/** A way through a site that finished a goal, with the agent's plan if there was one. */
+export interface SiteRoute { id: string; domain: string; goal: string; plan: PlanStep[] | null; steps: RouteStep[]; ok: number; fail: number; updatedAt: number }
+
+export interface MemoryEntry {
+  id: string; domain: string; pageKind: string; key: string; sig: string; weight: number;
+  successes: number; failures: number; consecutiveFailures: number; disabled: boolean; updatedAt: number;
+}
+
+const MAX_WEIGHT = 5;
+
+/**
+ * Per-domain site memory: which element (by signature) served a purpose ("param:from", "submit") on a kind of
+ * page. A hit is only a fast path: JEV still confirms it with one noul before acting.
+ */
+export class MemoryStore {
+  private db: Database;
+
+  constructor(db: Database) {
+    this.db = db;
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS site_memory (id TEXT PRIMARY KEY, domain TEXT, page_kind TEXT, key TEXT, sig TEXT, weight REAL,
+        successes INTEGER, failures INTEGER, consecutive_failures INTEGER, disabled INTEGER, updated_at INTEGER);
+      CREATE UNIQUE INDEX IF NOT EXISTS site_memory_uniq ON site_memory(domain, page_kind, key, sig);
+      CREATE TABLE IF NOT EXISTS site_hints (id TEXT PRIMARY KEY, domain TEXT, text TEXT, created_at INTEGER);
+      CREATE TABLE IF NOT EXISTS site_routes (id TEXT PRIMARY KEY, domain TEXT, goal TEXT, plan TEXT, steps TEXT, ok INTEGER, fail INTEGER, updated_at INTEGER);
+      CREATE INDEX IF NOT EXISTS site_routes_domain ON site_routes(domain);
+    `);
+    // Hints remember which step and param they were given for (older rows have none: they apply by wording).
+    const cols = new Set((db.prepare('PRAGMA table_info(site_hints)').all() as any[]).map((c) => c.name));
+    for (const c of ['step', 'key', 'about']) if (!cols.has(c)) db.exec(`ALTER TABLE site_hints ADD COLUMN ${c} TEXT`);
+  }
+
+  private row(r: any): MemoryEntry {
+    return {
+      id: r.id, domain: r.domain, pageKind: r.page_kind, key: r.key, sig: r.sig, weight: r.weight, successes: r.successes,
+      failures: r.failures, consecutiveFailures: r.consecutive_failures, disabled: !!r.disabled, updatedAt: r.updated_at,
+    };
+  }
+
+  lookup(domain: string, pageKind: string, key: string): MemoryEntry | null {
+    const exact = this.db.prepare(`SELECT * FROM site_memory WHERE domain = ? AND page_kind = ? AND key = ? AND disabled = 0 AND weight >= 1
+      ORDER BY weight DESC, updated_at DESC LIMIT 1`).get(domain, pageKind, key);
+    const any = exact ?? this.db.prepare(`SELECT * FROM site_memory WHERE domain = ? AND key = ? AND disabled = 0 AND weight >= 1
+      ORDER BY weight DESC, updated_at DESC LIMIT 1`).get(domain, key);
+    return any ? this.row(any) : null;
+  }
+
+  get(id: string): MemoryEntry | null {
+    const r = this.db.prepare('SELECT * FROM site_memory WHERE id = ?').get(id);
+    return r ? this.row(r) : null;
+  }
+
+  recordSuccess(domain: string, pageKind: string, key: string, sig: string): void {
+    if (!domain || !sig) return;
+    const r = this.db.prepare('SELECT * FROM site_memory WHERE domain = ? AND page_kind = ? AND key = ? AND sig = ?').get(domain, pageKind, key, sig) as any;
+    if (r) {
+      this.db.prepare(`UPDATE site_memory SET weight = ?, successes = successes + 1, consecutive_failures = 0, disabled = 0, updated_at = ? WHERE id = ?`)
+        .run(Math.min(MAX_WEIGHT, r.weight + 0.5), Date.now(), r.id);
+    } else {
+      this.db.prepare(`INSERT INTO site_memory (id, domain, page_kind, key, sig, weight, successes, failures, consecutive_failures, disabled, updated_at)
+        VALUES (?, ?, ?, ?, ?, 1, 1, 0, 0, 0, ?)`).run(newId('m'), domain, pageKind, key, sig, Date.now());
+    }
+  }
+
+  recordFailure(id: string): void {
+    const r = this.db.prepare('SELECT * FROM site_memory WHERE id = ?').get(id) as any;
+    if (!r) return;
+    const consecutive = r.consecutive_failures + 1;
+    this.db.prepare(`UPDATE site_memory SET weight = ?, failures = failures + 1, consecutive_failures = ?, disabled = ?, updated_at = ? WHERE id = ?`)
+      .run(r.weight - 1, consecutive, consecutive >= 2 ? 1 : 0, Date.now(), id);
+  }
+
+  addHint(domain: string, text: string, bind: { step?: string; key?: string; about?: string } = {}): void {
+    if (!domain) return;
+    const exists = this.db.prepare('SELECT id FROM site_hints WHERE domain = ? AND text = ?').get(domain, text);
+    if (!exists) {
+      this.db.prepare('INSERT INTO site_hints (id, domain, text, created_at, step, key, about) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(newId('h'), domain, text, Date.now(), bind.step ?? null, bind.key ?? null, bind.about ?? null);
+    }
+  }
+
+  hints(domain: string): Hint[] {
+    return (this.db.prepare('SELECT text, step, key, about FROM site_hints WHERE domain = ? ORDER BY created_at').all(domain) as any[])
+      .map((r) => ({ text: r.text, source: 'site' as const, ...(r.step ? { step: r.step } : {}), ...(r.key ? { key: r.key } : {}), ...(r.about ? { about: r.about } : {}) }));
+  }
+
+  private route(r: any): SiteRoute {
+    return { id: r.id, domain: r.domain, goal: r.goal, plan: r.plan ? JSON.parse(r.plan) : null, steps: JSON.parse(r.steps), ok: r.ok, fail: r.fail, updatedAt: r.updated_at };
+  }
+
+  /** Saves the way a goal was reached; the same goal on the same site updates its route. */
+  saveRoute(domain: string, goal: string, plan: PlanStep[] | null, steps: RouteStep[]): void {
+    if (!domain || !steps.length) return;
+    const r = this.db.prepare('SELECT id FROM site_routes WHERE domain = ? AND goal = ?').get(domain, goal) as any;
+    if (r) {
+      this.db.prepare('UPDATE site_routes SET plan = ?, steps = ?, ok = ok + 1, updated_at = ? WHERE id = ?').run(plan ? JSON.stringify(plan) : null, JSON.stringify(steps), Date.now(), r.id);
+    } else {
+      this.db.prepare('INSERT INTO site_routes (id, domain, goal, plan, steps, ok, fail, updated_at) VALUES (?, ?, ?, ?, ?, 1, 0, ?)')
+        .run(newId('rt'), domain, goal, plan ? JSON.stringify(plan) : null, JSON.stringify(steps), Date.now());
+    }
+  }
+
+  /** Routes worth offering for a site: those that worked more often than they failed recently. */
+  routes(domain: string, limit = 8): SiteRoute[] {
+    return (this.db.prepare('SELECT * FROM site_routes WHERE domain = ? AND fail < ok + 2 ORDER BY ok DESC, updated_at DESC LIMIT ?').all(domain, limit) as any[])
+      .map((r) => this.route(r));
+  }
+
+  routeResult(id: string, ok: boolean): void {
+    this.db.prepare(`UPDATE site_routes SET ${ok ? 'ok = ok + 1' : 'fail = fail + 1'}, updated_at = ? WHERE id = ?`).run(Date.now(), id);
+  }
+
+  list(): { entries: MemoryEntry[]; hints: { id: string; domain: string; text: string }[]; routes: SiteRoute[] } {
+    return {
+      entries: (this.db.prepare('SELECT * FROM site_memory ORDER BY domain, key, weight DESC').all() as any[]).map((r) => this.row(r)),
+      hints: this.db.prepare('SELECT id, domain, text, step, key, about FROM site_hints ORDER BY domain, created_at').all() as any[],
+      routes: (this.db.prepare('SELECT * FROM site_routes ORDER BY domain, ok DESC').all() as any[]).map((r) => this.route(r)),
+    };
+  }
+
+  remove(id: string): void {
+    this.db.prepare('DELETE FROM site_memory WHERE id = ?').run(id);
+    this.db.prepare('DELETE FROM site_hints WHERE id = ?').run(id);
+    this.db.prepare('DELETE FROM site_routes WHERE id = ?').run(id);
+  }
+
+  setWeight(id: string, weight: number): void {
+    this.db.prepare('UPDATE site_memory SET weight = ?, disabled = ?, updated_at = ? WHERE id = ?').run(weight, weight < 1 ? 1 : 0, Date.now(), id);
+  }
+}

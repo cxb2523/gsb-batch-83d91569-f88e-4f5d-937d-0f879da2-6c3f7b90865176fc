@@ -1,0 +1,115 @@
+import { z } from 'zod';
+import { confidenceSchema } from '../config/schema.ts';
+
+export const FIELD_TYPES = ['string', 'number', 'money', 'datetime', 'date', 'time', 'duration', 'url', 'boolean'] as const;
+
+const paramValueSchema = z.union([
+  z.string(), z.number(), z.boolean(), z.array(z.string()),
+  z.object({ from: z.string(), to: z.string() }),
+]);
+
+export const paramSpecSchema = z.object({
+  value: paramValueSchema,
+  about: z.string().optional(),
+  secret: z.boolean().optional(),
+});
+
+/** One milestone of the agent's plan: what to do, and how the page shows it is done (both in English). */
+export const planStepSchema = z.object({ do: z.string().min(3), done_when: z.string().min(3) });
+export type PlanStep = z.infer<typeof planStepSchema>;
+
+export const taskSpecSchema = z.object({
+  goal: z.string().min(3),
+  site: z.string().optional(),
+  tab: z.string().optional(),
+  params: z.record(z.string().regex(/^[A-Za-z_]\w*$/, 'param keys are identifiers such as "from" or "departure_date"'), paramSpecSchema).default({}),
+  result: z.object({
+    schema: z.record(z.string(), z.union([z.enum(FIELD_TYPES), z.object({ type: z.enum(FIELD_TYPES), about: z.string().optional() })])).optional(),
+    select: z.string().regex(/^(all|first|(min|max)\(\w+\))$/, 'select is all, first, min(field) or max(field)').optional(),
+    /** "agent": hand the results list to the main agent, which picks the answer; "code": parse items by `schema`. */
+    extract: z.enum(['agent', 'code']).default('agent'),
+    /** Result pages (or "show more" loads) to read before handing the list over. */
+    pages: z.number().int().min(1).max(10).default(1),
+  }).refine((r) => r.extract !== 'code' || !!r.schema, 'extract "code" needs a schema').optional(),
+  hints: z.array(z.string()).default([]),
+  /** Milestones from the agent (System 2): JEV checks each one's done_when on the page and aims at the current one. */
+  plan: z.array(planStepSchema).max(12).optional(),
+  policy: z.object({
+    confidence: confidenceSchema.optional(),
+    irreversible: z.enum(['ask', 'allow']).optional(),
+    allowed_domains: z.array(z.string()).optional(),
+    max_steps: z.number().int().positive().optional(),
+    max_minutes: z.number().positive().optional(),
+    budget_usd: z.number().positive().optional(),
+    max_items: z.number().int().positive().optional(),
+    /** Required choices without a param (lists, radio groups): "ask" the agent, or take "any" suitable option. */
+    fill_required: z.enum(['ask', 'any']).optional(),
+  }).default({}),
+  driver: z.enum(['auto', 'extension', 'chromium']).optional(),
+});
+export type TaskSpec = z.infer<typeof taskSpecSchema>;
+
+export type TaskState = 'queued' | 'running' | 'awaiting_input' | 'paused' | 'interrupted' | 'done' | 'failed' | 'cancelled';
+export const FINAL_STATES: ReadonlySet<TaskState> = new Set(['done', 'failed', 'cancelled']);
+
+/** `consult`: the task is stuck and asks the agent for a plan or a hint while it keeps exploring safe options. */
+export type EscalationKind = 'ground' | 'subintent' | 'assess' | 'risk_confirm' | 'missing_param' | 'blocker' | 'stuck' | 'off_domain' | 'budget' | 'consult';
+
+export interface Escalation {
+  question_id: string;
+  task_id: string;
+  kind: EscalationKind;
+  summary: string;
+  created_at: number;
+  page: { url: string; title: string; page_kind?: Record<string, number>; regions: string[] };
+  decision?: {
+    template: string;
+    asked: string;
+    candidates: { ref: string; p: number; desc: string }[];
+    confidence: number;
+    thresholds?: { act: number; escalate: number };
+  };
+  context?: Record<string, unknown>;
+  recent_steps: string[];
+  screenshot?: string;
+  answer_with: string[];
+}
+
+export const answerSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('pick'), ref: z.string() }),
+  z.object({ type: z.literal('set_param'), key: z.string(), value: paramValueSchema, about: z.string().optional(), secret: z.boolean().optional() }),
+  z.object({ type: z.literal('hint'), text: z.string().min(2), scope: z.enum(['task', 'domain']).optional() }),
+  z.object({ type: z.literal('continue') }),
+  z.object({ type: z.literal('thresholds'), value: confidenceSchema }),
+  z.object({ type: z.literal('skip') }),
+  z.object({ type: z.literal('none') }),
+  z.object({ type: z.literal('abort'), reason: z.string().optional() }),
+  z.object({ type: z.literal('plan'), steps: z.array(planStepSchema).min(1).max(12) }),
+  z.object({ type: z.literal('goto'), url: z.string().url() }),
+]);
+export type AnswerInput = z.infer<typeof answerSchema> & { remember?: boolean };
+
+export interface TaskStats { steps: number; jev_calls: number; escalations: number; cost_usd: number; duration_s: number }
+
+export interface TaskResult {
+  status: TaskState;
+  result?: { selected?: Record<string, unknown>; items_count?: number; goal_reached?: boolean; handoff?: boolean };
+  /** extract "agent": the results list for the main agent to read (one line per item). */
+  page?: {
+    url: string; title: string; sorted_by: string | null; items: { i: number; text: string; url: string | null }[];
+    /** The list had more items than were handed over (token budget or further pages). */
+    more: boolean;
+    /** Only when no results list was recognised: a compact view of the page instead. */
+    overview?: string;
+  };
+  items?: Record<string, unknown>[];
+  evidence?: { url: string; refs: string[]; snippets: string[] };
+  warnings?: string[];
+  error?: string;
+  stats: TaskStats;
+}
+
+export interface StepSummary { idx: number; subintent: string; outcome: string; note: string; url: string }
+
+/** `not_needed`: the path turned out not to need it (sign-in details when already signed in). */
+export type ParamStatus = 'pending' | 'typed' | 'done' | 'absent' | 'skipped' | 'not_needed';
