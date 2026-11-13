@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Urubu News{% endblock %}</title>
+<meta name="description" content="Newsletter do Flamengo antes e depois de cada jogo: pré-jogo com escalações e palpites, pós-jogo com análise e notícias resumidas.">
+<meta property="og:title" content="Urubu News">
+<meta property="og:description" content="As notícias do Mengão na sua caixa de entrada, antes e depois de cada jogo.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="{{ public_url }}/">
+<meta property="og:site_name" content="Urubu News">
+<meta property="og:image" content="{{ public_url }}/static/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Urubu News: urubu de cara fechada e o nome da newsletter">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#F4EFE6">
+<link rel="icon" href="/static/icon-512.png">
+<link rel="apple-touch-icon" href="/static/icon-512.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --red: #A51C24;
+    --red-dark: #84161D;
+    --ink: #1C1C1C;
+    --text: #222222;
+    --muted: #6B6B6B;
+    --line: #e6e6e6;
+    --paper: #ffffff;
+    --bg: #F4EFE6;
+    --black: #141414;
+    --display: "Oswald", "Arial Narrow", Impact, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  a { color: var(--red); font-weight: 600; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .header { background: var(--bg); }
+  .header-inner, .main, .footer-inner { max-width: 720px; margin: 0 auto; padding: 0 16px; }
+  .header-inner { display: flex; align-items: center; gap: 14px; padding-top: 18px; padding-bottom: 18px; }
+  .header img { width: 64px; height: 64px; }
+  .brand { color: var(--black); font-family: var(--display); font-size: 30px; font-weight: 700; letter-spacing: 1.5px; line-height: 1.1; margin: 0; }
+  .brand span { color: var(--red); }
+  .brand-link:hover { text-decoration: none; }
+  .tagline { color: var(--muted); font-size: 13px; margin: 2px 0 0; }
+  .stripe { background: var(--red); height: 5px; }
+  .card { background: var(--paper); margin: 24px 0; padding: 28px 24px; }
+  h1 { font-family: var(--display); font-size: 34px; line-height: 1.15; font-weight: 700; margin: 0 0 12px; color: var(--black); }
+  h2 { color: var(--red); font-size: 12px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; margin: 0 0 14px; }
+  p { margin: 0 0 12px; color: var(--text); }
+  .lead { font-size: 17px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  form.signup { display: flex; gap: 8px; margin: 20px 0 8px; flex-wrap: wrap; }
+  input[type=email] {
+    flex: 1 1 240px; min-width: 0; font: inherit; font-size: 16px;
+    padding: 12px 14px; border: 2px solid var(--black); border-radius: 0;
+  }
+  input[type=email]:focus { outline: 3px solid var(--red); outline-offset: 0; }
+  button {
+    font: inherit; font-size: 16px; font-weight: 800; letter-spacing: .5px; cursor: pointer;
+    background: var(--red); color: #fff; border: 0; padding: 12px 22px;
+  }
+  button:hover { background: var(--red-dark); }
+  button.secondary { background: var(--black); }
+  .error { color: var(--red); font-weight: 700; margin: 0 0 4px; }
+  .hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+  .item { border-left: 4px solid var(--red); background: #fafafa; padding: 14px 16px; }
+  .item strong { display: block; color: var(--black); margin-bottom: 4px; }
+  .item p { margin: 0; font-size: 14px; }
+  .scoreboard { background: var(--black); color: #fff; text-align: center; padding: 18px 12px 14px; }
+  .teams { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; }
+  .team img { width: 56px; height: 56px; }
+  .team div { font-weight: 700; font-size: 14px; margin-top: 6px; }
+  .score { font-size: 40px; font-weight: 700; display: flex; gap: 14px; align-items: center; }
+  .score .x { color: var(--red); font-size: 20px; }
+  .match-info { color: #bbbbbb; font-size: 12px; margin-top: 10px; }
+  .sample-caption { margin-top: 8px; }
+  .footer-inner { color: #777777; font-size: 12px; padding-bottom: 32px; }
+  .eyebrow { color: var(--red); font-size: 12px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; margin: 0 0 8px; }
+  .score-inputs { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-weight: 700; margin: 16px 0; }
+  .score-inputs input, .nickname input {
+    font: inherit; font-size: 16px; padding: 10px 12px; border: 2px solid var(--black); border-radius: 0;
+  }
+  .score-inputs input { width: 64px; text-align: center; }
+  .nickname { display: block; font-weight: 700; margin: 0 0 16px; }
+  .nickname input { display: block; width: 100%; max-width: 320px; margin-top: 6px; }
+  .ranking { width: 100%; border-collapse: collapse; margin: 8px 0 14px; }
+  .ranking th { font-size: 11px; color: var(--muted); text-align: left; padding: 6px 4px; border-bottom: 2px solid var(--black); }
+  .ranking td { font-size: 15px; padding: 8px 4px; border-bottom: 1px solid #eeeeee; }
+  .ranking tr.me td { font-weight: 800; color: var(--red); background: #fdf3f3; }
+  @media (max-width: 560px) {
+    h1 { font-size: 28px; }
+    .card { padding: 22px 16px; margin: 16px 0; }
+    .grid { grid-template-columns: 1fr; }
+    button { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<header class="header">
+  <div class="header-inner">
+    <img src="/static/icon-512.png" alt="" width="64" height="64">
+    <div>
+      <a class="brand-link" href="/"><p class="brand">URUBU <span>NEWS</span></p></a>
+      <p class="tagline">Antes e depois de cada jogo, no seu e-mail</p>
+    </div>
+  </div>
+</header>
+<div class="stripe"></div>
+<main class="main">
+{% block content %}{% endblock %}
+</main>
+<footer class="footer-inner">
+  Projeto pessoal de um torcedor, sem fins comerciais e sem ligação oficial com o clube.
+  Resumos gerados com IA a partir das fontes citadas em cada edição; escudos e dados: ESPN.
+  Código aberto no <a href="https://github.com/dpontejs/flamengo-news">GitHub</a>.
+</footer>
+</body>
+</html>

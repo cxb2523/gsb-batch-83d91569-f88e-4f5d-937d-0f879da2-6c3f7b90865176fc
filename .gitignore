@@ -1,0 +1,20 @@
+.venv/
+.python/
+.env
+__pycache__/
+*.py[cod]
+*$py.class
+out/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+.DS_Store
+# Local SQLite of the subscription page (has e-mail addresses): never commit it
+data/
+*.db
+# Local tool state
+.omc/
+
+# Brainstorm mockups (visual companion)
+.superpowers/

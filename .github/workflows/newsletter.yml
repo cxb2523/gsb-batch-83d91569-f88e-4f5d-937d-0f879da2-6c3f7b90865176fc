@@ -1,0 +1,94 @@
+name: Newsletter
+
+on:
+  # The VPS (infra: newsletter-trigger timer) checks the match calendar every 10 minutes and
+  # dispatches each edition once; this hourly cron is the backup (`auto` + --skip-if-sent: it only
+  # sends an edition that is due and not sent yet). Odd minute: GitHub drops runs on the hour.
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+    inputs:
+      edition:
+        description: "Edição (auto = a que a agenda dos jogos manda agora)"
+        type: choice
+        options: [auto, pre, post, news]
+        default: auto
+      date:
+        description: "Data de referência (AAAA-MM-DD, opcional)"
+        type: string
+        required: false
+      dry_run:
+        description: "Só simular (não envia e-mail)"
+        type: boolean
+        default: true
+      skip_if_sent:
+        description: "Não enviar se a edição já saiu (disparo automático)"
+        type: boolean
+        default: false
+      note:
+        description: "Aviso no quadro \"Novidades\" (opcional; o assunto ganha \"Novidades!\")"
+        type: string
+        required: false
+
+# Least privilege: jobs that need more ask for it (the image job publishes to GHCR).
+permissions:
+  contents: read
+
+# Never let two runs send the same edition in parallel.
+concurrency:
+  group: newsletter
+  cancel-in-progress: false
+
+jobs:
+  send:
+    name: Build and send newsletter
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Build and send
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-flash-latest' }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NEWSLETTER_FROM: ${{ secrets.NEWSLETTER_FROM }}
+          NEWSLETTER_RECIPIENTS: ${{ secrets.NEWSLETTER_RECIPIENTS }}
+          # Subscription page: without the token, only NEWSLETTER_RECIPIENTS receives it.
+          SUBSCRIBERS_API_TOKEN: ${{ secrets.SUBSCRIBERS_API_TOKEN }}
+          PUBLIC_URL: ${{ vars.PUBLIC_URL || 'https://urubunews.diegoponte.dev' }}
+          # Scheduled runs send for real; manual runs default to a dry run.
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || (inputs.dry_run && 'true' || 'false') }}
+          EDITION: ${{ inputs.edition || 'auto' }}
+          REFERENCE_DATE: ${{ inputs.date }}
+          NOTE: ${{ inputs.note }}
+          # Scheduled and VPS-triggered runs skip an edition another trigger already sent.
+          SKIP_IF_SENT: ${{ github.event_name == 'schedule' && 'true' || (inputs.skip_if_sent && 'true' || 'false') }}
+        run: |
+          args=(--edition "$EDITION")
+          if [ "$SKIP_IF_SENT" = "true" ]; then args+=(--skip-if-sent); fi
+          if [ -n "$REFERENCE_DATE" ]; then args+=(--date "$REFERENCE_DATE"); fi
+          if [ -n "$NOTE" ]; then args+=(--note "$NOTE"); fi
+          echo "DRY_RUN=$DRY_RUN SKIP_IF_SENT=$SKIP_IF_SENT edition=$EDITION date=${REFERENCE_DATE:-hoje}"
+          uv run python -m flanews run "${args[@]}"
+
+      - name: Upload rendered newsletter
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: newsletter-${{ github.run_id }}
+          path: out/
+          if-no-files-found: ignore
+          retention-days: 30

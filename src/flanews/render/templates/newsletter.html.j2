@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Urubu News — {{ n.edition.label }}</title>
+<style>
+  body { margin: 0; padding: 0; background-color: #F4EFE6; }
+  .wrapper { background-color: #F4EFE6; }
+  .container { background-color: #ffffff; }
+  .font { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #1C1C1C; }
+  .header { background-color: #F4EFE6; padding: 16px 24px 12px 24px; }
+  .brand { color: #ffffff; font-size: 24px; font-weight: 800; letter-spacing: 1px; margin: 0; }
+  .brand-red { color: #A51C24; }
+  .edition { color: #6B6B6B; font-size: 13px; margin: 4px 0 0 0; }
+  .stripe { background-color: #A51C24; height: 5px; line-height: 5px; font-size: 5px; }
+  .lead { padding: 24px 24px 8px 24px; }
+  .note { background-color: #F4EFE6; border-left: 4px solid #A51C24; padding: 12px 16px; }
+  .note-title { font-size: 13px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; color: #A51C24; margin: 0 0 4px 0; }
+  .note-text { font-size: 15px; line-height: 1.5; color: #1C1C1C; margin: 0; }
+  .headline { font-size: 24px; font-weight: 800; line-height: 1.25; margin: 0 0 10px 0; color: #141414; }
+  .text { font-size: 15px; line-height: 1.55; margin: 0; color: #222222; }
+  .muted { color: #6B6B6B; font-size: 13px; line-height: 1.5; margin: 0; }
+  .block { padding: 12px 24px; }
+  .card { border-left: 4px solid #A51C24; background-color: #fafafa; }
+  .card-body { padding: 16px 18px; }
+  .card-title { color: #A51C24; font-size: 12px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; margin: 0 0 12px 0; }
+  .scoreboard { background-color: #141414; }
+  .scoreboard-body { padding: 18px 12px; }
+  .team-name { color: #ffffff; font-size: 14px; font-weight: 700; padding-top: 6px; }
+  .score { color: #ffffff; font-size: 40px; line-height: 44px; font-weight: 700; }
+  .score-x { color: #A51C24; font-size: 20px; line-height: 44px; font-weight: 700; }
+  .match-info { color: #bbbbbb; font-size: 12px; padding: 0 12px 14px 12px; }
+  .goals { background-color: #1a1a1a; color: #ffffff; font-size: 14px; padding: 10px 16px; }
+  .goal-detail { color: #999999; font-size: 12px; }
+  .stats td { font-size: 14px; padding: 6px 0; border-bottom: 1px solid #eeeeee; }
+  .stat-label { color: #6B6B6B; font-size: 13px; }
+  .topic { padding: 0 0 18px 0; }
+  .topic-title { font-size: 17px; font-weight: 700; margin: 0 0 6px 0; color: #141414; }
+  .link { color: #A51C24; text-decoration: none; font-weight: 600; }
+  .next-name { font-size: 18px; font-weight: 800; margin: 0 0 4px 0; color: #141414; }
+  .table th { font-size: 11px; color: #6B6B6B; text-align: left; padding: 6px 4px; border-bottom: 2px solid #141414; }
+  .table td { font-size: 14px; padding: 7px 4px; border-bottom: 1px solid #eeeeee; }
+  .fla td { font-weight: 800; color: #A51C24; }
+  .subhead { font-size: 13px; font-weight: 700; color: #141414; margin: 14px 0 6px 0; }
+  .chip { width: 28px; height: 28px; font-size: 13px; font-weight: 800; color: #ffffff; }
+  .chip-sm { width: 20px; height: 20px; font-size: 11px; }
+  .chip-V { background-color: #1E8E3E; }
+  .chip-E { background-color: #8A8A8A; }
+  .chip-D { background-color: #A51C24; }
+  .kpi { padding: 6px 0; }
+  .kpi-value { font-size: 22px; font-weight: 800; color: #141414; }
+  .kpi-label { font-size: 12px; color: #6B6B6B; }
+  .brief { padding: 0 0 14px 0; }
+  .brief-title { color: #141414; font-size: 15px; font-weight: 700; text-decoration: none; }
+  .tag { background-color: #A51C24; color: #ffffff; font-size: 10px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; padding: 2px 6px; margin-right: 6px; }
+  .bet th { font-size: 11px; color: #6B6B6B; font-weight: 700; padding: 3px; }
+  .bet td { padding: 3px; }
+  .bet-cell { display: block; padding: 8px 0; font-size: 14px; font-weight: 700; color: #1C1C1C; text-decoration: none; text-align: center; border: 1px solid #dddddd; }
+  .bet-V { background-color: #E8F5EC; border-color: #1E8E3E; }
+  .bet-E { background-color: #f0f0f0; }
+  .bet-D { background-color: #FBEAEA; border-color: #A51C24; }
+  .footer { padding: 20px 24px 28px 24px; color: #777777; font-size: 12px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<table role="presentation" class="wrapper" width="100%" cellpadding="0" cellspacing="0" border="0">
+<tr><td align="center" style="padding: 16px 8px;">
+<table role="presentation" class="container font" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width: 600px;">
+
+  <tr><td class="header font">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+      <td valign="middle">
+        <img src="{{ logo_url }}" alt="Urubu News" width="320" height="127" style="display: block; border: 0; color: #141414; font-size: 26px; font-weight: 800;">
+        <p class="edition" style="padding-left: 4px;">{{ n.edition.label }}</p>
+      </td>
+    </tr></table>
+  </td></tr>
+  <tr><td class="stripe">&nbsp;</td></tr>
+
+  <tr><td class="lead font">
+    {% if note %}
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 16px;">
+      <tr><td class="note font">
+        <p class="note-title">Novidades</p>
+        <p class="note-text">{{ note }}</p>
+      </td></tr>
+    </table>
+    {% endif %}
+    {% if n.headline %}<p class="headline">{{ n.headline }}</p>{% endif %}
+    <p class="text">{{ n.intro }}</p>
+  </td></tr>
+
+  {% if n.last_match %}{% set m = n.last_match %}
+  <tr><td class="block font">
+    <p class="card-title" style="margin-top: 8px;">Última partida</p>
+    <table role="presentation" class="scoreboard" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr><td class="scoreboard-body">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+          <td width="35%" align="center" valign="top">
+            {% if m.home_logo %}<img src="{{ m.home_logo }}" alt="{{ m.home }}" width="56" height="56" style="display: block; border: 0; margin: 0 auto;">{% endif %}
+            <div class="team-name">{{ m.home }}</div>
+          </td>
+          <td width="30%" align="center" valign="middle">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center"><tr>
+              <td class="score" style="vertical-align: middle;">{{ m.home_goals }}</td>
+              <td class="score-x" style="vertical-align: middle; padding: 0 12px;">x</td>
+              <td class="score" style="vertical-align: middle;">{{ m.away_goals }}</td>
+            </tr></table>
+          </td>
+          <td width="35%" align="center" valign="top">
+            {% if m.away_logo %}<img src="{{ m.away_logo }}" alt="{{ m.away }}" width="56" height="56" style="display: block; border: 0; margin: 0 auto;">{% endif %}
+            <div class="team-name">{{ m.away }}</div>
+          </td>
+        </tr></table>
+      </td></tr>
+      <tr><td class="match-info" align="center">{{ m.competition }} · {{ m.date | when }}{% if m.venue %} · {{ m.venue }}{% endif %}</td></tr>
+      {% set goals = m.events | selectattr("type", "equalto", "goal") | list %}
+      {% if goals %}
+      <tr><td class="goals">
+        {% for e in goals %}
+        <div>⚽ {{ e | minute }} <strong>{{ e.player }}</strong> <span class="goal-detail">{{ e.team }}{% if e.detail %} · {{ e.detail }}{% endif %}</span></div>
+        {% endfor %}
+      </td></tr>
+      {% endif %}
+    </table>
+    {% if m.statistics %}
+    {% set is_home_fla = "flamengo" in m.home | lower %}
+    {% set c_home = "#A51C24" if is_home_fla else "#141414" %}
+    {% set c_away = "#141414" if is_home_fla else "#A51C24" %}
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top: 16px; background-color: #FAFAFA; border: 1px solid #EEEEEE; border-radius: 6px;">
+      <tr><td style="padding: 14px 16px 8px 16px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 12px;">
+          <tr>
+            <td width="40%" style="font-size: 13px; font-weight: 800; color: {{ c_home }};">{{ m.home }}</td>
+            <td width="20%" align="center" style="font-size: 11px; font-weight: 800; color: #888888; letter-spacing: 1px; text-transform: uppercase;">Estatísticas</td>
+            <td width="40%" align="right" style="font-size: 13px; font-weight: 800; color: {{ c_away }};">{{ m.away }}</td>
+          </tr>
+        </table>
+        {% for label, values in m.statistics.items() %}
+        {% set shares = values | stat_shares %}
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 10px;">
+          <tr>
+            <td width="25%" style="font-size: 13px; font-weight: {{ '800' if shares[0] >= shares[1] and shares[0] > 0 else '500' }}; color: #141414;">{{ values[0] }}</td>
+            <td width="50%" align="center" style="font-size: 12px; font-weight: 600; color: #6B6B6B;">{{ label }}</td>
+            <td width="25%" align="right" style="font-size: 13px; font-weight: {{ '800' if shares[1] >= shares[0] and shares[1] > 0 else '500' }}; color: #141414;">{{ values[1] }}</td>
+          </tr>
+          <tr>
+            <td colspan="3" style="padding-top: 4px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #EFEBE4; border-radius: 3px; height: 6px; line-height: 6px; font-size: 1px; overflow: hidden;">
+                <tr>
+                  {% if shares[0] > 0 and shares[1] > 0 %}
+                  <td width="{{ shares[0] }}%" bgcolor="{{ c_home }}" style="background-color: {{ c_home }}; height: 6px; line-height: 6px; font-size: 1px; border-radius: 3px 0 0 3px;">&nbsp;</td>
+                  <td width="2" bgcolor="#FAFAFA" style="background-color: #FAFAFA; width: 2px; height: 6px; line-height: 6px; font-size: 1px;">&nbsp;</td>
+                  <td width="{{ shares[1] }}%" bgcolor="{{ c_away }}" style="background-color: {{ c_away }}; height: 6px; line-height: 6px; font-size: 1px; border-radius: 0 3px 3px 0;">&nbsp;</td>
+                  {% elif shares[0] > 0 %}
+                  <td width="100%" bgcolor="{{ c_home }}" style="background-color: {{ c_home }}; height: 6px; line-height: 6px; font-size: 1px; border-radius: 3px;">&nbsp;</td>
+                  {% elif shares[1] > 0 %}
+                  <td width="100%" bgcolor="{{ c_away }}" style="background-color: {{ c_away }}; height: 6px; line-height: 6px; font-size: 1px; border-radius: 3px;">&nbsp;</td>
+                  {% else %}
+                  <td width="100%" bgcolor="#EFEBE4" style="background-color: #EFEBE4; height: 6px; line-height: 6px; font-size: 1px; border-radius: 3px;">&nbsp;</td>
+                  {% endif %}
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+        {% endfor %}
+      </td></tr>
+    </table>
+    {% endif %}
+  </td></tr>
+  {% endif %}
+
+  {% if n.bolao and page_url %}{% set b = n.bolao %}
+  <tr><td class="block font">
+    <table role="presentation" class="card" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td class="card-body">
+      <p class="card-title">Bolão · resultado</p>
+      <p class="text" style="margin: 0 0 10px 0;">{% if b.exact %}Cravaram o {{ b.fla_goals }} x {{ b.opp_goals }}: <strong>{{ b.exact | join(", ") }}</strong>.{% else %}Ninguém cravou o {{ b.fla_goals }} x {{ b.opp_goals }}.{% endif %}</p>
+      {% if b.king %}<p class="text" style="margin: 0 0 4px 0;">👑 Rei do Maracanã: <strong>{{ b.king }}</strong></p>{% endif %}
+      {% if b.cold_foot %}<p class="text" style="margin: 0 0 10px 0;">🧊 Pé-frio da rodada: <strong>{{ b.cold_foot }}</strong></p>{% endif %}
+      {% if b.top %}
+      <p class="subhead">Top 5 da temporada</p>
+      <table role="presentation" class="table" width="100%" cellpadding="0" cellspacing="0" border="0">
+        {% for r in b.top %}<tr><td>{{ loop.index }}</td><td>{{ r.nickname }}</td><td align="right">{{ r.points }} pts</td></tr>{% endfor %}
+      </table>
+      {% endif %}
+      <p style="margin: 12px 0 0 0;"><a class="link" href="{{ page_url }}/bolao?t=BET-TOKEN-PLACEHOLDER">Ver ranking completo →</a></p>
+    </td></tr></table>
+  </td></tr>
+  {% endif %}
+
+  {% if n.edition.kind == "pre" and n.next_match %}{% set x = n.next_match %}{% set pv = n.preview %}
+  {% set fla = {"name": "Flamengo", "logo": flamengo_logo, "form": pv.flamengo_form if pv else []} %}
+  {% set opp = {"name": x.opponent, "logo": x.opponent_logo, "form": pv.opponent_form if pv else []} %}
+  {% set sides = [fla, opp] if x.is_home else [opp, fla] %}
+  <tr><td class="block font">
+    <p class="card-title" style="margin-top: 8px;">O jogo</p>
+    <table role="presentation" class="scoreboard" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr><td class="scoreboard-body">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+          {% for side in sides %}
+          {% if loop.index == 2 %}
+          <td width="30%" align="center" valign="middle">
+            <div class="score" style="font-size: 30px; line-height: 34px;">{{ x.date.strftime("%H:%M") }}</div>
+            <div class="match-info" style="padding: 4px 0 0 0;">{{ x.date | when }}</div>
+          </td>
+          {% endif %}
+          <td width="35%" align="center" valign="top">
+            {% if side.logo %}<img src="{{ side.logo }}" alt="{{ side.name }}" width="56" height="56" style="display: block; border: 0; margin: 0 auto;">{% endif %}
+            <div class="team-name">{{ side.name }}</div>
+            {% if side.form %}
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin-top: 8px;"><tr>
+              {% for f in side.form %}<td class="chip chip-sm chip-{{ f.result }}" align="center" title="{{ f.score }} {{ f.opponent }}">{{ f.result }}</td>{% if not loop.last %}<td width="3"></td>{% endif %}{% endfor %}
+            </tr></table>
+            {% endif %}
+          </td>
+          {% endfor %}
+        </tr></table>
+      </td></tr>
+      <tr><td class="match-info" align="center">{{ x.competition }}{% if x.venue %} · {{ x.venue }}{% endif %}{% if n.broadcast %}<br><span style="color: #ffffff; font-weight: 700;">Onde assistir:</span> {{ n.broadcast }}{% endif %}{% if pv and (pv.flamengo_form or pv.opponent_form) %}<br><span style="font-size: 11px;">Momento dos times: últimos jogos, do mais recente ao mais antigo</span>{% endif %}</td></tr>
+    </table>
+  </td></tr>
+  {% if (pv and pv.head_to_head) or n.lineups or n.tips or n.outlook %}
+  <tr><td class="block font">
+    <table role="presentation" class="card" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td class="card-body">
+      {% if n.outlook %}
+      <p class="card-title">O que esperar</p>
+      <p class="text" style="margin: 0 0 18px 0;">{{ n.outlook }}</p>
+      {% endif %}
+      {% if pv and pv.head_to_head %}
+      <p class="card-title">Últimos confrontos</p>
+      <p class="muted" style="margin: 0 0 8px 0;">{{ pv | h2h }}</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+        {% for f in pv.head_to_head %}
+        <tr>
+          <td width="26" valign="middle" style="padding: 3px 0;"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td class="chip chip-sm chip-{{ f.result }}" align="center">{{ f.result }}</td></tr></table></td>
+          <td class="text" valign="middle" style="padding: 3px 0;">Flamengo {{ f.score | replace("-", " x ") }} {{ f.opponent }}</td>
+          <td class="muted" valign="middle" align="right" style="padding: 3px 0; white-space: nowrap;">{{ f.date.strftime("%d/%m/%Y") }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% endif %}
+      {% if n.lineups %}
+      <p class="card-title" style="margin-top: 18px;">Prováveis escalações</p>
+      {% for line in n.lineups.splitlines() if line.strip() %}<p class="text" style="margin: 0 0 6px 0;">{{ line }}</p>{% endfor %}
+      {% endif %}
+      {% if n.tips %}
+      <p class="card-title" style="margin-top: 18px;">Palpites</p>
+      {% for tip in n.tips %}<p class="text" style="margin: 0 0 6px 0;">· {{ tip }}</p>{% endfor %}
+      {% endif %}
+    </td></tr></table>
+  </td></tr>
+  {% endif %}
+  {% if n.bolao_open and page_url and n.edition.match_id %}
+  <!--bolao-->
+  <tr><td class="block font">
+    <table role="presentation" class="card" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td class="card-body">
+      <p class="card-title">Bolão · seu palpite</p>
+      <p class="muted" style="margin: 0 0 10px 0;">Clique no placar que você crava. Linha = gols do Flamengo, coluna = gols do {{ x.opponent }}. Vale até o apito.</p>
+      <table role="presentation" class="bet" width="100%" cellpadding="0" cellspacing="0" border="0">
+        <tr><th align="left">FLA \ {{ x.opponent }}</th>{% for o in range(4) %}<th>{{ o }}</th>{% endfor %}</tr>
+        {% for f in range(4) %}
+        <tr><th align="left">{{ f }}</th>{% for o in range(4) %}{% set kind = "V" if f > o else ("E" if f == o else "D") %}<td><a class="bet-cell bet-{{ kind }}" href="{{ page_url }}/palpite?t=BET-TOKEN-PLACEHOLDER&m={{ n.edition.match_id }}&p={{ f }}-{{ o }}">{{ f }}x{{ o }}</a></td>{% endfor %}</tr>
+        {% endfor %}
+      </table>
+      <p style="margin: 10px 0 0 0;"><a class="link" href="{{ page_url }}/palpite?t=BET-TOKEN-PLACEHOLDER&m={{ n.edition.match_id }}">Goleada? Outro placar →</a></p>
+    </td></tr></table>
+  </td></tr>
+  <!--/bolao-->
+  {% endif %}
+  {% endif %}
+
+  {% set mo = n.moment %}
+  {% set leaders = n.last_match.leaders if n.last_match else {} %}
+  {% if n.analysis or (mo and (mo.form or mo.standing or mo.rankings)) or leaders %}
+  <tr><td class="block font">
+    <table role="presentation" class="card" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td class="card-body">
+      <p class="card-title">Análise</p>
+      {% if n.analysis %}<p class="subhead">Leitura do jogo</p><p class="text">{{ n.analysis }}</p>{% endif %}
+      {% if mo and mo.form %}
+      <p class="subhead">Últimos {{ mo.form | length }} jogos</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+        {% for f in mo.form %}<td class="chip chip-{{ f.result }}" align="center" title="{{ f.score }} {{ f.opponent }}">{{ f.result }}</td><td width="6"></td>{% endfor %}
+      </tr></table>
+      <p class="muted" style="margin-top: 6px;">{% for f in mo.form %}{{ f.score }} {{ f.opponent }}{% if not loop.last %} · {% endif %}{% endfor %}</p>
+      {% endif %}
+      {% if mo and mo.standing %}{% set s = mo.standing %}
+      <p class="subhead">Campanha no Brasileirão</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+        <td width="33%" class="kpi"><span class="kpi-value">{{ s.position }}º</span><br><span class="kpi-label">{{ s.points }} pontos</span></td>
+        <td width="33%" class="kpi"><span class="kpi-value">{{ s | performance }}</span><br><span class="kpi-label">aproveitamento</span></td>
+        <td width="34%" class="kpi"><span class="kpi-value">{{ s.goals_for }}</span><br><span class="kpi-label">{{ s.goals_for }} gols pró · {{ s.goals_against }} contra</span></td>
+      </tr></table>
+      {% if mo.gap %}<p class="muted" style="margin-top: 6px;">Na tabela: {{ mo.gap }}.</p>{% endif %}
+      {% endif %}
+      {% if mo and mo.rankings %}
+      <p class="subhead">Rankings do campeonato</p>
+      {% for r in mo.rankings %}<p class="text">{{ r.player }} · {{ r.position }}º em {{ r.category | lower }} ({{ r.value }})</p>{% endfor %}
+      {% endif %}
+      {% if leaders.get("Flamengo") %}
+      <p class="subhead">Destaques do Flamengo na partida</p>
+      {% for label, player, value in leaders["Flamengo"] %}<p class="text">{{ label }}: <strong>{{ player }}</strong> ({{ value }})</p>{% endfor %}
+      {% endif %}
+    </td></tr></table>
+  </td></tr>
+  {% endif %}
+
+  {% if n.topics %}
+  <tr><td class="block font">
+    <table role="presentation" class="card" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td class="card-body">
+      <p class="card-title">Notícias</p>
+      {% for t in n.topics %}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td class="topic">
+        {% if t.image_url %}
+        <div style="margin: 0 0 10px 0;">
+          <img src="{{ t.image_url }}" alt="{{ t.title }}" width="512" height="268" style="display: block; width: 100%; max-width: 512px; height: auto; border: 0; border-radius: 4px;">
+        </div>
+        {% endif %}
+        <p class="topic-title">{{ t.title }}</p>
+        {% if t.summary %}<p class="text">{{ t.summary }}</p>{% endif %}
+        {% if t.articles %}<p class="muted" style="margin-top: 6px;">Fontes: {% for a in t.articles %}<a class="link" href="{{ a.url }}">{{ a.source | source }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+      </td></tr></table>
+      {% endfor %}
+    </td></tr></table>
+  </td></tr>
+  {% endif %}
+
+  {% for section_title, items in [("Saiba mais", n.learn_more), ("Brasil afora", n.around_brazil)] if items %}
+  <tr><td class="block font">
+    <table role="presentation" class="card" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td class="card-body">
+      <p class="card-title">{{ section_title }}</p>
+      {% for b in items %}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td class="brief">
+        {% if b.category %}<span class="tag">{{ b.category }}</span>{% endif %}
+        <a class="brief-title" href="{{ b.url }}">{{ b.title }}</a>
+        {% if b.summary %}<p class="text" style="margin-top: 4px;">{{ b.summary }}</p>{% endif %}
+        <p class="muted" style="margin-top: 2px;">{{ b.source | source }}</p>
+      </td></tr></table>
+      {% endfor %}
+    </td></tr></table>
+  </td></tr>
+  {% endfor %}
+
+  {% if n.next_match and n.edition.kind != "pre" %}{% set x = n.next_match %}
+  <tr><td class="block font">
+    <table role="presentation" class="card" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td class="card-body">
+      <p class="card-title">Próximo jogo</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+        {% if x.opponent_logo %}<td width="56" valign="middle"><img src="{{ x.opponent_logo }}" alt="{{ x.opponent }}" width="44" height="44" style="display: block; border: 0;"></td>{% endif %}
+        <td valign="middle">
+          <p class="next-name">{% if x.is_home %}Flamengo x {{ x.opponent }}{% else %}{{ x.opponent }} x Flamengo{% endif %}</p>
+          <p class="muted">{{ x.competition }} · {{ x.date | when }}{% if x.venue %} · {{ x.venue }}{% endif %}</p>
+        </td>
+      </tr></table>
+    </td></tr></table>
+  </td></tr>
+  {% endif %}
+
+  {% if standings %}
+  <tr><td class="block font">
+    <table role="presentation" class="card" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td class="card-body">
+      <p class="card-title">Classificação · Brasileirão</p>
+      <table role="presentation" class="table" width="100%" cellpadding="0" cellspacing="0" border="0">
+        <tr><th>#</th><th>Time</th><th>P</th><th>J</th><th>V</th><th>E</th><th>D</th><th>SG</th></tr>
+        {% for r in standings %}
+        <tr{% if r.is_flamengo %} class="fla"{% endif %}><td>{{ r.position }}</td><td>{{ r.team }}</td><td>{{ r.points }}</td><td>{{ r.played }}</td><td>{{ r.won }}</td><td>{{ r.drawn }}</td><td>{{ r.lost }}</td><td>{{ r.goals_diff }}</td></tr>
+        {% endfor %}
+      </table>
+    </td></tr></table>
+  </td></tr>
+  {% endif %}
+
+  <tr><td class="footer font">
+    Resumo gerado com IA a partir das fontes citadas; confira os links para detalhes. Escudos e dados: ESPN.
+    <br>Feito por um torcedor, sem ligação oficial com o clube.
+    {% if subscribe_url %}<br>Recebeu de alguém? Inscreva-se em <a class="link" href="{{ subscribe_url }}">{{ subscribe_url | replace("https://", "") }}</a>.{% endif %}
+    {% if unsubscribe_url %}<br>Não quer mais receber? <a class="link" href="{{ unsubscribe_url }}">Clique para se descadastrar</a>.{% endif %}
+  </td></tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>

@@ -1,0 +1,172 @@
+URUBU NEWS
+{{ n.edition.label }}
+{% if note %}
+
+== Novidades ==
+{{ note }}
+{% endif %}
+{% if n.headline %}
+
+{{ n.headline }}
+{% endif %}
+
+{{ n.intro }}
+{% if n.last_match %}{% set m = n.last_match %}
+
+== Última partida ==
+{{ m.home }} {{ m.home_goals }} x {{ m.away_goals }} {{ m.away }}
+{{ m.competition }} · {{ m.date | when }}{% if m.venue %} · {{ m.venue }}{% endif %}
+
+{% for e in m.events if e.type == "goal" %}
+⚽ {{ e | minute }} {{ e.player }}{% if e.detail %} ({{ e.detail }}){% endif %} — {{ e.team }}
+{% endfor %}
+{% if m.statistics %}
+
+{% for label, values in m.statistics.items() %}
+{{ label }}: {{ values[0] }} x {{ values[1] }}
+{% endfor %}
+{% endif %}
+{% endif %}
+{% if n.bolao and page_url %}{% set b = n.bolao %}
+
+== Bolão: resultado ==
+{% if b.exact %}Cravaram o {{ b.fla_goals }} x {{ b.opp_goals }}: {{ b.exact | join(", ") }}.{% else %}Ninguém cravou o {{ b.fla_goals }} x {{ b.opp_goals }}.{% endif %}
+
+{% if b.king %}Rei do Maracanã: {{ b.king }}
+{% endif %}
+{% if b.cold_foot %}Pé-frio da rodada: {{ b.cold_foot }}
+{% endif %}
+{% if b.top %}
+Top 5 da temporada:
+{% for r in b.top %}{{ loop.index }}. {{ r.nickname }} — {{ r.points }} pts
+{% endfor %}
+{% endif %}
+Ranking completo: {{ page_url }}/bolao?t=BET-TOKEN-PLACEHOLDER
+{% endif %}
+{% if n.edition.kind == "pre" and n.next_match %}{% set x = n.next_match %}{% set pv = n.preview %}
+
+== O jogo ==
+{% if x.is_home %}Flamengo x {{ x.opponent }}{% else %}{{ x.opponent }} x Flamengo{% endif %}
+
+{{ x.competition }} · {{ x.date | when }}{% if x.venue %} · {{ x.venue }}{% endif %}
+
+{% if n.broadcast %}
+Onde assistir: {{ n.broadcast }}
+{% endif %}
+{% if n.outlook %}
+
+O que esperar
+{{ n.outlook }}
+{% endif %}
+{% if pv and (pv.flamengo_form or pv.opponent_form) %}
+
+Momento dos times
+{% for team, form in [("Flamengo", pv.flamengo_form), (pv.opponent, pv.opponent_form)] if form %}
+{{ team }}: {{ form | map(attribute="result") | join(" ") }} ({% for f in form %}{{ f.score }} {{ f.opponent }}{% if not loop.last %}, {% endif %}{% endfor %})
+{% endfor %}
+{% endif %}
+{% if pv and pv.head_to_head %}
+
+Últimos confrontos: {{ pv | h2h }}
+{% for f in pv.head_to_head %}
+{{ f.result }} Flamengo {{ f.score | replace("-", " x ") }} {{ f.opponent }} ({{ f.date.strftime("%d/%m/%Y") }}, {{ f.competition }})
+{% endfor %}
+{% endif %}
+{% if n.lineups %}
+
+Prováveis escalações
+{{ n.lineups }}
+{% endif %}
+{% if n.tips %}
+
+Palpites
+{% for tip in n.tips %}- {{ tip }}
+{% endfor %}
+{% endif %}
+{% if n.bolao_open and page_url and n.edition.match_id %}
+<!--bolao-->
+
+== Bolão: seu palpite ==
+Crave o placar (Flamengo x {{ x.opponent }}), vale até o apito:
+{% for f, o in [(1, 0), (2, 0), (2, 1), (1, 1), (0, 0), (0, 1)] %}
+{{ f }}x{{ o }}: {{ page_url }}/palpite?t=BET-TOKEN-PLACEHOLDER&m={{ n.edition.match_id }}&p={{ f }}-{{ o }}
+{% endfor %}
+Outro placar: {{ page_url }}/palpite?t=BET-TOKEN-PLACEHOLDER&m={{ n.edition.match_id }}
+<!--/bolao-->
+{% endif %}
+{% endif %}
+{% set mo = n.moment %}
+{% set leaders = n.last_match.leaders if n.last_match else {} %}
+{% if n.analysis or (mo and (mo.form or mo.standing or mo.rankings)) or leaders %}
+
+== Análise ==
+{% if n.analysis %}
+{{ n.analysis }}
+{% endif %}
+{% if mo and mo.form %}
+
+Forma: {{ mo.form | map(attribute="result") | join(" ") }} ({% for f in mo.form %}{{ f.score }} {{ f.opponent }}{% if not loop.last %}, {% endif %}{% endfor %})
+{% endif %}
+{% if mo and mo.standing %}
+Brasileirão: {{ mo.standing.position }}º, {{ mo.standing.points }} pts, {{ mo.standing | performance }} de aproveitamento, {{ mo.standing.goals_for }} gols pró e {{ mo.standing.goals_against }} contra{% if mo.gap %}; {{ mo.gap }}{% endif %}.
+{% endif %}
+{% if mo and mo.rankings %}
+{% for r in mo.rankings %}
+{{ r.player }}: {{ r.position }}º em {{ r.category | lower }} ({{ r.value }})
+{% endfor %}
+{% endif %}
+{% if leaders.get("Flamengo") %}
+Destaques: {% for label, player, value in leaders["Flamengo"] %}{{ label }} {{ player }} ({{ value }}){% if not loop.last %}; {% endif %}{% endfor %}
+
+{% endif %}
+{% endif %}
+{% if n.topics %}
+
+== Notícias ==
+{% for t in n.topics %}
+
+* {{ t.title }}
+{{ t.summary }}
+{% for a in t.articles %}
+  - {{ a.source | source }}: {{ a.url }}
+{% endfor %}
+{% endfor %}
+{% endif %}
+{% for section_title, items in [("Saiba mais", n.learn_more), ("Brasil afora", n.around_brazil)] if items %}
+
+== {{ section_title }} ==
+{% for b in items %}
+
+* {% if b.category %}[{{ b.category }}] {% endif %}{{ b.title }}
+{% if b.summary %}
+{{ b.summary }}
+{% endif %}
+  {{ b.url }}
+{% endfor %}
+{% endfor %}
+{% if n.next_match and n.edition.kind != "pre" %}{% set x = n.next_match %}
+
+== Próximo jogo ==
+{% if x.is_home %}Flamengo x {{ x.opponent }}{% else %}{{ x.opponent }} x Flamengo{% endif %}
+
+{{ x.competition }} · {{ x.date | when }}{% if x.venue %} · {{ x.venue }}{% endif %}
+
+{% endif %}
+{% if standings %}
+
+== Classificação ==
+{% for r in standings %}
+{{ r.position }}. {{ r.team }} — {{ r.points }} pts ({{ r.played }} J, SG {{ r.goals_diff }}){% if r.is_flamengo %} ◀{% endif %}
+
+{% endfor %}
+{% endif %}
+
+--
+Resumo gerado com IA a partir das fontes citadas.
+Feito por um torcedor, sem ligação oficial com o clube.
+{% if subscribe_url %}
+Recebeu de alguém? Inscreva-se em {{ subscribe_url }}
+{% endif %}
+{% if unsubscribe_url %}
+Para se descadastrar: {{ unsubscribe_url }}
+{% endif %}

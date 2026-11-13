@@ -1,0 +1,451 @@
+"""Subscription page: landing, sign-up with e-mail confirmation and one-click unsubscribe.
+
+Run with `uvicorn flanews.web.app:create_app --factory`. Behind Caddy, start uvicorn with
+`--proxy-headers` so the rate limit sees the visitor's IP.
+"""
+
+import hmac
+import logging
+import os
+import re
+from collections import defaultdict, deque
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from urllib.parse import urlencode
+
+from fastapi import FastAPI, Form, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from jinja2 import select_autoescape
+from pydantic import BaseModel, Field
+
+from flanews.config import Settings, get_settings
+from flanews.send.resend_sender import UNSUBSCRIBE_PLACEHOLDER
+from flanews.web.bolao import TZ, BolaoStore
+from flanews.web.mailer import Mailer, MailError, mailer_from_settings
+from flanews.web.store import RequestResult, SubscriberStore, normalize
+from flanews.web.tokens import make_token, read_token
+from flanews.web.welcome import add_welcome
+
+logger = logging.getLogger(__name__)
+
+CONFIRM_MAX_AGE = timedelta(days=7)
+SIGNUPS_PER_IP = 5
+SIGNUP_WINDOW = timedelta(hours=1)
+# Deliberately strict: letters, digits and the usual symbols; dot-separated domain labels.
+EMAIL_RE = re.compile(
+    r"^[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}$"
+)
+CONFIRMATIONS_PER_DAY = 30  # global cap: protects the Resend quota and the domain reputation
+MAX_EMAIL_LENGTH = 254
+
+WELCOME_PREFIX = "Boas-vindas! "
+MIN_NICKNAME, MAX_NICKNAME = 3, 20
+SCORE_RE = re.compile(r"^(\d)-(\d)$")
+
+
+def parse_score(text: str) -> tuple[int, int] | None:
+    """'2-1' -> (2, 1); each side 0-9, anything else is None."""
+    found = SCORE_RE.match(text.strip())
+    return (int(found[1]), int(found[2])) if found else None
+
+
+templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+# Jinja only autoescapes .html by default; ours end in .html.j2 and show user input.
+templates.env.autoescape = select_autoescape(["html.j2"])
+
+
+class RateLimiter:
+    """At most `limit` hits per key within `window` (in memory: one process, few users)."""
+
+    def __init__(self, limit: int, window: timedelta) -> None:
+        self.limit = limit
+        self.window = window
+        self._hits: dict[str, deque[datetime]] = defaultdict(deque)
+
+    def allow(self, key: str, now: datetime) -> bool:
+        hits = self._hits[key]
+        while hits and now - hits[0] >= self.window:
+            hits.popleft()
+        if len(hits) >= self.limit:
+            return False
+        hits.append(now)
+        return True
+
+
+class EditionIn(BaseModel):
+    subject: str
+    html: str
+    text: str
+
+
+class BolaoMatchIn(BaseModel):
+    opponent: str
+    flamengo_home: bool
+    kickoff: datetime
+
+
+class BolaoResultIn(BaseModel):
+    fla_goals: int = Field(ge=0)
+    opp_goals: int = Field(ge=0)
+
+
+def is_valid_email(email: str) -> bool:
+    return len(email) <= MAX_EMAIL_LENGTH and EMAIL_RE.match(email) is not None
+
+
+def create_app(
+    settings: Settings | None = None,
+    store: SubscriberStore | None = None,
+    mailer: Mailer | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    bolao: BolaoStore | None = None,
+) -> FastAPI:
+    settings = settings or get_settings()
+    secret = settings.SUBSCRIBE_SECRET
+    if not secret:
+        raise RuntimeError("SUBSCRIBE_SECRET is required to sign confirmation links")
+    store = store or SubscriberStore(settings.SUBSCRIBERS_DB)
+    bolao = bolao or BolaoStore(settings.SUBSCRIBERS_DB)
+    mailer = mailer or mailer_from_settings(settings)
+    limiter = RateLimiter(SIGNUPS_PER_IP, SIGNUP_WINDOW)
+    public_url = settings.PUBLIC_URL.rstrip("/")
+
+    def link(path: str, purpose: str, email: str) -> str:
+        token = make_token(secret, purpose, email, now())
+        return f"{public_url}{path}?{urlencode({'token': token})}"
+
+    def page(request: Request, name: str, status: int = 200, **context) -> HTMLResponse:
+        context.setdefault("public_url", public_url)
+        return templates.TemplateResponse(request, name, context, status_code=status)
+
+    def message(request: Request, title: str, text: str, status: int = 200, **extra):
+        return page(request, "message.html.j2", status, title=title, text=text, **extra)
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    # Logo and icon: used by the page, the confirmation e-mail and the newsletter header.
+    app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+
+    @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
+    def index(request: Request):
+        return page(request, "index.html.j2")
+
+    @app.get("/subscribe")
+    def subscribe_reload():
+        # Reloading the "check your inbox" page, or a link preview, lands here.
+        return RedirectResponse("/", status_code=303)
+
+    @app.get("/favicon.ico")
+    def favicon():
+        return RedirectResponse("/static/icon-512.png", status_code=301)
+
+    @app.post("/subscribe", response_class=HTMLResponse)
+    def subscribe(request: Request, email: str = Form(""), website: str = Form("")):
+        check_inbox = (
+            "Confira seu e-mail",
+            "Se o endereço estiver certo, você vai receber um link para confirmar a inscrição. "
+            "Não chegou? Dá uma olhada no spam.",
+        )
+        if website:  # honeypot: only bots fill the hidden field
+            return message(request, *check_inbox)
+        email = normalize(email)
+        if not is_valid_email(email):
+            return page(
+                request, "index.html.j2", 400, error="Digite um e-mail válido.", email=email
+            )
+        client_ip = request.client.host if request.client else "unknown"
+        if not limiter.allow(client_ip, now()):
+            return message(
+                request,
+                "Muitas tentativas",
+                "Espere um pouco e tente de novo.",
+                status=429,
+            )
+
+        store.purge(now())
+        if store.confirmations_sent_since(now() - timedelta(days=1)) >= CONFIRMATIONS_PER_DAY:
+            logger.warning("Daily cap of %d confirmation e-mails reached", CONFIRMATIONS_PER_DAY)
+            return message(
+                request,
+                "Muitas inscrições hoje",
+                "Recebemos inscrições demais nas últimas horas. Tente de novo amanhã.",
+                status=429,
+            )
+        if store.request(email, now()) is RequestResult.SEND_CONFIRMATION:
+            try:
+                mailer.send_confirmation(email, link("/confirm", "confirm", email))
+            except MailError as e:
+                logger.error("Confirmation e-mail failed: %s", e)
+                store.forget_confirmation(email)
+                return message(
+                    request,
+                    "Não deu para enviar",
+                    "Não conseguimos enviar o e-mail de confirmação agora. Tente de novo em "
+                    "alguns minutos.",
+                    status=502,
+                )
+        return message(request, *check_inbox)
+
+    @app.get("/confirm", response_class=HTMLResponse)
+    def confirm(request: Request, token: str = ""):
+        email = read_token(secret, "confirm", token, now(), max_age=CONFIRM_MAX_AGE)
+        before = store.get(email) if email else None
+        if email is None or not store.confirm(email, now()):
+            return message(
+                request,
+                "Link inválido ou expirado",
+                "Esse link de confirmação não vale mais. Faça a inscrição de novo na página "
+                "inicial.",
+                status=400,
+            )
+        # Only the first click welcomes: reopening the link must not resend the edition.
+        first_time = before is not None and before.status == "pending"
+        welcomed = first_time and send_latest_edition(email)
+        if first_time:
+            notify_owner(email)
+        text = "Pronto: você vai receber a Urubu News antes e depois de cada jogo do Flamengo."
+        if welcomed:
+            text += " Mandamos a última edição para o seu e-mail para você já ir lendo."
+        return message(request, "Inscrição confirmada!", text + " Saudações rubro-negras!")
+
+    def notify_owner(email: str) -> None:
+        if not settings.NOTIFY_EMAIL:
+            return
+        active = len(store.active())
+        noun = "assinante ativo" if active == 1 else "assinantes ativos"
+        try:
+            mailer.send_notification(
+                settings.NOTIFY_EMAIL,
+                f"Novo assinante na Urubu News: {email}",
+                f"{email} confirmou a inscrição.\n\nAgora são {active} {noun}.\n",
+            )
+        except MailError as e:
+            logger.error("New subscriber notification failed: %s", e)
+
+    def send_latest_edition(email: str) -> bool:
+        edition = store.latest_edition()
+        if edition is None:
+            return False
+        try:
+            html, text = add_welcome(edition.html, edition.text)
+            mailer.send_edition(
+                email,
+                WELCOME_PREFIX + edition.subject,
+                html,
+                text,
+                link("/unsubscribe", "unsubscribe", email),
+                bet_token=make_token(secret, "bet", email, now()),
+            )
+        except MailError as e:
+            logger.error("Welcome edition failed: %s", e)
+            return False
+        return True
+
+    def unsubscribe_email(token: str) -> str | None:
+        return read_token(secret, "unsubscribe", token, now())
+
+    def invalid_unsubscribe(request: Request) -> HTMLResponse:
+        return message(
+            request,
+            "Link inválido",
+            "Não reconhecemos esse link de descadastro. Use o link do rodapé de uma edição.",
+            status=400,
+        )
+
+    @app.get("/unsubscribe", response_class=HTMLResponse)
+    def unsubscribe_form(request: Request, token: str = ""):
+        # GET only asks: e-mail scanners open links, and must not unsubscribe anyone.
+        if unsubscribe_email(token) is None:
+            return invalid_unsubscribe(request)
+        return message(
+            request,
+            "Sair da lista?",
+            "Você deixa de receber o Urubu News. Dá para voltar quando quiser.",
+            unsubscribe_token=token,
+        )
+
+    @app.post("/unsubscribe", response_class=HTMLResponse)
+    def unsubscribe(request: Request, token: str = ""):
+        # Also the RFC 8058 one-click target: the mail provider POSTs here directly.
+        email = unsubscribe_email(token)
+        if email is None:
+            return invalid_unsubscribe(request)
+        store.unsubscribe(email, now())
+        return message(
+            request,
+            "Você foi descadastrado",
+            "Não vai mais receber o Urubu News. Se mudar de ideia, é só se inscrever de novo.",
+        )
+
+    def bettor(request: Request, token: str, match_id: str):
+        """(email, match) behind a bet link, or the error page to return instead."""
+        email = read_token(secret, "bet", token, now())
+        if email is None:
+            return None, message(
+                request,
+                "Link inválido",
+                "Não reconhecemos esse link de palpite. Use a cartela de uma edição.",
+                status=400,
+            )
+        subscriber = store.get(email)
+        if subscriber is None or subscriber.status != "active":
+            return None, message(
+                request,
+                "Inscrição inativa",
+                "O bolão é para quem recebe a Urubu News. Inscreva-se de novo para palpitar.",
+                status=403,
+            )
+        match = bolao.match(match_id)
+        if match is None:
+            return None, message(
+                request, "Jogo não encontrado", "Esse jogo não está no bolão.", status=404
+            )
+        return (email, match), None
+
+    def bet_page(request: Request, status: int = 200, **context) -> HTMLResponse:
+        return page(request, "palpite.html.j2", status, **context)
+
+    @app.get("/palpite", response_class=HTMLResponse)
+    def bet_form(request: Request, t: str = "", m: str = "", p: str = ""):
+        # GET only asks: e-mail scanners open every link, and must not place bets.
+        found, error = bettor(request, t, m)
+        if error:
+            return error
+        email, match = found
+        context = {"match": match, "token": t, "nickname": bolao.nickname(email)}
+        if not bolao.is_open(match.match_id, now()):
+            return bet_page(request, mode="closed", bet=bolao.bet(email, m), **context)
+        if not p:
+            return bet_page(request, mode="other", **context)
+        score = parse_score(p)
+        if score is None:
+            return message(request, "Placar inválido", "Escolha um placar da cartela.", status=400)
+        return bet_page(request, mode="confirm", score=score, **context)
+
+    @app.post("/palpite", response_class=HTMLResponse)
+    def place_bet(
+        request: Request,
+        t: str = Form(""),
+        m: str = Form(""),
+        p: str = Form(""),
+        fla: str = Form(""),
+        opp: str = Form(""),
+        nickname: str = Form(""),
+    ):
+        found, error = bettor(request, t, m)
+        if error:
+            return error
+        email, match = found
+        score = parse_score(p or f"{fla}-{opp}")
+        if score is None:
+            return message(request, "Placar inválido", "Escolha um placar da cartela.", status=400)
+        context = {"match": match, "token": t, "score": score}
+        if not bolao.is_open(match.match_id, now()):
+            return bet_page(
+                request, 409, mode="closed", bet=bolao.bet(email, m), nickname=None, **context
+            )
+        if bolao.nickname(email) is None:
+            nickname = nickname.strip()
+            problem = None
+            if not MIN_NICKNAME <= len(nickname) <= MAX_NICKNAME:
+                problem = f"O apelido precisa ter de {MIN_NICKNAME} a {MAX_NICKNAME} caracteres."
+            elif not bolao.set_nickname(email, nickname):
+                problem = "Esse apelido já é de outra pessoa. Escolha outro."
+            if problem:
+                return bet_page(
+                    request, 409, mode="confirm", nickname=None, problem=problem, **context
+                )
+        bolao.place_bet(email, match.match_id, score, now())
+        return bet_page(request, mode="done", nickname=bolao.nickname(email), **context)
+
+    @app.get("/bolao", response_class=HTMLResponse)
+    def ranking(request: Request, t: str = ""):
+        email = read_token(secret, "bet", t, now()) if t else None
+        me = bolao.nickname(email) if email else None
+        season = now().astimezone(TZ).year
+        return page(request, "bolao.html.j2", rows=bolao.ranking(season), me=me, season=season)
+
+    def authorized(request: Request) -> bool:
+        expected = settings.SUBSCRIBERS_API_TOKEN
+        given = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        return bool(expected) and hmac.compare_digest(given.encode(), expected.encode())
+
+    def unauthorized() -> JSONResponse:
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+
+    @app.get("/api/subscribers")
+    def subscribers(request: Request):
+        if not authorized(request):
+            return unauthorized()
+        return [
+            {
+                "email": email,
+                "unsubscribe_url": link("/unsubscribe", "unsubscribe", email),
+                "bet_token": make_token(secret, "bet", email, now()),
+            }
+            for email in store.active()
+        ]
+
+    @app.get("/api/latest-edition")
+    def latest_edition(request: Request):
+        # Lets a second trigger of the same run see that the edition already went out.
+        if not authorized(request):
+            return unauthorized()
+        edition = store.latest_edition()
+        if edition is None:
+            return JSONResponse({"detail": "no edition published"}, status_code=404)
+        return {
+            "subject": edition.subject,
+            "published_at": edition.published_at.isoformat(),
+            "text": edition.text,  # the next run reads its topics to avoid repeating them
+        }
+
+    @app.put("/api/latest-edition", status_code=204)
+    def publish_edition(request: Request, edition: EditionIn):
+        # Published by the newsletter run after each real send; sent to new subscribers.
+        if not authorized(request):
+            return unauthorized()
+        if UNSUBSCRIBE_PLACEHOLDER not in edition.html:
+            return JSONResponse(
+                {"detail": "html must contain the unsubscribe placeholder"}, status_code=422
+            )
+        store.set_latest_edition(edition.subject, edition.html, edition.text, now())
+        return Response(status_code=204)
+
+    @app.put("/api/bolao/matches/{match_id}", status_code=204)
+    def register_match(request: Request, match_id: str, match: BolaoMatchIn):
+        if not authorized(request):
+            return unauthorized()
+        bolao.upsert_match(match_id, match.opponent, match.flamengo_home, match.kickoff)
+        return Response(status_code=204)
+
+    @app.get("/api/bolao/matches/{match_id}/summary")
+    def preview_summary(request: Request, match_id: str, fla: int, opp: int):
+        if not authorized(request):
+            return unauthorized()
+        if bolao.match(match_id) is None:
+            return JSONResponse({"detail": "unknown match"}, status_code=404)
+        return bolao.summary(match_id, (fla, opp), persist=False)
+
+    @app.put("/api/bolao/matches/{match_id}/result")
+    def report_result(request: Request, match_id: str, result: BolaoResultIn):
+        if not authorized(request):
+            return unauthorized()
+        if bolao.match(match_id) is None:
+            return JSONResponse({"detail": "unknown match"}, status_code=404)
+        return bolao.summary(match_id, (result.fla_goals, result.opp_goals), persist=True)
+
+    @app.get("/version.json")
+    def version():
+        # The deploy check polls this until the new commit is live (infra: auto-deploy).
+        commit = os.environ.get("GIT_SHA", "dev")
+        return JSONResponse({"commit": commit}, headers={"Cache-Control": "no-store"})
+
+    @app.get("/health")
+    def health():
+        store.active()  # fails loudly if the database is unreachable
+        return {"status": "ok"}
+
+    return app
