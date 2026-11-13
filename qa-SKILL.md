@@ -122,6 +122,45 @@ python3 scripts/qa_scraper.py --site amazon --api-key YOUR_KEY
 python3 scripts/qa_scraper.py --api-key YOUR_KEY --runs 5
 ```
 
+## Batch outcomes and resume
+
+`--all` records one explicit outcome per site instead of a bare pass/fail:
+
+| Outcome | Meaning |
+|---------|---------|
+| `success` | Page fetched and data extracted |
+| `extraction_failed` | Page fetched (2xx/3xx) but the extractor produced no data |
+| `blocked` | Intercepted: 401/403/429 response or a captcha/robot/challenge body marker |
+| `network_error` | No HTTP response (connection refused, DNS, timeout) or proxy/upstream failure (407/5xx) |
+| `unknown_site` | Site name not present in the manifest/`SITES` presets |
+
+```bash
+# Persist per-site outcomes; re-running the same file resumes
+python3 scripts/qa_scraper.py --all --report qa-report.json --api-key YOUR_KEY
+
+# Only run a subset of the presets
+python3 scripts/qa_scraper.py --all --sites amazon ebay wikipedia --report qa-report.json
+
+# Drive the batch from a custom manifest (local/offline testing)
+python3 scripts/qa_scraper.py --all --sites-file sites.json --no-proxy --report qa-report.json
+```
+
+Semantics:
+- Each site is written to the report immediately, atomically, so an interrupt
+  leaves earlier records intact.
+- Re-running against the same `--report` file skips sites whose latest outcome
+  is `success`; failed, blocked, extraction-failed and unknown sites retry.
+  Use `--no-resume` to force a full re-run.
+- The report keeps exactly one latest entry per site plus `counts` (`executed`,
+  `skipped`, `succeeded`, `failed`, per-outcome tallies, `records_in_file`).
+- Exit code is 0 even with failures unless `--fail-on-error` is passed.
+
+Local verification (no real sites or proxy credentials needed):
+
+```bash
+python3 -m pytest tests/test_qa_scraper_outcomes.py -q
+```
+
 ## Proxy Auth Format
 
 ```

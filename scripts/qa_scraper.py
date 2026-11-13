@@ -3,16 +3,91 @@
 
 import argparse
 import json
+import os
 import re
 import sys
 import urllib.request
 import urllib.error
 import urllib.parse
+from datetime import datetime, timezone
 from typing import Optional
 
 PROXY_HOST = "proxy.iploop.io"
 PROXY_PORT = 8880
 CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+# ── Per-site outcome categories ──────────────────
+OUTCOME_SUCCESS = "success"
+OUTCOME_EXTRACTION_FAILED = "extraction_failed"
+OUTCOME_BLOCKED = "blocked"
+OUTCOME_NETWORK_ERROR = "network_error"
+OUTCOME_UNKNOWN_SITE = "unknown_site"
+
+BLOCK_STATUSES = {401, 403, 429}
+PROXY_ERROR_STATUSES = {407, 502, 504}
+BLOCK_KEYWORDS = (
+    "captcha",
+    "are you a robot",
+    "verify you are human",
+    "unusual traffic",
+    "challenge-platform",
+    "cf-browser-verification",
+    "access denied",
+    "request blocked",
+    "you have been blocked",
+    "enable javascript and cookies",
+)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _say(message: str, stream=None) -> None:
+    """Print without dying on consoles that cannot encode emoji (e.g. GBK)."""
+    stream = stream or sys.stdout
+    try:
+        print(message, file=stream)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "ascii"
+        print(message.encode(encoding, errors="replace").decode(encoding, errors="replace"),
+              file=stream)
+
+
+def _detect_block_reason(status: int, body: str) -> Optional[str]:
+    """Return a human-readable interception reason, or None if not blocked."""
+    lower = (body or "")[:4000].lower()
+    keyword = next((word for word in BLOCK_KEYWORDS if word in lower), None)
+    if status in BLOCK_STATUSES:
+        if keyword:
+            return f"HTTP {status} block response (matched '{keyword}')"
+        return f"HTTP {status} block response"
+    if keyword and status and status < 400:
+        return f"HTTP {status} page contains block marker '{keyword}'"
+    if keyword and status >= 500:
+        return f"HTTP {status} error page contains block marker '{keyword}'"
+    return None
+
+
+# While a batch check is running, fetch()/fetch_scrapling() append low-level
+# observations here. This records HTTP status/page size without changing what
+# any existing extractor returns.
+_FETCH_LOG: Optional[list] = None
+
+
+def _record_fetch(url: str, status: int, body: str, error: Optional[str], source: str = "http"):
+    if _FETCH_LOG is None:
+        return
+    body = body or ""
+    page_size = len(body) if body else (0 if status else None)
+    _FETCH_LOG.append({
+        "url": url,
+        "status": status or 0,
+        "page_size": page_size,
+        "error": error,
+        "blocked_reason": _detect_block_reason(status or 0, body),
+        "source": source,
+    })
 
 SITES = {
     "youtube": {
@@ -309,11 +384,14 @@ def fetch(url: str, proxy_url: Optional[str] = None, timeout: int = 30) -> tuple
     try:
         resp = opener.open(req, timeout=timeout)
         body = resp.read().decode("utf-8", errors="replace")
+        _record_fetch(url, resp.status, body, None)
         return resp.status, body, None
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace") if e.fp else ""
+        _record_fetch(url, e.code, body, str(e))
         return e.code, body, str(e)
     except Exception as e:
+        _record_fetch(url, 0, "", str(e))
         return 0, "", str(e)
 
 
@@ -332,8 +410,10 @@ def fetch_scrapling(url: str, proxy_url: Optional[str] = None, timeout: int = 30
             kwargs["proxies"] = proxies
         r = f.get(url, **kwargs)
         body = r.body.decode("utf-8", errors="replace") if r.body else ""
+        _record_fetch(url, r.status, body, None, source="scrapling")
         return r.status, body, None
     except Exception as e:
+        _record_fetch(url, 0, "", str(e), source="scrapling")
         return 0, "", str(e)
 
 
@@ -492,10 +572,12 @@ def extract_scrapling_generic(url: str, proxy_url: Optional[str], site_name: str
     }
 
 
-def run_site(site_name: str, url: Optional[str], proxy_url: Optional[str]) -> dict:
-    config = SITES.get(site_name)
+def run_site(site_name: str, url: Optional[str], proxy_url: Optional[str],
+             sites_config: Optional[dict] = None) -> dict:
+    config = (sites_config or SITES).get(site_name)
     if not config:
-        return {"success": False, "error": f"Unknown site: {site_name}"}
+        return {"success": False, "error": f"Unknown site: {site_name}",
+                "site": site_name, "url": url, "method": None}
     test_url = url or config["test_url"]
     method = config["method"]
 
@@ -524,9 +606,283 @@ def run_site(site_name: str, url: Optional[str], proxy_url: Optional[str]) -> di
     return result
 
 
+# ── Outcome classification ──────────────────────
+
+def _resolve_blocked_reason(result: dict, fetch_events: list) -> Optional[str]:
+    """Prefer the block evidence from the final fetch, then the extractor's own."""
+    if fetch_events:
+        reason = fetch_events[-1].get("blocked_reason")
+        if reason:
+            return reason
+    reason = result.get("blocked_reason")
+    if reason:
+        return reason
+    if result.get("blocked"):
+        return "blocked page markers detected"
+    return None
+
+
+def classify_outcome(site_name: str, result: dict, fetch_events: list,
+                     sites_config: Optional[dict] = None) -> str:
+    """Map one site's raw result to a single explicit outcome category.
+
+    Signals come from the final fetch the extractor performed (HTTP status and
+    any interception markers in the body) plus whatever the extractor itself
+    reported. A block or connection failure is never collapsed into a generic
+    "failure".
+    """
+    if site_name not in (sites_config or SITES):
+        return OUTCOME_UNKNOWN_SITE
+
+    if result.get("success"):
+        return OUTCOME_SUCCESS
+
+    # An extractor that raised is a processing failure, not a connectivity one.
+    if result.get("internal_error"):
+        return OUTCOME_EXTRACTION_FAILED
+
+    last = fetch_events[-1] if fetch_events else None
+    status = result.get("status")
+    if not status and last:
+        status = last.get("status")
+    status = status if isinstance(status, int) else 0
+
+    blocked_reason = _resolve_blocked_reason(result, fetch_events)
+
+    # No HTTP response at all, or a proxy/upstream status → connectivity problem.
+    if status == 0 or status in PROXY_ERROR_STATUSES:
+        return OUTCOME_NETWORK_ERROR
+    # A definitive interception signal wins over a plain extraction failure.
+    if blocked_reason or status in BLOCK_STATUSES:
+        return OUTCOME_BLOCKED
+    # 5xx without any block marker: the origin could not serve a usable page.
+    if status >= 500:
+        return OUTCOME_NETWORK_ERROR
+    # The page answered, but the extractor could not produce data.
+    return OUTCOME_EXTRACTION_FAILED
+
+
+def build_outcome_entry(site_name: str, result: dict, fetch_events: list,
+                        sites_config: Optional[dict] = None) -> dict:
+    outcome = classify_outcome(site_name, result, fetch_events, sites_config)
+    last = fetch_events[-1] if fetch_events else None
+
+    status = result.get("status")
+    if not status and last:
+        status = last.get("status")
+    http_status = status if isinstance(status, int) and status > 0 else None
+
+    page_size = result.get("page_size")
+    if page_size is None and last:
+        page_size = last.get("page_size")
+    if page_size is None:
+        page_size = len(result["body"]) if isinstance(result.get("body"), str) else None
+
+    blocked_reason = _resolve_blocked_reason(result, fetch_events) \
+        if outcome == OUTCOME_BLOCKED else None
+    if outcome == OUTCOME_BLOCKED and not blocked_reason:
+        blocked_reason = "interception detected (blocked HTTP status)"
+
+    error = result.get("error")
+    if outcome == OUTCOME_UNKNOWN_SITE:
+        error = error or f"Unknown site: {site_name}"
+    elif outcome == OUTCOME_NETWORK_ERROR:
+        if not error and last:
+            error = last.get("error")
+        error = error or "no HTTP response (connection or proxy failure)"
+    elif outcome == OUTCOME_EXTRACTION_FAILED:
+        error = error or "page fetched but extractor produced no data"
+
+    entry = {
+        "site": site_name,
+        "outcome": outcome,
+        "success": outcome == OUTCOME_SUCCESS,
+        "http_status": http_status,
+        "page_size": page_size,
+        "error": error or None,
+        "blocked_reason": blocked_reason,
+        "url": result.get("url"),
+        "method": result.get("method"),
+        "checked_at": _now_iso(),
+    }
+    if "note" in result:
+        entry["note"] = result["note"]
+    return entry
+
+
+# ── Persistent per-site outcome file ─────────────
+
+REPORT_VERSION = 1
+
+
+class ReportError(RuntimeError):
+    """An existing report exists but cannot be trusted; refuse to overwrite it."""
+
+
+def load_report(path: str) -> dict:
+    """Load a prior outcome file. Returns {site_name: entry}.
+
+    A missing file is normal (first run). An *unreadable* file is not: silently
+    treating it as empty would overwrite previously written successes, so we
+    refuse instead and let the operator inspect or move the file.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ReportError(
+            f"Cannot read existing report {path}: {exc}. "
+            "Refusing to overwrite it (this would lose recorded outcomes). "
+            "Move or delete the file to start a fresh run."
+        ) from exc
+    if isinstance(data, dict) and isinstance(data.get("sites"), dict):
+        return {k: v for k, v in data["sites"].items() if isinstance(v, dict)}
+    if isinstance(data, dict):
+        return {k: v for k, v in data.items() if isinstance(v, dict) and "outcome" in v}
+    raise ReportError(
+        f"Report {path} does not look like a QA outcome file; refusing to overwrite it."
+    )
+
+
+def save_report(path: str, sites: dict, counts: dict, run_meta: Optional[dict] = None) -> None:
+    """Atomically persist all per-site outcomes (one latest record per site)."""
+    payload = {
+        "version": REPORT_VERSION,
+        "updated_at": _now_iso(),
+        "counts": counts,
+        "sites": {name: sites[name] for name in sorted(sites)},
+    }
+    if run_meta:
+        payload["last_run"] = run_meta
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, ensure_ascii=False)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+# ── Batch runner ─────────────────────────────────
+
+def run_batch(site_names: list, proxy_url: Optional[str],
+              sites_config: Optional[dict] = None,
+              report_path: Optional[str] = None,
+              skip_successful: bool = True,
+              verbose: bool = True) -> dict:
+    """Run the batch check one site at a time, persisting each outcome immediately.
+
+    A site whose latest recorded outcome is success is skipped by default; failed,
+    blocked, extraction-failed or unknown sites are retried. Every site keeps
+    exactly one latest record in the report, so writes survive an interruption.
+    """
+    global _FETCH_LOG
+    config = sites_config or SITES
+    ordered, seen = [], set()
+    for name in site_names:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+
+    prior = load_report(report_path) if report_path else {}
+    counts = {
+        "total": len(ordered),
+        "executed": 0,
+        "skipped": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "outcomes": {},
+    }
+    entries = dict(prior)
+
+    for site_name in ordered:
+        previous = prior.get(site_name)
+        if skip_successful and previous and previous.get("outcome") == OUTCOME_SUCCESS:
+            counts["skipped"] += 1
+            if verbose:
+                _say(f"⏭️  {site_name}: already {OUTCOME_SUCCESS} — skipped (resume)")
+            continue
+
+        _FETCH_LOG = []
+        try:
+            result = run_site(site_name, None, proxy_url, sites_config=config)
+        except KeyboardInterrupt:
+            # Persist everything completed so far, then let the caller stop.
+            _FETCH_LOG = None
+            counts["interrupted_at"] = site_name
+            counts["outcomes"] = dict(sorted(counts["outcomes"].items()))
+            counts["records_in_file"] = len(entries)
+            counts["successful_in_file"] = sum(
+                1 for entry in entries.values() if entry.get("outcome") == OUTCOME_SUCCESS
+            )
+            if report_path:
+                save_report(report_path, entries, counts,
+                            run_meta={"sites_requested": ordered, "resume": bool(skip_successful)})
+            raise
+        except Exception as exc:  # never let one site abort the batch
+            result = {"success": False, "internal_error": True,
+                      "error": f"{type(exc).__name__}: {exc}",
+                      "site": site_name, "url": None, "method": None}
+        events, _FETCH_LOG = _FETCH_LOG, None
+
+        entry = build_outcome_entry(site_name, result, events, config)
+        entries[site_name] = entry
+        counts["executed"] += 1
+        counts["outcomes"][entry["outcome"]] = counts["outcomes"].get(entry["outcome"], 0) + 1
+        if entry["success"]:
+            counts["succeeded"] += 1
+        else:
+            counts["failed"] += 1
+
+        if report_path:
+            save_report(report_path, entries, counts)
+
+        if verbose:
+            icon = "✅" if entry["success"] else "❌"
+            detail = {k: v for k, v in entry.items() if k not in ("site", "url", "checked_at")}
+            _say(f"{icon} {site_name} [{entry['outcome']}]: "
+                 f"{json.dumps(detail, ensure_ascii=False)}")
+
+    counts["outcomes"] = dict(sorted(counts["outcomes"].items()))
+    counts["records_in_file"] = len(entries)
+    counts["successful_in_file"] = sum(
+        1 for entry in entries.values() if entry.get("outcome") == OUTCOME_SUCCESS
+    )
+    if report_path:
+        save_report(report_path, entries, counts, run_meta={
+            "sites_requested": ordered,
+            "resume": bool(skip_successful),
+        })
+    return {"counts": counts, "entries": entries}
+
+
+def load_sites_manifest(path: str) -> dict:
+    """Load a custom site manifest: {name: {test_url, method}} or {"sites": {...}}."""
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if isinstance(data, dict) and isinstance(data.get("sites"), dict):
+        data = data["sites"]
+    if not isinstance(data, dict) or not data:
+        raise ValueError(f"Site manifest {path} must be a non-empty object of site configs")
+    cleaned = {}
+    for name, cfg in data.items():
+        if not isinstance(cfg, dict) or "test_url" not in cfg:
+            raise ValueError(f"Site manifest entry '{name}' needs at least 'test_url'")
+        cleaned[name] = {
+            "test_url": cfg["test_url"],
+            "method": cfg.get("method", "proxy_http"),
+        }
+        if "note" in cfg:
+            cleaned[name]["note"] = cfg["note"]
+    return cleaned
+
+
 def main():
     parser = argparse.ArgumentParser(description="IPLoop QA Scraper")
-    parser.add_argument("--all", action="store_true", help="Test all 10 sites")
+    parser.add_argument("--all", action="store_true", help="Test all sites")
     parser.add_argument("--site", type=str, help="Test single site")
     parser.add_argument("--url", type=str, help="Custom URL for --site")
     parser.add_argument("--api-key", type=str, default="testkey123", help="IPLoop API key")
@@ -534,6 +890,18 @@ def main():
     parser.add_argument("--proxy-host", type=str, default=PROXY_HOST)
     parser.add_argument("--proxy-port", type=int, default=PROXY_PORT)
     parser.add_argument("--json", action="store_true", help="Output as JSON")
+    parser.add_argument("--sites", type=str, nargs="+",
+                        help="--all: only run these sites from the manifest/presets")
+    parser.add_argument("--sites-file", type=str,
+                        help="--all: JSON site manifest {name: {test_url, method}}")
+    parser.add_argument("--report", "--results-file", dest="report", type=str,
+                        help="--all: persist per-site outcomes to this JSON file")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="--all: re-run sites already recorded as successful")
+    parser.add_argument("--no-proxy", action="store_true",
+                        help="--all: skip proxy routing entirely (local/test use)")
+    parser.add_argument("--fail-on-error", action="store_true",
+                        help="--all: exit nonzero if any site did not succeed")
     args = parser.parse_args()
 
     proxy_host = args.proxy_host
@@ -545,31 +913,63 @@ def main():
             auth += f"-country-{country.upper()}"
         return f"http://{auth}@{proxy_host}:{proxy_port}"
 
-    proxy_url = _make_proxy(args.api_key, args.country)
+    sites_config = SITES
+    if args.sites_file:
+        try:
+            sites_config = load_sites_manifest(args.sites_file)
+        except (OSError, ValueError) as exc:
+            print(f"Error loading site manifest: {exc}", file=sys.stderr)
+            sys.exit(2)
+
+    proxy_url = None if args.no_proxy else _make_proxy(args.api_key, args.country)
 
     if args.site:
-        result = run_site(args.site, args.url, proxy_url)
+        result = run_site(args.site, args.url, proxy_url, sites_config=sites_config)
         if args.json:
             print(json.dumps(result, indent=2))
         else:
             status = "✅" if result.get("success") else "❌"
-            print(f"{status} {result['site']}: {json.dumps({k: v for k, v in result.items() if k not in ('site', 'url')}, ensure_ascii=False)}")
+            _say(f"{status} {result['site']}: {json.dumps({k: v for k, v in result.items() if k not in ('site', 'url')}, ensure_ascii=False)}")
     elif args.all:
-        results = []
-        passed = 0
-        for site_name in SITES:
-            result = run_site(site_name, None, proxy_url)
-            results.append(result)
-            status = "✅" if result.get("success") else "❌"
-            if result.get("success"):
-                passed += 1
-            if not args.json:
-                print(f"{status} {site_name}: {json.dumps({k: v for k, v in result.items() if k not in ('site', 'url')}, ensure_ascii=False)}")
+        if args.sites:
+            missing = [name for name in args.sites if name not in sites_config]
+            if missing:
+                # Keep unknown sites visible as an explicit outcome instead of
+                # silently dropping them from the run.
+                for name in missing:
+                    _say(f"⚠️  Unknown site (not in manifest): {name}", stream=sys.stderr)
+            requested = list(args.sites)
+        else:
+            requested = list(sites_config)
+
+        try:
+            report = run_batch(
+                requested, proxy_url,
+                sites_config=sites_config,
+                report_path=args.report,
+                skip_successful=not args.no_resume,
+                verbose=not args.json,
+            )
+        except ReportError as exc:
+            _say(f"Error: {exc}", stream=sys.stderr)
+            sys.exit(2)
+        counts = report["counts"]
         if args.json:
-            print(json.dumps({"results": results, "passed": passed, "total": len(SITES)}, indent=2))
+            print(json.dumps({
+                "passed": counts["succeeded"],
+                "total": counts["total"],
+                "counts": counts,
+                "results": list(report["entries"].values()),
+            }, indent=2, ensure_ascii=False))
         else:
             print(f"\n{'='*40}")
-            print(f"Results: {passed}/{len(SITES)} sites passed")
+            print(f"Executed {counts['executed']}/{counts['total']} | "
+                  f"Skipped {counts['skipped']} | Succeeded {counts['succeeded']}")
+            print(f"Outcomes: {json.dumps(counts['outcomes'], ensure_ascii=False)}")
+            if args.report:
+                print(f"Report: {os.path.abspath(args.report)}")
+        if args.fail_on_error and counts["failed"]:
+            sys.exit(1)
     else:
         parser.print_help()
 
