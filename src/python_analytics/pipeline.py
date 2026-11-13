@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from python_analytics.clean import clean_missing, deduplicate
+from python_analytics.collect import collect_csv
 from python_analytics.eda import correlation_matrix, describe, missing_report
 from python_analytics.load import load_csv
 from python_analytics.viz import plot_corr_heatmap, plot_hist
@@ -27,8 +28,37 @@ def generate_synthetic_data(n: int = 1000, seed: int = 42) -> pd.DataFrame:
     return pd.concat([df, df.iloc[:5]], ignore_index=True)
 
 
-def run_pipeline(n: int = 1000, out_dir: str = "reports", data_dir: str = "data") -> dict:
-    """Прогнать загрузку → очистку → EDA → визуализацию. Возвращает сводку."""
+def run_pipeline(
+    n: int = 1000,
+    out_dir: str = "reports",
+    data_dir: str = "data",
+    collect_source_dir: str | None = None,
+    collect_output_dir: str | None = None,
+) -> dict:
+    """Прогнать загрузку → очистку → EDA → визуализацию. Возвращает сводку.
+
+    Args:
+        n: число синтетических строк.
+        out_dir: директория для графиков.
+        data_dir: директория для ``synthetic.csv``.
+        collect_source_dir: если задан, перед анализом выполняется пакетный
+            сбор CSV через :func:`python_analytics.collect.collect_csv`.
+        collect_output_dir: выходная директория сбора; по умолчанию
+            совпадает с ``data_dir``, так что собранные файлы становятся
+            входом последующего анализа.
+    """
+    collect_manifest = None
+    if collect_source_dir is not None:
+        collect_manifest = collect_csv(
+            collect_source_dir,
+            collect_output_dir if collect_output_dir is not None else data_dir,
+        )
+        print(
+            "=== Пакетный сбор CSV ===\n"
+            f"Источник: {collect_manifest['source_dir']}\n"
+            f"Итог: {collect_manifest['summary']}"
+        )
+
     data_path = Path(data_dir) / "synthetic.csv"
     data_path.parent.mkdir(parents=True, exist_ok=True)
     generate_synthetic_data(n).to_csv(data_path, index=False)
@@ -53,4 +83,7 @@ def run_pipeline(n: int = 1000, out_dir: str = "reports", data_dir: str = "data"
     print(corr.round(2).to_string())
     print(f"\nГрафики: {hist_path}, {heatmap_path}")
 
-    return {"rows": len(df), "hist": str(hist_path), "heatmap": str(heatmap_path)}
+    result = {"rows": len(df), "hist": str(hist_path), "heatmap": str(heatmap_path)}
+    if collect_manifest is not None:
+        result["collect_manifest"] = collect_manifest
+    return result

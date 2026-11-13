@@ -17,7 +17,7 @@
 
 [![CI](https://github.com/NikitaBoyarkin/python/actions/workflows/ci.yml/badge.svg)](https://github.com/NikitaBoyarkin/python/actions/workflows/ci.yml)
 
-> Пайплайн Python-аналитики (загрузка → очистка → EDA → визуализация) на синтетике seed=42; **34 теста** и порог покрытия **≥80 %**.
+> Пайплайн Python-аналитики (загрузка → очистка → EDA → визуализация) на синтетике seed=42; **46 тестов** и порог покрытия **≥80 %**.
 
 ## Навигация
 - 🌐 [Портфолио](https://nikitaboyarkin.github.io)
@@ -60,7 +60,7 @@
 
 ## Результат
 
-- **34 теста** — `tests/` (7 clean + 4 eda + 4 load + 2 pipeline + 1 report + 14 segment + 2 viz).
+- **46 тестов** — `tests/` (7 clean + 12 collect + 4 eda + 4 load + 2 pipeline + 1 report + 14 segment + 2 viz).
 - **≥ 80 %** — порог покрытия `--cov-fail-under=80` (`pyproject.toml`).
 - **1 000 строк** — синтетика по умолчанию: `generate_synthetic_data(n=1000, seed=42)` + 5 дубликатов и 21 пропуск в `income` (`pipeline.py:16`).
 - **2 отчёта** — `reports/report.md` и `reports/segmentation_report.md`.
@@ -68,7 +68,7 @@
 ## Решение
 
 Репозиторий доказывает, что пайплайн загрузка → очистка → EDA → визуализация собирается в пакет,
-прогоняется одной командой на синтетике `seed=42` и удерживается тестами — **34 теста** при
+прогоняется одной командой на синтетике `seed=42` и удерживается тестами — **46 тестов** при
 пороге покрытия **≥80 %**. Это процессный результат: он говорит о воспроизводимости и дисциплине
 тестов, а не о свойствах данных.
 
@@ -85,6 +85,7 @@
 ```
 src/python_analytics/
 ├── load.py       # загрузка CSV (REQ-002)
+├── collect.py    # пакетный сбор CSV: изоляция сбоев, манифест, возобновление
 ├── clean.py      # пропуски, дубликаты, типы (REQ-003)
 ├── eda.py        # статистика, пропуски, корреляции (REQ-004)
 ├── viz.py        # гистограммы, тепловые карты (REQ-005)
@@ -105,6 +106,36 @@ uv sync --all-groups
 uv run pytest                          # тесты + покрытие (≥80%)
 uv run python -m python_analytics      # end-to-end пайплайн
 ```
+
+### Пакетный сбор CSV
+
+`collect_csv(source_dir, output_dir)` обрабатывает сразу несколько CSV: сбой
+одного файла (отсутствует, пуст, только заголовок) не прерывает партию —
+каждый исход фиксируется в `output_dir/manifest.json`. Повторный запуск
+пропускает уже собранные неизменные файлы (статус `existing`); изменённые
+файлы собираются заново. Основание для решения — размер в байтах и время
+модификации (`size_bytes`, `modified_at`).
+
+```bash
+# сканировать все *.csv в источнике
+uv run python -m python_analytics collect data/raw data/collected
+# либо явный список (позволяет сослаться на отсутствующий путь)
+uv run python -m python_analytics collect data/raw data/collected a.csv b.csv
+```
+
+```python
+from python_analytics.collect import collect_csv
+
+# Тот же шаг доступен из run_pipeline:
+# run_pipeline(collect_source_dir="data/raw", data_dir="data/collected")
+manifest = collect_csv("data/raw", "data/collected",
+                       files=["a.csv", "b.csv", "missing.csv"])
+print(manifest["summary"])  # {'total': 3, 'success': 1, 'failed': 2, 'existing': 0}
+```
+
+Статусы файла в манифесте: `success` (собран, записаны `rows`/`columns`),
+`failed` (сохранены тип и исходный текст ошибки `load_csv`), `existing`
+(пропущен при возобновлении).
 
 ## Пример
 
