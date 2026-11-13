@@ -1,0 +1,121 @@
+{
+  "name": "node-wreq",
+  "version": "0.0.0-reserved.0",
+  "description": "HTTP client with native TLS, HTTP2, JA3, JA4 browser impersonation backed by wreq's Rust core",
+  "main": "./dist/node-wreq.js",
+  "module": "./dist/node-wreq.mjs",
+  "types": "dist/node-wreq.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/node-wreq.d.ts",
+      "require": "./dist/node-wreq.js",
+      "import": "./dist/node-wreq.mjs",
+      "default": "./dist/node-wreq.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "npm run build:rust && npm run build:ts",
+    "build:rust": "napi build --platform --release --cargo-cwd rust rust",
+    "build:ts": "rimraf dist && node ./scripts/generate-browser-profiles.mjs && tsc && node ./scripts/postbuild.mjs",
+    "deps:wreq": "node ./scripts/update-wreq-upstream.mjs",
+    "prepare": "node ./scripts/install-git-hooks.mjs",
+    "prepare:publish:main": "node ./scripts/prepare-main-package.mjs",
+    "prepare:publish:platform": "node ./scripts/prepare-platform-package.mjs",
+    "artifacts": "napi artifacts",
+    "clean": "rimraf dist rust/target && rimraf --glob \"rust/*.node\"",
+    "test": "npm run build && node --test dist/test/node-wreq.spec.js",
+    "lint": "oxlint --deny-warnings src scripts",
+    "lint:fix": "oxlint --fix src scripts",
+    "lint:staged": "lint-staged",
+    "lint:rust": "cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings",
+    "format": "oxfmt --write src scripts",
+    "format:check": "oxfmt --check src scripts",
+    "format:rust": "cargo fmt --manifest-path rust/Cargo.toml",
+    "format:rust:check": "cargo fmt --manifest-path rust/Cargo.toml --check"
+  },
+  "keywords": [
+    "anti-bot",
+    "bypass",
+    "browser",
+    "browser-fingerprint-bypass",
+    "browseer-impersonation",
+    "browser-emulation",
+    "crawler",
+    "cloudflare",
+    "cloudflare-bypass",
+    "curl-impersonate",
+    "scrapper",
+    "fingerprint",
+    "tls",
+    "tls-fingerprint",
+    "http2",
+    "fetch",
+    "websocket",
+    "impersonation",
+    "web-scraping",
+    "web-scraper",
+    "wreq",
+    "ja3",
+    "ja4"
+  ],
+  "author": "StopMakingThatBigFace",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/StopMakingThatBigFace/node-wreq.git"
+  },
+  "bugs": {
+    "url": "https://github.com/StopMakingThatBigFace/node-wreq/issues"
+  },
+  "homepage": "https://github.com/StopMakingThatBigFace/node-wreq#readme",
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0",
+    "@stylistic/eslint-plugin": "^5.10.0",
+    "@types/node": "^20.19.39",
+    "@types/ws": "^8.18.1",
+    "lint-staged": "^15.5.2",
+    "oxfmt": "^0.76.0",
+    "oxlint": "^1.60.0",
+    "rimraf": "^6.1.3",
+    "typescript": "^5.0.0",
+    "ws": "^8.20.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "files": [
+    "dist",
+    "rust/*.node"
+  ],
+  "napi": {
+    "name": "node-wreq",
+    "triples": {
+      "defaults": true,
+      "additional": [
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "x86_64-pc-windows-msvc"
+      ]
+    }
+  },
+  "lint-staged": {
+    "*.{ts,tsx,mts,cts,js,mjs,cjs}": [
+      "oxlint --fix --deny-warnings --no-error-on-unmatched-pattern",
+      "oxfmt --write"
+    ],
+    "rust/**/*.rs": "rustfmt --edition 2021"
+  }
+}

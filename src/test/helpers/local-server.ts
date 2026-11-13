@@ -1,0 +1,571 @@
+import { WebSocketServer, type WebSocket as WsPeer } from 'ws';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { after, before } from 'node:test';
+
+const WINDOWS_1251_BODY = Buffer.from('cff0e8e2e5f22c20ece8f021', 'hex');
+const ZSTD_RESPONSE_BODY = Buffer.from('KLUv/QRYgQAAenN0ZCByZXNwb25zZSBva4lnadQ=', 'base64');
+
+export function onceEvent<T extends Event>(target: EventTarget, type: string): Promise<T> {
+  return new Promise((resolve) => {
+    const listener = (event: Event) => {
+      resolve(event as T);
+    };
+
+    target.addEventListener(type, listener, { once: true });
+  });
+}
+
+function readCookieHeader(request: IncomingMessage): string {
+  const cookie = request.headers.cookie;
+
+  if (Array.isArray(cookie)) {
+    return cookie.join('; ');
+  }
+
+  return cookie ?? '';
+}
+
+function sendJson(
+  response: ServerResponse,
+  status: number,
+  body: unknown,
+  headers?: Record<string, string | string[]>
+) {
+  response.writeHead(status, {
+    'content-type': 'application/json',
+    ...headers,
+  });
+
+  response.end(JSON.stringify(body));
+}
+
+function readQuery(url: URL): Record<string, string> {
+  return Object.fromEntries(url.searchParams.entries());
+}
+
+async function readRequestBody(request: IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  return Buffer.concat(chunks);
+}
+
+export function setupLocalTestServer() {
+  let localBaseUrl = '';
+  let localServer: Server | undefined;
+  let wsServer: WebSocketServer | undefined;
+  const retryAttempts = new Map<string, number>();
+  const websocketMessages = new Map<string, string[]>();
+  const connectionIds = new WeakMap<object, number>();
+  let nextConnectionId = 1;
+
+  before(async () => {
+    wsServer = new WebSocketServer({
+      noServer: true,
+      perMessageDeflate: true,
+      handleProtocols(protocols: Set<string>) {
+        if (protocols.has('chat')) {
+          return 'chat';
+        }
+
+        return false;
+      },
+    });
+
+    wsServer.on('connection', (socket: WsPeer, request: IncomingMessage) => {
+      const cookie = readCookieHeader(request);
+      const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+      const captureKey = url.searchParams.get('capture');
+
+      if (captureKey) {
+        websocketMessages.set(captureKey, []);
+      }
+
+      socket.send(
+        JSON.stringify({
+          kind: 'connected',
+          cookie,
+          protocol: socket.protocol,
+          url: url.pathname + url.search,
+          rawHeaders: request.rawHeaders,
+        })
+      );
+
+      socket.on('message', (data: Buffer, isBinary: boolean) => {
+        if (captureKey) {
+          websocketMessages.get(captureKey)?.push(data.toString());
+        }
+
+        if (!isBinary && data.toString() === 'close-me') {
+          socket.close(1000, 'done');
+
+          return;
+        }
+
+        socket.send(data, { binary: isBinary });
+      });
+    });
+
+    localServer = createServer((request, response) => {
+      void (async () => {
+        const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+
+        if (url.pathname === '/ws/messages') {
+          sendJson(response, 200, {
+            messages: websocketMessages.get(url.searchParams.get('key') ?? '') ?? [],
+          });
+
+          return;
+        }
+
+        if (url.pathname === '/connection/id') {
+          let connectionId = connectionIds.get(request.socket);
+
+          if (connectionId === undefined) {
+            connectionId = nextConnectionId;
+            nextConnectionId += 1;
+            connectionIds.set(request.socket, connectionId);
+          }
+
+          sendJson(response, 200, { connectionId });
+
+          return;
+        }
+
+        if (url.pathname === '/retry') {
+          const key = url.searchParams.get('key') ?? 'default';
+          const failCount = Number(url.searchParams.get('failCount') ?? '0');
+          const count = (retryAttempts.get(key) ?? 0) + 1;
+
+          retryAttempts.set(key, count);
+
+          if (count <= failCount) {
+            sendJson(response, 503, { attempt: count, retried: false });
+
+            return;
+          }
+
+          sendJson(response, 200, { attempt: count, retried: count > 1 });
+
+          return;
+        }
+
+        if (url.pathname === '/retry/body') {
+          const key = url.searchParams.get('key') ?? 'default-body';
+          const failCount = Number(url.searchParams.get('failCount') ?? '0');
+          const count = (retryAttempts.get(key) ?? 0) + 1;
+          const body = await readRequestBody(request);
+
+          retryAttempts.set(key, count);
+
+          if (count <= failCount) {
+            sendJson(response, 503, { attempt: count });
+
+            return;
+          }
+
+          sendJson(response, 200, {
+            attempt: count,
+            body: body.toString('utf8'),
+            bodyBase64: body.toString('base64'),
+            headers: request.headers,
+          });
+
+          return;
+        }
+
+        if (url.pathname === '/retry/timeout') {
+          const key = url.searchParams.get('key') ?? 'default-timeout';
+          const failCount = Number(url.searchParams.get('failCount') ?? '0');
+          const delayMs = Number(url.searchParams.get('delayMs') ?? '100');
+          const count = (retryAttempts.get(key) ?? 0) + 1;
+
+          retryAttempts.set(key, count);
+
+          if (count <= failCount) {
+            setTimeout(() => {
+              if (!response.writableEnded) {
+                sendJson(response, 200, { attempt: count, timedOut: true });
+              }
+            }, delayMs);
+
+            return;
+          }
+
+          sendJson(response, 200, { attempt: count, timedOut: false });
+
+          return;
+        }
+
+        if (url.pathname === '/timings/delay') {
+          const delayMs = Number(url.searchParams.get('ms') ?? '50');
+
+          setTimeout(() => {
+            sendJson(response, 200, { delayed: true });
+          }, delayMs);
+
+          return;
+        }
+
+        if (url.pathname === '/connection/delay') {
+          const delayMs = Number(url.searchParams.get('ms') ?? '50');
+
+          setTimeout(() => {
+            response.writeHead(200, {
+              'content-type': 'application/json',
+            });
+
+            response.end(JSON.stringify({ delayedConnection: true }));
+          }, delayMs);
+
+          return;
+        }
+
+        if (url.pathname === '/stream/slow') {
+          const chunks = Math.max(1, Number(url.searchParams.get('chunks') ?? '3'));
+          const chunkBytes = Math.max(1, Number(url.searchParams.get('chunkBytes') ?? '1024'));
+          const delayMs = Math.max(0, Number(url.searchParams.get('delayMs') ?? '25'));
+          let sent = 0;
+
+          response.writeHead(200, {
+            'content-type': 'application/octet-stream',
+          });
+
+          const sendChunk = () => {
+            response.write(Buffer.alloc(chunkBytes, sent % 251));
+            sent += 1;
+
+            if (sent >= chunks) {
+              response.end();
+
+              return;
+            }
+
+            setTimeout(sendChunk, delayMs);
+          };
+
+          sendChunk();
+
+          return;
+        }
+
+        if (url.pathname === '/cookies/set') {
+          sendJson(
+            response,
+            200,
+            { stored: true },
+            {
+              'set-cookie': 'session=abc123',
+            }
+          );
+
+          return;
+        }
+
+        if (url.pathname === '/cookies/set-multiple') {
+          sendJson(
+            response,
+            200,
+            { stored: true },
+            {
+              'set-cookie': ['session=abc123; Path=/', 'csrf=token123; Path=/'],
+            }
+          );
+
+          return;
+        }
+
+        if (url.pathname === '/headers/duplicates') {
+          sendJson(
+            response,
+            200,
+            { ok: true },
+            {
+              'x-dupe': ['one', 'two'],
+              'set-cookie': ['session=abc123; Path=/', 'csrf=token123; Path=/'],
+            }
+          );
+
+          return;
+        }
+
+        if (url.pathname === '/cookies/echo') {
+          sendJson(response, 200, { cookie: readCookieHeader(request) });
+
+          return;
+        }
+
+        if (url.pathname === '/get' || url.pathname === '/headers') {
+          sendJson(response, 200, {
+            args: readQuery(url),
+            headers: request.headers,
+          });
+
+          return;
+        }
+
+        if (url.pathname === '/user-agent') {
+          sendJson(response, 200, {
+            'user-agent': request.headers['user-agent'] ?? '',
+          });
+
+          return;
+        }
+
+        if (url.pathname === '/anything') {
+          const body = await readRequestBody(request);
+
+          sendJson(response, 200, {
+            args: readQuery(url),
+            data: body.toString('utf8'),
+            headers: request.headers,
+            method: request.method,
+          });
+
+          return;
+        }
+
+        if (url.pathname === '/headers/raw') {
+          sendJson(response, 200, {
+            args: readQuery(url),
+            rawHeaders: request.rawHeaders,
+            headers: request.headers,
+          });
+
+          return;
+        }
+
+        if (url.pathname === '/body/echo') {
+          const body = await readRequestBody(request);
+
+          sendJson(response, 200, {
+            method: request.method,
+            headers: request.headers,
+            body: body.toString('utf8'),
+            bodyBase64: body.toString('base64'),
+          });
+
+          return;
+        }
+
+        if (url.pathname === '/charset/windows-1251') {
+          response.writeHead(200, {
+            'content-type': 'text/plain; charset=windows-1251',
+            'content-length': String(WINDOWS_1251_BODY.length),
+          });
+
+          response.end(WINDOWS_1251_BODY);
+
+          return;
+        }
+
+        if (url.pathname === '/compress/zstd') {
+          response.writeHead(200, {
+            'content-type': 'text/plain; charset=utf-8',
+            'content-encoding': 'zstd',
+            'content-length': String(ZSTD_RESPONSE_BODY.length),
+          });
+
+          response.end(ZSTD_RESPONSE_BODY);
+
+          return;
+        }
+
+        if (url.pathname.startsWith('/status/')) {
+          const status = Number(url.pathname.slice('/status/'.length));
+
+          sendJson(response, status, { status });
+
+          return;
+        }
+
+        if (url.pathname === '/redirect/start') {
+          const headers: Record<string, string> = {
+            location: url.searchParams.get('target') ?? '/redirect/final',
+            'set-cookie': 'redirect_session=1; Path=/',
+          };
+
+          const referrerPolicy = url.searchParams.get('referrerPolicy');
+
+          if (referrerPolicy) {
+            headers['referrer-policy'] = referrerPolicy;
+          }
+
+          response.writeHead(302, headers);
+
+          response.end();
+
+          return;
+        }
+
+        if (url.pathname === '/redirect/multiple-choices') {
+          response.writeHead(300, {
+            location: '/redirect/final',
+          });
+
+          response.end();
+
+          return;
+        }
+
+        if (url.pathname === '/redirect/post-start') {
+          response.writeHead(302, {
+            location: '/redirect/final',
+          });
+
+          response.end();
+
+          return;
+        }
+
+        if (url.pathname === '/redirect/preserve-body') {
+          await readRequestBody(request);
+
+          response.writeHead(307, {
+            location: '/body/echo',
+          });
+
+          response.end();
+
+          return;
+        }
+
+        if (url.pathname === '/redirect/chain') {
+          const count = Number(url.searchParams.get('count') ?? '0');
+
+          if (count > 0) {
+            response.writeHead(302, {
+              location: `/redirect/chain?count=${count - 1}`,
+            });
+
+            response.end();
+
+            return;
+          }
+
+          response.writeHead(302, {
+            location: '/redirect/final',
+          });
+
+          response.end();
+
+          return;
+        }
+
+        if (url.pathname === '/redirect/loop-a') {
+          response.writeHead(302, {
+            location: '/redirect/loop-b',
+          });
+
+          response.end();
+
+          return;
+        }
+
+        if (url.pathname === '/redirect/loop-b') {
+          response.writeHead(302, {
+            location: '/redirect/loop-a',
+          });
+
+          response.end();
+
+          return;
+        }
+
+        if (url.pathname === '/redirect/final') {
+          sendJson(response, 200, {
+            method: request.method,
+            cookie: readCookieHeader(request),
+            hookHeader: request.headers['x-redirect-hook'] ?? '',
+            authorization: request.headers.authorization ?? '',
+            proxyAuthorization: request.headers['proxy-authorization'] ?? '',
+            referrer: request.headers.referer ?? '',
+          });
+
+          return;
+        }
+
+        sendJson(response, 404, { path: url.pathname });
+      })().catch((error: unknown) => {
+        response.writeHead(500, {
+          'content-type': 'application/json',
+        });
+
+        response.end(
+          JSON.stringify({
+            error: error instanceof Error ? error.message : String(error),
+          })
+        );
+      });
+    });
+
+    localServer.on('upgrade', (request, socket, head) => {
+      const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+
+      if (url.pathname !== '/ws') {
+        socket.destroy();
+
+        return;
+      }
+
+      const upgrade = () => {
+        if (socket.destroyed) {
+          return;
+        }
+
+        wsServer?.handleUpgrade(request, socket, head, (websocketSocket: WsPeer) => {
+          wsServer?.emit('connection', websocketSocket, request);
+        });
+      };
+
+      const upgradeDelay = Number(url.searchParams.get('upgradeDelay') ?? '0');
+
+      if (upgradeDelay > 0) {
+        setTimeout(upgrade, upgradeDelay);
+      } else {
+        upgrade();
+      }
+    });
+
+    await new Promise<void>((resolve) => {
+      localServer?.listen(0, '127.0.0.1', () => {
+        const address = localServer?.address();
+
+        if (!address || typeof address === 'string') {
+          throw new Error('Failed to bind local test server');
+        }
+
+        localBaseUrl = `http://127.0.0.1:${address.port}`;
+        resolve();
+      });
+    });
+  });
+
+  after(async () => {
+    await new Promise<void>((resolve) => {
+      wsServer?.close(() => resolve());
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      localServer?.close((error) => {
+        if (error) {
+          reject(error);
+
+          return;
+        }
+
+        resolve();
+      });
+    });
+  });
+
+  return {
+    getBaseUrl() {
+      return localBaseUrl;
+    },
+    retryAttempts,
+  };
+}

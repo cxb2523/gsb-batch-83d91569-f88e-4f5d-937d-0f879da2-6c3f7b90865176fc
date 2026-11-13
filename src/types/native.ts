@@ -1,0 +1,231 @@
+import type { BrowserProfile, HeaderTuple, HttpMethod, RequestTimings } from './shared';
+
+/** Normalized DNS overrides passed to the native layer. */
+export interface NativeDnsOptions {
+  /** DNS-over-HTTPS endpoint used for hostname resolution. */
+  doh?: string;
+  /** DNS-over-TLS endpoint used for hostname resolution. */
+  dot?: string;
+  /** Upstream DNS servers used for hostname resolution. */
+  servers?: string[];
+  /** Static host-to-address mappings that bypass normal DNS lookups. */
+  hosts?: Record<string, string[]>;
+}
+
+/** Normalized local source addresses passed to the native layer. */
+export interface NativeLocalAddresses {
+  /** IPv4 source address used for outbound connections. */
+  ipv4?: string;
+  /** IPv6 source address used for outbound connections. */
+  ipv6?: string;
+}
+
+/** PEM-based client identity converted to raw buffers for the native layer. */
+export interface NativeTlsIdentityPem {
+  /** PEM certificate chain presented during mutual TLS authentication. */
+  cert: Buffer;
+  /** PEM private key associated with `cert`. */
+  key: Buffer;
+}
+
+/** PKCS#12 / PFX client identity converted to raw buffers for the native layer. */
+export interface NativeTlsIdentityPfx {
+  /** Raw PKCS#12 / PFX archive bytes. */
+  pfx: Buffer;
+  /** Passphrase used to decrypt `pfx`, when required. */
+  passphrase?: string;
+}
+
+/** Client certificate identity passed to the native layer. */
+export type NativeTlsIdentity = NativeTlsIdentityPem | NativeTlsIdentityPfx;
+
+/** Trusted certificate authorities passed to the native layer. */
+export interface NativeCertificateAuthority {
+  /** CA certificate chain converted to buffers. */
+  certs: Buffer[];
+  /** Keeps the platform default trust store in addition to `certs`. */
+  includeDefaultRoots: boolean;
+}
+
+/** TLS debug toggles passed to the native layer. */
+export interface NativeTlsDebug {
+  /** Includes peer certificates in response metadata. */
+  peerCertificates?: boolean;
+  /** Reads TLS key log configuration from the environment. */
+  keylogFromEnv?: boolean;
+  /** Writes TLS key material to the provided file path. */
+  keylogPath?: string;
+}
+
+/** Unsafe TLS toggles passed to the native layer. */
+export interface NativeTlsDanger {
+  /** Disables certificate chain verification when set to `false`. */
+  certVerification?: boolean;
+  /** Disables hostname verification when set to `false`. */
+  verifyHostname?: boolean;
+  /** Disables SNI when set to `false`. */
+  sni?: boolean;
+}
+
+/** TLS peer certificate data returned from the native layer. */
+export interface NativeTlsPeerInfo {
+  /** Leaf certificate returned by the peer. */
+  peerCertificate?: Buffer;
+  /** Full peer certificate chain when available. */
+  peerCertificateChain?: Buffer[];
+}
+
+/** Text field in a native multipart request. */
+export interface NativeMultipartTextPart {
+  kind: 'text';
+  name: string;
+  value: string;
+}
+
+/** Streamed file field in a native multipart request. */
+export interface NativeMultipartStreamPart {
+  kind: 'stream';
+  name: string;
+  fileName: string;
+  mimeType: string;
+  length: number;
+  uploadHandle: number;
+}
+
+/** Multipart body assembled and streamed by the native transport. */
+export interface NativeMultipartBody {
+  boundary: string;
+  parts: Array<NativeMultipartTextPart | NativeMultipartStreamPart>;
+}
+
+/** JS-side upload pump paired with a native multipart body. */
+export interface NativeUploadPump {
+  start(signal?: AbortSignal | null): Promise<void>;
+  cancel(reason?: unknown): void;
+}
+
+/** JS-side upload pump paired with a native multipart body. */
+export interface NativeMultipartUpload extends NativeUploadPump {
+  body: NativeMultipartBody;
+}
+
+/** Raw request stream consumed by the native transport. */
+export interface NativeBodyStream {
+  uploadHandle: number;
+  length?: number;
+}
+
+/** JS-side upload pump paired with a raw native request stream. */
+export interface NativeBodyStreamUpload extends NativeUploadPump {
+  body: NativeBodyStream;
+}
+
+/** Fully normalized native request payload. */
+export interface NativeRequestOptions {
+  /** Fully resolved request URL. */
+  url: string;
+  /** Normalized HTTP method. */
+  method: HttpMethod;
+  /** Normalized request headers. */
+  headers: HeaderTuple[];
+  /** Original-case header names preserved for the native layer. */
+  origHeaders?: string[];
+  /** Encoded request body bytes. */
+  body?: Buffer;
+  /** Multipart body assembled by the native transport. */
+  multipart?: NativeMultipartBody;
+  /** Internal JS upload pump; never read by the native options converter. */
+  multipartUpload?: NativeMultipartUpload;
+  /** Raw body stream consumed by the native transport. */
+  bodyStream?: NativeBodyStream;
+  /** Internal JS upload pump for `bodyStream`; never read by the native converter. */
+  bodyStreamUpload?: NativeBodyStreamUpload;
+  /** Browser fingerprint profile used by the native transport. */
+  browser?: BrowserProfile;
+  /** Browser profile selection strategy used by the native transport. */
+  browserMode?: 'fixed' | 'random' | 'weighted-random';
+  /** Operating-system identity paired with a fixed browser profile. */
+  browserPlatform?: 'windows' | 'macos' | 'linux' | 'android' | 'ios';
+  /** Whether the profile's HTTP/2 fingerprint settings are applied. */
+  browserHttp2?: boolean;
+  /** Whether the profile's default headers and ordering are applied. */
+  browserHeaders?: boolean;
+  /** Serialized emulation options passed to the native layer. */
+  emulationJson?: string;
+  /** Proxy URL used for the request. */
+  proxy?: string;
+  /** Prevents fallback to system proxy settings when `true`. */
+  disableSystemProxy?: boolean;
+  /** DNS overrides used by the native transport. */
+  dns?: NativeDnsOptions;
+  /** Total request timeout in milliseconds. */
+  timeout?: number;
+  /** Read timeout in milliseconds while receiving the response body. */
+  readTimeout?: number;
+  /** Connection establishment timeout in milliseconds. */
+  connectTimeout?: number;
+  /** Socket linger duration in milliseconds; zero requests an abortive close. */
+  tcpLinger?: number;
+  /** Maximum idle time for pooled connections, or `false` to disable idle expiry. */
+  poolIdleTimeout?: number | false;
+  /** Maximum idle pooled connections retained per origin. */
+  poolMaxIdlePerHost?: number;
+  /** Maximum total connections retained by the native client pool. */
+  poolMaxSize?: number;
+  /** Per-origin capacity of the native TLS session cache. */
+  tlsSessionCacheCapacity?: number;
+  /** Internal owner id for reusable native clients. */
+  clientId?: number;
+  /** Internal transport-configuration key for reusable native clients. */
+  clientCacheKey?: string;
+  /** Disables headers normally injected by the library. */
+  disableDefaultHeaders?: boolean;
+  /** Enables transparent compression handling where supported. */
+  compress?: boolean;
+  /** Forces the request to use HTTP/1.x only. */
+  http1Only?: boolean;
+  /** Forces the request to use HTTP/2 only. */
+  http2Only?: boolean;
+  /** Local source address used for the outbound socket. */
+  localAddress?: string;
+  /** Per-family local source addresses used for the outbound socket. */
+  localAddresses?: NativeLocalAddresses;
+  /** Network interface name used for the outbound socket. */
+  interface?: string;
+  /** Client certificate identity used for mTLS. */
+  tlsIdentity?: NativeTlsIdentity;
+  /** Additional trusted certificate authorities. */
+  ca?: NativeCertificateAuthority;
+  /** TLS diagnostic options. */
+  tlsDebug?: NativeTlsDebug;
+  /** Unsafe TLS toggles intended only for controlled environments. */
+  tlsDanger?: NativeTlsDanger;
+  /** Logical connection-pool partition for this request. */
+  connectionGroup?: string | number;
+  /** Discards the connection after this response. */
+  forbidConnectionReuse?: boolean;
+}
+
+/** Raw response payload returned by the native layer. */
+export interface NativeResponse {
+  /** HTTP status code. */
+  status: number;
+  /** HTTP reason phrase when provided by the transport. */
+  statusText?: string;
+  /** Response headers as ordered `[name, value]` tuples. */
+  headers: HeaderTuple[];
+  /** Eagerly loaded UTF-8 response body, when available. */
+  body?: string;
+  /** Native body handle used for streaming large responses. */
+  bodyHandle?: number;
+  /** Final cookie state after processing `Set-Cookie` headers. */
+  cookies: Record<string, string>;
+  /** Raw `Set-Cookie` header values received on the response. */
+  setCookies?: string[];
+  /** Request timing metrics when available. */
+  timings?: RequestTimings;
+  /** TLS peer certificate information when requested. */
+  tls?: NativeTlsPeerInfo;
+  /** Final response URL. */
+  url: string;
+}

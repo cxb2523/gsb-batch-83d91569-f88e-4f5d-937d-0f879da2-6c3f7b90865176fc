@@ -1,0 +1,298 @@
+name: 🏗️ Build Native Modules
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/build.yml'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'rust-toolchain.toml'
+      - 'rust/**'
+      - 'scripts/**'
+  release:
+    types: [published]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-latest
+            target: x86_64-apple-darwin
+            build: npm run build:rust -- --target x86_64-apple-darwin
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            build: npm run build:rust -- --target aarch64-apple-darwin
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            setup: |
+              set -eux
+              TOOLCHAIN_URL="https://github.com/troglobit/misc/releases/download/11-20211120/x86_64-linux-musl-cross.tgz"
+              TOOLCHAIN_ROOT="$HOME/musl-cross"
+              TOOLCHAIN_DIR="$TOOLCHAIN_ROOT/x86_64-linux-musl-cross"
+
+              if [ ! -d "$TOOLCHAIN_DIR" ]; then
+                mkdir -p "$TOOLCHAIN_ROOT"
+                curl -L "$TOOLCHAIN_URL" -o /tmp/x86_64-linux-musl-cross.tgz
+                tar -xzf /tmp/x86_64-linux-musl-cross.tgz -C "$TOOLCHAIN_ROOT"
+              fi
+
+              echo "$TOOLCHAIN_DIR/bin" >> "$GITHUB_PATH"
+            build: CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc CXX_x86_64_unknown_linux_musl=x86_64-linux-musl-g++ AR_x86_64_unknown_linux_musl=x86_64-linux-musl-ar RANLIB_x86_64_unknown_linux_musl=x86_64-linux-musl-ranlib npm run build:rust -- --target x86_64-unknown-linux-musl
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: npm run build:rust -- --target x86_64-pc-windows-msvc
+
+    name: Build - ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20.20.2
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          targets: ${{ matrix.settings.target }}
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          shared-key: ${{ matrix.settings.target }}
+
+      - name: Cache musl cross toolchain
+        if: matrix.settings.target == 'x86_64-unknown-linux-musl'
+        uses: actions/cache@v6
+        with:
+          path: ~/musl-cross
+          key: musl-cross-${{ runner.os }}-x86_64-11-20211120
+
+      - name: Install target toolchain dependencies
+        if: matrix.settings.setup != ''
+        run: ${{ matrix.settings.setup }}
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build native module
+        run: ${{ matrix.settings.build }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: rust/*.node
+          if-no-files-found: error
+
+  build-linux-gnu:
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: ubuntu-latest
+            image: quay.io/pypa/manylinux_2_28_x86_64@sha256:4dc41da7df20400310c80d162a2fe2d2c2f3d9734d8dec20f6b9843711618deb
+            node_arch: x64
+            target: x86_64-unknown-linux-gnu
+            binary: rust/node-wreq.linux-x64-gnu.node
+          - host: ubuntu-24.04-arm
+            image: quay.io/pypa/manylinux_2_28_aarch64@sha256:29a6ceb78de5b00494e6e7456a72782a4cb54238de102e7491d15fe47789b4d1
+            node_arch: arm64
+            target: aarch64-unknown-linux-gnu
+            binary: rust/node-wreq.linux-arm64-gnu.node
+
+    name: Build - ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    container:
+      image: ${{ matrix.settings.image }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Install container dependencies
+        run: dnf install -y --disablerepo=epel --setopt=install_weak_deps=False clang zstd
+
+      - uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20.20.2
+          architecture: ${{ matrix.settings.node_arch }}
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          targets: ${{ matrix.settings.target }}
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          shared-key: manylinux-${{ matrix.settings.target }}
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build native module
+        env:
+          LIBCLANG_PATH: /usr/lib64
+        run: npm run build:rust -- --target "${{ matrix.settings.target }}"
+
+      - name: Verify and smoke test native module
+        run: |
+          if [ ! -f "${{ matrix.settings.binary }}" ]; then
+            echo "Native build produced no ${{ matrix.settings.binary }} binary" >&2
+            exit 1
+          fi
+
+          node ./scripts/verify-linux-binary.mjs "${{ matrix.settings.binary }}"
+          node ./scripts/smoke-native.mjs "${{ matrix.settings.binary }}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: ${{ matrix.settings.binary }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish platform package - ${{ matrix.settings.target }}
+    runs-on: ubuntu-latest
+    needs: [build, build-linux-gnu]
+    if: github.event_name == 'release'
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - target: x86_64-apple-darwin
+          - target: aarch64-apple-darwin
+          - target: x86_64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
+          - target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Determine npm dist-tag
+        id: dist_tag
+        shell: bash
+        run: |
+          if [[ "${{ github.event.release.prerelease }}" == "true" ]]; then
+            echo "value=rc" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine publish version
+        id: publish_version
+        shell: bash
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          version="${tag#v}"
+
+          if [[ -z "$version" ]]; then
+            echo "Release tag produced an empty version" >&2
+            exit 1
+          fi
+
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: artifacts
+
+      - name: Prepare scoped platform package
+        shell: bash
+        env:
+          NODE_WREQ_PUBLISH_VERSION: ${{ steps.publish_version.outputs.value }}
+        run: |
+          BINARY_PATH="$(find artifacts -name '*.node' | head -n 1)"
+          node ./scripts/prepare-platform-package.mjs \
+            --target "${{ matrix.settings.target }}" \
+            --binary "$BINARY_PATH" \
+            --outDir ".release/${{ matrix.settings.target }}"
+
+      - name: Publish scoped platform package
+        run: npm publish ".release/${{ matrix.settings.target }}" --access public --tag "${{ steps.dist_tag.outputs.value }}"
+
+  publish-main:
+    name: Publish main package
+    runs-on: ubuntu-latest
+    needs: publish
+    if: github.event_name == 'release'
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Determine npm dist-tag
+        id: dist_tag
+        shell: bash
+        run: |
+          if [[ "${{ github.event.release.prerelease }}" == "true" ]]; then
+            echo "value=rc" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine publish version
+        id: publish_version
+        shell: bash
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          version="${tag#v}"
+
+          if [[ -z "$version" ]]; then
+            echo "Release tag produced an empty version" >&2
+            exit 1
+          fi
+
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build:ts
+
+      - name: Prepare main npm package
+        env:
+          NODE_WREQ_PUBLISH_VERSION: ${{ steps.publish_version.outputs.value }}
+        run: npm run prepare:publish:main -- .release/main-package
+
+      - name: Publish main package
+        run: npm publish .release/main-package --access public --tag "${{ steps.dist_tag.outputs.value }}"

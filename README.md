@@ -1,0 +1,1024 @@
+# node-wreq
+
+[![NPM Version](https://img.shields.io/npm/v/node-wreq)](https://npmjs.com/package/node-wreq)
+![ESM](https://img.shields.io/badge/ESM-supported-brightgreen)
+![CJS](https://img.shields.io/badge/CJS-supported-brightgreen)
+![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20MacOS%20%7C%20Windows-lightgrey)
+
+`node-wreq` is a thin Node.js wrapper around 0x676e67's [`wreq`](https://github.com/0x676e67/wreq) — 
+a Rust HTTP client exposing its full power to JavaScript.
+
+Use it when you need low-level control over the network layer: TLS configuration, 
+transport fingerprinting, browser impersonation, or fine-grained HTTP/WebSocket 
+behavior that standard Node.js clients simply don't expose.
+
+> [!TIP]
+> ### why does this exist?
+>
+> Node.js ships with a built-in `https` module, and the ecosystem offers popular clients like `axios`, `got`, and `node-fetch` — but all of them are built on top of OpenSSL via Node's `tls` module, which exposes **no control over low-level TLS handshake parameters**. This makes it fundamentally impossible to emulate real browser network behavior from pure JavaScript.
+>
+> - **HTTP/1 over TLS**
+>
+>   Node.js HTTP clients normalize headers to lowercase internally, which is compliant with HTTP/2 semantics but breaks compatibility with some **WAFs** that enforce case-sensitive header validation on **HTTP/1** requests. This wrapper preserves header case exactly as specified, preventing requests from being silently rejected.
+>
+> - **HTTP/2 over TLS**
+>
+>   Fingerprints like **JA3**, **JA4**, and **Akamai HTTP/2** are derived from the specifics of the TLS handshake and HTTP/2 SETTINGS frames — cipher suite ordering, TLS extensions, ALPN values, HPACK header compression parameters, and more. Node.js exposes none of these through its `tls` or `http2` APIs. You simply cannot spoof them from JS land, no matter the library. This package solves that at the native layer, giving you fine-grained control over TLS and HTTP/2 extensions to precisely match real browser behavior.
+>
+> - **Device Emulation**
+>
+>   Because TLS and HTTP/2 fingerprints evolve slowly relative to browser release cycles, a single fingerprint profile often covers many browser versions. **100+ pre-built browser device profiles** are bundled, so you don't have to figure out the right combination of settings yourself.
+
+TLS and HTTP/2 fingerprinting is actively used by major bot protection and WAF providers — including **Cloudflare** Bot Management, **AWS WAF** (Bot Control + CloudFront JA3 headers), **Google Cloud Armor**, **Akamai** (which maintains its own HTTP/2 fingerprint format on top of JA3/JA4), **ServicePipe** (a Russian DDoS protection and WAF provider), and various specialized anti-bot services like **DataDome** and **PerimeterX**. Correctly emulating a browser's TLS handshake and HTTP/2 SETTINGS frames is a hard requirement to get past these layers undetected.
+
+<img src="https://engineering.salesforce.com/wp-content/uploads/2022/05/salesforce-icon.png?w=32" width="16"/> [**TLS Fingerprinting with JA3 and JA3S**](https://engineering.salesforce.com/tls-fingerprinting-with-ja3-and-ja3s-247362855967/)
+
+<img src="https://developers.cloudflare.com/favicon.png" width="16"/> [**JA3/JA4 Fingerprint — Cloudflare Bot Solutions**](https://developers.cloudflare.com/bots/additional-configurations/ja3-ja4-fingerprint/)
+
+<img src="https://www.browserless.io/favicon.ico" width="16"/> [**TLS Fingerprinting: How It Works & How to Bypass It**](https://www.browserless.io/blog/tls-fingerprinting-explanation-detection-and-bypassing-it-in-playwright-and-puppeteer)
+
+> [!NOTE]
+> This only covers the transport layer. It does not help bypass JavaScript-based challenges (Cloudflare Turnstile, Akamai sensor data, Kasada, etc.), CAPTCHA, or behavioral analysis — those require a different approach entirely
+
+## install
+
+```bash
+npm install node-wreq
+```
+
+Node.js 20+ is required.
+
+## contents
+
+#### ⚡   **[quick start](#quick-start)**
+#### 🌐   **[fetch](#fetch)**
+#### 🧩   **[client](#client)** — shared defaults, reusable config.
+#### 🎭   **[browser profiles](#browser-profiles)**
+#### 🪝   **[hooks](#hooks)** — request lifecycle, dynamic auth, retries, etc.
+#### 🍪   **[cookies and sessions](#cookies)**
+#### 🔁   **[redirects and retries](#redirects-and-retries)**
+#### 📊   **[observability](#observability)**
+#### 🚨   **[error handling](#errors)**
+#### 🔌   **[websockets](#websockets)**
+#### 🧪   **[networking / transport knobs](#networking)** — TLS, HTTP/1, HTTP/2 options; header ordering, mTLS and custom CAs; DNS controls.
+
+## ⚡ <a id="quick-start"></a>quick start
+
+```ts
+import { fetch } from 'node-wreq';
+
+const response = await fetch('https://httpbin.org/get', {
+  browser: 'chrome_137',
+});
+
+console.log(response.status);
+console.log(await response.json());
+```
+
+If you keep repeating config, move to a client:
+
+```ts
+import { createClient } from 'node-wreq';
+
+const client = createClient({
+  baseURL: 'https://httpbin.org',
+  browser: 'chrome_137',
+  headers: {
+    'x-client': 'node-wreq',
+  },
+  retry: 2,
+});
+
+const response = await client.fetch('/anything', {
+  query: { from: 'client' },
+});
+
+console.log(response.status);
+console.log(await response.json());
+```
+
+## 🌐 <a id="fetch"></a>fetch   ·   [↑](#contents)
+
+### simple GET
+
+```ts
+import { fetch } from 'node-wreq';
+
+const response = await fetch('https://httpbin.org/get', {
+  browser: {
+    profile: 'firefox_151',
+    platform: 'linux',
+    http2: true,
+    headers: true,
+  },
+  query: {
+    source: 'node-wreq',
+    debug: true,
+  },
+  timeout: 15_000,
+});
+
+const body = await response.json();
+
+console.log(response.ok);
+console.log(body.args);
+```
+
+### JSON POST
+
+```ts
+import { fetch } from 'node-wreq';
+
+const response = await fetch('https://api.example.com/items', {
+  method: 'POST',
+  browser: 'chrome_137',
+  headers: {
+    'content-type': 'application/json',
+  },
+  body: JSON.stringify({
+    name: 'example',
+    enabled: true,
+  }),
+  throwHttpErrors: true,
+});
+
+console.log(await response.json());
+```
+
+### upload `FormData`
+
+`FormData` request bodies work like `fetch`. By default, `node-wreq` generates a
+`----WebKitFormBoundary...` boundary so the multipart envelope matches browser traffic as well as
+the TLS and HTTP fingerprints do. File parts are encoded by native `wreq` multipart support and
+streamed with backpressure instead of buffering the complete form in memory.
+
+```ts
+const formData = new FormData();
+
+formData.append('alpha', '1');
+formData.append('upload', new File(['hello'], 'hello.txt', { type: 'text/plain' }));
+
+const response = await fetch('https://api.example.com/upload', {
+  method: 'POST',
+  body: formData,
+  // Optional: multipartBoundary: '----my-explicit-boundary',
+});
+
+console.log(await response.json());
+```
+
+### build a `Request` first
+
+```ts
+import { Request, fetch } from 'node-wreq';
+
+const request = new Request('https://httpbin.org/post', {
+  method: 'POST',
+  headers: {
+    'content-type': 'application/json',
+  },
+  body: JSON.stringify({ via: 'Request' }),
+});
+
+const response = await fetch(request, {
+  browser: 'chrome_137',
+});
+
+console.log(await response.json());
+```
+
+### read extra metadata
+
+`fetch()` returns a fetch-style `Response`, plus extra metadata under `response.wreq`.
+
+```ts
+const response = await fetch('https://example.com', {
+  browser: 'chrome_137',
+});
+
+console.log(response.status);
+console.log(response.headers.get('content-type'));
+
+console.log(response.wreq.cookies);
+console.log(response.wreq.setCookies);
+console.log(response.wreq.timings);
+console.log(response.wreq.redirectChain);
+```
+
+If you need a Node stream instead of a WHATWG stream:
+
+```ts
+const readable = response.wreq.readable();
+
+readable.pipe(process.stdout);
+```
+
+## 🧩 <a id="client"></a>client   ·   [↑](#contents)
+
+Use `createClient(...)` when requests share defaults. A client also owns reusable native connection
+and TLS-session pools; it is not just a JavaScript defaults wrapper.
+
+- `baseURL`
+- browser profile
+- headers
+- proxy
+- timeout
+- hooks
+- retry policy
+- cookie jar
+
+### shared defaults
+
+```ts
+import { createClient } from 'node-wreq';
+
+const client = createClient({
+  baseURL: 'https://api.example.com',
+  browser: 'chrome_137',
+  timeout: 10_000,
+  headers: {
+    authorization: `Bearer ${process.env.API_TOKEN}`,
+  },
+  retry: {
+    limit: 2,
+    statusCodes: [429, 503],
+  },
+});
+
+const users = await client.get('/users');
+
+console.log(await users.json());
+
+const created = await client.post(
+  '/users',
+  JSON.stringify({ email: 'user@example.com' }),
+  {
+    headers: {
+      'content-type': 'application/json',
+    },
+  }
+);
+
+console.log(created.status);
+
+// Optional for long-lived processes; pooled resources are also released after GC.
+client.close();
+```
+
+### extend a client
+
+```ts
+const base = createClient({
+  baseURL: 'https://api.example.com',
+  browser: 'chrome_137',
+});
+
+const admin = base.extend({
+  headers: {
+    authorization: `Bearer ${process.env.ADMIN_TOKEN}`,
+  },
+});
+
+await base.get('/health');
+await admin.get('/admin/stats');
+```
+
+## 🎭 <a id="browser-profiles"></a>browser profiles   ·   [↑](#contents)
+
+Inspect the available profiles at runtime:
+
+```ts
+import { getProfiles } from 'node-wreq';
+
+console.log(getProfiles());
+```
+
+There is also `BROWSER_PROFILES` if you want the generated list directly.
+
+Typical profiles include browser families like:
+
+- Chrome
+- Edge
+- Firefox
+- Safari
+- Opera
+- OkHttp
+
+The current upstream snapshot includes the newest profiles through `chrome_149`, `edge_148`,
+`firefox_151`, `opera_131`, and `safari_26_4`. When `browser` is omitted, `chrome_149` is used.
+
+You can also select a platform explicitly or ask upstream to choose a profile automatically:
+
+```ts
+await fetch('https://example.com', {
+  browser: {
+    profile: 'chrome_149',
+    platform: 'windows',
+    // Optional component switches from upstream's Emulation builder:
+    http2: true,
+    headers: true,
+  },
+});
+
+await fetch('https://example.com', {
+  browser: { mode: 'random' },
+});
+
+await fetch('https://example.com', {
+  // Uses current browser-market-share weights and valid browser/platform pairings.
+  browser: { mode: 'weighted-random' },
+});
+```
+
+Set `browser.http2` to `false` when you want the selected TLS/profile identity without its
+HTTP/2 fingerprint settings. Set `browser.headers` to `false` to omit the profile's default
+headers and header ordering; the top-level `disableDefaultHeaders` option remains a convenient
+request-wide equivalent for the latter.
+
+## 🪝 <a id="hooks"></a>hooks   ·   [↑](#contents)
+
+Hooks are the request pipeline.
+
+Available phases:
+
+- `init`
+- `beforeRequest`
+- `afterResponse`
+- `beforeRetry`
+- `beforeError`
+- `beforeRedirect`
+
+### common pattern: auth, tracing, proxy rotation
+
+```ts
+import { createClient } from 'node-wreq';
+
+const client = createClient({
+  baseURL: 'https://example.com',
+  retry: {
+    limit: 2,
+    statusCodes: [429, 503],
+    backoff: ({ attempt }) => attempt * 250,
+  },
+  hooks: {
+    init: [
+      ({ options, state }) => {
+        options.query = { ...options.query, source: 'hook-init' };
+
+        state.startedAt = Date.now();
+      },
+    ],
+    beforeRequest: [
+      ({ request, options, state }) => {
+        request.headers.set('x-trace-id', crypto.randomUUID());
+        request.headers.set('authorization', `Bearer ${getAccessToken()}`);
+
+        options.proxy = pickProxy();
+
+        state.lastProxy = options.proxy;
+      },
+    ],
+    beforeRetry: [
+      ({ options, attempt, error, state }) => {
+        options.proxy = pickProxy(attempt);
+
+        console.log('retrying', {
+          attempt,
+          proxy: options.proxy,
+          previousProxy: state.lastProxy,
+          error,
+        });
+      },
+    ],
+    beforeError: [
+      ({ error, state }) => {
+        error.message = `[trace=${String(state.startedAt)}] ${error.message}`;
+
+        return error;
+      },
+    ],
+  },
+});
+```
+
+### replace a response in `afterResponse`
+
+```ts
+import { Response, fetch } from 'node-wreq';
+
+const response = await fetch('https://example.com/account', {
+  hooks: {
+    afterResponse: [
+      async ({ response }) => {
+        if (response.status === 401) {
+          return new Response(JSON.stringify({ guest: true }), {
+            status: 200,
+            headers: {
+              'content-type': 'application/json',
+            },
+            url: response.url,
+          });
+        }
+      },
+    ],
+  },
+});
+
+console.log(await response.json());
+```
+
+### mutate redirect hops
+
+```ts
+await fetch('https://example.com/login', {
+  hooks: {
+    beforeRedirect: [
+      ({ request, nextUrl, redirectCount }) => {
+        request.headers.set('x-redirect-hop', String(redirectCount));
+        request.headers.set('x-next-url', nextUrl);
+      },
+    ],
+  },
+});
+```
+
+Rule of thumb:
+
+- use hooks for dynamic behavior
+- use client defaults for static behavior
+
+## 🍪 <a id="cookies"></a>cookies and sessions   ·   [↑](#contents)
+
+`node-wreq` does not force a built-in cookie store.
+
+You provide a `cookieJar` with two methods:
+
+- `getCookies(url)`
+- `setCookie(cookie, url)`
+
+That jar can be:
+
+- in-memory
+- `tough-cookie`
+- Redis-backed
+- DB-backed
+- anything else that matches the interface
+
+### tiny in-memory jar
+
+```ts
+import { fetch, websocket } from 'node-wreq';
+
+const jarStore = new Map<string, string>();
+
+const cookieJar = {
+  getCookies() {
+    return [...jarStore.entries()].map(([name, value]) => ({
+      name,
+      value,
+    }));
+  },
+  setCookie(cookie: string) {
+    const [pair] = cookie.split(';');
+    const [name, value = ''] = pair.split('=');
+
+    jarStore.set(name, value);
+  },
+};
+
+await fetch('https://example.com/login', { cookieJar });
+await fetch('https://example.com/profile', { cookieJar });
+await websocket('wss://example.com/ws', { cookieJar });
+```
+
+### `tough-cookie`
+
+```bash
+npm install tough-cookie
+```
+
+```ts
+import { CookieJar as ToughCookieJar } from 'tough-cookie';
+import { createClient } from 'node-wreq';
+
+const toughJar = new ToughCookieJar();
+
+const cookieJar = {
+  async getCookies(url: string) {
+    const cookies = await toughJar.getCookies(url);
+
+    return cookies.map((cookie) => ({
+      name: cookie.key,
+      value: cookie.value,
+    }));
+  },
+  async setCookie(cookie: string, url: string) {
+    await toughJar.setCookie(cookie, url);
+  },
+};
+
+const client = createClient({
+  browser: 'chrome_137',
+  cookieJar,
+});
+
+await client.fetch('https://example.com/login');
+await client.fetch('https://example.com/profile');
+```
+
+### inspect cookies on a response
+
+```ts
+import { fetch } from 'node-wreq';
+
+const response = await fetch('https://example.com/login', { cookieJar });
+
+console.log(response.wreq.setCookies);
+console.log(response.wreq.cookies);
+```
+
+## 🔁 <a id="redirects-and-retries"></a>redirects and retries   ·   [↑](#contents)
+
+Both are opt-in controls on top of the normal request pipeline.
+
+### manual redirects
+
+```ts
+const response = await fetch('https://example.com/login', {
+  redirect: 'manual',
+});
+
+console.log(response.status);
+console.log(response.headers.get('location'));
+console.log(response.redirected);
+```
+
+Modes:
+
+- `follow` - default redirect following
+- `manual` - return the redirect response as-is
+- `error` - throw on the first redirect
+
+Useful redirect facts:
+
+- `response.wreq.redirectChain` records followed hops
+- `301` / `302` rewrite `POST` to `GET`
+- `303` rewrites to `GET` unless current method is `HEAD`
+- `307` / `308` preserve method and body
+
+### simple retries
+
+```ts
+const response = await fetch('https://example.com', {
+  retry: 2,
+});
+```
+
+### explicit retry policy
+
+```ts
+const response = await fetch('https://example.com', {
+  retry: {
+    limit: 3,
+    statusCodes: [429, 503],
+    backoff: ({ attempt }) => attempt * 500,
+  },
+});
+```
+
+### custom retry decision
+
+```ts
+import { TimeoutError, fetch } from 'node-wreq';
+
+const response = await fetch('https://example.com', {
+  retry: {
+    limit: 5,
+    shouldRetry: ({ error, response }) => {
+      if (response?.status === 429) {
+        return true;
+      }
+
+      return error instanceof TimeoutError;
+    },
+  },
+});
+```
+
+Defaults:
+
+- retry is off unless you enable it
+- default retry methods are `GET` and `HEAD`
+- default status codes include `408`, `425`, `429`, `500`, `502`, `503`, `504`
+- default error codes include `ECONNRESET`, `ECONNREFUSED`, `ETIMEDOUT`, `ERR_TIMEOUT`
+
+## 📊 <a id="observability"></a>observability   ·   [↑](#contents)
+
+Two main surfaces:
+
+- `response.wreq.timings`
+- `onStats(stats)`
+
+### per-request stats callback
+
+```ts
+await fetch('https://example.com', {
+  onStats: ({ attempt, timings, response, error }) => {
+    console.log({
+      attempt,
+      wait: timings.wait,
+      total: timings.total,
+      status: response?.status,
+      error,
+    });
+  },
+});
+```
+
+### read timings from the final response
+
+```ts
+const response = await fetch('https://example.com', {
+  browser: 'chrome_137',
+});
+
+console.log(response.wreq.timings);
+```
+
+Current timings are wrapper-level timings that are still useful in practice:
+
+- request start
+- response available
+- total time when body consumption is known
+
+## 🚨 <a id="errors"></a>error handling   ·   [↑](#contents)
+
+Main error classes:
+
+- `RequestError`
+- `HTTPError`
+- `TimeoutError`
+- `AbortError`
+- `WebSocketError`
+- `ERR_DNS`
+
+Typical patterns:
+
+```ts
+import { HTTPError, TimeoutError, fetch } from 'node-wreq';
+
+try {
+  await fetch('https://example.com', {
+    timeout: 1_000,
+    throwHttpErrors: true,
+  });
+} catch (error) {
+  if (error instanceof TimeoutError) {
+    console.error('request timed out');
+  } else if (error instanceof HTTPError) {
+    console.error('bad status', error.statusCode);
+  } else {
+    console.error(error);
+  }
+}
+```
+
+## 🔌 <a id="websockets"></a>websockets   ·   [↑](#contents)
+
+You can use either:
+
+- `await websocket(url, init?)`
+- `new WebSocket(url, init?)`
+
+### simple helper
+
+```ts
+import { websocket } from 'node-wreq';
+
+const socket = await websocket('wss://echo.websocket.events', {
+  browser: 'chrome_137',
+  protocols: ['chat'],
+});
+
+socket.addEventListener('message', (event) => {
+  console.log('message:', event.data);
+});
+
+socket.send('hello');
+```
+
+### WHATWG-like constructor
+
+```ts
+import { WebSocket } from 'node-wreq';
+
+const socket = new WebSocket('wss://example.com/ws', {
+  binaryType: 'arraybuffer',
+});
+
+await socket.opened;
+
+socket.onmessage = (event) => {
+  if (event.data instanceof ArrayBuffer) {
+    console.log(new Uint8Array(event.data));
+  }
+};
+
+socket.send(new Uint8Array([1, 2, 3]));
+socket.close(1000, 'done');
+```
+
+### websocket from a client
+
+Useful when you want shared defaults like browser, proxy, or cookies:
+
+```ts
+const client = createClient({
+  browser: 'chrome_137',
+  cookieJar: yourCookieJar,
+});
+
+const socket = await client.websocket('wss://example.com/ws');
+```
+
+Notes:
+
+- cookies from `cookieJar` are sent during handshake
+- duplicate subprotocols are rejected
+- `httpVersion: '1.1' | '2'` explicitly selects the handshake HTTP version
+
+## 🧪 <a id="networking"></a>networking / transport knobs   ·   [↑](#contents)
+
+This is the "transport nerd" section.
+
+Everything else here is for debugging request shape, fingerprint-sensitive targets, or testing transport hypotheses.
+
+### browser profile + proxy + timeout
+
+```ts
+const response = await fetch('https://httpbin.org/anything', {
+  browser: 'chrome_137',
+  proxy: 'http://username:password@proxy.example.com:8080',
+  timeout: 10_000,
+});
+```
+
+If you want to bypass env/system proxy detection for a specific request, use `proxy: false`:
+
+```ts
+await fetch('https://example.com', {
+  proxy: false,
+});
+```
+
+### disable default browser-like headers
+
+By default, `node-wreq` may apply profile-appropriate default headers.
+
+`disableDefaultHeaders: true` disables those browser/profile preset headers only.
+
+That means it turns off headers injected by the selected browser emulation, such as:
+
+- `user-agent`
+- `accept`
+- `accept-language`
+- `sec-ch-ua`
+- `sec-ch-ua-mobile`
+- `sec-ch-ua-platform`
+- `sec-fetch-dest`
+- `sec-fetch-mode`
+- `sec-fetch-site`
+- `priority`
+
+The exact set varies by profile.
+
+It does **not** disable protocol or transport-level headers that may still appear automatically, such as:
+
+- `host`
+- `accept-encoding` when `compress` is enabled
+- `content-length` when the request body requires it
+- `content-type` generated by the runtime for bodies like `FormData`
+
+It also does not remove headers you set explicitly yourself.
+
+If you want full manual control:
+
+```ts
+await fetch('https://example.com', {
+  disableDefaultHeaders: true,
+  headers: {
+    accept: '*/*',
+    'user-agent': 'custom-client',
+  },
+});
+```
+
+For example, with `browser: 'chrome_137'`, the default request would normally include Chrome-like `sec-ch-*`, `sec-fetch-*`, `user-agent`, `accept`, and `accept-language` headers. With `disableDefaultHeaders: true`, those browser preset headers are skipped, while transport headers like `host` and `accept-encoding` may still be present.
+
+### exact header order
+
+Use tuples when header order matters.
+
+Tuple headers also preserve the original header names exactly as you wrote them on the wire:
+
+```ts
+await fetch('https://example.com', {
+  headers: [
+    ['x-lower', 'one'],
+    ['X-Mixed', 'two'],
+  ],
+});
+```
+
+For example, this will preserve both the tuple order and the exact `x-lower` / `X-Mixed` casing you passed.
+
+### lower-level transport tuning
+
+If a browser preset gets you close but not all the way there:
+
+```ts
+await fetch('https://example.com', {
+  browser: 'chrome_137',
+  tlsOptions: {
+    greaseEnabled: true,
+    keyShares: ['X25519_MLKEM768', 'X25519', 'P256'],
+  },
+  http1Options: {
+    writev: true,
+  },
+  http2Options: {
+    adaptiveWindow: false,
+    maxConcurrentStreams: 64,
+  },
+});
+```
+
+Use these only when:
+
+- a target is still picky after choosing a browser profile
+- you are comparing transport behavior
+- you want to debug fingerprint mismatches
+
+Custom TLS/HTTP1/HTTP2 options are overlaid on the selected browser profile. Unspecified profile
+settings remain intact.
+
+### native connection and TLS-session pools
+
+`createClient()` reuses the underlying native `wreq::Client`, including HTTP keep-alive connections
+and TLS sessions. Builder-affecting per-request overrides automatically get an isolated client
+variant so a proxy, DNS, TLS, or browser change cannot reuse an incompatible pool.
+
+```ts
+const client = createClient({
+  baseURL: 'https://api.example.com',
+  poolIdleTimeout: 90_000,
+  poolMaxIdlePerHost: 8,
+  poolMaxSize: 128,
+  tlsSessionCacheCapacity: 8,
+  tcpLinger: 5_000,
+});
+
+await client.get('/account', {
+  // Requests in different groups never share pooled connections.
+  connectionGroup: 'account-session',
+});
+
+const response = await client.get('/health', {
+  // Static form: discard this request's connection after the response.
+  forbidConnectionReuse: true,
+});
+
+// Conditional form: call before consuming the body.
+response.wreq.forbidConnectionReuse();
+
+client.close();
+```
+
+Set `poolIdleTimeout: false` to disable idle expiry. `connectionGroup` accepts a string or a
+non-negative integer. `tcpLinger` configures `SO_LINGER` in milliseconds; `0` requests an abortive
+close with TCP `RST`, while omitting the option keeps the operating-system default.
+
+### mTLS and custom CAs
+
+Use `tlsIdentity` for client certificate authentication and `ca` for a custom trust store:
+
+```ts
+import { fetch } from 'node-wreq';
+import { readFileSync } from 'node:fs';
+
+await fetch('https://mtls.example.com', {
+  tlsIdentity: {
+    cert: readFileSync('./client-cert.pem'),
+    key: readFileSync('./client-key.pem'),
+  },
+  ca: {
+    cert: readFileSync('./ca.pem'),
+    includeDefaultRoots: false,
+  },
+});
+```
+
+PKCS#12 / PFX identities are also supported:
+
+```ts
+await fetch('https://mtls.example.com', {
+  tlsIdentity: {
+    pfx: readFileSync('./client-identity.p12'),
+    passphrase: 'secret',
+  },
+  ca: {
+    cert: readFileSync('./ca.pem'),
+    includeDefaultRoots: false,
+  },
+});
+```
+
+For TLS diagnostics, you can ask for peer certificate metadata on the response or write TLS session keys to a file for tools like Wireshark:
+
+```ts
+const response = await fetch('https://mtls.example.com', {
+  tlsDebug: {
+    peerCertificates: true,
+    keylog: {
+      path: '/tmp/node-wreq.keys',
+    },
+  },
+});
+
+console.log(response.wreq.tls?.peerCertificate);
+console.log(response.wreq.tls?.peerCertificateChain);
+```
+
+Unsafe TLS overrides are separate and explicit:
+
+```ts
+await fetch('https://staging.internal.example', {
+  tlsDanger: {
+    certVerification: false,
+    verifyHostname: false,
+    sni: false,
+  },
+});
+```
+
+### compression
+
+Compression is enabled by default.
+
+That includes `gzip`, `br`, `deflate`, and `zstd` response decoding when the server supports them.
+
+Disable it if you need stricter control over response handling:
+
+```ts
+await fetch('https://example.com/archive', {
+  compress: false,
+});
+```
+
+### DNS controls
+
+Use `dns.hosts` to pin hostnames to specific IPs, or `dns.servers` to send lookups through specific nameservers:
+
+```ts
+await fetch('https://api.internal.test/health', {
+  dns: {
+    servers: ['1.1.1.1', '8.8.8.8'],
+    hosts: {
+      'api.internal.test': ['127.0.0.1'],
+    },
+  },
+});
+```
+
+Use `dns.doh` to resolve request hostnames through DNS-over-HTTPS:
+
+```ts
+await fetch('https://example.com', {
+  dns: {
+    doh: 'https://cloudflare-dns.com/dns-query',
+  },
+});
+```
+
+Use `dns.dot` to resolve request hostnames through DNS-over-TLS:
+
+```ts
+await fetch('https://example.com', {
+  dns: {
+    dot: 'tls://one.one.one.one',
+  },
+});
+```
+
+`dns.doh` and `dns.dot` are mutually exclusive. When either encrypted DNS mode is set,
+`dns.servers` are used only to resolve the encrypted DNS endpoint hostname. If `dns.servers`
+are omitted, the endpoint is resolved with the system DNS settings.
+
+```ts
+await fetch('https://example.com', {
+  dns: {
+    doh: 'https://cloudflare-dns.com/dns-query',
+    servers: ['9.9.9.9'],
+  },
+});
+```
