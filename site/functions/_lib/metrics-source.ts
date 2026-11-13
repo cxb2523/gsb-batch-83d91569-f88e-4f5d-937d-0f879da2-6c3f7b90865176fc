@@ -4,7 +4,7 @@
  */
 import { MAINNET } from 'papertrade-sdk';
 import { computeMetrics, readOnchain, snapshotFrom } from '../../../src/sources.js';
-import type { OnchainReads } from '../../../src/metrics.js';
+import type { OnchainReadReport, OnchainReads } from '../../../src/metrics.js';
 import type { Metrics } from '../../../src/types.js';
 import { readSnapshots, recordSnapshot, type Env } from './snapshots.js';
 
@@ -14,13 +14,16 @@ const STALE_ONCHAIN_MS = 10 * 60_000;
 /** Last on-chain read that succeeded, kept per isolate so a rate-limited RPC does not blank the PAPER numbers. */
 let lastOnchain: { at: number; reads: OnchainReads } | null = null;
 
-async function onchain(): Promise<OnchainReads | null> {
-  const fresh = await readOnchain([MAINNET.network.rpcUrl, ...MAINNET.network.fallbackRpcUrls]);
-  if (fresh) {
-    lastOnchain = { at: Date.now(), reads: fresh };
-    return fresh;
+async function onchain(): Promise<OnchainReadReport> {
+  const report = await readOnchain([MAINNET.network.rpcUrl, ...MAINNET.network.fallbackRpcUrls]);
+  if (report.reads) {
+    lastOnchain = { at: Date.now(), reads: report.reads };
+    return report;
   }
-  return lastOnchain && Date.now() - lastOnchain.at < STALE_ONCHAIN_MS ? lastOnchain.reads : null;
+  if (lastOnchain && Date.now() - lastOnchain.at < STALE_ONCHAIN_MS) {
+    return { reads: lastOnchain.reads, sources: report.sources };
+  }
+  return report;
 }
 
 export function workerCache(): Cache | null {

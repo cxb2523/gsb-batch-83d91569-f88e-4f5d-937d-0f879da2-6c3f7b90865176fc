@@ -34,6 +34,13 @@ export async function recordedInputs(overrides: Partial<MetricsInputs> = {}): Pr
     house: house(),
     candles: { BTC: btc },
     onchain: null,
+    sourceReport: {
+      onchain: [{ source: 'supply', status: 'skipped', attempts: [] }],
+      candles: [
+        { symbol: 'BTC', status: 'success' },
+        { symbol: 'ETH', status: 'failed', error: 'recorded fixture has no ETH candles' },
+      ],
+    },
     snapshots: [],
     ...overrides,
   };

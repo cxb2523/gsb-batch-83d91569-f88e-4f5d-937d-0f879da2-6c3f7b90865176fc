@@ -25,6 +25,48 @@ export interface OnchainReads {
   accRewardPerShareRaw: bigint;
 }
 
+/** Final outcome for one upstream source after every fallback has been tried. */
+export type SourceStatus = 'success' | 'failed' | 'skipped';
+
+/** One RPC attempt recorded while reading the on-chain PAPER state. */
+export interface RpcAttempt {
+  rpcUrl: string;
+  ok: boolean;
+  /** Error message when ok is false; undefined on success. */
+  error?: string;
+}
+
+/** Per-source account of one HyperEVM read (PAPER supply or staking state). */
+export interface OnchainSourceReport {
+  /** 'supply' is paperTotalSupply, 'staking' is the PaperStaking multicall. */
+  source: 'supply' | 'staking';
+  status: SourceStatus;
+  /** Every RPC tried, in order, with its outcome. Empty when the read was skipped. */
+  attempts: RpcAttempt[];
+  /** RPC that returned the value, present only when status is 'success'. */
+  rpcUrl?: string;
+}
+
+/** On-chain read plus the per-source accounting that explains how it was reached. */
+export interface OnchainReadReport {
+  reads: OnchainReads | null;
+  sources: OnchainSourceReport[];
+}
+
+/** Per-market account of one Hyperliquid candle fetch. A failure keeps an empty candle array. */
+export interface CandleSourceReport {
+  symbol: string;
+  status: 'success' | 'failed';
+  /** Failure reason, present only when status is 'failed'. */
+  error?: string;
+}
+
+/** Per-source accounting for every degraded upstream read. Not part of the /api/metrics document. */
+export interface SourceReport {
+  onchain: OnchainSourceReport[];
+  candles: CandleSourceReport[];
+}
+
 export interface MetricsInputs {
   nowMs: number;
   summary: ProtocolSummary;
@@ -36,6 +78,8 @@ export interface MetricsInputs {
   /** Hyperliquid 1h candles keyed by symbol, oldest first. */
   candles: Record<string, Candle[]>;
   onchain: OnchainReads | null;
+  /** Which RPCs and candle fetches succeeded, failed or were skipped, and why. */
+  sourceReport: SourceReport;
   snapshots: readonly Snapshot[];
 }
 
