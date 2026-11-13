@@ -268,7 +268,42 @@ than fetched and parsed to nothing.
 opt-out. Every run that writes output writes `<out>.meta.json` beside it,
 recording the status, the stop reason, which targets failed by number, the
 window sizes, and `why_not_exhaustive`. A run that FAILED writes neither
-file, so the last good output and its own sidecar stay together.
+file, so the last good output and its own sidecar stay together. The one
+exception is `--mode video`: it always writes the sidecar, even with zero
+rows, because `video_outcomes` is the record of what happened to each named
+video and it would be lost exactly when it matters (see below).
+
+**Every named video ends visibly, in `--mode video`.** The sidecar carries
+`video_outcomes`, one entry per target in `--url` order:
+
+```json
+"video_outcomes": [
+  {"number": 1, "target": "7665075736742530317", "video_id": "7665075736742530317",
+   "url": "https://www.tiktok.com/@tiktok/video/7665075736742530317",
+   "outcome": "success"},
+  {"number": 2, "target": "7686600539525762318", "video_id": "7686600539525762318",
+   "url": "https://www.tiktok.com/@tiktok/video/7686600539525762318",
+   "outcome": "unavailable",
+   "reason": "TikTok returned no video: it is deleted, private, or was never there"},
+  {"number": 3, "target": "1111111111111111111", "video_id": "1111111111111111111",
+   "url": "https://www.tiktok.com/@tiktok/video/1111111111111111111",
+   "outcome": "failed", "reason": "parse_error: no __UNIVERSAL_DATA_FOR_REHYDRATION__ script in the page (119 chars)"}
+]
+```
+
+`outcome` is one of `success` (a row was produced), `unavailable` (TikTok
+answered that the video is deleted, private or absent), or `failed`
+(anything that left us without the row — a transport error, a challenge, a
+page our parser rejected, or a target no worker could reach). Every target
+in `--url` appears exactly once, whether the run fetched it serially or
+across workers: a worker that cannot start puts its targets back for its
+siblings, and anything still unclaimed is reported as `failed`, never
+silently dropped. `stop_reason` is `completed` only when every target is
+`success`. Otherwise the run is partial: exit 6 when some rows were
+gathered (`page_failed`, or `targets_unavailable` when the only misses are
+videos TikTok says are gone), exit 5 when the misses are failures and
+nothing was gathered, and exit 4 when TikTok answered "no video" for every
+target.
 
 **Exit 6 when asked-for enrichment did not happen.** With enrichment on
 (the default), a video whose own page could not be read keeps its embed

@@ -137,6 +137,12 @@ class PageOutcome:
     """
     number: int
     url: str = ""
+    # The id `--url` named, carried on the outcome rather than recovered by
+    # indexing back into the target list: a per-target record must still
+    # name the right video when a worker dies before fetching it, and a
+    # target filled in after the fact has no other way to say which one it
+    # was.
+    video_id: Optional[str] = None
     rows: List[Any] = field(default_factory=list)
     state: str = STATE_UNKNOWN
     status: Optional[int] = None
@@ -1212,7 +1218,15 @@ def _run_videos(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]
 
 
 def _run_video(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
-    """Named videos, each fetched from its own page."""
+    """Named videos, each fetched from its own page.
+
+    Every target `--url` named ends with an outcome, whichever path fetched
+    it, and `video_outcomes` in the sidecar is that list in `--url` order.
+    Before this a batch of N videos was checked by counting rows and treating
+    the remainder as failures: an unavailable video and a video no worker
+    reached were both simply ABSENT from the output, so a caller could not
+    tell "deleted" from "we never asked".
+    """
     targets = _targets(args)
     scraped_at = utc_now()
 
@@ -1237,15 +1251,8 @@ def _run_video(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
         outcomes = _fetch_videos_concurrently(pw, args, pool, targets,
                                               scraped_at, workers)
     else:
-        outcomes = []
-        for i, (_kind, handle, vid) in enumerate(targets):
-            if i and args.delay:
-                time.sleep(args.delay)
-            if i and pool and pool.rotates_per_page():
-                _rotate_if_per_page(session_box, pw, args, pool,
-                                    f"before video {vid}")
-            outcomes.append(_fetch_one_video(session_box, pw, args, pool,
-                                             handle, vid, scraped_at, i + 1))
+        outcomes = _fetch_videos_in_order(session_box, pw, args, pool,
+                                          targets, scraped_at)
 
     rows: List[Any] = []
     seen: set = set()
@@ -1266,8 +1273,13 @@ def _run_video(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
         stop_reason = "blocked"
     elif failed:
         stop_reason = "page_failed"
-    elif unavailable and not rows:
-        stop_reason = "video_unavailable"
+    elif unavailable:
+        # A video TikTok says is gone is a real answer, and on its own it
+        # ends a zero-row run as `video_unavailable` (complete, exit 4 —
+        # the site answered). Beside videos that WERE read it is not the
+        # whole batch, so it must not be reported as "completed": the run
+        # asked for N and holds fewer than N.
+        stop_reason = "video_unavailable" if not rows else "targets_unavailable"
     else:
         stop_reason = "completed"
 
@@ -1278,6 +1290,15 @@ def _run_video(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
         "blocked": blocked,
         "videos_requested": len(targets),
         "videos_unavailable": unavailable or None,
+        # EVERY named video's ending, success included and in the order
+        # `--url` named them. A caller checks a batch by comparing this
+        # list's length with `videos_requested`, and reads the category of
+        # each one, instead of counting output rows and guessing.
+        "video_outcomes": [
+            page_flow.target_outcome(o.number, o.video_id, o.url, o.state,
+                                     bool(o.rows), o.error)
+            for o in sorted(outcomes, key=lambda outcome: outcome.number)
+        ],
         "stats_sources": {
             s: sum(1 for r in rows if r.stats_source == s)
             for s in sorted({r.stats_source for r in rows if r.stats_source})
@@ -1287,14 +1308,43 @@ def _run_video(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
     return rows, meta
 
 
+def _fetch_videos_in_order(session_box, pw, args, pool, targets, scraped_at):
+    """The serial path: one video at a time, every target still ending in an
+    outcome.
+
+    An exception raised here used to escape `_run_video` and take the whole
+    batch with it — the remaining targets were never fetched and never
+    mentioned. The concurrent path already turns a raised exception into a
+    `failed` outcome; this is the same rule applied to the serial path, so
+    the sidecar reads the same whichever one the run used.
+    """
+    outcomes = []
+    for i, (_kind, handle, vid) in enumerate(targets):
+        if i and args.delay:
+            time.sleep(args.delay)
+        try:
+            if i and pool and pool.rotates_per_page():
+                _rotate_if_per_page(session_box, pw, args, pool,
+                                    f"before video {vid}")
+            outcomes.append(_fetch_one_video(session_box, pw, args, pool,
+                                             handle, vid, scraped_at, i + 1))
+        except Exception as exc:                              # noqa: BLE001
+            logger.error("video %s failed: %s", vid,
+                         _mask_credentials(exc))
+            outcomes.append(PageOutcome(
+                number=i + 1, url=video_url(vid, handle), video_id=vid,
+                state=STATE_UNKNOWN, error=_mask_credentials(exc)))
+    return outcomes
+
+
 def _fetch_one_video(session_box, pw, args, pool, handle, vid, scraped_at,
                      number) -> PageOutcome:
     url = video_url(vid, handle)
     status, text, state, blocked = _fetch_with_policy(
         session_box, pw, args, pool, url, f"video {vid}")
     _dump(args, f"video_{vid}", text)
-    outcome = PageOutcome(number=number, url=url, state=state, status=status,
-                          blocked=blocked)
+    outcome = PageOutcome(number=number, url=url, video_id=vid, state=state,
+                          status=status, blocked=blocked)
     if not page_flow.should_parse(state):
         if state == parser.STATE_VIDEO_UNAVAILABLE:
             logger.warning("video %s: TikTok returned no item. The video is "
@@ -1349,14 +1399,20 @@ def _fetch_videos_concurrently(pw, args, pool, targets, scraped_at, workers):
         first = targets[0]
         box = {"session": None,
                "prime_url": video_url(first[2], first[1])}
+        # The target this worker has taken but not finished. Held so that a
+        # worker dying MID-FETCH hands its video back instead of taking it
+        # down with it: a fetched-but-unrecorded target and a target never
+        # dequeued are the same loss to the caller, and both are avoidable.
+        pending: Optional[Tuple[int, Any]] = None
         try:
             box["session"] = _open_session(own, args, worker_pool)
             _prime_session(box["session"], args, box["prime_url"])
             while True:
                 try:
-                    slot, (_kind, handle, vid) = work.get_nowait()
+                    pending = work.get_nowait()
                 except queue.Empty:
                     return
+                slot, (_kind, handle, vid) = pending
                 try:
                     outcome = _fetch_one_video(box, own, args, worker_pool,
                                                handle, vid, scraped_at,
@@ -1366,28 +1422,49 @@ def _fetch_videos_concurrently(pw, args, pool, targets, scraped_at, workers):
                                  vid, _mask_credentials(exc))
                     outcome = PageOutcome(number=slot + 1,
                                           url=video_url(vid, handle),
+                                          video_id=vid,
                                           state=STATE_UNKNOWN,
                                           error=_mask_credentials(exc))
                 with lock:
                     results[slot] = outcome
                 work.task_done()
-        except Exception as exc:                              # noqa: BLE001
+                pending = None
+        except BaseException as exc:                          # noqa: BLE001
             # A worker that cannot START (no browser, a dead exit at
-            # launch) must not take its targets with it: they are left in
-            # the queue for its siblings and, if none can take them, given
-            # an outcome of their own below.
-            logger.error("worker %d could not start: %s", index,
+            # launch) — or that dies between fetches — must not take its
+            # targets with it: whatever it had taken goes back on the
+            # queue for its siblings, everything still queued stays there,
+            # and anything left when every worker is gone is given an
+            # outcome of its own below. `BaseException` rather than
+            # `Exception` because a worker thread that raises SystemExit
+            # leaves the queue exactly as short — the caller's batch is
+            # what must survive, not this thread's exit code.
+            logger.error("worker %d stopped early: %s", index,
                          _mask_credentials(exc))
         finally:
+            if pending is not None and pending[0] not in results:
+                work.put(pending)
             if box["session"] is not None:
                 box["session"].close()
             _release_worker_driver(own)
 
     threads = [threading.Thread(target=worker, args=(i,), daemon=True)
                for i in range(workers)]
+    started = []
     for t in threads:
-        t.start()
-    for t in threads:
+        try:
+            t.start()
+            started.append(t)
+        except Exception as exc:                              # noqa: BLE001
+            # A thread the OS refuses to create is the same fact as a
+            # worker that could not start: its targets stay in the queue
+            # for the threads that DID start, and are counted below if no
+            # one reaches them. Letting this raise out of here would take
+            # the whole batch with it, which is the defect this function
+            # exists to prevent.
+            logger.error("a worker thread could not be started: %s",
+                         _mask_credentials(exc))
+    for t in started:
         t.join()
     # Every target asked for ends with an outcome. Before this, a target no
     # worker reached simply vanished, and a run whose workers all failed
@@ -1396,6 +1473,7 @@ def _fetch_videos_concurrently(pw, args, pool, targets, scraped_at, workers):
         if slot not in results:
             results[slot] = PageOutcome(
                 number=slot + 1, url=video_url(targets[slot][2], targets[slot][1]),
+                video_id=targets[slot][2],
                 state=STATE_UNKNOWN,
                 error="no worker could fetch it (see the log)")
     return [results[i] for i in sorted(results)]

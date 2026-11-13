@@ -48,6 +48,11 @@ from dataclasses import dataclass, asdict, field, fields
 from datetime import datetime, timezone
 from typing import Optional, List, Set, Sequence, Any, Type
 
+# The per-target outcome vocabulary, defined where the engines BUILD it and
+# imported rather than restated: two copies of the same three strings is how
+# a sidecar contract drifts. `page_flow` imports no writer, so no cycle.
+from page_flow import OUTCOME_FAILED
+
 
 # The site a row came from. TikTok serves the same account on
 # `www.tiktok.com`, `m.tiktok.com` and the `vm.tiktok.com` short links,
@@ -615,6 +620,11 @@ COMPLETE_STOP_REASONS = ("completed", "pagination_exhausted", "no_new_products",
                          "single_page_route", "video_unavailable")
 
 
+def outcome_categories(video_outcomes: Optional[Sequence[dict]]) -> List[str]:
+    """The category of every per-target record, in order."""
+    return [str((o or {}).get("outcome") or "") for o in (video_outcomes or [])]
+
+
 def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
                allow_empty: bool, *, blocked: bool, stop_reason: str,
                pages_requested: int, pages_completed: int,
@@ -627,11 +637,14 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     Shared by all three browser engines so the status/exit-code mapping
     cannot drift between them.
 
-    The metadata sidecar is written ONLY when the row file was written.
-    Otherwise a failed run would leave a "status": "failed" sidecar next to
-    the previous run's still-intact good output (which `save` deliberately
-    does not overwrite) — the two files would contradict each other, and
-    diff_runs.py would refuse to compare data that is in fact fine.
+    The metadata sidecar is written ONLY when the row file was written,
+    with one exception: a run that carries per-target outcomes
+    (`video_outcomes`) writes its sidecar even with no rows. Otherwise the
+    very evidence that says WHICH named videos failed would be discarded
+    precisely when it matters — a run whose workers all died would leave a
+    caller holding nothing at all and no way to tell a deleted video from
+    one that was never fetched. `rows_written` in the sidecar says whether a
+    row file sits beside it, so the two are never confused.
     """
     # Completeness is decided by the reason AND by the evidence, and the
     # second half is the fix. `stop_reason` is a NAMED LIST, and a named
@@ -649,14 +662,35 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     # rule keyed on a list of names has a hole for every name nobody added
     # to it, so key on the thing that is actually true instead. If a page
     # failed, the run is not complete, whatever it stopped for.
+    ended = outcome_categories((extra or {}).get("video_outcomes"))
     complete = stop_reason in COMPLETE_STOP_REASONS and not pages_failed
+    # A per-target list is the second piece of evidence, and the same rule as
+    # `pages_failed` above: a batch can end for a COMPLETE reason while
+    # `video_outcomes` records a target we never read, and `status: complete`
+    # would then claim a whole batch the run does not hold.
+    #
+    # Only a FAILED target flips `complete`, and that is the existing exit
+    # convention rather than a new one: a video TikTok says is gone is the
+    # site ANSWERING, so a run of nothing but unavailable targets still exits
+    # 4 ("we asked, and the answer was nothing") and not 5 ("never
+    # obtained"). A batch that mixes answers with unread targets is
+    # incomplete either way, which the engine already says through
+    # `stop_reason`, and the run reports it as partial with exit 6.
+    if OUTCOME_FAILED in ended:
+        complete = False
     row_cls = ROW_CLASS_BY_MODE.get(mode, Video)
     write_stats: dict = {}
     rc = save(rows, out_prefix, fmt, allow_empty=allow_empty, row_cls=row_cls,
               stats=write_stats)
     wrote_output = bool(rows) or allow_empty
+    # A zero-row run still writes its sidecar when it carries per-target
+    # outcomes: the whole point of that list is to say which named videos
+    # failed, and discarding it exactly when every named video failed would
+    # put the caller back to guessing. It is never written beside a row file
+    # that does not exist for a run that says nothing per target.
+    wrote_meta = wrote_output or bool(ended)
 
-    if wrote_output:
+    if wrote_meta:
         status = "complete" if (rows and complete) else (
             "partial" if rows else "failed")
         # Merged UNDER the caller's `extra`: an engine's own facts win a
@@ -668,7 +702,7 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
             pages_requested=pages_requested, pages_completed=pages_completed,
             pages_failed=pages_failed, mode=mode, source=source,
             start_url=start_url, final_url=final_url, products=len(rows),
-            extra=extra))
+            extra={**(extra or {}), "rows_written": wrote_output}))
 
     if not rows:
         # Nothing gathered at all, and WHY decides the code. The three

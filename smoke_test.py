@@ -2836,6 +2836,180 @@ def check_every_target_ends_with_an_outcome_when_workers_cannot_start():
               meta.get("pages_failed"), [1, 2, 3])
         equal("%s: ...so the run says a page failed, not 'empty'" % name,
               meta.get("stop_reason"), "page_failed")
+        outcomes = meta.get("video_outcomes") or []
+        equal("%s: every target has a per-target outcome" % name,
+              [o.get("number") for o in outcomes], [1, 2, 3])
+        equal("%s: ...each one 'failed'" % name,
+              [o.get("outcome") for o in outcomes], ["failed"] * 3)
+        check("%s: ...each one naming its video and why" % name,
+              all(o.get("target") and o.get("reason") for o in outcomes),
+              "%r" % outcomes)
+
+
+def check_a_batch_of_videos_records_each_targets_ending():
+    """`--mode video` names videos, so every named video must end visibly.
+
+    A batch of four — two that parse, one the site says is gone, one served
+    but unreadable — must produce rows for exactly the two that parsed and
+    four per-target outcomes in `--url` order: success, success,
+    unavailable, failed. That list, not a row count, is what lets a caller
+    tell "deleted" from "we never fetched it", in both the serial and the
+    concurrent path. `stop_reason` must not say `completed`.
+    """
+    good1, good2 = "7665075736742530317", "7686600539525762318"
+    gone, junk = "7686150374289362190", "1111111111111111111"
+    unreadable = ('<!DOCTYPE html><html><head><title>x</title></head><body>'
+                  '<div><img src="https://example.test/a.png"></div>'
+                  '</body></html>')
+
+    def served(url):
+        if good1 in url:
+            return page("plain")
+        if good2 in url:
+            return page("entities")
+        if gone in url:
+            return page("missing")
+        return unreadable
+
+    def fetch(box, pw, args, pool, url, label):
+        html = served(url)
+        return 200, html, product_parser.detect_page_state(html, 200, url), False
+
+    url = ",".join([good1, good2, gone, junk])
+    for name in ENGINES:
+        try:
+            engine = _import_engine(name)
+        except Exception as exc:          # noqa: BLE001 — a broken driver
+            # A driver that is installed but raises on import (pywin32 in
+            # this environment does) is not this check's subject. Skipped
+            # rather than counted as a failure, the same way a missing
+            # library is.
+            skip(name, "engine library could not be imported (%s)"
+                 % type(exc).__name__)
+            continue
+        if engine is None:
+            skip(name, "engine library absent")
+            continue
+
+        class FakeSession:
+            proxy_url = None
+
+            def close(self):
+                pass
+
+        for concurrency, label in ((1, "serial"), (2, "concurrent")):
+            def body(FakeSession):
+                args = _fault_args(engine, url=url, mode="video",
+                                   concurrency=concurrency, transport="http")
+                box = {"session": FakeSession(), "prime_url": "u"}
+                return engine._run_video(box, None, args, None)
+
+            rows, meta = _with_stubs(engine, fetch, body)
+            outcomes = meta.get("video_outcomes") or []
+            equal("%s %s: rows are only the videos that parsed" % (name, label),
+                  [r.sku for r in rows], [good1, good2])
+            equal("%s %s: outcome numbers follow --url order" % (name, label),
+                  [o.get("number") for o in outcomes], [1, 2, 3, 4])
+            equal("%s %s: target ids follow --url order" % (name, label),
+                  [o.get("target") for o in outcomes], [good1, good2, gone, junk])
+            equal("%s %s: the four categories" % (name, label),
+                  [o.get("outcome") for o in outcomes],
+                  ["success", "success", "unavailable", "failed"])
+            check("%s %s: the unavailable and failed targets say why"
+                  % (name, label),
+                  all(o.get("reason") for o in outcomes[2:]),
+                  "%r" % [o.get("reason") for o in outcomes[2:]])
+            check("%s %s: stop_reason is not completed" % (name, label),
+                  meta.get("stop_reason") != "completed",
+                  "got %r" % meta.get("stop_reason"))
+            equal("%s %s: the legacy counters still describe the same run"
+                  % (name, label),
+                  (meta.get("pages_completed"), meta.get("pages_failed"),
+                   meta.get("videos_requested")),
+                  (3, [4], 4))
+
+
+def check_a_partial_video_batch_exits_six_and_has_a_checkable_sidecar():
+    """The exit code and the sidecar, through `finish_run`, not the runner.
+
+    A batch that yields rows AND has a failed target is partial: exit 6, and
+    the sidecar lists every target. A batch whose workers all fail gathers
+    nothing, so it is exit 5 — and its sidecar must STILL be written, or the
+    per-target evidence is discarded exactly when there is nothing else to
+    read. `rows_written` tells the two files apart.
+    """
+    import tempfile
+    from output_writer import finish_run, Video
+
+    def outcomes(cats):
+        return [{"number": i + 1, "target": "v%d" % (i + 1),
+                 "video_id": "v%d" % (i + 1), "url": "u%d" % (i + 1),
+                 "outcome": c, "reason": "why"}
+                for i, c in enumerate(cats)]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # Rows gathered, one failed target: partial, exit 6.
+        prefix = os.path.join(tmp, "partial")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = finish_run(
+                [Video(sku="v1")], prefix, "json", False,
+                blocked=False, stop_reason="page_failed", pages_requested=4,
+                pages_completed=3, pages_failed=[4], start_url="u",
+                final_url="u", mode="video",
+                extra={"video_outcomes": outcomes(
+                    ["success", "unavailable", "failed", "failed"])})
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        equal("a mixed video batch exits 6", rc, 6)
+        equal("...status partial", meta["status"], "partial")
+        equal("...and every target is in the sidecar",
+              [o["number"] for o in meta["video_outcomes"]], [1, 2, 3, 4])
+        equal("...with rows_written true", meta.get("rows_written"), True)
+
+        # Nothing gathered, failing targets: exit 5, and the sidecar exists.
+        prefix = os.path.join(tmp, "nothing")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = finish_run(
+                [], prefix, "json", False,
+                blocked=False, stop_reason="page_failed", pages_requested=3,
+                pages_completed=0, pages_failed=[1, 2, 3], start_url="u",
+                final_url="u", mode="video",
+                extra={"video_outcomes": outcomes(["failed"] * 3)})
+        equal("a wholly failed video batch exits 5", rc, 5)
+        check("...no empty row file is written",
+              not os.path.exists(prefix + ".json"))
+        check("...but the sidecar IS written, so the endings survive",
+              os.path.exists(prefix + ".meta.json"))
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        equal("...listing all three as failed",
+              [o["outcome"] for o in meta["video_outcomes"]],
+              ["failed", "failed", "failed"])
+        equal("...saying no rows were written", meta.get("rows_written"), False)
+
+        # All unavailable, nothing gathered: the site answered, so exit 4.
+        prefix = os.path.join(tmp, "gone")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = finish_run(
+                [], prefix, "json", False,
+                blocked=False, stop_reason="video_unavailable",
+                pages_requested=2, pages_completed=2, start_url="u",
+                final_url="u", mode="video",
+                extra={"video_outcomes": outcomes(["unavailable"] * 2)})
+        equal("a batch of gone videos still exits 4, not 5", rc, 4)
+
+        # A run that says nothing per target keeps the old rule: no output,
+        # no sidecar.
+        prefix = os.path.join(tmp, "quiet")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            finish_run([], prefix, "json", False, blocked=False,
+                       stop_reason="page_failed", pages_requested=1,
+                       pages_completed=0, start_url="u", final_url="u",
+                       mode="videos")
+        check("a run with no per-target list still writes no sidecar",
+              not os.path.exists(prefix + ".meta.json"))
 
 
 def check_a_worker_drives_its_own_driver_not_the_runs():

@@ -49,7 +49,7 @@ there.
 from __future__ import annotations
 
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from product_parser import (STATE_CHALLENGE, STATE_CONTENT,
                             STATE_EMPTY_SUCCESS, STATE_ERROR,
@@ -225,6 +225,75 @@ def counts_as_blocked(state: str) -> bool:
 
 def should_parse(state: str) -> bool:
     return STATE_POLICY.get(state, STATE_POLICY[STATE_UNKNOWN])["parse"]
+
+
+# ---------------------------------------------------------------------------
+# Per-target outcomes — `--mode video`
+# ---------------------------------------------------------------------------
+#
+# `--mode video` names videos, one address each, so every named video can end
+# in exactly one of three ways and the caller is entitled to see which. The
+# categories are a COARSENING of the page states above, not a second opinion
+# about them: `unavailable` is the site's own answer (deleted, private, never
+# existed) and is not a failure to fetch, while everything that left us
+# without the requested row — a transport error, a challenge, or our own
+# parser — is `failed`.
+#
+# The distinction is what makes the sidecar checkable. Before this, those two
+# outcomes were counted in different places (`videos_unavailable` and
+# `pages_failed`) and a target that no worker reached appeared in neither, so
+# a caller holding a batch of N could only count rows and guess.
+OUTCOME_SUCCESS = "success"
+OUTCOME_UNAVAILABLE = "unavailable"
+OUTCOME_FAILED = "failed"
+
+# Long errors (a stack-trace-shaped PayloadError, a browser's launch log) are
+# useful in the log and noise in a sidecar a machine reads. The sidecar says
+# WHAT ended and a short why; the log keeps the whole sentence.
+OUTCOME_REASON_CHARS = 200
+
+
+def _short_reason(text: Any) -> str:
+    collapsed = " ".join(str(text or "").split())
+    if len(collapsed) <= OUTCOME_REASON_CHARS:
+        return collapsed
+    return collapsed[:OUTCOME_REASON_CHARS - 1].rstrip() + "…"
+
+
+def target_outcome(number: int, video_id: Optional[str], url: str,
+                   state: str, has_rows: bool,
+                   error: Optional[str] = None) -> dict:
+    """One named video's ending, as the sidecar records it.
+
+    `has_rows` decides success rather than the state, because the output row
+    is the thing a caller consumes: a served page that parsed to nothing is
+    `unavailable`, and a served page our parser rejected is `failed`.
+
+    `number` is 1-based and follows `--url`, which is the order the caller
+    asked in — not the order workers happened to finish.
+    """
+    if has_rows:
+        category = OUTCOME_SUCCESS
+    elif state == STATE_VIDEO_UNAVAILABLE:
+        category = OUTCOME_UNAVAILABLE
+    else:
+        category = OUTCOME_FAILED
+
+    outcome = {
+        "number": int(number),
+        "target": video_id or url,
+        "video_id": video_id,
+        "url": url,
+        "outcome": category,
+    }
+    if category == OUTCOME_UNAVAILABLE:
+        outcome["reason"] = ("TikTok returned no video: it is deleted, "
+                             "private, or was never there")
+    elif category == OUTCOME_FAILED:
+        detail = _short_reason(error)
+        outcome["reason"] = (f"{state}: {detail}" if detail else
+                             (state or STATE_UNKNOWN))
+    return outcome
 
 
 # Whether a blocked page is worth re-fetching at all. CONSULTED by the

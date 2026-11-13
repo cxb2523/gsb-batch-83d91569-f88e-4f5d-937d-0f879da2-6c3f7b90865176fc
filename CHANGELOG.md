@@ -14,6 +14,41 @@ change in one, the note leads with it.
 
 - CI only: the whole canary, free and paid jobs alike, now runs weekly (Mondays 06:31 UTC) and on a manual dispatch; the daily schedule is removed.
 
+### Added
+
+- **Every named video in `--mode video` now ends with a visible outcome.**
+  The sidecar carries `video_outcomes`: one entry per `--url` target, in
+  `--url` order, with `number`, `target` (and `video_id`/`url`), an
+  `outcome` of `success`, `unavailable` (TikTok says the video is deleted,
+  private or absent) or `failed` (it could not be fetched or parsed), and a
+  short `reason` when it did not succeed. A batch of N can now be checked
+  entry by entry instead of by counting rows and guessing, which is all a
+  caller could do before: an unavailable video and a video no worker
+  reached were both simply missing from the output.
+- A failed or unavailable target now keeps `stop_reason` off `completed`, so
+  such a run reports `partial` (exit 6) when rows were gathered, `failed`
+  (exit 5) when none were, and still exit 4 when TikTok answered "no video"
+  for every target. `stop_reason: targets_unavailable` names a batch that
+  produced rows but not one for every target asked for.
+- A `--mode video` run now writes its sidecar even with zero rows, because
+  `video_outcomes` is the record of what happened to each named video and
+  discarding it exactly when everything failed would leave a caller with
+  nothing at all. `rows_written` says whether a row file sits beside it; a
+  run that says nothing per target keeps the old rule (no output, no
+  sidecar).
+
+### Fixed
+
+- **A worker that failed after taking a target took that target with it.**
+  A worker dying mid-fetch left its video unrecorded and un-queued, so it
+  disappeared from the batch; a worker that never started left its whole
+  share to the fill-in loop as failures even when a sibling could have
+  fetched them. The video a dying worker holds is now put back on the queue
+  for its siblings, and only targets no worker could reach end as `failed`.
+  The serial path got the same treatment: an exception there used to escape
+  the runner and end the batch silently, and now becomes that one target's
+  `failed` outcome with the remaining targets still fetched.
+
 ## [0.2.0] — 2026-10-15
 
 > **Behaviour changes.** Output files now get the mode `open()` would give
