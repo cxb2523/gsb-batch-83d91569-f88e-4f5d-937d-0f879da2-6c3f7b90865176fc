@@ -158,7 +158,7 @@ Both SDK clients provide the same clean, pythonic interface organized into logic
 | Namespace  | Purpose               | Key Methods                     |
 | ---------- | --------------------- | ------------------------------- |
 | `scrapes`  | Single URL extraction | `create()`, `get()`             |
-| `batches`  | Multi-URL processing  | `create()`, `info()`, `items()` |
+| `batches`  | Multi-URL processing  | `create()`, `info()`, `items()`, `create_summary()` |
 | `crawls`   | Website traversal     | `create()`, `info()`, `pages()` |
 | `maps`     | Link extraction       | `create()`, `urls()`            |
 | `answers`  | AI-powered extraction | `create()`, `get()`             |
@@ -276,6 +276,54 @@ for item in batch.items():
         content = item.retrieve(["json"])
         print(f"Search result: {content.json_content}")
 ```
+
+### Batch Result Summaries
+
+Creating a batch and then counting successful vs. failed items by hand is tedious.
+`create_summary()` accepts the same URL inputs as `create()`, starts the batch,
+waits for it to finish, and returns a summary that separates successes from failures:
+
+```python
+from olostep import Olostep, OlostepClientError_BatchItemFailed
+
+client = Olostep(api_key="your-api-key")
+
+summary = client.batches.create_summary([
+    {"url": "https://example.com", "custom_id": "home"},
+    {"url": "https://broken.example", "custom_id": "bad"},
+])
+
+print(summary.total_count)      # 2
+print(summary.success_count)    # 1
+print(summary.failed_count)     # 1
+
+# Successful items can retrieve their content
+content = summary.get_by_custom_id("home").retrieve(["markdown"])
+
+# Failed items keep their URL/custom_id plus a readable reason
+failed = summary.get_by_custom_id("bad")
+print(failed.url, failed.reason)
+
+# Retrieving a failed item raises instead of silently returning empty content
+try:
+    failed.retrieve()
+except OlostepClientError_BatchItemFailed as e:
+    print(f"Could not retrieve: {e}")
+```
+
+The async client shares the same semantics:
+
+```python
+summary = await client.batches.create_summary(urls)
+item = summary.get_by_custom_id("home")
+content = await item.retrieve(["markdown"])
+```
+
+A partially failed batch never aborts: every requested URL appears exactly once in the
+summary, and URLs the API never reports are marked failed rather than dropped. A URL that
+fails client-side validation is reported as a failed entry instead of rejecting the batch.
+Duplicate `custom_id`s are preserved — use `summary.get_all_by_custom_id(id)` to get every
+match. Passing an empty list returns an empty summary without calling the API.
 
 ### Intelligent Crawling
 

@@ -194,7 +194,7 @@ The frontend layer provides user-friendly interfaces and stateful objects for AP
 **Key Components**:
 
 - `ScrapeMenu`: Methods for scrape operations (`create()`, `get()`)
-- `BatchMenu`: Methods for batch operations (`create()`, `info()`, `items()`)
+- `BatchMenu`: Methods for batch operations (`create()`, `info()`, `items()`, `create_summary()`)
 - `CrawlMenu`: Methods for crawl operations (`create()`, `info()`, `pages()`)
 - `SitemapMenu`: Methods for sitemap/map operations (`create()`)
 - `RetrieveMenu`: Methods for retrieve operations (`get()`)
@@ -210,7 +210,7 @@ The frontend layer provides user-friendly interfaces and stateful objects for AP
 **API Methods**:
 
 - **scrapes**: `create()`, `get()`
-- **batches**: `create()`, `info()`, `items()`
+- **batches**: `create()`, `info()`, `items()`, `create_summary()`
 - **crawls**: `create()`, `info()`, `pages()`
 - **maps**: `create()`
 - **retrieve**: `get()`
@@ -222,9 +222,9 @@ The frontend layer provides user-friendly interfaces and stateful objects for AP
 
 **Key Components**:
 
-- **Result Objects**: `ScrapeResult`, `AnswersResult`, `Batch`, `Crawl`, `Sitemap`
+- **Result Objects**: `ScrapeResult`, `AnswersResult`, `Batch`, `BatchSummary`, `Crawl`, `Sitemap`
 - **Info Objects**: `BatchInfo`, `CrawlInfo`
-- **Item Objects**: `BatchItemResult`, `CrawlPage`
+- **Item Objects**: `BatchItemResult`, `BatchSummaryItem`, `CrawlPage`
 - **Utility Objects**: `RetrievableID`
 
 **Responsibilities**:

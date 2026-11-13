@@ -71,6 +71,7 @@ wrapped in sync proxies that:
 from __future__ import annotations
 
 import asyncio
+import warnings
 from typing import Any, Callable
 
 from ..frontend.answers_menu import AnswersMenu
@@ -80,6 +81,8 @@ from ..frontend.batch_menu import BatchMenu
 from ..frontend.client_state import (
     Batch,
     BatchItemResult,
+    BatchSummary,
+    BatchSummaryItem,
     Crawl,
     CrawlPage,
     ScrapeResult,
@@ -337,12 +340,20 @@ class _SyncStateProxy:
 
         # Copy all non-private, non-callable attributes from async object
         # This prevents issues with method wrapping and infinite recursion
-        for attr_name in dir(async_state_obj):
-            if not attr_name.startswith("_"):
-                attr_value = getattr(async_state_obj, attr_name)
-                # Only copy non-callable attributes directly
-                if not callable(attr_value):
-                    setattr(self, attr_name, attr_value)
+        with warnings.catch_warnings():
+            # Introspection may read deprecated properties (e.g. url_to_scrape);
+            # that warning belongs to the caller, not to wrapping.
+            warnings.simplefilter("ignore", DeprecationWarning)
+            for attr_name in dir(async_state_obj):
+                if not attr_name.startswith("_"):
+                    attr_value = getattr(async_state_obj, attr_name)
+                    # Only copy non-callable attributes directly
+                    if not callable(attr_value):
+                        # Nested state objects (e.g. a summary's items) must be
+                        # wrapped too so their async methods become synchronous.
+                        setattr(
+                            self, attr_name, sync_client._wrap_state_object(attr_value)
+                        )
 
     def __getattr__(self, name: str) -> Any:
         """Intercept attribute access to wrap methods and nested objects."""
@@ -430,8 +441,9 @@ class _SyncStateProxy:
             if self._is_state_object(result):
                 return self._wrap_nested_state(result)
 
-            # Regular result
-            return result
+            # Regular result - recurse into lists/dicts that may hold state
+            # objects (e.g. summary.get_all_by_custom_id()).
+            return self._sync_client._wrap_state_object(result)
 
         # Preserve method metadata
         sync_wrapper.__name__ = method_name
@@ -446,8 +458,10 @@ class _SyncStateProxy:
         if obj_id in self._wrapped_cache:
             return self._wrapped_cache[obj_id]
 
-        # Create new wrapper
-        wrapper = _SyncStateProxy(async_obj, self._sync_client)
+        # Create new wrapper, using the specific sync class when known so the
+        # nested object behaves exactly like a top-level result object.
+        wrapper_class = _STATE_WRAPPERS.get(type(async_obj), _SyncStateProxy)
+        wrapper = wrapper_class(async_obj, self._sync_client)
         self._wrapped_cache[obj_id] = wrapper
         return wrapper
 
@@ -565,10 +579,44 @@ class _SyncStateProxy:
         """Delegate str to async object."""
         return str(self._async_state)
 
+    def __len__(self) -> int:
+        """Delegate length to the async object (e.g. a batch summary)."""
+        if hasattr(self._async_state, "__len__"):
+            return len(self._async_state)
+        raise TypeError(f"object of type '{type(self._async_state).__name__}' has no len()")
+
+    def __iter__(self):
+        """Delegate iteration to the async object, wrapping yielded state objects."""
+        if not hasattr(self._async_state, "__iter__"):
+            raise TypeError(
+                f"object of type '{type(self._async_state).__name__}' is not iterable"
+            )
+        return iter(self._sync_client._wrap_state_object(list(self._async_state)))
+
+    def __getitem__(self, key: Any) -> Any:
+        """Delegate keyed access (e.g. ``summary["custom_id"]``)."""
+        if not hasattr(self._async_state, "__getitem__"):
+            raise TypeError(
+                f"object of type '{type(self._async_state).__name__}' is not subscriptable"
+            )
+        return self._sync_client._wrap_state_object(self._async_state[key])
+
 
 # Specific sync wrapper classes for type hints and clarity
 class SyncBatch(_SyncStateProxy):
     """Synchronous version of Batch state object."""
+
+    pass
+
+
+class SyncBatchSummary(_SyncStateProxy):
+    """Synchronous version of BatchSummary state object."""
+
+    pass
+
+
+class SyncBatchSummaryItem(_SyncStateProxy):
+    """Synchronous version of BatchSummaryItem state object."""
 
     pass
 
@@ -606,6 +654,8 @@ class SyncCrawlPage(_SyncStateProxy):
 # Mapping of async state classes to their sync wrappers
 _STATE_WRAPPERS = {
     Batch: SyncBatch,
+    BatchSummary: SyncBatchSummary,
+    BatchSummaryItem: SyncBatchSummaryItem,
     ScrapeResult: SyncScrapeResult,
     BatchItemResult: SyncBatchItemResult,
     Crawl: SyncCrawl,

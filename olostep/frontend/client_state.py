@@ -20,7 +20,7 @@ from typing import Any, AsyncIterator
 from .._log import get_logger
 from ..backend.api_endpoints import CONTRACTS
 from ..backend.caller import EndpointCaller
-from ..errors import OlostepClientError_Timeout
+from ..errors import OlostepClientError_BatchItemFailed, OlostepClientError_Timeout
 from ..models.response import (
     AnswersResponse,
     BatchCreateResponse,
@@ -420,16 +420,460 @@ class BatchItemResult:
             # Retrieve specific formats
             result = await batch_item.retrieve(["html", "markdown"])
         """
-        c = CONTRACTS[("retrieve", "get")]
-        # todo: if we had request validation for all endpoints we could put coersion into the models and
-        # have endpoints like this support coersion for e.g. formats too.
-        query_params: dict[str, Any] = {
-            "retrieve_id": self.retrieve_id,
-        }
-        if formats is not None:
-            query_params["formats"] = formats
-        data: RetrieveResponse = await self._caller.invoke(c, query_params=query_params)
-        return ScrapeResult(data)
+        return await _retrieve_content(self._caller, self.retrieve_id, formats)
+
+
+async def _retrieve_content(
+    caller: EndpointCaller,
+    retrieve_id: str | None,
+    formats: list[str] | None = None,
+) -> ScrapeResult:
+    """Fetch content for a retrieve id through the /retrieve endpoint."""
+    c = CONTRACTS[("retrieve", "get")]
+    # todo: if we had request validation for all endpoints we could put coersion into the models and
+    # have endpoints like this support coersion for e.g. formats too.
+    query_params: dict[str, Any] = {
+        "retrieve_id": retrieve_id,
+    }
+    if formats is not None:
+        query_params["formats"] = formats
+    data: RetrieveResponse = await caller.invoke(c, query_params=query_params)
+    return ScrapeResult(data)
+
+
+def _scrape_result_has_content(result: ScrapeResult) -> bool:
+    """Whether a retrieve result carries any usable scraped content."""
+    content_or_hosted_fields = (
+        "html_content",
+        "markdown_content",
+        "text_content",
+        "json_content",
+        "html_hosted_url",
+        "markdown_hosted_url",
+        "json_hosted_url",
+        "text_hosted_url",
+        "file_hosted_url",
+    )
+    return any(getattr(result, field, None) for field in content_or_hosted_fields)
+
+
+# Fields the batch items API may use to describe why an item failed. The response
+# model allows extra fields, so we read them without widening the contract model.
+_BATCH_ITEM_ERROR_FIELDS = (
+    "error",
+    "error_message",
+    "error_reason",
+    "failure_reason",
+    "reason",
+    "message",
+    "detail",
+)
+
+# Item statuses that mean "this URL could not be processed".
+_BATCH_ITEM_FAILED_STATUSES = ("failed", "error", "errored")
+
+
+def _raw_item_extra(item: BatchItemsResponseListItem) -> dict[str, Any]:
+    """Return the extra (non-contract) fields the API attached to a batch item."""
+    return dict(getattr(item, "model_extra", None) or {})
+
+
+def _raw_item_status(item: BatchItemsResponseListItem) -> str | None:
+    """Best-effort per-item status, if the API provides one."""
+    extra = _raw_item_extra(item)
+    for key in ("status", "state", "item_status"):
+        value = extra.get(key)
+        if isinstance(value, str) and value:
+            return value.lower()
+    return None
+
+
+def _raw_item_failure_reason(item: BatchItemsResponseListItem) -> str | None:
+    """Best-effort human-readable failure reason attached to a batch item."""
+    extra = _raw_item_extra(item)
+    for key in _BATCH_ITEM_ERROR_FIELDS:
+        value = extra.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            for nested_key in ("message", "reason", "detail"):
+                nested = value.get(nested_key)
+                if isinstance(nested, str) and nested.strip():
+                    return nested.strip()
+    return None
+
+
+def _classify_fetched_item(
+    item: BatchItemsResponseListItem,
+) -> tuple[bool, str | None]:
+    """Decide whether a fetched batch item succeeded, and why it did not.
+
+    The API does not always expose a per-item status, so failure detection is
+    conservative: an item is successful only when it has a ``retrieve_id`` and
+    no failure status/reason. This means failed items are never silently dropped.
+    """
+    status = _raw_item_status(item)
+    reason = _raw_item_failure_reason(item)
+
+    if status in _BATCH_ITEM_FAILED_STATUSES:
+        return False, reason or f"the item status is '{status}'"
+    if reason:
+        return False, reason
+    if not item.retrieve_id:
+        if status:
+            return False, f"the item status is '{status}' and it has no retrieve_id"
+        return False, "the item has no retrieve_id, so it has no retrievable content"
+    return True, None
+
+
+def _url_alias_candidates(url: str | None) -> set[str]:
+    """Normalized URL forms so HttpUrl trailing-slash changes still match."""
+    if not url:
+        return set()
+    candidates = {url, url.rstrip("/")}
+    if url.endswith("/"):
+        candidates.add(url[:-1])
+    else:
+        candidates.add(f"{url}/")
+    return candidates
+
+
+def _build_summary_items(
+    caller: EndpointCaller | None,
+    fetched: list[BatchItemsResponseListItem],
+    requested_items: list[dict[str, Any]] | None = None,
+    local_failures: dict[int, str] | None = None,
+) -> list[BatchSummaryItem]:
+    """Pair fetched API items with the original request and classify them.
+
+    Every requested item appears exactly once. Requested items the API never
+    reported are included as failures instead of being dropped.
+
+    ``local_failures`` maps an index in ``requested_items`` to a readable reason
+    for items that were rejected client-side and never sent to the API.
+    """
+    requested = list(requested_items or [])
+    local_failures = dict(local_failures or {})
+
+    if not requested:
+        # Nothing is known about the original request: summarize whatever the
+        # API returned, in API order.
+        entries: list[BatchSummaryItem] = []
+        for item in fetched:
+            succeeded, reason = _classify_fetched_item(item)
+            entries.append(
+                BatchSummaryItem(
+                    caller,
+                    url=item.url,
+                    custom_id=item.custom_id,
+                    retrieve_id=item.retrieve_id,
+                    succeeded=succeeded,
+                    reason=reason,
+                )
+            )
+        return entries
+
+    # Match fetched items to requested entries. custom_id is the primary key (the
+    # API round-trips it verbatim); URL matching and positional matching are
+    # fallbacks for items created without a custom id.
+    matched_entries: dict[int, BatchSummaryItem] = {}
+    extra_entries: list[BatchSummaryItem] = []
+
+    remaining = list(range(len(requested)))
+    for item in fetched:
+        request_index = _match_requested_index(item, requested, remaining)
+        succeeded, reason = _classify_fetched_item(item)
+
+        if request_index is None:
+            # The API reported an item we never asked for; keep it visible.
+            extra_entries.append(
+                BatchSummaryItem(
+                    caller,
+                    url=item.url,
+                    custom_id=item.custom_id,
+                    retrieve_id=item.retrieve_id,
+                    succeeded=succeeded,
+                    reason=reason,
+                )
+            )
+            continue
+
+        remaining.remove(request_index)
+        request = requested[request_index]
+        matched_entries[request_index] = BatchSummaryItem(
+            caller,
+            url=request.get("url") or item.url,
+            custom_id=request.get("custom_id") or item.custom_id,
+            retrieve_id=item.retrieve_id,
+            succeeded=succeeded,
+            reason=reason,
+        )
+
+    # Items the API never reported: still part of the summary, marked failed.
+    # This covers terminal states where the API dropped a URL (e.g. a batch that
+    # finished with fewer items than were submitted).
+    for index, request in enumerate(requested):
+        if index in matched_entries:
+            continue
+        matched_entries[index] = BatchSummaryItem(
+            caller,
+            url=request.get("url"),
+            custom_id=request.get("custom_id"),
+            retrieve_id=None,
+            succeeded=False,
+            reason=local_failures.get(index, "the batch item was not reported by the API"),
+        )
+
+    # Preserve input order for matched items, then append API-only extras.
+    return [matched_entries[index] for index in range(len(requested))] + extra_entries
+
+
+def _match_requested_index(
+    item: BatchItemsResponseListItem,
+    requested: list[dict[str, Any]],
+    remaining: list[int],
+) -> int | None:
+    """Find the requested entry a fetched item belongs to, if any."""
+    if item.custom_id:
+        for index in remaining:
+            if requested[index].get("custom_id") == item.custom_id:
+                return index
+        # The API returned an id we did not send: fall back to URL matching so
+        # the item is not double-counted as an extra entry.
+
+    aliases = _url_alias_candidates(item.url)
+    for index in remaining:
+        if requested[index].get("url") in aliases:
+            return index
+
+    # Last resort for items without custom id: take the next unmatched request
+    # that also had no custom id, so positional pairing stays stable.
+    for index in remaining:
+        if not requested[index].get("custom_id"):
+            return index
+    return None
+
+
+class BatchSummaryItem:
+    """A single entry in a :class:`BatchSummary`.
+
+    Unlike :class:`BatchItemResult` (which mirrors one item returned by the API),
+    a summary item may also represent a URL that the API never returned at all.
+    Every entry keeps the original ``url`` and ``custom_id`` (when one was supplied
+    or auto-generated) so callers can reconcile the summary with their input.
+
+    Attributes:
+        url: The original URL requested for this item.
+        custom_id: Custom identifier supplied with the batch, if any.
+        retrieve_id: Identifier usable with the retrieve endpoint (success items only).
+        succeeded: Whether the item was processed successfully.
+        reason: Human-readable failure reason (``None`` for successful items).
+    """
+
+    def __init__(
+        self,
+        caller: EndpointCaller | None,
+        *,
+        url: str,
+        custom_id: str | None = None,
+        retrieve_id: str | None = None,
+        succeeded: bool = False,
+        reason: str | None = None,
+    ) -> None:
+        self._caller = caller
+        self.url = url
+        self.custom_id = custom_id
+        self.retrieve_id = retrieve_id
+        self.succeeded = succeeded
+        self.reason = reason
+
+    @property
+    def success(self) -> bool:
+        """Alias for :attr:`succeeded`."""
+        return self.succeeded
+
+    @property
+    def failed(self) -> bool:
+        """Whether this item failed and therefore has no content to retrieve."""
+        return not self.succeeded
+
+    @property
+    def failure_reason(self) -> str | None:
+        """Alias for :attr:`reason`."""
+        return self.reason
+
+    @property
+    def error(self) -> str | None:
+        """Alias for :attr:`reason`."""
+        return self.reason
+
+    def __repr__(self) -> str:
+        return (
+            f"BatchSummaryItem(url={self.url!r}, custom_id={self.custom_id!r}, "
+            f"succeeded={self.succeeded!r}, reason={self.reason!r})"
+        )
+
+    def __str__(self) -> str:
+        label = self.custom_id or "-"
+        if self.succeeded:
+            return f"BatchSummaryItem {label} -> {self.url} (ok)"
+        return f"BatchSummaryItem {label} -> {self.url} (failed: {self.reason})"
+
+    async def retrieve(self, formats: list[str] | None = None) -> ScrapeResult:
+        """Retrieve the scraped content for this item.
+
+        Args:
+            formats: List of content formats to retrieve (e.g., ["html", "markdown"]).
+                If None, returns all available formats.
+
+        Returns:
+            ScrapeResult: The scraped content in the requested formats.
+
+        Raises:
+            OlostepClientError_BatchItemFailed: If this item failed processing, or
+                if the API returns no content at all. Failure is signalled explicitly
+                instead of returning an empty result the caller could mistake for
+                a successful scrape.
+            Exception: If the API request fails for a successful item.
+        """
+        if not self.succeeded or not self.retrieve_id:
+            raise OlostepClientError_BatchItemFailed(
+                url=self.url,
+                custom_id=self.custom_id,
+                reason=self.reason or "the item has no retrievable content",
+            )
+
+        result = await _retrieve_content(self._caller, self.retrieve_id, formats)
+        if not _scrape_result_has_content(result):
+            raise OlostepClientError_BatchItemFailed(
+                url=self.url,
+                custom_id=self.custom_id,
+                reason=(
+                    "the API returned no content for this item"
+                    f" (retrieve_id={self.retrieve_id!r})"
+                ),
+            )
+        return result
+
+
+class BatchSummary:
+    """Aggregated outcome of a batch: successful and failed items side by side.
+
+    Typically returned by ``BatchMenu.create_summary()`` (or ``Batch.summary()``)
+    after the batch has finished. Every requested URL is represented exactly once,
+    so partial failures never disappear from the summary.
+
+    Attributes:
+        batch: The underlying :class:`Batch` (``None`` for an empty input summary).
+        items: All entries in input order, each a :class:`BatchSummaryItem`.
+    """
+
+    def __init__(
+        self,
+        batch: "Batch | None",
+        items: list[BatchSummaryItem] | None = None,
+    ) -> None:
+        self.batch = batch
+        self.items: list[BatchSummaryItem] = list(items or [])
+
+    # ------------------------------------------------------------------
+    # Aggregates
+    # ------------------------------------------------------------------
+    @property
+    def total_count(self) -> int:
+        """Total number of entries in the summary."""
+        return len(self.items)
+
+    @property
+    def total(self) -> int:
+        """Alias for :attr:`total_count`."""
+        return self.total_count
+
+    @property
+    def success_count(self) -> int:
+        """Number of successfully processed entries."""
+        return sum(1 for item in self.items if item.succeeded)
+
+    @property
+    def failed_count(self) -> int:
+        """Number of failed entries."""
+        return self.total_count - self.success_count
+
+    @property
+    def successful_count(self) -> int:
+        """Alias for :attr:`success_count`."""
+        return self.success_count
+
+    @property
+    def successful_items(self) -> list[BatchSummaryItem]:
+        """All successful entries."""
+        return [item for item in self.items if item.succeeded]
+
+    @property
+    def failed_items(self) -> list[BatchSummaryItem]:
+        """All failed entries."""
+        return [item for item in self.items if not item.succeeded]
+
+    @property
+    def successes(self) -> list[BatchSummaryItem]:
+        """Alias for :attr:`successful_items`."""
+        return self.successful_items
+
+    @property
+    def failures(self) -> list[BatchSummaryItem]:
+        """Alias for :attr:`failed_items`."""
+        return self.failed_items
+
+    def __len__(self) -> int:
+        return self.total_count
+
+    def __iter__(self):
+        return iter(self.items)
+
+    # ------------------------------------------------------------------
+    # Lookups
+    # ------------------------------------------------------------------
+    def get_all_by_custom_id(self, custom_id: str) -> list[BatchSummaryItem]:
+        """Return every entry carrying ``custom_id`` (may be empty).
+
+        Duplicate custom ids are preserved in input order; use this method when
+        duplicates are possible, otherwise prefer :meth:`get_by_custom_id`.
+        """
+        return [item for item in self.items if item.custom_id == custom_id]
+
+    def get_by_custom_id(self, custom_id: str) -> BatchSummaryItem:
+        """Return the first entry carrying ``custom_id``.
+
+        Raises:
+            KeyError: If no entry has that custom id.
+        """
+        matches = self.get_all_by_custom_id(custom_id)
+        if not matches:
+            raise KeyError(f"No batch summary item with custom_id={custom_id!r}")
+        return matches[0]
+
+    def find_by_custom_id(self, custom_id: str) -> BatchSummaryItem | None:
+        """Return the first entry carrying ``custom_id`` or ``None`` if absent."""
+        matches = self.get_all_by_custom_id(custom_id)
+        return matches[0] if matches else None
+
+    def __getitem__(self, key: str) -> BatchSummaryItem:
+        """Look an entry up by custom id (raises ``KeyError`` when absent)."""
+        return self.get_by_custom_id(key)
+
+    def __repr__(self) -> str:
+        batch_id = self.batch.id if self.batch is not None else None
+        return (
+            f"BatchSummary(batch_id={batch_id!r}, total={self.total_count}, "
+            f"success={self.success_count}, failed={self.failed_count})"
+        )
+
+    def __str__(self) -> str:
+        batch_id = self.batch.id if self.batch is not None else "-"
+        return (
+            f"BatchSummary {batch_id}: {self.success_count}/{self.total_count} succeeded, "
+            f"{self.failed_count} failed"
+        )
 
 
 class BatchInfo:
@@ -519,14 +963,22 @@ class Batch:
         start_date: Human-readable start date of the batch.
     """
 
-    def __init__(self, caller: EndpointCaller, response: BatchCreateResponse) -> None:
+    def __init__(
+        self,
+        caller: EndpointCaller,
+        response: BatchCreateResponse,
+        requested_items: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Initialize Batch from API response.
 
         Args:
             caller: EndpointCaller for making API requests.
             response: Batch creation response from API.
+            requested_items: Coerced batch items as they were sent to the API.
+                Used to reconcile the summary with the original input.
         """
         self._caller = caller
+        self._requested_items = list(requested_items or [])
         # Copy fields from response to reduce dependency
         self.id = response.id
         self.status = str(response.status)
@@ -554,6 +1006,11 @@ class Batch:
         return (
             f"Batch {self.id} [{self.status}] {self.completed_urls}/{self.total_urls}"
         )
+
+    @property
+    def requested_items(self) -> list[dict[str, Any]]:
+        """The coerced batch items that were sent to the API, in input order."""
+        return list(self._requested_items)
 
     @classmethod
     async def _info(cls, caller: EndpointCaller, batch_id: str) -> BatchInfo:
@@ -752,6 +1209,87 @@ class Batch:
         """
         await self._wait_till_done_(
             self._caller, self.id, check_every_n_secs=check_every_n_secs
+        )
+
+    async def summary(
+        self,
+        *,
+        batch_size: int = 50,
+        wait_for_completion: bool = True,
+        check_every_n_secs: int = 10,
+    ) -> BatchSummary:
+        """Wait for the batch and return a successful/failed item summary.
+
+        Collects every batch item exactly once and classifies each as successful
+        or failed. Failed items keep their URL and custom id and carry a readable
+        reason; their ``retrieve()`` raises instead of returning empty content.
+        Items the API never reports are still included as failed, so partial
+        failures never disappear from the result.
+
+        Args:
+            batch_size: Number of items to fetch per API request (default: 50).
+            wait_for_completion: Wait for the batch to finish before collecting
+                items (default: True).
+            check_every_n_secs: Polling interval while waiting for completion.
+
+        Returns:
+            BatchSummary: Successful and failed entries plus totals and lookup helpers.
+
+        Examples:
+            summary = await batch.summary()
+            print(summary.total_count, summary.success_count, summary.failed_count)
+            item = summary.get_by_custom_id("news_1")
+            content = await item.retrieve(["markdown"])
+        """
+        items = await self._collect_summary_items(
+            self._caller,
+            self.id,
+            requested_items=self._requested_items,
+            batch_size=batch_size,
+            wait_for_completion=wait_for_completion,
+            check_every_n_secs=check_every_n_secs,
+        )
+        return BatchSummary(self, items)
+
+    @classmethod
+    async def _collect_summary_items(
+        cls,
+        caller: EndpointCaller,
+        batch_id: str,
+        *,
+        requested_items: list[dict[str, Any]] | None = None,
+        local_failures: dict[int, str] | None = None,
+        batch_size: int = 50,
+        wait_for_completion: bool = True,
+        check_every_n_secs: int = 10,
+    ) -> list[BatchSummaryItem]:
+        """Fetch every batch item and build summary entries, preserving input order."""
+        if wait_for_completion:
+            await cls._wait_till_done_(
+                caller, batch_id, check_every_n_secs=check_every_n_secs
+            )
+
+        fetched: list[BatchItemsResponseListItem] = []
+        current_cursor = None
+        while True:
+            c = CONTRACTS[("batch", "items")]
+            args: dict[str, Any] = {}
+            if current_cursor is None:
+                args["limit"] = batch_size
+            else:
+                args["cursor"] = current_cursor
+
+            data: BatchItemsResponse = await caller.invoke(
+                c, path_params={"batch_id": batch_id}, query_params=args
+            )
+            fetched.extend(data.items)
+
+            if data.cursor is None:
+                break
+            current_cursor = data.cursor
+
+        return _build_summary_items(
+            caller, fetched, requested_items, local_failures=local_failures
         )
 
 

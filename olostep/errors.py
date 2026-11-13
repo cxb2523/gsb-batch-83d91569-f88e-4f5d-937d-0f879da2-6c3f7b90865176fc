@@ -30,6 +30,7 @@ Our exception hierarchy:
     + OlostepClientError_AsyncContext
     + OlostepClientError_BetaFeatureAccessRequired
     + OlostepClientError_Timeout
+    + OlostepClientError_BatchItemFailed
 """
 
 import pprint
@@ -435,4 +436,30 @@ class OlostepClientError_Timeout(OlostepClientError_BaseError):
         self.operation = operation
         self.timeout_seconds = timeout_seconds
         message = f"Operation '{operation}' timed out after {timeout_seconds} seconds"
+        super().__init__(message)
+
+
+class OlostepClientError_BatchItemFailed(OlostepClientError_BaseError):
+    """Raised when content is requested for a batch item that failed processing.
+
+    Batch summaries expose failed items alongside successful ones. Calling
+    ``retrieve()`` on a failed item raises this error instead of silently
+    returning empty content, so callers cannot mistake a failed URL for a
+    successfully scraped one with no content.
+    """
+
+    def __init__(
+        self,
+        url: str | None = None,
+        custom_id: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        self.url = url
+        self.custom_id = custom_id
+        self.reason = reason
+
+        label = f"custom_id={custom_id!r}" if custom_id else f"url={url!r}"
+        message = f"Batch item {label} failed and has no content to retrieve"
+        if reason:
+            message = f"{message}: {reason}"
         super().__init__(message)
