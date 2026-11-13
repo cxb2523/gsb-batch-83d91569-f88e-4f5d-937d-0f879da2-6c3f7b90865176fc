@@ -1,0 +1,295 @@
+<div align="center">
+
+# LOB Regime Scanner
+
+### Hidden Markov Model Regime Detection for Cryptocurrency Order Books
+
+[![CI](https://github.com/CameronScarpati/lob-regime-scanner/actions/workflows/ci.yml/badge.svg)](https://github.com/CameronScarpati/lob-regime-scanner/actions/workflows/ci.yml)
+
+*A learning project exploring latent regimes in Level 2 order book data using*
+*Gaussian HMMs, order flow and liquidity features (OFI, VPIN, Kyle's*
+*&lambda;), and an interactive four-panel Plotly Dash dashboard. Exploratory, not a*
+*production trading signal.*
+
+---
+
+**[Methodology](docs/methodology.md)** &middot; **[Results](docs/results.md)** &middot; **[Notebooks](#notebooks)** &middot; **[Quick Start](#quick-start)**
+
+</div>
+
+<br>
+
+<p align="center">
+  <img src="docs/dashboard_screenshot.png" alt="Four-panel dashboard: order book heatmap with regime overlay, HMM state probabilities, 3D depth surface, and toxicity diagnostics" width="95%"/>
+</p>
+
+<p align="center"><i>
+  Four-panel interactive dashboard: Bookmap-style LOB heatmap with regime overlay,
+  HMM state probabilities, 3D depth surface, and toxicity diagnostics (VPIN, OFI, spread, PnL).
+</i></p>
+
+<br>
+
+## Overview
+
+An end-to-end pipeline, built as a learning project, that infers **hidden regimes** from noisy order book signals. The core flow:
+
+```
+Tardis L2 Snapshots ──▸ 36 Candidate Features (8 fitted) ──▸ Gaussian HMM ──▸ Regime Detection ──▸ Dashboard
+   (25 levels/side)       (OFI, VPIN, Kyle's λ,               (Baum-Welch       (causal filtered      (4 synced
+    100ms sampling)        spread, vol, autocorr)               EM fitting)        decode)               panels)
+```
+
+The model separates the data into **three hidden states**, which I label Quiet, Trending, and Toxic by ordering them on variance. On the synthetic and sample data used here they show different volatility and liquidity characteristics. The labels are interpretive, and the separation has not been validated on real market data.
+
+**Author:** Cameron Scarpati
+
+<br>
+
+## What the Model Produces
+
+After fitting, the three states sort cleanly by variance, and on the synthetic and sample data used here they line up with an intuitive reading of the order book:
+
+- **Quiet** is the lowest-variance state: tighter spreads, balanced order flow, near-zero return autocorrelation.
+- **Trending** sits in the middle: directional order flow imbalance and positive short-horizon return autocorrelation, a momentum signature.
+- **Toxic** is the highest-variance state: wider spreads, elevated VPIN, and negative return autocorrelation, a mean-reversion signature.
+
+The learned transition matrix is strongly diagonal, so each state tends to persist rather than flip every step. A simple regime-conditional rule (enter on Quiet to Trending in the order-flow direction, flatten on Toxic) is included to visualize how the regimes behave over time.
+
+These are qualitative observations on synthetic and sample data, not validated results. Please read **[Scope and Limitations](#scope-and-limitations)** before reading anything quantitative into them.
+
+<br>
+
+## Scope and Limitations
+
+This is a personal learning project for getting hands-on with Hidden Markov Models and order book dynamics. It is exploratory rather than a production trading signal. Several early methodological weaknesses have since been fixed (full-sample scaling, a fully in-sample fit, a cost-free same-bar backtest, and a non-causal smoothed decode driving the signal), and the remaining limitations are stated plainly so nothing here is mistaken for a validated result:
+
+- **No real-market validation.** The regime behavior shown above comes from synthetic and free sample data. None of it has been validated at scale on real market data, and the regime labels (Quiet/Trending/Toxic) remain an interpretive reading.
+- **Walk-forward split, but a short one.** The default pipeline fits the HMM (and its feature scaler) on the first 70% of the data only and reports headline backtest statistics on the held-out 30%. That makes the numbers out-of-sample rather than in-sample, but the sample itself is short (single instrument, limited dates), so out-of-sample here still does not mean robust.
+- **Causal decoding for the signal and the dashboard.** The states the backtest trades on, and the states and probabilities every dashboard panel shows, come from the forward algorithm alone (`predict_filtered`, `filtered_proba`), so the label at bar *t* uses no observation after *t*. The Viterbi path (`predict`) is a smoother whose label at *t* depends on the whole series, which makes it the better retrospective picture but invalid as a signal; the pipeline also computes it and returns it separately as `states_smoothed`, but no panel displays it.
+- **Standardization is causal in the default pipeline.** The HMM's `StandardScaler` and VPIN's volume-bucket sizing are both derived from the train segment only, and feature NaN handling forward-fills without back-filling, so no feature row draws on future data. The legacy fully in-sample mode (`train_frac=None`) uses full-sample statistics by design.
+- **Backtest is more realistic, still illustrative.** Execution is next-bar (a signal never earns the bar it fires on) and results are net of configurable taker fees and slippage (default 5.5 bps fee + 0.5 bps slippage per side), with gross figures reported alongside. Fills are still modeled naively (a full fill at the decision bar's mid, with returns accruing from the next bar; no queue position, no partial fills, no market impact). It exists to visualize regime behavior, not to demonstrate a tradeable edge.
+- **Two OFI formulations.** Both the simple volume-delta proxy and the canonical price-conditioned formulation of Cont, Kukanov & Stoikov (2014) are implemented; the HMM uses the canonical one, and the proxy is kept for comparison.
+- **Curated feature subset, diagonal covariance.** The pipeline computes 36 candidate features but feeds a curated subset of 8 to the HMM, fit with diagonal covariance, to keep the parameter count manageable.
+- **C++ engine is optional; throughput is measurable, not guaranteed.** A reproducible benchmark (`make bench`) is included. Run-to-run variance on shared hardware is large, so measure throughput locally with the benchmark; the README states no figure.
+
+<br>
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────┐
+│                              LOB REGIME SCANNER                                      │
+├────────────────────┬────────────────────┬──────────────────┬─────────────────────────┤
+│                    │                    │                  │                         │
+│   DATA LAYER       │   FEATURE ENGINE   │   HMM ENGINE     │   DASHBOARD             │
+│                    │                    │                  │                         │
+│  Tardis.dev        │  OFI (depth 1,5,10)│  Gaussian HMM    │  ┌──────┬──────-┐       │
+│  Direct HTTP       │  VPIN (flowrisk)   │  3-state (K=3)   │  │Book- │Regime │       │
+│  40+ exchanges     │  Kyle's λ (OLS)    │                  │  │map   │Probs  │       │
+│  Free 1st/mo       │  Spread dynamics   │  Baum-Welch EM   │  │Heat- │Stacked│       │
+│                    │  Book imbalance    │  (200 iter max)  │  │map   │Area   │       │
+│  book_snapshot_25  │  Realized vol (4x) │                  │  ├──────┼───────┤       │
+│  100ms subsampling │  Ret autocorr (10) │  Filtered decode │  │3D    │Toxi-  │       │
+│                    │  Trade aggression  │  (causal signal) │  │Depth │city   │       │
+│  C++ LOB Engine    │  Cancel ratio      │  + Viterbi path  │  │Surf. │Diag.  │       │
+│  (pybind11, opt.)  │                    │  (not displayed) │  └──────┴───────┘       │
+│  not used by the   │  36 candidates,    │  BIC/AIC model   │  Synchronized panels    │
+│  default pipeline  │  8 fed to the HMM  │  selection       │  Crosshair + slider     │
+│                    │  Rolling z-score   │                  │                         │
+└────────────────────┴────────────────────┴──────────────────┴─────────────────────────┘
+```
+
+<br>
+
+## Tech Stack
+
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| **Core** | Python 3.11+, NumPy, Pandas | Feature computation, data pipeline |
+| **Performance** | C++17, pybind11 | Optional engine that rebuilds a book from level updates; the default pipeline loads snapshots and does not call it (benchmark via `make bench`) |
+| **Statistics** | hmmlearn, scikit-learn, flowrisk | Gaussian HMM, VPIN computation |
+| **Visualization** | Plotly, Dash, Dash Mantine | Interactive 4-panel dashboard |
+| **Data** | Tardis.dev (direct HTTP) | Tick-level L2 snapshots, 40+ exchanges |
+| **Testing** | pytest | Unit tests across all modules |
+
+<br>
+
+## Quick Start
+
+```bash
+# Clone & setup
+git clone https://github.com/CameronScarpati/lob-regime-scanner.git
+cd lob-regime-scanner
+make install-dev
+source .venv/bin/activate
+
+# Preview the dashboard with mock regimes (no download, no model fit)
+python -m dashboard.app --demo
+
+# Or fit the real pipeline on generated synthetic snapshot files
+python data/generate_realistic.py
+python -m dashboard.app --symbol BTCUSDT --start 2025-02-01 --end 2025-02-03
+
+# Or download free sample data (1st of any month, no API key)
+python data/download.py --symbol BTCUSDT --start 2024-01-01 --end 2024-01-01
+python -m dashboard.app --symbol BTCUSDT --start 2024-01-01 --end 2024-01-01
+```
+
+<br>
+
+## Downloading Data
+
+Data is sourced from [Tardis.dev](https://tardis.dev), which provides tick-level order book data for 40+ crypto exchanges. Free sample data for the **1st of each month** is available without an API key.
+
+```bash
+# Free sample data (no API key needed)
+python data/download.py --symbol BTCUSDT --start 2024-01-01 --end 2024-01-01
+
+# Multiple free months
+python data/download.py --symbol BTCUSDT --start 2024-01-01 --end 2024-03-01
+
+# Full API access (any date, requires paid key)
+python data/download.py --symbol BTCUSDT --start 2024-06-15 --end 2024-06-21 \
+  --tardis-api-key YOUR_KEY
+```
+
+<details>
+<summary><b>Download Options &amp; Supported Exchanges</b></summary>
+<br>
+
+```bash
+python data/download.py [OPTIONS]
+
+  --symbol TEXT          Trading pair (default: BTCUSDT)
+  --start DATE          Start date YYYY-MM-DD (required)
+  --end DATE            End date YYYY-MM-DD (required)
+  --exchange NAME       Exchange source (default: bybit)
+  --data-type TYPE      Tardis data type (default: book_snapshot_25)
+  --output-dir PATH     Output directory (default: data/raw/)
+  --tardis-api-key KEY  Tardis.dev API key (or set TARDIS_API_KEY env var)
+```
+
+| Exchange | `--exchange` | Description |
+|----------|:--------:|-------------|
+| Bybit | `bybit` | Bybit derivatives (default) |
+| Binance Futures | `binance` | Binance USD-M Futures |
+| Binance Spot | `binance-spot` | Binance spot market |
+| OKX | `okx` | OKX perpetual swaps |
+| Deribit | `deribit` | Deribit options/futures |
+
+</details>
+
+<br>
+
+## Dashboard
+
+```bash
+python -m dashboard.app [OPTIONS]
+
+  --symbol TEXT        Trading pair (default: BTCUSDT)
+  --start DATE         Start date (e.g. 2024-01-01)
+  --end DATE           End date (e.g. 2024-01-01)
+  --sample-interval N  Snapshot subsampling in ms (default: 1000)
+  --demo               Show mock regimes and features (skips the pipeline)
+  --host HOST          Bind address (default: 0.0.0.0)
+  --port PORT          Port (default: 8050)
+  --debug              Enable Dash debug mode
+```
+
+The `--sample-interval` flag controls temporal resolution. Tardis `book_snapshot_25` files contain a snapshot on every book change (potentially millions per day). The CLI default of 1000ms keeps memory usage reasonable (roughly 86k snapshots per day); the pipeline API defaults to 100ms. Use `100` for sub-second resolution, `10` for near-tick-level detail, or larger values for faster loading on large date ranges.
+
+<br>
+
+## Project Structure
+
+```
+lob-regime-scanner/
+│
+├── src/                           Core library
+│   ├── data_loader.py                 Tardis CSV parser + snapshot loader
+│   ├── book_reconstructor.py          Rebuild a book from level updates (optional C++ path)
+│   ├── features.py                    OFI, VPIN, Kyle's λ: 36 candidates, 8 fitted
+│   ├── hmm_model.py                   Gaussian HMM regime detection
+│   ├── backtest.py                    Regime-conditional strategy validation
+│   └── cpp/                           C++17 LOB engine (pybind11)
+│       ├── lob_engine.hpp/cpp             Sparse order book (std::map)
+│       └── bindings.cpp                   Python bindings
+│
+├── dashboard/                     Plotly Dash app, 4 synchronized panels
+│   ├── app.py                         Main app + CLI entry point
+│   ├── pipeline.py                    End-to-end data → model → viz
+│   ├── callbacks.py                   Dash interactivity callbacks
+│   └── components/                    Visualization panels
+│       ├── heatmap.py                     Bookmap-style LOB heatmap
+│       ├── regime_probs.py                Regime probability areas
+│       ├── depth_surface.py               3D order book surface
+│       └── diagnostics.py                 VPIN, OFI, spread, PnL
+│
+├── data/                          Data acquisition
+│   ├── download.py                    Tardis.dev HTTP downloader
+│   └── generate_realistic.py          Synthetic data generator
+│
+├── benchmarks/                    C++ engine throughput benchmark (make bench)
+├── notebooks/                     Analysis notebooks (4)
+├── tests/                         pytest suite
+├── docs/                          Methodology + results writeups
+└── pyproject.toml                 Dependencies & package config
+```
+
+<br>
+
+## Notebooks
+
+| # | Notebook | Description |
+|:-:|----------|-------------|
+| 1 | [Data Exploration](notebooks/01_data_exploration.ipynb) | Raw L2 data statistics, order book shape analysis, spread distributions |
+| 2 | [Feature Engineering](notebooks/02_feature_engineering.ipynb) | Feature distributions, correlations, OFI/VPIN time series |
+| 3 | [HMM Fitting](notebooks/03_hmm_fitting.ipynb) | BIC/AIC model selection, EM convergence, state interpretation |
+| 4 | [Regime Analysis](notebooks/04_regime_analysis.ipynb) | Regime-conditional statistics, transition dynamics, backtest results |
+
+<br>
+
+## Methodology
+
+> For the full mathematical formulation, see [docs/methodology.md](docs/methodology.md).
+
+The pipeline computes **36 candidate microstructure features** from Level 2 snapshots, feeds a curated subset to a **Gaussian Hidden Markov Model**, and decodes regimes causally with the **forward algorithm** (`predict_filtered`; the Viterbi path is also computed but not displayed):
+
+**Feature Engineering.** Order flow imbalance in two formulations (a simple multi-level volume-delta proxy and the canonical price-conditioned Cont, Kukanov & Stoikov (2014) version, which the HMM uses), VPIN (Easley, L&oacute;pez de Prado & O'Hara, 2012), Kyle's &lambda; via rolling OLS, book imbalance, realized volatility at 4 horizons, return autocorrelation at 10 lags, spread dynamics, trade aggression, and cancellation ratio. NaN handling is forward-fill only (no backward fill), and VPIN's volume-bucket size (a full-sample statistic of whatever frame it sees) is estimated from the training segment alone, so no feature row draws on future data.
+
+**HMM Regime Detection.** A 3-state Gaussian HMM, fit via Baum-Welch EM (up to 200 iterations) with diagonal covariance in the default pipeline (full covariance is also supported). The default pipeline is walk-forward: the model and its `StandardScaler` are fit on the first 70% of the series only. Regimes are then decoded **causally** with the forward algorithm (`predict_filtered`), so the state at bar *t* conditions only on observations up to *t*; the smoothed Viterbi path is also computed and returned, but no dashboard panel displays it. States are auto-sorted by covariance trace (a volatility proxy) for deterministic labeling. A BIC/AIC sweep over K &isin; {2, 3, 4, 5} is implemented; the default uses K = 3, chosen for interpretability.
+
+**Backtest.** A regime-conditional rule (enter on Quiet to Trending in the OFI direction, flatten on Toxic) driven by causally decoded states, with next-bar execution, taker fees and slippage (defaults: 5.5 + 0.5 bps per side), Sharpe annualized from the actual bar interval, and drawdown reported as a fraction of peak equity measured from starting capital. Headline statistics come from the held-out segment, net of costs, with in-sample and gross figures reported alongside. It exists to visualize regime behavior, not to demonstrate a tradeable edge.
+
+<br>
+
+## Development
+
+```bash
+make install-dev       # Create venv + install all dependencies
+make test              # Run pytest suite
+make lint              # Run ruff linter
+make format            # Auto-format with ruff
+```
+
+<br>
+
+## References
+
+<table>
+<tr><td>1</td><td>Cont, R., Kukanov, A., Stoikov, S. (2014). "The Price Impact of Order Book Events." <i>Journal of Financial Econometrics</i>, 12(1), 47–88.</td></tr>
+<tr><td>2</td><td>Easley, D., López de Prado, M., O'Hara, M. (2012). "Flow Toxicity and Liquidity in a High Frequency World." <i>Review of Financial Studies</i>, 25(5), 1457–1493.</td></tr>
+<tr><td>3</td><td>Hamilton, J.D. (1989). "A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle." <i>Econometrica</i>, 57(2), 357–384.</td></tr>
+<tr><td>4</td><td>Kyle, A.S. (1985). "Continuous Auctions and Insider Trading." <i>Econometrica</i>, 53(6), 1315–1335.</td></tr>
+</table>
+
+<br>
+
+<div align="center">
+
+---
+
+*Built with Python, C++, and quantitative curiosity.*
+
+</div>

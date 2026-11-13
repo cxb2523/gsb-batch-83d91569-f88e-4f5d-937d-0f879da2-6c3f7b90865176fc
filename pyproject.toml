@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel", "pybind11>=2.11"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lob-regime-scanner"
+version = "0.1.0"
+description = "Regime detection on cryptocurrency order books: 36 candidate features (8 fed to the model), a Gaussian hidden Markov model, a C++ pybind11 order-book engine, and a Plotly Dash dashboard"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Cameron Scarpati", email = "138163850+CameronScarpati@users.noreply.github.com"},
+]
+keywords = [
+    "hidden-markov-model",
+    "order-book",
+    "regime-detection",
+    "cryptocurrency",
+    "vpin",
+    "order-flow-imbalance",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "requests>=2.31",
+    "plotly>=5.18",
+    "dash>=2.14",
+    "dash-mantine-components>=2.0",
+    "hmmlearn>=0.3",
+    "scikit-learn>=1.3",
+    "flowrisk>=0.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/CameronScarpati/lob-regime-scanner"
+Repository = "https://github.com/CameronScarpati/lob-regime-scanner"
+Documentation = "https://github.com/CameronScarpati/lob-regime-scanner/blob/main/docs/methodology.md"
+Issues = "https://github.com/CameronScarpati/lob-regime-scanner/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pybind11>=2.11",
+    "ruff>=0.4",
+]
+
+[tool.setuptools.packages.find]
+include = ["src*", "data*", "dashboard*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    "E501",    # line length handled by formatter
+    "SIM108",  # ternary operator: readability preference
+    "RUF001",  # ambiguous unicode in strings (en-dash in messages)
+    "RUF002",  # ambiguous unicode in docstrings (math symbols: ×, −)
+    "RUF003",  # ambiguous unicode in comments (math symbols)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src", "dashboard", "data"]

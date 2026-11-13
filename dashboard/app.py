@@ -1,0 +1,662 @@
+"""Main Plotly Dash application.
+
+Renders a four-panel synchronized dashboard: LOB heatmap with regime
+overlay, regime state probabilities, 3D depth surface, and toxicity
+diagnostics.
+
+Run with:
+    python -m dashboard.app --symbol BTCUSDT --start 2025-01-01 --end 2025-01-14
+    python -m dashboard.app --demo   # use synthetic mock data
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sys
+
+import dash_mantine_components as dmc
+import numpy as np
+from dash import Dash, dcc
+
+from dashboard._constants import PANEL_DESCRIPTIONS, REGIME_COLORS, REGIME_NAMES
+from dashboard.callbacks import register_callbacks
+from dashboard.components.depth_surface import create_depth_surface_figure
+from dashboard.components.diagnostics import create_diagnostics_figure
+from dashboard.components.heatmap import create_heatmap_figure
+from dashboard.components.regime_probs import create_regime_probs_figure
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_panel(title: str, description: str, graph_id: str, figure, config: dict):
+    """Build a single chart panel with DMC Paper + title + dcc.Graph."""
+    return dmc.Paper(
+        radius="md",
+        withBorder=True,
+        p=0,
+        children=[
+            dmc.Stack(
+                gap=2,
+                p="sm",
+                pb=0,
+                children=[
+                    dmc.Text(title, fw=600, size="sm", c="gray.2"),
+                    dmc.Text(description, size="xs", c="dimmed", lh=1.5),
+                ],
+            ),
+            dcc.Graph(id=graph_id, figure=figure, config=config),
+        ],
+    )
+
+
+def _make_stat_item(label: str, value: str, color: str = "dimmed"):
+    """Build a single statistic display for the summary bar."""
+    return dmc.Stack(
+        gap=0,
+        align="center",
+        children=[
+            dmc.Text(value, fw=700, size="lg", c=color, ff="monospace"),
+            dmc.Text(
+                label,
+                size="xs",
+                c="dimmed",
+                tt="uppercase",
+                style={"letterSpacing": "0.06em"},
+            ),
+        ],
+    )
+
+
+def _compute_regime_durations(states: np.ndarray) -> dict[int, float]:
+    """Compute mean regime duration in time steps."""
+    durations: dict[int, list[int]] = {0: [], 1: [], 2: []}
+    if len(states) == 0:
+        return {0: 0.0, 1: 0.0, 2: 0.0}
+    current = states[0]
+    length = 1
+    for s in states[1:]:
+        if s == current:
+            length += 1
+        else:
+            durations[int(current)].append(length)
+            current = s
+            length = 1
+    durations[int(current)].append(length)
+    return {k: (np.mean(v) if v else 0.0) for k, v in durations.items()}
+
+
+# ---------------------------------------------------------------------------
+# CLI argument parsing
+# ---------------------------------------------------------------------------
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for the dashboard."""
+    parser = argparse.ArgumentParser(
+        description="LOB Regime Scanner Dashboard",
+    )
+    parser.add_argument(
+        "--symbol",
+        default="BTCUSDT",
+        help="Trading pair symbol (default: BTCUSDT)",
+    )
+    parser.add_argument(
+        "--start",
+        default=None,
+        help="Start date ISO format, e.g. 2025-01-01",
+    )
+    parser.add_argument(
+        "--end",
+        default=None,
+        help="End date ISO format, e.g. 2025-01-14",
+    )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Use synthetic mock data instead of the real pipeline",
+    )
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Host to bind to (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8050,
+        help="Port to listen on (default: 8050)",
+    )
+    parser.add_argument(
+        "--sample-interval",
+        type=int,
+        default=1000,
+        help="Snapshot subsampling interval in milliseconds (default: 1000). "
+        "Lower values capture more microstructure detail but use more memory. "
+        "Try 100 for sub-second resolution, 10 for tick-level detail.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable Dash debug mode",
+    )
+    return parser.parse_args(argv)
+
+
+# ---------------------------------------------------------------------------
+# Data loading
+# ---------------------------------------------------------------------------
+
+
+def load_data(args: argparse.Namespace) -> dict:
+    """Load data from the real pipeline or fall back to mock data.
+
+    Returns the standard dict with keys: snapshots, features, hmm, cumulative_pnl,
+    backtest_stats.
+    """
+    if args.demo:
+        logger.info("Running in demo mode with synthetic data")
+        from dashboard._mock_data import generate_all
+
+        return generate_all(n_timestamps=3600)
+
+    # Try the real pipeline
+    from dashboard.pipeline import NoDataError, run_pipeline
+
+    try:
+        return run_pipeline(
+            symbol=args.symbol,
+            start=args.start,
+            end=args.end,
+            sample_interval_us=args.sample_interval * 1000,
+        )
+    except NoDataError as exc:
+        print(
+            f"\n*** No data available ***\n\n{exc}\n\n"
+            "To preview the dashboard with mock regimes, run with --demo:\n"
+            "  python -m dashboard.app --demo\n"
+            "To fit the pipeline on synthetic snapshot files, generate them first:\n"
+            "  python data/generate_realistic.py\n"
+            "  python -m dashboard.app --symbol BTCUSDT --start 2025-02-01 --end 2025-02-03\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# App factory
+# ---------------------------------------------------------------------------
+
+
+def create_app(args: argparse.Namespace | None = None) -> Dash:
+    """Build and return the Dash app with layout and callbacks registered.
+
+    If *args* is ``None``, defaults to ``--demo`` mode (for tests / imports).
+    """
+    if args is None:
+        args = parse_args(["--demo"])
+
+    data = load_data(args)
+
+    snap = data["snapshots"]
+    feat = data["features"]
+    hmm = data["hmm"]
+    pnl = data["cumulative_pnl"]
+    bt_stats = data.get("backtest_stats", {})
+
+    # Build initial figures
+    init_heatmap = create_heatmap_figure(snap, hmm["states"])
+    init_regime = create_regime_probs_figure(
+        feat["timestamp"].values, hmm["state_probs"], hmm["transition_matrix"]
+    )
+    init_depth = create_depth_surface_figure(snap, hmm["states"])
+    init_diag = create_diagnostics_figure(feat, hmm["states"], pnl)
+
+    # Determine data source label
+    if args.demo:
+        source_label = "Mock / Synthetic"
+    else:
+        source_label = f"Tardis ({args.symbol})"
+
+    date_label = ""
+    if args.start and args.end:
+        date_label = f"{args.start} - {args.end}"
+    elif args.start:
+        date_label = f"{args.start} - ..."
+    elif args.end:
+        date_label = f"... - {args.end}"
+    else:
+        date_label = "Full range"
+
+    # Prepare time-range slider marks
+    timestamps = feat["timestamp"]
+    n_points = len(timestamps)
+    n_marks = 6
+    mark_indices = np.linspace(0, n_points - 1, n_marks, dtype=int)
+    slider_marks = [
+        {"value": int(idx), "label": str(timestamps.iloc[idx].strftime("%H:%M:%S"))}
+        for idx in mark_indices
+    ]
+
+    # Regime duration statistics
+    regime_durs = _compute_regime_durations(hmm["states"])
+
+    # Backtest statistics (with safe defaults)
+    sharpe = bt_stats.get("sharpe_ratio", 0.0)
+    max_dd = bt_stats.get("max_drawdown", 0.0)
+    n_trades = bt_stats.get("n_trades", 0)
+    hit_rate = bt_stats.get("hit_rate", 0.0)
+    total_pnl = bt_stats.get("total_pnl", 0.0)
+    is_walk_forward = "out_of_sample" in bt_stats
+    # Mock demo stats are plain random draws with no execution or cost model,
+    # so the caption must not claim cost-netting for them.
+    is_synthetic = bool(bt_stats.get("synthetic", False))
+    if is_synthetic:
+        bt_caption = (
+            "(Regime-conditional: enter Quiet→Trending, "
+            "flatten on Toxic · synthetic demo data, no execution or cost "
+            "model · illustrative)"
+        )
+        sharpe_label = "Sharpe (ann., demo)"
+    elif is_walk_forward:
+        train_pct = round(bt_stats.get("train_frac", 0.7) * 100)
+        bt_caption = (
+            "(Regime-conditional: enter Quiet→Trending, "
+            f"flatten on Toxic · held-out {100 - train_pct}% after a "
+            f"{train_pct}% walk-forward fit · next-bar execution, net of "
+            "fees and slippage · illustrative)"
+        )
+        sharpe_label = "Sharpe (OOS, net)"
+    else:
+        bt_caption = (
+            "(Regime-conditional: enter Quiet→Trending, "
+            "flatten on Toxic · in-sample · next-bar execution, net of fees "
+            "and slippage · illustrative)"
+        )
+        sharpe_label = "Sharpe (ann., net)"
+
+    # Build app
+    dash_app = Dash(
+        __name__,
+        title="LOB Regime Scanner",
+        assets_folder=os.path.join(os.path.dirname(__file__), "assets"),
+    )
+
+    dash_app.layout = dmc.MantineProvider(
+        id="mantine-provider",
+        forceColorScheme="dark",
+        theme={
+            "primaryColor": "blue",
+            "fontFamily": "Inter, Helvetica Neue, Helvetica, Arial, sans-serif",
+            "colors": {
+                "dark": [
+                    "#c1c7d0",  # dark.0 - lightest text
+                    "#a6adb8",  # dark.1
+                    "#8892a0",  # dark.2
+                    "#5c6775",  # dark.3
+                    "#3a4654",  # dark.4
+                    "#283444",  # dark.5
+                    "#1a2332",  # dark.6 - paper bg
+                    "#111a26",  # dark.7 - card bg
+                    "#0d1420",  # dark.8 - body bg
+                    "#080c12",  # dark.9 - deepest
+                ],
+            },
+        },
+        children=[
+            dmc.Container(
+                id="app-container",
+                size="1860px",
+                px="md",
+                py="sm",
+                children=dmc.Stack(
+                    gap="sm",
+                    children=[
+                        # -- Header --
+                        dmc.Paper(
+                            radius="md",
+                            withBorder=True,
+                            p="sm",
+                            px="lg",
+                            children=dmc.Group(
+                                justify="space-between",
+                                children=[
+                                    dmc.Title(
+                                        "Limit Order Book Regime Scanner",
+                                        order=4,
+                                        tt="uppercase",
+                                        lts="0.1em",
+                                    ),
+                                    dmc.Group(
+                                        gap="lg",
+                                        children=[
+                                            dmc.Group(
+                                                gap=6,
+                                                children=[
+                                                    dmc.Badge(
+                                                        "Instrument", size="xs", variant="light"
+                                                    ),
+                                                    dmc.Text(
+                                                        f"{args.symbol} Perp", size="sm", c="dimmed"
+                                                    ),
+                                                ],
+                                            ),
+                                            dmc.Group(
+                                                gap=6,
+                                                children=[
+                                                    dmc.Badge("Date", size="xs", variant="light"),
+                                                    dmc.Text(date_label, size="sm", c="dimmed"),
+                                                ],
+                                            ),
+                                            dmc.Group(
+                                                gap=6,
+                                                children=[
+                                                    dmc.Badge("Model", size="xs", variant="light"),
+                                                    dmc.Text(
+                                                        "GaussianHMM (K=3, diag cov)",
+                                                        size="sm",
+                                                        c="dimmed",
+                                                    ),
+                                                ],
+                                            ),
+                                            dmc.Group(
+                                                gap=6,
+                                                children=[
+                                                    dmc.Badge(
+                                                        "Interval", size="xs", variant="light"
+                                                    ),
+                                                    dmc.Text(
+                                                        f"{args.sample_interval}ms",
+                                                        size="sm",
+                                                        c="dimmed",
+                                                    ),
+                                                ],
+                                            ),
+                                            dmc.Group(
+                                                gap=6,
+                                                children=[
+                                                    dmc.Badge("Source", size="xs", variant="light"),
+                                                    dmc.Text(source_label, size="sm", c="dimmed"),
+                                                ],
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                        ),
+                        # -- Strategy Performance Summary --
+                        dmc.Paper(
+                            radius="md",
+                            withBorder=True,
+                            p="sm",
+                            px="lg",
+                            children=dmc.Group(
+                                justify="space-between",
+                                children=[
+                                    dmc.Group(
+                                        gap=4,
+                                        children=[
+                                            dmc.Text(
+                                                "Strategy Performance",
+                                                size="xs",
+                                                fw=600,
+                                                c="dimmed",
+                                                tt="uppercase",
+                                                style={"letterSpacing": "0.08em"},
+                                            ),
+                                            dmc.Text(
+                                                bt_caption,
+                                                size="xs",
+                                                c="dimmed",
+                                            ),
+                                        ],
+                                    ),
+                                    dmc.Group(
+                                        gap="xl",
+                                        children=[
+                                            _make_stat_item(
+                                                sharpe_label,
+                                                f"{sharpe:.2f}",
+                                                "#4CAF82" if sharpe > 0 else "#EF6C6C",
+                                            ),
+                                            dmc.Divider(
+                                                orientation="vertical",
+                                                color="dark.4",
+                                                size="sm",
+                                            ),
+                                            _make_stat_item(
+                                                "Max Drawdown",
+                                                f"{max_dd:.2%}",
+                                                "#EF6C6C",
+                                            ),
+                                            dmc.Divider(
+                                                orientation="vertical",
+                                                color="dark.4",
+                                                size="sm",
+                                            ),
+                                            _make_stat_item(
+                                                "Trades",
+                                                str(n_trades),
+                                            ),
+                                            dmc.Divider(
+                                                orientation="vertical",
+                                                color="dark.4",
+                                                size="sm",
+                                            ),
+                                            _make_stat_item(
+                                                "Hit Rate",
+                                                f"{hit_rate:.1%}",
+                                                "#4CAF82" if hit_rate > 0.5 else "#E6A817",
+                                            ),
+                                            dmc.Divider(
+                                                orientation="vertical",
+                                                color="dark.4",
+                                                size="sm",
+                                            ),
+                                            _make_stat_item(
+                                                "Total PnL",
+                                                f"{total_pnl:+.4f}",
+                                                "#4CAF82" if total_pnl > 0 else "#EF6C6C",
+                                            ),
+                                            dmc.Divider(
+                                                orientation="vertical",
+                                                color="dark.4",
+                                                size="sm",
+                                            ),
+                                            # Regime duration stats
+                                            *[
+                                                dmc.Stack(
+                                                    gap=0,
+                                                    align="center",
+                                                    children=[
+                                                        dmc.Text(
+                                                            f"{regime_durs[i]:.0f}s",
+                                                            fw=700,
+                                                            size="lg",
+                                                            c=REGIME_COLORS[i],
+                                                            ff="monospace",
+                                                        ),
+                                                        dmc.Text(
+                                                            f"Avg {REGIME_NAMES[i]}",
+                                                            size="xs",
+                                                            c="dimmed",
+                                                            tt="uppercase",
+                                                            style={
+                                                                "letterSpacing": "0.06em",
+                                                            },
+                                                        ),
+                                                    ],
+                                                )
+                                                for i in range(3)
+                                            ],
+                                        ],
+                                    ),
+                                ],
+                            ),
+                        ),
+                        # -- Controls bar --
+                        dmc.Paper(
+                            radius="md",
+                            withBorder=True,
+                            pt="xs",
+                            pb="md",
+                            px="lg",
+                            children=dmc.Group(
+                                justify="space-between",
+                                children=[
+                                    # Time range selector
+                                    dmc.Group(
+                                        gap="sm",
+                                        style={"flex": "1"},
+                                        children=[
+                                            dmc.Text(
+                                                "Time Range",
+                                                size="xs",
+                                                fw=600,
+                                                c="dimmed",
+                                                tt="uppercase",
+                                                style={
+                                                    "letterSpacing": "0.08em",
+                                                    "whiteSpace": "nowrap",
+                                                },
+                                            ),
+                                            dmc.RangeSlider(
+                                                id="time-range-slider",
+                                                min=0,
+                                                max=n_points - 1,
+                                                value=[0, n_points - 1],
+                                                marks=slider_marks,
+                                                step=1,
+                                                minRange=10,
+                                                color="blue",
+                                                size="sm",
+                                                style={"flex": "1", "minWidth": "300px"},
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                        ),
+                        # -- 2x2 Panel grid --
+                        dmc.SimpleGrid(
+                            cols=2,
+                            spacing="sm",
+                            children=[
+                                _make_panel(
+                                    "Order-Book Heatmap with Regime Overlay",
+                                    PANEL_DESCRIPTIONS["heatmap"],
+                                    "heatmap-panel",
+                                    init_heatmap,
+                                    {
+                                        "displayModeBar": "hover",
+                                        "scrollZoom": True,
+                                        "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+                                    },
+                                ),
+                                _make_panel(
+                                    "Regime Posterior Probabilities",
+                                    PANEL_DESCRIPTIONS["regime_probs"],
+                                    "regime-probs-panel",
+                                    init_regime,
+                                    {"displayModeBar": "hover"},
+                                ),
+                                _make_panel(
+                                    "3-D Order-Book Depth Surface",
+                                    PANEL_DESCRIPTIONS["depth_surface"],
+                                    "depth-surface-panel",
+                                    init_depth,
+                                    {"displayModeBar": "hover", "scrollZoom": True},
+                                ),
+                                _make_panel(
+                                    "Microstructure Diagnostics",
+                                    PANEL_DESCRIPTIONS["diagnostics"],
+                                    "diagnostics-panel",
+                                    init_diag,
+                                    {"displayModeBar": "hover"},
+                                ),
+                            ],
+                        ),
+                        # -- Footer --
+                        dmc.Paper(
+                            radius="md",
+                            withBorder=True,
+                            p="xs",
+                            px="lg",
+                            children=dmc.Group(
+                                justify="space-between",
+                                children=[
+                                    dmc.Group(
+                                        gap="xs",
+                                        children=[
+                                            dmc.Text(
+                                                "LOB Regime Scanner",
+                                                size="xs",
+                                                fw=600,
+                                                c="dimmed",
+                                            ),
+                                            dmc.Text(
+                                                "\u00b7",
+                                                size="xs",
+                                                c="dark.3",
+                                            ),
+                                            dmc.Text(
+                                                "Cameron Scarpati",
+                                                size="xs",
+                                                c="dimmed",
+                                            ),
+                                        ],
+                                    ),
+                                    dmc.Text(
+                                        "Gaussian HMM (Baum-Welch EM) "
+                                        "\u00b7 OFI (Cont, Kukanov & Stoikov 2014) "
+                                        "\u00b7 VPIN (Easley, L\u00f3pez de Prado & O'Hara 2012) "
+                                        "\u00b7 Kyle's \u03bb (Kyle 1985)",
+                                        size="xs",
+                                        c="dark.3",
+                                    ),
+                                    dmc.Text(
+                                        f"{n_points:,} observations \u00b7 "
+                                        f"3-state diagonal-covariance HMM",
+                                        size="xs",
+                                        c="dark.3",
+                                    ),
+                                ],
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+        ],
+    )
+
+    # Register interactive callbacks (passes data through closure)
+    register_callbacks(dash_app, data)
+
+    return dash_app
+
+
+# ---------------------------------------------------------------------------
+# Module-level app for import-based usage (``from dashboard.app import app``)
+# Uses demo mode by default to avoid requiring data files on import.
+# ---------------------------------------------------------------------------
+app = create_app()
+server = app.server  # For deployment (gunicorn / waitress)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    cli_args = parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    cli_app = create_app(cli_args)
+    cli_app.run(debug=cli_args.debug, host=cli_args.host, port=cli_args.port)

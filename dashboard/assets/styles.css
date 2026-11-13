@@ -1,0 +1,66 @@
+/* LOB Regime Scanner Dashboard
+ *
+ * Minimal overrides -- Mantine handles theming via MantineProvider.
+ * Only custom rules here are for Plotly graph integration and
+ * body-level dark background that Mantine doesn't set.
+ */
+
+/* ── Base ── */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background-color: #080c12;
+}
+
+/* ── Plotly mode-bar: subtle until hovered ── */
+.dash-graph .modebar {
+    top: 4px !important;
+    right: 4px !important;
+    opacity: 0.25;
+}
+
+.dash-graph .modebar:hover {
+    opacity: 0.85;
+}
+
+.dash-graph {
+    margin: 0;
+    padding: 0;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: #080c12;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #1c2736;
+    border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #2d3f52;
+}
+
+/* ── RangeSlider: mark labels ── */
+.mantine-RangeSlider-markLabel {
+    font-size: 10px;
+    color: #5c6775;
+    margin-top: 4px;
+}
+
+/* ── Responsive: stack panels on narrow screens ── */
+@media (max-width: 1200px) {
+    .mantine-SimpleGrid-root {
+        grid-template-columns: 1fr !important;
+    }
+}
