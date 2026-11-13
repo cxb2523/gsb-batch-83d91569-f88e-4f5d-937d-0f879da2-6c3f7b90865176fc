@@ -7,7 +7,11 @@ def sanitize_url_to_path(raw_url: str, base_domain: str = "wechat_h5") -> tuple[
     将 URL 解析并转换为安全的本地磁盘相对路径 (支持中文 URL 解码)
     """
     parsed = urllib.parse.urlparse(raw_url)
-    domain = parsed.netloc or base_domain
+    raw_domain = parsed.netloc or base_domain
+    # 域名同样需要清洗非法字符（如带端口时的 ":"），否则 Windows 下无法创建目录
+    domain = "".join(
+        c if c not in '<>:"/\\|?*' else "_" for c in raw_domain
+    ).strip("_") or base_domain
     raw_path = urllib.parse.unquote(parsed.path).lstrip("/")
 
     if not raw_path or raw_path.endswith("/"):

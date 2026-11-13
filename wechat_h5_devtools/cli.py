@@ -322,11 +322,24 @@ from .extractor.deobfuscator import Deobfuscator
 @click.option("--output", "-o", default="output_project", help="本地源码保存目录 (相对路径自动存入本项目 output/ 目录)")
 @click.option("--ua", "-u", default="ios", help="请求 User-Agent 平台")
 @click.option("--deobfuscate", "-d", is_flag=True, default=False, help="抓取完成后自动执行全量 AST 语法树解混淆与解包")
-def dump_cmd(url, output, ua, deobfuscate):
+@click.option("--report", "-r", "report_path", default=None, help="将逐资源抓取清单与汇总计数写入指定 JSON 文件")
+@click.option("--json", "as_json", is_flag=True, default=False, help="将逐资源抓取清单以纯 JSON 格式输出到 stdout")
+def dump_cmd(url, output, ua, deobfuscate, report_path, as_json):
     print_banner()
     final_output = _resolve_path(output, "output_project")
     dumper = ProjectDumper(output_dir=str(final_output), platform_ua=ua)
-    success = dumper.dump(url)
+    report = dumper.dump_with_report(url)
+    success = report.success
+
+    if report_path:
+        final_report = _resolve_path(report_path, "dump_report.json")
+        with open(final_report, "w", encoding="utf-8") as f:
+            json.dump(report.to_dict(), f, ensure_ascii=False, indent=2)
+        log_info(f"逐资源抓取报告已写入: {final_report}")
+
+    if as_json:
+        click.echo(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+
     if success and deobfuscate:
         deobf = Deobfuscator(input_dir=str(final_output))
         deobf.deobfuscate()
