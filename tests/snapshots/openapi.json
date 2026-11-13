@@ -925,10 +925,27 @@
         "type": "object"
       },
       "Previews": {
-        "additionalProperties": {
-          "$ref": "#/components/schemas/Preview"
+        "description": "Batch preview result: the previews found, and why the rest were skipped.",
+        "properties": {
+          "previews": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Preview"
+            },
+            "title": "Previews",
+            "type": "object"
+          },
+          "skipped": {
+            "items": {
+              "$ref": "#/components/schemas/SkippedChannel"
+            },
+            "title": "Skipped",
+            "type": "array"
+          }
         },
-        "description": "Previews keyed by the requested username; unknown channels are omitted.",
+        "required": [
+          "previews",
+          "skipped"
+        ],
         "title": "Previews",
         "type": "object"
       },
@@ -1025,6 +1042,36 @@
           "to_message"
         ],
         "title": "Reply",
+        "type": "object"
+      },
+      "SkipReason": {
+        "enum": [
+          "not_found",
+          "upstream_failed"
+        ],
+        "type": "string"
+      },
+      "SkippedChannel": {
+        "description": "A channel of a batch preview that could not be resolved.",
+        "properties": {
+          "channel": {
+            "title": "Channel",
+            "type": "string"
+          },
+          "normalized": {
+            "title": "Normalized",
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/SkipReason"
+          }
+        },
+        "required": [
+          "channel",
+          "normalized",
+          "reason"
+        ],
+        "title": "SkippedChannel",
         "type": "object"
       },
       "Text": {
@@ -1742,7 +1789,7 @@
     },
     "/v1/previews": {
       "post": {
-        "description": "Previews of up to 100 channels at once; unknown channels are omitted.",
+        "description": "Previews of up to 100 channels at once; unresolved channels are listed in `skipped`.",
         "operationId": "previews_v1_previews_post",
         "requestBody": {
           "content": {

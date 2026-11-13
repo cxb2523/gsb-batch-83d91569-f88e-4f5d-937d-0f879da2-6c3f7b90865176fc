@@ -113,7 +113,7 @@ async def preview(channel: ChannelName, service: Channels, features: Features) -
     responses=_ERRORS,
 )
 async def previews(payload: ChannelsRequest, service: Channels, features: Features) -> Response:
-    """Previews of up to 100 channels at once; unknown channels are omitted."""
+    """Previews of up to 100 channels at once; unresolved channels are listed in `skipped`."""
     features.require("previews")
     return _json(await service.previews(payload.channels))
 

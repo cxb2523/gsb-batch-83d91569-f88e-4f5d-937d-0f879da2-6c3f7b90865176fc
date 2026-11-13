@@ -83,8 +83,8 @@ class RequestLoader:
         return await self._once(("previews", channels), lambda: self._previews(channels))
 
     async def _previews(self, channels: tuple[str, ...]) -> dict[str, JSONDict]:
-        previews = await self._channels.previews(list(channels))
-        return {name: preview.model_dump(mode="json") for name, preview in previews.root.items()}
+        result = await self._channels.previews(list(channels))
+        return {name: p.model_dump(mode="json") for name, p in result.previews.items()}
 
     async def preview(self, channel: str) -> JSONDict:
         """Channel preview, as returned by `GET /v1/preview/{channel}`."""

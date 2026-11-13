@@ -107,6 +107,26 @@ def test_invalid_input_is_rejected(
     assert fetcher.requests == []
 
 
+def test_previews_reject_invalid_channel_names_at_the_entry(
+    client: TestClient, fetcher: FixtureFetcher
+) -> None:
+    # One invalid name rejects the whole batch before anything reaches t.me.
+    response = client.post("/v1/previews", json={"channels": ["durov", "bad-name"]})
+    assert response.status_code == 422
+    assert fetcher.requests == []
+
+
+def test_previews_report_skipped_channels(client: TestClient, manifest: dict[str, Any]) -> None:
+    missing = manifest["missing"]
+    response = client.post("/v1/previews", json={"channels": ["durov", missing]})
+    assert response.status_code == 200
+    body = response.json()
+    assert list(body["previews"]) == ["durov"]
+    assert body["skipped"] == [
+        {"channel": missing, "normalized": missing.lower(), "reason": "not_found"}
+    ]
+
+
 def test_response_headers(client: TestClient) -> None:
     response = client.get("/v1/body/durov")
     assert response.headers["x-app-node"]

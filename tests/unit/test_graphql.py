@@ -580,8 +580,9 @@ MIRRORS: dict[type[BaseModel], tuple[str, frozenset[str]]] = {
     channel_models.PreviewChannel: ("PreviewChannel", frozenset()),
     channel_models.Preview: ("Preview", frozenset({"username"})),
 }
-# Represented differently: a list of `Preview` with `username` instead of a map.
-NOT_MIRRORED = {channel_models.Previews}
+# Represented differently: a list of `Preview` with `username` instead of a map,
+# and the batch `skipped` list is not exposed over GraphQL.
+NOT_MIRRORED = {channel_models.Previews, channel_models.SkippedChannel}
 
 
 def _models() -> set[type[BaseModel]]:

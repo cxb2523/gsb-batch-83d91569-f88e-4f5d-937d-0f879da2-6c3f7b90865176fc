@@ -31,7 +31,14 @@ from pydantic import BaseModel, ValidationError
 from pydantic_core import from_json, to_json
 
 from telegram_me.cache import Cache, CacheEntry
-from telegram_me.schemas.channel import ChannelBody, More, Preview, Previews
+from telegram_me.schemas.channel import (
+    ChannelBody,
+    More,
+    Preview,
+    Previews,
+    SkippedChannel,
+    SkipReason,
+)
 from telegram_me.schemas.post import Post
 from telegram_me.services import upstream
 from telegram_me.services.coalesce import SingleFlight, flight_table
@@ -381,31 +388,43 @@ class ChannelService:
         return await loop.run_in_executor(self._executor, functools.partial(func, *args, **kwargs))
 
     async def previews(self, channels: list[str]) -> Previews:
-        """Previews of several channels; channels that can not be resolved are omitted.
+        """Previews of several channels, with a skipped entry for every unresolved one.
 
-        Raises the first error only when every channel failed for a reason other
-        than not existing (for example while t.me is unreachable).
+        Channels are deduplicated case-insensitively (`Durov` is `durov`) before
+        fetching, keeping the first spelling of each channel; results and skipped
+        entries point back to that first spelling. Raises the first error only
+        when no channel resolved and none of them simply does not exist (for
+        example while t.me is unreachable).
         """
-        unique = list(dict.fromkeys(channels))
+        # normalized (lookup key) -> as first requested
+        unique: dict[str, str] = {}
+        for channel in channels:
+            unique.setdefault(channel.lower(), channel)
+        names = list(unique.items())
         # One flow upstream: a large batch must not crowd out other requests.
-        with upstream.flow(f"previews:{id(unique)}"):
+        with upstream.flow(f"previews:{id(names)}"):
             results = await asyncio.gather(
-                *(self.preview(channel) for channel in unique), return_exceptions=True
+                *(self.preview(normalized) for normalized, _ in names),
+                return_exceptions=True,
             )
         found: dict[str, Preview] = {}
+        skipped: list[SkippedChannel] = []
         failures: list[BaseException] = []
-        for channel, result in zip(unique, results, strict=True):
+        for (normalized, requested), result in zip(names, results, strict=True):
             if isinstance(result, Preview):
-                found[channel] = result
-            elif isinstance(result, TelegramNotFoundError):
+                found[requested] = result
                 continue
+            reason: SkipReason = "upstream_failed"
+            if isinstance(result, TelegramNotFoundError):
+                reason = "not_found"
             elif isinstance(result, TelegramError):
                 failures.append(result)
             else:
                 raise result
-        if failures and len(failures) == len(unique):
+            skipped.append(SkippedChannel(channel=requested, normalized=normalized, reason=reason))
+        if failures and len(failures) == len(names):
             raise failures[0]
-        return Previews(found)
+        return Previews(previews=found, skipped=skipped)
 
 
 def encode(data: Any) -> bytes:

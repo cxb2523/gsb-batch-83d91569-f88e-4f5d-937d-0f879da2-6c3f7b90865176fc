@@ -1,17 +1,18 @@
 import asyncio
 import gzip
 from collections.abc import Mapping
-from typing import Any, override
+from typing import Any
 
 import pytest
 
 from telegram_me.cache import MemoryCache
+from telegram_me.schemas.channel import SkippedChannel
 from telegram_me.services.channels import ChannelService, encode
 from telegram_me.services.feed import FeedRefresher, FeedService
 from telegram_me.services.popularity import LocalLeaderLock, MemoryPopularity
 from telegram_me.settings import Settings
-from telegram_me.telegram.client import FetchResult, Method, TelegramClient
-from telegram_me.telegram.errors import TelegramNotFoundError
+from telegram_me.telegram.client import Fetcher, FetchResult, Method, TelegramClient
+from telegram_me.telegram.errors import TelegramNotFoundError, TelegramUpstreamError
 from tests.conftest import FIXTURES_DIR, make_settings
 
 
@@ -46,7 +47,7 @@ def durov_html() -> str:
     return _fixture("body_durov")
 
 
-def _service(fetcher: PageFetcher, settings: Settings) -> ChannelService:
+def _service(fetcher: Fetcher, settings: Settings) -> ChannelService:
     client = TelegramClient(fetcher, max_concurrency=4)
     return ChannelService(client, MemoryCache(64 * 1024 * 1024), settings)
 
@@ -99,24 +100,114 @@ async def test_invalid_post_is_dropped_not_fatal(durov_html: str) -> None:
     assert len(body.content.posts) == len(page["content"]["posts"]) - 1
 
 
-async def test_previews_skip_missing_channels() -> None:
-    preview_html = _fixture("preview_durov")
-    missing_html = _fixture("preview_missing")
+class PreviewFetcher:
+    """Serves scripted responses for preview landing pages and counts requests."""
 
-    class PreviewFetcher(PageFetcher):
-        @override
-        async def fetch(self, method: Method, path: str, **kwargs: Any) -> FetchResult:
-            await super().fetch(method, path, **kwargs)
-            return FetchResult(200, preview_html if path == "/durov" else missing_html)
+    def __init__(self, script: Mapping[str, FetchResult]) -> None:
+        self.script = script
+        self.paths: list[str] = []
 
-    fetcher = PreviewFetcher("")
+    async def fetch(
+        self,
+        method: Method,
+        path: str,
+        *,
+        query: Mapping[str, int] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> FetchResult:
+        self.paths.append(path)
+        return self.script[path]
+
+    async def close(self) -> None:
+        return None
+
+
+def _preview_script(*channels: str, status: int = 200) -> dict[str, FetchResult]:
+    html = _fixture("preview_durov")
+    return {
+        f"/{channel}": FetchResult(status, html if status == 200 else "") for channel in channels
+    }
+
+
+async def test_previews_all_succeed() -> None:
+    fetcher = PreviewFetcher(_preview_script("durov", "telegram"))
     service = _service(fetcher, make_settings())
-    previews = await service.previews(["durov", "zzzzzznothing", "durov"])
-    assert list(previews.root) == ["durov"]
+    result = await service.previews(["durov", "telegram"])
+    assert list(result.previews) == ["durov", "telegram"]
+    assert result.skipped == []
+
+
+async def test_previews_skip_missing_channels() -> None:
+    fetcher = PreviewFetcher(
+        {
+            "/durov": FetchResult(200, _fixture("preview_durov")),
+            "/zzzzzznothing": FetchResult(200, _fixture("preview_missing")),
+        }
+    )
+    service = _service(fetcher, make_settings())
+    result = await service.previews(["durov", "zzzzzznothing", "durov"])
+    assert list(result.previews) == ["durov"]
+    assert result.skipped == [
+        SkippedChannel(channel="zzzzzznothing", normalized="zzzzzznothing", reason="not_found")
+    ]
     # The miss is cached briefly, so repeated lookups do not hit t.me again.
     with pytest.raises(TelegramNotFoundError):
         await service.preview("zzzzzznothing")
     assert fetcher.paths.count("/zzzzzznothing") == 1
+
+
+async def test_previews_all_upstream_failures_raise() -> None:
+    fetcher = PreviewFetcher(_preview_script("durov", "telegram", status=500))
+    service = _service(fetcher, make_settings())
+    with pytest.raises(TelegramUpstreamError):
+        await service.previews(["durov", "telegram"])
+
+
+async def test_previews_partial_upstream_failure_is_skipped() -> None:
+    fetcher = PreviewFetcher(
+        {"/durov": FetchResult(200, _fixture("preview_durov")), "/telegram": FetchResult(503, "")}
+    )
+    service = _service(fetcher, make_settings())
+    result = await service.previews(["durov", "telegram"])
+    assert list(result.previews) == ["durov"]
+    assert result.skipped == [
+        SkippedChannel(channel="telegram", normalized="telegram", reason="upstream_failed")
+    ]
+
+
+async def test_previews_missing_and_upstream_failure_does_not_raise() -> None:
+    fetcher = PreviewFetcher(
+        {
+            "/zzzzzznothing": FetchResult(200, _fixture("preview_missing")),
+            "/telegram": FetchResult(500, ""),
+        }
+    )
+    service = _service(fetcher, make_settings())
+    result = await service.previews(["zzzzzznothing", "telegram"])
+    assert result.previews == {}
+    # Skipped entries keep the first-appearance order and classify the reason.
+    assert result.skipped == [
+        SkippedChannel(channel="zzzzzznothing", normalized="zzzzzznothing", reason="not_found"),
+        SkippedChannel(channel="telegram", normalized="telegram", reason="upstream_failed"),
+    ]
+
+
+async def test_previews_dedup_mixed_case_fetches_once() -> None:
+    fetcher = PreviewFetcher(
+        {
+            "/durov": FetchResult(200, _fixture("preview_durov")),
+            "/zzzzzznothing": FetchResult(200, _fixture("preview_missing")),
+        }
+    )
+    service = _service(fetcher, make_settings())
+    result = await service.previews(["Durov", "durov", "ZZZZZZNothing", "zzzzzznothing", "DUROV"])
+    # Results and skipped entries point back to the first spelling of a channel.
+    assert list(result.previews) == ["Durov"]
+    assert result.skipped == [
+        SkippedChannel(channel="ZZZZZZNothing", normalized="zzzzzznothing", reason="not_found")
+    ]
+    # Each channel is fetched from t.me once, under its normalized name.
+    assert sorted(fetcher.paths) == ["/durov", "/zzzzzznothing"]
 
 
 async def test_feed_fetches_missing_pages_in_parallel_and_tracks_popularity(

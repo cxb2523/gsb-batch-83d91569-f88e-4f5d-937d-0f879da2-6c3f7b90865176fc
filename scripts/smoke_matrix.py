@@ -145,10 +145,11 @@ def previews(channels: list[str]) -> Check:
     """`/v1/previews`: a card with a title for each channel that exists."""
 
     def check(body: Any) -> str | None:
-        if not isinstance(body, dict) or not body:
+        found = body.get("previews") if isinstance(body, dict) else None
+        if not isinstance(found, dict) or not found:
             return "no previews"
         for channel in channels:
-            if channel in body and not _get(body, channel, "channel", "title"):
+            if channel in found and not _get(found, channel, "channel", "title"):
                 return f"preview of {channel} without a channel title"
         return None
 

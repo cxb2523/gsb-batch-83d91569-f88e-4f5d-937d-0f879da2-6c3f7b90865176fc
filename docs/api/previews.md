@@ -49,15 +49,26 @@ curl -X POST http://localhost:8000/v1/previews \
 
 ```json
 {
-  "durov":    {"channel": {"title": "Pavel Durov", "subscribers": "10 281 023 subscribers", "description": "Founder of Telegram.", "avatar": "https://…", "is_verified": true}},
-  "telegram": {"channel": {"title": "Telegram News", "subscribers": "9 257 928 subscribers", "description": "The official Telegram on Telegram. Much recursion. …", "avatar": "https://…", "is_verified": true}}
+  "previews": {
+    "durov":    {"channel": {"title": "Pavel Durov", "subscribers": "10 281 023 subscribers", "description": "Founder of Telegram.", "avatar": "https://…", "is_verified": true}},
+    "telegram": {"channel": {"title": "Telegram News", "subscribers": "9 257 928 subscribers", "description": "The official Telegram on Telegram. Much recursion. …", "avatar": "https://…", "is_verified": true}}
+  },
+  "skipped": [
+    {"channel": "nosuchchannel123", "normalized": "nosuchchannel123", "reason": "not_found"}
+  ]
 }
 ```
 
-- Keys are the usernames as sent; duplicates are resolved once.
-- Channels that do not exist are **omitted** from the result.
-- If every channel fails for another reason (for example t.me is down) the
-  request fails with that error (`503`).
+- `previews` keys are the usernames as first sent; duplicates are resolved
+  once — usernames are case-insensitive, so `Durov` and `durov` are fetched
+  from t.me a single time.
+- Channels that could not be resolved are listed in `skipped`, in
+  first-appearance order, each with the username as first sent (`channel`),
+  the canonical lowercase username it was looked up as (`normalized`) and a
+  `reason`: `not_found` (the channel does not exist) or `upstream_failed`
+  (t.me could not be queried).
+- If no channel resolves and none of them simply does not exist (for example
+  t.me is down) the request fails with that error (`503`).
 
 !!! note "Changed in 2.0"
     1.x answered `404` for the whole request when any single channel was

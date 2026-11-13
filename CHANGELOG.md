@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `POST /v1/previews` answers `{"previews": {…}, "skipped": […]}` instead of a
+  bare map: every channel that could not be resolved is listed in `skipped`
+  with the username as first sent, its normalized (lowercase) form and a
+  `reason` (`not_found` or `upstream_failed`). Usernames are now deduplicated
+  case-insensitively before fetching, so `Durov` and `durov` reach t.me once;
+  results point back to the first spelling. The failure semantics are
+  unchanged: missing channels never fail the batch, and the request fails only
+  when nothing resolved and no channel simply does not exist.
+
 ### Fixed
 
 - The Nightly smoke test of production through the public URL accepts

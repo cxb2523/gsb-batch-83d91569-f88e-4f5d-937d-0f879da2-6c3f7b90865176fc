@@ -169,7 +169,9 @@ Returned by [`/v1/preview`](previews.md): `{"channel": PreviewChannel}`.
 | `avatar` | URL \| null | Picture |
 | `is_verified` | boolean | Verified badge |
 
-`/v1/previews` returns `{username: Preview}`.
+`/v1/previews` returns `{"previews": {username: Preview}, "skipped": [SkippedChannel]}`,
+where a `SkippedChannel` is `{"channel": string, "normalized": string, "reason": "not_found" | "upstream_failed"}`
+— see [Channel previews](previews.md#post-v1previews).
 
 ## FeedResponse
 

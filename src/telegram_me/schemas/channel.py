@@ -1,8 +1,8 @@
 """Response models of channel pages, previews and pagination."""
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, HttpUrl, RootModel, field_validator, model_validator
+from pydantic import BaseModel, HttpUrl, field_validator, model_validator
 
 from telegram_me.schemas.post import ParsedAndRaw, Post
 
@@ -105,5 +105,24 @@ class Preview(BaseModel):
     channel: PreviewChannel | None = None
 
 
-class Previews(RootModel[dict[str, Preview]]):
-    """Previews keyed by the requested username; unknown channels are omitted."""
+type SkipReason = Literal["not_found", "upstream_failed"]
+"""Why a channel was skipped in a batch preview: it does not exist, or t.me failed."""
+
+
+class SkippedChannel(BaseModel):
+    """A channel of a batch preview that could not be resolved."""
+
+    channel: str
+    """The username as it first appeared in the request."""
+    normalized: str
+    """The canonical (lowercase) username the channel was looked up as."""
+    reason: SkipReason
+
+
+class Previews(BaseModel):
+    """Batch preview result: the previews found, and why the rest were skipped."""
+
+    previews: dict[str, Preview]
+    """Previews keyed by the username as it first appeared in the request."""
+    skipped: list[SkippedChannel]
+    """Channels without a preview, in first-appearance order, with the reason."""

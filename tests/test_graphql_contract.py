@@ -205,7 +205,7 @@ def test_previews_parity(client: TestClient, manifest: dict[str, Any]) -> None:
     rest = client.post("/v1/previews", json={"channels": channels}).json()
     result = gql.data(client, gql.PREVIEWS, {"channels": channels})["previews"]
     # Same entries in the same (first-requested) order; unknown channels omitted.
-    assert result == [{"username": name, **preview} for name, preview in rest.items()]
+    assert result == [{"username": name, **preview} for name, preview in rest["previews"].items()]
     assert [entry["username"] for entry in result] == PREVIEW_CHANNELS
 
 
