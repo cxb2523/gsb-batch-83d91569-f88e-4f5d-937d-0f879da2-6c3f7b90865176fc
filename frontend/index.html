@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ShopSmart AI — Trợ Lý Mua Sắm Thông Minh</title>
+    <meta name="description" content="AI Agent giúp so sánh giá, tìm deal, theo dõi giá sản phẩm từ nhiều nguồn.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="css/main.css">
+    <link rel="stylesheet" href="css/chat.css">
+    <link rel="stylesheet" href="css/dashboard.css">
+    <link rel="stylesheet" href="css/animations.css">
+    <link rel="stylesheet" href="css/search.css">
+    <link rel="stylesheet" href="css/auth.css">
+</head>
+<body>
+    <!-- ── Auth Overlay ────────────────────────────── -->
+    <div id="auth-overlay" class="auth-overlay" style="display:none">
+        <div class="auth-card">
+            <div class="auth-brand">
+                <div class="brand-icon"><i class="fas fa-robot"></i></div>
+                <h1>ShopSmart</h1>
+                <p>Trợ lý mua sắm thông minh</p>
+            </div>
+            <h2 id="auth-title">Đăng nhập</h2>
+            <form id="auth-form" class="auth-form" autocomplete="on">
+                <div class="auth-field" id="auth-name-group" style="display:none">
+                    <label for="auth-name">Tên hiển thị</label>
+                    <input type="text" id="auth-name" placeholder="Tên của bạn" maxlength="50">
+                </div>
+                <div class="auth-field">
+                    <label for="auth-email">Email</label>
+                    <input type="email" id="auth-email" placeholder="ban@email.com" autocomplete="email" required>
+                </div>
+                <div class="auth-field">
+                    <label for="auth-password">Mật khẩu</label>
+                    <input type="password" id="auth-password" placeholder="Tối thiểu 6 ký tự" autocomplete="current-password" required>
+                </div>
+                <div id="auth-error" class="auth-error" style="display:none"></div>
+                <button type="submit" id="auth-submit" class="auth-submit">Đăng nhập</button>
+            </form>
+            <p id="auth-toggle-text" class="auth-toggle-text">
+                Chưa có tài khoản? <a href="#" id="auth-toggle">Đăng ký</a>
+            </p>
+        </div>
+    </div>
+    <!-- ── Sidebar ─────────────────────────────────── -->
+    <nav id="sidebar" class="sidebar">
+        <div class="sidebar-brand">
+            <div class="brand-icon">
+                <i class="fas fa-robot"></i>
+            </div>
+            <div class="brand-text">
+                <h1>ShopSmart</h1>
+                <span>AI Agent</span>
+            </div>
+        </div>
+
+        <div class="sidebar-nav">
+            <button class="nav-item active" data-view="chat" id="nav-chat">
+                <i class="fas fa-comments"></i>
+                <span>Chat AI</span>
+            </button>
+            <button class="nav-item" data-view="search" id="nav-search">
+                <i class="fas fa-search"></i>
+                <span>Tìm Kiếm</span>
+            </button>
+            <button class="nav-item" data-view="dashboard" id="nav-dashboard">
+                <i class="fas fa-chart-line"></i>
+                <span>Dashboard</span>
+            </button>
+            <button class="nav-item" data-view="tracking" id="nav-tracking">
+                <i class="fas fa-bell"></i>
+                <span>Theo Dõi</span>
+                <span class="badge" id="tracking-badge" style="display:none">0</span>
+            </button>
+            <button class="nav-item" data-view="notifications" id="nav-notifications">
+                <i class="fas fa-bell"></i>
+                <span>Thông Báo</span>
+                <span class="badge" id="notif-badge" style="display:none">0</span>
+            </button>
+            <button class="nav-item" data-view="settings" id="nav-settings">
+                <i class="fas fa-cog"></i>
+                <span>Cài Đặt</span>
+            </button>
+        </div>
+
+        <div class="sidebar-footer">
+            <div class="user-box">
+                <div class="user-avatar"><i class="fas fa-user-circle"></i></div>
+                <span id="current-user-name" class="user-name">—</span>
+                <button class="btn-icon" id="btn-logout" title="Đăng xuất">
+                    <i class="fas fa-sign-out-alt"></i>
+                </button>
+            </div>
+            <div class="api-status" id="api-status">
+                <span class="status-dot"></span>
+                <span>Đang kiểm tra...</span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- ── Main Content ────────────────────────────── -->
+    <main id="main-content" class="main-content">
+
+        <!-- ══ Chat View ═══════════════════════════ -->
+        <section id="view-chat" class="view active">
+            <header class="view-header">
+                <div class="header-left">
+                    <button class="menu-toggle" id="menu-toggle">
+                        <i class="fas fa-bars"></i>
+                    </button>
+                    <h2><i class="fas fa-comments"></i> Chat với ShopSmart AI</h2>
+                </div>
+                <div class="header-actions">
+                    <button class="btn-icon" id="btn-clear-chat" title="Xóa lịch sử chat">
+                        <i class="fas fa-trash-alt"></i>
+                    </button>
+                </div>
+            </header>
+
+            <div id="chat-messages" class="chat-messages">
+                <div class="welcome-message">
+                    <div class="welcome-icon">
+                        <i class="fas fa-shopping-cart"></i>
+                    </div>
+                    <h3>Xin chào! Tôi là ShopSmart AI 🛒</h3>
+                    <p>Tôi có thể giúp bạn tìm kiếm sản phẩm, so sánh giá, và theo dõi deal tốt.</p>
+                    <div class="quick-actions">
+                        <button class="quick-btn" data-msg="Tìm iPhone 16 giá tốt nhất">
+                            <i class="fas fa-mobile-alt"></i> Tìm iPhone 16
+                        </button>
+                        <button class="quick-btn" data-msg="So sánh giá laptop gaming dưới 20 triệu">
+                            <i class="fas fa-laptop"></i> Laptop gaming
+                        </button>
+                        <button class="quick-btn" data-msg="Tìm tai nghe bluetooth giá rẻ chất lượng">
+                            <i class="fas fa-headphones"></i> Tai nghe BT
+                        </button>
+                        <button class="quick-btn" data-msg="Xem sản phẩm đang theo dõi">
+                            <i class="fas fa-list"></i> Đang theo dõi
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="chat-input-area">
+                <div class="input-wrapper">
+                    <textarea id="chat-input" placeholder="Hỏi ShopSmart AI... (vd: Tìm giá iPhone 16 Pro Max)" rows="1"></textarea>
+                    <button id="btn-send" class="btn-send" disabled>
+                        <i class="fas fa-paper-plane"></i>
+                    </button>
+                </div>
+                <div class="input-hint">
+                    <span>Nhấn <kbd>Enter</kbd> để gửi · <kbd>Shift+Enter</kbd> để xuống dòng</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══ Search View (NO AI needed) ══════════ -->
+        <section id="view-search" class="view">
+            <header class="view-header">
+                <div class="header-left">
+                    <button class="menu-toggle" id="menu-toggle-search">
+                        <i class="fas fa-bars"></i>
+                    </button>
+                    <h2><i class="fas fa-search"></i> Tìm Kiếm Sản Phẩm</h2>
+                </div>
+            </header>
+
+            <div class="search-content">
+                <div class="search-bar">
+                    <div class="search-input-wrapper">
+                        <i class="fas fa-search search-icon"></i>
+                        <input type="text" id="search-input" placeholder="Nhập tên sản phẩm... (vd: iPhone 16, tai nghe bluetooth, laptop gaming)">
+                        <button id="btn-search" class="btn-search">Tìm kiếm</button>
+                        <button id="btn-compare" class="btn-compare" title="So sánh giá nhiều sàn"><i class="fas fa-balance-scale"></i> So sánh</button>
+                    </div>
+                    <div class="search-tags">
+                        <button class="search-tag" data-q="iPhone 16 Pro Max">iPhone 16 Pro Max</button>
+                        <button class="search-tag" data-q="tai nghe bluetooth">Tai nghe BT</button>
+                        <button class="search-tag" data-q="laptop gaming">Laptop Gaming</button>
+                        <button class="search-tag" data-q="samsung galaxy s25">Galaxy S25</button>
+                        <button class="search-tag" data-q="máy hút bụi robot">Robot hút bụi</button>
+                    </div>
+                </div>
+                <div id="search-status" class="search-status" style="display:none"></div>
+                <div id="search-results" class="search-results">
+                    <div class="empty-state">
+                        <i class="fas fa-search"></i>
+                        <h3>Tìm kiếm trực tiếp</h3>
+                        <p>Không cần API key! Tìm sản phẩm từ Shopee, Tiki, Lazada, CellphoneS, FPT Shop...</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══ Dashboard View ══════════════════════ -->
+        <section id="view-dashboard" class="view">
+            <header class="view-header">
+                <div class="header-left">
+                    <button class="menu-toggle" id="menu-toggle-dash">
+                        <i class="fas fa-bars"></i>
+                    </button>
+                    <h2><i class="fas fa-chart-line"></i> Dashboard</h2>
+                </div>
+            </header>
+
+            <div class="dashboard-content">
+                <div class="stats-row">
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background: linear-gradient(135deg, #6C63FF, #9B59B6)">
+                            <i class="fas fa-box"></i>
+                        </div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-total">0</span>
+                            <span class="stat-label">Sản phẩm theo dõi</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background: linear-gradient(135deg, #00D9FF, #0099CC)">
+                            <i class="fas fa-arrow-down"></i>
+                        </div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-deals">0</span>
+                            <span class="stat-label">Deal đã tìm</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background: linear-gradient(135deg, #FF6B6B, #EE5A24)">
+                            <i class="fas fa-bell"></i>
+                        </div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-alerts">0</span>
+                            <span class="stat-label">Thông báo</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background: linear-gradient(135deg, #2ECC71, #27AE60)">
+                            <i class="fas fa-comments"></i>
+                        </div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-chats">0</span>
+                            <span class="stat-label">Cuộc hội thoại</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="chart-section">
+                    <div class="chart-card">
+                        <h3><i class="fas fa-chart-area"></i> Lịch Sử Giá</h3>
+                        <div class="chart-placeholder" id="chart-placeholder">
+                            <i class="fas fa-chart-line"></i>
+                            <p>Thêm sản phẩm vào theo dõi để xem biểu đồ giá</p>
+                        </div>
+                        <div class="chart-container" id="chart-container" style="display:none">
+                            <select id="chart-product-select" class="chart-select">
+                                <option value="">-- Chọn sản phẩm --</option>
+                            </select>
+                            <div id="chart-stats" class="chart-stats"></div>
+                            <canvas id="price-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══ Tracking View ═══════════════════════ -->
+        <section id="view-tracking" class="view">
+            <header class="view-header">
+                <div class="header-left">
+                    <button class="menu-toggle" id="menu-toggle-track">
+                        <i class="fas fa-bars"></i>
+                    </button>
+                    <h2><i class="fas fa-crosshairs"></i> Sản Phẩm Theo Dõi</h2>
+                </div>
+                <div class="header-actions">
+                    <button class="btn-icon" id="btn-export-tracked" title="Xuất CSV">
+                        <i class="fas fa-file-csv"></i>
+                    </button>
+                    <button class="btn-icon" id="btn-refresh-prices" title="Làm mới giá tất cả sản phẩm">
+                        <i class="fas fa-sync-alt"></i>
+                    </button>
+                </div>
+            </header>
+
+            <div class="tracking-content">
+                <div class="tracking-toolbar">
+                    <div class="tracking-filter-wrap">
+                        <i class="fas fa-search"></i>
+                        <input type="text" id="tracking-filter" placeholder="Lọc theo tên hoặc nguồn...">
+                    </div>
+                    <select id="tracking-sort" class="tracking-sort">
+                        <option value="name">Sắp xếp: Tên (A→Z)</option>
+                        <option value="price_asc">Giá thấp → cao</option>
+                        <option value="price_desc">Giá cao → thấp</option>
+                        <option value="drop">Gần giá mục tiêu nhất</option>
+                    </select>
+                </div>
+                <div id="tracking-list" class="tracking-list">
+                    <div class="empty-state">
+                        <i class="fas fa-box-open"></i>
+                        <h3>Chưa có sản phẩm nào</h3>
+                        <p>Chat với AI để tìm và theo dõi giá sản phẩm!</p>
+                        <button class="btn-primary" onclick="switchView('chat')">
+                            <i class="fas fa-comments"></i> Bắt đầu chat
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══ Notifications View ══════════════════ -->
+        <section id="view-notifications" class="view">
+            <header class="view-header">
+                <div class="header-left">
+                    <button class="menu-toggle" id="menu-toggle-notif">
+                        <i class="fas fa-bars"></i>
+                    </button>
+                    <h2><i class="fas fa-bell"></i> Thông Báo</h2>
+                </div>
+                <div class="header-actions">
+                    <button class="btn-icon" id="btn-mark-read" title="Đánh dấu đã đọc tất cả">
+                        <i class="fas fa-check-double"></i>
+                    </button>
+                </div>
+            </header>
+
+            <div class="notifications-content">
+                <div id="notifications-list" class="notifications-list">
+                    <div class="empty-state">
+                        <i class="fas fa-bell-slash"></i>
+                        <h3>Chưa có thông báo</h3>
+                        <p>Bạn sẽ nhận thông báo khi giá sản phẩm thay đổi.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══ Settings View ═══════════════════════ -->
+        <section id="view-settings" class="view">
+            <header class="view-header">
+                <div class="header-left">
+                    <button class="menu-toggle" id="menu-toggle-settings">
+                        <i class="fas fa-bars"></i>
+                    </button>
+                    <h2><i class="fas fa-cog"></i> Cài Đặt</h2>
+                </div>
+            </header>
+
+            <div class="settings-content">
+                <!-- Account -->
+                <div class="settings-card">
+                    <h3><i class="fas fa-user"></i> Tài khoản</h3>
+                    <div class="settings-row">
+                        <span class="settings-label">Email</span>
+                        <span class="settings-value" id="settings-email">—</span>
+                    </div>
+                    <div class="settings-row">
+                        <span class="settings-label">Tên hiển thị</span>
+                        <span class="settings-value" id="settings-name">—</span>
+                    </div>
+                </div>
+
+                <!-- Notifications -->
+                <div class="settings-card">
+                    <h3><i class="fas fa-bell"></i> Thông báo giá</h3>
+                    <p class="settings-hint">Nhận cảnh báo khi giá sản phẩm theo dõi giảm hoặc chạm mục tiêu.</p>
+
+                    <div class="settings-row">
+                        <div class="settings-label-group">
+                            <span class="settings-label"><i class="fas fa-envelope"></i> Email</span>
+                            <span class="settings-sub" id="settings-email-status">Gửi tới email tài khoản của bạn</span>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="settings-notify-email">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+
+                    <div class="settings-field">
+                        <label for="settings-telegram"><i class="fab fa-telegram"></i> Telegram Chat ID</label>
+                        <span class="settings-sub">Để trống nếu không dùng. Lấy chat id bằng cách nhắn cho bot rồi mở <code>/getUpdates</code>.</span>
+                        <input type="text" id="settings-telegram" placeholder="vd: 123456789">
+                    </div>
+
+                    <div class="settings-channel-status" id="settings-channel-status"></div>
+
+                    <div id="settings-error" class="auth-error" style="display:none"></div>
+                    <div id="settings-success" class="settings-success" style="display:none"></div>
+                    <button id="btn-save-settings" class="auth-submit">Lưu cài đặt</button>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script src="js/api.js"></script>
+    <script src="js/auth.js"></script>
+    <script src="js/chat.js"></script>
+    <script src="js/dashboard.js"></script>
+    <script src="js/notifications.js"></script>
+    <script src="js/search.js"></script>
+    <script src="js/settings.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

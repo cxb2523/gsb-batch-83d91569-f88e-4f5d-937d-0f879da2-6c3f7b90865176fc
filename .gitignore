@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Database
+*.db
+*.sqlite3
+
+# Environment
+.env
+*.env
+.venv/
+venv/
+env/
+
+# Auth — locally generated JWT signing secret (never commit)
+.jwt_secret
+
+# Pytest
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
