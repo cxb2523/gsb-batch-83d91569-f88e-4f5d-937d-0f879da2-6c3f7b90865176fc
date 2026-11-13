@@ -492,6 +492,70 @@ body {
 .repos-table .t-name a:hover { color: var(--blue); text-decoration: underline }
 .repos-table .t-actions { display: flex; flex-wrap: wrap; gap: 4px }
 
+/* ---- Inventory Panel (per-account collection status) ---- */
+.inventory-panel {
+  background: var(--bg1); border: 1px solid var(--border);
+  border-radius: var(--r); margin-bottom: 20px; overflow: hidden;
+}
+.inventory-panel-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.inventory-panel-title {
+  font-size: 12px; font-weight: 700; color: var(--t1);
+  display: flex; align-items: center; gap: 8px;
+}
+.inventory-panel-title .inv-sum { font-size: 11px; font-weight: 400; color: var(--t3) }
+.inventory-panel-actions { display: flex; gap: 6px; align-items: center }
+.inventory-table { width: 100%; border-collapse: collapse; font-size: 12px }
+.inventory-table th, .inventory-table td {
+  padding: 8px 12px; text-align: left;
+  border-bottom: 1px solid var(--border); vertical-align: middle;
+}
+.inventory-table th {
+  background: var(--bg2); color: var(--t3); font-weight: 700;
+  font-size: 10px; text-transform: uppercase; letter-spacing: .6px; white-space: nowrap;
+}
+.inventory-table tbody tr:last-child td { border-bottom: none }
+.inventory-table tbody tr:hover { background: rgba(59,130,246,0.03) }
+.inv-status {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 9px; border-radius: 10px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+  border: 1px solid;
+}
+.inv-status.st-success { color: var(--green); border-color: rgba(34,197,94,0.25); background: rgba(34,197,94,0.07) }
+.inv-status.st-partial { color: var(--yellow); border-color: rgba(234,179,8,0.25); background: rgba(234,179,8,0.07) }
+.inv-status.st-failed { color: var(--red); border-color: rgba(239,68,68,0.25); background: rgba(239,68,68,0.07) }
+.inv-status.st-rate_limited { color: var(--orange); border-color: rgba(249,115,22,0.25); background: rgba(249,115,22,0.07) }
+.inv-status.st-skipped { color: var(--t2); border-color: var(--border-active); background: rgba(255,255,255,0.03) }
+.inv-account { font-weight: 600; color: var(--t1) }
+.inv-account small { display: block; font-weight: 400; font-size: 10px; color: var(--t3) }
+.inv-count { font-variant-numeric: tabular-nums; color: var(--t1); font-weight: 700 }
+.inv-count small { font-weight: 400; color: var(--t3) }
+.inv-reason { color: var(--t2); font-size: 11px; max-width: 320px }
+.inv-reason .inv-code {
+  font-family: var(--mono); font-size: 10px; color: var(--t3);
+  display: block; margin-top: 1px;
+}
+.inv-resume { color: var(--t3); font-size: 11px; font-family: var(--mono) }
+.inv-row-actions { text-align: right; white-space: nowrap }
+.inv-retry-btn {
+  padding: 3px 10px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--border-active); background: transparent;
+  color: var(--t1); font-size: 11px; font-family: var(--font);
+  transition: var(--tr);
+}
+.inv-retry-btn:hover { border-color: rgba(59,130,246,0.5); color: var(--blue) }
+.inv-retry-btn:disabled { opacity: .45; cursor: default }
+.inv-retry-btn.resume { border-color: rgba(249,115,22,0.4); color: var(--orange) }
+.inventory-panel-foot {
+  padding: 7px 14px; font-size: 10px; color: var(--t3);
+  border-top: 1px solid var(--border); background: rgba(255,255,255,0.01);
+  display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+}
+
 /* ---- Focus View ---- */
 .focus-view { max-width: 900px; padding: 0 0 24px }
 .focus-header {
@@ -1408,6 +1472,7 @@ body {
     </div>
   </aside>
   <div class="main-scroll">
+    <div class="main" id="inventoryPanel" style="padding-bottom:0"></div>
     <div class="main" id="mainContent"><div class="empty"><div class="spinner" style="width:24px;height:24px;border-width:3px"></div><p style="margin-top:12px">Loading repos...</p></div></div>
   </div>
 </div>
@@ -1907,6 +1972,9 @@ function escAttr(str) {
 let allRepos = [];
 let allAccounts = {};
 let accountErrors = {};
+let inventoryData = null;      // last GET /api/repos/inventory payload
+let inventoryLoading = false;
+let inventoryRetrying = {};    // account -> true while its retry is in flight
 let filters = {account:'all',visibility:'all',status:'all',sort:'updated',branch:'all'};
 var primaryBranchName = localStorage.getItem('primaryBranchName') || 'main';
 var viewDensity = localStorage.getItem('gitdock_viewDensity') || 'comfortable';
@@ -2950,6 +3018,201 @@ function copyPublicKey() {
   } else {
     fallbackCopy(lastPublicKey);
   }
+}
+
+// --- INVENTORY VIEW (shared contract) ---------------------------------------
+// Pure view-model helpers for GET /api/repos/inventory. Kept dependency-free so
+// the automated test can extract this exact block from dashboard.html and check
+// that the rendered rows line up with the API response fields.
+function inventoryStatusLabel(status) {
+  if (status === 'success') return 'Success';
+  if (status === 'partial') return 'Partial';
+  if (status === 'failed') return 'Failed';
+  if (status === 'rate_limited') return 'Rate limited';
+  if (status === 'skipped') return 'Skipped';
+  return 'Unknown';
+}
+
+function inventoryReasonText(entry) {
+  if (!entry) return '';
+  if (entry.message) return String(entry.message);
+  var reason = entry.reason;
+  if (!reason) return entry.status === 'success' ? '' : 'No details provided.';
+  if (reason === 'invalid_account_name') return 'Account name failed security validation.';
+  if (reason === 'invalid_github_user') return 'GitHub username failed security validation.';
+  if (reason === 'not_configured') return 'Account is not configured.';
+  if (reason === 'auth_required') return 'No token connected for this account.';
+  if (reason === 'rate_limited') return 'GitHub rate limit reached.';
+  if (reason === 'http_error') return 'GitHub returned an error response.';
+  if (reason === 'network_error') return 'Could not reach GitHub.';
+  if (reason === 'internal_error') return 'Collection failed unexpectedly.';
+  return String(reason);
+}
+
+function inventoryResumeText(entry) {
+  if (!entry) return '';
+  var parts = [];
+  if (entry.retryAfter) {
+    var when = new Date(entry.retryAfter);
+    var stamp = isNaN(when.getTime()) ? String(entry.retryAfter) : when.toLocaleTimeString();
+    var secs = (typeof entry.retryAfterSeconds === 'number') ? entry.retryAfterSeconds : null;
+    parts.push('Retry after ' + stamp + (secs !== null ? ' (~' + secs + 's)' : ''));
+  }
+  if (entry.resume && typeof entry.resume.page === 'number') {
+    parts.push('Resume at page ' + entry.resume.page);
+  }
+  if (!parts.length) return entry.complete ? 'Complete' : '';
+  return parts.join(' · ');
+}
+
+function buildInventoryRow(entry) {
+  entry = entry || {};
+  var repoCount = typeof entry.repoCount === 'number' ? entry.repoCount : (entry.repos ? entry.repos.length : 0);
+  var status = entry.status || 'failed';
+  return {
+    account: String(entry.account || ''),
+    label: String(entry.label || entry.account || ''),
+    githubUser: entry.githubUser ? String(entry.githubUser) : '',
+    status: status,
+    statusLabel: inventoryStatusLabel(status),
+    statusClass: 'st-' + status,
+    ok: !!entry.ok,
+    repoCount: repoCount,
+    repoCountText: repoCount + (repoCount === 1 ? ' repo' : ' repos'),
+    pages: (typeof entry.pagesTotal === 'number' ? entry.pagesTotal : entry.pagesFetched) || 0,
+    reason: entry.reason || null,
+    reasonText: inventoryReasonText(entry),
+    resumeText: inventoryResumeText(entry),
+    retryAfter: entry.retryAfter || null,
+    canRetry: !!entry.canRetry,
+    retryLabel: (entry.status === 'rate_limited' || entry.status === 'partial') ? 'Resume' : 'Retry',
+    complete: !!entry.complete,
+    truncated: !!entry.truncated,
+  };
+}
+
+function renderInventoryRow(row, escape) {
+  var esc = escape || function (s) { return String(s == null ? '' : s); };
+  var sub = row.githubUser ? '<small>@' + esc(row.githubUser) + '</small>' : '';
+  var action = row.canRetry
+    ? '<button class="inv-retry-btn' + (row.status === 'rate_limited' ? ' resume' : '') + '"' +
+      ' data-inv-account="' + esc(row.account) + '"' +
+      ' onclick="retryInventoryAccount(this.getAttribute(\'data-inv-account\'))"' +
+      ' title="Retry only this account">' + esc(row.retryLabel) + '</button>'
+    : '';
+  return '<tr data-inv-row="' + esc(row.account) + '">' +
+    '<td class="inv-account">' + esc(row.label) + sub + '</td>' +
+    '<td><span class="inv-status ' + esc(row.statusClass) + '">' + esc(row.statusLabel) + '</span></td>' +
+    '<td class="inv-count">' + esc(String(row.repoCount)) + ' <small>(' + esc(String(row.pages)) + 'p)</small></td>' +
+    '<td class="inv-reason">' + esc(row.reasonText) +
+      (row.reason ? '<span class="inv-code">' + esc(row.reason) + '</span>' : '') + '</td>' +
+    '<td class="inv-resume">' + esc(row.resumeText) + '</td>' +
+    '<td class="inv-row-actions">' + action + '</td>' +
+  '</tr>';
+}
+// --- END INVENTORY VIEW ------------------------------------------------------
+
+function renderInventory() {
+  var el = document.getElementById('inventoryPanel');
+  if (!el) return;
+  if (!inventoryData) {
+    el.innerHTML = inventoryLoading
+      ? '<div class="inventory-panel"><div class="inventory-panel-head"><div class="inventory-panel-title">Repository collection' +
+        '<span class="inv-sum">Collecting per-account repo lists…</span></div></div></div>'
+      : '';
+    return;
+  }
+  var accounts = inventoryData.accounts || [];
+  if (accounts.length === 0) {
+    el.innerHTML = '';
+    return;
+  }
+  var sum = inventoryData.summary || {};
+  var sumParts = [];
+  sumParts.push(accounts.length + (accounts.length === 1 ? ' account' : ' accounts'));
+  if (sum.success) sumParts.push(sum.success + ' ok');
+  if (sum.partial) sumParts.push(sum.partial + ' partial');
+  if (sum.failed) sumParts.push(sum.failed + ' failed');
+  if (sum.rate_limited) sumParts.push(sum.rate_limited + ' limited');
+  if (sum.skipped) sumParts.push(sum.skipped + ' skipped');
+  var rows = accounts.map(function (entry) { return renderInventoryRow(buildInventoryRow(entry), escAttr); });
+  var h = '<div class="inventory-panel">' +
+    '<div class="inventory-panel-head">' +
+      '<div class="inventory-panel-title">Repository collection' +
+        '<span class="inv-sum">' + esc(sumParts.join(' · ')) + '</span>' +
+      '</div>' +
+      '<div class="inventory-panel-actions">' +
+        '<button class="btn btn-sm" onclick="loadInventory()"' + (inventoryLoading ? ' disabled' : '') + '>' +
+          (inventoryLoading ? 'Collecting…' : 'Refresh collection') + '</button>' +
+      '</div>' +
+    '</div>' +
+    '<table class="inventory-table"><thead><tr>' +
+      '<th>Account</th><th>Outcome</th><th>Repos</th><th>Failure reason</th><th>Next step</th><th></th>' +
+    '</tr></thead><tbody>' + rows.join('') + '</tbody></table>' +
+    '<div class="inventory-panel-foot">' +
+      '<span>' + esc((sum.totalRepos || 0) + ' repos collected') + '</span>' +
+      '<span>' + (inventoryData.generatedAt ? 'Collected ' + esc(new Date(inventoryData.generatedAt).toLocaleTimeString()) : '') + '</span>' +
+    '</div>' +
+  '</div>';
+  el.innerHTML = h;
+}
+
+async function loadInventory(reset) {
+  inventoryLoading = true;
+  renderInventory();
+  try {
+    var data = await apiGet('/repos/inventory' + (reset ? '?reset=1' : ''));
+    if (data && data.ok) {
+      inventoryData = data;
+    } else {
+      toast('Collection failed: ' + ((data && data.error) || 'unknown error'), 'error');
+    }
+  } catch (e) {
+    toast('Collection request failed', 'error');
+  }
+  inventoryLoading = false;
+  renderInventory();
+}
+
+async function retryInventoryAccount(account) {
+  if (!account) return;
+  inventoryRetrying[account] = true;
+  try {
+    var data = await apiPost('/repos/inventory/retry', { account: account });
+    if (data && data.ok && data.account) {
+      var entry = data.account;
+      if (!inventoryData) inventoryData = { accounts: [], summary: {}, generatedAt: data.generatedAt };
+      var replaced = false;
+      var list = (inventoryData.accounts || []).map(function (a) {
+        if (a.account === entry.account) { replaced = true; return entry; }
+        return a;
+      });
+      if (!replaced) list.push(entry);
+      inventoryData.accounts = list;
+      inventoryData.summary = summarizeInventory(list);
+      inventoryData.generatedAt = data.generatedAt || inventoryData.generatedAt;
+      renderInventory();
+      if (entry.status === 'success') toast(entry.label + ': collection complete', 'success');
+      else if (entry.status === 'partial') toast(entry.label + ': partially collected', 'info');
+      else toast(entry.label + ': ' + entry.status, 'error');
+    } else {
+      toast('Retry failed: ' + ((data && data.error) || 'unknown error'), 'error');
+    }
+  } catch (e) {
+    toast('Retry request failed', 'error');
+  }
+  delete inventoryRetrying[account];
+  renderInventory();
+}
+
+function summarizeInventory(accounts) {
+  var sum = { accounts: accounts.length, success: 0, partial: 0, failed: 0, rate_limited: 0, skipped: 0, totalRepos: 0, truncated: 0 };
+  accounts.forEach(function (a) {
+    if (Object.prototype.hasOwnProperty.call(sum, a.status)) sum[a.status] += 1;
+    sum.totalRepos += a.repoCount || 0;
+    if (a.truncated) sum.truncated += 1;
+  });
+  return sum;
 }
 
 // --- Load Repos ---
@@ -4348,6 +4611,7 @@ document.getElementById('cloneUrlFolderName').addEventListener('keydown', functi
 // --- Init ---
 connectSSE();
 refreshRepos();
+loadInventory();
 </script>
 </body>
 </html>

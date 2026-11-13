@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Repository inventory API (`GET /api/repos/inventory`, `POST /api/repos/inventory/retry`) plus the dashboard collection panel. It pages through GitHub's repo listing per configured account, keeps pagination state so retries resume instead of re-reading fetched pages, reports success / partial / failed / rate-limited / skipped per account without letting one account abort the run, and surfaces the reset time for rate-limited accounts. Account and repo names are validated with `lib/security.js`; invalid values are skipped with a recorded reason.
 - Automated test suite (`npm test`) using Node.js built-in test runner and supertest.
 - Shared libraries under `lib/` for security validation, git status parsing, and dormant repo logic.
 - GitHub Actions workflow to run tests on push and pull requests to `main`.

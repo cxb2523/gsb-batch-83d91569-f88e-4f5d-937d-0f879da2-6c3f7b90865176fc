@@ -42,6 +42,7 @@ const APP_DIR = isPkg || isStandalone ? path.dirname(process.execPath) : __dirna
 const workspaceModule = require("./workspace");
 const security = require("./lib/security");
 const gitParse = require("./lib/git-parse");
+const repoInventory = require("./lib/repo-inventory");
 const {
   sanitizeAccountName,
   sanitizeRepoName,
@@ -716,6 +717,75 @@ async function githubListAllPages({ initialUrl, token, maxPages = 50 }) {
   }
   return { ok: true, status: 200, items: all };
 }
+
+// =============================================================================
+// Repository inventory (dashboard-wide collection across accounts)
+// =============================================================================
+// The collector pages through GET /user/repos per account, keeps pagination
+// state between calls, and isolates per-account failures. Tests replace the
+// transport with local fake GitHub responses.
+let inventoryTransportOverride = null;
+let inventoryTokenOverride = null;
+
+function inventoryFetchPage({ url, token }) {
+  if (inventoryTransportOverride) return inventoryTransportOverride({ url, token });
+  return githubRequestJson({ url, token, timeoutMs: 20000 });
+}
+
+async function inventoryResolveToken(accountName) {
+  if (inventoryTokenOverride) return inventoryTokenOverride(accountName);
+  return getAccountToken(accountName);
+}
+
+const repoInventoryCollector = repoInventory.createInventoryCollector({
+  getAccounts,
+  getToken: inventoryResolveToken,
+  fetchPage: inventoryFetchPage,
+  maxPages: repoInventory.DEFAULT_MAX_PAGES,
+  perPage: repoInventory.DEFAULT_PER_PAGE,
+});
+
+app.get("/api/repos/inventory", async (req, res) => {
+  if (!checkRateLimit("repos-inventory", 30, 60000)) {
+    return res.status(429).json({ ok: false, error: "Too many inventory requests; retry shortly." });
+  }
+  try {
+    const rawAccounts = req.query.accounts;
+    const accounts = Array.isArray(rawAccounts)
+      ? rawAccounts.flatMap((v) => String(v).split(",")).map((s) => s.trim()).filter(Boolean)
+      : typeof rawAccounts === "string" && rawAccounts.trim()
+        ? rawAccounts.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
+    const result = await repoInventoryCollector.collect({
+      accounts,
+      reset: String(req.query.reset || "") === "1",
+    });
+    return res.json({ ok: true, ...result });
+  } catch (e) {
+    // collect() isolates account failures; this is a defensive last resort.
+    return res.status(500).json({ ok: false, error: "Inventory collection failed" });
+  }
+});
+
+// Retry a single account only. Resumes from the stored page unless reset=1.
+app.post("/api/repos/inventory/retry", async (req, res) => {
+  if (!checkRateLimit("repos-inventory-retry", 30, 60000)) {
+    return res.status(429).json({ ok: false, error: "Too many retry requests; retry shortly." });
+  }
+  const body = req.body || {};
+  const account = typeof body.account === "string" ? body.account.trim() : "";
+  if (!account) return res.status(400).json({ ok: false, error: "account is required" });
+  try {
+    const result = await repoInventoryCollector.collect({
+      accounts: [account],
+      reset: body.reset === true || body.reset === "1",
+    });
+    const entry = result.accounts[0];
+    return res.json({ ok: true, account: entry, entry, generatedAt: result.generatedAt });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "Inventory retry failed" });
+  }
+});
 
 // Helper: fetch a GitHub API endpoint using token (preferred) or gh CLI (fallback).
 // Returns { ok, json, raw } — always resolves, never throws.
@@ -3358,6 +3428,21 @@ module.exports = {
   startServer,
   security,
   gitParse,
+  repoInventory,
+  repoInventoryCollector,
+  setInventoryTransport(fn) {
+    const previous = inventoryTransportOverride;
+    inventoryTransportOverride = typeof fn === "function" ? fn : null;
+    return previous;
+  },
+  setInventoryTokenResolver(fn) {
+    const previous = inventoryTokenOverride;
+    inventoryTokenOverride = typeof fn === "function" ? fn : null;
+    return previous;
+  },
+  resetInventoryState() {
+    repoInventoryCollector.resetState();
+  },
   loadConfig,
   saveConfig,
   getAccounts,
