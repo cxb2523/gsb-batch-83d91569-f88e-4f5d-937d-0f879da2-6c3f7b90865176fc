@@ -1,0 +1,464 @@
+# YouTube Scraper — Comments, Video Metadata and Search in Python
+
+[![release](https://img.shields.io/github/v/release/2scraper/youtube-scraper?sort=semver)](https://github.com/2scraper/youtube-scraper/releases)
+[![tests](https://github.com/2scraper/youtube-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/youtube-scraper/actions/workflows/tests.yml)
+[![canary](https://github.com/2scraper/youtube-scraper/actions/workflows/canary.yml/badge.svg)](https://github.com/2scraper/youtube-scraper/actions/workflows/canary.yml)
+[![Python](https://img.shields.io/badge/python-3.9%20%7C%203.13-blue)](pyproject.toml)
+[![licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+[![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20Puppeteer-informational)](#engines)
+[![runs without an account](https://img.shields.io/badge/runs%20without-an%20account-success)](#do-you-need-any-of-this)
+
+**YouTube scraper** — an open-source (MIT) Python tool that reads YouTube comment threads and replies, video metadata and video search from the endpoint YouTube's own front end calls, and writes them to JSON or CSV over plain HTTPS, with no browser. Measured on 2026-09-21 from a bare datacentre address with no API key, no proxy and no account: 60 consecutive pages, 1,200 comments, zero refusals. Use it to build comment and sentiment datasets, or to compare two runs of the same video.
+
+YouTube comment threads and replies, video metadata, and video search —
+read from the endpoint YouTube's own front end calls.
+
+```bash
+git clone https://github.com/2scraper/youtube-scraper.git
+cd youtube-scraper
+python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+./.venv/bin/python youtube_scraper.py --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" --pages 3
+```
+
+**No browser is installed above, and none is started.** The endpoint this
+reads answers plain HTTPS, so `--transport auto` — the default — never
+opens one unless the site refuses.
+
+Those four lines are now tested as written. Until v0.3.0 the fourth one
+named `playwright_scraper.py`, which imports Playwright at module level,
+so the quick start died with `ModuleNotFoundError` on a clean install —
+a paragraph promising no browser was needed sat directly beneath a
+command that needed one. `youtube_scraper.py` is the CLI that carries
+that promise; the three engine scripts are still there and still take
+the same flags, but each one needs its own library.
+
+Install an engine when you want the fallback to have something to fall
+back to, or when you want to drive a browser deliberately:
+
+```bash
+./.venv/bin/pip install -r requirements-playwright.txt
+./.venv/bin/playwright install chromium
+```
+
+```
+Page 1: 20 comments (20 total so far)
+Page 2: 20 comments (40 total so far)
+Page 3: 20 comments (60 total so far)
+Collected 60 of the video's 2,457,616 comments (0.0024%). A run that fetched
+every page it asked for is COMPLETE; it is not exhaustive.
+[+] Saved 60 rows -> youtube_comments.json
+```
+
+---
+
+## Do you need any of this?
+
+Probably not, and saying so is more useful than a pitch.
+
+**Measured 2026-09-21** from a bare datacentre address in Finland, with no
+API key, no proxy, no cookies and no account: **60 consecutive pages,
+1,200 comments, zero refusals, about 0.25 s per page.** YouTube publishes
+its comments through `POST /youtubei/v1/next`, and that endpoint is not
+gated. The 1.4 MB watch page is needed for nothing.
+
+So this repo's paid integrations — captcha solving, proxies, fingerprints,
+the Scraping Browser API — are **readiness rather than routine here**. What
+they buy, if you need it: volume from many addresses, a specific exit
+country, and somewhere to run a browser that is not your machine.
+
+**And before you use this at all, consider the official API.** The YouTube
+Data API's `commentThreads.list` costs 1 quota unit per call and returns up
+to 100 comments; the default allocation is 10,000 units a day, so roughly a
+million comments daily, free, with a Google account. It also gives two
+things this scraper **cannot** give you, because YouTube does not publish
+them to the web client at all — see the next section.
+
+Use this scraper when you want no account and no quota ceiling, when you
+want to control which of the site's two orderings you sample, or when you
+want the fields the official API does not expose (pinned, creator-hearted,
+verified, the sort a row came from).
+
+---
+
+## What this cannot tell you
+
+Two limits, both properties of the site rather than of this code, both
+measured over 70 comments in four captures under three different InnerTube
+clients:
+
+| | comment row | video row |
+|---|---|---|
+| like count | **approximate** — the site publishes `"318K"` and nothing better, under any client | **exact** — `19,384,917`, read from the like button's own accessibility label |
+| timestamp | **relative only** — `"1 year ago"`. There is no ISO date in the payload | **exact** — `2009-10-24T23:57:33-07:00` |
+
+So a `Comment` row carries `like_count` **and** `like_count_text`, and
+`published_at_approx` **and** `published_time_text` **and**
+`published_at_precision`. The number is a magnitude; the text is what the
+site actually said; the precision says how much the derived date is worth.
+A row precise only to the year cannot answer "was this posted after March",
+and the column says so rather than letting you find out from a chart.
+
+`published_at_approx` is the **latest** instant the comment could have been
+written, because YouTube floors: `"1 year ago"` is an age in [1, 2) years.
+
+If you need exact like counts or real timestamps, use the official API.
+That sentence is in this README because the alternative is you discovering
+it from a dashboard.
+
+---
+
+## Transports
+
+```bash
+--transport auto      # default: plain HTTPS, a browser only if refused
+--transport http      # never start a browser; report a refusal instead
+--transport browser   # always drive one (what this repo did before v0.2.0)
+```
+
+Measured end to end on 2026-09-22, two pages of comments, median of three
+runs on one machine — identical rows either way:
+
+| | wall clock |
+|---|---|
+| `--transport http` | **2.0 s** |
+| `--transport auto` | **2.0 s** |
+| `--transport browser` | 3.4 s |
+
+The fetch alone is 0.9 s against 3.1 s; the table shows the figure you
+actually feel, which is a smaller ratio because process start, parsing and
+writing cost the same on either path.
+
+`auto` starts a browser the first time a response classifies as a
+challenge, and then stays on it for the rest of the run — a site that
+refused once will refuse again, and flapping would pay the start-up cost
+on every page. An HTTP client has nowhere to put a solved captcha token,
+so `--transport http` reports a refusal rather than trying to clear it.
+
+`--cdp-endpoint` implies `browser`. `--fingerprint` is ignored on the HTTP
+transport and says so: an HTTP client cannot carry User-Agent Client
+Hints, so it could only wear half an identity, which is measurably worse
+than none.
+
+## Modes
+
+```bash
+# comments (default) — a video's threads, newest first, with replies
+python3 youtube_scraper.py --url dQw4w9WgXcQ --pages 5 --sort newest --replies
+
+# video — one video's metadata, including the exact upload date
+python3 youtube_scraper.py --url dQw4w9WgXcQ --mode video
+
+# search — a query to videos, to feed --mode comments
+python3 youtube_scraper.py --url "web scraping tutorial" --mode search --pages 3
+```
+
+**A page is a continuation, not a screen.** In `--mode comments` one page
+is 20 top-level comments; a reply page is 10. `--pages 3` is 60 comments.
+
+**`--replies` costs a request per thread that has any** — about 20 more
+requests per page of comments. A one-page run with `--replies` returned 192
+rows from 20 threads on 2026-09-21.
+
+**The two orderings are two different samples**, not the same rows
+reordered. `top` is YouTube's relevance ranking (and is what the site
+selects); `newest` is chronological. Which one a row came from is the
+`sort` column, and `diff_runs.py` refuses to compare runs that disagree on
+it.
+
+**`--mode video` makes two calls per video** — `next` for the rendered
+figures and `player` for the exact upload date, duration, category and
+keywords. It is the only mode where `--concurrency` above 1 does anything:
+a video has its own address, while a comment page is addressed by a token
+the *previous* page handed out, so a comments run is strictly sequential
+and says so rather than silently ignoring the flag.
+
+---
+
+## Output
+
+One row per comment, in the order the site sent them. The first five
+columns — `source`, `scraped_at`, `url`, `sku`, `title` — are identical
+across every scraper in this family; `sku` is the comment id and `title` is
+the **video's** title, repeated so a CSV of ten thousand comments reads
+without a join.
+
+```json
+{
+  "source": "youtube.com",
+  "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&lc=Ugz…",
+  "sku": "Ugz…",
+  "title": "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)",
+  "text": "…",
+  "author_name": "@someone",
+  "author_is_verified": true,
+  "like_count": 318000,
+  "like_count_text": "318K",
+  "reply_count": 962,
+  "published_time_text": "1 year ago",
+  "published_at_approx": "2025-09-21T02:10:14Z",
+  "published_at_precision": "year",
+  "edited": false,
+  "reply_level": 0,
+  "parent_id": null,
+  "is_pinned": true,
+  "pinned_by": "Pinned by @RickAstleyYT",
+  "creator_hearted": true,
+  "sort": "top",
+  "data_source": "innertube.entity"
+}
+```
+
+`sample_output.json` and `sample_output.csv` are cut from a real run. **The
+commenters in them are placeholders** — names, channel ids, avatars and the
+comment text are rewritten, because a comment is a person's own words and
+republishing them is a separate act from YouTube showing them on its own
+page. Everything the site generates is untouched: the counts, the
+timestamps, the flags, the video.
+
+**In the CSV only, a cell that starts with `=`, `+`, `-`, `@`, a tab or a
+line break gets a leading `'`**, so a spreadsheet reads it as text rather
+than running it as a formula. That includes every `author_name`, which on
+YouTube is an `@handle`. Numbers and the JSON output are untouched, and the
+sidecar records how many cells were changed as `csv_cells_escaped`.
+
+**A reply's id contains its parent's**, separated by a dot, so threading
+needs no bookkeeping: `parent_id` is derived from `sku`.
+
+**Exit codes**: `0` ok · `1` crash · `2` bad usage · `3` blocked · `4` no
+comments · `5` the content was never obtained · `6` partial.
+
+**A served page that parses to nothing is a parser failure, not "no
+comments".** It is recorded as `stop_reason: parse_error` with the page in
+`pages_failed`: exit `5` on the first page, exit `6` after rows were
+gathered. A video row that comes out of a served watch page without its
+`video_id`, `title` or `view_count` is the same failure: the row is
+written, the run is `partial` with `stop_reason: parse_error`, exit `6`,
+and the sidecar names the field (`videos_unparsed` on the browser and HTTP
+engines, `fields_unparsed` on the Scraper API path).
+
+**A run is `complete` only if nothing failed.** That includes reply threads
+and the `/player` call: if `--replies` asked for twenty threads and three
+did not come back, or if the second call a `--mode video` run makes never
+answered, the run is `partial` and exits `6` — even though every top-level
+page arrived. The sidecar names what was lost (`reply_failures` with the
+parent comment id, `videos_incomplete` with the columns) rather than
+leaving a reader to infer it from a null. Every run writes
+`<out>.meta.json` beside its output; a failed run writes none, so a
+`"failed"` sidecar can never sit next to good data.
+
+**A run that finds nothing writes nothing** — last night's good output is
+never replaced with `[]`. Pass `--allow-empty` when an empty result is the
+answer you want.
+
+---
+
+## Traps that look like bugs
+
+* **"Comments are turned off" is exit 4, not exit 3.** It is a complete
+  answer to the question you asked, so no proxy will help. Same for a video
+  that has been deleted or made private. Both answer HTTP 200 with a large,
+  healthy-looking payload.
+* **`total_comments` in the sidecar can be approximate.** The exact figure
+  is in the comment section's own header, which the site sends only on the
+  first page of its DEFAULT ordering. A `--sort newest` run falls back to
+  the watch page's abbreviated panel total (`"2.4M"` → 2400000) and says so
+  by the roundness of the number.
+* **A long run can see the same comment twice.** `--sort top` is a live
+  ranking, and a comment that gains likes between page 3 and page 30 can be
+  served again. The run logs the drop rather than absorbing it silently.
+  This is also why a long run is a sample, not a snapshot.
+* **`--locale` other than `en` empties two columns on purpose.** A Russian
+  payload writes the timestamp and the abbreviated like count in Russian;
+  this parser returns `null` for both rather than reading `318` out of
+  "318 thousand". The comment TEXT is unaffected — it is user-written and
+  identical in every locale.
+* **Emoji are in the text, but the payload's run offsets are not Python
+  offsets.** They are UTF-16 code units. This matters only if you read
+  `attachmentRuns` yourself; `product_parser.utf16_span` is the correct
+  reader.
+
+---
+
+## Engines
+
+| | comments | video | search | notes |
+|---|---|---|---|---|
+| `youtube_scraper.py` | yes | yes | yes | **no browser library required** |
+| `playwright_scraper.py` | yes | yes | yes | primary browser engine |
+| `puppeteer_scraper.py` | yes | yes | yes | pyppeteer is effectively unmaintained |
+| `selenium_scraper.py` | yes | yes | yes | cannot use `--cdp-endpoint`, see below |
+| `scraper_api_client.py` | **no** | yes | no | measured, see below |
+
+The three browser engines are one file with three driver layers, and since
+v0.3.0 that is literal rather than aspirational: the run lives in
+`run_core.py` and each engine supplies four operations (`name`,
+`context`, `launch_local`, `connect_remote`). Before the split, 24 of the
+29 definitions they shared were byte-identical — 1,078 lines each, 2,156
+duplicated — and `scrape()` differed by one line, the engine's own name.
+They cannot drift on exit codes or run status because there is one copy. Verified live on 2026-09-21: the same video and ordering
+through all three gave **40 rows each, 40 ids in common, and zero
+disagreeing columns**.
+
+**Install exactly one engine, in its own virtualenv.** Playwright and
+pyppeteer pin incompatible `pyee` versions and pyppeteer and Selenium
+collide on `urllib3`; `pip install` will "resolve" that by quietly
+downgrading something you wanted.
+
+```bash
+python3 -m venv .venv-selenium
+./.venv-selenium/bin/pip install -r requirements.txt -r requirements-selenium.txt
+```
+
+**Selenium cannot use an authenticated remote CDP endpoint.** Playwright's
+`connect_over_cdp` and pyppeteer's `browserWSEndpoint` take a full
+`ws://user:pass@host:port` and authenticate on the WebSocket upgrade;
+chromedriver's `debuggerAddress` takes a bare `host:port` with nowhere to
+put a password. The engine refuses `--cdp-endpoint` with that reason
+instead of failing later. Selenium also cannot authenticate a `--proxy` at
+all: the credentials are stripped and a warning is printed.
+
+**The Scraping Browser (`--cdp-endpoint`) works, on the two engines that
+can reach it.** Measured 2026-09-21 against a live US profile: comments,
+video metadata and search all returned normally, and a page YouTube served
+came back at 2.1 MB against 1.36 MB locally. Two things about that path are
+worth knowing before you use it:
+
+- **A rejected WebSocket upgrade is usually the service, not you.** Three
+  raw upgrades to the same endpoint seconds apart: `HTTP 500` instantly on
+  the first, connected on the other two. The engines now retry the upgrade
+  (`--retries`), because un-retried that is a failed run about a third of
+  the time for a condition that clears by itself. `profile_locked` is the
+  exception and is not retried — another run holds that `pid`.
+- **The auto-solve extension injects captcha markers into every page it
+  loads**, including pages that were served perfectly normally. Counted on
+  one: `chrome-extension://` 16, `hunter.js` 4, `cf-turnstile` 1,
+  `data-ts-input` 1. This repo carries none of those as block markers, and
+  a fixture cut from that exact page is in the offline suite so it stays
+  that way — a scraper that trusted `cf-turnstile` would report every good
+  page over this path as blocked.
+
+**The Scraper API path cannot read comments on this site, and that is a
+fact about YouTube.** The service renders a page and returns its HTML;
+YouTube renders no comments into its HTML and fetches them over a POST the
+service does not make. Measured 2026-09-21 against `/watch?v=dQw4w9WgXcQ`:
+
+| request | result |
+|---|---|
+| no `waitFor` | HTTP 200, 1,354,420 bytes, **0 comments** |
+| `waitFor {"state":"networkidle"}` | HTTP 200, 1,386,808 bytes, **0 comments** |
+| `waitFor {"element":"ytd-comment-thread-renderer"}` | **HTTP 408** — it never appears |
+| `waitFor {"text":"Top comments"}` | **HTTP 408** |
+
+Those were sent as a JSON-encoded string, which the API accepted that day.
+Measured 2026-09-23, the API answers the string form with HTTP 422 ("must be
+an object") and the `networkidle` state with HTTP 422 too — both still
+billed — so the client now sends an object and `--wait-state` offers only
+`load` and `domcontentloaded`. The second row cannot be reproduced today;
+the first row already makes the same point.
+
+A deliberately wrong key answered HTTP 401 in 0.1 s against the real key's
+200 in 6.7 s, so those 200s are real work rather than a cached refusal.
+What the client does do is `--mode video`, at $0.0005 per task, which is
+what the watch document is genuinely good for.
+
+**What the Scraper API path fills (as of 2026-10-16).** It requests
+`/watch?v=<id>&hl=en&gl=US`, so the page is in English whatever country
+the service fetches from. Besides the rendered figures (title, channel,
+view and like counts, description), the watch document inlines the same
+player data the browser engines get from their `/player` call, and this
+path reads `published_at`, `duration_seconds`, `category`, `keywords`, the
+exact `view_count` and the exact `like_count` from it. That data is used
+only when it names the requested video id; a column it does not state
+stays null. If the document carries no player data for the video, those
+columns are null and the run is `partial` (exit `6`,
+`stop_reason: player_incomplete`, the reason in the sidecar's
+`player_incomplete`). Comments still need one of the other engines.
+
+---
+
+## Configuration
+
+Credentials go in `.env` beside the scripts, never on a command line — a
+secret in `argv` is readable by anything that can run `ps` and lands in
+shell history. Copy `.env.example`, and check what was picked up without
+printing any of it:
+
+```bash
+cp .env.example .env
+python3 env_config.py
+```
+
+Precedence, highest first: an explicit flag → an exported environment
+variable → `.env` → the default.
+
+`YOUTUBE_URL` is a default video for `--mode comments` and `--mode video`;
+`.env.example` ships it commented out. A `--mode search` query is only ever
+taken from `--url`.
+
+Output files are written atomically. A new file gets the mode your umask
+gives it (`0644` under the usual `022`); a file being replaced keeps its
+own mode.
+
+`TWOCAPTCHA_KEY` is one key for four separately billed 2Captcha products:
+captcha solving, the Scraping Browser API, proxies and fingerprints.
+
+---
+
+## Comparing two runs
+
+```bash
+python3 diff_runs.py --old yesterday.json --new today.json
+```
+
+It refuses to compare runs whose `mode`, `source` or `sort` differ, and
+refuses a pair that is not both `complete` — a partial run's un-fetched
+pages would otherwise read as comments that were deleted.
+
+---
+
+## Development
+
+```bash
+python3 smoke_test.py          # the offline suite; no engine library needed
+python3 smoke_test.py -v       # print every check as it passes
+pytest                          # the same checks, wrapped as one test
+python3 make_fixtures.py       # regenerate fixtures from your own captures
+```
+
+`make_fixtures.py` proves every trimmed fixture parses identically to its
+untrimmed original — every column of every row, matched by id — before
+writing anything, and refuses to write if any scrubbed value survived.
+
+See `CONTRIBUTING.md`, and `TROUBLESHOOTING.md` for what a given exit code
+means and what to do about it.
+
+---
+
+## Legal
+
+This tool reads publicly visible pages. Comments are written by real
+people: think about what you are collecting, keep it lawful where you are,
+and read YouTube's Terms of Service. Nothing here circumvents
+authentication, and the endpoint it uses is the one the site's own front
+end calls.
+
+MIT licensed. Not affiliated with, endorsed by, or connected to YouTube or
+Google.
+
+## Guides
+
+- [How to scrape YouTube: step-by-step guide](https://2captcha.com/h/how-to-scrape-youtube)
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [Meta Ad Library scraper](https://github.com/2scraper/facebook-ads-scraper) — Every ad of a keyword or advertiser search in Meta's Ad…
+- [Facebook scraper](https://github.com/2scraper/facebook-pages-scraper) — Public Facebook Pages — contacts, followers, owner…
+- [Instagram scraper](https://github.com/2scraper/instagram-scraper) — Public profiles, posts and Reels, read logged out
+- [Snapchat scraper](https://github.com/2scraper/snapchat-scraper) — Public Snapchat profiles, Spotlight engagement and story…
+- [TikTok Ad Library scraper](https://github.com/2scraper/tiktok-ads-scraper) — Ads from TikTok's EU Ad Library
+- [TikTok Profile scraper](https://github.com/2scraper/tiktok-profile-scraper) — Exact follower, like and video counts, bio, verification…
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)

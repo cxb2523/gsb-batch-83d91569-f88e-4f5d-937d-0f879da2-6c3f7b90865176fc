@@ -1,0 +1,399 @@
+# Real runs against youtube.com. tests.yml (deliberately) never touches the
+# site, a credential or a paid product; everything that does is here.
+#
+# WHY THIS CANARY IS NOT GATED ON A SECRET
+# ----------------------------------------
+# A canary that CAN pass without a credential should never be gated on one.
+# Its central README claim is that YouTube's
+# comment endpoint answers a bare datacentre address with no key, no proxy
+# and no account — measured 2026-09-21 as 60 consecutive pages and 1,200
+# comments with no refusal. A GitHub runner is a bare datacentre address.
+# So this job runs a real three-page scrape every Monday and is EXPECTED
+# to be green, and if YouTube ever puts that endpoint behind a key or a
+# challenge, the badge goes red on the next weekly run and the claim is retested
+# without anyone having to remember to.
+#
+# The paid path is the one that needs a secret: `scraper-api` needs
+# TWOCAPTCHA_KEY, and FAILS with an ::error:: naming it when it is absent.
+# A skipped step is not a tested path, and a green badge over it would say
+# the Scraper API path works when nothing checked it.
+name: canary
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The README's central claim, under test every Monday: this site needs
+  # no key, no proxy, no account AND NO BROWSER LIBRARY. Nothing here
+  # installs an engine, so if YouTube ever stops answering a plain HTTPS
+  # client this job goes red on the next weekly run and the claim is retested
+  # without anyone remembering to.
+  #
+  # It exists because v0.2.0's quick start was broken in exactly this way
+  # and every other job installed Playwright, so nothing could see it: a
+  # reader following the README met ModuleNotFoundError on their first
+  # command while the badges were green.
+  core-only:
+    name: the quick start, with only requirements.txt installed
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the core and NOTHING else
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: No engine library may be importable here
+        run: |
+          for lib in playwright selenium pyppeteer; do
+            if python -c "import $lib" 2>/dev/null; then
+              echo "::error::$lib is installed; this job tests the case where none is"
+              exit 1
+            fi
+          done
+          echo "confirmed: no browser engine is importable"
+
+      - name: The README's own first command
+        run: |
+          set +e
+          python youtube_scraper.py --url dQw4w9WgXcQ --pages 3 \
+            --format json --out core_only
+          code=$?
+          set -e
+          echo "youtube_scraper.py exit $code"
+          test "$code" = "0"
+          python - <<'PY'
+          import json
+          rows = json.load(open("core_only.json"))
+          meta = json.load(open("core_only.meta.json"))
+          assert len(rows) >= 40, "only %d rows" % len(rows)
+          assert meta["status"] == "complete", meta["status"]
+          assert meta["transports_used"] == ["http"], meta["transports_used"]
+          assert len({r["sku"] for r in rows}) == len(rows), "duplicate sku"
+          print("core-only OK: %d rows, %s, transport %s"
+                % (len(rows), meta["status"], meta["transports_used"]))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-core-only
+          path: core_only.*
+
+  comments:
+    name: a real three-page comment scrape, with no credentials at all
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the core and the Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          python -m playwright install --with-deps chromium
+
+      # >=3 pages, because with one page pagination is never exercised —
+      # which is exactly how a silent single-page bug survived in a sibling
+      # repo, reporting a complete-looking success holding a third of the
+      # data.
+      - name: Scrape three pages of comments
+        id: run
+        run: |
+          set +e   # GitHub runs `run:` under `bash -e`, and a non-zero exit
+                   # would abort the step BEFORE the echo below.
+          python playwright_scraper.py \
+            --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
+            --pages 3 --format both --out canary_comments --dump-html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Interpret the result
+        run: |
+          python - <<'PY'
+          import json, os, sys
+
+          code = int("${{ steps.run.outputs.exit_code }}")
+          if code != 0:
+              meaning = {1: "crash", 2: "bad usage",
+                         3: "BLOCKED — the endpoint refused a datacentre "
+                            "address, which is the README's central claim "
+                            "failing",
+                         4: "no comments",
+                         5: "the content was never obtained",
+                         6: "partial"}.get(code, "unknown")
+              sys.exit(f"::error::exit {code} ({meaning})")
+
+          meta = json.load(open("canary_comments.meta.json"))
+          rows = json.load(open("canary_comments.json"))
+          fail = []
+
+          if meta["status"] != "complete":
+              fail.append(f"status is {meta['status']!r}, not 'complete'")
+          if meta["pages_completed"] < 3:
+              fail.append(f"only {meta['pages_completed']} page(s) completed "
+                          f"— pagination stopped early, which is the failure "
+                          f"a one-page canary cannot see")
+          # 20 per page is what the site serves, measured over 60
+          # consecutive pages. A floor rather than an equality: a short
+          # page at the end of a thread is legitimate, twenty missing
+          # comments are not.
+          if len(rows) < 55:
+              fail.append(f"{len(rows)} rows from 3 pages; expected ~60")
+
+          # Value floors, not coverage: a column can be 100% populated and
+          # entirely wrong.
+          #
+          # The text check tests the PARSER, not what people wrote. The site
+          # serves `content: ""` for some comments (on 2026-10-14, 4 of 60;
+          # most likely image-only, not proven), and a 95% non-empty floor over a
+          # live `top` ranking went red on that with the parser reading the
+          # site correctly. A parser that lost the field yields None on
+          # every row; one that reads it yields a string, empty or not.
+          text_read = sum(1 for r in rows if isinstance(r.get("text"), str))
+          if text_read < len(rows) * 0.95:
+              fail.append(f"the text field was read on only "
+                          f"{text_read}/{len(rows)} rows")
+          with_text = sum(1 for r in rows if (r.get("text") or "").strip())
+          if with_text < len(rows) * 0.5:
+              fail.append(f"only {with_text}/{len(rows)} rows carry any "
+                          f"text — far below what any page of comments holds")
+          with_author = sum(1 for r in rows
+                            if (r.get("author_name") or "").startswith("@"))
+          if with_author < len(rows) * 0.95:
+              fail.append(f"only {with_author}/{len(rows)} rows name an author")
+          # Every count must come with the string the site actually wrote.
+          unpaired = [r["sku"] for r in rows
+                      if r.get("like_count") is not None
+                      and not r.get("like_count_text")]
+          if unpaired:
+              fail.append(f"{len(unpaired)} row(s) carry a like_count with no "
+                          f"like_count_text beside it")
+          # And no row may claim a precision it does not have.
+          bad_dates = [r["sku"] for r in rows
+                       if r.get("published_at_approx")
+                       and not r.get("published_at_precision")]
+          if bad_dates:
+              fail.append(f"{len(bad_dates)} row(s) carry a derived date with "
+                          f"no precision column")
+          # page+position must be unique across a multi-page run, or the
+          # column is worthless.
+          pairs = [(r.get("page"), r.get("position")) for r in rows]
+          if len(set(pairs)) != len(pairs):
+              fail.append("page+position is not unique across the run")
+          # The site's own total must have reached the sidecar.
+          if not meta.get("total_comments"):
+              fail.append("the sidecar carries no total_comments — the "
+                          "comment section header was not read")
+
+          if fail:
+              for line in fail:
+                  print(f"::error::{line}")
+              sys.exit(1)
+          print(f"::notice::{len(rows)} comments over "
+                f"{meta['pages_completed']} pages; the video states "
+                f"{meta['total_comments']:,} in total "
+                f"({meta.get('sample_share_pct')}%). No key, no proxy, no "
+                f"account.")
+          PY
+
+      # Checked, not just run: the second scrape must succeed and the two
+      # complete runs must be comparable. The CONTENT of the diff is not
+      # asserted — `top` is a live ranking and moves between two runs.
+      - name: Diff two runs of the same ordering
+        run: |
+          set +e
+          python playwright_scraper.py \
+            --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
+            --pages 3 --out canary_comments_b
+          code=$?
+          echo "second run exit: $code"
+          [ "$code" = "0" ] || { echo "::error::second run exit $code"; exit 1; }
+          python diff_runs.py --old canary_comments.json \
+                              --new canary_comments_b.json
+          code=$?
+          echo "diff exit: $code"
+          [ "$code" = "0" ] || { echo "::error::diff_runs exit $code"; exit 1; }
+
+      # Everything above reads over plain HTTPS (`--transport auto` never
+      # needed the browser), so without this step no browser engine is
+      # exercised live at all.
+      - name: The same scrape through a real browser
+        run: |
+          set +e
+          python playwright_scraper.py \
+            --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
+            --pages 2 --transport browser --out canary_browser
+          code=$?
+          echo "playwright --transport browser exit $code"
+          [ "$code" = "0" ] || { echo "::error::browser transport exit $code"; exit 1; }
+          python - <<'PY'
+          import json, sys
+          rows = json.load(open("canary_browser.json"))
+          meta = json.load(open("canary_browser.meta.json"))
+          fail = []
+          if "browser" not in meta.get("transports_used", []):
+              fail.append(f"transports_used is {meta.get('transports_used')}"
+                          f" — the browser was not the transport")
+          if meta["status"] != "complete":
+              fail.append(f"status is {meta['status']!r}")
+          if len(rows) < 35:
+              fail.append(f"{len(rows)} rows from 2 pages; expected ~40")
+          if sum(1 for r in rows if r.get("sku")) != len(rows):
+              fail.append("a row has no comment id")
+          if fail:
+              for line in fail:
+                  print(f"::error::{line}")
+              sys.exit(1)
+          print(f"::notice::browser transport: {len(rows)} rows, "
+                f"{meta['transports_used']}")
+          PY
+
+      - name: The edge states still answer the way they are documented to
+        run: |
+          set +e
+          # Comments turned off, and a video that does not exist. Both
+          # answer HTTP 200 with a healthy-looking payload, and both must
+          # come back as exit 4 rather than exit 3 — reporting either as
+          # blocked sends a user rotating proxies over a video that simply
+          # has its comments switched off.
+          python playwright_scraper.py --url J38Yq85ZoyY --out canary_off
+          off=$?
+          python playwright_scraper.py --url aaaaaaaaaaa --out canary_gone
+          gone=$?
+          echo "comments-off exit $off, unavailable exit $gone"
+          if [ "$off" != "4" ] || [ "$gone" != "4" ]; then
+            echo "::error::expected exit 4 from both; got $off and $gone"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-comments
+          path: |
+            canary_comments*.json
+            canary_comments*.csv
+            canary_browser*.json
+
+  video:
+    name: one video's metadata, including the exact upload date
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install the core and the Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          python -m playwright install --with-deps chromium
+      # `set +e` so the exit code can be captured, and then CHECKED — a
+      # captured code nothing reads is the same defect as a swallowed one.
+      - name: Read the video row
+        run: |
+          set +e
+          python playwright_scraper.py --url dQw4w9WgXcQ --mode video \
+            --out canary_video
+          code=$?
+          echo "playwright_scraper --mode video exit $code"
+          [ "$code" = "0" ] || { echo "::error::exit $code"; exit 1; }
+      - name: The asymmetry this mode exists for
+        run: |
+          python - <<'PY'
+          import json, sys
+          row = json.load(open("canary_video.json"))[0]
+          fail = []
+          # These four come from /player and are the whole reason this mode
+          # makes two calls. If any goes null, that endpoint changed.
+          for field in ("published_at", "duration_seconds", "category"):
+              if not row.get(field):
+                  fail.append(f"{field} is null — /player stopped answering")
+          # And these are the EXACT figures a comment row cannot have.
+          if not row.get("view_count") or row["view_count"] < 1_000_000_000:
+              fail.append(f"view_count {row.get('view_count')!r} is not the "
+                          f"exact figure the watch page states")
+          if not row.get("like_count"):
+              fail.append("like_count is null — the a11y label changed")
+          if row.get("comments_enabled") is not True:
+              fail.append("comments_enabled is not True on a video that "
+                          "plainly takes comments")
+          if fail:
+              for line in fail:
+                  print(f"::error::{line}")
+              sys.exit(1)
+          print(f"::notice::{row['title'][:50]} — published {row['published_at']}, "
+                f"{row['view_count']:,} views, {row['like_count']:,} likes")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-video
+          path: canary_video*.json
+
+  scraper-api:
+    name: the paid path (needs the TWOCAPTCHA_KEY secret)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # `secrets` is not available in a job-level `if`, so presence is tested
+    # through job `env`.
+    env:
+      HAVE_KEY: ${{ secrets.TWOCAPTCHA_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # A missing secret FAILS this job. Skipping green would report the
+      # Scraper API path as checked when nothing reached the service.
+      - name: Require the secret this path needs
+        if: env.HAVE_KEY != 'true'
+        run: |
+          echo "::error::TWOCAPTCHA_KEY secret is not set, so the Scraper API path was NOT tested. Add it under Settings > Secrets and variables > Actions. The free comment path is tested by the other jobs."
+          exit 1
+      - name: Install the core
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Read a video through the Scraper API
+        env:
+          # Through the ENVIRONMENT, never a command line: env_config.py
+          # already reads exactly this name, and an unset secret arrives as
+          # an empty string which the loader treats as unset.
+          TWOCAPTCHA_KEY: ${{ secrets.TWOCAPTCHA_KEY }}
+        run: |
+          set +e
+          python scraper_api_client.py --url dQw4w9WgXcQ --out canary_sapi
+          code=$?
+          echo "scraper_api_client exit $code"
+          [ "$code" = "0" ] || exit 1
+          python - <<'PY'
+          import json
+          row = json.load(open("canary_sapi.json"))[0]
+          assert row["sku"] == "dQw4w9WgXcQ", row["sku"]
+          assert row["view_count"], "no view count came through"
+          # The document's inlined player response states these; a null
+          # here means it moved or stopped naming this video.
+          assert row["published_at"], "no published_at from the document"
+          assert row["duration_seconds"], "no duration_seconds from the document"
+          assert row["data_source"] == "innertube.watch+player", row["data_source"]
+          meta = json.load(open("canary_sapi.meta.json"))
+          assert meta["status"] == "complete", meta["status"]
+          print(f"::notice::Scraper API read {row['sku']}: published "
+                f"{row['published_at']}, {row['duration_seconds']} s, "
+                f"{row['view_count']:,} views, like_count {row['like_count']}.")
+          PY
