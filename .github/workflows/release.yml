@@ -1,0 +1,103 @@
+name: Release
+
+# Pushing a tag like v0.6.0 builds the Windows installer and zip and the Linux .deb and AppImage, checks
+# each packaged app with the smoke test, and publishes them as one GitHub Release with that version's
+# changelog section as its notes. Running it by hand with a tag (for example v0.6.2) does the same from
+# the chosen branch and creates the tag, or adds the files to that release if it exists; without a tag it
+# only builds and uploads the files as workflow artifacts.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create or update, for example v0.6.2 (must match package.json). Leave empty to only build."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.tag }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      # The publish job attaches the files, so electron-builder must not try to publish.
+      - run: npm run build
+      - run: npm run rebuild
+      - run: npx electron-builder --win --publish never
+      - run: npm run smoke
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: |
+            dist/*.exe
+            dist/*.zip
+
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      # SQLite must be built for Electron, not for the Node that just ran the tests.
+      - run: npm run rebuild
+      - run: npx electron-builder --linux --publish never
+      # Installed the way a Linux Mint or Ubuntu user installs it, then started as a new user.
+      - run: sudo apt-get update && sudo apt-get install -y ./dist/*.deb
+      - run: xvfb-run -a npm run smoke -- "/opt/Game Release Tracker/game-release-tracker"
+      - run: xvfb-run -a npm run smoke -- dist/*.AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-build
+          path: |
+            dist/*.deb
+            dist/*.AppImage
+
+  publish:
+    needs: [windows, linux]
+    if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Release notes from the changelog
+        run: |
+          version="${RELEASE_TAG#v}"
+          test "$version" = "$(node -p "require('./package.json').version")"
+          awk -v heading="## ${version}" '$0 == heading { found = 1; next } found && /^## / { exit } found' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+      - uses: actions/download-artifact@v4
+        with:
+          path: builds
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          draft: false
+          name: Game Release Tracker ${{ env.RELEASE_TAG }}
+          body_path: release-notes.md
+          files: |
+            builds/*.exe
+            builds/*.zip
+            builds/*.deb
+            builds/*.AppImage

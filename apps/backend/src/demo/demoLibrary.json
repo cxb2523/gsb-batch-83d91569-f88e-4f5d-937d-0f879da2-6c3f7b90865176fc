@@ -1,0 +1,4068 @@
+{
+ "releases": [
+  {
+   "igdbId": 375170,
+   "title": "Sonic Racing: CrossWorlds - Pac-Man Pack",
+   "dateText": "Jan 07, 2026",
+   "releaseDate": "2026-01-07",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "DLC",
+   "publishers": [
+    "Sega"
+   ],
+   "platforms": [
+    "PC",
+    "PS4",
+    "PS5",
+    "Series X|S",
+    "Switch",
+    "Switch 2",
+    "XONE"
+   ],
+   "genres": [
+    "Adventure",
+    "Racing"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/sonic-racing-crossworlds-pac-man-pack",
+   "artworks": [
+    {
+     "imageId": "ar50zg",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar50zh",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar50zi",
+     "source": "artwork"
+    },
+    {
+     "imageId": "cobbxh",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc11gbo",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "WMBPSI6hIlo",
+     "name": "Teaser",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 372351,
+   "title": "Romance of the Three Kingdoms 8 Remake: Destiny and Strategy Expansion Pack",
+   "dateText": "Jan 28, 2026",
+   "releaseDate": "2026-01-28",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Expansion",
+   "publishers": [
+    "Koei Tecmo Games"
+   ],
+   "platforms": [
+    "PC"
+   ],
+   "genres": [
+    "Simulator",
+    "Strategy"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/romance-of-the-three-kingdoms-8-remake-destiny-and-strategy-expansion-pack",
+   "artworks": [
+    {
+     "imageId": "coanah",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sczmah",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sczmal",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sczmam",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sczmai",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "ZIQF_JGQVj0",
+     "name": "Launch Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 407928,
+   "title": "My Hero Academia: All's Justice - Deluxe Edition",
+   "dateText": "Feb 05, 2026",
+   "releaseDate": "2026-02-05",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Main",
+   "publishers": [
+    "Bandai Namco Entertainment"
+   ],
+   "platforms": [
+    "PC",
+    "PS5",
+    "Series X|S",
+    "Switch 2"
+   ],
+   "genres": [],
+   "igdbUrl": "https://www.igdb.com/games/my-hero-academia-alls-justice-deluxe-edition",
+   "artworks": [
+    {
+     "imageId": "cocb0z",
+     "source": "cover"
+    },
+    {
+     "imageId": "ar6gmg",
+     "source": "artwork"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc14syg",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc14syh",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc14syi",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc14syj",
+     "source": "artwork"
+    }
+   ],
+   "trailers": []
+  },
+  {
+   "igdbId": 368182,
+   "title": "Yakuza Kiwami 3",
+   "dateText": "Feb 12, 2026",
+   "releaseDate": "2026-02-12",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Remake",
+   "publishers": [
+    "Sega"
+   ],
+   "platforms": [
+    "PC",
+    "PS4",
+    "PS5",
+    "Series X|S",
+    "Switch 2"
+   ],
+   "genres": [
+    "Adventure",
+    "Hack and slash/Beat 'em up",
+    "Role-playing (RPG)"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/yakuza-kiwami-3",
+   "artworks": [
+    {
+     "imageId": "coay0x",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc112u2",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc112u3",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc112u4",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "za9rjoTdG_M",
+     "name": "Announcement Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 387351,
+   "title": "Reigns: The Witcher",
+   "dateText": "Feb 25, 2026",
+   "releaseDate": "2026-02-25",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Main",
+   "publishers": [
+    "Devolver Digital"
+   ],
+   "platforms": [
+    "Android",
+    "Mac",
+    "PC",
+    "iOS"
+   ],
+   "genres": [
+    "Adventure",
+    "Indie",
+    "Role-playing (RPG)",
+    "Simulator",
+    "Strategy",
+    "Tactical"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/reigns-the-witcher",
+   "artworks": [
+    {
+     "imageId": "ar56ee",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar56ef",
+     "source": "artwork"
+    },
+    {
+     "imageId": "cobdiz",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc11hzx",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc11hzv",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc11i03",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc11i04",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "9it7oMf0l00",
+     "name": "Announcement Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 275177,
+   "title": "World of Warcraft: Midnight",
+   "dateText": "Mar 02, 2026",
+   "releaseDate": "2026-03-02",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Expansion",
+   "publishers": [
+    "Blizzard Entertainment"
+   ],
+   "platforms": [
+    "Mac",
+    "PC"
+   ],
+   "genres": [
+    "Adventure",
+    "Role-playing (RPG)"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/world-of-warcraft-midnight",
+   "artworks": [
+    {
+     "imageId": "ar41k5",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar41k6",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar41k7",
+     "source": "artwork"
+    },
+    {
+     "imageId": "cobned",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "scyn2y",
+     "source": "artwork"
+    },
+    {
+     "imageId": "scyn2z",
+     "source": "artwork"
+    },
+    {
+     "imageId": "scyn30",
+     "source": "artwork"
+    },
+    {
+     "imageId": "scyn32",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "SiIjThwKLaE",
+     "name": "Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 390929,
+   "title": "Digimon Story: Time Stranger - Additional Digimon & Episode Pack 3: Anti-ParadoX",
+   "dateText": "Mar 12, 2026",
+   "releaseDate": "2026-03-12",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "DLC",
+   "publishers": [
+    "Bandai Namco Entertainment"
+   ],
+   "platforms": [
+    "PC",
+    "PS5",
+    "Series X|S",
+    "Switch"
+   ],
+   "genres": [
+    "Role-playing (RPG)"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/digimon-story-time-stranger-additional-digimon-and-episode-pack-3-anti-paradox",
+   "artworks": [
+    {
+     "imageId": "ar5djf",
+     "source": "artwork"
+    },
+    {
+     "imageId": "coc0jo",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc14bg5",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc14bg2",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc14bg3",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc14bg4",
+     "source": "artwork"
+    }
+   ],
+   "trailers": []
+  },
+  {
+   "igdbId": 389375,
+   "title": "Hearthstone: Cataclysm",
+   "dateText": "Mar 17, 2026",
+   "releaseDate": "2026-03-17",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Expansion",
+   "publishers": [
+    "Blizzard Entertainment"
+   ],
+   "platforms": [
+    "Android",
+    "Mac",
+    "PC",
+    "iOS"
+   ],
+   "genres": [
+    "Card & Board Game",
+    "Strategy",
+    "Turn-based strategy (TBS)"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/hearthstone-cataclysm",
+   "artworks": [
+    {
+     "imageId": "ar5aeg",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar5aeh",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar5aej",
+     "source": "artwork"
+    },
+    {
+     "imageId": "cobi4k",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [],
+   "trailers": [
+    {
+     "videoId": "KX30KD7vbQI",
+     "name": "Cinematic Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 395978,
+   "title": "Winning Post 10 2026",
+   "dateText": "Mar 26, 2026",
+   "releaseDate": "2026-03-26",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Main",
+   "publishers": [
+    "Koei Tecmo Games"
+   ],
+   "platforms": [
+    "PC",
+    "PS4",
+    "PS5",
+    "Switch",
+    "Switch 2"
+   ],
+   "genres": [
+    "Simulator"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/winning-post-10-2026",
+   "artworks": [
+    {
+     "imageId": "ar5lwo",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar5lwp",
+     "source": "artwork"
+    },
+    {
+     "imageId": "cobttt",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc12pb8",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "zDEgBG4EsOA",
+     "name": "Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 394291,
+   "title": "G-Mode Archives+: Digital Devil Saga Avatar Tuner - A's Test Server",
+   "dateText": "Apr 16, 2026",
+   "releaseDate": "2026-04-16",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Port",
+   "publishers": [
+    "G-MODE"
+   ],
+   "platforms": [
+    "PC",
+    "Switch"
+   ],
+   "genres": [
+    "Role-playing (RPG)"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/g-mode-archives-plus-digital-devil-saga-avatar-tuner-as-test-server",
+   "artworks": [
+    {
+     "imageId": "ar5lie",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar5lif",
+     "source": "artwork"
+    },
+    {
+     "imageId": "cobxv5",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc12j72",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc12j73",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc12j74",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc12j75",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "Yd3IIhRvf44",
+     "name": "Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 398625,
+   "title": "G-Mode Archives+: Xenosaga Pied Piper",
+   "dateText": "Apr 29, 2026",
+   "releaseDate": "2026-04-29",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Port",
+   "publishers": [
+    "G-MODE"
+   ],
+   "platforms": [
+    "PC",
+    "Switch"
+   ],
+   "genres": [
+    "Role-playing (RPG)"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/g-mode-archives-plus-xenosaga-pied-piper",
+   "artworks": [
+    {
+     "imageId": "ar5qce",
+     "source": "artwork"
+    },
+    {
+     "imageId": "cobxv8",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc12ze8",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc12ze9",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc12zea",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc12zeb",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "KWe9fSM991Y",
+     "name": "Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 398626,
+   "title": "G-Mode Archives+: Namco Chronicle",
+   "dateText": "May 27, 2026",
+   "releaseDate": "2026-05-27",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Main",
+   "publishers": [
+    "G-MODE"
+   ],
+   "platforms": [
+    "PC",
+    "Switch"
+   ],
+   "genres": [
+    "Role-playing (RPG)",
+    "Simulator",
+    "Turn-based strategy (TBS)"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/g-mode-archives-plus-namco-chronicle",
+   "artworks": [
+    {
+     "imageId": "ar5qck",
+     "source": "artwork"
+    },
+    {
+     "imageId": "cobxva",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc12zel",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc12zem",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc12zen",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc12zeo",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "Uo41a1SDqT8",
+     "name": "Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 407079,
+   "title": "G-Mode Archives+: Pac-Man",
+   "dateText": "Jun 17, 2026",
+   "releaseDate": "2026-06-17",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Main",
+   "publishers": [
+    "G-MODE Corporation"
+   ],
+   "platforms": [
+    "PC",
+    "Switch"
+   ],
+   "genres": [
+    "Arcade"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/g-mode-archives-plus-pac-man",
+   "artworks": [
+    {
+     "imageId": "ar63z5",
+     "source": "artwork"
+    },
+    {
+     "imageId": "cocb3l",
+     "source": "cover"
+    },
+    {
+     "imageId": "ar6bcd",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar6bce",
+     "source": "artwork"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc13xtc",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc13xtd",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc13xte",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc13xtf",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "sDD7Bjm0UhI",
+     "name": "Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 408844,
+   "title": "The Crew: Motorfest - Chevrolet Pack",
+   "dateText": "Jul 01, 2026",
+   "releaseDate": "2026-07-01",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "DLC",
+   "publishers": [
+    "Ubisoft Entertainment"
+   ],
+   "platforms": [
+    "PC",
+    "PS4",
+    "PS5",
+    "Series X|S",
+    "XONE"
+   ],
+   "genres": [
+    "Racing"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/the-crew-motorfest-chevrolet-pack",
+   "artworks": [
+    {
+     "imageId": "cocckm",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc145l1",
+     "source": "artwork"
+    }
+   ],
+   "trailers": []
+  },
+  {
+   "igdbId": 393932,
+   "title": "Echoes of Aincrad",
+   "dateText": "Jul 09, 2026",
+   "releaseDate": "2026-07-09",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Main",
+   "publishers": [
+    "Bandai Namco Entertainment"
+   ],
+   "platforms": [
+    "PC",
+    "PS5",
+    "Series X|S"
+   ],
+   "genres": [
+    "Adventure",
+    "Role-playing (RPG)"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/echoes-of-aincrad",
+   "artworks": [
+    {
+     "imageId": "ar5ied",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar69pn",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar69po",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar5ija",
+     "source": "artwork"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc14g7p",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc14g7j",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc14g7l",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc14g7k",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "JXZUqTlirQM",
+     "name": "Gameplay Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 396236,
+   "title": "Blue Reflection",
+   "dateText": "Jul 30, 2026",
+   "releaseDate": "2026-07-30",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Remaster",
+   "publishers": [
+    "Koei Tecmo"
+   ],
+   "platforms": [
+    "PC",
+    "PS5",
+    "Switch",
+    "Switch 2"
+   ],
+   "genres": [
+    "Adventure",
+    "Role-playing (RPG)"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/blue-reflection--1",
+   "artworks": [
+    {
+     "imageId": "ar5lxu",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar5lxv",
+     "source": "artwork"
+    },
+    {
+     "imageId": "cobu3k",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc12qbd",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc12qbe",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc12qbf",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc12qbg",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "80Ir3RnUF0U",
+     "name": "Announcement Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 395097,
+   "title": "The Prince of Tennis: Sweet School Festival 0-40 and more…",
+   "dateText": "Jul 30, 2026",
+   "releaseDate": "2026-07-30",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Remaster",
+   "publishers": [
+    "Konami"
+   ],
+   "platforms": [
+    "PC",
+    "Switch",
+    "Switch 2"
+   ],
+   "genres": [
+    "Adventure",
+    "Visual Novel"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/the-prince-of-tennis-sweet-school-festival-0-40-and-more-dot-dot-dot",
+   "artworks": [
+    {
+     "imageId": "ar6428",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar5k0p",
+     "source": "artwork"
+    },
+    {
+     "imageId": "cobs4g",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc12m1v",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc12m1w",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc12m1x",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc12m1y",
+     "source": "artwork"
+    }
+   ],
+   "trailers": []
+  },
+  {
+   "igdbId": 389216,
+   "title": "Tekken 8: Bob",
+   "dateText": "Aug 19, 2026",
+   "releaseDate": "2026-08-19",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "DLC",
+   "publishers": [
+    "Bandai Namco Entertainment"
+   ],
+   "platforms": [
+    "PC",
+    "PS5",
+    "Series X|S"
+   ],
+   "genres": [],
+   "igdbUrl": "https://www.igdb.com/games/tekken-8-bob",
+   "artworks": [
+    {
+     "imageId": "cocq95",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc14shz",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc14shl",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc14shm",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc14shn",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "Sp1BF4Ov55A",
+     "name": "Gameplay Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 415023,
+   "title": "The Crew 2: Sky, Dirt, and Waves Pack",
+   "dateText": "Aug 19, 2026",
+   "releaseDate": "2026-08-19",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "DLC",
+   "publishers": [
+    "Ubisoft Entertainment"
+   ],
+   "platforms": [
+    "PC",
+    "PS4",
+    "XONE"
+   ],
+   "genres": [
+    "Racing"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/the-crew-2-sky-dirt-and-waves-pack",
+   "artworks": [
+    {
+     "imageId": "cocrke",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc14vvf",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc14vvp",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc14vvv",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc14vvz",
+     "source": "artwork"
+    }
+   ],
+   "trailers": []
+  },
+  {
+   "igdbId": 403310,
+   "title": "Call of Duty: Modern Warfare 4",
+   "dateText": "Aug 28, 2026",
+   "releaseDate": "2026-08-28",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Main",
+   "publishers": [
+    "Activision"
+   ],
+   "platforms": [
+    "PC",
+    "PS5",
+    "Series X|S",
+    "Switch 2"
+   ],
+   "genres": [
+    "Shooter"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/call-of-duty-modern-warfare-4",
+   "artworks": [
+    {
+     "imageId": "ar604t",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar604u",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar604o",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar604s",
+     "source": "artwork"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc13i3n",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc13i3o",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc13i3p",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc13i3q",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "Yl7TOzNEaJ8",
+     "name": "Gameplay Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 417182,
+   "title": "Dragon Quest Heroes: Torneko's Mystery Dungeon Classic HD",
+   "dateText": "Sep 09, 2026",
+   "releaseDate": "2026-09-09",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Remaster",
+   "publishers": [
+    "Square Enix"
+   ],
+   "platforms": [
+    "PC",
+    "PS5",
+    "Series X|S",
+    "Switch",
+    "Switch 2"
+   ],
+   "genres": [
+    "Adventure",
+    "Role-playing (RPG)",
+    "Simulator",
+    "Strategy"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/dragon-quest-heroes-tornekos-mystery-dungeon-classic-hd",
+   "artworks": [
+    {
+     "imageId": "ar6kho",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar6kiz",
+     "source": "artwork"
+    },
+    {
+     "imageId": "cocvbe",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc154cc",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc154cx",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc154cy",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc154cz",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "zy5TA6_SMkI",
+     "name": "Launch Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 222342,
+   "title": "Silent Hill: Townfall",
+   "dateText": "Sep 22, 2026",
+   "releaseDate": "2026-09-22",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Main",
+   "publishers": [
+    "Annapurna Interactive",
+    "Konami"
+   ],
+   "platforms": [
+    "PC",
+    "PS5"
+   ],
+   "genres": [
+    "Adventure",
+    "Puzzle"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/silent-hill-townfall",
+   "artworks": [
+    {
+     "imageId": "ar5b7i",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar5z7w",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar5z7v",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar5z7x",
+     "source": "artwork"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "scjfq5",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc11x88",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc11x82",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc11x83",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "bpqRBsXP6M0",
+     "name": "Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 369991,
+   "title": "Dynasty Warriors 3: Complete Edition Remastered",
+   "dateText": "Oct 01, 2026",
+   "releaseDate": "2026-10-01",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Remaster",
+   "publishers": [
+    "Koei Tecmo"
+   ],
+   "platforms": [
+    "PC",
+    "PS5",
+    "Series X|S",
+    "Switch 2"
+   ],
+   "genres": [
+    "Hack and slash/Beat 'em up",
+    "Role-playing (RPG)",
+    "Strategy",
+    "Tactical"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/dynasty-warriors-3-complete-edition-remastered",
+   "artworks": [
+    {
+     "imageId": "ar4ahy",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar4aht",
+     "source": "artwork"
+    },
+    {
+     "imageId": "coajzb",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sczg49",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sczg4b",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sczg47",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sczg45",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "CPBxiZlyk0o",
+     "name": "Announcement Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 409690,
+   "title": "Just Dance: Decades of Hits",
+   "dateText": "Oct 13, 2026",
+   "releaseDate": "2026-10-13",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Main",
+   "publishers": [
+    "Ubisoft Entertainment"
+   ],
+   "platforms": [
+    "PS5",
+    "Series X|S",
+    "Switch"
+   ],
+   "genres": [],
+   "igdbUrl": "https://www.igdb.com/games/just-dance-decades-of-hits",
+   "artworks": [
+    {
+     "imageId": "ar6af1",
+     "source": "artwork"
+    },
+    {
+     "imageId": "cocjfj",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [],
+   "trailers": [
+    {
+     "videoId": "WaemsD8T1kA",
+     "name": "Teaser",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 381077,
+   "title": "Virtue and a Sledgehammer",
+   "dateText": "Oct 27, 2026",
+   "releaseDate": "2026-10-27",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Main",
+   "publishers": [
+    "Devolver Digital"
+   ],
+   "platforms": [
+    "PC"
+   ],
+   "genres": [
+    "Adventure"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/virtue-and-a-sledgehammer",
+   "artworks": [
+    {
+     "imageId": "ar4umf",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar4umg",
+     "source": "artwork"
+    },
+    {
+     "imageId": "cob00e",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc10sfi",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc10sfk",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc10sfl",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc10sfm",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "UqnwUdfvwv8",
+     "name": "Release Date Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 404917,
+   "title": "Cronos: Lazarus",
+   "dateText": "Q4 2026",
+   "releaseDate": "2026-12-31",
+   "datePrecision": "Window",
+   "releaseWindow": "Q4 2026",
+   "category": "DLC",
+   "publishers": [
+    "Bloober Team"
+   ],
+   "platforms": [
+    "PC",
+    "PS5",
+    "Series X|S",
+    "Switch 2"
+   ],
+   "genres": [
+    "Adventure",
+    "Puzzle",
+    "Shooter"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/cronos-lazarus",
+   "artworks": [
+    {
+     "imageId": "ar60ke",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar6da0",
+     "source": "artwork"
+    },
+    {
+     "imageId": "cocm93",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc13oko",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc13okp",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc13okq",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc13okr",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "9dS2Gnut7mA",
+     "name": "Reveal Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 325599,
+   "title": "Stranger Than Heaven",
+   "dateText": "Jan 15, 2027",
+   "releaseDate": "2027-01-15",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Main",
+   "publishers": [
+    "Sega"
+   ],
+   "platforms": [
+    "PC",
+    "PS5",
+    "Series X|S"
+   ],
+   "genres": [
+    "Adventure",
+    "Fighting",
+    "Puzzle",
+    "Role-playing (RPG)"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/stranger-than-heaven",
+   "artworks": [
+    {
+     "imageId": "ar659m",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar659n",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar659o",
+     "source": "artwork"
+    },
+    {
+     "imageId": "ar659r",
+     "source": "artwork"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc13ujs",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc13ujo",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc13ujp",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc13uju",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "-hihuPFku9I",
+     "name": "Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 404690,
+   "title": "Gundam Rogue Orbit",
+   "dateText": "Mar 05, 2027",
+   "releaseDate": "2027-03-05",
+   "datePrecision": "Exact",
+   "releaseWindow": null,
+   "category": "Main",
+   "publishers": [
+    "Bandai Namco Entertainment"
+   ],
+   "platforms": [
+    "PC",
+    "PS5",
+    "Series X|S"
+   ],
+   "genres": [
+    "Adventure",
+    "Shooter"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/gundam-rogue-orbit",
+   "artworks": [
+    {
+     "imageId": "ar60ao",
+     "source": "artwork"
+    },
+    {
+     "imageId": "coc6ls",
+     "source": "cover"
+    },
+    {
+     "imageId": "ar6iz5",
+     "source": "artwork"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc13nr7",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc13nr8",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc13nrc",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc13nr9",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "JUE--Q87xYc",
+     "name": "Announcement Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 252840,
+   "title": "Clockwork Revolution",
+   "dateText": "2027",
+   "releaseDate": "2027-12-31",
+   "datePrecision": "Year",
+   "releaseWindow": "2027",
+   "category": "Main",
+   "publishers": [
+    "Xbox Game Studios"
+   ],
+   "platforms": [
+    "PC",
+    "Series X|S"
+   ],
+   "genres": [
+    "Role-playing (RPG)"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/clockwork-revolution",
+   "artworks": [
+    {
+     "imageId": "ar3ow8",
+     "source": "artwork"
+    },
+    {
+     "imageId": "co9xwq",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "scmwnx",
+     "source": "artwork"
+    },
+    {
+     "imageId": "scmwns",
+     "source": "artwork"
+    },
+    {
+     "imageId": "scmwnt",
+     "source": "artwork"
+    },
+    {
+     "imageId": "scmwnu",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "6B5NUd6B9I4",
+     "name": "The Heist - Gameplay Trailer",
+     "provider": "youtube"
+    }
+   ]
+  },
+  {
+   "igdbId": 404709,
+   "title": "Monster Hunter Wilds: Ascendance",
+   "dateText": "2027",
+   "releaseDate": "2027-12-31",
+   "datePrecision": "Year",
+   "releaseWindow": "2027",
+   "category": "Expansion",
+   "publishers": [
+    "Capcom"
+   ],
+   "platforms": [
+    "PC",
+    "PS5",
+    "Series X|S",
+    "Switch 2"
+   ],
+   "genres": [
+    "Adventure",
+    "Role-playing (RPG)"
+   ],
+   "igdbUrl": "https://www.igdb.com/games/monster-hunter-wilds-ascendance",
+   "artworks": [
+    {
+     "imageId": "ar60ol",
+     "source": "artwork"
+    },
+    {
+     "imageId": "coc6oe",
+     "source": "cover"
+    }
+   ],
+   "screenshots": [
+    {
+     "imageId": "sc141gb",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc141gd",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc141ge",
+     "source": "artwork"
+    },
+    {
+     "imageId": "sc141g7",
+     "source": "artwork"
+    }
+   ],
+   "trailers": [
+    {
+     "videoId": "URrMx-2l_ek",
+     "name": "Announcement Trailer",
+     "provider": "youtube"
+    }
+   ]
+  }
+ ],
+ "completedGames": [
+  {
+   "title": "Triangle Strategy",
+   "userPlatform": "PC",
+   "ratingRaw": "7/10",
+   "yearsAgo": 1,
+   "month": 1,
+   "day": 26,
+   "notes": "Finally finished it after a long break.",
+   "metadata": {
+    "igdbId": 318779,
+    "coverImageId": "co8wc9",
+    "igdbReleaseDate": "2024-10-31",
+    "igdbDeveloper": "Square Enix Creative Studio 5",
+    "igdbPublisher": "Square Enix",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Strategy",
+     "Turn-based strategy (TBS)",
+     "Tactical"
+    ],
+    "igdbPlatforms": [
+     "Meta Quest 2"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "TRIANGLE STRATEGY on Meta Quest offers a complex, tactical battle system enhanced by intuitive VR controls that make for an immersive hands-on RPG experience. Utilize 360-degree 3D movement on the battlefield and place characters yourself to fine-tune combat strategy – with the characters’ fates literally in your hands, players can experience the dramatic story of clashing kingdoms like never before. The title also supports Meta Quest’s Passthrough feature on Meta Quest 3 and Meta Quest 3S, meshing the game’s environment with real-world surroundings to create next-level immersion.",
+    "screenshots": [
+     {
+      "imageId": "scu2r2",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scu2r3",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scu2r4",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scu2r5",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Persona 4: Golden",
+   "userPlatform": "Switch",
+   "ratingRaw": "8/10",
+   "yearsAgo": 1,
+   "month": 12,
+   "day": 9,
+   "notes": null,
+   "metadata": {
+    "igdbId": 2985,
+    "coverImageId": "co1n1x",
+    "igdbReleaseDate": "2012-06-15",
+    "igdbDeveloper": "Atlus",
+    "igdbPublisher": "NIS America",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Vita"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Persona 4 Golden is an enhanced version of the role-playing game Persona 4, combining turn-based combat with daily life simulation. Players control a high school student who moves to the rural town of Inaba for one year and becomes involved in investigating a series of murders linked to a mysterious world inside television sets. Gameplay is divided between exploring randomly generated dungeons where players fight Shadows using summoned creatures called Personas, and navigating daily life by attending school, building friendships through Social Links, and developing character attributes.\n\nGolden adds new story content including the character Marie, additional Personas, online features, new difficulty settings, expanded voice acting, and additional animated cutscenes over the original PlayStation 2 release.",
+    "screenshots": [
+     {
+      "imageId": "fnpbq0wy3fczzzwr2k1m",
+      "source": "artwork"
+     },
+     {
+      "imageId": "zx3rfqbtbdnib0m8arcn",
+      "source": "artwork"
+     },
+     {
+      "imageId": "r89g5ktv0kljptpgones",
+      "source": "artwork"
+     },
+     {
+      "imageId": "gc5xs0cejelrvqxobrxq",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Lost Odyssey",
+   "userPlatform": "PC",
+   "ratingRaw": "8/10",
+   "yearsAgo": 1,
+   "month": 2,
+   "day": 7,
+   "notes": null,
+   "metadata": {
+    "igdbId": 7057,
+    "coverImageId": "co3tos",
+    "igdbReleaseDate": "2007-12-06",
+    "igdbDeveloper": "Feelplus",
+    "igdbPublisher": "Microsoft Game Studios",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Turn-based strategy (TBS)"
+    ],
+    "igdbPlatforms": [
+     "X360"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Lost Odyssey is set in a world in which a \"Magic-Industrial Revolution\" is taking place. While magic energy existed in all living creatures beforehand, it suddenly became far more powerful thirty years before the beginning of the game. Because of this, it has affected society greatly, with devices called \"Magic Engines\" harnessing this power for lighting, automobiles, communication, and robots, among other uses. While previously only a select few could wield magic, many magicians gained the ability. However, such progress has also caused two nations to develop new and more powerful weapons of mass destruction. The kingdom of Gohtza and the Republic of Uhra (which recently converted from a monarchy). Uhra is building Grand Staff, a gigantic magic engine, while the heavily industrialized Gohtza actively pursues magic research of their own. A third nation, the Free Ocean State of Numara, remains isolated and neutral, though it is falling into disarray due to a general attempting to stage a coup d'etat. Uhra, at war with Khent, a nation of beastmen, sends its forces to the Highlands of Wohl for a decisive battle at the start of the game.",
+    "screenshots": [
+     {
+      "imageId": "jw4rnjbujr5d4eycc6pk",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scsooz",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scsoox",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scsooy",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Bloodborne",
+   "userPlatform": "Switch",
+   "ratingRaw": "8/10",
+   "yearsAgo": 1,
+   "month": 10,
+   "day": 13,
+   "notes": null,
+   "metadata": {
+    "igdbId": 7334,
+    "coverImageId": "cob99l",
+    "igdbReleaseDate": "2015-03-24",
+    "igdbDeveloper": "FromSoftware",
+    "igdbPublisher": "Sony Computer Entertainment",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "PS4"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "An action RPG in which the player embodies a Hunter who, after being transfused with the mysterious blood local to the city of Yharnam, sets off into a \"night of the Hunt\", an extended night in which Hunters may phase in and out of dream and reality in order to thin the outbreak of abominable beasts that plague the land and, for the more resilient and insightful Hunters, uncover the answers to the Hunt's many mysteries.",
+    "screenshots": [
+     {
+      "imageId": "uqmif3sshdrbbcd0pu8l",
+      "source": "artwork"
+     },
+     {
+      "imageId": "adssvwsfbaxcrucjolv9",
+      "source": "artwork"
+     },
+     {
+      "imageId": "hc9nb80b0xni5wxm5zh3",
+      "source": "artwork"
+     },
+     {
+      "imageId": "aokcsspzrqyaaoug7jnn",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Halo Campaign Evolved",
+   "userPlatform": "PC",
+   "ratingRaw": "10/10",
+   "yearsAgo": 1,
+   "month": 4,
+   "day": 3,
+   "notes": null,
+   "metadata": {
+    "igdbId": 375232,
+    "coverImageId": "coaqxe",
+    "igdbReleaseDate": "2026-07-28",
+    "igdbDeveloper": "Halo Studios",
+    "igdbPublisher": "Xbox Game Studios",
+    "igdbGenres": [
+     "Shooter",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "PC",
+     "PS5"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Halo: Campaign Evolved is a faithful yet modernized remake of Halo: Combat Evolved’s campaign. Experience the original story rebuilt with high-definition visuals, updated cinematics, and refined controls, plus three brand-new prequel missions featuring the Master Chief and Sgt. Johnson. A broader arsenal of weapons, vehicles, enemies, and gameplay-modifying “Skulls” – optional modifiers that change combat in fun and challenging ways – add fresh tactics and endless replayability.",
+    "screenshots": [
+     {
+      "imageId": "sc13pnd",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc13pne",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc13pnf",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc13pnh",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Like A Dragon: Ishin",
+   "userPlatform": "PS5",
+   "ratingRaw": "8.5/10",
+   "yearsAgo": 1,
+   "month": 5,
+   "day": 7,
+   "notes": "Came for the art style, stayed for the puzzles.",
+   "metadata": {
+    "igdbId": 217597,
+    "coverImageId": "co59yh",
+    "igdbReleaseDate": "2023-02-21",
+    "igdbDeveloper": "Ryu Ga Gotoku Studio",
+    "igdbPublisher": "Sega",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Hack and slash/Beat 'em up",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "PS4",
+     "PC",
+     "PS5",
+     "XONE"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Like a Dragon: Ishin! is an action-adventure game developed by Ryu Ga Gotoku Studio and published by Sega. Released in February 2023, it is a remake of the 2014 Japan-exclusive Ryu Ga Gotoku Ishin! and reimagines the Like a Dragon series in a historical setting. Set in the Bakumatsu period of Japan (mid-1800s), the game follows Sakamoto Ryoma, modelled after Kazuma Kiryu, as he navigates political intrigue, conspiracies, and samurai combat while seeking revenge for his mentor's murder.\n\nThe gameplay combines swordplay, gunfighting, and hand-to-hand combat, with a mix of main story missions and side activities, including minigames and historical recreations of series staples.",
+    "screenshots": [
+     {
+      "imageId": "scix57",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scix58",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scix59",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scix5a",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Silent Hill 3",
+   "userPlatform": "PC",
+   "ratingRaw": "9/10",
+   "yearsAgo": 1,
+   "month": 2,
+   "day": 25,
+   "notes": null,
+   "metadata": {
+    "igdbId": 222486,
+    "coverImageId": "co5wkq",
+    "igdbReleaseDate": "2012-03-20",
+    "igdbDeveloper": "Hijinx Studios",
+    "igdbPublisher": "Konami",
+    "igdbGenres": [
+     "Puzzle",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "PS3",
+     "X360"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "This version of Silent Hill 3 is a remaster included in the Silent Hill HD Collection. The graphics have been re-mastered to 720p, the in-game voice-over was updated along with a re-mastering of the soundtrack and achievements/trophies were added.",
+    "screenshots": [
+     {
+      "imageId": "scjg5w",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Battlefield 5",
+   "userPlatform": "PC",
+   "ratingRaw": "8/10",
+   "yearsAgo": 1,
+   "month": 10,
+   "day": 24,
+   "notes": null,
+   "metadata": {
+    "igdbId": 83728,
+    "coverImageId": "co1xbv",
+    "igdbReleaseDate": "2018-11-20",
+    "igdbDeveloper": "EA Digital Illusions CE",
+    "igdbPublisher": "Electronic Arts",
+    "igdbGenres": [
+     "Shooter"
+    ],
+    "igdbPlatforms": [
+     "PS4",
+     "PC",
+     "XONE"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Battlefield V is a first-person shooter set during World War II. Its multiplayer features large-scale battles with infantry, vehicles, and aircraft across various theaters of the war, with modes including Grand Operations (multi-stage campaigns simulating wartime offensives) and Firestorm (a battle royale mode). The single-player component consists of episodic \"War Stories\" that follow different characters across lesser-known fronts of the conflict. The game emphasizes squad-based teamwork, player customization through a Company system, and resource scarcity. It is the successor to the World War I-themed Battlefield 1.",
+    "screenshots": [
+     {
+      "imageId": "cdlqzmwub64eokzm7cdt",
+      "source": "artwork"
+     },
+     {
+      "imageId": "xokasjrbubfkqtnvy9p3",
+      "source": "artwork"
+     },
+     {
+      "imageId": "enrem5i1bj7kcgx0qx6n",
+      "source": "artwork"
+     },
+     {
+      "imageId": "lxeavjeryfvcj2jtzpu5",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Resident Evil 8 Village",
+   "userPlatform": "PC",
+   "ratingRaw": "6/10",
+   "yearsAgo": 1,
+   "month": 3,
+   "day": 28,
+   "notes": null,
+   "metadata": {
+    "igdbId": 55163,
+    "coverImageId": "coab9q",
+    "igdbReleaseDate": "2021-05-06",
+    "igdbDeveloper": "Capcom Development Division 1",
+    "igdbPublisher": "Capcom",
+    "igdbGenres": [
+     "Shooter",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Stadia",
+     "Series X|S",
+     "PS4",
+     "Switch 2",
+     "PC",
+     "iOS",
+     "PS5",
+     "Mac",
+     "XONE"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Resident Evil Village is a first-person survival horror game and the sequel to Resident Evil 7: Biohazard. The game maintains elements from previous Resident Evil games, with players having to scavenge environments for items and manage their resources. However, it adds more action-oriented gameplay, with higher enemy counts and a greater emphasis on combat.",
+    "screenshots": [
+     {
+      "imageId": "sc8zrh",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc99kk",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc99kl",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc99km",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "The Legend Of Heroes: Trails Beyond The Horizon",
+   "userPlatform": "PS5",
+   "ratingRaw": "9.5/10",
+   "yearsAgo": 1,
+   "month": 1,
+   "day": 24,
+   "notes": null,
+   "metadata": {
+    "igdbId": 280573,
+    "coverImageId": "cobjgs",
+    "igdbReleaseDate": "2024-09-26",
+    "igdbDeveloper": "Nihon Falcom",
+    "igdbPublisher": "NIS America",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Turn-based strategy (TBS)",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "PS4",
+     "Switch 2",
+     "PC",
+     "PS5",
+     "Switch"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "The Legend of Heroes: Trails Beyond the Horizon is the thirteenth installment in the main Trails series, serving as a direct sequel to the events of The Legend of Heroes: Trails through Daybreak II. The game marks the turning point of the series and many of the mysteries of Zemuria.",
+    "screenshots": [
+     {
+      "imageId": "scu2fq",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scu2fr",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scu2fs",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scu2ft",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Wo Long: Fallen Dynasty",
+   "userPlatform": "Xbox Series X|S",
+   "ratingRaw": "6/10",
+   "yearsAgo": 1,
+   "month": 2,
+   "day": 17,
+   "notes": "Played it with a friend over two weekends.",
+   "metadata": {
+    "igdbId": 204628,
+    "coverImageId": "cocjk6",
+    "igdbReleaseDate": "2023-03-03",
+    "igdbDeveloper": "Team NINJA",
+    "igdbPublisher": "Koei Tecmo Games",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "PS4",
+     "Switch 2",
+     "PC",
+     "PS5",
+     "XONE"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Wo Long: Fallen Dynasty is a historical fantasy action role-playing video game developed by Team Ninja and published by Koei Tecmo.\n\nSet during a fictionalised version of the fall of the Han Dynasty, the plot follows an unnamed protagonist who battles historical characters and Chinese mythological creatures corrupted by demonic qi.",
+    "screenshots": [
+     {
+      "imageId": "schdtm",
+      "source": "artwork"
+     },
+     {
+      "imageId": "schdtl",
+      "source": "artwork"
+     },
+     {
+      "imageId": "schdtn",
+      "source": "artwork"
+     },
+     {
+      "imageId": "schdtp",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "007: First Light",
+   "userPlatform": "PC",
+   "ratingRaw": "7/10",
+   "yearsAgo": 1,
+   "month": 6,
+   "day": 2,
+   "notes": null,
+   "metadata": {
+    "igdbId": 141114,
+    "coverImageId": "coaoiz",
+    "igdbReleaseDate": "2026-05-27",
+    "igdbDeveloper": "IO Interactive",
+    "igdbPublisher": "IO Interactive",
+    "igdbGenres": [
+     "Shooter",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "Switch 2",
+     "PC",
+     "PS5"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "007 First Light is a thrilling espionage action-adventure game from IO Interactive. Players follow James Bond as a young, resourceful, and sometimes reckless recruit in MI6's training program and discover an origin story of the world's most famous spy.",
+    "screenshots": [
+     {
+      "imageId": "scx79u",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scx79v",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scx79w",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scx79x",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Halo 2",
+   "userPlatform": "PS5",
+   "ratingRaw": "9.5/10",
+   "yearsAgo": 1,
+   "month": 8,
+   "day": 4,
+   "notes": null,
+   "metadata": {
+    "igdbId": 986,
+    "coverImageId": "co1x77",
+    "igdbReleaseDate": "2004-11-09",
+    "igdbDeveloper": "Bungie",
+    "igdbPublisher": "Microsoft Game Studios",
+    "igdbGenres": [
+     "Shooter"
+    ],
+    "igdbPlatforms": [
+     "XBOX",
+     "PC",
+     "XONE"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Halo 2 is a first-person shooter developed by Bungie and the sequel to Halo: Combat Evolved. The campaign alternates between two playable characters: the human supersoldier Master Chief and the Covenant warrior known as the Arbiter. The game introduced online multiplayer via Xbox Live with an automated matchmaking system, dual-wielding of certain weapons, and vehicle hijacking. It supports both cooperative campaign and competitive multiplayer modes, and was the best-selling game on the original Xbox.",
+    "screenshots": [
+     {
+      "imageId": "ppkhu9pegv8hoabn9y6j",
+      "source": "artwork"
+     },
+     {
+      "imageId": "b17my1yma83aotndxzmt",
+      "source": "artwork"
+     },
+     {
+      "imageId": "fvacs3rdihmf3khuyalg",
+      "source": "artwork"
+     },
+     {
+      "imageId": "ywej5ml7zsj7w5kyezyb",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "The Legend of Heroes: Trails From Zero",
+   "userPlatform": "PC",
+   "ratingRaw": "8.5/10",
+   "yearsAgo": 1,
+   "month": 1,
+   "day": 2,
+   "notes": null,
+   "metadata": {
+    "igdbId": 23322,
+    "coverImageId": "cob8gm",
+    "igdbReleaseDate": "2020-04-23",
+    "igdbDeveloper": "Nihon Falcom",
+    "igdbPublisher": "Nihon Falcom",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Turn-based strategy (TBS)"
+    ],
+    "igdbPlatforms": [
+     "PS4",
+     "Switch 2",
+     "PC",
+     "PS5",
+     "Switch"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "The Legend of Heroes: Trails from Zero is the fourth installment in the main Trails series, serving as a direct sequel to the events of the Liberl arc and the beginning to the Crossbell arc. The game follows Lloyd Bannings and his colleagues Elie MacDowell, Randy Orlando, and Tio Plato. The four form the Special Support Section, a newly formed department of the Crossbell police in a city-state located between two great powers fighting for control over it.",
+    "screenshots": [
+     {
+      "imageId": "sccwaw",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sccwax",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sccway",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sccwaz",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Black Myth Wukong",
+   "userPlatform": "Switch",
+   "ratingRaw": "9.5/10",
+   "yearsAgo": 1,
+   "month": 2,
+   "day": 21,
+   "notes": null,
+   "metadata": {
+    "igdbId": 136879,
+    "coverImageId": "co8h3y",
+    "igdbReleaseDate": "2024-08-20",
+    "igdbDeveloper": "Game Science",
+    "igdbPublisher": "Game Science",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Hack and slash/Beat 'em up",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "PC",
+     "PS5"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Black Myth: Wukong is an action role-playing game developed by Game Science, inspired by the classical Chinese novel Journey to the West. Players control the Destined One, a staff-wielding monkey protagonist, through mostly linear levels interspersed with expansive areas. The game features Soulslike elements, a flexible skill system, and boss encounters of varying intensity. It was the first installment in the Black Myth series and is widely regarded as the first AAA game from the Chinese video game industry.",
+    "screenshots": [
+     {
+      "imageId": "sc8i9c",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc8i9d",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc8i9e",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc8i9f",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Call Of Duty: Vanguard",
+   "userPlatform": "PC",
+   "ratingRaw": "6/10",
+   "yearsAgo": 1,
+   "month": 1,
+   "day": 22,
+   "notes": "Too many side quests; did most of them anyway.",
+   "metadata": {
+    "igdbId": 165067,
+    "coverImageId": "co3kq8",
+    "igdbReleaseDate": "2021-11-05",
+    "igdbDeveloper": "Sledgehammer Games",
+    "igdbPublisher": "Activision",
+    "igdbGenres": [
+     "Shooter"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "PS4",
+     "PC",
+     "PS5",
+     "XONE"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "This is WWII combat like never before. Witness the origins of Special Forces as you play a pivotal role and change the face of history, forming Task Force One in a gripping Campaign across four major theaters of war. Become an original Special Forces Operator in an online Multiplayer rich in innovation with 20 maps available at launch. Prepare for a franchise-first, universe-expanding Zombies crossover. Immerse yourself in a fully integrated Call of Duty: Warzone experience featuring a new and massive map. This is the most connected Call of Duty ever, all powered by the next generation Call of Duty engine introduced in Modern Warfare.\n\nThis is Call of Duty: Vanguard.",
+    "screenshots": [
+     {
+      "imageId": "sccqto",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sccqtp",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sccqtq",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sccqtl",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "God of War",
+   "userPlatform": "PS5",
+   "ratingRaw": "8/10",
+   "yearsAgo": 1,
+   "month": 3,
+   "day": 14,
+   "notes": null,
+   "metadata": {
+    "igdbId": 19560,
+    "coverImageId": "cobkt6",
+    "igdbReleaseDate": "2018-04-20",
+    "igdbDeveloper": "SIE Santa Monica Studio",
+    "igdbPublisher": "Sony Interactive Entertainment",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Hack and slash/Beat 'em up",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "PS4",
+     "PC",
+     "PS5"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "God of War is the sequel to God of War III as well as a continuation of the canon God of War chronology. Unlike previous installments, this game focuses on Norse mythology and follows an older and more seasoned Kratos and his son Atreus in the years since the third game. It is in this harsh, unforgiving world that he must fight to survive… and teach his son to do the same.",
+    "screenshots": [
+     {
+      "imageId": "rm35ytrytuka9qkylqyk",
+      "source": "artwork"
+     },
+     {
+      "imageId": "ywrkjcrbeemmb51flsfj",
+      "source": "artwork"
+     },
+     {
+      "imageId": "qseegzssgetrybgbplrv",
+      "source": "artwork"
+     },
+     {
+      "imageId": "jvdoaxza3cawklvof1sl",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Nier: Automata - The End of Yorha Edition",
+   "userPlatform": "PC",
+   "ratingRaw": "8.5/10",
+   "yearsAgo": 1,
+   "month": 9,
+   "day": 12,
+   "notes": null,
+   "metadata": {
+    "igdbId": 206805,
+    "coverImageId": "co5jbj",
+    "igdbReleaseDate": "2022-10-06",
+    "igdbDeveloper": "Square Enix Creative Business Unit II",
+    "igdbPublisher": "Square Enix",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Hack and slash/Beat 'em up",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Switch"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "NieR: Automata tells the story of androids 2B, 9S and A2 and their battle to reclaim the machine-driven dystopia overrun by powerful machines.\n\nThe NieR: Automata - The End of YoRHa Edition includes the game itself and comes packed with DLC and bonus content for the full experience of the award-winning post-apocalyptic action RPG.",
+    "screenshots": [
+     {
+      "imageId": "schmdp",
+      "source": "artwork"
+     },
+     {
+      "imageId": "schmdo",
+      "source": "artwork"
+     },
+     {
+      "imageId": "schmdq",
+      "source": "artwork"
+     },
+     {
+      "imageId": "schmdn",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Watch Dogs Legion: The Bloodline",
+   "userPlatform": "PC",
+   "ratingRaw": "7.5/10",
+   "yearsAgo": 1,
+   "month": 5,
+   "day": 27,
+   "notes": null,
+   "metadata": {
+    "igdbId": 139395,
+    "coverImageId": "co398q",
+    "igdbReleaseDate": "2021-07-06",
+    "igdbDeveloper": "Ubisoft Toronto",
+    "igdbPublisher": "Ubisoft Entertainment",
+    "igdbGenres": [
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Stadia",
+     "Series X|S",
+     "PS4",
+     "PC",
+     "PS5",
+     "XONE"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Vigilante hacker Aiden Pearce is back, and this time he's teaming up with Wrench in a new storyline set before the events of the main game.",
+    "screenshots": [
+     {
+      "imageId": "scahbm",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scahbn",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scahbo",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scahbp",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Assassin's Creed IV Black Flag",
+   "userPlatform": "Switch",
+   "ratingRaw": "7.5/10",
+   "yearsAgo": 1,
+   "month": 11,
+   "day": 6,
+   "notes": null,
+   "metadata": {
+    "igdbId": 1970,
+    "coverImageId": "co4qfn",
+    "igdbReleaseDate": "2013-10-29",
+    "igdbDeveloper": "Ubisoft Montreal",
+    "igdbPublisher": "Ubisoft Entertainment",
+    "igdbGenres": [
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Stadia",
+     "PS3",
+     "PS4",
+     "PC",
+     "WiiU",
+     "X360",
+     "XONE",
+     "Switch"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Assassin’s Creed IV Black Flag begins in 1715, when pirates established a lawless republic in the Caribbean and ruled the land and seas. These outlaws paralyzed navies, halted international trade, and plundered vast fortunes. They threatened the power structures that ruled Europe, inspired the imaginations of millions, and left a legacy that still endures.",
+    "screenshots": [
+     {
+      "imageId": "jejhpngrm1kttpn03lol",
+      "source": "artwork"
+     },
+     {
+      "imageId": "uiaywb4ybnqal47xgska",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sceevg",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sceety",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "God Of War: The Chains Of Olympus",
+   "userPlatform": "Switch",
+   "ratingRaw": "8/10",
+   "yearsAgo": 1,
+   "month": 12,
+   "day": 4,
+   "notes": "Great combat, forgettable story.",
+   "metadata": {
+    "igdbId": 224439,
+    "coverImageId": "co5qi2",
+    "igdbReleaseDate": "2011-09-13",
+    "igdbDeveloper": "Ready At Dawn",
+    "igdbPublisher": "Sony Computer Entertainment",
+    "igdbGenres": [
+     "Hack and slash/Beat 'em up",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "PS3"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "An HD remaster of God of War: Chains of Olympus included in \"God of War: Origins Collection.\" It features high-definition resolution, stereoscopic 3D, anti-aliased graphics locked in at 60 frames per second, DualShock 3 vibration function, and Trophies.\n\nChains of Olympus serves as a prequel, unfolding its narrative a decade before the events in the original God of War. While retaining the familiar gameplay dynamics of its predecessors, subtle modifications enhance the overall experience. Kratos embarks on a journey through various levels, engaging in relentless combat against foes and formidable bosses, deciphering puzzles based on manipulating boxes, and participating in quick-time events. Throughout his odyssey, he amasses red orbs to fortify his weapons and abilities, secures Gorgon eyeballs to augment his health, and acquires Phoenix feathers to amplify his magical prowess.\n\nThe iconic Blades of Chaos, synonymous with the God of War series, make a return, accompanied by an array of new weapons and magical spells such as the Sun Shield, Efreet spell, and Light of Dawn.\n\nThe narrative unfolds as the Gods dispatch Kratos to the city of Attica, charging him with the defence against an encroaching Persian army. However, as Morpheus unleashes chaos, Kratos finds himself compelled to harness his formidable powers to once again rescue the world from impending doom.",
+    "screenshots": [
+     {
+      "imageId": "scplfa",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scplfb",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scplfc",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Resident Evil 3",
+   "userPlatform": "Xbox Series X|S",
+   "ratingRaw": "8/10",
+   "yearsAgo": 1,
+   "month": 4,
+   "day": 14,
+   "notes": null,
+   "metadata": {
+    "igdbId": 115115,
+    "coverImageId": "co22l7",
+    "igdbReleaseDate": "2020-04-03",
+    "igdbDeveloper": "Capcom Development Division 1",
+    "igdbPublisher": "Capcom",
+    "igdbGenres": [
+     "Shooter",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "PS4",
+     "PC",
+     "iOS",
+     "PS5",
+     "Mac",
+     "XONE"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Resident Evil 3 is a remake of the original Resident Evil 3: Nemesis released in 1999. It updates the story and gameplay for a modern audience. Like the Resident Evil 2 remake, the game uses over-the-shoulder third person point of view similar to Resident Evil 4 and later installments. Players will spend most of their time playing as Jill Valentine, although on some occasions they will assume the role of Carlos Oliveira, giving him more screen time as a deuteragonist.",
+    "screenshots": [
+     {
+      "imageId": "scifch",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scifci",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scifcj",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scifck",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Yakuza 4",
+   "userPlatform": "PS5",
+   "ratingRaw": "9.5/10",
+   "yearsAgo": 1,
+   "month": 9,
+   "day": 12,
+   "notes": null,
+   "metadata": {
+    "igdbId": 2062,
+    "coverImageId": "co1w7p",
+    "igdbReleaseDate": "2010-03-08",
+    "igdbDeveloper": "Ryu Ga Gotoku Studios",
+    "igdbPublisher": "Sega",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Simulator",
+     "Sport",
+     "Hack and slash/Beat 'em up",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "PS3"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Yakuza 4 is the fourth game in Sega's crime drama series, known as 'Ryu ga Gotoku' in Japan. As a first for the series, the story is split between the viewpoints of four different protagonists.",
+    "screenshots": [
+     {
+      "imageId": "bkbzvjpbplw1pwm9yfna",
+      "source": "artwork"
+     },
+     {
+      "imageId": "go3gqymf9ztbpr90s7zg",
+      "source": "artwork"
+     },
+     {
+      "imageId": "pgeo8h8ssdjm0r9ajjxz",
+      "source": "artwork"
+     },
+     {
+      "imageId": "ejaz1cp8xe6tjlndvqfj",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Sekiro",
+   "userPlatform": "Xbox Series X|S",
+   "ratingRaw": "9/10",
+   "yearsAgo": 1,
+   "month": 2,
+   "day": 2,
+   "notes": null,
+   "metadata": {
+    "igdbId": 76882,
+    "coverImageId": "co2a23",
+    "igdbReleaseDate": "2019-03-22",
+    "igdbDeveloper": "FromSoftware",
+    "igdbPublisher": "Activision",
+    "igdbGenres": [
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Stadia",
+     "PS4",
+     "PC",
+     "XONE"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Carve your own clever path to vengeance as you come face-to-face with larger than life foes in FromSoftware's dark and twisted adventure set in feudal Japan. Unleash an arsenal of deadly prosthetic tools and ninja abilities, while blending stealth, vertical traversal, and visceral combat. Survive a relentless and bloody confrontation on a quest to restore your honor and save the one you're sworn to protect.",
+    "screenshots": [
+     {
+      "imageId": "smay0rol1vbibwop2t7n",
+      "source": "artwork"
+     },
+     {
+      "imageId": "cmootzhyx1l7scxeihej",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sn1rmqcvrwomyuttaoyq",
+      "source": "artwork"
+     },
+     {
+      "imageId": "ocxemodvr6oa72argpyo",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Resident Evil 2",
+   "userPlatform": "Xbox Series X|S",
+   "ratingRaw": "9/10",
+   "yearsAgo": 1,
+   "month": 3,
+   "day": 9,
+   "notes": null,
+   "metadata": {
+    "igdbId": 347128,
+    "coverImageId": "coaawg",
+    "igdbReleaseDate": "2025-08-19",
+    "igdbDeveloper": "Capcom",
+    "igdbPublisher": "Capcom",
+    "igdbGenres": [
+     "Shooter",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "PS4",
+     "PS5"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "A port of Resident Evil 2, enhanced with up-rendering, rewind, quick save, and custom video filters.\n\nResident Evil 2 is a sequel to the first Resident Evil title. Like the previous game in the series, Resident Evil 2 is a 3D action-adventure using three-dimensional polygon characters over two-dimensional pre-rendered backgrounds, with the action viewed through a variety of cinematic fixed camera angles in each room. Players can choose to play as one of two possible characters; each goes through the same initial scenario but with differences in the type of weaponry they find and the people they meet along the way.",
+    "screenshots": [
+     {
+      "imageId": "sc118oj",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc118oi",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Stellar Blade",
+   "userPlatform": "Xbox Series X|S",
+   "ratingRaw": "9.5/10",
+   "yearsAgo": 1,
+   "month": 4,
+   "day": 24,
+   "notes": "The last act dragged, but the ending landed.",
+   "metadata": {
+    "igdbId": 117170,
+    "coverImageId": "co9s0t",
+    "igdbReleaseDate": "2024-04-26",
+    "igdbDeveloper": "SHIFT UP",
+    "igdbPublisher": "Sony Interactive Entertainment",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Hack and slash/Beat 'em up",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Switch 2",
+     "PC",
+     "PS5"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Stellar Blade is a third-person action-adventure game set on a post-apocalyptic Earth. Players control Eve, an elite soldier deployed from an orbital colony to reclaim the planet from hostile creatures called Naytibas. The combat system emphasizes timing-based parrying and evasion, with skill gauges that unlock powerful attacks and buffs. The game features exploration across ruined environments, side quests from NPC survivors in the last human city of Xion, and a narrative with multiple endings based on player choices.",
+    "screenshots": [
+     {
+      "imageId": "sc6dq3",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc6dq6",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc6dq8",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc6dq4",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Yakuza Kiwami",
+   "userPlatform": "PC",
+   "ratingRaw": "9/10",
+   "yearsAgo": 1,
+   "month": 5,
+   "day": 19,
+   "notes": null,
+   "metadata": {
+    "igdbId": 12595,
+    "coverImageId": "cob1qh",
+    "igdbReleaseDate": "2016-01-21",
+    "igdbDeveloper": "Ryu Ga Gotoku Studios",
+    "igdbPublisher": "Deep Silver",
+    "igdbGenres": [
+     "Fighting",
+     "Role-playing (RPG)",
+     "Hack and slash/Beat 'em up",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "PS3",
+     "PS4",
+     "Switch 2",
+     "PC",
+     "PS5",
+     "XONE",
+     "Switch"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Yakuza: Kiwami is an enhanced remake of the original Yakuza game for PlayStation 2, not just an HD port. While the original PS2 release also had English voice-acting for western release, this PS4 remake only retains Japanese voice-acting for authenticity with available subtitles for other countries.",
+    "screenshots": [
+     {
+      "imageId": "pw559s2tnxnhutpata8c",
+      "source": "artwork"
+     },
+     {
+      "imageId": "lidt4lyow5rzkpafgdoz",
+      "source": "artwork"
+     },
+     {
+      "imageId": "i5kmaw7za1ocuj2chcll",
+      "source": "artwork"
+     },
+     {
+      "imageId": "gcbqkf1rbxvxzcj50vkw",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Shinobi: Art of Vengeance",
+   "userPlatform": "PS5",
+   "ratingRaw": "8/10",
+   "yearsAgo": 1,
+   "month": 1,
+   "day": 2,
+   "notes": null,
+   "metadata": {
+    "igdbId": 279630,
+    "coverImageId": "co9e1j",
+    "igdbReleaseDate": "2025-08-29",
+    "igdbDeveloper": "Lizardcube",
+    "igdbPublisher": "Sega",
+    "igdbGenres": [
+     "Platform",
+     "Hack and slash/Beat 'em up"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "PS4",
+     "Switch 2",
+     "PC",
+     "PS5",
+     "XONE",
+     "Switch"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Slay the enemies in the silence of the moment. Run through the world of Shinobi full of monsters and ninja actions. Grab Oborozuki, the legendary sword, and slay evil once more. Your clan and the world are counting on you.",
+    "screenshots": [
+     {
+      "imageId": "scvbp1",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scvbp2",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scvbp3",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scvbp4",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Gears of War Ultimate Edition",
+   "userPlatform": "PC",
+   "ratingRaw": "9.5/10",
+   "yearsAgo": 1,
+   "month": 3,
+   "day": 6,
+   "notes": null,
+   "metadata": {
+    "igdbId": 16605,
+    "coverImageId": "co246i",
+    "igdbReleaseDate": "2015-08-25",
+    "igdbDeveloper": "Epic Games",
+    "igdbPublisher": "Microsoft Studios",
+    "igdbGenres": [
+     "Shooter"
+    ],
+    "igdbPlatforms": [
+     "PC",
+     "XONE"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Gears of War: Ultimate Edition is a remaster of the original Gears of War game developed by The Coalition and Splash Damage and published by Microsoft Studios for Microsoft's Xbox One console and Windows 10 operating system.\n\nThe game features remastered graphics, textures and sound, while running at native 1080p 30 frames per second in the campaign and 1080p 60 frames per second in multiplayer, and includes the missions and maps from the PC version of the original Gears of War that were absent from the Xbox 360 version of the game.\n\nMore features have been added that include mechanics from newer Gears of War games, such as spotting and switching weapons while roadie running, among others.\nGears of War: Ultimate Edition also supports dedicated servers for both online matchmaking and private matches.",
+    "screenshots": [
+     {
+      "imageId": "vgsbnlbtyzyvczeswlzp",
+      "source": "artwork"
+     },
+     {
+      "imageId": "nvxwf9t6bt5fm2mdelpk",
+      "source": "artwork"
+     },
+     {
+      "imageId": "ipzzs6rg6oztr5lkokvu",
+      "source": "artwork"
+     },
+     {
+      "imageId": "ajwwtom7qevio2yi27jf",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Assassin's Creed Black Flag Resynced",
+   "userPlatform": "PC",
+   "ratingRaw": "6/10",
+   "yearsAgo": 1,
+   "month": 11,
+   "day": 19,
+   "notes": null,
+   "metadata": {
+    "igdbId": 337738,
+    "coverImageId": "cobyue",
+    "igdbReleaseDate": "2026-07-09",
+    "igdbDeveloper": "Ubisoft Singapore",
+    "igdbPublisher": "Ubisoft Entertainment",
+    "igdbGenres": [
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "PC",
+     "PS5"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "The iconic solo pirate adventure returns with Assassin's Creed Black Flag Resynced, launching on July 9, 2026. Sail the Caribbean as Edward Kenway during the Golden Age of Piracy in this faithfully enhanced remake featuring stunning visuals, upgraded gameplay, and new content.",
+    "screenshots": [
+     {
+      "imageId": "sc131ra",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc131rb",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc131rc",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc131rd",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Super Mario Bros",
+   "userPlatform": "Switch",
+   "ratingRaw": "9.5/10",
+   "yearsAgo": 1,
+   "month": 6,
+   "day": 23,
+   "notes": "A comfort game for rainy evenings.",
+   "metadata": {
+    "igdbId": 222095,
+    "coverImageId": "co5k7b",
+    "igdbReleaseDate": "1993-07-14",
+    "igdbDeveloper": "Nintendo Entertainment Analysis & Development",
+    "igdbPublisher": "Nintendo",
+    "igdbGenres": [
+     "Platform"
+    ],
+    "igdbPlatforms": [
+     "SNES",
+     "SFAM"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "A remaster of the original Super Mario Bros., released exclusively as part of the Super Mario All-Stars bundle.",
+    "screenshots": [
+     {
+      "imageId": "scknvq",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scknvr",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scknvs",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Gears of War 4",
+   "userPlatform": "PC",
+   "ratingRaw": "9/10",
+   "yearsAgo": 1,
+   "month": 7,
+   "day": 10,
+   "notes": null,
+   "metadata": {
+    "igdbId": 11186,
+    "coverImageId": "co2y29",
+    "igdbReleaseDate": "2016-10-11",
+    "igdbDeveloper": "The Coalition",
+    "igdbPublisher": "Microsoft Studios",
+    "igdbGenres": [
+     "Shooter"
+    ],
+    "igdbPlatforms": [
+     "PC",
+     "XONE"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "A new saga begins for one of the most acclaimed video game franchises in history. After narrowly escaping an attack on their village, JD Fenix and his friends, Kait and Del, must rescue the ones they love and discover the source of a monstrous new enemy.",
+    "screenshots": [
+     {
+      "imageId": "yvetimucce2onvkfqkzr",
+      "source": "artwork"
+     },
+     {
+      "imageId": "qzwmmwsv2dlgsojbeaud",
+      "source": "artwork"
+     },
+     {
+      "imageId": "beaxxtxy7d3zc7oowvdb",
+      "source": "artwork"
+     },
+     {
+      "imageId": "gpcoovqw1tfqzynptnvw",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Condemned: Criminal Origins",
+   "userPlatform": "PC",
+   "ratingRaw": "6/10",
+   "yearsAgo": 1,
+   "month": 3,
+   "day": 3,
+   "notes": null,
+   "metadata": {
+    "igdbId": 6942,
+    "coverImageId": "co2eis",
+    "igdbReleaseDate": "2005-11-16",
+    "igdbDeveloper": "Monolith Productions",
+    "igdbPublisher": "WB Games",
+    "igdbGenres": [
+     "Shooter",
+     "Puzzle",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "PC",
+     "X360"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Investigate crime scenes, collect evidence, and bring to light the murderers terrorizing the city as Detective Ethan Thomas. With danger lurking around every corner, you’ll need whatever weapons you can find to stay alive.\n\nWhat twists the mind of an ordinary human into a serial killer? Assigned to the Serial Crimes Unit, Agent Ethan Thomas must answer this question, and bring the worst of society to justice. His solve rate is the best in the bureau....perhaps too good.",
+    "screenshots": [
+     {
+      "imageId": "qvzoyztrzz8o7ssypkwd",
+      "source": "artwork"
+     },
+     {
+      "imageId": "hrkwyujkwowzl7jtrgag",
+      "source": "artwork"
+     },
+     {
+      "imageId": "vc7goytbnvg0k04o1tmx",
+      "source": "artwork"
+     },
+     {
+      "imageId": "fejmrvwlemryvhtu8dca",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Dying Light",
+   "userPlatform": "PC",
+   "ratingRaw": "8.5/10",
+   "yearsAgo": 1,
+   "month": 4,
+   "day": 8,
+   "notes": null,
+   "metadata": {
+    "igdbId": 3042,
+    "coverImageId": "co65yq",
+    "igdbReleaseDate": "2015-01-26",
+    "igdbDeveloper": "Techland",
+    "igdbPublisher": "Techland",
+    "igdbGenres": [
+     "Shooter",
+     "Role-playing (RPG)",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "PS4",
+     "Linux",
+     "PC",
+     "PS5",
+     "Mac",
+     "XONE"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Dying Light is a first-person, action survival horror game set in a vast and dangerous open world. During the day, players traverse an expansive urban environment overrun by a vicious outbreak, scavenging the world for supplies and crafting weapons to defend against the growing infected population. At night, the hunter becomes the hunted, as the infected become aggressive and more dangerous. Most frightening are the predators which only appear after sundown. Players must use everything in their power to survive until the morning’s first light.",
+    "screenshots": [
+     {
+      "imageId": "yvstmj75wfqrtz4um8x0",
+      "source": "artwork"
+     },
+     {
+      "imageId": "ldffm3ihtlvoqt9qtrnh",
+      "source": "artwork"
+     },
+     {
+      "imageId": "y3mcevfaze2vqv1qmapj",
+      "source": "artwork"
+     },
+     {
+      "imageId": "uuotpnsbi3rgjcmxqjhl",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "RKGK",
+   "userPlatform": "PC",
+   "ratingRaw": "8/10",
+   "yearsAgo": 1,
+   "month": 1,
+   "day": 28,
+   "notes": null,
+   "metadata": {
+    "igdbId": 296838,
+    "coverImageId": "co82co",
+    "igdbReleaseDate": "2024-05-22",
+    "igdbDeveloper": "Wabisabi Games",
+    "igdbPublisher": "Gearbox Publishing",
+    "igdbGenres": [
+     "Platform",
+     "Adventure",
+     "Indie",
+     "Arcade"
+    ],
+    "igdbPlatforms": [
+     "PC"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Turn heads. Drop jaws. Be bright. In this single-player 3D platformer, you’re the only one who can take down Mr. Buff and his lackies to restore color and life to the citizens of Cap City. Accompany Valah and the RKGK crew on their journey to take down the oppressive B Corp.",
+    "screenshots": [
+     {
+      "imageId": "scruoa",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scruob",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scruoc",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scruod",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Splinter Cell: Blacklist",
+   "userPlatform": "PC",
+   "ratingRaw": "9/10",
+   "yearsAgo": 1,
+   "month": 9,
+   "day": 26,
+   "notes": "Best soundtrack of the year.",
+   "metadata": {
+    "igdbId": 1305,
+    "coverImageId": "co1ygp",
+    "igdbReleaseDate": "2013-08-20",
+    "igdbDeveloper": "Ubisoft Toronto",
+    "igdbPublisher": "Ubisoft Entertainment",
+    "igdbGenres": [
+     "Shooter",
+     "Tactical",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "PS3",
+     "PC",
+     "WiiU",
+     "X360"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Splinter Cell Blacklist builds on the stealth roots of the franchise, while exploring new directions to embrace the realms of action and adventure. Players can define their personal play styles and be rewarded for those choices.\n\nGhost players want to remain undetected.\nAssault players rely on instincts and firepower to deal with a situation.\nPanther players strike lethally from the shadows in the most efficient and silent way.",
+    "screenshots": [
+     {
+      "imageId": "re1tt6hdqt6n3ug4e4st",
+      "source": "artwork"
+     },
+     {
+      "imageId": "oiwciviaur2qfh1lyvnx",
+      "source": "artwork"
+     },
+     {
+      "imageId": "jktwccor8atpqpbtix2j",
+      "source": "artwork"
+     },
+     {
+      "imageId": "eulef9mscldpr58ax1o2",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Ninja Gaiden 2 Black",
+   "userPlatform": "Xbox Series X|S",
+   "ratingRaw": "7.5/10",
+   "yearsAgo": 1,
+   "month": 1,
+   "day": 10,
+   "notes": null,
+   "metadata": {
+    "igdbId": 329132,
+    "coverImageId": "co9b3s",
+    "igdbReleaseDate": "2025-01-23",
+    "igdbDeveloper": "Team NINJA",
+    "igdbPublisher": "Koei Tecmo",
+    "igdbGenres": [
+     "Hack and slash/Beat 'em up",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "PC",
+     "PS5"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Using Unreal Engine 5 to significantly enhance graphic expression, this is the definitive version of \"NINJA GAIDEN 2,\" featuring additional playable characters and enhanced battle support functions.",
+    "screenshots": [
+     {
+      "imageId": "scv57v",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scv57w",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scv57x",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scv57y",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Wolfenstein The New Colossus",
+   "userPlatform": "PC",
+   "ratingRaw": "8/10",
+   "yearsAgo": 1,
+   "month": 3,
+   "day": 11,
+   "notes": null,
+   "metadata": {
+    "igdbId": 36952,
+    "coverImageId": "co21c5",
+    "igdbReleaseDate": "2017-10-26",
+    "igdbDeveloper": "MachineGames",
+    "igdbPublisher": "Bethesda Softworks",
+    "igdbGenres": [
+     "Shooter",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "PS4",
+     "PC",
+     "XONE",
+     "Switch"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Wolfenstein II: The New Colossus is the eleventh installment of the Wolfenstein series and a sequel to the 2014's Wolfenstein: The New Order. The game follows the main protagonist, William Joseph \"B.J.\" Blazkowicz, in his efforts to ignite a Second American Revolution.\n\nThe game is played from a first-person perspective and most of its levels are navigated on foot. The story is arranged in chapters, which players complete in order to progress. A binary choice in the prologue alters the game's entire storyline; some characters and small plot points are replaced throughout the timelines. The game features a variety of weapons, most of which can be dual wielded. A cover system is also present.",
+    "screenshots": [
+     {
+      "imageId": "vpso35dm66hwfanmtvpk",
+      "source": "artwork"
+     },
+     {
+      "imageId": "hs7edr5zhrdvyclst6os",
+      "source": "artwork"
+     },
+     {
+      "imageId": "z7xnj7gsn7jnb7d0sbj5",
+      "source": "artwork"
+     },
+     {
+      "imageId": "o38yjyvnmakxzdgn7bc8",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Elden Ring Nightreign",
+   "userPlatform": "Xbox Series X|S",
+   "ratingRaw": "9/10",
+   "yearsAgo": 0,
+   "month": 4,
+   "day": 10,
+   "notes": null,
+   "metadata": {
+    "igdbId": 325591,
+    "coverImageId": "co95gk",
+    "igdbReleaseDate": "2025-05-30",
+    "igdbDeveloper": "FromSoftware",
+    "igdbPublisher": "Bandai Namco Entertainment",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Hack and slash/Beat 'em up"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "PS4",
+     "PC",
+     "PS5",
+     "XONE"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Elden Ring: Nightreign is a standalone adventure within the ELDEN RING universe, crafted to offer players a new gaming experience by reimagining the game’s core design.",
+    "screenshots": [
+     {
+      "imageId": "scus1u",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scus1v",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scus1w",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scus1x",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Ratchet And Clank: Rift Apart",
+   "userPlatform": "PC",
+   "ratingRaw": "8.5/10",
+   "yearsAgo": 0,
+   "month": 3,
+   "day": 17,
+   "notes": null,
+   "metadata": {
+    "igdbId": 134582,
+    "coverImageId": "co2str",
+    "igdbReleaseDate": "2021-06-11",
+    "igdbDeveloper": "Insomniac Games",
+    "igdbPublisher": "Sony Interactive Entertainment",
+    "igdbGenres": [
+     "Shooter",
+     "Platform",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "PC",
+     "PS5"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Go dimension-hopping with Ratchet and Clank as they take on an evil emperor from another reality. Jump between action-packed worlds and beyond at mind-blowing speeds, complete with dazzling visuals and an insane arsenal.",
+    "screenshots": [
+     {
+      "imageId": "sc8bit",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc8biu",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc8biv",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc8biw",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Onimusha: Way of the Sword",
+   "userPlatform": "PC",
+   "ratingRaw": "7.5/10",
+   "yearsAgo": 0,
+   "month": 2,
+   "day": 15,
+   "notes": "Finally finished it after a long break.",
+   "metadata": {
+    "igdbId": 325602,
+    "coverImageId": "cocdt3",
+    "igdbReleaseDate": "2026-09-04",
+    "igdbDeveloper": "Capcom",
+    "igdbPublisher": "Capcom",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Hack and slash/Beat 'em up",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "Switch 2",
+     "PC",
+     "PS5"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Fight through bloodstained battlefields of intense swordplay action. Explore the historic Japanese capital of Edo-era Kyoto, twisted by malevolent clouds of Malice.\nWith every stage cloaked in mystery, danger and intrigue. Battle against monstrosities from the underworld known as Genma in a tale of dark fantasy.\nFollow the tale of a samurai who wields the Oni Gauntlet, a mystical artifact that grants its bearer the power to slay Genma.\nThrough gritty, blood-soaked brawls, he searches for his reason to fight. What fate awaits at the end of his path?",
+    "screenshots": [
+     {
+      "imageId": "scus45",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scus43",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scus47",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scus44",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Shadow Warrior 3",
+   "userPlatform": "Xbox Series X|S",
+   "ratingRaw": "10/10",
+   "yearsAgo": 0,
+   "month": 5,
+   "day": 27,
+   "notes": null,
+   "metadata": {
+    "igdbId": 135655,
+    "coverImageId": "co45x3",
+    "igdbReleaseDate": "2022-03-01",
+    "igdbDeveloper": "Flying Wild Hog",
+    "igdbPublisher": "Devolver Digital",
+    "igdbGenres": [
+     "Shooter",
+     "Role-playing (RPG)",
+     "Adventure",
+     "Indie",
+     "Arcade"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "PS4",
+     "PC",
+     "PS5",
+     "XONE"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Shadow Warrior 3 launches the offbeat first-person shooter series to the next level with a seamless blend of fast-paced gunplay, razor-sharp melee combat, and a spectacular free-running movement system.",
+    "screenshots": [
+     {
+      "imageId": "sc8eam",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc8ean",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc8eao",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc8eap",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Still Wakes The Deep",
+   "userPlatform": "PC",
+   "ratingRaw": "8.5/10",
+   "yearsAgo": 0,
+   "month": 3,
+   "day": 2,
+   "notes": null,
+   "metadata": {
+    "igdbId": 252837,
+    "coverImageId": "co8dbd",
+    "igdbReleaseDate": "2024-06-18",
+    "igdbDeveloper": "The Chinese Room",
+    "igdbPublisher": "Secret Mode",
+    "igdbGenres": [
+     "Adventure",
+     "Indie"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "PC",
+     "PS5"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "1975. Disaster strikes the Beira D oil rig off the coast of Scotland. Navigate the collapsing rig to save your crew from an otherworldly horror on the edge of all logic and reality.",
+    "screenshots": [
+     {
+      "imageId": "scmwnn",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scmwno",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scmwnp",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scmwnq",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Prince of Persia The Lost Crown",
+   "userPlatform": "PC",
+   "ratingRaw": "9/10",
+   "yearsAgo": 0,
+   "month": 2,
+   "day": 20,
+   "notes": null,
+   "metadata": {
+    "igdbId": 252476,
+    "coverImageId": "co6lli",
+    "igdbReleaseDate": "2024-01-18",
+    "igdbDeveloper": "Ubisoft Montpellier",
+    "igdbPublisher": "Ubisoft Entertainment",
+    "igdbGenres": [
+     "Platform",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Series X|S",
+     "PS4",
+     "PC",
+     "PS5",
+     "Mac",
+     "XONE",
+     "Switch"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Dash into a stylish and thrilling action-adventure platformer set in a mythological Persian world where the boundaries of time and space are yours to manipulate. Play as Sargon and evolve from sword-wielding prodigy to extraordinary legend as you master acrobatic combat and unlock new Time Powers and unique super abilities.",
+    "screenshots": [
+     {
+      "imageId": "scmvmx",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scmxop",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scmxoq",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scmxor",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Demon Souls",
+   "userPlatform": "PC",
+   "ratingRaw": "6/10",
+   "yearsAgo": 0,
+   "month": 4,
+   "day": 1,
+   "notes": null,
+   "metadata": {
+    "igdbId": 134606,
+    "coverImageId": "co2kj9",
+    "igdbReleaseDate": "2020-11-12",
+    "igdbDeveloper": "Bluepoint Games",
+    "igdbPublisher": "Sony Interactive Entertainment",
+    "igdbGenres": [
+     "Role-playing (RPG)",
+     "Hack and slash/Beat 'em up",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "PS5"
+    ],
+    "igdbThemes": [],
+    "igdbGameModes": [],
+    "igdbRating": null,
+    "igdbAggregatedRating": null,
+    "igdbTotalRating": null,
+    "igdbTotalRatingCount": null,
+    "summary": "Entirely rebuilt from the ground up and masterfully enhanced, Demon's Souls is a remake of the 2009 release that introduces the horrors of a fog-laden, dark fantasy land to a whole new generation of gamers. Those who’ve faced its trials and tribulations before, can once again challenge the darkness in stunning visual quality with incredible performance. The remake features improved graphics and animations, sound and lighting tweaks and a reimagining of many of the visual, musical and mechanical aspects of the original game.",
+    "screenshots": [
+     {
+      "imageId": "sc8bl7",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc8bl6",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc8bl8",
+      "source": "artwork"
+     },
+     {
+      "imageId": "sc8bl5",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  },
+  {
+   "title": "Bayonetta 3",
+   "userPlatform": "PS5",
+   "ratingRaw": "7/10",
+   "yearsAgo": 0,
+   "month": 4,
+   "day": 25,
+   "notes": "Came for the art style, stayed for the puzzles.",
+   "metadata": {
+    "igdbId": 76888,
+    "coverImageId": "co4z2i",
+    "igdbReleaseDate": "2022-10-28",
+    "igdbDeveloper": "PlatinumGames",
+    "igdbPublisher": "Nintendo",
+    "igdbGenres": [
+     "Shooter",
+     "Hack and slash/Beat 'em up",
+     "Adventure"
+    ],
+    "igdbPlatforms": [
+     "Switch"
+    ],
+    "igdbThemes": [
+     "Action",
+     "Fantasy"
+    ],
+    "igdbGameModes": [
+     "Single player"
+    ],
+    "igdbRating": 81.5479668070219,
+    "igdbAggregatedRating": 90.25,
+    "igdbTotalRating": 85.89898340351095,
+    "igdbTotalRatingCount": 54,
+    "summary": "You’ve waited long enough. The witch. Is. Back! A new-look Bayonetta returns to battle foes with her signature Witch Time! This time, she’ll wield her new Demon Masquerade ability to channel the power of demons and engage in larger-than-life action.",
+    "screenshots": [
+     {
+      "imageId": "scdrto",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scdrtn",
+      "source": "artwork"
+     },
+     {
+      "imageId": "scdrtp",
+      "source": "artwork"
+     },
+     {
+      "imageId": "pmmovxi7xxjklelbv2ia",
+      "source": "artwork"
+     }
+    ],
+    "matchStatus": "matched"
+   }
+  }
+ ]
+}

@@ -1,0 +1,26 @@
+node_modules/
+dist/
+data/
+coverage/
+.vite/
+
+.env
+.env.*
+!.env.example
+
+*.log
+*.db
+*.db-wal
+*.db-shm
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+.DS_Store
+Thumbs.db
+.node-v22/
+
+# Local packaged-restore input and Windows metadata; contains personal app data.
+/game-release-tracker/
+*.Zone.Identifier

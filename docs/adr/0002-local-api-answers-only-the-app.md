@@ -1,0 +1,3 @@
+# The local backend answers only this app's window
+
+The renderer talks to the backend over HTTP on 127.0.0.1 rather than through Electron IPC, so the same frontend runs in the desktop app, in the browser during development and in tests against a fake client. Any web page or local program can reach a loopback port, so every `/api` request must carry a random token the desktop app creates on each launch and hands only to its own window, and requests whose Host header is not a loopback name are refused (a DNS-rebinding page is turned away). Images and the app shell stay readable without the token because `<img>` tags cannot send headers, and a foreign page can show an image but never read it.

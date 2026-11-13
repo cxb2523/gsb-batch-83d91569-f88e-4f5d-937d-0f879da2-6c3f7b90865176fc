@@ -1,0 +1,4 @@
+# One line ending everywhere; Windows tools handle LF.
+* text=auto eol=lf
+*.ico binary
+*.png binary

@@ -1,0 +1,118 @@
+{
+  "name": "game-release-tracker",
+  "version": "0.7.0",
+  "description": "A desktop app that tracks upcoming game releases and keeps a journal of the games you finish.",
+  "author": "hachi23 (https://github.com/hachi23)",
+  "homepage": "https://github.com/hachi23/game-release-tracker",
+  "desktopName": "game-release-tracker.desktop",
+  "license": "MIT",
+  "private": true,
+  "main": "dist/apps/desktop/src/main.js",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "dev:backend": "tsx apps/backend/src/child.ts",
+    "build": "tsc -p tsconfig.build.json && vite build && node scripts/bundle.mjs",
+    "test": "vitest run",
+    "test:backend": "vitest run tests/backend",
+    "test:frontend": "vitest run tests/frontend",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "rebuild": "electron-rebuild -f -w better-sqlite3",
+    "dist": "npm run build && npm run rebuild && electron-builder",
+    "smoke": "node scripts/smoke-packaged.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "12.11.1"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "4.2.0",
+    "@fontsource/alegreya-sans": "5.3.0",
+    "@fontsource/cinzel": "5.3.0",
+    "@fontsource/cinzel-decorative": "5.3.0",
+    "@fontsource/im-fell-english-sc": "5.3.0",
+    "@fontsource/marcellus": "5.3.0",
+    "@fontsource/pirata-one": "5.3.0",
+    "@fontsource/uncial-antiqua": "5.3.0",
+    "@types/better-sqlite3": "7.6.13",
+    "@types/node": "24.10.1",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.1.1",
+    "electron": "42.11.8",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.27.7",
+    "fastify": "5.12.5",
+    "jsdom": "27.3.0",
+    "react": "19.2.1",
+    "react-dom": "19.2.1",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3",
+    "vite": "7.2.6",
+    "vitest": "4.0.15"
+  },
+  "build": {
+    "appId": "io.github.hachi23.game-release-tracker",
+    "productName": "Game Release Tracker",
+    "asar": true,
+    "electronLanguages": [
+      "en-US"
+    ],
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**"
+    ],
+    "files": [
+      "dist/apps/desktop/src/main.js",
+      "dist/apps/desktop/src/preload.js",
+      "dist/apps/backend/src/child.js",
+      "dist/frontend/**",
+      "data/**",
+      "build/icon.{ico,png}",
+      "package.json",
+      "!node_modules/**",
+      "node_modules/{better-sqlite3,bindings,file-uri-to-path}/**",
+      "!dist/**/*.map",
+      "!**/node_modules/better-sqlite3/{deps,src}/**",
+      "!**/node_modules/better-sqlite3/build/{deps,Release/obj,Release/obj.target,Release/.deps}/**",
+      "!**/node_modules/better-sqlite3/build/Release/{test_extension.node,*.lib,*.exp,*.pdb,*.iobj,*.ipdb}",
+      "!**/node_modules/*/{docs,benchmarks,test,tests}/**"
+    ],
+    "afterPack": "scripts/afterPack.cjs",
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "grantFileProtocolExtraPrivileges": false
+    },
+    "extraMetadata": {
+      "main": "dist/apps/desktop/src/main.js"
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false,
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "category": "Game",
+      "synopsis": "Track upcoming game releases and keep a journal of the games you finish",
+      "maintainer": "hachi23 <88461786+hachi23@users.noreply.github.com>",
+      "syncDesktopName": true,
+      "target": [
+        "AppImage",
+        "deb"
+      ]
+    },
+    "deb": {
+      "packageName": "game-release-tracker"
+    }
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "electron@42.11.8": true,
+    "esbuild@0.27.7": true,
+    "esbuild@0.25.12": true,
+    "electron-winstaller@5.4.0": true
+  }
+}
