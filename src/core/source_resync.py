@@ -10,6 +10,13 @@ este script descarga cada candidato, lo descomprime, calcula el hash al
 estilo RetroAchievements sobre la ROM de adentro, y matchea contra los
 hashes que ya tenemos en Data/TamperMonkeyRetroachievements.json. Lo que no
 matchea queda listado aparte para resolver a mano.
+
+Cada corrida deja ademas un reporte auditable
+(Data/<label>_resync_report.json) con la conclusion de cada candidato:
+"computed" (hasheado en esta corrida), "cached" (hash reusado del cache en
+disco) o "failed" (descarga/descompresion fallo, con razon corta), mas un
+resumen de conteos. Las entradas fallidas del cache se reintentan en la
+corrida siguiente en vez de quedar descartadas para siempre.
 """
 
 import hashlib
@@ -63,13 +70,38 @@ def _get_with_retries(url: str, **kwargs) -> requests.Response:
             last_error = f"error de red ({e})"
         if attempt < MAX_ATTEMPTS:
             time.sleep(1)
-    raise RuntimeError(f"{url}: {last_error} (despues de {MAX_ATTEMPTS} intentos)")
+    # Sin la URL en el mensaje: el caller ya sabe que archivo estaba bajando
+    # y asi el texto sirve directo como razon corta de fallo en el reporte.
+    raise RuntimeError(f"{last_error} (despues de {MAX_ATTEMPTS} intentos)")
+
+
+def _normalize_cache_entry(entry) -> Dict[str, str]:
+    """Normaliza una entrada de cache al formato actual
+    {hash, status, reason}. Admite el formato viejo (filename -> hash en
+    texto plano, "" = fallo) para no perder caches de corridas anteriores."""
+    if isinstance(entry, str):
+        if entry:
+            return {"hash": entry, "status": "ok", "reason": ""}
+        return {"hash": "", "status": "failed", "reason": "fallo registrado en un cache viejo"}
+    return {
+        "hash": entry.get("hash", ""),
+        "status": entry.get("status") or ("ok" if entry.get("hash") else "failed"),
+        "reason": entry.get("reason", ""),
+    }
 
 
 class SourceResync:
     """Orquesta el resync de la fuente de descarga de una consola."""
 
-    def __init__(self, console: str, item: str, label: str = None, header_modulus: int = 8192):
+    def __init__(
+        self,
+        console: str,
+        item: str,
+        label: str = None,
+        header_modulus: int = 8192,
+        data_dir: str = "Data",
+        json_file: str = None,
+    ):
         # `console` puede ser una sola consola o varias separadas por coma
         # (ej: "TurboGrafx-16,PC Engine" -- dos valores distintos de
         # get_console_from_rom_path que en la practica son la misma
@@ -78,12 +110,18 @@ class SourceResync:
         self.item = item
         self.base_url = f"https://archive.org/download/{item}/"
         file_label = (label or self.consoles[0]).lower().replace(" ", "_")
-        self.override_file = f"Data/{file_label}_source_override.json"
-        self.missing_file = f"Data/{file_label}_missing_sources.txt"
+        self.data_dir = data_dir
+        self.json_file = json_file or config.JSON_FILE_PATH
+        self.override_file = os.path.join(data_dir, f"{file_label}_source_override.json")
+        self.missing_file = os.path.join(data_dir, f"{file_label}_missing_sources.txt")
         # Cache de resumen (hash por archivo ya calculado) -- el job puede
         # tardar bastante (un archivo por request a archive.org) y cortarse
         # a mitad de camino, esto evita perder el progreso ya hecho.
-        self.cache_file = f"Data/.{file_label}_hash_cache.json"
+        self.cache_file = os.path.join(data_dir, f".{file_label}_hash_cache.json")
+        # Reporte por archivo: conclusion de ESTA corrida para cada candidato
+        # (nuevo / cache / fallo + razon), para auditar de donde salio cada
+        # hash en vez de quedarse solo con el porcentaje final.
+        self.report_file = os.path.join(data_dir, f"{file_label}_resync_report.json")
         self.header_modulus = header_modulus
 
     # Extensiones de ROM cruda que se hashean directo, sin descomprimir.
@@ -100,32 +138,34 @@ class SourceResync:
             if f.get("name", "").lower().endswith((".zip",) + self.RAW_EXTENSIONS)
         ]
 
-    def _hash_candidate(self, filename: str) -> str | None:
-        """Descarga un archivo del item nuevo y devuelve el hash estilo RA
-        de la ROM. Si es .zip, extrae el archivo mas grande de adentro;
-        si no, hashea el archivo tal cual (ya es la ROM cruda). None si
-        algo sale mal (zip corrupto, vacio, etc. -- se reporta y se sigue)."""
+    def _hash_candidate(self, filename: str) -> Tuple[str, str]:
+        """Descarga un archivo del item nuevo y devuelve (hash estilo RA de
+        la ROM, ""). Si es .zip, extrae el archivo mas grande de adentro;
+        si no, hashea el archivo tal cual (ya es la ROM cruda). Si algo
+        sale mal devuelve ("", razon corta) -- se reporta y se sigue."""
         url = self.base_url + requests.utils.quote(filename, safe="")
         try:
             content = _get_with_retries(url).content
-            if filename.lower().endswith(".zip"):
+        except RuntimeError as e:
+            return "", f"descarga fallo: {e}"
+        if filename.lower().endswith(".zip"):
+            try:
                 with zipfile.ZipFile(io.BytesIO(content)) as zf:
                     infos = [i for i in zf.infolist() if not i.is_dir()]
                     if not infos:
-                        return None
+                        return "", "zip vacio (sin archivos adentro)"
                     largest = max(infos, key=lambda i: i.file_size)
                     rom_bytes = zf.read(largest)
-            else:
-                rom_bytes = content
-        except (RuntimeError, zipfile.BadZipFile) as e:
-            print(f"  [!] {_safe_console_text(filename)}: {e}")
-            return None
-        return _ra_hash(rom_bytes, self.header_modulus)
+            except zipfile.BadZipFile:
+                return "", "zip corrupto o invalido"
+        else:
+            rom_bytes = content
+        return _ra_hash(rom_bytes, self.header_modulus), ""
 
     def _load_our_hashes(self) -> Dict[str, str]:
         """{hash: rom_path} de todas las entradas de las consolas pedidas en
         Data/TamperMonkeyRetroachievements.json."""
-        with open(config.JSON_FILE_PATH, encoding="utf-8") as f:
+        with open(self.json_file, encoding="utf-8") as f:
             data = json.load(f)
         ours: Dict[str, str] = {}
         for game_id, versions in data.items():
@@ -145,43 +185,90 @@ class SourceResync:
         files = self._fetch_item_files()
         print(f"{len(files)} archivos en el item nuevo. Descargando y hasheando...")
 
-        # filename -> hash (o "" si no se pudo hashear), cacheado en disco por
-        # si el job se corta a mitad de camino -- al reiniciar, se saltea lo
-        # que ya esta en el cache en vez de volver a descargar todo.
-        cache: Dict[str, str] = {}
+        # filename -> {hash, status, reason}, cacheado en disco por si el
+        # job se corta a mitad de camino -- al reiniciar, se saltea lo que
+        # ya esta OK en el cache en vez de volver a descargar todo. Las
+        # entradas con status "failed" NO se saltean: se reintentan, porque
+        # un fallo viejo (red caida, archive.org caido) no es definitivo.
+        cache: Dict[str, Dict[str, str]] = {}
         if os.path.exists(self.cache_file):
             with open(self.cache_file, encoding="utf-8") as f:
-                cache = json.load(f)
-            print(f"Retomando desde cache: {len(cache)}/{len(files)} ya hasheados.")
+                cache = {name: _normalize_cache_entry(e) for name, e in json.load(f).items()}
+            cached_ok = sum(1 for e in cache.values() if e["status"] == "ok")
+            cached_failed = len(cache) - cached_ok
+            print(f"Retomando desde cache: {cached_ok} OK, {cached_failed} fallidos a reintentar.")
+
+        # Conclusion de ESTA corrida por archivo: "computed" (hasheado
+        # ahora), "cached" (salio del cache) o "failed" (con razon corta).
+        report: Dict[str, Dict[str, str]] = {}
 
         for i, (filename, _size) in enumerate(files, start=1):
-            if filename in cache:
+            entry = cache.get(filename)
+            if entry and entry["status"] == "ok":
+                report[filename] = {"status": "cached", "hash": entry["hash"], "reason": ""}
                 continue
-            print(f"[{i}/{len(files)}] {_safe_console_text(filename)}")
-            h = self._hash_candidate(filename) or ""
-            cache[filename] = h
+            if entry:
+                print(f"[{i}/{len(files)}] {_safe_console_text(filename)} (reintento: {entry['reason']})")
+            else:
+                print(f"[{i}/{len(files)}] {_safe_console_text(filename)}")
+            h, reason = self._hash_candidate(filename)
+            if h:
+                cache[filename] = {"hash": h, "status": "ok", "reason": ""}
+                report[filename] = {"status": "computed", "hash": h, "reason": ""}
+            else:
+                print(f"  [!] {_safe_console_text(filename)}: {reason}")
+                cache[filename] = {"hash": "", "status": "failed", "reason": reason}
+                report[filename] = {"status": "failed", "hash": "", "reason": reason}
             if i % 20 == 0:
-                with open(self.cache_file, "w", encoding="utf-8") as f:
-                    json.dump(cache, f)
+                self._save_cache(cache)
 
+        self._save_cache(cache)
+
+        summary = self.write_outputs(cache, our_hashes, partial=False)
+        summary["computed"] = sum(1 for r in report.values() if r["status"] == "computed")
+        summary["cached"] = sum(1 for r in report.values() if r["status"] == "cached")
+        summary["failed"] = sum(1 for r in report.values() if r["status"] == "failed")
+        self._write_report(report, summary)
+
+    def _save_cache(self, cache: Dict[str, Dict[str, str]]):
+        os.makedirs(self.data_dir, exist_ok=True)
         with open(self.cache_file, "w", encoding="utf-8") as f:
-            json.dump(cache, f)
+            json.dump(cache, f, sort_keys=True)
 
-        self.write_outputs(cache, our_hashes, partial=False)
+    def _write_report(self, report: Dict[str, Dict[str, str]], summary: Dict[str, int]):
+        """Escribe el reporte auditable de la corrida: la conclusion de cada
+        candidato (nuevo / cache / fallo + razon) y el resumen de conteos."""
+        os.makedirs(self.data_dir, exist_ok=True)
+        payload = {
+            "item": self.item,
+            "consoles": self.consoles,
+            "summary": summary,
+            "files": {name: report[name] for name in sorted(report)},
+        }
+        with open(self.report_file, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+        print("\nResumen de la corrida:")
+        print(f"  Hasheados nuevos:     {summary['computed']}")
+        print(f"  Reusados del cache:   {summary['cached']}")
+        print(f"  Fallidos:             {summary['failed']}")
+        print(f"  Hashes con match:     {summary['matched']}/{summary['total']}")
+        print(f"  Faltantes:            {summary['missing']}")
+        print(f"Reporte por archivo: {self.report_file}")
 
-    def write_outputs(self, cache: Dict[str, str], our_hashes: Dict[str, str] = None, partial: bool = True):
+    def write_outputs(self, cache: Dict[str, Dict[str, str]], our_hashes: Dict[str, str] = None, partial: bool = True):
         """Arma override_file/missing_file a partir de lo que haya en el
         cache en este momento. Se puede llamar con un cache a medio
         terminar (partial=True) para tener un preview mientras el resync
         completo sigue corriendo -- se reescribe igual al final con el
-        cache completo."""
+        cache completo. Devuelve el resumen {total, matched, missing}."""
         if our_hashes is None:
             our_hashes = self._load_our_hashes()
 
         new_hash_to_filename: Dict[str, str] = {}
-        for filename, h in cache.items():
-            if h:
-                new_hash_to_filename[h.upper()] = filename
+        for filename, entry in cache.items():
+            entry = _normalize_cache_entry(entry)
+            if entry["status"] == "ok" and entry["hash"]:
+                new_hash_to_filename[entry["hash"].upper()] = filename
 
         override: Dict[str, str] = {}
         missing: List[Tuple[str, str, str]] = []  # (nombre, rom_path, hash)
@@ -192,7 +279,7 @@ class SourceResync:
             else:
                 missing.append((extract_game_name(rom_path), rom_path, hash_value))
 
-        os.makedirs("Data", exist_ok=True)
+        os.makedirs(self.data_dir, exist_ok=True)
         with open(self.override_file, "w", encoding="utf-8") as f:
             json.dump(override, f, ensure_ascii=False, indent=2, sort_keys=True)
 
@@ -209,6 +296,7 @@ class SourceResync:
         print(f"Override: {self.override_file}")
         partial_note = " -- incluye lo todavia no hasheado" if partial else ""
         print(f"Faltantes: {self.missing_file} ({len(missing)}{partial_note})")
+        return {"total": total, "matched": matched, "missing": len(missing)}
 
 
 if __name__ == "__main__":
