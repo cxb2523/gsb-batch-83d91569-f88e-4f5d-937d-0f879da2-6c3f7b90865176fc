@@ -225,13 +225,214 @@ def scroll_until_settled(count: Callable[[str], int],
         logger.info("scroll round %d: %d cards, height %s, stable %d",
                     i, found, height, stable)
         prev = (found, height)
-        if stable >= stable_rounds and found >= MIN_CARD_MATCHES:
+        if stable >= stable_rounds and found > 0:
+            # `found > 0`, not `found >= MIN_CARD_MATCHES`, and the difference
+            # is a real page kind rather than a hypothetical. The last page of
+            # a listing legitimately holds two or three products; a settle
+            # rule that demanded four would keep scrolling it until the round
+            # budget ran out and then declare its row count a FLOOR — a false
+            # "partial" warning on a page that had simply reached the end of
+            # the catalogue. Readiness still uses MIN_CARD_MATCHES (waiting
+            # for the first batch), but the settle rule only has to know that
+            # SOMETHING painted and then held still.
             return {"settled": True, "rounds": i + 1, "cards": found,
                     "height": height, "counts": seen_counts}
         scroll_to_bottom()
     return {"settled": False, "rounds": len(seen_counts),
             "cards": prev[0] if prev else 0,
             "height": prev[1] if prev else None, "counts": seen_counts}
+
+
+# ---------------------------------------------------------------------------
+# Per-page conclusions
+# ---------------------------------------------------------------------------
+# "How many rows did this run get" is not "how much of each page did it see".
+# Tokopedia hydrates a listing 60 tiles at a time while the scroll runs, so a
+# page whose round budget ran out holds a FLOOR — and a floor read beside a
+# settled page's count is two different kinds of number wearing one label.
+# That distinction used to live only in the scroll trace and in warning lines;
+# it now goes into the run metadata as one entry per page, so a consumer can
+# audit every page instead of trusting the run's total.
+#
+# The bar for "thin". Tokopedia's page size is steady — 60 tiles per category
+# page on both pages captured — so a page holding materially less than the
+# fullest page of the SAME run is what a truncated response or a half-painted
+# grid looks like. It is deliberately applied to neither of two cases:
+#
+#   * the LAST page of a listing, which is short because the catalogue ran
+#     out. Flagging it would warn on every healthy run, and a warning that
+#     fires on every healthy run teaches the reader to ignore it;
+#   * an UNSETTLED page, whose row count is already declared a floor. Calling
+#     a floor "thin" would blame the read for a scroll budget that ran out,
+#     and the two states must stay distinguishable.
+THIN_PAGE_SHARE = 0.6
+
+
+def page_conclusion(page_num: int, rows: int,
+                    scroll: Optional[dict] = None, *,
+                    fullest: int = 0, last_page: bool = False,
+                    thin_reference: Optional[int] = None) -> dict:
+    """One page's collection conclusion, for `<out>.meta.json`.
+
+    `scroll` is what `scroll_until_settled` returned for this page, or None
+    when the page was never scrolled (a listing page that came back EMPTY —
+    one page past the end — has nothing to scroll).
+
+    `fullest` is the largest row count among the pages this run obtained —
+    the literal "fullest page in this run" — and `share_of_fullest_page` is
+    `rows / fullest`. 0 means there is nothing to compare against and the
+    share is None.
+
+    `thin_reference` is the yardstick the THIN verdict uses, and it is a
+    different number on purpose. It is the fullest page whose count is a
+    COUNT (settled) and which is not the last page. Measuring against an
+    unsettled page's lower bound would let that floor declare every settled
+    page thin — inverting the finding, since the problem is the page that
+    stopped short. None falls back to `fullest`.
+
+    The `conclusion` field is the verdict a consumer branches on:
+
+        settled   the scroll settled, and the row count is the page's count
+        floor     the round budget ran out while the grid was still growing:
+                  the row count is a LOWER BOUND, not the page's catalogue
+        thin      settled, not the last page, and materially below its
+                  siblings — a truncated response or a half-painted grid
+        empty     no rows, and that is the page's real answer (past the end)
+        unscrolled no scroll was run for a non-empty page; reported honestly
+                  rather than guessed at
+
+    `rows_are_floor` is the explicit flag for the one case that must never be
+    read as a count: it is True only when the scroll did not settle.
+    """
+    settled = None if scroll is None else scroll.get("settled")
+    rounds = None if scroll is None else scroll.get("rounds")
+    share = (float(rows) / fullest) if fullest else None
+    yardstick = fullest if thin_reference is None else thin_reference
+    result = {
+        "page": page_num,
+        "rows": rows,
+        "scroll_rounds": rounds,
+        "scroll_settled": settled,
+        "share_of_fullest_page": round(share, 3) if share is not None else None,
+        "rows_are_floor": False,
+        "thin": False,
+        "last_page": bool(last_page),
+        "conclusion": "unscrolled",
+    }
+    if settled is False:
+        result["rows_are_floor"] = True
+        result["conclusion"] = "floor"
+        result["note"] = ("rows are a LOWER BOUND, not the page's catalogue: "
+                          "the grid was still growing when the scroll round "
+                          "budget ran out")
+    elif rows == 0:
+        result["conclusion"] = "empty"
+    elif last_page:
+        # Short by design: the catalogue ended here. Settled and normal.
+        result["conclusion"] = "settled"
+    elif yardstick and rows < THIN_PAGE_SHARE * yardstick:
+        result["thin"] = True
+        result["conclusion"] = "thin"
+    elif settled is True:
+        result["conclusion"] = "settled"
+    return result
+
+
+def scroll_stop_reason(floor_pages) -> Optional[str]:
+    """The stop reason naming which page(s) the scroll left unconverged.
+
+    A run holding an unsettled page is NOT a complete view, and the reason has
+    to say which page, because "scroll_not_settled" alone sends the reader
+    back through the sidecar to find out where. Kept as a string in the
+    engine's existing `stop_reason` vocabulary rather than as a new field, so
+    a consumer that already branches on `stop_reason` sees a value it treats
+    as partial without learning a second key.
+    """
+    pages = sorted(int(p) for p in floor_pages)
+    if not pages:
+        return None
+    if len(pages) == 1:
+        return "scroll_not_settled_page_%d" % pages[0]
+    return "scroll_not_settled_pages_" + "_".join(str(p) for p in pages)
+
+
+def summarize_listing(pages) -> dict:
+    """Per-page conclusions plus the run-level verdict for a listing run.
+
+    `pages` is a sequence of dicts, one per page ATTEMPTED:
+
+        page    int        page number
+        rows    int        rows the parser produced from that page
+        ok      bool       whether the page was obtained (not blocked, not
+                           a load failure, not content-not-obtained)
+        scroll  dict|None  what scroll_until_settled returned
+
+    Only OK pages get a conclusion — a page that was never obtained has no
+    row count to characterise, and folding it in here would let a failed
+    fetch borrow the vocabulary of a successful-but-short one. Failed pages
+    are already named in `pages_failed`.
+
+    Returned keys:
+
+        pages            {page_num: conclusion} for every OK page
+        fullest_page     the page with the most rows, or None
+        fullest_rows     that page's row count (0 when there are no OK pages)
+        floor_pages      sorted pages whose rows are a lower bound
+        thin_pages       sorted settled pages materially below the fullest
+        all_settled      True when no page's scroll was left unconverged
+        stop_reason      scroll_stop_reason(floor_pages), or None
+
+    Pure: no browser, no I/O, no logging. The engine decides what to do with
+    the verdict; this decides what the evidence says.
+    """
+    ok_pages = sorted((p for p in pages if p.get("ok")),
+                      key=lambda p: p["page"])
+    # TWO references, and the difference between them is the point:
+    #
+    #   fullest    the literal fullest page this run obtained — what
+    #              `share_of_fullest_page` is measured against, so a consumer
+    #              reading the field sees the same denominator the sentence
+    #              "this page's share of the fullest page" promises;
+    #   thin_ref   the yardstick the THIN verdict uses: only pages whose count
+    #              is a COUNT, i.e. settled. Measuring against an unsettled
+    #              page's lower bound would let that floor declare every
+    #              settled page thin, inverting the finding.
+    #
+    # The LAST page stays eligible as the yardstick on purpose. Its own
+    # shortness is excused (a settled last page is never flagged), but if it
+    # happens to be the fullest page then an interior page at 3% of it is
+    # genuinely thin, and dropping the last page from the reference would
+    # hide exactly that case.
+    fullest = max((int(p["rows"]) for p in ok_pages), default=0)
+    last = ok_pages[-1]["page"] if ok_pages else None
+    thin_ref = max((int(p["rows"]) for p in ok_pages
+                    if (p.get("scroll") or {}).get("settled") is not False),
+                   default=0)
+    fullest_page = None
+    for p in ok_pages:                      # page order on a tie
+        if int(p["rows"]) == fullest:
+            fullest_page = p["page"]
+            break
+
+    conclusions = {}
+    for p in ok_pages:
+        conclusions[p["page"]] = page_conclusion(
+            p["page"], int(p["rows"]), p.get("scroll"),
+            fullest=fullest, last_page=(p["page"] == last),
+            thin_reference=thin_ref)
+
+    floor_pages = sorted(n for n, c in conclusions.items()
+                         if c["rows_are_floor"])
+    thin_pages = sorted(n for n, c in conclusions.items() if c["thin"])
+    return {
+        "pages": conclusions,
+        "fullest_page": fullest_page,
+        "fullest_rows": fullest,
+        "floor_pages": floor_pages,
+        "thin_pages": thin_pages,
+        "all_settled": not floor_pages,
+        "stop_reason": scroll_stop_reason(floor_pages),
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -1662,9 +1662,23 @@ def test_no_capture_leaks():
     names = [k for k, v in sorted(globals().items())
              if k.endswith("_FIXTURE") and isinstance(v, str)]
     fixtures = "\n".join(globals()[k] for k in names)
+    # ...AND the fixture FILES on disk. The in-memory captures above are
+    # scanned by name; a regenerated file under tests/fixtures/ would not be,
+    # and "the scan does not cover the one directory it was added for" is the
+    # same silent-hole defect the non-empty assertion below exists to stop.
+    fix_root = os.path.join(REPO_ROOT, "tests", "fixtures")
+    fix_files = []
+    for dirpath, _, filenames in os.walk(fix_root):
+        for fn in sorted(filenames):
+            if fn.endswith(".html"):
+                fix_files.append(os.path.join(dirpath, fn))
+    fixtures += "\n" + "\n".join(
+        open(p, encoding="utf-8").read() for p in fix_files)
     ok &= check("the privacy checks below have fixtures to scan "
-                "(%d fixtures, %d chars)" % (len(names), len(fixtures)),
-                len(names) >= 3 and len(fixtures) > 30000)
+                "(%d fixtures, %d files, %d chars)"
+                % (len(names), len(fix_files), len(fixtures)),
+                len(names) >= 3 and len(fix_files) >= 3
+                and len(fixtures) > 30000)
     # Guarded with PATTERNS rather than with the literals a previous capture
     # happened to contain, so the NEXT capture is checked too. On a sibling
     # site (mediamarkt-scraper) the pages embed a front-end configuration blob — a Sentry DSN, a Woosmap
@@ -2575,6 +2589,15 @@ def test_engines(skips):
         ok &= check("%s names the scroll operations, and passes no JS to "
                     "page_flow" % name,
                     "page_height" in src and "scroll_to_bottom" in src)
+        # The PER-PAGE CONCLUSION is shared for the same reason as the scroll
+        # itself: the sidecar field, the thin warning and the run status have
+        # to agree, and three hand-rolled copies of "is this page a floor"
+        # would drift silently. Every engine must reach the shared verdict and
+        # must not carry its own thin-page threshold.
+        ok &= check("%s takes the per-page conclusion from page_flow" % name,
+                    "page_flow.summarize_listing" in src)
+        ok &= check("%s does not carry its own thin-page threshold" % name,
+                    "THIN_PAGE_SHARE = page_flow.THIN_PAGE_SHARE" in src)
         # "Not painted yet" is not a fault, and every engine has to make that
         # distinction the same way — the first live search run of the
         # Playwright engine reported 0 rows and exit 4 because it did not.
@@ -3300,7 +3323,13 @@ def _probe_args(out, mode="listing", **over):
         delay=0.0, proxy_block_retries=2, out=out, dump_html=None,
         twocaptcha_key="stub-never-sent", captcha_api="v2", min_score=0.7,
         solve_captcha="always", category=None, format="json",
-        allow_empty=False)
+        allow_empty=False,
+        # Everything scrape()/proxy_pool_from_args reads on the sequential
+        # path. Defaults match the shipped CLI so a probe never depends on a
+        # flag the real parser would have supplied.
+        concurrency=1, headless=True, locale="id-ID", fingerprint=False,
+        fp_tags="Windows", fp_country=None, cdp_endpoint=None, proxy=None,
+        proxy_file=None, proxy_rotate="per-run", proxy_shuffle=False)
     a.__dict__.update(over)
     return a
 
@@ -3464,6 +3493,376 @@ def test_engine_fetch_loop_is_driven():
                     "'complete' sidecar (got %s, %r)" % (rc, meta.get("status")),
                     rc == EXIT_NO_PRODUCTS and meta.get("status") == "complete"
                     and meta.get("products") == 0)
+    return ok
+
+
+def test_listing_page_conclusions():
+    group("listing page conclusions reach the run metadata (offline fixtures)")
+    ok = True
+
+    # THE POLICY, in isolation first. Three shapes that must stay distinct:
+    # every page settled; one page whose scroll never converged; a run whose
+    # only short page is the LAST one.
+    settled_scroll = {"settled": True, "rounds": 5, "cards": 6, "height": 900}
+    growing_scroll = {"settled": False, "rounds": 24, "cards": 40,
+                      "height": 5000}
+
+    all_settled = page_flow.summarize_listing([
+        {"page": 1, "rows": 6, "ok": True, "scroll": settled_scroll},
+        {"page": 2, "rows": 6, "ok": True, "scroll": settled_scroll},
+        {"page": 3, "rows": 2, "ok": True, "scroll": settled_scroll},
+    ])
+    ok &= check("all-settled run: every page is marked settled",
+                all(c["conclusion"] == "settled"
+                    for c in all_settled["pages"].values()))
+    ok &= check("all-settled run: no page is a floor",
+                all_settled["floor_pages"] == []
+                and all_settled["all_settled"])
+    ok &= check("all-settled run: no stop_reason override",
+                all_settled["stop_reason"] is None)
+    ok &= check("the LAST page being short is NOT thin",
+                all_settled["thin_pages"] == []
+                and all_settled["pages"][3]["last_page"])
+
+    one_growing = page_flow.summarize_listing([
+        {"page": 1, "rows": 6, "ok": True, "scroll": settled_scroll},
+        {"page": 2, "rows": 40, "ok": True, "scroll": growing_scroll},
+    ])
+    ok &= check("an unconverged page is marked a floor",
+                one_growing["pages"][2]["rows_are_floor"]
+                and one_growing["pages"][2]["conclusion"] == "floor")
+    ok &= check("...and its note says the row count is a lower bound",
+                "LOWER BOUND" in one_growing["pages"][2]["note"])
+    ok &= check("...and it is named in the run's floor_pages",
+                one_growing["floor_pages"] == [2])
+    ok &= check("a floor page is NOT also reported thin (the states must not "
+                "blur)", one_growing["thin_pages"] == [])
+    ok &= check("the stop_reason names the unconverged page",
+                one_growing["stop_reason"] == "scroll_not_settled_page_2")
+    # The SHARE is literal — rows / the fullest page this run obtained — so
+    # that a consumer reading the field gets the denominator it names.
+    ok &= check("share_of_fullest_page is measured against the literal "
+                "fullest page",
+                one_growing["fullest_page"] == 2
+                and one_growing["pages"][1]["share_of_fullest_page"] == 0.15)
+    # ...but the floor page is never the yardstick for the THIN verdict, or
+    # its lower bound would declare the settled page thin and invert the
+    # finding.
+    ok &= check("an unconverged page is never the thin-reference: the "
+                "settled page is not called thin",
+                one_growing["thin_pages"] == [])
+
+    multi = page_flow.summarize_listing([
+        {"page": 1, "rows": 6, "ok": True, "scroll": settled_scroll},
+        {"page": 2, "rows": 40, "ok": True, "scroll": growing_scroll},
+        {"page": 3, "rows": 40, "ok": True, "scroll": growing_scroll},
+    ])
+    ok &= check("several unconverged pages are all named",
+                multi["stop_reason"] == "scroll_not_settled_pages_2_3")
+
+    middle_short = page_flow.summarize_listing([
+        {"page": 1, "rows": 6, "ok": True, "scroll": settled_scroll},
+        {"page": 2, "rows": 2, "ok": True, "scroll": settled_scroll},
+        {"page": 3, "rows": 6, "ok": True, "scroll": settled_scroll},
+    ])
+    ok &= check("a short page that is NOT last IS thin",
+                middle_short["thin_pages"] == [2]
+                and middle_short["pages"][2]["conclusion"] == "thin")
+    ok &= check("...and it is not called a floor",
+                not middle_short["pages"][2]["rows_are_floor"]
+                and middle_short["stop_reason"] is None)
+
+    # The last page's own shortness is excused, NOT its role as a reference:
+    # when the last page is the fullest, an interior page at a sliver of it
+    # must still be caught. Both halves of that rule at once.
+    last_is_fullest = page_flow.summarize_listing([
+        {"page": 1, "rows": 1, "ok": True, "scroll": settled_scroll},
+        {"page": 2, "rows": 40, "ok": True, "scroll": settled_scroll},
+    ])
+    ok &= check("when the last page is the fullest, an interior page IS thin",
+                last_is_fullest["thin_pages"] == [1])
+    ok &= check("...and the fullest (last) page itself is still not thin",
+                last_is_fullest["pages"][2]["thin"] is False)
+
+    # THE END-TO-END PATHS, through the real Playwright engine's scrape()
+    # with only its browser replaced. The fixtures are local HTML; the
+    # scroll is simulated by exposing fewer tiles on each successive count,
+    # which is exactly what Tokopedia's lazy hydration does to the grid.
+    try:
+        import playwright_scraper as eng
+    except ImportError as e:  # pragma: no cover - engine is installed in CI
+        ok &= check("playwright_scraper imports for the listing-conclusion "
+                    "probe (%s)" % e, False)
+        return ok
+
+    fix_dir = os.path.join(REPO_ROOT, "tests", "fixtures", "listing")
+
+    def fixture(name):
+        with open(os.path.join(fix_dir, name), encoding="utf-8") as f:
+            return f.read()
+
+    def repaint(html, painted):
+        """The fixture with only its first `painted` tiles present.
+
+        This is the hydration model: the tiles all exist in the committed
+        page, and the browser sees more of them after each scroll round.
+        """
+        head, rest = html.split("<!--TILES_START-->", 1)
+        tiles, tail = rest.split("<!--TILES_END-->", 1)
+        kept, cursor = [], 0
+        while len(kept) < painted and "<a " in tiles[cursor:]:
+            start = tiles.index("<a ", cursor)
+            end = tiles.index("</a>", start) + len("</a>")
+            kept.append(tiles[start:end])
+            cursor = end
+        return (head + "<!--TILES_START-->" + "\n".join(kept)
+                + "<!--TILES_END-->" + tail)
+
+    class _ListPage:
+        """A fake Playwright page whose painted tile count can grow.
+
+        `growth` is how many more tiles each wait reveals (0 = the page
+        settles immediately); only pages in `growing_pages` grow, so a
+        simulated run can have page 1 settle and page 2 never finish.
+        """
+
+        def __init__(self, pages_html, urls, growth=0, growing_pages=()):
+            self.pages, self.urls = pages_html, urls
+            self.growth = growth
+            self.growing_pages = set(growing_pages)
+            self.index, self.url = 0, urls[0]
+            self.painted = None
+            self.html = pages_html[0]
+
+        def goto(self, url, *a, **kw):
+            self.url = url
+            try:
+                self.index = self.urls.index(url)
+            except ValueError:
+                self.index = min(self.index, len(self.pages) - 1)
+            self.html = self.pages[self.index]
+            page_no = self.index + 1
+            self.painted = (1 if page_no in self.growing_pages else None)
+            import types as _t
+            return _t.SimpleNamespace(status=200)
+
+        def _html(self):
+            if self.painted is None:
+                return self.html
+            return repaint(self.html, self.painted)
+
+        def content(self):
+            return self._html()
+
+        def query_selector_all(self, selector):
+            from bs4 import BeautifulSoup
+            return BeautifulSoup(self._html(), "html.parser").select(selector)
+
+        def evaluate(self, *a, **kw):
+            # `document.body.scrollHeight` grows with the painted tiles, so a
+            # still-hydrating grid keeps a changing height and can never look
+            # settled on height alone. The captcha discovery script asks a
+            # DIFFERENT question through the same call, and answering it with
+            # a number would crash the detector — so anything that is not the
+            # height probe gets "nothing found", which is what this fixture
+            # site would honestly report.
+            probe = a[0] if a else kw.get("script", "")
+            if "scrollHeight" in str(probe):
+                return 1000 + len(self.query_selector_all(
+                    page_flow.READY_SELECTOR_LISTING)) * 100
+            return {"found": False}
+
+        def wait_for_timeout(self, ms):
+            if self.index + 1 in self.growing_pages:
+                self.painted = (self.painted or 1) + self.growth
+
+        def screenshot(self, *a, **kw):
+            return None
+
+        def close(self):
+            return None
+
+    class _ListSession:
+        def __init__(self, page):
+            self.page, self.pool = page, None
+
+        def open(self):
+            return self
+
+        def relaunch(self):
+            return self
+
+        def close(self):
+            return None
+
+    def run_listing(pages_html, urls, growth=0, growing_pages=(),
+                    dump_html=None):
+        """scrape() end to end, with only the browser replaced.
+
+        `_fetch_one_page` is deliberately NOT stubbed: the point of this
+        probe is to exercise the engine's real fetch, scroll, parse and
+        sidecar-writing path. Only the browser and its session are fake.
+        """
+        page = _ListPage(pages_html, urls, growth=growth,
+                         growing_pages=growing_pages)
+        original = (eng.sync_playwright, eng._BrowserSession)
+
+        eng.sync_playwright = lambda: _FakePlaywright()
+        eng._BrowserSession = lambda pw, args, pool, **kw: _ListSession(page)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "run")
+                args = _probe_args(
+                    out, url=urls[0], pages=len(urls), delay=0.0,
+                    retry_delay=0.0, proxy_block_retries=0,
+                    dump_html=(os.path.join(d, "snap") if dump_html else None))
+                with redirect_stdout(io.StringIO()):
+                    rc = eng.scrape(args)
+                meta_path = out + ".meta.json"
+                meta = (json.load(open(meta_path, encoding="utf-8"))
+                        if os.path.exists(meta_path) else None)
+                rows = (json.load(open(out + ".json", encoding="utf-8"))
+                        if os.path.exists(out + ".json") else [])
+                # Sizes captured BEFORE the temp dir is torn down; a list of
+                # paths handed back would be dangling by the time it is read.
+                dumps = sorted(
+                    (n, os.path.getsize(os.path.join(d, n)))
+                    for n in os.listdir(d) if n.startswith("snap"))
+                return rc, meta, rows, dumps
+        finally:
+            (eng.sync_playwright, eng._BrowserSession) = original
+
+    cat = "https://www.tokopedia.com/p/makanan-minuman/minuman/kopi-bubuk"
+
+    def conclusion(meta, n):
+        pages_meta = (meta or {}).get("listing_pages") or {}
+        return pages_meta.get(str(n)) or pages_meta.get(n) or {}
+
+    # PATH 1 — every page settles. The metadata must carry one conclusion
+    # per page, and the run must be COMPLETE.
+    full_a, full_b = fixture("page_full_a.html"), fixture("page_full_b.html")
+    rc, meta, rows, dumps = run_listing([full_a, full_b],
+                                        [cat, cat + "?page=2"])
+    ok &= check("path 1 (all settled): exit 0 (got %s)" % rc, rc == 0)
+    ok &= check("path 1: status is complete (got %r)"
+                % (meta or {}).get("status"),
+                meta is not None and meta.get("status") == "complete")
+    pages_meta = (meta or {}).get("listing_pages") or {}
+    ok &= check("path 1: the sidecar carries a conclusion for EVERY page",
+                sorted(int(p) for p in pages_meta) == [1, 2])
+    ok &= check("path 1: each page records rows, rounds, settled and share",
+                all(isinstance(c.get("rows"), int)
+                    and isinstance(c.get("scroll_rounds"), int)
+                    and c.get("scroll_settled") is True
+                    and c.get("share_of_fullest_page") is not None
+                    for c in pages_meta.values()))
+    ok &= check("path 1: no page is marked a floor or thin",
+                all(not c.get("rows_are_floor") and not c.get("thin")
+                    for c in pages_meta.values()))
+    summary = (meta or {}).get("listing_summary") or {}
+    ok &= check("path 1: the summary says every page settled",
+                summary.get("all_pages_settled") is True
+                and summary.get("floor_pages") == [])
+    ok &= check("path 1: run reported 12 rows", len(rows) == 12)
+
+    # PATH 2 — page 2's grid is still growing when the round budget runs
+    # out. That page must be marked a floor, and the run must NOT report
+    # complete success.
+    growing = fixture("page_still_growing.html")
+    # One tile per round: the fixture holds 60, and the scroll budget is 24
+    # rounds, so the grid is still growing when the budget runs out — which
+    # is the case that must be reported as a floor.
+    rc, meta, rows, dumps = run_listing([full_a, growing],
+                                        [cat, cat + "?page=2"],
+                                        growth=1, growing_pages=(2,),
+                                        dump_html=True)
+    page2 = conclusion(meta, 2)
+    # --dump-html is KEPT alongside the new conclusion: the snapshot the
+    # parser saw is the thing a reader opens to tell a scroll budget problem
+    # from a parsing one. Multi-page runs write one file per page.
+    ok &= check("path 2: --dump-html still writes one snapshot per page",
+                len(dumps) == 2
+                and all(size > 0 for _, size in dumps)
+                and sorted(n for n, _ in dumps)
+                == ["snap.page1", "snap.page2"])
+    ok &= check("path 2 (unconverged scroll): page 2 is marked a floor",
+                page2.get("rows_are_floor") is True
+                and page2.get("conclusion") == "floor")
+    ok &= check("path 2: page 2's note says its rows are a lower bound",
+                "LOWER BOUND" in (page2.get("note") or ""))
+    ok &= check("path 2: status is NOT complete (got %r)"
+                % (meta or {}).get("status"),
+                meta is not None and meta.get("status") == "partial")
+    ok &= check("path 2: stop_reason names the unconverged page (got %r)"
+                % (meta or {}).get("stop_reason"),
+                (meta or {}).get("stop_reason")
+                == "scroll_not_settled_page_2")
+    ok &= check("path 2: exit is the partial code, not a success (got %s)"
+                % rc, rc == EXIT_PARTIAL)
+    ok &= check("path 2: page 1 is still recorded as settled, not tarred "
+                "with page 2's floor",
+                conclusion(meta, 1).get("rows_are_floor") is False)
+
+    # PATH 3 — only the LAST page is short. It must settle, be recorded as
+    # complete, and never be called thin.
+    short_last = fixture("page_last_short.html")
+    rc, meta, rows, dumps = run_listing([full_a, full_b, short_last],
+                                        [cat, cat + "?page=2",
+                                         cat + "?page=3"])
+    ok &= check("path 3 (short last page): exit 0 (got %s)" % rc, rc == 0)
+    ok &= check("path 3: status is complete (got %r)"
+                % (meta or {}).get("status"),
+                meta is not None and meta.get("status") == "complete")
+    last = conclusion(meta, 3)
+    ok &= check("path 3: the short last page settled normally",
+                last.get("scroll_settled") is True
+                and not last.get("rows_are_floor"))
+    ok &= check("path 3: the short last page is NOT thin",
+                last.get("thin") is False
+                and ((meta or {}).get("listing_summary") or {})
+                .get("thin_pages") == [])
+    ok &= check("path 3: the short page's share is still recorded",
+                last.get("share_of_fullest_page") is not None
+                and last.get("share_of_fullest_page") < 1.0)
+
+    # THE EXISTING EXIT CONTRACT IS NOT DISTURBED BY THE NEW CONCLUSIONS.
+    # A page-level verdict must never re-label a whole-run fact: an empty
+    # catalogue is still 4, a refusal is still 3, content never obtained is
+    # still 5. Driven through the real engine where the browser can produce
+    # those states, and through finish_run for the codes themselves.
+    empty_html = page("<div data-ssr=\"productsCategoryL2/L3SSR\"></div>"
+                      "<p>Oops, produk nggak ditemukan</p>")
+    rc, meta, rows, dumps = run_listing([empty_html], [cat])
+    ok &= check("an empty catalogue is still exit 4 (got %s)" % rc,
+                rc == EXIT_NO_PRODUCTS)
+
+    blocked_html = "<html><body><h1>no tokopedia asset here</h1></body></html>"
+    rc, meta, rows, dumps = run_listing([blocked_html], [cat])
+    ok &= check("a refused page is still exit 3 (got %s)" % rc,
+                rc == EXIT_BLOCKED)
+
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "codes")
+        # An unsettled page alongside rows that WERE gathered: partial (6),
+        # never a complete success — but also never exit 4/3/5, which are
+        # statements about the catalogue or the transport.
+        with redirect_stdout(io.StringIO()):
+            rc_partial = finish_run(
+                [Product(sku="1", url="u1")], prefix, "json", False,
+                blocked=False, stop_reason="scroll_not_settled_page_2",
+                pages_requested=2, pages_completed=2,
+                start_url=SEARCH_URL, final_url=SEARCH_URL,
+                extra={"listing_pages": {"1": {"conclusion": "settled"},
+                                         "2": {"conclusion": "floor"}}})
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        ok &= check("a floor-page stop reason is exit 6 and NOT complete "
+                    "(got %s, %r)" % (rc_partial, meta.get("status")),
+                    rc_partial == EXIT_PARTIAL
+                    and meta.get("status") == "partial"
+                    and meta.get("stop_reason") == "scroll_not_settled_page_2")
+        ok &= check("...and the per-page conclusions reach the sidecar",
+                    meta.get("listing_pages", {}).get("2", {})
+                    .get("conclusion") == "floor")
     return ok
 
 
@@ -3640,6 +4039,7 @@ def main() -> int:
     ok &= test_csv_formulas_are_neutralised()
     ok &= test_cdp_failure_hint_names_the_real_cause()
     ok &= test_engine_fetch_loop_is_driven()
+    ok &= test_listing_page_conclusions()
     ok &= test_status_reaches_every_classify_call()
     ok &= test_counting_flags_reject_nonsense()
     ok &= test_no_private_citations()

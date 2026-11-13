@@ -15,6 +15,29 @@ with it, so nobody discovers it from a bill or from a diff.
 
 ### Changed
 
+- **A listing run now records a per-page conclusion in `<out>.meta.json`.**
+  `listing_pages` carries, for every page the run successfully obtained, the
+  page number, the rows parsed, the scroll rounds spent, whether the scroll
+  settled, that page's row count as a share of the fullest settled page, and
+  a `conclusion` (`settled` / `floor` / `thin` / `empty` / `unscrolled`). A
+  `listing_summary` beside it names the floor and thin pages and the
+  effective stop reason. A page whose grid was still growing when the
+  scroll round budget ran out is marked `rows_are_floor: true` with a note
+  saying its count is a lower bound, not the catalogue. The last page of a
+  listing is never called thin. The `scroll` trace, `result_header` and
+  `pages_still_growing` fields and `--dump-html` are unchanged.
+- **An unconverged scroll now makes the run `partial`, not complete.** When
+  any page's scroll ran out of rounds while the grid was still growing,
+  `stop_reason` names the page (`scroll_not_settled_page_2`, or
+  `scroll_not_settled_pages_2_3`) and the run reports `partial` with exit
+  6 instead of `complete` and exit 0. All pages converged keeps the existing
+  "complete" semantics, and empty (4), blocked (3) and content-not-obtained
+  (5) are unchanged.
+- **The scroll settle rule no longer requires four cards.** It now settles
+  on a non-zero, stable count: the last page of a listing legitimately holds
+  two or three products, and the old floor of four kept scrolling it until
+  the round budget ran out and then declared its count a floor. Readiness
+  still waits for the first batch.
 - **The canary now runs weekly** (Tuesdays, 06:41 UTC) as well as on demand,
   through the Scraping Browser API. It had only ever run by hand, and its last
   run (2026-10-15) failed because the endpoint secret was not set; the secret

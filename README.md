@@ -381,6 +381,62 @@ tiles that the parser returned zero rows from (`parser_found_nothing`). The
 last two end a run with rows already gathered as exit 6, never as a
 complete one. `stop_reason` in the sidecar names which.
 
+### Per-page conclusions in `<out>.meta.json`
+
+"How many rows did this run get" is not "how much of each page did it see".
+A listing hydrates 60 tiles at a time while the scroll runs, so a page whose
+scroll round budget ran out holds a **floor**, and a floor read next to a
+settled page's count is two different kinds of number under one label. Each
+page a listing run **successfully obtained** therefore gets its own entry
+under `listing_pages`, keyed by page number:
+
+    "listing_pages": {
+      "2": {
+        "page": 2,
+        "rows": 41,                     # rows the parser got from this page
+        "scroll_rounds": 24,            # rounds the scroll actually spent
+        "scroll_settled": false,        # did the grid stop growing?
+        "share_of_fullest_page": 0.683, # vs the fullest SETTLED page
+        "rows_are_floor": true,         # THE flag to branch on
+        "thin": false,
+        "last_page": false,
+        "conclusion": "floor",
+        "note": "rows are a LOWER BOUND, not the page's catalogue: ..."
+      }
+    }
+
+`conclusion` is the verdict:
+
+| value | meaning |
+|---|---|
+| `settled` | the scroll settled; `rows` is this page's count |
+| `floor` | the round budget ran out while the grid was still growing — `rows` is a **lower bound, not the listing**, and `rows_are_floor` is `true` |
+| `thin` | settled, not the last page, and materially below the fullest settled page — a truncated response or a half-painted grid |
+| `empty` | no rows, and that is the page's real answer (one page past the end) |
+| `unscrolled` | a non-empty page with no scroll trace; reported rather than guessed at |
+
+A run-level `listing_summary` sits beside it: `floor_pages`, `thin_pages`,
+`fullest_page`/`fullest_rows`, `all_pages_settled` and the effective
+`stop_reason`. The older `scroll` trace and `pages_still_growing` are kept
+unchanged.
+
+**Never the last page, never a floor.** The last page of a listing is short
+because the catalogue ended, so it is never called thin — but it can still be
+the yardstick if it happens to be the fullest page, so a genuinely thin
+interior page is not missed. An unconverged page is never the yardstick:
+comparing settled pages against a lower bound would report them as broken
+instead of the page that actually stopped short. `share_of_fullest_page` is
+the literal ratio against the run's fullest page; the `thin` verdict compares
+against the fullest **settled** page.
+
+**An unconverged scroll is not a complete run.** When any page's scroll was
+left unconverged, `status` is `partial`, the exit is **6**, and the
+`stop_reason` names the page — `scroll_not_settled_page_2`, or
+`scroll_not_settled_pages_2_3` for several. When every page converged, the
+existing semantics hold: a run that fetched every requested page is
+`complete` and exits 0. The other exit codes are untouched — an empty
+catalogue is still 4, a refusal still 3, content never obtained still 5.
+
 ---
 
 ## Traps that look like bugs

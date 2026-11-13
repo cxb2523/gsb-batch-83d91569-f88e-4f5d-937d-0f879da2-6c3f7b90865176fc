@@ -88,10 +88,11 @@ ITEM_LINK_SELECTOR = page_flow.READY_SELECTOR_LISTING
 PRICE_FLOOR = {"search": 95, "category": 95}
 
 # A page holding less than this share of the fullest page in the same run is
-# reported as thin. Tokopedia's page size is steady (60 tiles on both
-# category pages captured), but the LAST page of a listing is legitimately
-# short, so the bar stays loose.
-THIN_PAGE_SHARE = 0.6
+# reported as thin. The bar lives in page_flow with the rest of the per-page
+# conclusion policy, so this engine, its sidecar and the run status cannot
+# disagree about which pages are thin. Re-exported here under the name this
+# engine has always used.
+THIN_PAGE_SHARE = page_flow.THIN_PAGE_SHARE
 
 PAGE_LOAD_TIMEOUT = 60
 SCRIPT_TIMEOUT = 30
@@ -964,44 +965,50 @@ def scrape(args) -> int:
     #
     # What is worth warning about is a page that came back materially THIN
     # against its siblings — that is what a truncated response or a
-    # half-painted grid looks like. A page holding less than 60% of the
-    # fullest page is well outside the +-3% spread that the varying page size
-    # accounts for.
+    # half-painted grid looks like. The verdicts themselves are page_flow's,
+    # so the sidecar, the warnings and the run status cannot disagree about
+    # which pages are short, which are floors, or which are simply the end of
+    # the catalogue.
     total_available = next((o.total_available for o in outcomes
                             if o.total_available is not None), None)
-    if args.mode == "listing" and all_rows:
-        counts = [(o.page_num, len(o.products)) for o in outcomes if o.ok]
-        fullest = max((n for _, n in counts), default=0)
-        thin = [(p, n) for p, n in counts
-                if fullest and n < THIN_PAGE_SHARE * fullest]
-        # The LAST page of a listing is legitimately short — the catalogue
-        # simply ran out — so it is excluded unless there are pages after it.
-        last_page = max((p for p, _ in counts), default=0)
-        thin = [(p, n) for p, n in thin if p != last_page]
-        if thin:
+    listing = None
+    if args.mode == "listing":
+        listing = page_flow.summarize_listing([
+            {"page": o.page_num, "rows": len(o.products), "ok": o.ok,
+             "scroll": o.scroll} for o in outcomes])
+        if listing["thin_pages"]:
+            by_page = listing["pages"]
             logger.warning(
                 "Page(s) %s came back much thinner than the fullest page "
                 "(%d rows): %s. A truncated response or a half-painted grid "
                 "looks like this — re-run with --dump-html to check the "
                 "snapshot for those pages.",
-                ", ".join(str(p) for p, _ in thin), fullest,
-                ", ".join("page %d: %d" % (p, n) for p, n in thin))
+                ", ".join(str(p) for p in listing["thin_pages"]),
+                listing["fullest_rows"],
+                ", ".join("page %d: %d" % (p, by_page[p]["rows"])
+                          for p in listing["thin_pages"]))
         if total_available:
             logger.info("This listing holds %d product(s) in total; this run "
                         "took %d (%.1f%%).", total_available, len(all_rows),
                         100.0 * len(all_rows) / total_available)
-
 
     ok_pages = [o for o in outcomes if o.ok]
     failed_pages = [o.page_num for o in outcomes if not o.ok]
     final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
                  if ok_pages else args.url)
 
+    # AN UNCONVERGED SCROLL IS NOT A COMPLETE RUN, whatever the page loop
+    # itself decided. See playwright_scraper.py's copy of this for the full
+    # argument — the decision is shared, so the three engines cannot disagree
+    # about whether a run is whole.
+    if listing and listing["floor_pages"] and not failed_pages:
+        stop_reason = listing["stop_reason"]
+
     # One-per-run context, in the sidecar rather than repeated down a column.
     # Mirrors the other two engines exactly: the seller's own facts in
-    # --mode product, and the scroll trace plus the page's own result header
-    # in --mode listing, because on an infinitely-scrolling site those are
-    # what say how much of the listing the run actually saw.
+    # --mode product, and the scroll trace, the page's result header and the
+    # PER-PAGE conclusion in --mode listing, because on an infinitely-scrolling
+    # site those are what say how much of the listing the run actually saw.
     extra = None
     if args.mode == "product":
         first = next((o for o in outcomes if o.ok and o.shop_facts), None)
@@ -1014,16 +1021,30 @@ def scrape(args) -> int:
     else:
         scrolls = {o.page_num: o.scroll for o in outcomes if o.scroll}
         headers = {o.page_num: o.header for o in outcomes if o.header}
-        unsettled = sorted(n for n, s in scrolls.items()
-                           if s and not s.get("settled"))
-        if scrolls or headers:
-            extra = {"scroll": scrolls, "result_header": headers,
-                     "pages_still_growing": unsettled}
+        unsettled = listing["floor_pages"] if listing else []
+        extra = {
+            "scroll": scrolls,
+            "result_header": headers,
+            "pages_still_growing": unsettled,
+            "listing_pages": listing["pages"] if listing else {},
+            "listing_summary": {
+                "pages_collected": len(ok_pages),
+                "fullest_page": listing["fullest_page"] if listing else None,
+                "fullest_rows": listing["fullest_rows"] if listing else 0,
+                "floor_pages": unsettled,
+                "thin_pages": listing["thin_pages"] if listing else [],
+                "all_pages_settled": (listing["all_settled"]
+                                      if listing else True),
+                "stop_reason": stop_reason,
+            },
+        }
         if unsettled:
             logger.warning(
                 "Page(s) %s were still loading more products when the scroll "
-                "budget ran out, so their row counts are floors rather than "
-                "the listing.", ", ".join(str(n) for n in unsettled))
+                "budget ran out, so their row counts are FLOORS rather than "
+                "the listing — they are marked rows_are_floor in "
+                "listing_pages and this run is not complete success.",
+                ", ".join(str(n) for n in unsettled))
 
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       blocked=blocked, stop_reason=stop_reason,
