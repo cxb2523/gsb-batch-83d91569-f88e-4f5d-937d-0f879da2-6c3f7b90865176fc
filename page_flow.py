@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from product_parser import (SELECTORS, PAGE_CAP, CONCURRENCY_REASON,
                             PAGE_STATES, PAGE_URL_REASON, collection_totals,
@@ -703,6 +703,136 @@ def prices_ran_out(rows, sort: str) -> bool:
     if not rows or not str(sort).startswith("price"):
         return False
     return all(getattr(row, "price", None) is None for row in rows)
+
+
+# ---------------------------------------------------------------------------
+# Per-page records
+# ---------------------------------------------------------------------------
+# ONE run-level `stop_reason` answers "why did this run end" and therefore
+# cannot answer "which page was throttled, which one ran out of cursor, and
+# which one started returning unpriced rows". Those are facts about PAGES,
+# and on a ten-page walk the run-level reason describes only the last one.
+#
+# So the sidecar carries one record per page, and the record's `stop_reason`
+# is the page's own ending:
+#
+#   throttled_then_recovered  the endpoint answered 429/503, this run waited,
+#                             asked the SAME exit again, and the page landed
+#                             WITHOUT ending the walk. A page that recovered
+#                             and then ended the walk carries its ending in
+#                             `stop_reason` and `throttle: recovered` beside
+#                             it, because both facts are true.
+#   throttle_exhausted        the throttle budget ran out and the page failed
+#                             (a FAILED page, never a block — the exit is fine)
+#   cursor_exhausted          the page landed and handed back NO cursor; the
+#                             feed genuinely ended here
+#   listed_items_exhausted    under a price ordering, the cursor's sort key
+#                             went null (`detail: cursor_key_null`) or the page
+#                             carried no priced row at all
+#                             (`detail: page_unpriced`) — the listed items end
+#                             here while the feed itself does not
+#   graphql_error             HTTP 200 carrying an `errors` array
+#   not_json                  HTTP 200 carrying bytes that are not JSON
+#   http_refused              a 4xx/5xx answered instead of content. A 403 is
+#                             a REFUSAL — the endpoint will not serve this
+#                             request — and is reported as a block (exit 3).
+#                             Every other 4xx/5xx is a FAILED page, and says
+#                             so here rather than under `transport_error`: no
+#                             answer at all and an answer of 500 are different
+#                             facts. `http_status` carries the code either way.
+#   transport_error           no HTTP answer at all after --retries attempts
+#                             (status 0, a driver error); `detail` says what
+#   no_new_products           the page landed empty, which ends the feed
+#   page_cap                  the walk stopped at PAGE_CAP
+#   page_limit_reached        the run fetched the --pages it was asked for and
+#                             a live cursor says there is more behind it
+#   parser_found_nothing      page 1 was served and parsed to nothing
+#   page_load_timeout         page 1 never loaded
+#
+# `stop_reason` is null on a page that landed and whose cursor carried the
+# walk on, which is the normal case for every page but the last.
+#
+# The record deliberately carries the THROTTLE WAIT COUNT as its own field,
+# not in the reason text: `--retries` is the transport budget and a throttle
+# wait must never be charged to it (see `THROTTLE_RETRIES`), so a reader can
+# confirm from the record that a page that needed two waits still used the
+# same transport attempt budget as a page that needed none.
+
+
+def stop_page(outcome, reason: Optional[str], detail: Optional[str] = None):
+    """Record why ONE page ended, for the sidecar's per-page list.
+
+    Called by the engines at every point where they decide to stop, so the
+    page record is written from the same branch that sets the run-level
+    reason rather than reconstructed afterwards from a guess.
+
+    LAST CALL WINS, because the call that ended the walk is the one a reader
+    needs. A page can carry two facts at once — page 3 waited out a throttle,
+    landed, and then handed back no cursor — and both stay visible as
+    fields: `throttle: recovered` and `throttle_waits: 1` sit beside an
+    ending of `cursor_exhausted`, and say exactly what happened.
+    `throttled_then_recovered` in `stop_reason` is for the recovery that did
+    NOT end the walk.
+    """
+    outcome.page_stop = reason
+    if detail is not None:
+        outcome.detail = detail
+    return outcome
+
+
+def _source_of_rows(products) -> Optional[str]:
+    for row in products or []:
+        source = getattr(row, "data_source", None)
+        if source:
+            return source
+    return None
+
+
+def page_record(outcome) -> Dict[str, Any]:
+    """One page of a run, as the sidecar records it.
+
+    Every field a reader needs to tell two endings apart that the run-level
+    `stop_reason` collapses into one word: WHICH page, which ROUTE its rows
+    came from, how many rows, whether it succeeded, why this page ended, and
+    how much of it was spent waiting out a throttle.
+    """
+    products = getattr(outcome, "products", None) or []
+    return {
+        "page": getattr(outcome, "page_num", None),
+        "source": (getattr(outcome, "data_source", None)
+                   or _source_of_rows(products)),
+        "rows": len(products),
+        "ok": bool(getattr(outcome, "ok", True)),
+        "stop_reason": getattr(outcome, "page_stop", None),
+        "throttle": getattr(outcome, "throttle", None),
+        "throttle_waits": int(getattr(outcome, "throttle_waits", 0) or 0),
+        "http_status": getattr(outcome, "http_status", None),
+        "detail": getattr(outcome, "detail", None),
+    }
+
+
+def page_records(outcomes) -> List[Dict[str, Any]]:
+    """Every page the run fetched, in PAGE order (never arrival order)."""
+    return [page_record(o) for o in sorted(outcomes, key=lambda o: o.page_num)]
+
+
+def pages_note(outcomes) -> str:
+    """One log line saying what each page did, for a run that walked several."""
+    parts = []
+    for record in page_records(outcomes):
+        state = "ok" if record["ok"] else "FAILED"
+        waits = (f", {record['throttle_waits']} throttle wait(s)"
+                 if record["throttle_waits"] else "")
+        throttle = (f", throttle {record['throttle']}"
+                    if record.get("throttle") else "")
+        reason = (f" — {record['stop_reason']}" if record["stop_reason"]
+                  else "")
+        detail = f" ({record['detail']})" if record["detail"] else ""
+        parts.append(f"page {record['page']} "
+                     f"{record['source'] or 'no rows'} "
+                     f"{record['rows']} row(s) {state}{waits}{throttle}"
+                     f"{reason}{detail}")
+    return "; ".join(parts)
 
 
 def sort_note(sort: str, rows: int, totals: Optional[dict] = None) -> str:

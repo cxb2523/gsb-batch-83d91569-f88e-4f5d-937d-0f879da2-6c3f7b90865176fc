@@ -1298,6 +1298,761 @@ def _engine_flags(name):
     return flags
 
 
+def _page_record_engine_harness():
+    """The fake driver's answers, and the args, one cursor page needs.
+
+    Kept as a function so the per-page-record checks below and any future
+    one drive the SAME page through the SAME shape. `rows=N` builds a real
+    GraphQL body with N distinct items, so the record's `rows` is counted
+    from rows the parser built rather than from a number this harness wrote.
+    """
+    import base64
+
+    def cursor(value):
+        return base64.b64encode(json.dumps(value).encode()).decode()
+
+    def body(rows=1, next_cursor="live", priced=True):
+        items = []
+        for index in range(rows):
+            node = {"id": "id-%d" % index,
+                    "tokenId": str(index + 1),
+                    "name": "#%d" % (index + 1),
+                    "contractAddress": "0x" + "ab" * 20,
+                    "chain": {"identifier": "ethereum"},
+                    "collection": {"slug": "x", "name": "X"}}
+            if priced:
+                node["bestListing"] = {"pricePerItem": {
+                    "token": {"unit": "1.5", "symbol": "ETH"},
+                    "usd": "3000.0"}}
+            items.append(node)
+        feed = {"items": items}
+        feed["nextPageCursor"] = next_cursor
+        return {"status": 200,
+                "text": json.dumps({"data": {"collectionItems": feed}})}
+
+    return cursor, body
+
+def _drive_one_cursor_page(engine, answers, *, retries=1, sort="price",
+                           clock=None):
+    """One page through the engine's real `_graphql_page`, fakes only the driver.
+
+    Returns (outcome, page, slept). `clock` is a list the sleeps are appended
+    to; passing one lets a check assert the throttle wait rather than only
+    that it happened.
+    """
+
+    class _Page:
+        url = "https://opensea.io/collection/x"
+
+        def __init__(self, answers):
+            self.answers, self.calls = list(answers), 0
+
+        def evaluate(self, js, arg=None):
+            self.calls += 1
+            return (self.answers.pop(0) if self.answers else
+                    {"status": 0, "text": "", "error": "no answer scripted"})
+
+    class _Session:
+        def __init__(self, page):
+            self.page = page
+
+    class _Args:
+        mode = "items"
+        collection_slug = "x"
+        limit = 2
+        ranking = "TRENDING"
+        timeframe = "1d"
+        activity = "all"
+        retry_delay = 0.0
+        dump_html = None
+        rank_offset = 1
+
+    a = _Args()
+    a.retries, a.sort = retries, sort
+    slept = []
+    real_sleep = engine.time.sleep
+    engine.time.sleep = slept.append
+    try:
+        page = _Page(answers)
+        outcome = engine._graphql_page(_Session(page), a, None, 2)
+    finally:
+        engine.time.sleep = real_sleep
+    if clock is not None:
+        clock.extend(slept)
+    return outcome, page, slept
+
+
+def test_per_page_records_a_throttle_that_cleared():
+    """429 then 200: the PAGE record says it recovered, and did not spend `--retries`.
+
+    The run-level `stop_reason` cannot distinguish a page that waited out a
+    throttle from one that never saw one; the per-page record is where that
+    lives. And the wait must be charged to the THROTTLE budget (which has
+    its own `THROTTLE_RETRIES`) rather than to `--retries`, which is why the
+    driver is called twice under `--retries 1`.
+    """
+    group("per-page records: throttle recovered")
+    ok = True
+    try:
+        import playwright_scraper as engine
+    except ImportError as exc:
+        print("  SKIP  playwright_scraper could not be imported (%s)" % exc)
+        return ok
+    cursor, body = _page_record_engine_harness()
+
+    # `--retries 1`: a THROTTLE must not consume the transport budget, so a
+    # page that waits and lands still needs only one transport attempt.
+    slept = []
+    outcome, page, _ = _drive_one_cursor_page(
+        engine,
+        [{"status": 429, "retry_after": "2", "text": ""},
+         body(rows=1, next_cursor=cursor([1.5, "id"]))],
+        retries=1, clock=slept)
+
+    record = page_flow.page_record(outcome)
+    ok &= check(record["ok"] is True,
+                "a page that waited out a throttle and landed is a SUCCESS, "
+                "got ok=%r" % (record["ok"],))
+    ok &= check(record["stop_reason"] == "throttled_then_recovered",
+                "the page record should say it recovered from a throttle, "
+                "got %r" % (record["stop_reason"],))
+    ok &= check(record["throttle_waits"] == 1,
+                "the record must count the waits, got %r"
+                % (record["throttle_waits"],))
+    ok &= check(record["throttle"] == "recovered",
+                "the throttle field must say the page recovered, got %r"
+                % (record["throttle"],))
+    ok &= check(record["http_status"] == 200,
+                "the record must carry the status the page finally got, "
+                "got %r" % (record["http_status"],))
+    ok &= check(record["source"] == "graphql",
+                "a cursor page's rows come from the endpoint, got %r"
+                % (record["source"],))
+    ok &= check(page.calls == 2 and slept == [2.0],
+                "the throttle must be retried at the same exit after the "
+                "server's wait: calls=%d sleeps=%r"
+                % (page.calls, slept))
+    ok &= check("throttled_then_recovered"
+                not in output_writer.COMPLETE_STOP_REASONS,
+                "the per-page reason is not a RUN-level stop reason, and "
+                "must not be mistaken for one")
+    return ok
+
+
+def test_per_page_records_a_throttle_that_never_cleared():
+    """429 forever: a FAILED page, and NOT the same thing as a block."""
+    group("per-page records: throttle exhausted")
+    ok = True
+    try:
+        import playwright_scraper as engine
+    except ImportError as exc:
+        print("  SKIP  playwright_scraper could not be imported (%s)" % exc)
+        return ok
+    outcome, page, _ = _drive_one_cursor_page(
+        engine, [{"status": 429, "text": ""}] * 10, retries=2)
+
+    record = page_flow.page_record(outcome)
+    ok &= check(record["ok"] is False,
+                "a page that never cleared its throttle must be a FAILED "
+                "page, got ok=%r" % (record["ok"],))
+    ok &= check(record["stop_reason"] == "throttle_exhausted",
+                "the record should say the throttle budget ran out, got %r"
+                % (record["stop_reason"],))
+    ok &= check(record["throttle_waits"] == page_flow.THROTTLE_RETRIES,
+                "the wait count is the throttle budget, got %r"
+                % (record["throttle_waits"],))
+    ok &= check(outcome.blocked_by is None,
+                "a throttle that never cleared is NOT a block — the exit is "
+                "fine and the rate is not")
+    ok &= check(page.calls == page_flow.THROTTLE_RETRIES + 1,
+                "the page should be asked once more than there are waits, "
+                "got %d call(s)" % page.calls)
+    # The two throttle outcomes must not share a reason: one landed, the
+    # other did not, and a reader deciding whether the row file is short
+    # needs to tell them apart at a glance.
+    ok &= check(record["throttle"] == "exhausted",
+                "the throttle field must say the budget ran out, got %r"
+                % (record["throttle"],))
+    ok &= check(record["http_status"] == 429,
+                "the record must carry the status that was throttling, "
+                "got %r" % (record["http_status"],))
+    return ok
+
+
+def test_per_page_records_a_cursor_that_ended_the_feed():
+    """A page that lands and hands back NO cursor: `cursor_exhausted`."""
+    group("per-page records: cursor exhausted")
+    ok = True
+    try:
+        import playwright_scraper as engine
+    except ImportError as exc:
+        print("  SKIP  playwright_scraper could not be imported (%s)" % exc)
+        return ok
+    cursor, body = _page_record_engine_harness()
+
+    # The endpoint's own answer: a page of rows and `nextPageCursor: null`.
+    outcome, _, _ = _drive_one_cursor_page(engine, [body(rows=1, next_cursor=None)])
+
+    ok &= check(outcome.ok,
+                "a page with rows and no cursor is a SUCCESS")
+    ok &= check(page_flow.cursor_exhausted(outcome.next_cursor),
+                "a null cursor must read as the end of the feed")
+    # The page record's own ending is written by the WALK, because it is the
+    # walk that decides to stop. Here the walk's decision is reproduced
+    # directly, so the record's shape is asserted rather than assumed.
+    page_flow.stop_page(outcome, "cursor_exhausted", detail="no cursor")
+    record = page_flow.page_record(outcome)
+    ok &= check(record["stop_reason"] == "cursor_exhausted",
+                "the page record should say the feed ended here, got %r"
+                % (record["stop_reason"],))
+    ok &= check(record["rows"] == 1 and record["ok"] is True,
+                "the record must keep the page's rows and its success "
+                "alongside the ending")
+    ok &= check("cursor_exhausted" in output_writer.COMPLETE_STOP_REASONS,
+                "the feed genuinely running out is a COMPLETE run")
+    return ok
+
+
+def test_per_page_records_an_unpriced_page():
+    """A full page with not one priced row: the listed items end HERE."""
+    group("per-page records: unpriced page")
+    ok = True
+    try:
+        import playwright_scraper as engine
+    except ImportError as exc:
+        print("  SKIP  playwright_scraper could not be imported (%s)" % exc)
+        return ok
+    cursor, body = _page_record_engine_harness()
+
+    outcome, _, _ = _drive_one_cursor_page(
+        engine, [body(rows=2, next_cursor=cursor([1.5, "id"]), priced=False)])
+
+    ok &= check(page_flow.prices_ran_out(outcome.products, "price"),
+                "the page must read as unpriced under a price ordering")
+    ok &= check(not page_flow.prices_ran_out(outcome.products, "created"),
+                "an unpriced page is NORMAL under --sort created; stopping "
+                "there would end every run at page 1")
+    page_flow.stop_page(outcome, "listed_items_exhausted",
+                        detail="page_unpriced")
+    record = page_flow.page_record(outcome)
+    ok &= check(record["stop_reason"] == "listed_items_exhausted"
+                and record["detail"] == "page_unpriced",
+                "the record must say WHICH price-boundary signal fired, "
+                "got %r/%r" % (record["stop_reason"], record["detail"]))
+    ok &= check(record["rows"] == 2,
+                "the unpriced rows are still rows, got %r" % (record["rows"],))
+    ok &= check("listed_items_exhausted" in output_writer.COMPLETE_STOP_REASONS,
+                "reaching the end of the listed items is COMPLETE for the "
+                "question the ordering asks")
+    return ok
+
+
+def test_per_page_records_graphql_errors_and_non_json():
+    """HTTP 200 with `errors`, and HTTP 200 with bytes: two different endings."""
+    group("per-page records: graphql errors and non-JSON")
+    ok = True
+    try:
+        import playwright_scraper as engine
+    except ImportError as exc:
+        print("  SKIP  playwright_scraper could not be imported (%s)" % exc)
+        return ok
+
+    errors = {"status": 200, "text": json.dumps(
+        {"errors": [{"message": "Invalid cursor"}], "data": None})}
+    outcome, _, _ = _drive_one_cursor_page(engine, [errors])
+    record_errors = page_flow.page_record(outcome)
+
+    not_json = {"status": 200, "text": "<html>not a GraphQL body</html>"}
+    outcome, _, _ = _drive_one_cursor_page(engine, [not_json])
+    record_not_json = page_flow.page_record(outcome)
+
+    ok &= check(record_errors["ok"] is False,
+                "an `errors` array is a FAILED page, not an empty one")
+    ok &= check(record_errors["stop_reason"] == "graphql_error",
+                "the record should name the errors array, got %r"
+                % (record_errors["stop_reason"],))
+    ok &= check("Invalid cursor" in (record_errors["detail"] or ""),
+                "the record must carry the endpoint's own message, got %r"
+                % (record_errors["detail"],))
+    ok &= check(record_errors["http_status"] == 200,
+                "the status was 200 — that is why the errors array had to be "
+                "read at all")
+
+    ok &= check(record_not_json["ok"] is False,
+                "a 200 carrying nothing parseable is a FAILED page")
+    ok &= check(record_not_json["stop_reason"] == "not_json",
+                "the record should name the non-JSON body, got %r"
+                % (record_not_json["stop_reason"],))
+    ok &= check(record_errors["stop_reason"] != record_not_json["stop_reason"],
+                "an `errors` array and a non-JSON body are different "
+                "endings and must not share a reason")
+    for name in ENGINES:
+        source = _engine_source(name)
+        for token in ("page_flow.stop_page(", '"graphql_error"',
+                      '"not_json"', '"throttle_exhausted"',
+                      '"throttled_then_recovered"', '"cursor_exhausted"',
+                      '"listed_items_exhausted"', '"no_new_products"',
+                      '"transport_error"', '"page_limit_reached"',
+                      '"page_cap"', "page_flow.page_records(outcomes)"):
+            ok &= check(token in source,
+                        "%s does not carry %s in its per-page record"
+                        % (name, token))
+        # The FIELD must be on the outcome every engine records from, or the
+        # record would be computed from a shape one engine does not build.
+        for field_name in ("page_stop: Optional[str]", "throttle_waits: int",
+                           "throttle: Optional[str]",
+                           "http_status: Optional[int]", "detail: Optional[str]",
+                           "data_source: Optional[str]"):
+            ok &= check(field_name in source,
+                        "%s's PageOutcome is missing %s, so its per-page "
+                        "record would lose that fact" % (name, field_name))
+    return ok
+
+
+def _run_a_fake_scrape(answers, *, html, pages, ssr_usable=True,
+                       sort="price", retries=2, out_prefix=None):
+    """Drive `playwright_scraper.scrape()` with a fake browser, end to end.
+
+    Everything below the engine's own control flow is stubbed — the
+    browser, the session, the page — so the walk, the per-page records and
+    the sidecar are the REAL ones. Returns (exit_code, meta or None, page).
+    """
+    import playwright_scraper as engine
+    from types import SimpleNamespace
+
+    class _Response:
+        status = 200
+
+    class _Page:
+        def __init__(self):
+            self.url = "https://opensea.io/collection/boredapeyachtclub"
+            self.answers = list(answers)
+            self.evaluate_calls = []
+
+        def goto(self, url, **kwargs):
+            self.url = url
+            return _Response()
+
+        def content(self):
+            return html
+
+        def query_selector_all(self, selector):
+            return []
+
+        def wait_for_timeout(self, ms):
+            return None
+
+        def screenshot(self, path=None):
+            return None
+
+        def evaluate(self, js, arg=None):
+            # Only the GraphQL fetch draws a scripted answer. Page 1's
+            # challenge detection also evaluates — that is a different
+            # question and must not consume an endpoint response.
+            if isinstance(arg, dict) and "endpoint" in arg:
+                self.evaluate_calls.append(arg)
+                return self.answers.pop(0)
+            return None
+
+    class _Session:
+        def __init__(self):
+            self.page = _Page()
+
+        def open(self):
+            return self
+
+        def close(self):
+            return None
+
+        def relaunch(self):
+            return None
+
+    class _PW:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    args = SimpleNamespace(
+        url="https://opensea.io/collection/boredapeyachtclub",
+        out=out_prefix, format="both", allow_empty=False, mode="items",
+        pages=pages, limit=2, sort=sort, ranking="TRENDING", timeframe="1d",
+        activity="all", collection_slug="boredapeyachtclub",
+        retries=retries, retry_delay=0.0, delay=0, dump_html=None,
+        rank_offset=1, ssr_usable=ssr_usable, concurrency=1,
+        cdp_endpoint=None, proxy=None, proxy_file=None,
+        proxy_rotate="per-run", proxy_shuffle=False,
+        proxy_block_retries=0, headless=True, browser_channel=None,
+        twocaptcha_key=None)
+
+    real = {
+        "sync_playwright": engine.sync_playwright,
+        "_BrowserSession": engine._BrowserSession,
+        "sleep": engine.time.sleep,
+    }
+    session = _Session()
+    engine.sync_playwright = lambda: _PW()
+    engine._BrowserSession = lambda pw, a, pool, remote=False: session
+    engine.time.sleep = lambda seconds: None
+    try:
+        rc = engine.scrape(args)
+    finally:
+        engine.sync_playwright = real["sync_playwright"]
+        engine._BrowserSession = real["_BrowserSession"]
+        engine.time.sleep = real["sleep"]
+
+    meta_path = "%s.meta.json" % out_prefix
+    meta = None
+    if os.path.exists(meta_path):
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+    return rc, meta, session.page
+
+
+def test_per_page_records_reach_the_sidecar():
+    """The records are IN `<out>.meta.json`, one per page, in page order.
+
+    Driven through the real walk: page 1 is a navigation that reads the
+    inlined state (the shipped fixture), page 2 is a cursor page that
+    hands back a null cursor and ends the feed. The assertion that matters
+    is that the sidecar explains EACH page rather than only the run.
+    """
+    group("per-page records: sidecar")
+    ok = True
+    try:
+        import playwright_scraper  # noqa: F401
+    except ImportError as exc:
+        print("  SKIP  playwright_scraper could not be imported (%s)" % exc)
+        return ok
+    import base64
+
+    def cursor(value):
+        return base64.b64encode(json.dumps(value).encode()).decode()
+
+    def page_body(rows, next_cursor):
+        items = [{
+            "id": "id-%d" % i, "tokenId": str(9000 + i), "name": "#%d" % i,
+            "contractAddress": "0x" + "cd" * 20,
+            "chain": {"identifier": "ethereum"},
+            "collection": {"slug": "boredapeyachtclub", "name": "BAYC"},
+            "bestListing": {"pricePerItem": {
+                "token": {"unit": "2.5", "symbol": "ETH"}, "usd": "5000"}},
+        } for i in range(rows)]
+        return {"status": 200, "text": json.dumps({"data": {"collectionItems": {
+            "items": items, "nextPageCursor": next_cursor}}})}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "out")
+        rc, meta, page = _run_a_fake_scrape(
+            [page_body(1, None)],          # page 2: one row, then the feed ends
+            html=html_of("collection"), pages=2, out_prefix=out)
+
+        ok &= check(rc == 0, "a complete two-page walk must exit 0, got %r" % rc)
+        ok &= check(meta is not None, "no sidecar was written")
+        if meta is None:
+            return ok
+        pages = meta.get("pages")
+        ok &= check(isinstance(pages, list) and len(pages) == 2,
+                    "the sidecar must carry one record per page, got %r"
+                    % (pages,))
+        if not isinstance(pages, list) or len(pages) != 2:
+            return ok
+
+        first, second = pages
+        ok &= check([p["page"] for p in pages] == [1, 2],
+                    "the page records must be in page order, got %r"
+                    % ([p["page"] for p in pages],))
+        ok &= check(first["source"] == "ssr",
+                    "page 1's rows come from the inlined state, got %r"
+                    % (first["source"],))
+        ok &= check(first["rows"] == len(
+                        P.parse_rows(html_of("collection"),
+                                     fixture("collection")["url"],
+                                     mode="items")),
+                    "page 1's record must count what the parser wrote, got %r"
+                    % (first["rows"],))
+        ok &= check(first["ok"] is True,
+                    "page 1 landed, so its record must say so")
+        ok &= check(first["stop_reason"] is None,
+                    "page 1's cursor carried the walk on, so its record has "
+                    "no ending of its own, got %r" % (first["stop_reason"],))
+        ok &= check(second["source"] == "graphql",
+                    "page 2's rows come from the endpoint, got %r"
+                    % (second["source"],))
+        ok &= check(second["rows"] == 1,
+                    "page 2's record must count its own rows, got %r"
+                    % (second["rows"],))
+        ok &= check(second["ok"] is True,
+                    "page 2 answered with rows, so it succeeded")
+        ok &= check(second["stop_reason"] == "cursor_exhausted",
+                    "page 2 handed back no cursor and ended the feed, got %r"
+                    % (second["stop_reason"],))
+        ok &= check(meta["stop_reason"] == "completed",
+                    "the run-level reason for a walk that reached the end of "
+                    "the feed is `completed`, got %r" % (meta["stop_reason"],))
+        ok &= check(meta["status"] == "complete",
+                    "the run is complete, got %r" % (meta["status"],))
+        # Page 2's request must carry page 1's cursor, not None: a null
+        # cursor means the START of the feed, and sending it would re-read
+        # page 1's rows.
+        sent = page.evaluate_calls
+        ok &= check(len(sent) == 1 and sent[0]["body"]["variables"].get("after")
+                    is not None,
+                    "page 2 must be asked for with page 1's cursor, got %r"
+                    % ([s["body"]["variables"].get("after") for s in sent],))
+        # And the merged file follows PAGE order.
+        with open(out + ".json", encoding="utf-8") as f:
+            rows = json.load(f)
+        ok &= check([r["page"] for r in rows]
+                    == sorted(r["page"] for r in rows),
+                    "the merged rows must be in page order, got pages %r"
+                    % ([r["page"] for r in rows],))
+        ok &= check(len(rows) == pages[0]["rows"] + pages[1]["rows"],
+                    "the file must hold every page's rows, got %d"
+                    % len(rows))
+    return ok
+
+
+def test_per_page_records_when_page_1_rows_are_dropped():
+    """Dropped page 1: the feed RESTARTS at the endpoint, cursor included.
+
+    A null cursor means "start of the feed". If the walk treated it as the
+    end it would stop before fetching anything — the bug this guard exists
+    to keep out — and the per-page record is where a reader sees that page
+    1 was a navigation with no rows of its own.
+    """
+    group("per-page records: page 1 dropped")
+    ok = True
+    try:
+        import playwright_scraper  # noqa: F401
+    except ImportError as exc:
+        print("  SKIP  playwright_scraper could not be imported (%s)" % exc)
+        return ok
+
+    def page_body(rows, next_cursor):
+        items = [{
+            "id": "id-%d" % i, "tokenId": str(7000 + i), "name": "#%d" % i,
+            "contractAddress": "0x" + "ef" * 20,
+            "chain": {"identifier": "ethereum"},
+            "collection": {"slug": "boredapeyachtclub", "name": "BAYC"},
+            "bestListing": {"pricePerItem": {
+                "token": {"unit": "1.0", "symbol": "ETH"}, "usd": "2000"}},
+        } for i in range(rows)]
+        return {"status": 200, "text": json.dumps({"data": {"collectionItems": {
+            "items": items, "nextPageCursor": next_cursor}}})}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "out")
+        # --sort created does not match what the page renders, so page 1 is
+        # proof-of-service and the feed starts from the endpoint.
+        rc, meta, page = _run_a_fake_scrape(
+            [page_body(2, None)], html=html_of("collection"), pages=1,
+            ssr_usable=False, sort="created", out_prefix=out)
+
+        ok &= check(rc == 0, "the run must complete, got %r" % rc)
+        ok &= check(meta is not None, "no sidecar was written")
+        if meta is None:
+            return ok
+        pages = meta.get("pages") or []
+        ok &= check(len(pages) == 2,
+                    "two pages were fetched (the navigation and the first "
+                    "endpoint page), got %d record(s)" % len(pages))
+        if len(pages) != 2:
+            return ok
+        ok &= check(pages[0]["rows"] == 0,
+                    "page 1's dropped rows must not be reported as kept, "
+                    "got %r rows" % (pages[0]["rows"],))
+        ok &= check(meta["rows_dropped_from_page_1"] > 0,
+                    "the sidecar must say page 1's rows were dropped")
+        sent = page.evaluate_calls
+        ok &= check(len(sent) == 1 and "after" not in sent[0]["body"]["variables"],
+                    "the first endpoint page must send NO cursor — a null "
+                    "cursor means the START of the feed, and passing it as "
+                    "an end would write nothing. Got %r"
+                    % (sent[0]["body"]["variables"] if sent else None,))
+        ok &= check(pages[1]["rows"] == 2 and pages[1]["ok"] is True,
+                    "the endpoint page's rows must be recorded, got %r"
+                    % (pages[1],))
+    return ok
+
+
+def test_per_page_records_drive_the_run_stop_reason():
+    """The run-level `stop_reason` and the per-page record agree, and differ.
+
+    Two walks on the same page-1 fixture, differing only in what page 2
+    answers: one waits out a 429 and lands (the run is COMPLETE), the other
+    never clears it (the run is PARTIAL, and the page says
+    `throttle_exhausted`). A reader must not have to guess which happened
+    from a single run-level word.
+    """
+    group("per-page records: run-level consequence")
+    ok = True
+    try:
+        import playwright_scraper  # noqa: F401
+    except ImportError as exc:
+        print("  SKIP  playwright_scraper could not be imported (%s)" % exc)
+        return ok
+
+    def page_body(rows, next_cursor):
+        items = [{
+            "id": "id-%d" % i, "tokenId": str(8000 + i), "name": "#%d" % i,
+            "contractAddress": "0x" + "12" * 20,
+            "chain": {"identifier": "ethereum"},
+            "collection": {"slug": "boredapeyachtclub", "name": "BAYC"},
+            "bestListing": {"pricePerItem": {
+                "token": {"unit": "1.2", "symbol": "ETH"}, "usd": "2400"}},
+        } for i in range(rows)]
+        return {"status": 200, "text": json.dumps({"data": {"collectionItems": {
+            "items": items, "nextPageCursor": next_cursor}}})}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # 1. A 429 that clears: page 2 lands and ends the feed.
+        out = os.path.join(tmp, "cleared")
+        answers = [{"status": 429, "retry_after": "1", "text": ""},
+                   page_body(1, None)]
+        rc, meta, page = _run_a_fake_scrape(
+            answers, html=html_of("collection"), pages=2, out_prefix=out)
+        ok &= check(rc == 0, "a run whose throttle cleared must exit 0, got %r"
+                    % (rc,))
+        if meta:
+            ok &= check(meta["pages"][1]["throttle"] == "recovered",
+                        "page 2's record must say it recovered from a "
+                        "throttle, got %r"
+                        % (meta["pages"][1]["throttle"],))
+            ok &= check(meta["pages"][1]["stop_reason"] == "cursor_exhausted",
+                        "page 2 recovered AND then ended the feed, so its "
+                        "ending is the cursor running out — the recovery is "
+                        "recorded beside it, not instead of it. Got %r"
+                        % (meta["pages"][1]["stop_reason"],))
+            ok &= check(meta["pages"][1]["throttle_waits"] == 1,
+                        "page 2's record must count the wait, got %r"
+                        % (meta["pages"][1]["throttle_waits"],))
+            ok &= check(meta["stop_reason"] == "completed"
+                        and meta["status"] == "complete",
+                        "the run itself is COMPLETE — it waited one throttle "
+                        "and read the whole requested walk. Got %r/%r"
+                        % (meta["stop_reason"], meta["status"]))
+            ok &= check(len(page.evaluate_calls) == 2,
+                        "one throttled response plus one landing response")
+
+        # 2. A throttle that never clears: the page fails, the run is partial.
+        out = os.path.join(tmp, "exhausted")
+        answers = [{"status": 429, "text": ""}] * (page_flow.THROTTLE_RETRIES + 1)
+        rc, meta, page = _run_a_fake_scrape(
+            answers, html=html_of("collection"), pages=2, out_prefix=out,
+            retries=2)
+        ok &= check(rc == output_writer.EXIT_PARTIAL,
+                    "a run that gathered page 1 and then lost page 2 to a "
+                    "throttle is PARTIAL (exit 6), got %r" % (rc,))
+        if meta:
+            ok &= check(meta["stop_reason"] == "endpoint_error",
+                        "the run-level reason for a failed cursor page is "
+                        "endpoint_error, got %r" % (meta["stop_reason"],))
+            ok &= check(meta["pages"][1]["stop_reason"] == "throttle_exhausted",
+                        "page 2's own record must say WHY it failed, got %r"
+                        % (meta["pages"][1]["stop_reason"],))
+            ok &= check(meta["pages"][1]["throttle"] == "exhausted",
+                        "the throttle field must say the budget ran out, "
+                        "got %r" % (meta["pages"][1]["throttle"],))
+            ok &= check(meta["pages"][1]["ok"] is False,
+                        "page 2 did not land, so its record says so")
+            ok &= check(meta["pages_failed"] == [2],
+                        "the sidecar must name the failed page, got %r"
+                        % (meta["pages_failed"],))
+            ok &= check(meta["pages"][1]["throttle_waits"]
+                        == page_flow.THROTTLE_RETRIES,
+                        "the record counts waits SPENT, not throttles seen: "
+                        "got %r" % (meta["pages"][1]["throttle_waits"],))
+            # The throttle wait must not consume `--retries`: with retries=2
+            # the page is asked 1 + THROTTLE_RETRIES times, not 2.
+            ok &= check(len(page.evaluate_calls)
+                        == 1 + page_flow.THROTTLE_RETRIES,
+                        "a throttle wait was charged to --retries: the "
+                        "endpoint was asked %d time(s), expected %d"
+                        % (len(page.evaluate_calls),
+                           1 + page_flow.THROTTLE_RETRIES))
+    return ok
+
+
+def test_a_multi_page_run_merges_in_page_order():
+    """The normal walk: page 1's rows first, then each cursor page's, merged.
+
+    The per-page records ride beside the rows and must be in PAGE order too,
+    which is the same contract `merge_pages` keeps for the rows: an arrival
+    order that differs from the page order is how a retried page quietly
+    reorders the file.
+    """
+    group("per-page records: a normal walk")
+    ok = True
+    import base64
+
+    def cursor(value):
+        return base64.b64encode(json.dumps(value).encode()).decode()
+
+    class _Outcome:
+        """The shape `page_flow.page_record` reads — nothing more."""
+
+        def __init__(self, page_num, rows, source, stop=None, detail=None,
+                     waits=0, status=200, ok_=True):
+            self.page_num = page_num
+            self.products = rows
+            self.data_source = source
+            self.page_stop = stop
+            self.detail = detail
+            self.throttle_waits = waits
+            self.http_status = status
+            self.ok = ok_
+
+    def rows_for(page_num, count):
+        return [output_writer.Item(sku="p%d-%d" % (page_num, i),
+                                   price=1.0 + i, page=page_num,
+                                   data_source="graphql")
+                for i in range(count)]
+
+    outcomes = [
+        _Outcome(1, rows_for(1, 2), "ssr"),
+        _Outcome(2, rows_for(2, 2), "graphql", stop="listed_items_exhausted",
+                 detail="cursor_key_null", waits=1),
+        _Outcome(3, rows_for(3, 1), "graphql",
+                 stop="cursor_exhausted", detail="no cursor"),
+    ]
+    # Out-of-order arrival, as a retried page really produces.
+    shuffled = [outcomes[2], outcomes[0], outcomes[1]]
+    records = page_flow.page_records(shuffled)
+    ok &= check([r["page"] for r in records] == [1, 2, 3],
+                "the per-page records must be in PAGE order, got %r"
+                % ([r["page"] for r in records],))
+    ok &= check([r["source"] for r in records] == ["ssr", "graphql", "graphql"],
+                "each record must name its own route, got %r"
+                % ([r["source"] for r in records],))
+    ok &= check([r["rows"] for r in records] == [2, 2, 1],
+                "each record must carry its own row count, got %r"
+                % ([r["rows"] for r in records],))
+    ok &= check(records[1]["throttle_waits"] == 1,
+                "a page that waited out a throttle says so even when it did "
+                "NOT end the walk")
+
+    merged, new_per_page, _ = output_writer.merge_pages(
+        [(o.page_num, o.products) for o in shuffled], key="sku")
+    ok &= check([r.page for r in merged] == [1, 1, 2, 2, 3],
+                "the ROWS must merge in page order, got pages %r"
+                % ([r.page for r in merged],))
+    ok &= check([r.sku for r in merged][:2] == [r.sku for r in outcomes[0].products],
+                "page 1's rows must come first")
+    ok &= check(new_per_page == {1: 2, 2: 2, 3: 1},
+                "the per-page new-row counts must follow the merge, got %r"
+                % (new_per_page,))
+
+    note = page_flow.pages_note(shuffled)
+    ok &= check("page 1" in note and "page 2" in note and "page 3" in note,
+                "the log line must name every page, got %r" % (note,))
+    ok &= check("1 throttle wait(s)" in note,
+                "the log line must say which page was throttled, got %r"
+                % (note,))
+    return ok
+
+
 def test_a_throttle_is_not_a_block():
     """The throttle/block distinction, driven end to end against a FAKE driver.
 
@@ -2405,24 +3160,32 @@ def test_writes_are_atomic():
         ok &= check(not leftovers, "a failed write left temp files behind: %s"
                     % leftovers)
 
-        for umask in (0o022, 0o002, 0o077):
-            new_path = os.path.join(tmp, "fresh_%o.json" % umask)
-            old = os.umask(umask)
-            try:
-                output_writer.write_json(rows, new_path)
-            finally:
-                os.umask(old)
-            mode = os.stat(new_path).st_mode & 0o777
-            ok &= check(mode == 0o666 & ~umask,
-                        "a new file under umask %03o got mode %03o, expected "
-                        "%03o (what open() would give)"
-                        % (umask, mode, 0o666 & ~umask))
-        kept = os.path.join(tmp, "kept.json")
-        output_writer.write_json(rows, kept)
-        os.chmod(kept, 0o640)
-        output_writer.write_json(rows, kept)
-        ok &= check(os.stat(kept).st_mode & 0o777 == 0o640,
-                    "rewriting an existing file did not keep its mode")
+        # File-mode assertions are POSIX-only, and saying so is not a skip of
+        # the check: on Windows `os.umask` and `st_mode` do not carry Unix
+        # permission bits (a new file reports 0o666 whatever the umask), so
+        # the assertion cannot fail there for the reason it is about.
+        if os.name == "posix":
+            for umask in (0o022, 0o002, 0o077):
+                new_path = os.path.join(tmp, "fresh_%o.json" % umask)
+                old = os.umask(umask)
+                try:
+                    output_writer.write_json(rows, new_path)
+                finally:
+                    os.umask(old)
+                mode = os.stat(new_path).st_mode & 0o777
+                ok &= check(mode == 0o666 & ~umask,
+                            "a new file under umask %03o got mode %03o, "
+                            "expected %03o (what open() would give)"
+                            % (umask, mode, 0o666 & ~umask))
+            kept = os.path.join(tmp, "kept.json")
+            output_writer.write_json(rows, kept)
+            os.chmod(kept, 0o640)
+            output_writer.write_json(rows, kept)
+            ok &= check(os.stat(kept).st_mode & 0o777 == 0o640,
+                        "rewriting an existing file did not keep its mode")
+        else:
+            print("  SKIP  file modes are not Unix permission bits on %s; "
+                  "the umask assertions do not apply here" % os.name)
     return ok
 
 
@@ -2725,6 +3488,15 @@ def main():
     ok &= test_merge_is_page_ordered()
     ok &= test_dedupe()
     ok &= test_a_throttle_is_not_a_block()
+    ok &= test_per_page_records_a_throttle_that_cleared()
+    ok &= test_per_page_records_a_throttle_that_never_cleared()
+    ok &= test_per_page_records_a_cursor_that_ended_the_feed()
+    ok &= test_per_page_records_an_unpriced_page()
+    ok &= test_per_page_records_graphql_errors_and_non_json()
+    ok &= test_per_page_records_reach_the_sidecar()
+    ok &= test_per_page_records_when_page_1_rows_are_dropped()
+    ok &= test_per_page_records_drive_the_run_stop_reason()
+    ok &= test_a_multi_page_run_merges_in_page_order()
     ok &= test_engine_flag_parity()
     ok &= test_retries_is_a_count_of_attempts()
     ok &= test_engine_constants_agree()

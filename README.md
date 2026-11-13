@@ -453,12 +453,46 @@ Same across this family of scrapers.
   `stop_reason`, which pages failed by number, the ordering the run used, and
   `collection_totals` — what OpenSea says the collection holds, beside what
   the run read.
+* **A per-page list in the same sidecar**, under `pages`. `stop_reason` says
+  why the RUN ended, which on a ten-page walk describes only the last page.
+  `pages` says what happened to EACH one, in page order: `page`, `source`
+  (`ssr` / `graphql` / `dom`), `rows`, `ok`, that page's own `stop_reason`,
+  `throttle` (`recovered` / `exhausted`), `throttle_waits`, `http_status`
+  and a short `detail`. The log prints the same list on one line.
 * **An empty CSV still carries its header**, of the mode that produced it.
 * Rows are merged in **page order**, never arrival order.
 
 `stop_reason` is worth reading. `cursor_exhausted` and
 `listed_items_exhausted` both mean COMPLETE; `endpoint_error` and
 `parser_found_nothing` do not.
+
+### What each page says
+
+A page's `stop_reason` in `pages[]` is the page's OWN ending, and it is
+deliberately finer-grained than the run-level reason:
+
+| page `stop_reason` | what happened | run status |
+|---|---|---|
+| `null` | landed, and its cursor carried the walk on | — |
+| `throttled_then_recovered` | the endpoint answered 429/503, the run waited, asked the same exit again, and the page landed without ending the walk (`throttle: recovered` also appears on a page that landed and then ended the walk — its ending is the `stop_reason`, the recovery is the field beside it) | not a stop |
+| `throttle_exhausted` | the throttle budget ran out and the page failed — a FAILED page, never a block (the exit is fine, the rate is not) | partial |
+| `cursor_exhausted` | the page landed and handed back NO cursor: the feed genuinely ended | complete |
+| `listed_items_exhausted` | under a price ordering the cursor's sort key went null (`detail: cursor_key_null`) or the page carried no priced row (`detail: page_unpriced`): the LISTED items end here | complete |
+| `graphql_error` | HTTP 200 carrying an `errors` array; `detail` holds the messages | partial |
+| `not_json` | HTTP 200 carrying bytes that are not JSON | partial |
+| `http_refused` | a 4xx/5xx answered instead of content | partial, or blocked on page 1 |
+| `transport_error` | no HTTP answer at all after `--retries` attempts | partial |
+| `no_new_products` | the page landed empty, which ends the feed | complete |
+| `page_cap` | the walk stopped at the 100-page cap | partial |
+| `page_limit_reached` | the run fetched the `--pages` it was asked for and a live cursor says there is more behind it | complete for what was asked |
+| `parser_found_nothing` / `page_load_timeout` | page 1 was served and parsed to nothing / never loaded | failed |
+
+Two distinctions the table exists to keep: a **throttle that cleared** is a
+successful page and must not read like one that never did, and a throttle
+wait is charged to its own budget (`THROTTLE_RETRIES`), never to
+`--retries` — so `throttle_waits` can be non-zero while the transport
+attempt count stays at one.
+
 
 ### Diffing two runs
 

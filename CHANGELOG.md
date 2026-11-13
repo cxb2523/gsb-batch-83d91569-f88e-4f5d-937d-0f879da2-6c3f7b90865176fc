@@ -14,6 +14,27 @@ was written, because anyone can read it with `git show v0.1.0:CHANGELOG.md`.
 
 ## [Unreleased]
 
+### Added
+
+- **The `.meta.json` sidecar now carries a per-page list (`pages`).** A run's
+  single `stop_reason` answers "why did this RUN end", which on a walk longer
+  than one page describes only the last page — a reader could not tell which
+  page was throttled, which one ran out of cursor, and which one started
+  returning unpriced rows. Each entry now records the page number, its route
+  (`source`: `ssr` / `graphql` / `dom`), its row count, whether it succeeded,
+  that page's own `stop_reason`, plus `throttle` (`recovered` / `exhausted`),
+  `throttle_waits`, `http_status` and a short `detail`. The log prints the
+  same list on one line. The distinctions kept honest: a throttle that
+  cleared is a SUCCESSFUL page (`throttled_then_recovered`) and does not read
+  like one whose budget ran out (`throttle_exhausted`, a FAILED page, never a
+  block); a throttle wait is charged to its own budget and never to
+  `--retries`, so the record can show waits with the transport attempt count
+  unchanged. Nothing else about the walk changed: `--concurrency` above 1 is
+  still refused with its reason, a page 1 whose rows are dropped still
+  restarts the feed from the endpoint (a null cursor is the START of the
+  feed, not the end), an all-DOM run still reports `degraded_to_dom`, and
+  the exit codes are untouched.
+
 ### Changed
 
 - CI only: the canary now runs weekly (Mondays 06:20 UTC) and on a manual dispatch, with its optional secret `OPENSEA_PROXY` passed on every run; the daily schedule is removed.

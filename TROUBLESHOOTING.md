@@ -32,6 +32,15 @@ The run reports `status: complete` and `stop_reason:
 listed_items_exhausted`, and the sidecar carries `collection_totals` so the
 gap between "complete" and "exhaustive" is visible rather than implied.
 
+**Which page stopped the walk.** A run-level `stop_reason` describes the
+LAST page; the `pages` list in the same sidecar describes every one. Look
+there for a page whose `stop_reason` is `throttle_exhausted` (waited and
+never cleared — raise `--delay`), `graphql_error` (the endpoint answered
+HTTP 200 with an `errors` array; `detail` holds the messages),
+`not_json`, `http_refused` or `transport_error`. A page that waited out a
+throttle and landed reads `throttle: recovered` with `throttle_waits: n`,
+and the RUN is still complete — the wait does not consume `--retries`.
+
 To walk the collection itself:
 
 ```bash

@@ -655,6 +655,13 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
     a description once pages can be fetched independently and page 3 can fail
     while 4 and 5 succeed. Recording the numbers keeps the sidecar honest
     about WHICH part of the catalogue is missing, not just how much.
+
+    The engines put ONE RECORD PER PAGE in `extra["pages"]` (see
+    `page_flow.page_record`): page number, route, row count, success, that
+    page's own stop reason, throttle waits and HTTP status. `stop_reason`
+    above is about the RUN and names only its last ending; on a walk longer
+    than one page the two are different facts, and a reader asking "which
+    page was throttled" cannot get the answer from the run-level field.
     """
     meta = {
         "source": source,

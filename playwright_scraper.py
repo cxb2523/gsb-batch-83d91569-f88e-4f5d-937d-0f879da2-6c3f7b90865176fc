@@ -196,6 +196,34 @@ class PageOutcome:
     # `_fetch_first_page`).
     ssr_used: bool = False
     scroll: Optional[dict] = None
+    # Where this page's rows came from: "ssr", "graphql" or "dom". Recorded
+    # per page rather than derived afterwards from the merged file, because
+    # only the page knows which route produced it — and a page that yielded
+    # no rows at all has no row to ask.
+    data_source: Optional[str] = None
+    # WHY THIS PAGE ENDED, in the sidecar's per-page record. None on a page
+    # that landed and whose cursor carried the walk on. Kept separate from
+    # the run-level `stop_reason` for the reason `page_flow.page_record`
+    # records: a ten-page walk whose third page was throttled and whose last
+    # page ran out of cursor has two different stories, and one field cannot
+    # hold both.
+    page_stop: Optional[str] = None
+    # How many times this page waited out a throttle. Separate from the
+    # transport attempt budget on purpose — a wait must not consume
+    # `--retries` (see page_flow.THROTTLE_RETRIES).
+    throttle_waits: int = 0
+    # "recovered" when the page waited out a throttle and then landed,
+    # "exhausted" when the budget ran out. Its OWN field rather than a value
+    # of `page_stop`: a page can recover and THEN end the walk (its cursor
+    # ran out), and a reader needs both facts. `throttled_then_recovered`
+    # stays in `page_stop` for the recovery that did not end the walk.
+    throttle: Optional[str] = None
+    # The HTTP status the endpoint answered with, where it answered at all.
+    http_status: Optional[int] = None
+    # The human-readable half of a page's ending: the error messages a
+    # GraphQL `errors` array carried, the detail of a transport fault, or
+    # `cursor_key_null` / `page_unpriced` on the two price-boundary endings.
+    detail: Optional[str] = None
 
     @property
     def ok(self) -> bool:
@@ -615,6 +643,8 @@ def _graphql_page(session, args, cursor: Optional[str], page_num: int):
             result = {"status": 0, "text": "", "error": str(e)}
         status = (result or {}).get("status") or 0
         text = (result or {}).get("text") or ""
+        outcome.http_status = status or None
+        outcome.throttle_waits = throttled
 
         if status == 200 and text:
             try:
@@ -624,6 +654,8 @@ def _graphql_page(session, args, cursor: Optional[str], page_num: int):
                              "something that is not JSON (%d bytes).",
                              page_num, len(text))
                 outcome.load_failed = True
+                page_flow.stop_page(outcome, "not_json",
+                                    detail="%d bytes" % len(text))
                 return outcome
             errors = graphql_errors(payload)
             if errors:
@@ -635,6 +667,8 @@ def _graphql_page(session, args, cursor: Optional[str], page_num: int):
                              page_num, "; ".join(errors[:3]))
                 outcome.load_failed = True
                 outcome.state = "graphql_error"
+                page_flow.stop_page(outcome, "graphql_error",
+                                    detail="; ".join(errors[:3]))
                 return outcome
 
             if args.dump_html:
@@ -653,7 +687,13 @@ def _graphql_page(session, args, cursor: Optional[str], page_num: int):
             outcome.products = rows
             outcome.next_cursor = feed.get("nextPageCursor")
             outcome.state = "content"
+            outcome.data_source = "graphql"
             outcome.final_url = session.page.url
+            if throttled:
+                outcome.throttle = "recovered"
+                page_flow.stop_page(outcome, "throttled_then_recovered",
+                                    detail="HTTP %d, %d wait(s)"
+                                    % (status, throttled))
             return outcome
 
         if page_flow.is_throttle(status):
@@ -674,6 +714,10 @@ def _graphql_page(session, args, cursor: Optional[str], page_num: int):
                     page_num, status, pause, throttled,
                     page_flow.THROTTLE_RETRIES)
                 time.sleep(pause)
+                # Counted when the wait is actually SPENT, not when a
+                # throttle is merely seen: the response that exhausts the
+                # budget is answered with a report, not a pause.
+                outcome.throttle_waits = throttled
                 attempt -= 1          # a throttle is not a transport fault
                 continue
             logger.error(
@@ -683,6 +727,10 @@ def _graphql_page(session, args, cursor: Optional[str], page_num: int):
                 "--delay.", page_num, status, page_flow.THROTTLE_RETRIES)
             outcome.load_failed = True
             outcome.state = "throttled"
+            outcome.throttle = "exhausted"
+            page_flow.stop_page(outcome, "throttle_exhausted",
+                                detail="HTTP %d after %d wait(s)"
+                                % (status, page_flow.THROTTLE_RETRIES))
             return outcome
 
         if page_flow.is_refusal(status):
@@ -692,6 +740,8 @@ def _graphql_page(session, args, cursor: Optional[str], page_num: int):
                          page_num, status)
             outcome.blocked_by = "endpoint-http-%d" % status
             outcome.state = "blocked"
+            page_flow.stop_page(outcome, "http_refused",
+                                detail="HTTP %d" % status)
             return outcome
 
         detail = (result or {}).get("error") or f"HTTP {status}"
@@ -705,6 +755,15 @@ def _graphql_page(session, args, cursor: Optional[str], page_num: int):
             logger.error("Page %d: gave up after %d attempt(s) (%s).",
                          page_num, args.retries, detail[:160])
             outcome.load_failed = True
+            # A status >= 400 that was neither a throttle nor a refusal still
+            # means the endpoint ANSWERED and refused to serve the page —
+            # a different fact from a request that never got an answer at
+            # all, and the two must not share a reason.
+            page_flow.stop_page(
+                outcome,
+                "http_refused" if status >= 400 else "transport_error",
+                detail=(("HTTP %d" % status) if status >= 400 else detail[:160]))
+    outcome.throttle_waits = throttled
     return outcome
 
 
@@ -1088,6 +1147,12 @@ def _fetch_first_page(session, args, pool) -> PageOutcome:
     # which served both modes in full on the same day.
     state_answered = page_flow.state_answered(html or "", args.mode)
     outcome.ssr_used = bool(args.ssr_usable and state_answered)
+    # Which route page 1's rows came from. `parse_rows` tries the inlined
+    # state first and falls back to the anchors, so a row's own `data_source`
+    # is the fact — but a page that parsed to nothing has no row to ask, and
+    # `page_flow.page_record` still has to say what it was.
+    outcome.data_source = ("ssr" if outcome.ssr_used else
+                           (rows[0].data_source if rows else None))
     if outcome.ssr_used:
         outcome.products = rows
         outcome.next_cursor = next_cursor(html or "", args.mode)
@@ -1129,6 +1194,9 @@ def _fetch_first_page(session, args, pool) -> PageOutcome:
             # Reported as what it is, so a reader opens product_parser.py
             # instead of checking their URL for a typo.
             outcome.state = "parser_found_nothing"
+            page_flow.stop_page(outcome, "parser_found_nothing",
+                                detail="%d card link(s), 0 row(s)"
+                                % page_flow.count_cards(html or ""))
             logger.error(
                 "0 rows parsed from a page the site SERVED, which links to "
                 "%d item(s). That is a parser regression rather than an empty "
@@ -1207,6 +1275,12 @@ def scrape(args) -> int:
                 stop_reason = ("page_load_timeout" if first.load_failed
                                else f"blocked_{first.blocked_by}")
                 blocked = first.blocked_by is not None
+                page_flow.stop_page(
+                    first,
+                    "page_load_timeout" if first.load_failed else "blocked",
+                    detail=(first.detail or first.blocked_by or
+                            ("HTTP %s" % first.http_status
+                             if first.http_status else None)))
             elif first.state == "parser_found_nothing":
                 stop_reason = "parser_found_nothing"
             else:
@@ -1232,6 +1306,13 @@ def scrape(args) -> int:
                     if page_flow.page_cap_reached(page_num):
                         logger.warning("Stopping at the %d-page cap.", PAGE_CAP)
                         stop_reason = "page_cap"
+                        # Attribution: the page whose live cursor the cap
+                        # stopped is the LAST one fetched, not the one that
+                        # was never asked for.
+                        page_flow.stop_page(
+                            outcomes[-1], "page_cap",
+                            detail="%d-page cap reached before page %d"
+                            % (PAGE_CAP, page_num))
                         break
                     if feed_started and page_flow.price_boundary_reached(cursor):
                         # The cheap half of the price boundary: a null
@@ -1242,11 +1323,18 @@ def scrape(args) -> int:
                         # erroring on such a cursor, which it stopped doing
                         # between 2026-09-17 and 2026-10-13.
                         stop_reason = "listed_items_exhausted"
+                        # Page N-1 handed this cursor back; its sort key is
+                        # the null one that ends the listed items.
+                        page_flow.stop_page(outcomes[-1],
+                                            "listed_items_exhausted",
+                                            detail="cursor_key_null")
                         logger.info("%s", page_flow.sort_note(
                             args.sort, rank_seen, first.totals))
                         break
                     if feed_started and page_flow.cursor_exhausted(cursor):
                         stop_reason = "cursor_exhausted"
+                        page_flow.stop_page(outcomes[-1], "cursor_exhausted",
+                                            detail="no cursor")
                         logger.info("The site handed back no cursor after "
                                     "page %d — that is the end of this feed, "
                                     "and the run is COMPLETE holding "
@@ -1283,6 +1371,8 @@ def scrape(args) -> int:
                         # page with no rows on it is the end of the feed,
                         # whatever the cursor says.
                         stop_reason = "no_new_products"
+                        page_flow.stop_page(outcome, "no_new_products",
+                                            detail="0 rows")
                         logger.info("Page %d came back with no rows — "
                                     "treating that as the end of the feed.",
                                     page_num)
@@ -1297,6 +1387,8 @@ def scrape(args) -> int:
                     # is a fact about the catalogue and says the same thing.
                     if page_flow.prices_ran_out(outcome.products, args.sort):
                         stop_reason = "listed_items_exhausted"
+                        page_flow.stop_page(outcome, "listed_items_exhausted",
+                                            detail="page_unpriced")
                         logger.info("%s", page_flow.sort_note(
                             args.sort, rank_seen, first.totals))
                         break
@@ -1305,10 +1397,20 @@ def scrape(args) -> int:
                     # site still has a cursor, the run is complete for what
                     # was ASKED for and there is more behind it; the sidecar
                     # records both.
-                    if args.pages > 1 and cursor:
-                        logger.info("Fetched the %d page(s) asked for and the "
-                                    "feed goes on — pass a higher --pages to "
-                                    "keep walking.", args.pages)
+                    if cursor:
+                        page_flow.stop_page(
+                            outcomes[-1], "page_limit_reached",
+                            detail="%d page(s) asked for, cursor still live"
+                            % args.pages)
+                        if args.pages > 1:
+                            logger.info("Fetched the %d page(s) asked for and "
+                                        "the feed goes on — pass a higher "
+                                        "--pages to keep walking.", args.pages)
+                    elif feed_started:
+                        # The last page the loop fetched handed back no
+                        # cursor: the feed itself ended on it.
+                        page_flow.stop_page(outcomes[-1], "cursor_exhausted",
+                                            detail="no cursor")
         finally:
             session.close()
 
@@ -1326,6 +1428,13 @@ def scrape(args) -> int:
     # on their own URL.
     if page_flow.degraded_to_dom(all_rows):
         stop_reason = page_flow.DEGRADED_STOP_REASON
+        # Every page that landed was the fallback, so each one's route says
+        # so too. The run-level reason is what forced this report, and the
+        # per-page records are where a reader sees WHICH pages were degraded
+        # rather than only that all of them were.
+        for outcome in outcomes:
+            if outcome.ok and outcome.page_stop is None:
+                outcome.page_stop = page_flow.DEGRADED_STOP_REASON
         logger.error(
             "Every one of the %d row(s) came from the DOM fallback, which "
             "carries an address and a name and NO prices. The site's own "
@@ -1348,9 +1457,23 @@ def scrape(args) -> int:
     final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
                  if ok_pages else args.url)
 
+    # One log line per PAGE, beside the one-per-run reason: a ten-page
+    # walk's stop_reason names only the last ending, and the whole point of
+    # the per-page records is that a reader does not have to infer which
+    # page was throttled or which one ran out of cursor.
+    if len(outcomes) > 1:
+        logger.info("Pages: %s.", page_flow.pages_note(outcomes))
+
     # One-per-run context, in the sidecar rather than repeated down a column.
     extra = {
         "rows_new_per_page": fresh_by_page,
+        # ONE RECORD PER PAGE, in page order. `stop_reason` above answers
+        # "why did this RUN end"; this answers "what happened to page 3". The
+        # two are different facts on any walk longer than one page: a run
+        # whose page 3 waited out a throttle and whose page 5 ended the feed
+        # has both stories, and one field cannot hold both. See
+        # `page_flow.page_record` for what each record carries.
+        "pages": page_flow.page_records(outcomes),
         "scroll": {o.page_num: o.scroll for o in outcomes if o.scroll},
         # The ORDERING, because on this site it decides WHICH rows are in the
         # file rather than what order they sit in — two runs under different
