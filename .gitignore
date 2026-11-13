@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# Flarecrawl output
+.flarecrawl/
+out/
+out_*/
+
+# Forma protocol working files
+.forma/
+
+# Agent worktrees — owned by the spawning session, never commit.
+# Past `git add -A` sweeps captured these as gitlinks (mode 160000)
+# with no .gitmodules entry, breaking CI submodule recursion.
+.claude/worktrees/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Locks
+# uv.lock is intentionally committed — reproducible, hash-verified builds
+# are a supply-chain control for the PyPI publish pipeline.
+.env
+tests/bench-results*.json

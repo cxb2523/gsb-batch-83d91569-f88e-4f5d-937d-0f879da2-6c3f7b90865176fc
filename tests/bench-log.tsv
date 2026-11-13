@@ -1,0 +1,7 @@
+iteration	commit	total_ms	html_ms	text_ms	delta	status	description
+0	baseline	0.856	0.375	0.480	0	baseline	Initial: prompt_injection 61% text, semantic_manipulation 30% text, unicode_tricks 20% html
+1	iter1	0.829	0.368	0.462	-0.027	keep	Pre-compiled delimiter XML tag, urgency pre-check, css-class require injection pattern
+2	iter2	0.583	0.377	0.206	-0.246	keep	Fast keyword pre-check for prompt_injection (6.5x speedup on that sanitiser)
+3	iter3	0.477	0.376	0.101	-0.106	keep	Fast keyword pre-check for semantic_manipulation authority patterns
+4	iter4	0.441	0.339	0.101	-0.036	keep	Unicode tricks bail-out when no trick chars in document
+5	iter5	0.419	0.319	0.101	-0.022	keep	Hidden text fast keyword pre-check on style string
