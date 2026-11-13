@@ -1,4 +1,4 @@
-﻿/**
+/**
  * main.js – Application bootstrap and core logic.
  *
  * Responsibilities:
@@ -13,6 +13,8 @@ import { request, probeWriteAccess } from "./api.js";
 import { registerManualRefresh } from "./manual-refresh.js";
 import { registerVisibilityRefresh } from "./visibility-refresh.js";
 import { registerVisiblePolling } from "./visible-polling.js";
+import { batchCollector } from "./batch-collect.js";
+import { registerBatchCollectPanel } from "./batch-collect-ui.js";
 import {
   loadConfig, clearConfig, getConfig, consumeConfigCleanupWarning, consumeStorageRecoveryWarning,
   loadProfiles, getProfileById, saveProfile, deleteProfile, setActiveProfile,
@@ -58,6 +60,7 @@ let fetchAbortController = null;
 let latestSummaryData = null;
 let cleanupVisibilityRefresh = null;
 let cleanupManualRefresh = null;
+let batchCollectPanelRefresh = null;
 let connectPending = false;
 let advancedHistoryChartEnabled = false;
 let advancedHistoryChartModulePromise = null;
@@ -1282,6 +1285,9 @@ function openSettingsModal(selectedProfileId = null) {
       setRibbonConnectState("connected");
       syncModePickerAltRow();
       startAutoRefresh();
+      // Re-resolve the batch panel's highlighted conclusion against the
+      // newly active profile so two proxies' summaries can never cross.
+      batchCollectPanelRefresh?.();
       showToast("已切换到 " + profile.name, "success");
     } catch (err) {
       if (err.status === 401 || err.status === 403) {
@@ -1790,6 +1796,21 @@ async function init() {
       ) startAutoRefresh();
     },
   });
+
+  // Batch collection panel. The collector runs every saved profile through
+  // api.request independently; this panel only renders its per-profile
+  // conclusions and re-resolves the highlighted one against the active
+  // profile, so switching profiles can never show another proxy's summary.
+  const batchPanelApi = registerBatchCollectPanel({
+    documentRef: document,
+    container: document.querySelector("#batchCollectSlot"),
+    collector: batchCollector,
+    getProfiles: loadProfiles,
+    getActiveProfileId: loadActiveProfileId,
+    notify: showToast,
+    enabled: () => Boolean(getConfig()) && activeDashboardMode === "readonly",
+  });
+  batchCollectPanelRefresh = batchPanelApi.render;
 
   // Wire the view-mode ribbon: click or keyboard activation opens the
   // mode picker. The ribbon itself never closes the picker — that lives

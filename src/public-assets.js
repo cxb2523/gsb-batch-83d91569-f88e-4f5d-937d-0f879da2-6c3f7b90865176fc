@@ -24,6 +24,8 @@ export const PUBLIC_ASSET_PATHS = Object.freeze([
   "src/snapshot-export.js",
   "src/metrics-history.js",
   "src/advanced-history-chart.js",
+  "src/batch-collect.js",
+  "src/batch-collect-ui.js",
   "vendor/uplot/uPlot.iife.min.js",
   "vendor/uplot/uPlot.min.css",
   "src/ui.js",

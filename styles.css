@@ -1663,3 +1663,148 @@ body.has-custom-background {
   max-width: 100%;
 }
 
+
+/* ==========================================================================
+   Batch collection panel
+   Per-source collection conclusions across every saved Proxy profile.
+   Uses only CSS variables so it themes automatically.
+   ========================================================================== */
+.batch-collect-slot {
+  margin: 0.75rem 0 1rem;
+}
+
+.batch-collect-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  padding: 1rem 1.1rem;
+  box-shadow: var(--shadow-sm);
+}
+
+.batch-collect-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.batch-collect-title {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--text-primary);
+}
+
+.batch-collect-summary {
+  margin: 0.6rem 0 0;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.batch-collect-current {
+  margin-top: 0.75rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+}
+
+.batch-collect-current-title {
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 0.35rem;
+}
+
+.batch-collect-current-body {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  color: var(--text-primary);
+}
+
+.batch-collect-current-detail,
+.batch-collect-stale {
+  flex-basis: 100%;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+
+.batch-collect-stale {
+  color: var(--accent-yellow);
+}
+
+.batch-collect-reason {
+  color: var(--accent-red-light);
+}
+
+.batch-collect-muted {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.batch-collect-dot {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.batch-collect-dot.is-ok {
+  background: var(--accent-green);
+}
+
+.batch-collect-dot.is-failed {
+  background: var(--accent-red);
+}
+
+.batch-collect-list {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.batch-collect-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  font-size: 0.8rem;
+}
+
+.batch-collect-item.is-active {
+  border-color: var(--accent-copper);
+}
+
+.batch-collect-item-name {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.batch-collect-item-status {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+}
+
+.batch-collect-item-status.is-ok {
+  color: var(--accent-green);
+}
+
+.batch-collect-item-status.is-failed {
+  color: var(--accent-red-light);
+}
+
+#batchCollectButton:disabled {
+  opacity: 0.65;
+  cursor: progress;
+}

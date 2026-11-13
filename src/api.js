@@ -74,10 +74,16 @@ function combineRequestSignals(timeoutSignal, callerSignal) {
  * @param {string} path   Path relative to the XMRig-Proxy API base (e.g. "/1/summary").
  * @param {object} [options] Optional fetch options (headers and signal).
  *   This client is read-only: only GET requests without a body are allowed.
+ * @param {object} [configOverride] Optional connection config
+ *   (`{ apiUrl, apiToken }`) used instead of the currently active profile.
+ *   Batch collection passes one saved profile at a time so every request can
+ *   run concurrently without mutating which profile is "active" in storage.
+ *   The override is subject to the exact same origin/read-only/timeout rules
+ *   as a normal request — it only changes which saved proxy is addressed.
  * @returns {Promise<any>} Resolves with parsed JSON on success.
  */
-export async function request(path, options = {}) {
-  const cfg = getConfig();
+export async function request(path, options = {}, configOverride = null) {
+  const cfg = configOverride || getConfig();
   if (!cfg || !cfg.apiUrl) {
     throw new Error("API configuration missing");
   }
