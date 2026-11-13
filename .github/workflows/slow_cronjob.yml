@@ -1,0 +1,93 @@
+name: Cron Job - Enriched 
+
+permissions:
+  contents: write
+
+on:
+  schedule:
+    # 08:00 AM IST on 1st of every month (GitHub Actions uses UTC)
+    - cron: '30 2 1 * *'
+  workflow_dispatch:
+
+jobs:
+  trigger-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Pull Docker image
+        run: docker pull ${{ secrets.DOCKERHUB_USERNAME }}/mutualfund-screener:latest
+
+      - name: Start container
+        run: |
+          docker run -d --name fundscreener-cron-enriched -p 80:80 \
+            --env ENVIRONMENT="prod" \
+            --env LOG_LEVEL="WARNING" \
+            --env MF_ENRICHMENT_ENABLED="true" \
+            --env DB_HOST="${{ secrets.DB_HOST }}" \
+            --env DB_PORT="${{ secrets.DB_PORT }}" \
+            --env DB_NAME="${{ secrets.DB_NAME }}" \
+            --env DB_USER="${{ secrets.DB_USER }}" \
+            --env DB_PASSWORD="${{ secrets.DB_PASSWORD }}" \
+            --env PIPELINE_TRIGGER_API_KEY="${{ secrets.PIPELINE_TRIGGER_API_KEY }}" \
+            ${{ secrets.DOCKERHUB_USERNAME }}/mutualfund-screener:latest
+
+      - name: Wait for service
+        run: |
+          for i in $(seq 1 60); do
+            if curl --silent --fail http://localhost/health > /dev/null 2>&1; then
+              echo "Service is up"
+              exit 0
+            fi
+            echo "Attempt $i/30 - waiting..."
+            sleep 5
+          done
+          echo "Service failed to start after 300s"
+          docker logs fundscreener-cron-enriched
+          exit 1
+
+      - name: Trigger pipeline
+        run: |
+          curl --fail --show-error --silent -X POST "http://localhost/api/v1/pipeline/trigger" \
+            -H "accept: application/json" \
+            -H "x-api-key: ${{ secrets.PIPELINE_TRIGGER_API_KEY }}"
+
+      - name: Stream container logs (live until done or 2 hour timeout)
+        run: |
+          while IFS= read -r line; do
+            echo "$line"
+            if echo "$line" | grep -q "Pipeline execution completed successfully"; then
+              echo "Success detected — waiting 5 minutes for final logs"
+              sleep 300
+              break
+            fi
+          done < <(docker logs -f fundscreener-cron-enriched 2>&1) || true
+
+      - name: Cleanup container
+        if: always()
+        run: |
+          docker stop fundscreener-cron-enriched || true
+          docker rm fundscreener-cron-enriched || true
+
+      - name: Record run and push
+        if: always()
+        run: |
+          mkdir -p .github/logs
+          echo "$(date -u +'%Y-%m-%d %H:%M:%S UTC') - enriched pipeline - ${{ job.status }}" >> .github/logs/logs
+
+          git config user.name "deep-div"
+          git config user.email "div20023041@gmail.com"
+
+          git add .github/logs/logs
+          git commit -m "Log enriched pipeline run (${{ job.status }})"
+
+          git pull --rebase origin ${{ github.ref_name }}
+          git push origin HEAD:${{ github.ref_name }}
