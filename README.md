@@ -111,12 +111,32 @@ file it describes: the files are each written atomically but not as a set,
 so a crash between two writes can leave new data beside an older sidecar —
 `diff_runs.py` checks the digest and refuses such a pair.
 
+**Pages are fetched in order, and a page that is missing is named.** Page 1
+comes first and states how many pages exist — "164 results found: Showing
+page 1 of 7" — so the run plans against the smaller of that page count and
+the count implied by the result total, never past the site's own last page.
+Page 2 is then fetched on its own, sequentially, and its company ids are
+compared with page 1's: **if page 2 adds nothing page 1 did not already
+have, the `?page=` parameter is not working**, so the run stops, keeps page
+1, and reports `stop_reason: pagination_not_addressable` with `status:
+partial` rather than walking the same page again as pages 3..N. If page 2
+itself is blocked or never loads, page 1's rows are still written and the
+exit code says which happened (**3** blocked, **5** never obtained), with
+page 2 in `pages_failed` — not the generic partial code. A listing the site
+declares as one page never asks for page 2 at all. Merging is by page
+number, and a sku repeated across pages keeps its first occurrence and is
+counted in `duplicate_skus_across_pages`.
+
 **Exit codes**, shared by every engine: `0` ok · `1` crash · `2` bad usage ·
 `3` blocked · `4` the site says the listing is empty · `5` the content was
 never obtained (a timeout, a dead proxy, a 404 or 5xx, an API error, a start
 page past the end, a page nobody could read) · `6` partial. A blocked or
 failed run never writes output — `--allow-empty` included, which only lets
-a listing the site reports as empty write an empty file.
+a listing the site reports as empty write an empty file. The one case where
+those two rules meet: a page that fails AFTER an earlier page produced rows
+writes what it has, and the Playwright engine returns the specific code
+(**3** for a blocked page, **5** for one never obtained) rather than 6, so
+the caller can still tell a refusal from a failure.
 
 ## Engines
 

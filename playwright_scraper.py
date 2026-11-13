@@ -66,7 +66,8 @@ import page_flow
 from captcha_solver import (INJECT_TOKEN_FN, detect_in_html, detect_in_page,
                             reconcile_detections, solve)
 from fingerprint_client import FingerprintError
-from output_writer import (EXIT_API_ERROR, failure_stop_reason, finish_run,
+from output_writer import (EXIT_API_ERROR, EXIT_BLOCKED, EXIT_FETCH_FAILED,
+                           EXIT_PARTIAL, failure_stop_reason, finish_run,
                            merge_pages)
 from product_parser import SELECTORS, parse_products
 from proxy_pool import (CDP_CONNECT_ATTEMPTS, CDP_CONNECT_PAUSE_S, CDP_CONNECT_TIMEOUT_S,
@@ -703,6 +704,27 @@ def _addressable(first: PageOutcome, second: PageOutcome) -> bool:
     return any(p.sku and p.sku not in first_ids for p in second.products)
 
 
+def _failed_page_exit(outcome: PageOutcome) -> Optional[int]:
+    """The exit code a run stopped ON THIS PAGE should carry.
+
+    Three facts a caller branches on, kept distinct even when earlier pages
+    produced rows: blocked (3) — something stood between the run and the
+    content; 5 — the content was never obtained (a timeout, a page nobody
+    could read, a dead exit); 6 — the page was fetched and the run stopped
+    for a reason that is neither (an attempt gap, a catalogue that moved).
+    """
+    if outcome.state is not None and outcome.state.policy.blocked:
+        return EXIT_BLOCKED
+    if (outcome.load_failed or outcome.parse_failed
+            or outcome.raised or outcome.proxy_failed
+            or (outcome.state is not None and not outcome.state.policy.usable)):
+        # The last clause is a 404 or a 5xx: the page was fetched and it was
+        # NOT the content the run asked for, which is the same fact exit 5
+        # states when nothing was gathered at all.
+        return EXIT_FETCH_FAILED
+    return None
+
+
 def _between_pages(session, args, pool, page_num: int) -> None:
     """The pause, and the per-page rotation, before every page after the first.
 
@@ -723,6 +745,12 @@ def scrape(args) -> int:
     total_results = None
     pages_available = None
     addressable = None
+    # The exit code a PARTIAL run should carry, when the engine can say
+    # exactly which page failed and how. Page 1's rows are still written —
+    # discarding a good page is worse — but a blocked page 2 stays exit 3 and
+    # a page 2 nobody could load stays exit 5, rather than both collapsing to
+    # the generic "partial" 6. None keeps 6.
+    partial_exit = None
     start = args.start_page
 
     pool = proxy_pool_from_args(args)
@@ -767,11 +795,18 @@ def scrape(args) -> int:
             if first.state is not None:
                 total_results = first.state.total_results
                 pages_available = first.state.pages_available
-            planned = page_flow.plan_pages(args.pages, start, pages_available)
+            # Planned against BOTH statements the site makes: "164 results
+            # found" and "Showing page 1 of 7". Either alone is enough, and
+            # when both are present the smaller wins — a run never walks past
+            # the last page the site declared, and a one-page listing never
+            # asks for page 2 at all.
+            declared = page_flow.declared_pages(total_results, pages_available)
+            planned = page_flow.plan_pages(args.pages, start, pages_available,
+                                           total_results)
             if planned < args.pages and first.ok:
                 logger.info("The site states %s page(s) for this listing, so "
                             "this run fetches %d rather than the %d asked for.",
-                            pages_available, planned, args.pages)
+                            declared, planned, args.pages)
 
             if not first.ok:
                 stop_reason = failure_stop_reason(first)
@@ -801,8 +836,21 @@ def scrape(args) -> int:
                     addressable = _addressable(first, second)
 
                 if not second.ok:
+                    # Page 1's rows are kept and written; only the RUN is
+                    # partial. The exit code still says WHAT went wrong on
+                    # page 2 — blocked (3) or never obtained (5) — because
+                    # "some rows, unclear why" (6) is not something the caller
+                    # can act on.
                     stop_reason = failure_stop_reason(second)
                     blocked = bool(second.state and second.state.policy.blocked)
+                    partial_exit = _failed_page_exit(second)
+                    logger.error("Page %d failed (%s) after page %d was parsed "
+                                 "— keeping the %d row(s) already gathered and "
+                                 "reporting a PARTIAL run (exit %s). Page %d is "
+                                 "recorded in pages_failed.",
+                                 second.page_num, stop_reason, first.page_num,
+                                 len(first.products),
+                                 partial_exit or EXIT_PARTIAL, second.page_num)
                 elif second.complete_here or not second.products:
                     stop_reason = "listing_exhausted"
                 elif not addressable:
@@ -858,6 +906,7 @@ def scrape(args) -> int:
                             # which called a run blocked because of a page
                             # fetched after the one that actually failed.
                             blocked = bool(worst.state and worst.state.policy.blocked)
+                            partial_exit = _failed_page_exit(worst)
                         elif ran_out:
                             # Workers do not finish in page order: pages
                             # numbered BELOW the one that ran out may still
@@ -885,6 +934,7 @@ def scrape(args) -> int:
                             if not outcome.ok:
                                 stop_reason = failure_stop_reason(outcome)
                                 blocked = bool(outcome.state and outcome.state.policy.blocked)
+                                partial_exit = _failed_page_exit(outcome)
                                 break
                             if outcome.complete_here or not outcome.products:
                                 stop_reason = "listing_exhausted"
@@ -902,7 +952,9 @@ def scrape(args) -> int:
                                 stop_reason = "no_new_listings"
                                 break
             if (stop_reason == "completed"
-                    and page_flow.reached_last_page(start, planned, pages_available)):
+                    and page_flow.reached_last_page(start, planned,
+                                                    pages_available,
+                                                    total_results)):
                 # Every page the site has was fetched: that is the end of
                 # the listing, not merely the end of --pages — and the
                 # difference is what `coverage` tells diff_runs.py.
@@ -912,11 +964,11 @@ def scrape(args) -> int:
                 session.close()
 
     return _finish(args, outcomes, blocked, stop_reason, total_results,
-                   pages_available, addressable)
+                   pages_available, addressable, partial_exit)
 
 
 def _finish(args, outcomes, blocked, stop_reason, total_results,
-            pages_available, addressable) -> int:
+            pages_available, addressable, partial_exit=None) -> int:
     # Merge once, in PAGE order — not in the order pages happened to finish.
     all_products, merge_stats = merge_pages(
         (o.page_num, o.products) for o in outcomes)
@@ -948,7 +1000,7 @@ def _finish(args, outcomes, blocked, stop_reason, total_results,
                       total_results_last=counted[-1] if counted else None,
                       pages_available=pages_available, start_page=args.start_page,
                       start_url=args.url, final_url=final_url,
-                      engine="playwright")
+                      engine="playwright", partial_exit=partial_exit)
 
 
 def build_parser():

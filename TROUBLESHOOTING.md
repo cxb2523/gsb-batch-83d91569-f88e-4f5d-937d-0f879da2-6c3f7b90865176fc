@@ -50,8 +50,30 @@ listing all answered HTTP 200 with page SEVEN's real rows (measured
 thing that tells the two apart, and it is what this scraper reads.
 
 If `stop_reason` is `pagination_not_addressable`, page 2 carried nothing page
-1 did not already have — the `?page=` convention has changed. Please open a
-"Site changed" issue with the URL.
+1 did not already have — the `?page=` convention has changed, or the site
+served the same page for every URL. The run stops there rather than fetching
+pages 3..N (they are the same page too) and reports itself **partial**: page
+1's rows are in the output, `pages_failed` names the pages that yielded
+nothing, and `coverage` is null because neither "exhaustive" nor "window" is
+true of a run that could not page at all. Please open a "Site changed" issue
+with the URL.
+
+Page 2 is fetched on its own, before anything else after page 1, and only
+once — it is what proves the `?page=` parameter works at all. Its row ids are
+compared against page 1's: **no company that page 1 did not already have
+means the URL parameter did nothing**. That check runs before any decision to
+fetch page 3, so the run can never claim completeness from a listing it could
+only ever read the first page of.
+
+**When page 2 itself fails**, the run keeps page 1 and exits with the
+specific code rather than a generic partial: **3** if page 2 was blocked,
+**5** if it never loaded or could not be parsed, and `<out>.meta.json` names
+the page in `pages_failed`. The rows already gathered are written — throwing
+away a good page would be worse — but `status` is `partial` and `coverage`
+is null, so a consumer cannot mistake the file for a whole listing. A
+`--pages` larger than the site's own declared page count is planned down to
+it; a listing the site declares as one page never requests page 2 at all, and
+is complete on its own terms.
 
 ## "cannot read ...: /market/ is the industries overview"
 

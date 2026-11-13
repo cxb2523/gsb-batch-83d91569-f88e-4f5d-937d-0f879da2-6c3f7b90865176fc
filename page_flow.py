@@ -335,22 +335,49 @@ def url_for(start_url: str, start_page: int, run_page: int) -> str:
     return page_url(start_url, site_page(start_page, run_page))
 
 
+def declared_pages(total_results: Optional[int] = None,
+                   pages_available: Optional[int] = None,
+                   page_size: int = PAGE_SIZE) -> Optional[int]:
+    """The last page the site itself declares, or None when it says nothing.
+
+    Two independent statements carry the same arithmetic and either can be
+    missing: "164 results found" (total_results) and "Showing page 1 of 7"
+    (pages_available). A capture can carry the first without the second — a
+    browser re-serialisation that drops the "Showing page" clause, or a page
+    kind that prints only the count — and planning that ignores it would
+    fetch page 2 of a one-page listing the site had already declared. When
+    both are present their MINIMUM is used: neither statement is overridden
+    by the other, and a run never walks past a last page the site named.
+    """
+    counts = []
+    if isinstance(pages_available, int) and pages_available >= 1:
+        counts.append(pages_available)
+    if isinstance(total_results, int) and total_results > 0:
+        counts.append((total_results + page_size - 1) // page_size)
+    return min(counts) if counts else None
+
+
 def plan_pages(requested: int, start_page: int,
-               pages_available: Optional[int]) -> int:
+               pages_available: Optional[int],
+               total_results: Optional[int] = None) -> int:
     """How many pages this run should fetch, given what the site states.
 
-    Where the site states its page count, the run PLANS against it rather
-    than walking off the end: asking for 50 pages of a 7-page listing costs 7
-    fetches, not 7 plus 43 copies of page 7.
+    Where the site states its page count — through either "of N" or the
+    total result count — the run PLANS against it rather than walking off
+    the end: asking for 50 pages of a 7-page listing costs 7 fetches, not 7
+    plus 43 copies of page 7. A one-page listing planned against either
+    statement plans ONE page, so page 2 is never requested.
     """
-    if not isinstance(pages_available, int) or pages_available < 1:
+    declared = declared_pages(total_results, pages_available)
+    if declared is None:
         return requested
-    return max(1, min(requested, pages_available - start_page + 1))
+    return max(1, min(requested, declared - start_page + 1))
 
 
 def reached_last_page(start_page: int, fetched: int,
-                      pages_available: Optional[int]) -> bool:
+                      pages_available: Optional[int],
+                      total_results: Optional[int] = None) -> bool:
     """Whether a run that fetched `fetched` pages from `start_page` reached
     the last page the site says the listing has."""
-    return (isinstance(pages_available, int)
-            and start_page + fetched - 1 >= pages_available)
+    declared = declared_pages(total_results, pages_available)
+    return isinstance(declared, int) and start_page + fetched - 1 >= declared

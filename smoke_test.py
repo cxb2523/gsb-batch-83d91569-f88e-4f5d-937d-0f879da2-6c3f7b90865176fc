@@ -2403,6 +2403,350 @@ def check_engine_flows_on_real_answers():
         sac.fetch_html = real_fetch
 
 
+# ---------------------------------------------------------------------------
+# Page-by-page retrieval: the anti-"complete-looking" pagination tests
+# ---------------------------------------------------------------------------
+# The HTML below is SYNTHETIC — built here, never a capture — and labelled as
+# such. The committed fixtures are real pages of a 7-page listing and cannot
+# express the cases that matter here: a two-page listing with a clean split, a
+# ?page= parameter that does nothing, a page 2 the site refuses, and a listing
+# the site declares as ONE page. Those are shapes a live site only produces
+# under conditions nobody can reproduce on demand, so they are assembled from
+# the site's own markup — the `data-page-info` sentence and the
+# `data-row-company-id` rows the parser keys on.
+_PAGE_TEMPLATE = """<!DOCTYPE html><html><head>
+<title>{title} - Screener</title>
+<link rel="stylesheet" href="https://cdn-static.screener.in/assets/app-{n}.css">
+<link rel="icon" href="https://cdn-static.screener.in/assets/favicon.ico">
+</head><body>
+<ul><li><a href="/register/">Register</a></li></ul>
+<h1>{title}</h1>
+<div data-page-info>{total:,} results found: Showing page {served} of {of}</div>
+<table class="data-table text-nowrap striped">
+<tr><th>S.No.</th><th data-tooltip="Current Price">CMP <span>Rs.</span></th>
+<th data-tooltip="Market Capitalization">Mar Cap <span>Rs.Cr.</span></th>
+<th>Name</th></tr>
+{rows}
+</table>
+</body></html>"""
+
+_A_ROW_TEMPLATE = ('<tr data-row-company-id="{sku}"><td>{rank}.</td>'
+                   '<td>{price}</td><td>{cap}</td>'
+                   '<td><a href="/company/T{sku}/">{name}</a></td></tr>')
+
+
+def _synth_page(title, total, of, served=None, skus=(), rank_base=0):
+    """A minimal screener.in-shaped listing page. SYNTHETIC, not a capture."""
+    rows = "".join(
+        _A_ROW_TEMPLATE.format(sku=sku, rank=rank_base + i + 1,
+                               price=100 + i, cap=1000 + i,
+                               name=f"{title} {i + 1}")
+        for i, sku in enumerate(skus))
+    return _PAGE_TEMPLATE.format(title=title, total=total, of=of,
+                                 served=served if served is not None else 1,
+                                 n=len(skus), rows=rows)
+
+
+def _two_page_htmls():
+    """(page 1 html, page 2 html) of a synthetic TWO-page, 30-result listing."""
+    page1 = _synth_page("Synth Two Page", 30, 2, served=1,
+                        skus=[f"11{n}" for n in range(1, 26)])
+    page2 = _synth_page("Synth Two Page", 30, 2, served=2,
+                        skus=[f"11{n}" for n in range(26, 31)],
+                        rank_base=25)
+    return page1, page2
+
+
+def _count_only_page(title, total, skus):
+    """A page that states its RESULT COUNT but not "Showing page N of M".
+
+    A browser re-serialisation can drop the second clause, and a run must
+    still plan against the count it does state rather than walk off the end.
+    SYNTHETIC; built from the site's template wording.
+    """
+    rows = "".join(
+        _A_ROW_TEMPLATE.format(sku=sku, rank=i + 1, price=100 + i, cap=1000 + i,
+                               name=f"{title} {i + 1}")
+        for i, sku in enumerate(skus))
+    return f"""<!DOCTYPE html><html><head><title>{title} - Screener</title>
+<link rel="stylesheet" href="https://cdn-static.screener.in/assets/app.css">
+</head><body><h1>{title}</h1>
+<div data-page-info>{total:,} results found</div>
+<table class="data-table text-nowrap striped">
+<tr><th>S.No.</th><th data-tooltip="Current Price">CMP <span>Rs.</span></th>
+<th data-tooltip="Market Capitalization">Mar Cap <span>Rs.Cr.</span></th>
+<th>Name</th></tr>
+{rows}</table></body></html>"""
+
+
+def _forbidden_page():
+    """A page the site refused: HTTP 403, no rows.
+
+    Not a login wall and not a challenge — the classifier's own refusal
+    status, which is what a rate limiter answers with. Synthetic.
+    """
+    return ("<!DOCTYPE html><html><head><title>403 Forbidden</title></head>"
+            "<body><h1>403 Forbidden</h1></body></html>")
+
+
+def check_pagination_retrieval_is_offline_and_honest():
+    """Page 1 first, page 2 alone, and a run that cannot page says so.
+
+    Every shape this file can build offline is driven through the real
+    scrape(): a clean two-page listing; a page 2 that repeats page 1 (the
+    ?page= parameter doing nothing); page 2 blocked; page 2 timing out; page
+    2 unreadable; a listing the site declares as a single page; an
+    overlapping page 2; and a later page failing on both the sequential and
+    the worker-pool path. The assertions are on what a CONSUMER reads — the
+    sidecar's stop_reason, pages_failed and coverage, the exit code, and the
+    row count in the output — because the bug these guard against produced a
+    perfectly formatted file that was silently short.
+    """
+    print("\n[pagination retrieval]")
+    engine = ENGINES.get("playwright_scraper")
+    if engine is None:
+        skip("pagination retrieval", "playwright not installed")
+        return
+    base = "https://www.screener.in/market/IN08/IN0801/IN080101/"
+    page1, page2 = _two_page_htmls()
+    same_as_page1 = _synth_page("Synth Two Page", 30, 2, served=2,
+                                skus=[f"11{n}" for n in range(1, 26)])
+    one_page = _synth_page("Synth One Page", 18, 1, served=1,
+                           skus=[f"90{n}" for n in range(1, 19)])
+    blocked = _forbidden_page()
+    never_painted = _synth_page("Synth Two Page", 30, 2, served=2, skus=())
+
+    class _Session:
+        def __init__(self, *a, **kw):
+            self.pool = None
+
+        def open(self):
+            return self
+
+        def close(self):
+            pass
+
+        def relaunch(self):
+            pass
+
+    class _PW:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    saved = (engine.sync_playwright, engine._BrowserSession, engine._fetch_one_page)
+    try:
+        engine.sync_playwright = lambda: _PW()
+        engine._BrowserSession = _Session
+
+        def run(label, pages_arg, answers, want_rc, want_stop, want_failed,
+                want_coverage, want_rows, concurrency=1, want_status=None):
+            """Drive scrape() over `answers` keyed by the SITE page it returns.
+
+            `answers[site_page]` is either an HTML string (classified and
+            parsed through the REAL page_flow/product_parser — only the
+            browser is stubbed), an (html, status_code) pair when the response
+            carries a refusal status, or a PageOutcome to return as-is (for a
+            transport failure no HTML describes).
+            """
+            fetched = []
+
+            def fake(session, args, pool, page_num, url, _answers=answers,
+                     _fetched=fetched):
+                _fetched.append(page_num)
+                answer = _answers.get(page_num)
+                outcome = engine.PageOutcome(page_num=page_num, url=url)
+                if isinstance(answer, engine.PageOutcome):
+                    return outcome.__class__(**{**answer.__dict__, "url": url})
+                if answer is None:
+                    outcome.load_failed = True
+                    return outcome
+                status = None
+                if isinstance(answer, tuple):
+                    answer, status = answer
+                outcome.state = page_flow.classify(answer, status_code=status,
+                                                   url=url,
+                                                   requested_page=page_num)
+                outcome.final_url = url
+                if outcome.state.state == page_flow.CONTENT:
+                    outcome.products = parse_products(answer, url,
+                                                      page=page_num)
+                    outcome.parse_failed = not outcome.products
+                return outcome
+
+            engine._fetch_one_page = fake
+            with tempfile.TemporaryDirectory() as tmp:
+                out = os.path.join(tmp, "run")
+                args = engine.parse_args([
+                    "--url", base, "--pages", str(pages_arg), "--delay", "0",
+                    "--retry-delay", "0", "--format", "json",
+                    "--concurrency", str(concurrency),
+                    "--out", out])
+                with redirect_stdout(io.StringIO()):
+                    rc = engine.scrape(args)
+                eq(f"{label}: exits {want_rc}", rc, want_rc)
+                meta_path = out + ".meta.json"
+                check(f"{label}: writes a sidecar", os.path.exists(meta_path))
+                meta = json.load(open(meta_path, encoding="utf-8"))
+                eq(f"{label}: stop_reason is {want_stop}",
+                   meta["stop_reason"], want_stop)
+                eq(f"{label}: pages_failed names {want_failed}",
+                   meta["pages_failed"], want_failed)
+                eq(f"{label}: coverage is {want_coverage}",
+                   meta["coverage"], want_coverage)
+                expected_status = want_status or (
+                    "complete" if want_stop in ("completed", "listing_exhausted")
+                    else "partial")
+                eq(f"{label}: status is {expected_status}",
+                   meta["status"], expected_status)
+                rows = json.load(open(out + ".json", encoding="utf-8"))
+                eq(f"{label}: the output holds {want_rows} row(s)",
+                   len(rows), want_rows)
+                eq(f"{label}: fetched pages are {sorted(answers)}",
+                   fetched, sorted(answers))
+                return meta
+
+        # 1. A clean two-page listing. Page 1 then page 2, merged in page
+        #    order; --pages 2 of a 2-page listing is the whole listing.
+        run("two pages", 2, {1: page1, 2: page2}, 0,
+            "listing_exhausted", [], "exhaustive", 30)
+        # ...and asking for MORE than the site declares fetches only what it
+        #    declares: pages 3..5 are never requested, and the run is still
+        #    complete because it reached the listing's real end.
+        run("--pages 5 of a 2-page listing", 5, {1: page1, 2: page2}, 0,
+            "listing_exhausted", [], "exhaustive", 30)
+
+        # 2. Page 2 repeats page 1's companies: ?page= did not work. The
+        #    remaining pages are NOT walked, page 2 stays in the output, and
+        #    the run calls itself partial rather than complete.
+        meta = run("page 2 identical to page 1", 5,
+                   {1: page1, 2: same_as_page1}, EXIT_PARTIAL,
+                   "pagination_not_addressable", [], None, 25)
+        eq("a page that proves the parameter dead is recorded as such",
+           meta["addressable"], False)
+        eq("and every repeat it carried is dropped and counted",
+           (meta["rows_before_dedupe"], meta["duplicate_skus_across_pages"],
+            meta["duplicate_pages"]), (50, 25, [2]))
+
+        # 3. Page 2 refused: exit 3, and page 1's rows are still written.
+        run("page 2 blocked", 3, {1: page1, 2: (blocked, 403)}, EXIT_BLOCKED,
+            "blocked_http", [2], None, 25)
+
+        # 4. Page 2 never loaded (a timeout on every attempt): exit 5, page 1
+        #    kept, and the page named in pages_failed.
+        timeout = engine.PageOutcome(page_num=2, url=base + "?page=2")
+        timeout.load_failed = True
+        run("page 2 timed out", 3, {1: page1, 2: timeout}, EXIT_FETCH_FAILED,
+            "page_load_timeout", [2], None, 25)
+
+        # 4b. Page 2 came back without a table at all — the site's own assets,
+        #     its count, and no rows: a page nobody could read, which is exit
+        #     5 and a partial run, never "the listing ended on page 2". Page
+        #     1's 25 rows are what the output holds.
+        run("page 2 unreadable", 3, {1: page1, 2: never_painted},
+            EXIT_FETCH_FAILED, "content_unparsed", [2], None, 25)
+
+        # 5. The site declares ONE page. Page 2 is never requested, and the
+        #    run is complete on its own terms.
+        run("one declared page", 5, {1: one_page}, 0,
+            "listing_exhausted", [], "exhaustive", 18)
+        # ...and the same when the ONLY statement is the result count: 18
+        #    results at 25 a page is one page, whichever clause says it.
+        run("one page stated only by its count", 5,
+            {1: _count_only_page("Synth Count Only", 18,
+                                 [f"93{n}" for n in range(1, 19)])}, 0,
+            "listing_exhausted", [], "exhaustive", 18)
+        # ...and asking for --pages 1 of a 2-page listing is a complete
+        #    WINDOW: completed, not exhaustive, and no page 2 fetch.
+        run("one page of a longer listing", 1, {1: page1}, 0,
+            "completed", [], "window", 25)
+
+        # 6. Cross-page duplicate skus: the second occurrence is dropped and
+        #    recorded, and the counts stay honest. Page 2 carries four of
+        #    page 1's companies plus one genuinely new one.
+        overlap = _synth_page("Synth Two Page", 30, 2, served=2,
+                              skus=[f"11{n}" for n in (1, 2, 3, 4, 31)])
+        meta = run("an overlapping page 2", 2, {1: page1, 2: overlap}, 0,
+                   "listing_exhausted", [], "exhaustive", 26)
+        eq("the overlap is counted, not hidden",
+           (meta["duplicate_skus_across_pages"], meta["duplicate_pages"]),
+           (4, [2]))
+        eq("and rows_before_dedupe shows what was read",
+           meta["rows_before_dedupe"], 30)
+
+        # 7. The same rule on page 3, sequentially and through the worker
+        #    pool: a page that fails AFTER good ones still names its own exit
+        #    code, and the pages before it are still written.
+        page3 = _synth_page("Synth Four Page", 100, 4, served=3,
+                            skus=[f"12{n}" for n in range(1, 26)], rank_base=50)
+        page4 = _synth_page("Synth Four Page", 100, 4, served=4,
+                            skus=[f"12{n}" for n in range(26, 51)], rank_base=75)
+        page1_4 = _synth_page("Synth Four Page", 100, 4, served=1,
+                              skus=[f"11{n}" for n in range(1, 26)])
+        page2_4 = _synth_page("Synth Four Page", 100, 4, served=2,
+                              skus=[f"11{n}" for n in range(26, 51)],
+                              rank_base=25)
+        run("page 3 blocked, sequential", 4,
+            {1: page1_4, 2: page2_4, 3: (blocked, 403)}, EXIT_BLOCKED,
+            "blocked_http", [3], None, 50)
+        run("page 4 timed out, two workers", 4,
+            {1: page1_4, 2: page2_4, 3: page3,
+             4: engine.PageOutcome(page_num=4, url=base + "?page=4", load_failed=True)},
+            EXIT_FETCH_FAILED, "page_load_timeout", [4], None, 75,
+            concurrency=2)
+
+    finally:
+        (engine.sync_playwright, engine._BrowserSession, engine._fetch_one_page) = saved
+
+    # The planning helpers behind all of this, directly: a listing the site
+    # declares as one page plans ONE fetch, whichever statement carries it.
+    eq("a declared page count caps the plan",
+       page_flow.plan_pages(5, 1, 2), 2)
+    eq("a total result count does too, when 'of N' is missing",
+       page_flow.plan_pages(5, 1, None, total_results=30), 2)
+    eq("a one-page listing plans a single fetch",
+       page_flow.plan_pages(5, 1, 1), 1)
+    eq("and so does a one-page listing stated only by its count",
+       page_flow.plan_pages(5, 1, None, total_results=18), 1)
+    eq("the smaller of the two statements wins",
+       page_flow.declared_pages(total_results=40, pages_available=2), 2)
+    eq("and reaching the declared last page is recognised",
+       page_flow.reached_last_page(1, 2, None, total_results=30), True)
+    eq("while one page short of it is not",
+       page_flow.reached_last_page(1, 1, None, total_results=30), False)
+
+    # The helper the exit codes go through, directly: the three facts stay
+    # distinct, and a page fetched with no observable fault is not given a
+    # failure code it did not earn.
+    def _o(state=None, **flags):
+        o = engine.PageOutcome(page_num=2, url="u2")
+        o.state = state
+        for k, v in flags.items():
+            setattr(o, k, v)
+        return o
+    eq("a blocked page names exit 3",
+       engine._failed_page_exit(_o(page_flow.PageState(page_flow.BLOCKED, "x", vendor="http",
+                                                       status_code=403))),
+       EXIT_BLOCKED)
+    eq("a page that never loaded names exit 5",
+       engine._failed_page_exit(_o(load_failed=True)), EXIT_FETCH_FAILED)
+    eq("a page that would not parse names exit 5 too",
+       engine._failed_page_exit(_o(page_flow.PageState(page_flow.CONTENT, "rows"), parse_failed=True)),
+       EXIT_FETCH_FAILED)
+    eq("a fetch that raised is exit 5", engine._failed_page_exit(_o(raised=True)),
+       EXIT_FETCH_FAILED)
+    eq("and a page with no fault of that kind stays the generic partial 6",
+       engine._failed_page_exit(_o(page_flow.PageState(page_flow.UNPAINTED, "shell"))),
+       None)
+    eq("a page the site answered 404 for is named exit 5",
+       engine._failed_page_exit(
+           _o(page_flow.PageState(page_flow.NOT_FOUND, "404", vendor="not_found",
+                                  status_code=404))),
+       EXIT_FETCH_FAILED)
+
+
 def check_secret_scan_judges_the_credential_not_the_line():
     """The CI scan's allowlist is matched against the URL's userinfo, exactly.
 
@@ -3232,6 +3576,7 @@ def main() -> int:
                   check_cli_refuses_impossible_values,
                   check_diff_refuses_a_window_comparison,
                   check_engine_flows_on_real_answers,
+                  check_pagination_retrieval_is_offline_and_honest,
                   check_secret_scan_judges_the_credential_not_the_line,
                   check_config_report_never_prints_a_credential,
                   check_every_log_line_is_redacted,

@@ -9,6 +9,32 @@ notes with a warning saying so.
 
 ## [Unreleased]
 
+> **Exit codes for a page that fails mid-run change under the Playwright
+> engine.** A run whose page 2 (or any later page) is blocked used to write
+> page 1's rows and exit 6 ("partial"); it now exits **3**, and a page that
+> never loaded or could not be parsed exits **5**. The rows are still
+> written, `status` is still `partial`, and the page is still named in
+> `pages_failed` — only the exit code is more specific, so a caller can tell
+> a refusal from a failure without parsing the sidecar. Runs that end 0 or 4
+> are unchanged.
+
+### Fixed
+
+- **A paginated run can no longer look complete when page 2 never arrived.**
+  Page 1 is fetched first and the run plans its page count against the site's
+  own statement — the smaller of "Showing page 1 of 7" and the page count
+  implied by "164 results found" — so a one-page listing never asks for page
+  2 and a run never walks past the site's declared last page. Page 2 is then
+  fetched on its own and its company ids are compared with page 1's: if it
+  adds none that page 1 did not already have, `?page=` did not take effect,
+  the run stops, keeps page 1, and reports `pagination_not_addressable` (a
+  partial run) instead of fetching the same page again as 3..N. A page 2 that
+  is blocked or never loads now exits 3 or 5 respectively — not the generic
+  6 — with page 1's rows written and the page named in `pages_failed`. The
+  offline suite covers all four shapes on synthetic HTML: a clean two-page
+  listing, page 2 identical to page 1, page 2 blocked, and a listing the site
+  declares as one page.
+
 ### Security
 
 - **certifi 2026.7.22 → 2026.10.23** in every lock (`requirements.lock` and the Playwright, Selenium and pyppeteer locks), clearing PYSEC-2026-4320. The CI tooling lock also moves filelock 4.0.5 → 4.2.9 (Python ≥ 3.11) and msgpack 1.2.2 → 1.2.4 for their advisories. Only these packages were upgraded; every other pin is unchanged. On Python 3.9 and 3.10 the CI lock keeps filelock 3.19.1 and 4.1.0, the newest releases installable there; the audit job runs on 3.12.

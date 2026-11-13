@@ -595,11 +595,20 @@ def finish_run(products: List[Product], out_prefix: str, fmt: str,
                total_results_last: Optional[int] = None,
                pages_available: Optional[int] = None,
                start_page: int = 1,
-               engine: Optional[str] = None) -> int:
+               engine: Optional[str] = None,
+               partial_exit: Optional[int] = None) -> int:
     """Write output + the run-metadata sidecar; return the exit code.
 
     Shared by all engines so the status/exit-code mapping cannot drift between
     them.
+
+    `partial_exit` names the code to return instead of EXIT_PARTIAL (6) when
+    rows WERE written but the run did not finish. It exists for one contract:
+    an engine that can say exactly which page failed wants a blocked page 2
+    to stay exit 3 and a page 2 nobody could load to stay exit 5, even though
+    page 1's rows are written and the sidecar says `status: partial`. The
+    rows are still kept — throwing away a good page is worse — but the exit
+    code is not downgraded to "some rows, unclear why". None keeps 6.
 
     The metadata sidecar is written ONLY when the output file was written.
     Otherwise a failed run would leave a "status": "failed" sidecar next to
@@ -712,9 +721,10 @@ def finish_run(products: List[Product], out_prefix: str, fmt: str,
             return EXIT_FETCH_FAILED
         return rc
     if not complete:
+        code = EXIT_PARTIAL if partial_exit is None else partial_exit
         print(f"[!] Partial run: stopped after {pages_completed} of "
               f"{pages_requested} page(s) ({stop_reason}). The output holds "
               f"what was gathered, but it is NOT a complete view — see "
               f"{out_prefix}.meta.json.")
-        return EXIT_PARTIAL
+        return code
     return rc
