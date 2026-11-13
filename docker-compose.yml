@@ -1,0 +1,44 @@
+# webmirage MCP server with its managed Mihomo proxy sidecar.
+# Persistent Mihomo state (subscription output, geodata and controller config)
+# lives in ./mihomo/data and is intentionally excluded from Git.
+# Set MIHOMO_API_SECRET and MIHOMO_SUBSCRIPTION_URL in .env; never commit it.
+
+services:
+  mihomo:
+    # Set MIHOMO_IMAGE in .env on a new host, or prebuild this compatible image.
+    image: ${MIHOMO_IMAGE:-local/mihomo:v1.19.31}
+    container_name: mihomo
+    restart: unless-stopped
+    volumes:
+      - ./mihomo/data:/root/.config/mihomo
+    ports:
+      - "7890:7890"
+      - "7891:7891"
+      # Controller remains private to this host and the Compose network.
+      - "127.0.0.1:9090:9090"
+
+  webmirage:
+    build: .
+    container_name: webmirage
+    restart: unless-stopped
+    depends_on:
+      - mihomo
+    ports:
+      - "8084:8084"
+    volumes:
+      - ./webmirage-config:/root/.webmirage
+    environment:
+      WEBMIRAGE_TRANSPORT: sse
+      WEBMIRAGE_HOST: 0.0.0.0
+      WEBMIRAGE_PORT: "8084"
+      # WebMirage consumes the integrated sidecar over the private network.
+      TWITTER_PROXY: http://mihomo:7890
+      http_proxy: http://mihomo:7890
+      https_proxy: http://mihomo:7890
+      HTTP_PROXY: http://mihomo:7890
+      HTTPS_PROXY: http://mihomo:7890
+      MIHOMO_CONTROLLER: http://mihomo:9090
+      MIHOMO_API_SECRET: ${MIHOMO_API_SECRET:-}
+      # GitHub stays direct; mihomo must not be proxied recursively.
+      no_proxy: localhost,127.0.0.1,mihomo,github.com,api.github.com,objects.githubusercontent.com,raw.githubusercontent.com
+      NO_PROXY: localhost,127.0.0.1,mihomo,github.com,api.github.com,objects.githubusercontent.com,raw.githubusercontent.com

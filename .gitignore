@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment & secrets
+.env
+*.local
+
+# User config (contains cookies)
+config.yaml
+
+# Cache
+*.log
+.cache/
+
+# Gateway console
+node_modules/
+*.tsbuildinfo
+gateway/artifacts/
+gateway/data/
+gateway/frontend/test-results/
+
+# Managed Mihomo state: subscription config, controller secret and geodata
+mihomo/data/*
+!mihomo/data/.gitkeep
+mihomo/*.candidate.yaml
+
+# Runtime credential-update lock (the config itself is already ignored).
+webmirage-config/.gateway-config.lock
+webmirage-config/health-checks.sqlite3*
+webmirage-config/reddit-browser.sock
+webmirage-config/reddit-browser.sock.*

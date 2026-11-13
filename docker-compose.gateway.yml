@@ -1,0 +1,19 @@
+# Optional console. This file is NOT loaded by the normal Compose startup.
+# Enable explicitly with: docker compose -f docker-compose.yml -f docker-compose.gateway.yml up -d --build gateway
+services:
+  gateway:
+    build: ./gateway
+    container_name: mirage-gateway
+    restart: unless-stopped
+    depends_on:
+      - mihomo
+    ports:
+      - "${GATEWAY_BIND_HOST:-127.0.0.1}:${GATEWAY_PORT:-8091}:8091"
+    environment:
+      MIHOMO_CONTROLLER: http://mihomo:9090
+      MIHOMO_API_SECRET: ${MIHOMO_API_SECRET:-}
+      GATEWAY_CONFIG: /state/mihomo/config.yaml
+      GATEWAY_ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+    volumes:
+      - ./mihomo/data:/state/mihomo:ro
+      - ./mihomo/data/gateway-admin-password:/run/secrets/admin_password:ro
