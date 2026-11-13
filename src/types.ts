@@ -1,0 +1,104 @@
+export interface OpenAIMessage {
+  role: string;
+  /** Text, or a multimodal content-part array passed through verbatim. */
+  content?: string | Array<Record<string, unknown>> | null;
+  tool_call_id?: string;
+  tool_calls?: unknown[];
+}
+
+export interface CatalogEntry {
+  /** OpenAI-compatible model requested in the chat body. */
+  id: string;
+  /** Predict path segment, e.g. minimax-m3 or llama-3_1-8b-instruct. */
+  slug: string;
+  /** Predict-path namespace from the model page, falls back to NAMESPACE. */
+  namespace?: string;
+  /** Per-model value for the nv-function-id header. */
+  functionId: string;
+  created: number;
+  ownedBy: string;
+  /** Params the model accepts, from its OpenAPI spec. Undefined = unknown, send all. */
+  params?: string[];
+  /** Advertised reasoning_effort values, ordered as published by the model. */
+  reasoningEfforts?: string[];
+}
+
+export interface ModelRoute {
+  modelId: string;
+  functionId: string;
+  /** Params accepted by the deployed model, when its spec is available. */
+  params?: string[];
+  /** Advertised reasoning_effort values, ordered as published by the model. */
+  reasoningEfforts?: string[];
+}
+
+export interface ChatRequest {
+  model: string;
+  messages: OpenAIMessage[];
+  stream?: boolean;
+  temperature?: number;
+  top_p?: number;
+  max_tokens?: number;
+  enable_thinking?: boolean;
+  tools?: unknown[];
+}
+
+export interface OpenAIChunk {
+  id: string;
+  object: "chat.completion.chunk";
+  created: number;
+  model: string;
+  choices: Array<{
+    index: number;
+    delta: { role?: string; content?: string; reasoning_content?: string };
+    finish_reason: string | null;
+  }>;
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+}
+
+export interface ChatCompletion {
+  id: string;
+  object: "chat.completion";
+  created: number;
+  model: string;
+  choices: Array<{
+    index: number;
+    message: {
+      role: string;
+      content: string;
+      reasoning_content?: string;
+    };
+    finish_reason: string | null;
+  }>;
+  usage: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+}
+
+export interface UpstreamChatParams {
+  token: string;
+  messages: OpenAIMessage[];
+  model: string;
+  temperature?: number;
+  topP?: number;
+  maxTokens?: number;
+  enableThinking: boolean;
+  stream: boolean;
+  tools?: unknown[];
+  /** Deployment route (predict path + queue function id) for this request. */
+  route: { modelId: string; functionId: string };
+  /** Params the model accepts; unsupported ones are dropped before sending. */
+  allowedParams?: string[];
+  /** Advertised reasoning_effort values used to map enable_thinking. */
+  reasoningEfforts?: string[];
+  /** Cancels the upstream request when the downstream client disconnects. */
+  signal?: AbortSignal;
+  /** Runs synchronously immediately before the NVIDIA fetch begins. */
+  onDispatch?: () => void;
+}

@@ -1,0 +1,8 @@
+node_modules
+PROXIES.txt
+.git
+tests
+.github
+.kiro
+.opencode
+*.md

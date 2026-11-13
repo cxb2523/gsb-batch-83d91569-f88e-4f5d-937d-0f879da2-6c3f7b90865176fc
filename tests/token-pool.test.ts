@@ -1,0 +1,262 @@
+import { expect, spyOn, test } from "bun:test";
+import { TokenPool, type TokenSource } from "../src/token-pool.ts";
+
+function fakeSource(tokens: string[]): TokenSource & { minted: number } {
+  let i = 0;
+  return {
+    minted: 0,
+    async mintToken() {
+      this.minted++;
+      const t = tokens[i++ % tokens.length];
+      await new Promise((r) => setTimeout(r, 1));
+      return `${t}-${this.minted}`;
+    },
+  };
+}
+
+test("acquire pops warm tokens and refills in the background", async () => {
+  const src = fakeSource(["t1", "t2", "t3"]);
+  const pool = new TokenPool(src, 2);
+
+  const a = await pool.acquire();
+  const b = await pool.acquire();
+  expect(a).toBe("t1-1");
+  expect(b).toBe("t2-2");
+
+  // burned 2, capacity 2 -> refill should top back up to 2
+  await new Promise((r) => setTimeout(r, 20));
+  expect(src.minted).toBeGreaterThanOrEqual(3);
+
+  const c = await pool.acquire();
+  expect(c.startsWith("t")).toBe(true);
+});
+
+test("acquire waits for a mint when the pool is cold", async () => {
+  const src = fakeSource(["t1"]);
+  const pool = new TokenPool(src, 1);
+
+  const first = await pool.acquire();
+  expect(first).toBe("t1-1");
+
+  const second = pool.acquire(); // pool empty, no warm token -> must mint
+  const got = await second;
+  expect(got).toBe("t1-2");
+});
+
+test("concurrent cold acquires each get a distinct token", async () => {
+  const src = fakeSource(["t1", "t2", "t3"]);
+  const pool = new TokenPool(src, 2);
+
+  const [a, b, c] = await Promise.all([
+    pool.acquire(),
+    pool.acquire(),
+    pool.acquire(),
+  ]);
+  const tokens = [a, b, c];
+  expect(new Set(tokens).size).toBe(3);
+  expect(tokens.every((t) => t.startsWith("t"))).toBe(true);
+});
+
+test("mint failure rejects all waiting acquirers", async () => {
+  const src: TokenSource = {
+    async mintToken() {
+      throw new Error("captcha down");
+    },
+  };
+  const pool = new TokenPool(src, 1);
+
+  await expect(pool.acquire()).rejects.toThrow("captcha down");
+});
+
+test("acquire times out when the pool stays cold", async () => {
+  const src: TokenSource = {
+    async mintToken() {
+      await new Promise((r) => setTimeout(r, 1000)); // slow, but finite
+      throw new Error("unreachable");
+    },
+  };
+  const pool = new TokenPool(src, 1, { acquireTimeoutMs: 30 });
+
+  await expect(pool.acquire()).rejects.toThrow("timed out");
+});
+
+test("aborted acquire leaves the cold token queue", async () => {
+  const src: TokenSource = {
+    async mintToken() {
+      return new Promise<string>(() => {});
+    },
+  };
+  const pool = new TokenPool(src, 1, { acquireTimeoutMs: 1_000 });
+  const controller = new AbortController();
+  const pending = pool.acquire(controller.signal);
+  controller.abort();
+
+  await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  pool.close();
+});
+
+test("acquire rejects beyond the waiter cap", async () => {
+  const src: TokenSource = {
+    async mintToken() {
+      await new Promise((r) => setTimeout(r, 1000));
+      throw new Error("unreachable");
+    },
+  };
+  const pool = new TokenPool(src, 1, { acquireTimeoutMs: 200, maxWaiters: 1 });
+
+  const first = pool.acquire();
+  await expect(pool.acquire()).rejects.toThrow("too many");
+  await expect(first).rejects.toThrow("timed out");
+});
+
+test("a single mint failure retries before rejecting waiters", async () => {
+  let attempts = 0;
+  const src: TokenSource = {
+    async mintToken() {
+      attempts++;
+      if (attempts < 3) throw new Error("transient");
+      return "P1_ok";
+    },
+  };
+  const pool = new TokenPool(src, 1, { maxRetries: 2 });
+
+  const token = await pool.acquire();
+  expect(token).toBe("P1_ok");
+  expect(attempts).toBeGreaterThanOrEqual(3);
+});
+
+test("prewarm retries after a transient mint failure", async () => {
+  let attempts = 0;
+  const errors: string[] = [];
+  const src: TokenSource = {
+    async mintToken() {
+      attempts++;
+      if (attempts === 1) throw new Error("transient warmup failure");
+      return "P1_warm";
+    },
+  };
+  const pool = new TokenPool(src, 1, {
+    prewarmRetryMs: 5,
+    onError: (error) => errors.push(error.message),
+  });
+
+  pool.prewarm();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  expect(errors).toEqual(["transient warmup failure"]);
+  expect(attempts).toBeGreaterThanOrEqual(2);
+  expect(await pool.acquire()).toBe("P1_warm");
+});
+
+test("stale warm tokens are discarded and reminted", async () => {
+  const src = fakeSource(["t1", "t2"]);
+  const pool = new TokenPool(src, 1);
+  pool.prewarm();
+  await new Promise((r) => setTimeout(r, 20)); // warm token stocked
+  const spy = spyOn(Date, "now").mockReturnValue(Date.now() + 200_000);
+  try {
+    const t = await pool.acquire();
+    expect(t).toBe("t2-2");
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+test("pool heals on the next acquire after a mint failure", async () => {
+  let attempts = 0;
+  const src: TokenSource = {
+    async mintToken() {
+      attempts++;
+      if (attempts === 1) throw new Error("captcha down");
+      return `P1_healed_${attempts}`;
+    },
+  };
+  const pool = new TokenPool(src, 1);
+
+  await expect(pool.acquire()).rejects.toThrow("captcha down");
+  const token = await pool.acquire();
+  expect(token).toBe("P1_healed_2");
+});
+
+test("a waiter re-acquiring from a rejection handler is served", async () => {
+  let attempts = 0;
+  const src: TokenSource = {
+    async mintToken() {
+      attempts++;
+      if (attempts === 1) throw new Error("down");
+      return "P1_ok";
+    },
+  };
+  const pool = new TokenPool(src, 1, { acquireTimeoutMs: 1000 });
+  const result = await pool.acquire().catch(() => pool.acquire());
+  expect(result).toBe("P1_ok");
+});
+
+test("persistent mint failure rejects all waiters after retries exhausted", async () => {
+  let attempts = 0;
+  const src: TokenSource = {
+    async mintToken() {
+      attempts++;
+      throw new Error("captcha down");
+    },
+  };
+  const pool = new TokenPool(src, 1, { maxRetries: 1 });
+
+  const first = pool.acquire();
+  const second = pool.acquire();
+  let e1: string | undefined;
+  let e2: string | undefined;
+  await first.catch((e) => (e1 = (e as Error).message));
+  await second.catch((e) => (e2 = (e as Error).message));
+  expect(e1).toBe("captcha down");
+  expect(e2).toBe("captcha down");
+  expect(attempts).toBeGreaterThanOrEqual(2);
+});
+
+test("invalidate cancels a stuck mint and serves a fresh generation", async () => {
+  let calls = 0;
+  let resets = 0;
+  let rejectFirst: ((error: Error) => void) | undefined;
+  const firstMint = new Promise<string>((_resolve, reject) => {
+    rejectFirst = reject;
+  });
+  const src: TokenSource = {
+    async mintToken() {
+      calls++;
+      if (calls === 1) return firstMint;
+      return "P1_fresh";
+    },
+    async reset() {
+      resets++;
+      rejectFirst?.(new Error("mint cancelled by reset"));
+    },
+  };
+  const pool = new TokenPool(src, 1);
+
+  pool.prewarm();
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  await pool.invalidate();
+
+  expect(await pool.acquire()).toBe("P1_fresh");
+  expect(resets).toBe(1);
+});
+
+test("close rejects new acquires and stops background retries", async () => {
+  let attempts = 0;
+  const src: TokenSource = {
+    async mintToken() {
+      attempts++;
+      throw new Error("captcha down");
+    },
+  };
+  const pool = new TokenPool(src, 1, { prewarmRetryMs: 5 });
+
+  pool.prewarm();
+  await new Promise((resolve) => setTimeout(resolve, 2));
+  pool.close();
+  const atClose = attempts;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  await expect(pool.acquire()).rejects.toThrow("token pool is closed");
+  expect(attempts).toBe(atClose);
+});
