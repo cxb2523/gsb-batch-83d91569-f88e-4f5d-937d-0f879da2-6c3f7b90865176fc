@@ -178,6 +178,31 @@ Every successful run writes `<out>.meta.json` beside its output:
 `pages_failed` names WHICH pages produced nothing, by number — a count stops
 being a description once page 3 can fail while 4 and 5 succeed.
 
+`page_outcomes` (Playwright engine) gives one checkable verdict per
+**requested** page, so a number in `pages_failed` no longer has to be guessed
+at. Each record holds the page, its final `status`, the rows parsed on it and
+the proxy exit it used:
+
+```json
+"page_outcomes": [
+  {"page": 1, "status": "success", "rows_parsed": 22, "proxy_exit": "none", ...},
+  {"page": 2, "status": "blocked", "rows_parsed": 0, "proxy_exit": "http://***:***@exit-a.example:8000", ...},
+  {"page": 3, "status": "not_attempted", "rows_parsed": 0, "proxy_exit": "none", ...}
+]
+```
+
+The per-page `status` is one of: `success` (loaded and parsed — a zero-row
+page that ends the listing is still a successful fetch), `blocked`,
+`load_failed`, `needs_signin`, `not_found`, `not_dispatched` (the listing ran
+out while the page was still queued under `--concurrency`; not a failure) or
+`not_attempted` (a worker died, or the sequential loop broke after an earlier
+page failed). `proxy_exit` is the masked exit that served the page, or the
+explicit string `"none"` when no proxy was configured — including for pages
+that were never fetched, which produced no traffic. `not_dispatched` and
+`not_attempted` pages never appear in `pages_failed`: the run-level
+`status`/`pages_completed`/`pages_failed` and the exit codes keep their
+existing meaning, and `page_outcomes` only supplements them.
+
 `records` is how many rows were written and `record_type` says what one row
 is — `product` for `--mode listing` and `--mode product`, `review` for
 `--mode reviews`. Count the reviews, not the products: a reviews run returns

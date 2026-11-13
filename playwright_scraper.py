@@ -97,6 +97,39 @@ def _chrome_ua(chromium_version: str) -> str:
             f"(KHTML, like Gecko) Chrome/{chromium_version} Safari/537.36")
 
 
+# Per-page verdicts written into the run sidecar (`page_outcomes`). They are
+# the checkable answer to "what happened to page N?", which the run-level
+# `status`/`pages_failed` pair cannot give once pages are fetched
+# independently: a number in `pages_failed` does not say whether the page was
+# throttled, its proxy was dead, or the listing had simply run out before it
+# was dispatched.
+PAGE_SUCCESS = "success"
+PAGE_BLOCKED = "blocked"
+PAGE_LOAD_FAILED = "load_failed"
+PAGE_NEEDS_SIGNIN = "needs_signin"
+PAGE_NOT_FOUND = "not_found"
+# The listing ended (a fetched page returned no rows) while this page was
+# still queued: it was never dispatched. NOT a failure — there was nothing
+# left to fetch. Concurrent path only.
+PAGE_NOT_DISPATCHED = "not_dispatched"
+# A worker thread died (or the sequential loop broke after a failure) before
+# this page could even be attempted. Distinct from a page that WAS attempted
+# and failed: nothing was learned about it, so treating it as a failed page
+# would overstate what the run knows.
+PAGE_NOT_ATTEMPTED = "not_attempted"
+
+# Every value that can appear as `status` in a page_outcomes record.
+PAGE_STATUSES = (PAGE_SUCCESS, PAGE_BLOCKED, PAGE_LOAD_FAILED,
+                 PAGE_NEEDS_SIGNIN, PAGE_NOT_FOUND, PAGE_NOT_DISPATCHED,
+                 PAGE_NOT_ATTEMPTED)
+
+# What `proxy_exit` says when no traffic left through a proxy. A fetched page
+# on a run with no pool says this too — the absence has to be explicit,
+# because a missing key would be indistinguishable from "we forgot to record
+# it" and could not be told apart from a masked exit string.
+NO_PROXY_EXIT = "none"
+
+
 @dataclass
 class PageOutcome:
     """What one page produced.
@@ -122,11 +155,75 @@ class PageOutcome:
     # Set when Amazon answered "this page does not exist" (HTTP 404/410 or its
     # own not-found page). Not a block: no exit, proxy or solve changes it.
     not_found: bool = False
+    # The proxy exit this page's traffic actually left from, masked with
+    # proxy_pool.mask (credentials stripped, host/port kept). NO_PROXY_EXIT
+    # when the run had no pool. Placeholder outcomes for pages that were
+    # never dispatched/attempted carry it too: they produced no traffic.
+    proxy_exit: str = NO_PROXY_EXIT
+    # Explicit verdict for pages that were never fetched. None for a fetched
+    # page, whose verdict is derived from its flags via `page_status`. This is
+    # what lets one dataclass represent both kinds of record.
+    conclusion: Optional[str] = None
 
     @property
     def ok(self) -> bool:
         return (not self.load_failed and self.blocked_by is None
                 and not self.needs_signin and not self.not_found)
+
+    @property
+    def rows_parsed(self) -> int:
+        """How many rows the parser found on this page (0 when not fetched)."""
+        return len(self.products) if self.conclusion is None else 0
+
+    @property
+    def page_status(self) -> str:
+        """The sidecar verdict for this page, one of PAGE_STATUSES."""
+        if self.conclusion is not None:
+            return self.conclusion
+        if self.blocked_by is not None:
+            return PAGE_BLOCKED
+        if self.load_failed:
+            return PAGE_LOAD_FAILED
+        if self.needs_signin:
+            return PAGE_NEEDS_SIGNIN
+        if self.not_found:
+            return PAGE_NOT_FOUND
+        # A page that loaded and parsed — even to zero rows — is a successful
+        # fetch. Zero rows is what trips the end-of-listing stop, not a
+        # failure: the page was fetched and answered, it just held nothing.
+        return PAGE_SUCCESS
+
+    @classmethod
+    def not_dispatched(cls, page_num: int,
+                       url: Optional[str] = None) -> "PageOutcome":
+        """Placeholder for a page still queued when the listing ran out."""
+        return cls(page_num=page_num, url=url or "",
+                   conclusion=PAGE_NOT_DISPATCHED)
+
+    @classmethod
+    def not_attempted(cls, page_num: int,
+                      url: Optional[str] = None) -> "PageOutcome":
+        """Placeholder for a page a dead worker / broken loop never reached."""
+        return cls(page_num=page_num, url=url or "",
+                   conclusion=PAGE_NOT_ATTEMPTED)
+
+    def to_record(self) -> dict:
+        """The JSON-safe per-page record written into the sidecar.
+
+        Kept explicit (rather than dataclasses.asdict) so the shape is the
+        contract a consumer reads: page number, final verdict, parsed row
+        count, and the exit used — plus the URLs that make the record
+        checkable against what was requested.
+        """
+        return {
+            "page": self.page_num,
+            "status": self.page_status,
+            "rows_parsed": self.rows_parsed,
+            "proxy_exit": self.proxy_exit,
+            "url": self.url or None,
+            "final_url": self.final_url,
+            "blocked_by": self.blocked_by,
+        }
 
 
 ITEM_LINK_SELECTOR = SELECTORS["item_link"]
@@ -638,6 +735,11 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     exactly the bug _BrowserSession exists to prevent.
     """
     outcome = PageOutcome(page_num=page_num, url=url)
+    # The exit this page is about to use. Rotations below re-point the pool
+    # (and relaunch the browser onto the new exit), so this is refreshed at
+    # every advance: the sidecar must name the exit that served the FINAL
+    # attempt, not merely the one the page started on.
+    outcome.proxy_exit = mask(pool.current) if pool else NO_PROXY_EXIT
 
     # How many times a blocked page may be retried from a DIFFERENT exit.
     # Zero without a pool: there is nowhere else to go, and a bare retry from
@@ -687,6 +789,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
                            "one (%d/%d).", mask(pool.current), exit_failed,
                            block_attempt + 1, block_retries)
             pool.advance(f"unusable exit: {exit_failed}")
+            outcome.proxy_exit = mask(pool.current)
             session.relaunch()
             continue
         if load_failed:
@@ -740,6 +843,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
                            "another exit (%d/%d).", page_num, state,
                            mask(pool.current), block_attempt + 1, block_retries)
             pool.advance(f"{state} on page {page_num}")
+            outcome.proxy_exit = mask(pool.current)
             session.relaunch()
 
     if load_failed:
@@ -953,12 +1057,90 @@ def _worker_pool(pool, worker_index: int):
     return ProxyPool(proxies[offset:] + proxies[:offset], rotate="per-run")
 
 
+def classify_undispatched_pages(specs, fetched_page_nums,
+                                dispatched_page_nums, exhausted: bool):
+    """Split pages that produced no outcome into NOT_DISPATCHED vs NOT_ATTEMPTED.
+
+    Pure (no threads, no browser) so the rule behind the sidecar's verdicts is
+    testable on its own. A page is "dispatched" the moment a worker pulls it
+    from the queue, whether or not that worker lived long enough to return an
+    outcome:
+
+      * exhausted  -> the listing ran out while pages were still queued.
+        Every page nobody had started is `not_dispatched`: there was nothing
+        left to fetch, and it must NOT be counted as a failed page.
+      * a worker died -> a page it had pulled but never returned is
+        `not_attempted` (the work was taken, the answer never came back). So
+        is anything left in the queue when dispatch stopped for any other
+        reason.
+
+    Returns `(not_dispatched, not_attempted)` as two sorted lists of page
+    numbers. Every page in `specs` that is not in `fetched_page_nums` lands in
+    exactly one of them.
+    """
+    done = set(fetched_page_nums)
+    dispatched = set(dispatched_page_nums)
+    not_dispatched, not_attempted = [], []
+    for page_num, _url in specs:
+        if page_num in done:
+            continue
+        if exhausted and page_num not in dispatched:
+            not_dispatched.append(page_num)
+        else:
+            not_attempted.append(page_num)
+    return sorted(not_dispatched), sorted(not_attempted)
+
+
+def build_page_outcome_records(fetched_outcomes, pages_requested: int,
+                               not_dispatched=(), not_attempted=(),
+                               url_for_page=None):
+    """One checkable verdict per requested page, sorted by page number.
+
+    The merge point used by BOTH paths: fetched pages keep the verdict derived
+    from what actually happened to them (success/blocked/load_failed/
+    needs_signin/not_found, with their row count and proxy exit), while pages
+    that were never fetched get explicit placeholders instead of silently
+    disappearing from the sidecar.
+
+    Pure and side-effect free so it can be driven directly from a test with
+    hand-built PageOutcome objects — no browser, network or Playwright call.
+    """
+    url_for_page = url_for_page or {}
+    by_page = {o.page_num: o for o in fetched_outcomes}
+    records = []
+    for page_num in range(1, pages_requested + 1):
+        if page_num in by_page:
+            outcome = by_page[page_num]
+        elif page_num in set(not_dispatched):
+            outcome = PageOutcome.not_dispatched(
+                page_num, url_for_page.get(page_num))
+        elif page_num in set(not_attempted):
+            outcome = PageOutcome.not_attempted(
+                page_num, url_for_page.get(page_num))
+        else:
+            # Defensive: a requested page with no outcome and no explicit
+            # reason is treated as never attempted rather than dropped, so a
+            # page can never vanish from the per-page record silently.
+            outcome = PageOutcome.not_attempted(
+                page_num, url_for_page.get(page_num))
+        records.append(outcome.to_record())
+    return records
+
+
 def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
     """Fetch `specs` [(page_num, url), ...] across `concurrency` workers.
 
     Each worker owns its own Playwright instance, browser and exit: with the
     sync API a browser belongs to the thread that made it, so sharing one
     across threads is not an option even if it were desirable.
+
+    Returns `(results, not_dispatched, not_attempted, exhausted)`:
+      * results          — PageOutcome for every page a worker returned;
+      * not_dispatched   — pages still queued when the listing ran out (a
+                           fetched page returned zero rows). Not failures;
+      * not_attempted    — pages a dead worker took but never returned, or
+                           that were still queued for any other reason;
+      * exhausted        — whether the end-of-listing stop tripped.
     """
     work = queue.Queue()
     for spec in specs:
@@ -966,6 +1148,12 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
 
     results = []
     results_lock = threading.Lock()
+    # Every page number a worker has PULLED from the queue, whether or not it
+    # came back. The distinction is the whole point of the two placeholder
+    # verdicts: a page still in the queue when the listing ends was never
+    # dispatched; a page pulled by a worker that then died was attempted in
+    # the scheduler's sense but produced no answer, so it is "not attempted".
+    dispatched = []
     # Set when a page comes back with no rows at all — the end of the
     # listing. Without it, asking for 50 pages of a 5-page result would fetch
     # 45 empty ones. Workers check it before taking more work, so at most
@@ -984,6 +1172,8 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
                             page_num, url = work.get_nowait()
                         except queue.Empty:
                             break
+                        with results_lock:
+                            dispatched.append(page_num)
                         if not first:
                             time.sleep(args.delay)
                         first = False
@@ -999,7 +1189,8 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
                 finally:
                     session.close()
         except Exception:  # noqa: BLE001 — a dead worker must not hang the run
-            logger.exception("[%s] died; its pages will be reported as failed.", name)
+            logger.exception("[%s] died; its pages will be reported as not "
+                             "attempted.", name)
 
     threads = [threading.Thread(target=worker, args=(i,), name=f"page-worker-{i + 1}")
                for i in range(concurrency)]
@@ -1008,16 +1199,12 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
     for t in threads:
         t.join()
 
-    # Anything still queued was never attempted (a worker died, or dispatch
-    # stopped at the end of the listing). Not reported as failed pages: they
-    # were not tried, and claiming otherwise would overstate the damage.
-    unattempted = []
-    while True:
-        try:
-            unattempted.append(work.get_nowait()[0])
-        except queue.Empty:
-            break
-    return results, sorted(unattempted), exhausted.is_set()
+    with results_lock:
+        fetched = [o.page_num for o in results]
+        dispatched_snapshot = list(dispatched)
+    not_dispatched, not_attempted = classify_undispatched_pages(
+        specs, fetched, dispatched_snapshot, exhausted.is_set())
+    return results, not_dispatched, not_attempted, exhausted.is_set()
 
 
 def scrape(args) -> int:
@@ -1037,6 +1224,16 @@ def scrape(args) -> int:
     # has no page 2. Anything else is an early stop, and the run is only a
     # partial view.
     stop_reason = "single_page_mode" if args.mode != "listing" else "completed"
+    # Pages 2..N that never produced an outcome and why. Filled in by the two
+    # fetch paths and turned into explicit per-page records below. They stay
+    # OUT of `outcomes` (and therefore out of pages_completed/pages_failed):
+    # a page that was never fetched is neither a completed page nor a failed
+    # one. Page 1, if it fails, is in neither list — it IS in `outcomes`.
+    not_dispatched_pages: List[int] = []
+    not_attempted_pages: List[int] = []
+    # Planned page-2..N URLs, hoisted out of the browser block so the sidecar
+    # records can name the URL a never-dispatched page would have used.
+    planned: Optional[List[str]] = None
 
     pool = proxy_pool_from_args(args)
     if pool and args.cdp_endpoint:
@@ -1118,8 +1315,8 @@ def scrape(args) -> int:
                     logger.info("Fetching pages 2-%d across %d workers%s.",
                                 args.pages, concurrency,
                                 f" over {len(pool)} exit(s)" if pool else "")
-                    rest, unattempted, exhausted = _fetch_pages_concurrently(
-                        args, pool, specs, concurrency)
+                    rest, not_dispatched_pages, not_attempted_pages, exhausted = \
+                        _fetch_pages_concurrently(args, pool, specs, concurrency)
                     outcomes.extend(rest)
 
                     failed = [o for o in rest if not o.ok]
@@ -1132,14 +1329,21 @@ def scrape(args) -> int:
                         blocked = any(o.blocked_by or o.needs_signin for o in rest)
                     elif exhausted:
                         stop_reason = "no_new_products"
-                    elif unattempted:
-                        # Should not happen without a failure or exhaustion,
-                        # but say so rather than reporting a complete run.
+                    elif not_attempted_pages:
+                        # A worker died without a failed page to name, or the
+                        # queue did not drain for another reason. Say so
+                        # rather than reporting a complete run.
                         stop_reason = "pages_unattempted"
                     session = None  # already closed
                 else:
                     url = (planned[0] if planned else
                            _next_url_from_page(session.page, args, 1))
+                    # What pages after a break are recorded as. A failure
+                    # means pages were never tried; the end-of-listing break
+                    # means they were never dispatched because nothing was
+                    # left to fetch.
+                    trailing_status = PAGE_NOT_ATTEMPTED
+                    last_attempted = 1
                     for page_num in range(2, args.pages + 1):
                         # A new exit per page is what actually spreads a run's
                         # volume, and it costs a browser relaunch: carrying the
@@ -1150,6 +1354,7 @@ def scrape(args) -> int:
 
                         outcome = _fetch_one_page(session, args, pool, page_num, url)
                         outcomes.append(outcome)
+                        last_attempted = page_num
                         if not outcome.ok:
                             stop_reason = ("page_load_timeout" if outcome.load_failed
                                            else "needs_signin" if outcome.needs_signin
@@ -1183,12 +1388,22 @@ def scrape(args) -> int:
                                         "— treating that as the end of the "
                                         "listing.", page_num)
                             stop_reason = "no_new_products"
+                            trailing_status = PAGE_NOT_DISPATCHED
                             break
 
                         if page_num < args.pages:
                             url = (planned[page_num - 1] if planned else
                                    _next_url_from_page(session.page, args, page_num))
                             time.sleep(args.delay)
+                    # Whatever the loop did not reach still gets an explicit
+                    # record — after a failure as "not attempted", after the
+                    # listing ran out as "not dispatched". Neither is a failed
+                    # page, so pages_failed below never contains them.
+                    trailing = list(range(last_attempted + 1, args.pages + 1))
+                    if trailing_status == PAGE_NOT_DISPATCHED:
+                        not_dispatched_pages = trailing
+                    else:
+                        not_attempted_pages = trailing
         finally:
             if session is not None:
                 session.close()
@@ -1231,12 +1446,29 @@ def scrape(args) -> int:
     final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
                  if ok_pages else args.url)
 
+    # One checkable verdict per REQUESTED page. This supplements the run-level
+    # status/pages_completed/pages_failed without changing any of them: those
+    # still count only pages that were actually fetched, while this also names
+    # the pages that were never dispatched (listing ran out) or never attempted
+    # (a worker died / the sequential loop broke), and which exit each fetched
+    # page used. Written into BOTH sidecars by finish_run via `extra`.
+    url_for_page = {1: args.url}
+    if planned:
+        url_for_page.update({n: planned[n - 2]
+                             for n in range(2, args.pages + 1)})
+    page_outcome_records = build_page_outcome_records(
+        outcomes, args.pages,
+        not_dispatched=not_dispatched_pages,
+        not_attempted=not_attempted_pages,
+        url_for_page=url_for_page)
+
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       blocked=blocked, stop_reason=stop_reason,
                       pages_requested=args.pages, pages_completed=len(ok_pages),
                       pages_failed=failed_pages, mode=args.mode,
                       source=marketplace_host(final_url),
-                      start_url=args.url, final_url=final_url)
+                      start_url=args.url, final_url=final_url,
+                      extra={"page_outcomes": page_outcome_records})
 
 
 def parse_args():

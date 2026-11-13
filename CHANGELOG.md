@@ -10,6 +10,21 @@ one, and when it does the release notes say so first.
 
 ## [Unreleased]
 
+### Added
+
+- Playwright engine (`playwright_scraper.py`): the run sidecars
+  (`<out>.meta.json` and `<out>.last_attempt.json`) now carry a
+  `page_outcomes` list — one checkable verdict per **requested** page. Each
+  record names the page number, its final status (`success`, `blocked`,
+  `load_failed`, `needs_signin`, `not_found`, `not_dispatched` when the
+  listing ran out before the page was queued, or `not_attempted` when a
+  worker died / the sequential loop broke first), the parsed row count, and
+  the masked proxy exit that served it (`"none"` for a run without a proxy).
+  Pages never dispatched because the listing was exhausted are **not** failed
+  pages and never enter `pages_failed`; the run-level `status`,
+  `pages_completed`, `pages_failed` and exit codes are unchanged. New offline
+  tests live in `tests/test_page_outcomes.py`.
+
 ### Changed
 
 - CI only: the canary now runs weekly (Mondays 06:23 UTC) and on a manual dispatch, with its optional secret `AMAZON_PROXY` passed on every run; the daily schedule is removed.
