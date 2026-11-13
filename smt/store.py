@@ -42,8 +42,16 @@ CREATE TABLE IF NOT EXISTS holdings (
     PRIMARY KEY (scheme_code, as_of, isin, asset_class)
 );
 CREATE TABLE IF NOT EXISTS disclosure_files (
-    url TEXT PRIMARY KEY, connector TEXT NOT NULL, as_of TEXT NOT NULL,
-    fetched_at TEXT NOT NULL, bytes INTEGER, schemes_matched INTEGER, status TEXT NOT NULL
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    connector TEXT NOT NULL,
+    as_of TEXT NOT NULL,                -- month-end date the row describes, e.g. 2026-09-30
+    url TEXT,                           -- source file(s); NULL when no file was found for the month
+    fetched_at TEXT NOT NULL,
+    bytes INTEGER,
+    schemes_matched INTEGER,
+    status TEXT NOT NULL,               -- ok | missing | download_failed | parse_failed | no_schemes
+    detail TEXT,                        -- why, e.g. the exception text or "no file on the page"
+    UNIQUE (connector, as_of)           -- one outcome per AMC per month; refreshes overwrite
 );
 CREATE TABLE IF NOT EXISTS refresh_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, started_at TEXT NOT NULL,
@@ -63,7 +71,62 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     con = sqlite3.connect(path)
     con.execute("PRAGMA journal_mode=WAL")      # readers are not blocked while a refresh writes
     con.executescript(SCHEMA)
+    _migrate_disclosure_files(con)
     return con
+
+
+def _migrate_disclosure_files(con: sqlite3.Connection) -> None:
+    """Upgrade a pre-existing table that keyed rows by url instead of (connector, as_of).
+
+    The old table had one row per file, so PPFAS's several scheme files for a month
+    became several rows. They are combined into one row per AMC-month, which is the
+    unit the pipeline now reports on. A rename (rather than a drop) keeps the old rows
+    until the new table is populated, so a failure cannot lose the file history.
+    """
+    cols = {row[1] for row in con.execute("PRAGMA table_info(disclosure_files)")}
+    if not cols or "id" in cols:
+        return
+    old = con.execute(
+        "SELECT connector, as_of, url, fetched_at, bytes, schemes_matched, status FROM disclosure_files"
+    ).fetchall()
+    merged: dict[tuple[str, str], dict] = {}
+    for connector, as_of, url, fetched_at, size, matched, status in old:
+        row = merged.setdefault((connector, as_of), {
+            "connector": connector, "as_of": as_of, "urls": [], "fetched_at": fetched_at,
+            "size": 0, "matched": 0, "failed": [],
+        })
+        row["urls"].append(url)
+        row["fetched_at"] = max(row["fetched_at"], fetched_at)
+        row["size"] += size or 0
+        row["matched"] += matched or 0
+        if status != "ok":
+            row["failed"].append(status)
+    with con:
+        con.execute("ALTER TABLE disclosure_files RENAME TO disclosure_files_old")
+        con.execute(
+            """CREATE TABLE disclosure_files (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   connector TEXT NOT NULL,
+                   as_of TEXT NOT NULL,
+                   url TEXT,
+                   fetched_at TEXT NOT NULL,
+                   bytes INTEGER,
+                   schemes_matched INTEGER,
+                   status TEXT NOT NULL,
+                   detail TEXT,
+                   UNIQUE (connector, as_of)
+               )"""
+        )
+        con.executemany(
+            """INSERT INTO disclosure_files
+                   (connector, as_of, url, fetched_at, bytes, schemes_matched, status, detail)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            [(r["connector"], r["as_of"], "; ".join(r["urls"]), r["fetched_at"], r["size"] or None,
+              r["matched"], "ok" if not r["failed"] else "parse_failed",
+              None if not r["failed"] else "; ".join(r["failed"]))
+             for r in merged.values()],
+        )
+        con.execute("DROP TABLE disclosure_files_old")
 
 
 # --------------------------------------------------------------------------- #
@@ -114,14 +177,25 @@ def replace_holdings(con: sqlite3.Connection, scheme_code: str, as_of: str, df: 
     return len(df)
 
 
-def record_file(con: sqlite3.Connection, url: str, connector: str, as_of: str,
-                size: int | None, matched: int, status: str) -> None:
+def record_file(con: sqlite3.Connection, connector: str, as_of: str, *,
+                url: str | None = None, size: int | None = None, matched: int = 0,
+                status: str = "ok", detail: str | None = None) -> None:
+    """Store the outcome for one AMC-month, replacing any earlier outcome for the same month.
+
+    A month always gets a row, even when no file was found (url NULL, status 'missing'),
+    so a gap is a visible fact rather than an absence of rows.
+    """
     with con:
         con.execute(
-            "INSERT OR REPLACE INTO disclosure_files VALUES (?,?,?,?,?,?,?)",
-            (url, connector, as_of, now(), size, matched, status),
+            """INSERT INTO disclosure_files
+                   (connector, as_of, url, fetched_at, bytes, schemes_matched, status, detail)
+               VALUES (?,?,?,?,?,?,?,?)
+               ON CONFLICT(connector, as_of) DO UPDATE SET
+                   url=excluded.url, fetched_at=excluded.fetched_at, bytes=excluded.bytes,
+                   schemes_matched=excluded.schemes_matched, status=excluded.status,
+                   detail=excluded.detail""",
+            (connector, as_of, url, now(), size, matched, status, detail),
         )
-
 
 
 @contextmanager
@@ -195,7 +269,9 @@ def refresh_log(con: sqlite3.Connection, limit: int = 50) -> pd.DataFrame:
 
 
 def disclosure_files(con: sqlite3.Connection) -> pd.DataFrame:
-    return pd.read_sql_query("SELECT * FROM disclosure_files ORDER BY as_of DESC, connector", con)
+    return pd.read_sql_query(
+        "SELECT connector, as_of, url, fetched_at, bytes, schemes_matched, status, detail "
+        "FROM disclosure_files ORDER BY as_of DESC, connector", con)
 
 
 def market_cap_label(con: sqlite3.Connection) -> str | None:

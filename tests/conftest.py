@@ -11,7 +11,7 @@ import pytest
 from openpyxl import Workbook
 
 from smt import universe
-from smt.holdings.connectors.base import Connector, DisclosureFile
+from smt.holdings.connectors.base import Connector, DisclosureFile, month_end
 from smt.pipeline import Sources
 
 
@@ -104,18 +104,30 @@ def market_cap_df() -> pd.DataFrame:
 # Fake connectors and sources for an offline pipeline run
 # --------------------------------------------------------------------------- #
 class FakeConnector(Connector):
-    def __init__(self, name: str, titles: list[str]):
+    """An offline AMC. `months` are the months it publishes; `skip`, `fail_download`
+    and `empty` create the gaps the pipeline must report instead of hiding."""
+
+    def __init__(self, name: str, titles: list[str], months: tuple[int, ...] = (9, 8, 6)):
         self.name = name
         self.titles = titles
+        self.months = months
         self.downloads = 0
+        self.skip: set[int] = set()          # months with no file on the page
+        self.fail_download: set[int] = set()  # months whose file raises on download
+        self.empty: set[int] = set()          # months that parse to no tracked scheme
 
     def discover(self, html=None):
-        return [DisclosureFile(self.name, f"https://example.test/{self.name}/{m}.zip", date(2026, m, 28 if m == 2 else 30), "all")
-                for m in (9, 8, 6)]
+        return [DisclosureFile(self.name, f"https://example.test/{self.name}/{m}.zip",
+                               month_end(2026, m), "all")
+                for m in self.months if m not in self.skip]
 
     def download(self, f):
         self.downloads += 1
         month = f.as_of.month
+        if month in self.fail_download:
+            raise ConnectionError(f"HTTP 503 for {f.url}")
+        if month in self.empty:
+            return zip_of({"equity.xlsx": workbook({"S0": ("Some Fund We Do Not Track", "x", [])})})
         sheets = {f"S{i}": (t, f"{f.as_of:%B %d, %Y}", portfolio(month)) for i, t in enumerate(self.titles)}
         return zip_of({"equity.xlsx": workbook(sheets), "debt.xlsx": workbook({"D": ("Debt Fund", "x", [])})})
 
@@ -154,4 +166,5 @@ def fake_sources(tmp_path, market_cap_df):
         market_cap=lambda: ("31Dec2025", market_cap_df),
         connectors={name: FakeConnector(name, disclosure_titles(name)) for name in ("ppfas", "dsp")},
         raw_dir=tmp_path / "raw",
+        today=lambda: date(2026, 10, 6),   # Sept has ended; Oct's disclosure is not due yet
     )

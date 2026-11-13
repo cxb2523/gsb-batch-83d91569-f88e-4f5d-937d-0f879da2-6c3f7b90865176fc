@@ -14,7 +14,7 @@ pip install -r requirements.txt
 python -m smt refresh        # download, validate and store (about 2 minutes the first time)
 python -m smt check          # data-quality report
 python -m smt serve          # dashboard at http://127.0.0.1:8050
-python -m pytest             # 73 offline tests
+python -m pytest             # 82 offline tests
 ```
 
 ## What it covers
@@ -92,6 +92,7 @@ smt/
 - **Arbitrage stays separate from investing.** Stocks bought and hedged with futures are tagged `Equity - Arbitrage`. REITs, foreign stocks and overseas funds each get their own class, so "equity %" means directional Indian stock exposure.
 - **The benchmark is investable.** The Nifty 50 benchmark is the UTI Nifty 50 index fund's NAV. It includes that fund's small cost, which makes the comparison fair to active funds.
 - **Every number has a source.** Downloaded disclosure files are kept in `data/raw/`, and `disclosure_files` records each URL, month, size and the schemes matched. Re-parsing after a parser fix never re-downloads.
+- **A missing month is a recorded fact, not a gap.** For each AMC and each of the last `SMT_HOLDINGS_MONTHS` month-ends, the refresh writes one `disclosure_files` row with an explicit status: `ok`, `missing` (no file on the page), `download_failed`, `parse_failed` or `no_schemes` (nothing matched a tracked scheme). The row is keyed by `(connector, as_of)`, so re-running overwrites it instead of piling up duplicates. The AMC's `refresh_log` entry is `warning` and names each bad month and why; a month, AMC or download failing never stops the rest. The Data status tab shows the same row per AMC-month, including gaps.
 - **Market-cap classes follow AMFI's official list.** That list puts the top 100 companies in large cap and 101–250 in mid cap. A stock split changes the ISIN but keeps its first 9 characters, which are used as a fallback key. That lifts coverage from 97% to 99.9% of equity weight.
 
 ## Data quality
@@ -104,17 +105,18 @@ smt/
 | NAV is current for every fund | catches a source that stopped updating |
 | At least one year of NAV history | warns on new funds, whose risk numbers would mislead |
 | Latest month present for every holdings fund | catches an AMC renaming its files |
+| Every AMC published every recent month | shows each AMC-month's outcome, including gaps |
 | Securities with an ISIN add up to 60–101% of NAV | catches a parser reading the wrong column or table |
 | Cash, TREPS and derivatives under 15% | flags funds with unusual non-stock exposure (warning only) |
 | Indian stocks with an AMFI market-cap class | style drift is only as good as this coverage |
 
 ## Tests
 
-**73 offline tests:**
+**82 offline tests:**
 - **Parser:** SEBI workbooks built in code, in both AMCs' layouts, with sections, arbitrage, REITs, foreign stocks, footnote tables, every date format and percent scale.
 - **Connectors:** link discovery from saved page snippets, including DSP's inconsistent file names.
 - **Analytics:** checked against hand-computed answers, for example a NAV compounding at exactly 10% a year, XIRR roots, and a min-volatility portfolio favouring the calmest fund.
-- **Pipeline:** full runs with fake sources, covering a wrong scheme code, a failing fund, cache reuse and idempotent reruns.
+- **Pipeline:** full runs with fake sources, covering a wrong scheme code, a failing fund, cache reuse and idempotent reruns; and a fake AMC whose disclosure page is missing some months, whose August download throws and whose July file matches no tracked scheme. Each month gets its outcome, the loaded months stay in the database, and a rerun overwrites rather than duplicates the `disclosure_files` rows.
 - **Dashboard:** every Dash callback run through Flask on a seeded database.
 
 **Live tests:** `SMT_LIVE_TESTS=1 python -m pytest tests/test_live.py` checks the real sources. It verifies every scheme code against today's AMFI list and confirms each connector finds and parses its latest month.

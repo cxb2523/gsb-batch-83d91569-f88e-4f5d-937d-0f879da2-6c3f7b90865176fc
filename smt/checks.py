@@ -43,6 +43,15 @@ def run(con: sqlite3.Connection) -> pd.DataFrame:
         missing = sorted(set(hf["scheme_code"]) - set(h.loc[h["as_of"] == latest, "scheme_code"]))
         add("Latest month present for every holdings fund", not missing,
             f"latest month {latest.date()}" + ("" if not missing else "; missing: " + ", ".join(missing)))
+
+    files = store.disclosure_files(con)
+    if not files.empty:
+        bad = files[files["status"] != "ok"]
+        add("Every AMC published every recent month", bad.empty,
+            f"{len(files)} AMC-months checked" if bad.empty else
+            "gaps: " + ", ".join(f"{r.connector} {r.as_of} ({r.status})" for r in bad.itertuples()))
+
+    if not h.empty:
         totals = h.groupby(["scheme_code", "as_of"])["pct_nav"].sum()
         broken = totals[(totals < 60) | (totals > 101)]
         low = totals[(totals >= 60) & (totals < 85)]

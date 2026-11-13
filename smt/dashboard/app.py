@@ -185,8 +185,8 @@ def create_app(db_path: Path | str | None = None) -> Dash:
     status_rows = data.checks.rename(columns=str.title)
     verify = funds.reset_index()[["scheme_code", "scheme_name", "expected_name", "category", "holdings_source",
                                   "verified", "verified_at"]]
-    files = data.files[["connector", "as_of", "schemes_matched", "bytes", "status", "url"]] if not data.files.empty \
-        else pd.DataFrame()
+    files = data.files[["connector", "as_of", "status", "detail", "schemes_matched", "bytes", "url"]] \
+        if not data.files.empty else pd.DataFrame()
     t_status = dbc.Tab(label="Data status", tab_id="status", children=[
         section("Checks", table(status_rows, "status-checks", page_size=20,
                                 style_data_conditional=[

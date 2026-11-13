@@ -34,6 +34,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"NAV rows       : {rep.nav_rows:,}")
         print(f"files parsed   : {rep.files}")
         print(f"holding rows   : {rep.holdings_rows:,}")
+        for o in rep.holdings_outcomes:
+            if o["status"] != "ok":
+                print(f"GAP       {o['connector']} {o['as_of']}: {o['status']} -- {o['detail']}")
         for m in rep.mismatched:
             print(f"MISMATCH  {m}")
         for e in rep.errors:

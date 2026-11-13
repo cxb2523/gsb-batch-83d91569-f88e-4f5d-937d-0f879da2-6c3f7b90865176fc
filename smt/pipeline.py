@@ -10,11 +10,13 @@ Sources are injected (see `Sources`) so tests can run the whole pipeline offline
 """
 from __future__ import annotations
 
+import calendar
 import hashlib
 import logging
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -33,6 +35,9 @@ class Sources:
     market_cap: Callable[[], tuple[str, pd.DataFrame]] = amfi.fetch_market_cap
     connectors: dict[str, Connector] = field(default_factory=default_connectors)
     raw_dir: Path = settings.RAW_DIR      # downloaded disclosure files are kept here
+    # The holdings window is computed from this. Tests pin it so a refresh does not
+    # depend on the wall clock.
+    today: Callable[[], date] = date.today
 
 
 def cached_download(connector: Connector, f: DisclosureFile, raw_dir: Path) -> bytes:
@@ -59,6 +64,10 @@ class Report:
     holdings_rows: int = 0
     files: int = 0
     errors: list[str] = field(default_factory=list)
+    # One entry per (connector, month-end) with its status: ok | missing |
+    # download_failed | parse_failed | no_schemes | discover_failed. The same
+    # outcomes are stored in disclosure_files.
+    holdings_outcomes: list[dict] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -123,8 +132,84 @@ def refresh_market_cap(con: sqlite3.Connection, src: Sources, report: Report) ->
             info["status"], info["message"] = "warning", str(e)
 
 
+# --------------------------------------------------------------------------- #
+# Holdings
+# --------------------------------------------------------------------------- #
+def month_ends(today: date, months: int) -> list[date]:
+    """The `months` most recent month-ends at or before `today`, newest first.
+
+    A month still in progress has not had its disclosure published yet, so the
+    window starts from the previous month when `today` is mid-month. Otherwise
+    every refresh early in a month would report the running month as missing.
+    """
+    last = date(today.year, today.month, calendar.monthrange(today.year, today.month)[1])
+    if last > today:
+        last = date(today.year, today.month, 1) - timedelta(days=1)
+    out = []
+    for _ in range(max(months, 0)):
+        out.append(last)
+        last = date(last.year, last.month, 1) - timedelta(days=1)
+    return out
+
+
+def _ingest_file(con: sqlite3.Connection, connector: Connector, f: DisclosureFile,
+                 targets: dict[str, str], report: Report, raw_dir: Path) -> tuple[str, int, int, str | None]:
+    """Download, parse and store one disclosure file.
+
+    Returns (status, schemes matched, bytes, detail) where status is one of
+    download_failed, parse_failed, no_schemes or ok. A failure here is one file's
+    outcome, never an exception that escapes the month or AMC loop.
+    """
+    name = f.url.rsplit("/", 1)[-1]
+    try:
+        content = cached_download(connector, f, raw_dir)
+    except Exception as e:  # noqa: BLE001 - classified as a download failure
+        return "download_failed", 0, 0, f"{name}: {e}"
+    try:
+        portfolios = connector.parse(content)
+        matched = 0
+        for p in portfolios:
+            code = targets.get(universe.normalise(p.scheme_title))
+            if code is None:
+                continue
+            as_of = (p.as_of or f.as_of).isoformat()
+            report.holdings_rows += store.replace_holdings(con, code, as_of, p.holdings)
+            matched += 1
+    except Exception as e:  # noqa: BLE001 - a bad workbook must not stop other months
+        return "parse_failed", 0, len(content), f"{name}: {e}"
+    report.files += 1
+    if not matched:
+        return "no_schemes", 0, len(content), f"{name}: parsed but matched no tracked scheme"
+    return "ok", matched, len(content), None
+
+
+def _save_outcome(con: sqlite3.Connection, report: Report, connector: str, month: date,
+                  status: str, *, url: str | None = None, size: int | None = None,
+                  matched: int = 0, detail: str | None = None) -> None:
+    """Store one AMC-month outcome and add it to the report."""
+    as_of = month.isoformat()
+    store.record_file(con, connector, as_of, url=url, size=size, matched=matched,
+                      status=status, detail=detail)
+    report.holdings_outcomes.append({
+        "connector": connector, "as_of": as_of, "status": status,
+        "url": url, "schemes_matched": matched, "detail": detail,
+    })
+
+
+# Worse outcomes win when one month has several files (PPFAS publishes one per scheme).
+_WORST_FIRST = ("parse_failed", "download_failed")
+
+
 def refresh_holdings(con: sqlite3.Connection, src: Sources, report: Report,
                      months: int = settings.HOLDINGS_MONTHS) -> None:
+    """Give every tracked AMC-month in the window an explicit outcome.
+
+    A month never disappears just because no file was found for it: each month gets
+    a disclosure_files row (status missing / download_failed / parse_failed /
+    no_schemes / ok) and a line in the job message. One bad month or AMC does not
+    stop the others; it only turns the job into a warning.
+    """
+    window = month_ends(src.today(), months)
     funds = store.funds(con)
     for name, connector in src.connectors.items():
         targets = {
@@ -136,31 +221,50 @@ def refresh_holdings(con: sqlite3.Connection, src: Sources, report: Report,
         with store.job(con, f"holdings:{name}") as info:
             try:
                 files = connector.discover()
-            except Exception as e:  # noqa: BLE001
-                report.errors.append(f"{name} discover: {e}")
-                info["status"], info["message"] = "error", f"could not list files: {e}"
+            except Exception as e:  # noqa: BLE001 - the other AMCs still run
+                reason = f"could not list files: {e}"
+                report.errors.append(f"{name}: {reason}")
+                # Without a listing no month can be judged, so every month in the
+                # window is recorded as unknown rather than silently omitted.
+                for month in window:
+                    _save_outcome(con, report, name, month, "discover_failed", detail=reason)
+                info["message"] = reason
+                info["status"] = "warning"
                 continue
-            wanted_months = sorted({f.as_of for f in files}, reverse=True)[:months]
-            problems = []
-            for f in (f for f in files if f.as_of in wanted_months):
-                try:
-                    content = cached_download(connector, f, src.raw_dir)
-                    matched = 0
-                    for p in connector.parse(content):
-                        code = targets.get(universe.normalise(p.scheme_title))
-                        if code is None:
-                            continue
-                        as_of = (p.as_of or f.as_of).isoformat()
-                        report.holdings_rows += store.replace_holdings(con, code, as_of, p.holdings)
-                        matched += 1
-                    store.record_file(con, f.url, name, f.as_of.isoformat(), len(content), matched, "ok")
-                    report.files += 1
-                    info["rows"] += matched
-                except Exception as e:  # noqa: BLE001
-                    store.record_file(con, f.url, name, f.as_of.isoformat(), None, 0, f"error: {e}")
-                    problems.append(f"{f.url.rsplit('/', 1)[-1]}: {e}")
+
+            by_month: dict[date, list[DisclosureFile]] = {}
+            for f in files:
+                by_month.setdefault(f.as_of, []).append(f)
+
+            problems: list[str] = []
+            for month in window:
+                month_files = by_month.get(month, [])
+                if not month_files:
+                    _save_outcome(con, report, name, month, "missing", detail="no file found on the page")
+                    problems.append(f"{month.isoformat()}: no file found on the page")
+                    continue
+                results = [_ingest_file(con, connector, f, targets, report, src.raw_dir)
+                           for f in month_files]
+                matched = sum(r[1] for r in results)
+                size = sum(r[2] for r in results)
+                failures = [(r[0], r[3]) for r in results if r[0] in ("download_failed", "parse_failed")]
+                if failures:
+                    # Other files for the same month may still have loaded; the month
+                    # is flagged because part of it is missing.
+                    status = next(s for s in _WORST_FIRST if s in [f[0] for f in failures])
+                    detail = "; ".join(d for _, d in failures if d)
+                    problems.append(f"{month.isoformat()}: {status.replace('_', ' ')}: {detail}")
+                elif matched:
+                    status, detail = "ok", None
+                else:
+                    status = "no_schemes"
+                    detail = "no file for this month matched a tracked scheme"
+                    problems.append(f"{month.isoformat()}: {detail}")
+                _save_outcome(con, report, name, month, status, url="; ".join(f.url for f in month_files),
+                              size=size or None, matched=matched, detail=detail)
+                info["rows"] += matched
             if problems:
-                report.errors += problems
+                report.errors += [f"{name} {p}" for p in problems]
                 info["status"], info["message"] = "warning", "; ".join(problems)
 
 
