@@ -1,0 +1,822 @@
+#!/usr/bin/env python3
+"""
+sleepnumber-scraper — Selenium edition (secondary engine)
+==================================================
+
+The same two modes, the same flags and the same exit codes as
+playwright_scraper.py, which is the engine the README recommends. This one
+exists so the family's "three engines must agree" contract is testable
+rather than asserted, and because a reader who already has Selenium
+installed should not have to add another browser stack to try this.
+
+    --mode listing   a /categories/… or /collections/… page. The default.
+    --mode product   a /products/… detail page.
+
+Read playwright_scraper.py's docstring for what is actually unusual about
+Sleep Number: the catalogue arrives as a React Router turbo-stream
+hydration payload rather than as markup, `?page=N` is ignored by the
+server, and access is an ADDRESS problem — every URL answers an identical
+CloudFront 403 from a datacentre address and 200 from a residential one.
+
+Requires: pip install -r requirements.txt -r requirements-selenium.txt
+"""
+
+import argparse
+import logging
+import re
+import sys
+import time
+from dataclasses import dataclass, field
+from urllib.parse import urlparse
+from typing import List, Optional
+from urllib.parse import urlsplit
+
+from selenium import webdriver
+from selenium.common.exceptions import (TimeoutException, WebDriverException,
+                                        JavascriptException)
+from selenium.webdriver.chrome.options import Options
+
+from captcha_solver import (detect_aws_waf, detect_recaptcha_v3,
+                            detect_recaptcha_in_page, reconcile_detections,
+                            solve_recaptcha, AWS_WAF_COOKIE, INJECT_TOKEN_JS)
+from product_parser import (parse_products, detect_page_state, page_url,
+                            detect_bot_challenge,
+                            is_supported_url, normalise_url, HOSTS,
+                            category_url, product_url, CATEGORY_URL,
+                            CANONICAL_HOST)
+from output_writer import (dedupe_by_key, finish_run, RemoteAPIError,
+                           EXIT_REMOTE_API_ERROR, SOURCE_DEFAULT,
+                           finish_without_fetch)
+import page_flow
+from proxy_pool import (from_args as proxy_pool_from_args, mask, ROTATE_MODES,
+                        ProxyError, split_credentials)
+import env_config
+import proxy_check
+import proxy_meter
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("selenium_scraper")
+
+PAGE_LOAD_TIMEOUT = 60
+SCRIPT_TIMEOUT = 30
+PAGINATED_MODES = page_flow.PAGINATED_MODES
+
+_PROXY_ERROR_MARKERS = (
+    "ERR_PROXY_CONNECTION_FAILED", "ERR_TUNNEL_CONNECTION_FAILED",
+    "ERR_PROXY_AUTH_UNSUPPORTED", "ERR_PROXY_AUTH_REQUESTED",
+    "ERR_UNEXPECTED_PROXY_AUTH", "ERR_PROXY_CERTIFICATE_INVALID",
+)
+
+_CREDENTIALS_IN_URL_RE = re.compile(r"([a-z][a-z0-9+.\-]*://)[^\s/@]+:[^\s/@]+@",
+                                    re.IGNORECASE)
+
+
+def _mask_credentials(text: str) -> str:
+    return _CREDENTIALS_IN_URL_RE.sub(r"\1***:***@", text or "")
+
+
+def _chrome_ua(version: str) -> str:
+    return (f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Chrome/{version} Safari/537.36")
+
+
+def _cdp_host_port(endpoint: str) -> str:
+    """`host:port` for chromedriver's debuggerAddress, or exit 2 with a reason."""
+    parts = urlsplit(endpoint if "//" in endpoint else f"//{endpoint}")
+    if parts.username or parts.password:
+        logger.error(
+            "This --cdp-endpoint carries credentials (%s), and Selenium "
+            "cannot send them: chromedriver's debuggerAddress is a bare "
+            "host:port. Use playwright_scraper.py or puppeteer_scraper.py "
+            "for a credentialed endpoint such as the Scraping Browser API.",
+            _mask_credentials(endpoint))
+        sys.exit(2)
+    host = parts.hostname or endpoint
+    port = f":{parts.port}" if parts.port else ""
+    return f"{host}{port}"
+
+
+@dataclass
+class PageOutcome:
+    page_num: int
+    url: str
+    final_url: Optional[str] = None
+    rows: List = field(default_factory=list)
+    blocked_by: Optional[str] = None
+    load_failed: bool = False
+    state: Optional[str] = None
+    # The exact bytes the parser was given. Kept because the run's sidecar
+    # records the SITE's own arithmetic about the result set, which lives in
+    # the hydration payload — so it has to be re-read from the page we
+    # already have rather than asked of a browser that may have navigated on.
+    # Present on all three engines by contract: an engine that omitted it
+    # would silently write a sidecar missing fields its twins record.
+    html: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        return not self.load_failed and self.blocked_by is None
+
+
+class _Session:
+    """One Chrome driver, relaunchable onto a different exit."""
+
+    def __init__(self, args, pool):
+        self.args, self.pool = args, pool
+        self.remote = bool(args.cdp_endpoint)
+        self.driver = None
+
+    def open(self):
+        options = Options()
+        # Selenium's equivalent of the `domcontentloaded` that
+        # playwright_scraper.py and puppeteer_scraper.py both navigate with.
+        # The default strategy is "normal", which blocks until the `load`
+        # event — i.e. until the last third-party pixel has settled.
+        #
+        # "eager" is the right choice here for a reason specific to this
+        # site rather than a general preference: the catalogue is in the
+        # FIRST response, inlined as the hydration payload, so everything
+        # this scraper reads exists at DOMContentLoaded and every further
+        # millisecond is spent waiting for analytics. Sleep Number loads a
+        # Cloudinary image CDN, New Relic and a Dynamic Yield tag, none of
+        # which this engine reads a byte of.
+        #
+        # The stronger form of this — a `load` event that never arrives at
+        # all and times the driver out on every attempt — was measured on a
+        # sibling repo (transfermarkt-scraper, 2026-09-16) rather than here,
+        # and is named as that repo's measurement rather than restated as
+        # this one's: this site has not been observed hanging, and a number
+        # inherited is not a number measured.
+        options.page_load_strategy = "eager"
+        if self.remote:
+            options.debugger_address = _cdp_host_port(self.args.cdp_endpoint)
+            logger.info("Attaching to an existing browser at %s.",
+                        options.debugger_address)
+            self.driver = webdriver.Chrome(options=options)
+            self._apply_timeouts()
+            return self
+
+        if self.args.headless:
+            options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1600,1000")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+
+        if self.pool:
+            scrubbed, credentials = split_credentials(self.pool.current)
+            options.add_argument(f"--proxy-server={scrubbed}")
+            logger.info("Using proxy exit %s", mask(self.pool.current))
+            if credentials:
+                logger.warning(
+                    "This proxy has credentials and SELENIUM CANNOT SEND "
+                    "THEM. They have been stripped, so requests will go out "
+                    "unauthenticated. Use playwright_scraper.py or "
+                    "puppeteer_scraper.py for an authenticated proxy.")
+
+        # The meter reads Chrome's performance log, which has to be asked
+        # for when the driver is created.
+        proxy_meter.selenium_options(options, proxy_meter.of(self.args))
+        self.driver = webdriver.Chrome(options=options)
+        proxy_meter.install_selenium(self.driver, proxy_meter.of(self.args))
+        self._apply_timeouts()
+        if proxy_check.block_media(self.args, self.pool, remote=False):
+            proxy_check.install_selenium(self.driver)
+
+        version = self.driver.capabilities.get("browserVersion", "")
+        if version:
+            try:
+                self.driver.execute_cdp_cmd(
+                    "Network.setUserAgentOverride",
+                    {"userAgent": _chrome_ua(version)})
+            except WebDriverException as e:
+                logger.debug("Could not override the user agent: %s", e)
+
+        if self.args.fingerprint:
+            self._apply_fingerprint()
+        return self
+
+    def _apply_timeouts(self):
+        self.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
+        self.driver.set_script_timeout(SCRIPT_TIMEOUT)
+
+    def _apply_fingerprint(self):
+        from fingerprint_client import get_fingerprint, playwright_init_script, fingerprint_user_agent
+        fp = get_fingerprint(self.args.twocaptcha_key, tags=self.args.fp_tags,
+                             country=self.args.fp_country)
+        ua = fingerprint_user_agent(fp)
+        script = playwright_init_script(fp)
+        try:
+            if ua:
+                self.driver.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": ua})
+            self.driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument", {"source": script})
+            logger.info("Using 2captcha fingerprint %s (%s)", fp.get("id"), fp.get("country"))
+        except WebDriverException as e:
+            logger.warning("Could not apply the fingerprint over CDP (%s).", e)
+
+    def relaunch(self):
+        if self.remote:
+            return
+        self.close()
+        self.open()
+
+    def close(self):
+        try:
+            if self.driver is not None:
+                # The last page's traffic is still in the performance log.
+                proxy_meter.drain_selenium(self.driver)
+                self.driver.quit()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Ignoring error during driver teardown: %s", e)
+
+
+def _driver(session):
+    driver = session.driver
+
+    def count(selector):
+        try:
+            return len(driver.find_elements("css selector", selector))
+        except WebDriverException as e:
+            logger.debug("count(%s) failed: %s", selector, e)
+            return 0
+
+    def sleep(ms):
+        time.sleep(ms / 1000.0)
+
+    def content():
+        try:
+            return driver.page_source
+        except WebDriverException as e:
+            logger.debug("page_source unavailable (page navigating?): %s", e)
+            return None
+
+    def current_url():
+        try:
+            return driver.current_url
+        except WebDriverException:
+            return ""
+
+    return {"count": count, "sleep": sleep, "content": content,
+            "current_url": current_url}
+
+
+def _parse_for_mode(html: str, url: str, args, page_num: int) -> List:
+    """Both modes, one reader — see playwright_scraper.py's twin of this.
+
+    Kept byte-identical across the three engines on purpose: this is the
+    function that decides what a row IS, and three spellings of it is how
+    two engines come to disagree about the same page.
+    """
+    if args.mode not in page_flow.MODES:
+        raise ValueError(f"unknown mode {args.mode!r}")
+    return parse_products(html, url, page=page_num if args.mode == "listing" else None)
+
+
+def _next_page_href(session) -> Optional[str]:
+    try:
+        return session.driver.execute_script(
+            "const a = document.querySelector(\"link[rel='next'], a[rel='next']\");"
+            "return a ? (a.href || a.getAttribute('href')) : null;")
+    except WebDriverException:
+        return None
+
+
+def handle_captcha_if_present(session, args, ready_selector: str,
+                              proxy=None, budget=None) -> bool:
+    driver = session.driver
+    d = _driver(session)
+    html = d["content"]()
+    if html is None:
+        return False
+
+    already_rendered = d["count"](ready_selector)
+    when_blocked = getattr(args, "solve_captcha", "when-blocked") == "when-blocked"
+
+    # AWS WAF first, exactly as playwright_scraper.py does it: `window.gokuProps`
+    # appears on nothing else. This site has not been observed serving it. This engine used to skip the check entirely,
+    # so it could detect a WAF page through the generic markers and then have
+    # nothing to do about it.
+    challenge = detect_aws_waf(html, d["current_url"]())
+    if challenge is None:
+        html_challenge = detect_recaptcha_v3(html, d["current_url"]())
+        runtime_challenge = detect_recaptcha_in_page(
+            lambda js: driver.execute_script(f"return ({js})();"),
+            page_url=d["current_url"]())
+        challenge = reconcile_detections(html_challenge, runtime_challenge)
+    if not challenge:
+        return False
+    if when_blocked and already_rendered > 0:
+        logger.info("%s detected via %s, but content is already on the "
+                    "page — not solving it.", challenge.kind, challenge.source)
+        return False
+    # "Unsolvable" is a property of a PAGE -- it means the page
+    # carries no widget. An AWS WAF CHALLENGE-action page is exactly that:
+    # challenge.js only, no puzzle rendered, nothing for a solver to work
+    # on. Sending it anyway buys a token for a widget that was never there,
+    # and `createTask` validates little enough to take the money. A browser
+    # that runs the script passes this by itself, which is why the wait
+    # above is still the right thing to do for it.
+    if challenge.is_aws_waf and not challenge.has_captcha_widget:
+        logger.info("AWS WAF %s action and no captcha widget on the page — "
+                    "not sending this to the solver API; there is no puzzle "
+                    "here to buy an answer to. NOTE: this engine does not "
+                    "wait for the challenge script to finish either, so a "
+                    "run can report blocked on a page a browser might have "
+                    "cleared by itself.",
+                    challenge.aws_waf_action)
+        return False
+
+    logger.warning("%s detected via %s (sitekey=%s) — attempting to solve.",
+                   challenge.kind, challenge.source, challenge.sitekey)
+    if not args.twocaptcha_key:
+        logger.warning("No 2captcha API key set, so this challenge is not "
+                       "being solved. 2captcha does solve this type — set "
+                       "TWOCAPTCHA_KEY (or pass --twocaptcha-key) to use it.")
+        return False
+    # The per-page allowance, checked BEFORE the paid request is sent. A
+    # caller that passes none gets a fresh one-solve allowance for this call.
+    if not (budget if budget is not None else page_flow.SolveBudget()).claim():
+        return False
+    try:
+        token = solve_recaptcha(challenge, args.twocaptcha_key,
+                                api_version=args.captcha_api,
+                                min_score=args.min_score,
+                               proxy=proxy)
+    except Exception as e:  # noqa: BLE001
+        logger.error("Solving the challenge failed (%s).", e)
+        return False
+    if challenge.is_aws_waf:
+        # AWS WAF reads its answer back from a COOKIE, not a form field, so
+        # there is no `g-recaptcha-response` textarea for INJECT_TOKEN_JS to
+        # fill. add_cookie() applies to the driver's current domain, which is
+        # this page's, and survives the refresh below.
+        host = urlparse(d["current_url"]()).hostname or ""
+        try:
+            driver.add_cookie({"name": AWS_WAF_COOKIE, "value": token,
+                               "domain": host, "path": "/"})
+        except WebDriverException as e:
+            logger.error("Could not set %s (%s).", AWS_WAF_COOKIE, e)
+            return False
+        logger.info("Set %s for %s — refreshing to let the WAF re-check.",
+                    AWS_WAF_COOKIE, host)
+    else:
+        try:
+            driver.execute_script(f"return ({INJECT_TOKEN_JS})(arguments[0]);", token)
+        except WebDriverException as e:
+            logger.error("Could not inject the token (%s).", e)
+            return False
+    time.sleep(1.5)
+    driver.refresh()
+    return True
+
+
+def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome:
+    outcome = PageOutcome(page_num=page_num, url=url)
+    d = _driver(session)
+    ready_selector = page_flow.ready_selector(args.mode)
+    ready_count = page_flow.ready_count(args.mode)
+    content_timeout = page_flow.content_timeout_ms(args.mode)
+    html, state, load_failed = None, "ok", False
+
+    block_retries = args.proxy_block_retries if (pool and len(pool) > 1) else 0
+
+    # One paid-solve allowance for this page, shared by every block attempt
+    # and every exit rotation below; it never resets inside this function.
+    budget = page_flow.SolveBudget(page_flow.SOLVES_PER_PAGE)
+
+    for block_attempt in range(block_retries + 1):
+        logger.info("Fetching page %d: %s", page_num, url)
+        load_failed, exit_failed = False, None
+        for attempt in range(1, args.retries + 1):
+            proxy_meter.drain_selenium(session.driver)
+            proxy_meter.check(args)
+            try:
+                session.driver.get(url)
+                load_failed = False
+                proxy_meter.drain_selenium(session.driver)
+                break
+            except (TimeoutException, WebDriverException) as e:
+                text = str(e)
+                reason = next((m for m in _PROXY_ERROR_MARKERS if m in text), "")
+                load_failed = True
+                if reason:
+                    exit_failed = reason
+                    break
+                if attempt < args.retries:
+                    pause = args.retry_delay * (2 ** (attempt - 1))
+                    logger.warning("Failed to load %s (attempt %d/%d) — "
+                                   "retrying in %.1fs.", url, attempt,
+                                   args.retries, pause)
+                    time.sleep(pause)
+
+        if exit_failed and block_attempt < block_retries:
+            logger.warning("Exit %s is unusable (%s) — rotating (%d/%d).",
+                           mask(pool.current), exit_failed,
+                           block_attempt + 1, block_retries)
+            pool.advance(f"unusable exit: {exit_failed}")
+            session.relaunch()
+            d = _driver(session)
+            continue
+        if load_failed:
+            break
+
+        if handle_captcha_if_present(session, args, ready_selector,
+                                    proxy=pool.current if pool else None,
+                                    budget=budget):
+            time.sleep(1)
+
+        html = d["content"]() or ""
+        state = page_flow.classify(html, url=d["current_url"]())
+
+        if not page_flow.should_retry(state):
+            break
+
+        if block_attempt < block_retries:
+            logger.warning("Page %d came back as %s from %s — retrying from "
+                           "another exit (%d/%d).", page_num, state,
+                           mask(pool.current), block_attempt + 1, block_retries)
+            pool.advance(f"{state} on page {page_num}")
+            session.relaunch()
+            d = _driver(session)
+
+    if load_failed:
+        logger.error("Gave up loading %s after %d attempt(s).", url, args.retries)
+        outcome.load_failed = True
+        return outcome
+
+    outcome.state = state
+
+    if state == "blocked":
+        debug_html = f"{args.out}_page{page_num}_debug.html"
+        with open(debug_html, "w", encoding="utf-8") as f:
+            f.write(html or "")
+        logger.error("Refused or unreachable (state=blocked) — saved to %s.", debug_html)
+        outcome.blocked_by = "blocked"
+        outcome.final_url = d["current_url"]()
+        return outcome
+
+    if state == "content":
+        seen = page_flow.wait_for_count(d["count"], d["sleep"], ready_selector,
+                                        ready_count, content_timeout)
+        if seen >= ready_count:
+            time.sleep(0.3)
+        else:
+            logger.info("No rows appeared within %.0fs (%d/%d matched) — if "
+                        "this is a genuinely empty page, that is the expected "
+                        "answer.", content_timeout / 1000, seen, ready_count)
+        html = d["content"]() or html
+
+    if args.dump_html:
+        dump_path = (args.dump_html if page_num == 1
+                     else f"{args.dump_html}.page{page_num}")
+        with open(dump_path, "w", encoding="utf-8") as f:
+            f.write(html)
+
+    vendor = (detect_bot_challenge(html, url=d["current_url"]())
+              if state != "content" else None)
+    if vendor:
+        debug_html = f"{args.out}_page{page_num}_debug.html"
+        with open(debug_html, "w", encoding="utf-8") as f:
+            f.write(html)
+        try:
+            session.driver.save_screenshot(f"{args.out}_page{page_num}_debug.png")
+        except WebDriverException as e:
+            logger.warning("Could not capture screenshot: %s", e)
+        logger.error("Blocked by %s before parsing (%d bytes) — saved to %s.",
+                     vendor, len(html), debug_html)
+        outcome.blocked_by = vendor
+        return outcome
+
+    final_url = d["current_url"]() or url
+    rows = _parse_for_mode(html, final_url, args, page_num)
+    logger.info("Parsed %d row(s) from page %d.", len(rows), page_num)
+
+    if rows:
+        priced = sum(1 for r in rows if r.price is not None)
+        coverage = priced / len(rows)
+        logger.info("Price coverage on page %d: %d/%d (%.0f%%).", page_num,
+                    priced, len(rows), 100.0 * coverage)
+        # See page_flow.PRICE_COVERAGE_FLOOR: every variant measured on this
+        # site publishes a price, so a shortfall is a parsing regression.
+        if coverage < page_flow.PRICE_COVERAGE_FLOOR:
+            logger.warning("Price coverage on page %d (%.0f%%) is below the "
+                           "%.0f%% floor — every variant measured on this "
+                           "site publishes a price, so check for a parsing "
+                           "regression rather than assuming these products "
+                           "are unpriced.",
+                           page_num, 100.0 * coverage,
+                           100.0 * page_flow.PRICE_COVERAGE_FLOOR)
+        fallback = sum(1 for r in rows if r.price_source == "url-fallback")
+        if fallback:
+            logger.warning("%d of %d row(s) on page %d came from the URL "
+                           "pattern because the hydration payload could not "
+                           "be decoded — those rows carry no price.",
+                           fallback, len(rows), page_num)
+
+    if not rows:
+        debug_html = f"{args.out}_page{page_num}_debug.html"
+        with open(debug_html, "w", encoding="utf-8") as f:
+            f.write(html)
+        try:
+            session.driver.save_screenshot(f"{args.out}_page{page_num}_debug.png")
+        except WebDriverException as e:
+            logger.warning("Could not capture screenshot: %s", e)
+        # An empty category, a landing page and a broken parser are three
+        # different facts and want three different readers. Kept identical in
+        # all three engines: this is the message a user acts on, and three
+        # spellings of it is how two engines come to describe the same page
+        # differently.
+        if outcome.state == "notfound":
+            logger.error(
+                "The site answered with its own 404 page: there is no "
+                "page at %s. Check --category or --url; this is not a "
+                "block and no proxy will change it.", url)
+        elif outcome.state == "no_listing":
+            logger.error(
+                "This URL is not a product listing. The site routed and "
+                "rendered it, but its payload carries no product list at all "
+                "— some /categories/... paths are curated landing pages "
+                "rather than listings. Pass a category that actually holds "
+                "products, e.g. --category mattresses. Saved to %s.",
+                debug_html)
+        elif page_flow.is_broken_parse(outcome.state or "content", html, 0):
+            outcome.state = "broken_parse"
+            logger.error("Page %d was SERVED and links to products, and "
+                         "parsed to zero rows. That is a bug in this parser, "
+                         "not an empty category. Saved to %s.",
+                         page_num, debug_html)
+        else:
+            logger.warning("0 rows parsed — saved what the browser saw to %s.",
+                           debug_html)
+
+    outcome.rows = rows
+    outcome.html = html
+    outcome.final_url = final_url
+    return outcome
+
+
+def scrape(args) -> int:
+    outcomes: List[PageOutcome] = []
+    seen_keys = set()
+    blocked = False
+    stop_reason = "single_page_mode" if args.mode not in PAGINATED_MODES else "completed"
+
+    pool = proxy_pool_from_args(args)
+    if pool and args.cdp_endpoint:
+        logger.warning("Ignoring --proxy/--proxy-file: with --cdp-endpoint "
+                       "the remote browser has its own exit.")
+        pool = None
+    if args.concurrency > 1:
+        # page_flow.CONCURRENCY_CAPABLE_MODES is empty for this site — see
+        # there for the measurement (?page=N returns page one) rather than
+        # repeating the reason in three engines and letting them drift.
+        assert not page_flow.CONCURRENCY_CAPABLE_MODES
+        logger.warning(page_flow.CONCURRENCY_IGNORED)
+
+    # One request through the proxy before a browser exists: a 407 or 402
+    # from the gateway ends the run here, in seconds, instead of surfacing
+    # as a navigation timeout after every retry.
+    refused = proxy_check.gate(pool, args.url)
+    if refused:
+        return finish_without_fetch(
+            args.out, stop_reason=refused.stop_reason,
+            pages_requested=args.pages, start_url=args.url, mode=args.mode,
+            source=SOURCE_DEFAULT)
+    # chromedriver's --proxy-server has nowhere to put a password, so a
+    # credentialled exit would be used WITHOUT its credential: the gateway
+    # answers 407, Chrome renders a blank page, and the run used to end as
+    # "blocked" — as though the site had refused. The outcome is known
+    # before any browser starts, so the run ends here, as a usage error —
+    # after the pre-check, so a credential the gateway itself rejects is
+    # still reported as that (exit 5, proxy_auth_failed).
+    if pool:
+        credentialled = [p for p in pool.proxies if split_credentials(p)[1]]
+        if credentialled:
+            logger.error(
+                "%d of %d proxy exit(s) carry a login and password (e.g. %s), "
+                "and Selenium cannot send them: chromedriver's --proxy-server "
+                "takes host:port only, so the proxy would refuse every "
+                "request. Nothing was fetched. Use http_scraper.py, "
+                "playwright_scraper.py or puppeteer_scraper.py with this "
+                "proxy, or give Selenium an exit that needs no password "
+                "(an IP-allowlisted one).",
+                len(credentialled), len(pool), mask(credentialled[0]))
+            return 2
+    meter = proxy_meter.start(args, pool, remote=bool(getattr(args, "cdp_endpoint", None)))
+
+    session = _Session(args, pool).open()
+    try:
+        first = _fetch_one_page(session, args, pool, 1, args.url)
+        outcomes.append(first)
+
+        if not first.ok:
+            stop_reason = ("page_load_timeout" if first.load_failed
+                           else page_flow.blocked_stop_reason(first.blocked_by))
+            blocked = first.blocked_by is not None
+        elif args.mode not in PAGINATED_MODES:
+            pass
+        else:
+            seen_keys.update(r.sku for r in first.rows if r.sku is not None)
+            site_next = _next_page_href(session)
+            addressable = page_flow.pagination_is_addressable(
+                args.mode, first.final_url, site_next)
+            planned = ([page_url(first.final_url, n) for n in range(2, args.pages + 1)]
+                      if addressable else None)
+
+            for page_num in range(2, args.pages + 1):
+                if planned:
+                    url = planned[page_num - 2]
+                else:
+                    href = _next_page_href(session)
+                    if not href:
+                        logger.info("No further pagination link on page %d "
+                                    "— stopping here.", page_num - 1)
+                        stop_reason = "pagination_exhausted"
+                        break
+                    url = href
+
+                outcome = _fetch_one_page(session, args, pool, page_num, url)
+                outcomes.append(outcome)
+                if not outcome.ok:
+                    stop_reason = ("page_load_timeout" if outcome.load_failed
+                                   else page_flow.blocked_stop_reason(outcome.blocked_by))
+                    blocked = outcome.blocked_by is not None
+                    break
+
+                fresh_count = sum(1 for r in outcome.rows
+                                  if r.sku is None or r.sku not in seen_keys)
+                seen_keys.update(r.sku for r in outcome.rows if r.sku is not None)
+                if not fresh_count:
+                    logger.info("Page %d added no rows not already seen — "
+                                "treating that as the end.", page_num)
+                    stop_reason = "no_new_products"
+                    break
+                if page_flow.is_thin_page(len(outcome.rows), len(first.rows)):
+                    logger.warning(
+                        "Page %d returned only %d row(s), well under page "
+                        "1's %d — possibly a page beyond the listing's "
+                        "real depth, or a markup regression. Continuing; "
+                        "this is informational only and does not change "
+                        "the exit code.", page_num, len(outcome.rows),
+                        len(first.rows))
+                if page_num < args.pages:
+                    if pool and pool.rotates_per_page():
+                        pool.advance(f"per-page rotation after page {page_num}")
+                        session.relaunch()
+                    time.sleep(args.delay)
+    except proxy_meter.ProxyBudgetExceeded as e:
+        logger.error("Stopping: %s. The pages already gathered are kept.", e)
+    finally:
+        session.close()
+
+    # Over budget is the stop reason whatever the loop concluded: the
+    # requests after the cap were refused, so nothing after it was read.
+    if meter is not None and meter.exceeded:
+        stop_reason, blocked = proxy_meter.STOP_BUDGET_EXCEEDED, False
+
+    all_rows = []
+    merged_seen = set()
+    for oc in sorted(outcomes, key=lambda o: o.page_num):
+        fresh = dedupe_by_key(oc.rows, merged_seen, key="sku")
+        if len(fresh) < len(oc.rows):
+            logger.info("Page %d: dropped %d duplicate row(s).",
+                        oc.page_num, len(oc.rows) - len(fresh))
+        all_rows.extend(fresh)
+
+    ok_pages = [o for o in outcomes if o.ok]
+    failed_pages = [o.page_num for o in outcomes if not o.ok]
+    final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
+                 if ok_pages else args.url)
+
+    # The SITE's own arithmetic about the result set, recorded beside the
+    # status because "complete" and "exhaustive" are different words. A
+    # sidecar that says only "complete" is lying by omission: it means "we
+    # fetched everything this site would serve", which is worth knowing
+    # alongside how much of the catalogue that actually was.
+    arithmetic = {}
+    first_html = next((o.html for o in outcomes if getattr(o, "html", None)), None)
+    if first_html and args.mode == "listing":
+        arithmetic = page_flow.listing_arithmetic(first_html)
+
+    # Did we parse everything the SITE says is there? It counts products
+    # while a row here is a size variant, so the comparison is on distinct
+    # product_id. A shortfall is the response contradicting us, which is a
+    # stronger signal than any coverage threshold — see
+    # page_flow.products_shortfall. Only meaningful for a run that otherwise
+    # finished: a blocked or truncated run is already not complete.
+    if (args.mode == "listing" and first_html
+            and stop_reason in ("completed", "pagination_exhausted",
+                                "no_new_products", "single_page_mode")):
+        missing = page_flow.products_shortfall(
+            first_html, (r.product_id for r in all_rows))
+        if missing:
+            logger.error(
+                "The site says this listing holds %s products; we parsed %d. "
+                "%d missing. That is this parser falling short of what the "
+                "response itself states, not an empty shelf — reporting the "
+                "run as partial rather than complete.",
+                arithmetic.get("total_results"),
+                len({r.product_id for r in all_rows if r.product_id}), missing)
+            stop_reason = "parser_incomplete"
+            arithmetic["products_missing"] = missing
+
+    arithmetic = proxy_meter.finish(args, arithmetic) or {}
+
+    return finish_run(all_rows, args.out, args.format, args.allow_empty,
+                      extra=arithmetic or None,
+                      blocked=blocked, stop_reason=stop_reason,
+                      pages_requested=args.pages, pages_completed=len(ok_pages),
+                      pages_failed=failed_pages, mode=args.mode,
+                      source=SOURCE_DEFAULT,
+                      start_url=args.url, final_url=final_url)
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Sleep Number scraper (Selenium edition)")
+    p.add_argument("--mode", choices=list(page_flow.MODES), default="listing",
+                   help="listing (default) or product. See "
+                        "playwright_scraper.py --help for the full text; the "
+                        "three engines take the same flags by contract.")
+    p.add_argument("--url", default=None,
+                   help="The exact URL to read, replacing --category.")
+    p.add_argument("--category", default=None,
+                   help="A category/collection slug for --mode listing, or a "
+                        "product slug for --mode product.")
+    p.add_argument("--pages", type=page_flow.positive_int, default=1)
+    p.add_argument("--delay", type=page_flow.non_negative_float, default=2.0)
+    p.add_argument("--concurrency", type=page_flow.positive_int, default=1,
+                   help="Has no effect on this site (a warning says why): ?page=N is "
+                        "ignored by the server, so pages cannot be fetched in "
+                        "parallel.")
+    p.add_argument("--retries", type=page_flow.attempts, default=3,
+                   help="Attempts per page load before giving up (default 3). "
+                        "Counts ATTEMPTS, so 1 means 'try once, do not retry'; "
+                        "0 is a usage error — see page_flow.attempts.")
+    p.add_argument("--retry-delay", type=page_flow.non_negative_float, default=2.0)
+    p.add_argument("--format", choices=["json", "csv", "both"], default="both")
+    p.add_argument("--out", default="sleepnumber_products")
+    p.add_argument("--locale", default="en-US",
+                   help="Browser locale (default en-US: Sleep Number is a US storefront and prices in USD).")
+    p.add_argument("--proxy", default=None)
+    p.add_argument("--proxy-file", default=None)
+    p.add_argument("--proxy-rotate", choices=list(ROTATE_MODES), default="per-run")
+    p.add_argument("--proxy-sessions", type=int, default=None,
+                   help="With --proxy pointing at a 2Captcha proxy gateway, mint this many session-pinned exits from that one credential instead of keeping a file of them. Each session is a different exit address (measured 2026-09-17: ten sessions, ten distinct addresses). Has no effect with --proxy-file, and is refused for a non-2Captcha host.")
+    p.add_argument("--proxy-shuffle", action="store_true")
+    p.add_argument("--proxy-block-retries", type=page_flow.non_negative_int, default=2)
+    p.add_argument("--twocaptcha-key", default=None)
+    p.add_argument("--allow-empty", action="store_true")
+    p.add_argument("--fingerprint", action="store_true")
+    p.add_argument("--fp-tags", default="Windows")
+    p.add_argument("--fp-country", default=None)
+    p.add_argument("--captcha-api", choices=["v2", "v1"], default="v2")
+    p.add_argument("--solve-captcha", choices=["when-blocked", "always"], default="when-blocked")
+    p.add_argument("--min-score", type=float, default=0.7)
+    proxy_check.add_media_flags(p)
+    proxy_meter.add_budget_flag(p)
+    p.add_argument("--cdp-endpoint", default=None,
+                   help="A CREDENTIAL-FREE debuggerAddress only — Selenium "
+                        "cannot authenticate on the WebSocket upgrade the "
+                        "way Playwright/pyppeteer do. See this file's "
+                        "docstring.")
+    p.add_argument("--dump-html", default=None, metavar="PATH")
+    p.add_argument("--headless", action="store_true", default=True)
+    p.add_argument("--headful", dest="headless", action="store_false")
+    args = p.parse_args()
+    # Captured BEFORE the environment fills anything in: afterwards a URL
+    # from SLEEPNUMBER_URL is indistinguishable from one typed on the
+    # command line, and a typed --category must win over the former.
+    typed_url = args.url
+    env_config.apply(args)
+    page_flow.resolve_start_url(p, args, typed_url)
+
+    args.url = normalise_url(args.url)
+    supported, why = is_supported_url(args.url)
+    if not supported:
+        p.error(why)
+    if args.mode not in PAGINATED_MODES and args.pages != 1:
+        logger.warning("--pages %d is ignored in --mode %s.", args.pages, args.mode)
+        args.pages = 1
+    return args
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    if args.fingerprint and not args.twocaptcha_key:
+        logger.error("--fingerprint needs --twocaptcha-key.")
+        sys.exit(2)
+    try:
+        sys.exit(scrape(args))
+    except ProxyError as e:
+        logger.error("%s", e)
+        sys.exit(2)
+    except RemoteAPIError as e:
+        # The Fingerprint API call failed on its own terms -- not
+        # CloudFront refusing a page (exit 3) and not an unexpected bug
+        # (exit 1, which still gets a real traceback). See
+        # output_writer.RemoteAPIError. (Selenium has no credentialed
+        # --cdp-endpoint path to fail this way -- see _cdp_host_port, which
+        # exits 2 for that as a usage error before any connection attempt.)
+        logger.error("%s", e)
+        sys.exit(EXIT_REMOTE_API_ERROR)

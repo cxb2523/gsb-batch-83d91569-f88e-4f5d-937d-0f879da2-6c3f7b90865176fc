@@ -1,0 +1,694 @@
+# Sleep Number Scraper — Beds, Mattresses and Size Prices in Python
+
+[![release](https://img.shields.io/github/v/release/2scraper/sleepnumber-scraper?sort=semver)](https://github.com/2scraper/sleepnumber-scraper/releases)
+[![tests](https://github.com/2scraper/sleepnumber-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/sleepnumber-scraper/actions/workflows/tests.yml)
+[![canary](https://github.com/2scraper/sleepnumber-scraper/actions/workflows/canary.yml/badge.svg)](https://github.com/2scraper/sleepnumber-scraper/actions/workflows/canary.yml)
+[![Python](https://img.shields.io/badge/python-3.9%20%E2%80%93%203.13-blue)](pyproject.toml)
+[![licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+[![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20Puppeteer%20%7C%20Scraper%20API-informational)](#engines)
+[![needs a residential IP](https://img.shields.io/badge/needs-a%20residential%20IP-orange)](#access-read-this-before-anything-else)
+
+**Sleep Number scraper** — an open-source (MIT) Python tool that reads the sleepnumber.com catalogue of smart beds, mattresses, bases and bedding and writes one row per size variant, with its own sku, price, sale price, rating and availability, to JSON or CSV. Measured 2026-09-17, every URL answered a CloudFront 403 to a datacentre address while GB and US residential exits were served the full catalogue, so on a VPS or CI runner you need a residential proxy (or the Scraping Browser API), and on a home connection nothing at all. Use it for per-size price monitoring, comparing two runs with `diff_runs.py` to see which sizes went on sale.
+
+Scrapes [sleepnumber.com](https://www.sleepnumber.com): smart beds, mattresses,
+bases, bedding and furniture — **one row per size variant**, with its own sku,
+price, sale price, rating and availability.
+
+Four entry points share one parser: Playwright (recommended), pyppeteer,
+Selenium, and the 2Captcha Scraping Browser API over CDP or the Scraper API
+with no local browser at all.
+
+```bash
+pip install -r requirements.txt          # no browser needed on this site
+
+python3 http_scraper.py --category mattresses --format both --out mattresses
+```
+
+```
+[+] Saved 52 products -> mattresses.json
+[+] Saved 52 products -> mattresses.csv
+[+] Wrote run metadata -> mattresses.meta.json (status=complete)
+```
+
+---
+
+## Access: read this before anything else
+
+**Sleep Number refuses datacentre addresses, and that is the entire
+difficulty of scraping it.** Everything else about the site is unusually
+easy.
+
+Measured 2026-09-17 from a datacentre address (netcup, Nuremberg, AS197540):
+every URL on the site answers an identical **919-byte CloudFront
+"Request blocked" 403**. Not a challenge, not a captcha — a refusal.
+
+| request | result |
+|---|---|
+| plain `curl` | 403 |
+| full browser header set, HTTP/2 | 403 |
+| HTTP/1.1, `Sec-Fetch-*`, `Accept-Language` | 403 |
+| Googlebot user agent | 403 |
+| `HEAD` | 403 |
+| headless Chromium (Playwright) | 403 |
+| `/robots.txt` and `/sitemap.xml` | 403 |
+| 2Captcha **Scraper API**, its own exits | 403 |
+
+It is the **address**, not the request. From a residential exit the same
+requests answer 200 — measured the same day on two:
+
+| exit | result |
+|---|---|
+| GB residential (TalkTalk, AS13285) | **200**, full catalogue |
+| US residential (Charter, Ohio, AS10796) | **200**, full catalogue |
+
+So the block is datacentre **reputation**, not geography — a UK address is
+served.
+
+**And the exit country does not change the data.** Parsing the same category
+captured through each exit: 52 rows both times, the same 52 skus, and **zero
+rows differing in price, original price or currency** — everything is USD
+from both. So a rotating residential exit that lands outside the US is not a
+correctness problem here; it is a US-only storefront quoting one currency to
+everyone it serves.
+
+That matters in practice because a 2Captcha gateway without a `-region-`
+token in the login rotates: the same credential was measured exiting in GB
+(TalkTalk) and, minutes later, in US Pennsylvania (Verizon). Both worked and
+both returned identical rows. Pin a region only if you want a *reproducible*
+exit for other reasons, not because the data needs it.
+
+There is **no captcha to solve here.** The refusal carries no
+`x-amzn-waf-action` header, no challenge iframe and no widget of any kind, so
+no solver at any price can help: the request never reaches Sleep Number. What
+helps is a different exit.
+
+```bash
+# .env, next to the scripts — never on the command line
+# {login} and {password} exactly as the 2Captcha dashboard shows them
+SLEEPNUMBER_PROXY=http://{login}:{password}@eu.proxy.2captcha.com:2334
+# or, to pin a US exit:
+# SLEEPNUMBER_PROXY=http://{login}-zone-custom-region-us:{password}@eu.proxy.2captcha.com:2334
+```
+
+Use the gateway host the dashboard gives you (`eu.proxy.2captcha.com` or
+`na.proxy.2captcha.com`); the bare `proxy.2captcha.com` is not a proxy
+gateway and the connection times out. A login with `-zone-resi` was refused
+by the gateway with HTTP 407 (measured 2026-11-11), which this toolkit
+reports as exit 5 before any browser starts.
+
+---
+
+## Do you need any of the paid products?
+
+**For the catalogue itself: no key, no captcha solving, no fingerprint.**
+Sleep Number server-renders its entire catalogue into the page, so an
+ordinary HTTP client on a residential connection reads it — a plain
+`requests` fetch through a residential exit returned byte-identical data to a
+browser and parsed to the same 52 rows.
+
+What you *do* need is an exit the site will serve. If you are on a home
+connection, this repo needs nothing at all. If you are on a VPS, a CI runner
+or a container — which is where scrapers usually live — you need a
+residential proxy, and that is the one thing worth paying for here.
+
+| product | does it help on this site? |
+|---|---|
+| **Proxies** | **Yes — this is the one that matters.** Without a residential exit nothing works from a datacentre. |
+| **Scraping Browser API** | Yes, as an alternative to a proxy: it brings its own residential exit, and it is the way to make the Scraper API work (`--cdp-url`). |
+| Captcha solving | **No.** Nothing on this site renders a challenge. The detection is wired in and stays broad, but no solve has ever been attempted here. |
+| Fingerprints | Not needed. `--fingerprint` works (verified live, US fingerprint, 52 rows) but nothing measured here required it. |
+
+This is the honest answer and it is not a sales pitch. Saying a captcha
+solver is *unnecessary* is a statement about this site; it is never a
+statement about what 2Captcha can solve.
+
+---
+
+## What it reads
+
+### A row is a size variant
+
+`QCM10` is the ComfortMode™ Mattress in Queen; `KCM10` is the same model in
+King. They are two rows, because they are two prices — ComfortMode spans
+**$989.10 to $2,069.10** across seven sizes. Grouping by model would force a
+min/max pair and throw away the size dimension, which is the thing a mattress
+price monitor most wants.
+
+`sku` is the variant id, so the family's dedupe-and-diff-on-sku contract
+works unchanged, and `diff_runs.py` reports per-size moves: QCM10 going on
+sale while KCM10 does not is two facts, and you get two.
+
+### Columns
+
+`source` `scraped_at` `url` `sku` `title` `brand` `price` `currency`
+`original_price` `discount_pct` `price_source` `rating` `review_count`
+`in_stock` `image_url` `category` `size` `product_id` `product_slug`
+`collection_slug` `product_type` `promo_badge` `page` `position`
+
+See `sample_output.json` / `sample_output.csv`, both cut from a real run.
+
+### Measured coverage
+
+Every figure below was taken through a US residential exit and is
+reproducible with `python3 tools/capture.py`. Two dates are given where the
+figure moved, because that is more useful than one that looks permanent.
+
+| listing | rows (variants) | priced | discounted 2026-09-17 | discounted 2026-10-13 |
+|---|---:|---:|---:|---:|
+| `/categories/mattresses` | 52 | 52 | 52 | **0** |
+| `/categories/sheets-pillowcases` | 211 → 194 | all | 13 | 11 |
+| `/categories/furniture` | 169 | 169 | 157 | **0** |
+| `/products/cm-mattress` (detail) | 7 | 7 | 7 | 0 |
+
+**Two dates, because the second one is the useful lesson.** Price coverage is
+100% on both — every sellable variant publishes a price, which is why the
+engines treat a shortfall as a parsing regression
+(`page_flow.PRICE_COVERAGE_FLOOR`, 0.98). The DISCOUNT column is a property
+of whatever sale is running: in September nearly everything was reduced, and
+on 13 October nothing in mattresses or furniture was. The same ComfortMode
+Twin that read `price 989.10, original_price 1099.00` in September reads
+`price 1499.00, original_price null` today.
+
+So do not build a threshold on the discount share. An earlier version of the
+canary did, and it went red the day the sale ended with the parser working
+perfectly.
+
+**Price coverage is 100% on every listing measured**, which is why the
+engines treat a shortfall as a parsing regression rather than as the
+catalogue's own doing (`page_flow.PRICE_COVERAGE_FLOOR`, 0.98).
+
+`discounted` genuinely varies — 52 of 52 on mattresses, 13 of 211 on sheets —
+so `original_price` is a real column and not a constant. `rated` varies too
+(21 of 27 on the collection page).
+
+### How big is the catalogue?
+
+From the site's own `sitemap.xml.gz` — re-measured 2026-10-13, with the
+2026-09-17 figures beside them so you can see how fast this moves:
+
+| path | URLs (13 Oct) | unique | unique (17 Sep) |
+|---|---:|---:|---:|
+| `/stores/` | 1,103 | 1,100 | 1,137 |
+| `/post/` | 343 | 343 | 337 |
+| `/pages/` | 240 | 129 | 129 |
+| `/categories/` | 110 | 52 | 51 |
+| `/products/` | 91 | 91 | 88 |
+| `/bundles/` | 16 | 16 | 16 |
+
+Totals: **1,962 URLs, 1,770 unique** today against 1,994 and 1,796 in
+September.
+
+So the sellable catalogue is **91 products across 52 distinct categories**
+(88 and 51 four weeks earlier) — small, and a complete pass over it is
+minutes rather than hours. Re-measure rather than quoting this:
+
+```bash
+curl -s https://www.sleepnumber.com/sitemap.xml.gz | gunzip \
+  | grep -o '<loc>[^<]*</loc>' | sed 's|.*//[^/]*\(/[^/?#]*\).*|\1|' \
+  | sort | uniq -c | sort -rn | head
+```
+
+---
+
+## Where the data actually is
+
+This is the unusual part, and it is worth knowing before you read the parser.
+
+Sleep Number runs a **React Router (Remix)** front end on **Workarea
+Commerce**, served from **Fly.io** behind **CloudFront**. A category page
+carries **zero** product anchors and **zero** `"sku"` strings as markup: the
+grid is painted client-side.
+
+What every page *does* carry is the router's hydration payload:
+
+```html
+<script>window.__reactRouterContext.streamController.enqueue("[{\"_1\":2,…}]")</script>
+```
+
+That is a **turbo-stream** document — a single flat array in which every
+value is an *index into that same array*, and an object is spelled
+`{"_16": 17}` meaning "the key at index 16, the value at index 17". Decoded
+(`product_parser.decode_turbo_stream`), it hands back the complete
+server-side loader data: every product, every size variant, every price,
+before a single script has run.
+
+So the extraction order here inverts this family's usual one, and the counts
+are the reason rather than taste:
+
+1. **The hydration payload — primary.** Present and complete on both page
+   kinds. A listing exposes it at `category.products[]`, a detail page at
+   `.product`, and they are **the same object shape**, so one reader serves
+   both and they cannot drift.
+2. **JSON-LD — confirmation, not primary.** Real but partial: an `ItemList`
+   appears on `/categories/mattresses/king` and on *none* of
+   `/categories/mattresses`, `/categories/beds-on-sale` or the collection
+   page. Where present it agrees — **7 of 7 rows** on the king capture, and
+   the Climate360 detail page's `7686.75` against the payload's `768675`
+   cents. That agreement is recorded per row in `price_source`.
+3. **The `/collections/{slug}/{SKU}` URL pattern — fallback.** A URL pattern,
+   never a CSS class. It emits identifiable rows with **null prices** rather
+   than pretending to have parsed.
+
+### Prices are integer cents
+
+```json
+{"sale": {"cents": 393750, "currency_iso": "USD"},
+ "regular": {"cents": 525000, "currency_iso": "USD"}}
+```
+
+No thousands separator to disambiguate, no decimal comma, no dash standing in
+for the cents, no currency symbol to match longest-first. **This repo ships no
+price-parsing grammar at all**, because there is nothing here for one to do —
+and porting the family's would have been dead code that looks load-bearing.
+`currency` comes from `currency_iso`, which is a stated fact, never a guess.
+
+---
+
+## Traps that look like bugs
+
+Each of these is measured, and each is pinned by a check in `smoke_test.py`.
+
+**The site's own structured data points at its origin host.** Every URL inside
+the JSON-LD reads `http://sndotcom.fly.dev/…` — the Fly application
+hostname, leaked through the renderer — and not `https://www.sleepnumber.com/…`.
+Read verbatim, every row would link to a dev host that is not the shop. The
+parser rewrites it.
+
+**`?page=N` is ignored.** `/categories/sheets-pillowcases?page=2` and
+`?page=99` both answer HTTP 200 carrying **page one** — the same ten
+products, and the payload's own `page` field still reads `1`. A count-based
+pagination loop would never terminate. Pagination is therefore planned from
+the site's own arithmetic (`next_page`, `last_page`, `total_results`,
+`per_page`) and terminated on **data** — a page that adds no new sku ends the
+listing.
+
+**`--concurrency` has no effect, and every entry point says why.** It is
+accepted, a warning gives the reason and the run is sequential. It follows from
+the above: workers would fetch page one in parallel. It is also moot — `per_page` is 100
+and the largest category measured holds 20 products, so **every category is
+one page**.
+
+**A size-filtered listing URL is the same request.**
+`/categories/mattresses/king` decodes to the same payload as
+`/categories/mattresses` — the same 7 products, the same `full_url`. The size
+segment selects a facet in the browser. The two are not different samples.
+
+**`regular` equals `sale` on everything that is not discounted** — 198 of 211
+variants on the sheets category. Copied across, that gives an
+`original_price` identical to the price and a 0% discount on most of the
+catalogue. `original_price` is null unless the regular price is genuinely
+higher, and `discount_pct` is computed from the two rather than read from the
+`promo_badge`.
+
+**An unreviewed product reports `0`, not null.** `rating` and `review_count`
+go null *together* rather than dragging a consumer's average toward zero.
+
+**`/products/{slug}` is not the model's `slug`.** The ComfortMode mattress has
+`slug: "comfortmode"` and a canonical URL of `/products/cm-mattress`; only
+the latter answers 200. `/products/i8` looks entirely plausible, appears in
+search results, and returns the site's 404.
+
+**Not every `/categories/…` URL is a listing.** Some are curated landing
+pages: `/categories/beds-on-sale` renders 320 KB with `category.name = "Sale"`
+and **no `products` key at all** — no `total_results`, no `slug`. The scraper
+reports this as `no_listing` and says so in as many words, rather than "zero
+products", which would read as a claim about the catalogue and send you to
+check the shelf instead of the URL. The distinction is exact in the payload:
+`products` absent is a landing page, present-and-empty is an empty category.
+
+**A rotating proxy exit occasionally misses.** A 2Captcha gateway with no
+`-region-` token in its login rotates per request. Measured 2026-09-17 over
+15 requests through one: **14 answered and all 14 were HTTP 200**, one never
+connected. In a separate capture run of nine URLs, one came back 403 and one
+timed out. So refusals are rare but real — `--retries` and
+`--proxy-block-retries` exist for exactly this, and a pinned `-region-` exit
+avoids it.
+
+**The site's 404 is a full, 200-KB page** with site chrome and a JSON-LD
+`@graph` block, and its `<title>` is just "Sleep Number" — so a title check
+sees nothing wrong with it. It is told apart structurally: React Router puts
+one key per matched route into `loaderData`, and a URL that matched no route
+has `root` and nothing else. Measured across 17 routed captures and both real
+404s: one route key on every routed page, zero on both 404s.
+
+**reCAPTCHA is configured on this site and never rendered.** The base
+template ships a reCAPTCHA loader, so `recaptcha` and `captcha` each occur
+**once on every page**, good and refused alike. Either one used as a block
+marker would report the entire catalogue as challenged. That a captcha is
+*configured* is a different statement from a challenge being *rendered*.
+
+---
+
+## Block detection
+
+Built from counts on pages known to be good, not from a vendor list. Over
+four served pages, two of the site's own 404s and two CloudFront refusals
+(one as an HTTP client receives it, one read out of a browser DOM):
+
+| candidate marker | served ×4 | 404 ×2 | refused ×2 | kept? |
+|---|---|---|---|---|
+| `Request blocked` | 0 0 0 0 | 0 0 | 1 1 | **yes** |
+| `Generated by cloudfront` | 0 0 0 0 | 0 0 | 1 1 | **yes** |
+| `recaptcha` | 1 1 1 1 | 1 1 | 0 0 | no — fires on every page |
+| `captcha` | 1 1 1 1 | 1 1 | 0 0 | no — same |
+| `akamai`, `datadome`, `perimeterx`, `incapsula`, `hcaptcha`, `awswaf`, `cf-turnstile`, `challenges.cloudflare.com`, `errors.edgesuite.net` | 0 0 0 0 | 0 0 | 0 0 | no — dead code |
+
+The **positive** signal is what actually carries detection: a page Sleep
+Number served is *built out of its own assets*, and an interstitial is not.
+`cdn.sleepnumber.com` appears **214 / 549 / 53 / 221** times on the four
+served pages and **0** on both refusals; `__reactRouterContext` is 5 against 0.
+
+Response headers are read first where available, because they are the one
+signal a body cannot forge: a served page answers `x-cache: Miss from
+cloudfront` with `server: Fly/…`, a refusal `Error from cloudfront` with
+`server: CloudFront`. CloudFront also writes `Error from cloudfront` on the
+site's own 404, so that header counts as a refusal only when the body carries
+none of the site's assets; a 404 page the application rendered is reported as
+not found (exit 4), not as a block.
+
+---
+
+## Engines
+
+| engine | on this site |
+|---|---|
+| **`http_scraper.py`** | **Recommended. No browser at all** — same rows, about a third of the time. |
+| `playwright_scraper.py` | A real browser, for when one is wanted. 52 rows, exit 0, complete. |
+| `puppeteer_scraper.py` | Byte-identical rows to Playwright on the same URL. pyppeteer downloads its own Chromium, which does not start on every system; then the run stops with exit 5 (`browser_launch_failed`) and `--chromium-path /path/to/chrome` points it at a local Chrome or Chromium. |
+| `selenium_scraper.py` | **Cannot authenticate a proxy** — see below. |
+| `scraper_api_client.py` | No local browser. Needs `--cdp-url` here. |
+
+### You probably do not need a browser
+
+Sleep Number server-renders its whole catalogue into the page, so there is
+nothing to wait for and nothing to scroll. `http_scraper.py` fetches with
+`requests`, hands the bytes to the same parser the browser engines use, and
+is the path to reach for on this site.
+
+Measured 2026-10-13 through one US residential exit, three runs each, same
+URL:
+
+| | run 1 | run 2 | run 3 | median |
+|---|---|---|---|---|
+| `http_scraper.py` (fetch + parse) | 1.4s | 1.3s | 2.1s | **1.4s** |
+| `playwright_scraper.py` (whole run) | 4.2s | 2.9s | 64.2s | 4.2s |
+
+Both produce **52 rows whose every field is identical**. The 64-second
+outlier is the rotating proxy gateway rather than the engine, and is left in
+the table because it is the ordinary variance of this setup.
+
+```bash
+python3 http_scraper.py --category mattresses --format both --out mattresses
+```
+
+It deliberately takes no `--headless`, `--cdp-endpoint`, `--fingerprint` or
+captcha flags: there is no browser to configure, no challenge has ever been
+observed on this site, and a fingerprint describes a browser there is none
+of. It keeps the whole output contract — same rows, same exit codes, same
+sidecar, same refusal to overwrite good output.
+
+**It still needs an exit the site serves.** Removing the browser does not
+change the address, and the address is the whole difficulty here.
+
+The browser engines stay because they are the answer if Sleep Number ever
+moves its grid behind client-side rendering, and because `--cdp-endpoint`
+reaches the Scraping Browser's own residential exit without a proxy of your
+own.
+
+### Selenium's limitation matters more here than elsewhere
+
+`chromedriver`'s `--proxy-server` takes a bare `host:port` with nowhere to put
+a password. Sent without it, the proxy itself refuses the browser (HTTP
+407) and the site is never asked. So the engine checks before it starts a
+browser: if any proxy exit carries a login and password, it stops with
+**exit 2**, names the problem and fetches nothing — rather than reporting the
+proxy's refusal as a site block.
+
+**The engine itself is fine, and that is measured rather than assumed.** Give
+it a proxy that needs no password and it returns the same rows as the other
+two: verified 2026-09-17 through a local relay that adds the credentials
+upstream — **52 rows, exit 0, `status: complete`, byte-identical to
+Playwright's output**. So this is a credential-plumbing limit, not a broken
+engine.
+
+Three ways to use Selenium here:
+
+- a residential connection, with no proxy at all;
+- a proxy that authenticates by **source IP** rather than by password;
+- a local forwarding proxy that injects the credentials, then
+  `--proxy http://127.0.0.1:PORT`.
+
+Selenium also cannot use an authenticated remote CDP endpoint, and refuses it
+explicitly with exit 2 rather than silently stripping it.
+
+Playwright's `connect_over_cdp` and pyppeteer's `browserWSEndpoint` take a
+full `ws://user:pass@host:port` and authenticate on the WebSocket upgrade;
+`debuggerAddress` takes a bare `host:port`, which is the whole difference.
+
+### The Scraper API needs a Scraping Browser exit
+
+Measured 2026-09-17: the Scraper API's own exits are datacentre addresses, and
+this site answers them with the same 919-byte CloudFront 403 it gives any
+other. Route the fetch through a Scraping Browser session:
+
+```bash
+python3 scraper_api_client.py \
+  --url https://www.sleepnumber.com/categories/mattresses \
+  --cdp-url "$SLEEPNUMBER_CDP_ENDPOINT"
+```
+
+Verified 2026-09-17: upstream HTTP 200, 882 KB, **52 rows, exit 0**, billed
+$0.0005 — the same rows the browser engines produce. A Scraping Browser
+profile's credentials expire (how long they last was not measured here), so
+mint one when you need it rather than keeping it in `.env`:
+
+```bash
+python3 tools/browser_profile_client.py accounts
+python3 tools/browser_profile_client.py connection --account-id ID \
+    --profile-id PID --no-proxy --write-env
+```
+
+A refusal is **not retried** — a CloudFront deny is a property of the exit
+address and does not change between attempts, so retrying buys a second copy
+of a certainty and is billed for it. A challenge page still retries, because
+that one can clear.
+
+### Proxy traffic savers
+
+A proxy is billed by traffic, so a run through `--proxy` / `--proxy-file` /
+`SLEEPNUMBER_PROXY` does two things to avoid paying for bytes it does not
+use:
+
+- **One pre-check before the first page request, in every entry point**
+  (`http_scraper.py` and the three browser engines). It is a CONNECT through
+  the proxy and a `HEAD /robots.txt` on www.sleepnumber.com. Chromium
+  reports a proxy's HTTP 407 as a navigation timeout, and `requests` reports
+  it inside a `ProxyError`, so a wrong or exhausted credential used to spend
+  every retry before ending as `page_load_timeout`. Now a **407** (the
+  gateway refused the credential, or the traffic balance is exhausted) or a
+  **402** (proxy traffic/balance exhausted) ends the run in seconds with
+  **exit 5** and writes `<out>.latest_attempt.meta.json` saying
+  `status: failed`, `stop_reason: proxy_auth_failed` (or
+  `proxy_balance_exhausted`). Any previous output and its `.meta.json` are
+  left as they were. The message names the variable and never prints the
+  credential. If the proxy does not answer at all, the run goes on as
+  before. No pre-check runs without a proxy or with `--cdp-endpoint`.
+- **Images, video/audio and web fonts are not downloaded** by the browser
+  engines through a local proxy. Playwright aborts them by resource type,
+  pyppeteer through CDP's Fetch domain, and Selenium by file extension with
+  CDP `Network.setBlockedURLs`. The rows come from the page's inline
+  payload, which is why `http_scraper.py` (which never loads a sub-resource)
+  produces the same rows. `http_scraper.py` fetches HTML only, so blocking
+  does not apply to it. On 2026-10-20 a run with no proxy from a datacentre
+  got the same 923-byte CloudFront "Request blocked" 403 with media loaded
+  and with media blocked, so the refusal does not depend on what the page
+  loads; a served comparison needs a residential exit and was not made.
+  `--load-media` (or `SLEEPNUMBER_LOAD_MEDIA=1`) loads media. Without a
+  proxy, or over `--cdp-endpoint`, nothing is blocked.
+- **Every run is metered and capped, in every entry point.**
+  `--proxy-budget-mb` (default **10**, `0` = no cap, also
+  `SLEEPNUMBER_PROXY_BUDGET_MB`). Once more than that has gone through the
+  proxy, further requests are refused, the run stops before its next page
+  request or retry, keeps the rows it has and exits **6** (or **5** with no
+  rows), `stop_reason: proxy_budget_exceeded`. It never carries on past the
+  cap; with `--concurrency` every worker shares the one budget and the
+  pages left in the queue are reported unattempted. The sidecars
+  (`<out>.meta.json`, and `<out>.latest_attempt.meta.json`, which every
+  metered run writes) carry `proxy_bytes`, `proxy_budget_bytes` (`null` with
+  no cap) and `proxy_budget_exceeded`, and the log ends with
+  `Proxy traffic: X.X MB of Y MB budget`.
+
+How the bytes are counted, per entry point: Playwright sums
+`request.sizes()` (request headers + body, response headers + body) of
+every finished or failed request; pyppeteer reads CDP
+`Network.loadingFinished.encodedDataLength` (bytes received, headers
+included) plus each request's line, headers and body from
+`Network.requestWillBeSent`; Selenium reads the same CDP events from
+chromedriver's performance log around every page load; `http_scraper. Only `http(s)` requests and responses that came over the network are counted: Chrome's own `chrome://`, `data:` and `blob:` loads, cache hits and Chrome's error page count nothing.py`
+counts each response's status line, headers and body (its `Content-Length`,
+i.e. the compressed size, when the server sends one) plus the request it
+sent, for every redirect hop. The figure is an **estimate of the payload
+through the tunnel**: TLS, the CONNECT exchange and connections the browser
+opens for itself are not visible to any engine and add a few percent; the
+pre-check (under 1 KB) is not counted. Measured 2026-10-21 against a local
+stub proxy that counted every byte it carried: a 60 kB page with a 30 kB
+stylesheet and a 90 kB script, Playwright within 0.2%, pyppeteer 0.6%,
+Selenium 0.7%; a 30 kB page through `http_scraper.py`, 0.9% (the
+uncounted pre-check included). A megabyte here is 10^6 bytes. Nothing is
+metered without a proxy or over `--cdp-endpoint`.
+
+### Install exactly one engine
+
+`playwright` and `pyppeteer` pin mutually unsatisfiable `pyee` versions, and
+`pyppeteer` and `selenium` collide on `urllib3`. They do run side by side in
+practice, but `pip check` reports the conflict and pip may resolve it by
+downgrading something you wanted. Use a virtualenv per engine, and create it
+**outside the clone**:
+
+```bash
+python3 -m venv ~/.venvs/sleepnumber-playwright
+~/.venvs/sleepnumber-playwright/bin/pip install -r requirements-playwright.txt
+```
+
+The offline checks (`smoke_test.py`, `pytest`) read every Python file inside
+the clone and skip only a directory named `.venv`; a virtualenv under any
+other name there gets its third-party code checked too, and those checks
+fail on code that is not this repository's.
+
+---
+
+## Modes
+
+```bash
+# a category or collection listing (the default)
+python3 playwright_scraper.py --category mattresses
+python3 playwright_scraper.py --category collections/mattresses-climate-collection
+
+# one product's detail page — same rows, one model's worth
+python3 playwright_scraper.py --mode product --category cm-mattress
+```
+
+## Output contract
+
+- **A run that finds nothing writes nothing.** Last night's good output is
+  never replaced with `[]`. `--allow-empty` is the opt-out.
+- **Exit codes:** `0` ok · `1` crash · `2` bad usage · `3` blocked ·
+  `4` zero products · `5` the content was never obtained (a remote API
+  error, a navigation timeout, a dead proxy, or a proxy that refused the
+  credential or the balance before the run began: `stop_reason:
+  proxy_auth_failed` / `proxy_balance_exhausted`; or the proxy budget spent
+  before any row: `proxy_budget_exceeded`) · `6` partial (including a run
+  `--proxy-budget-mb` stopped after gathering rows).
+- **`<out>.meta.json` beside every run that WRITES ROWS**, recording
+  `status`, `stop_reason`, `transport`, which pages failed by number, and the
+  site's own arithmetic about the result set — `total_results`, `per_page`,
+  `pages_available`, `page_param_honoured` — because "complete" and
+  "exhaustive" are different words.
+
+  **A run that gathers nothing writes neither file, sidecar included**, and
+  that is deliberate rather than an oversight. The row file is left holding
+  the last good run; a `"status": "failed"` sidecar beside it would describe
+  a run that did not produce the data sitting next to it, and a consumer
+  reading the pair would be misled about data that is in fact fine. The
+  blocked run still tells you everything: a non-zero exit code, the reason on
+  stderr, and `<out>_page{N}_debug.html` holding the exact bytes that came
+  back.
+
+  This cost a third-party audit a finding on 2026-10-13 — the README said
+  "per run" and it meant "per run that writes rows". If you want a machine-
+  readable record of attempts including failures, read the exit code and keep
+  your own log; this repo will not put a contradicting file next to good
+  data. The one exception is a run the proxy pre-check stopped (see "Proxy
+  traffic savers"): it writes `<out>.latest_attempt.meta.json`, a file with
+  its own name, and leaves `<out>.meta.json` alone. A run through a local
+  proxy always writes that file too, with its proxy traffic, rows or not.
+- **An empty CSV still carries its header.**
+- **Writes are atomic.** Each file is written beside its target and renamed
+  over it, so a crash or a full disk mid-write leaves the previous file
+  intact rather than truncated.
+- **CSV cells that a spreadsheet would execute are neutralised.** A string
+  cell beginning with `=`, `+`, `-`, `@`, a tab, CR or LF gets a leading
+  apostrophe in the CSV only; numbers and the JSON are untouched, and the
+  sidecar records `csv_cells_escaped`. On the committed sample none qualify.
+
+## Diffing two runs
+
+```bash
+python3 playwright_scraper.py --category mattresses --out "mattresses_$(date +%F)"
+python3 diff_runs.py --old mattresses_2026-09-16.json \
+                     --new mattresses_2026-09-17.json
+```
+
+Keyed on `sku`, so per size variant. A price difference that comes with a
+`price_source` difference is reported as `source_changed`, not `changed`, and
+`--fail-on-change` ignores it: it says something about our two snapshots, not
+about Sleep Number.
+
+## Configuration
+
+Credentials live in `.env` next to the scripts, never on a command line — a
+secret in `argv` is readable by anything that can run `ps`.
+
+```bash
+cp .env.example .env
+$EDITOR .env
+python3 env_config.py     # prints what was picked up, without secrets
+```
+
+Precedence, highest first: explicit flag → exported environment variable →
+`.env` → default.
+
+## Tests
+
+```bash
+python3 smoke_test.py -v      # 112 checks, no network, no engine needed
+pytest                        # the same checks, wrapped
+```
+
+The suite passes with **no engine library installed at all**, and CI's
+`engine-smoke` job installs each engine in its own virtualenv and fails if the
+matching group reports a skip — "skipped, engine absent" reads identically to
+a broken import.
+
+Fixtures come from real captures. Because a capture is 300-900 KB and its
+catalogue lives in a turbo-stream document where every value is an index into
+the same array, products cannot simply be deleted from it: every index after
+the cut shifts. `tools/make_fixtures.py` therefore decodes a real capture,
+takes real product objects out verbatim, re-encodes them into the same wire
+format, and **asserts that what it produced decodes back to objects equal to
+what went in** — so "smaller" cannot quietly become "different".
+
+## Re-measuring anything in this README
+
+```bash
+python3 tools/capture.py                     # fetch and report what a parser could read
+python3 tools/capture.py --direct            # measure THIS machine's exit
+python3 tools/make_fixtures.py captures/     # rebuild the pinned fixtures
+```
+
+Every number here is dated and reproducible with one of those. A figure that
+describes a living thing rots; the command beside it does not.
+
+## Guides
+
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [StockX scraper](https://github.com/2scraper/stockx-scraper) — Search results, category listings and product pages
+- [TikTok Shop scraper](https://github.com/2scraper/tiktok-shop-scraper) — Product pages to 39 columns
+- [Tokopedia scraper](https://github.com/2scraper/tokopedia-scraper) — IDR prices, discounts, ratings, sold counts and shops…
+- [Tractor Supply scraper](https://github.com/2scraper/tractorsupply-scraper) — Categories, departments and searches
+- [Woolworths scraper](https://github.com/2scraper/woolworths-scraper) — Prices, unit prices, specials, health star ratings…
+- [Amazon scraper](https://github.com/2scraper/amazon-scraper) — Search results, best-seller grids, product pages and reviews…
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
+
+## Licence
+
+MIT. Not affiliated with, endorsed by, or connected to Sleep Number
+Corporation. Respect `robots.txt`, the site's terms and a sane request rate;
+this tool defaults to one page at a time with a delay and refuses
+`--concurrency` outright.

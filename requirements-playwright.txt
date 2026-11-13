@@ -1,0 +1,19 @@
+# The recommended engine.
+#
+#   pip install -r requirements.txt -r requirements-playwright.txt
+#   playwright install chromium
+#
+# `chromium` is enough here, and that is a measurement rather than a shrug: a
+# sibling repo in this family has to install real Chrome because its site
+# refuses the bundled build. Sleep Number does not — Playwright's own bundled
+# Chromium was served HTTP 200 and the full 52-row mattresses catalogue on
+# 2026-09-17, through a US residential exit.
+#
+# HEADLESS IS FINE HERE, and that too is measured rather than assumed. Some
+# sites in this family refuse a headless browser outright and their engines
+# default to headful under Xvfb; this one does not care. The same bundled
+# Chromium, headless, returned the full catalogue. What the site DOES refuse
+# is the datacentre ADDRESS — see the README's "Access" — and no browser
+# setting changes that.
+
+playwright>=1.40.0

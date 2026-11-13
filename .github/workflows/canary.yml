@@ -1,0 +1,300 @@
+name: canary
+
+# One real run a week (Mondays; every run bills the proxy) against www.sleepnumber.com, and the only workflow in
+# this repo that touches the site. Everything else is offline (see tests.yml).
+#
+# WHY THIS CANARY NEEDS A PROXY SECRET, AND FAILS WITHOUT ONE
+# -----------------------------------------------------------
+# Sleep Number refuses datacentre addresses, and a GitHub runner is one.
+# Measured 2026-09-17: every URL on the site — /robots.txt included — answers
+# an identical 919-byte CloudFront "Request blocked" 403 from a datacentre
+# address, whatever headers, HTTP version or user agent is used, and whether
+# the client is curl or a headless browser. The same requests answer 200 from
+# a residential exit.
+#
+# So the live run needs a residential exit:
+#
+#     gh secret set SLEEPNUMBER_PROXY --repo 2scraper/sleepnumber-scraper
+#
+# Without it the job FAILS with an error naming the secret. It used to skip
+# green instead, and on 2026-10-14 every scheduled run on record had done
+# exactly that: a green badge for a canary that had never reached the site.
+# A canary that did not test the site must not read as one that passed.
+#
+# The secret goes through the ENVIRONMENT rather than a commented-out
+# `--proxy` line, because env_config.py already reads exactly that variable
+# and an unset secret arrives as an empty string which the loader treats as
+# unset. One line is therefore correct with and without it, and the
+# credential never reaches a command line.
+#
+# `secrets` is not available in a job-level `if`, so presence is tested
+# through job `env` and read in each step's `if`.
+#
+# WHY IT READS THREE CATEGORIES RATHER THAN THREE PAGES
+# -----------------------------------------------------
+# The family's rule is "ask for >= 3 pages, because one page never exercises
+# pagination". It cannot be honoured literally here, and saying why is better
+# than faking it: `per_page` is 100 and the largest category measured holds
+# 20 products, so EVERY category on this site is a single page. Asking for
+# three would exercise nothing.
+#
+# What this does instead: it asks for three pages anyway on one category — so
+# the pagination machinery is exercised and must terminate correctly, which
+# means reporting `complete` with `pagination_exhausted` rather than a false
+# `partial` — and then reads three DIFFERENT categories, which is this site's
+# real equivalent of depth. The three were chosen because they disagree with
+# each other in ways a broken parser would flatten: mattresses is 52 of 52
+# discounted, sheets is 13 of 211, and furniture is 157 of 169.
+
+on:
+  schedule:
+    - cron: "23 11 * * 1"        # Mondays 06:23 US eastern, off-peak for a US shop; weekly because every run bills the proxy
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      HAVE_PROXY: ${{ secrets.SLEEPNUMBER_PROXY != '' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fail without a residential exit
+        if: env.HAVE_PROXY != 'true'
+        run: |
+          echo "::error::No SLEEPNUMBER_PROXY secret is set, so the canary cannot reach the site: a GitHub runner is a datacentre address, which Sleep Number refuses with a CloudFront 403. Set a residential exit: gh secret set SLEEPNUMBER_PROXY --repo 2scraper/sleepnumber-scraper"
+          {
+            echo "### Canary did not run"
+            echo
+            echo "Sleep Number refuses datacentre addresses and a GitHub runner is one."
+            echo "Measured 2026-09-17: every URL, /robots.txt included, answers an identical"
+            echo "919-byte CloudFront \"Request blocked\" 403 from a datacentre address, and"
+            echo "200 from a residential exit."
+            echo
+            echo 'Set a residential exit to turn it on:'
+            echo '```'
+            echo 'gh secret set SLEEPNUMBER_PROXY --repo 2scraper/sleepnumber-scraper'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+      - name: Install the Playwright engine
+        if: env.HAVE_PROXY == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      # Headless, and that is measured rather than assumed: a headless
+      # Playwright run through a residential exit returned the full 52-row
+      # mattresses catalogue on 2026-09-17. No Xvfb, no headful default — see
+      # the Dockerfile for the same note.
+      - name: Run the canary
+        if: env.HAVE_PROXY == 'true'
+        id: run
+        env:
+          SLEEPNUMBER_PROXY: ${{ secrets.SLEEPNUMBER_PROXY }}
+        run: |
+          # set +e: GitHub runs `run:` under `bash -e`, so a non-zero exit
+          # would abort the step BEFORE the exit code could be captured, and
+          # continue-on-error does not change that.
+          set +e
+          worst=0
+          for c in mattresses sheets-pillowcases furniture; do
+            python3 playwright_scraper.py \
+              --category "$c" \
+              --pages 3 \
+              --format json \
+              --proxy-budget-mb 10 \
+              --out "canary_$c" 2>&1 | tee -a canary.log
+            code=${PIPESTATUS[0]}
+            echo "$c exited $code"
+            [ "$code" -ne 0 ] && worst=$code
+          done
+          # And the SAME category through the browserless transport. This is
+          # the family's "every engine agrees" contract under weekly test
+          # rather than asserted: it costs about two seconds, and it is the
+          # check that would notice if the site started painting its grid
+          # client-side, because then the HTTP path would come back empty
+          # while the browser path kept working.
+          python3 http_scraper.py \
+            --category mattresses \
+            --format json \
+            --proxy-budget-mb 10 \
+            --out canary_http 2>&1 | tee -a canary.log
+          http_code=${PIPESTATUS[0]}
+          echo "http transport exited $http_code"
+          [ "$http_code" -ne 0 ] && worst=$http_code
+          set -e
+          echo "exit_code=$worst" >> "$GITHUB_OUTPUT"
+          echo "The worst exit code across three categories and two transports was $worst."
+
+      - name: Proxy traffic of each run
+        # Every run meters what it sends through SLEEPNUMBER_PROXY and stops
+        # at --proxy-budget-mb 10. This puts each figure in the step summary
+        # and fails the job when any run hit the cap, so a page that has
+        # grown heavy is a red run rather than a quietly larger bill.
+        if: ${{ !cancelled() && env.HAVE_PROXY == 'true' }}
+        run: |
+          rc=0
+          for c in mattresses sheets-pillowcases furniture; do
+            python3 .github/proxy_traffic.py "live/$c" "canary_$c" || rc=1
+          done
+          python3 .github/proxy_traffic.py "live/http" canary_http || rc=1
+          exit $rc
+
+      - name: Interpret the exit code
+        if: env.HAVE_PROXY == 'true'
+        run: |
+          case "${{ steps.run.outputs.exit_code }}" in
+            0) echo "::notice::All three categories completed." ;;
+            3) echo "::error::Exit 3 — blocked. CloudFront refused the proxy's exit. Check the exit is residential; if it is, the site has changed what it refuses." ;;
+            4) echo "::error::Exit 4 — zero products from a category that is not empty. That is the parser, not the site." ;;
+            5) echo "::error::Exit 5 — the content was never obtained: a dead or unauthenticated proxy, or a navigation timeout." ;;
+            6) echo "::error::Exit 6 — partial. Some page failed; see pages_failed in the sidecar." ;;
+            *) echo "::error::Unexpected exit ${{ steps.run.outputs.exit_code }}." ;;
+          esac
+          test "${{ steps.run.outputs.exit_code }}" = "0"
+
+      # Thresholds are the numbers real runs produced on 2026-09-17, set low
+      # enough to absorb an ordinary day's catalogue change and high enough
+      # that a broken read cannot pass.
+      - name: Assert what the run actually produced
+        if: env.HAVE_PROXY == 'true'
+        run: |
+          python3 - <<'PY'
+          import json, sys
+
+          FLOORS = {"mattresses": 40, "sheets-pillowcases": 150, "furniture": 120}
+          problems = []
+
+          def want(cond, msg):
+              if not cond:
+                  problems.append(msg)
+
+          for cat, floor in FLOORS.items():
+              meta = json.load(open(f"canary_{cat}.meta.json"))
+              rows = json.load(open(f"canary_{cat}.json"))
+
+              want(meta["status"] == "complete",
+                   f"{cat}: status is {meta['status']!r}, not 'complete'")
+              # Asking for 3 pages of a 1-page category is a COMPLETE run.
+              # Reporting it partial would put this canary permanently red.
+              want(meta["stop_reason"] in
+                   ("completed", "pagination_exhausted", "no_new_products"),
+                   f"{cat}: stop_reason {meta['stop_reason']!r} is not a complete one")
+              want(not meta.get("pages_failed"),
+                   f"{cat}: pages failed: {meta.get('pages_failed')}")
+              want(len(rows) >= floor,
+                   f"{cat}: {len(rows)} rows, floor is {floor}")
+
+              # Price coverage is 100% on every listing measured here, so the
+              # floor is high on purpose: a shortfall is a parsing regression,
+              # not the catalogue's doing.
+              priced = [r for r in rows if r.get("price") is not None]
+              want(len(priced) == len(rows),
+                   f"{cat}: only {len(priced)}/{len(rows)} rows carry a price")
+
+              want(all(r.get("sku") for r in rows), f"{cat}: some row has no sku")
+              want(all(r.get("currency") == "USD" for r in rows),
+                   f"{cat}: some row is not priced in USD")
+
+              # page+position unique as a PAIR: position restarts each page.
+              pairs = [(r["page"], r["position"]) for r in rows]
+              want(len(set(pairs)) == len(pairs), f"{cat}: page+position is not unique")
+
+              # No was-price at or below its price, and no zero/negative
+              # discount. One line, and it catches the regression forever.
+              for r in rows:
+                  if r.get("original_price") is not None and r.get("price") is not None:
+                      want(r["original_price"] > r["price"],
+                           f"{cat}: {r['sku']} original_price {r['original_price']} "
+                           f"is not above price {r['price']}")
+                  if r.get("discount_pct") is not None:
+                      want(r["discount_pct"] > 0,
+                           f"{cat}: {r['sku']} discount_pct is {r['discount_pct']}")
+
+              # The site's structured data leaks its Fly origin hostname. If
+              # one reaches a row, the rewrite has regressed.
+              want(not any("fly.dev" in (r.get("url") or "") for r in rows),
+                   f"{cat}: a row points at the origin host rather than the shop")
+
+              # A row read from the URL pattern has no price, so a run made of
+              # them would pass a row-count floor while carrying no data.
+              fallback = [r for r in rows if r.get("price_source") == "url-fallback"]
+              want(not fallback,
+                   f"{cat}: {len(fallback)} row(s) came from the URL fallback — "
+                   "the hydration payload did not decode")
+
+          # The two TRANSPORTS must agree, field for field. The browser and
+          # the HTTP client read the same server-rendered payload, so a
+          # difference here is a defect in one of them rather than news
+          # about the site.
+          def rows_of(path):
+              return sorted(tuple(sorted((k, v) for k, v in r.items()
+                                         if k != "scraped_at"))
+                            for r in json.load(open(path)))
+          try:
+              browser_rows = rows_of("canary_mattresses.json")
+              http_rows = rows_of("canary_http.json")
+          except FileNotFoundError as exc:
+              problems.append(f"a transport wrote no rows to compare: {exc}")
+          else:
+              want(browser_rows == http_rows,
+                   f"the browser and HTTP transports disagree: "
+                   f"{len(browser_rows)} vs {len(http_rows)} rows, "
+                   f"{sum(1 for a, b in zip(browser_rows, http_rows) if a != b)} "
+                   f"differing rows")
+
+          # NO ASSERTION ON THE DISCOUNT SHARE, and that is a correction.
+          #
+          # This used to require the three categories to disagree about
+          # discounting by at least 20 points, on the reasoning that a
+          # flattened column would make them look alike. The figures it was
+          # built from (52 of 52 mattresses discounted, 13 of 211 sheets,
+          # 157 of 169 furniture) were measured on 2026-09-17 during a sale.
+          #
+          # The sale has since ended. On 2026-10-13 the same three categories
+          # read 0, 11 of 194, and 0 — so the check went red on a catalogue
+          # that is simply not discounted today, with the parser working
+          # perfectly (52/52, 194/194 and 169/169 priced, every row from the
+          # payload). A canary that is red for a reason that is not a defect
+          # teaches everyone to ignore the canary.
+          #
+          # The discount column is still guarded, by assertions that hold
+          # whether or not a sale is running: no original_price at or below
+          # its price, no discount that is not positive, and 100% price
+          # coverage. Those are properties of the parser. "How much of the
+          # catalogue is on sale" is a property of the week.
+          shares = {cat: sum(1 for r in json.load(open(f"canary_{cat}.json"))
+                             if r.get("discount_pct"))
+                    for cat in FLOORS}
+          print(f"discounted rows today (informational): {shares}")
+
+          if problems:
+              print("CANARY FAILED:")
+              for p in problems:
+                  print("  -", p)
+              sys.exit(1)
+          print("Canary assertions passed.")
+          PY
+
+      - name: Upload artefacts
+        if: always() && env.HAVE_PROXY == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-output
+          path: |
+            canary*.json
+            canary*.log
+          if-no-files-found: ignore
+          retention-days: 14
