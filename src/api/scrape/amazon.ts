@@ -25,7 +25,9 @@ import {
     AmazonDiscoverProductsByUPCFilterSchema,
 } from '../../schemas/filters/amazon.js';
 import { assertSchema } from '../../schemas/utils.js';
+import { ValidationError } from '../../utils/errors.js';
 import { BaseAPI, type BaseAPIOptions } from './base.js';
+import type { ScrapeResult } from '../../models/result.js';
 
 const DATASET_ID = {
     PRODUCT: 'gd_l7q7dkf244hwjntr0',
@@ -243,6 +245,51 @@ export class AmazonAPI extends BaseAPI {
         this.logger.info(`products (orchestrated) for ${input.length} urls`);
         const [safeInput] = assertInput(input, {}, 'products');
         return this.orchestrate(safeInput, DATASET_ID.PRODUCT, opts);
+    }
+    /**
+     * Scrape Amazon products with a per-URL outcome.
+     *
+     * Each URL is triggered, polled and fetched as its own snapshot. A failure
+     * or timeout on one URL never aborts the others and already-fetched data
+     * is never lost: the resolved array holds one {@link ScrapeResult} per URL,
+     * in input order, each carrying the original `url`, the `data` on success
+     * or the `error` reason on failure, and a `status` of `ready`, `error` or
+     * `timeout`.
+     *
+     * The total `pollTimeout` is a single budget shared by the whole batch,
+     * not re-counted per URL.
+     *
+     * @param urls - Non-empty array of Amazon product URLs
+     * @param opts - Optional poll interval, total timeout and format
+     * @returns One ScrapeResult per URL (same order as `urls`)
+     * @throws ValidationError if `urls` is not an array, is empty, or contains
+     *         a non-string element — thrown before any network request
+     */
+    async productsSettled(
+        urls: string[],
+        opts?: OrchestrateOptions,
+    ): Promise<ScrapeResult[]> {
+        const prefix = 'amazon.productsSettled: ';
+        if (!Array.isArray(urls)) {
+            throw new ValidationError(
+                `${prefix}invalid input: expected an array of URLs`,
+            );
+        }
+        if (urls.length === 0) {
+            throw new ValidationError(
+                `${prefix}invalid input: URL array must not be empty`,
+            );
+        }
+        const badIndex = urls.findIndex((u) => typeof u !== 'string');
+        if (badIndex !== -1) {
+            throw new ValidationError(
+                `${prefix}invalid input[${badIndex}]: expected a URL string`,
+            );
+        }
+
+        this.logger.info(`productsSettled (per-URL) for ${urls.length} urls`);
+        const records = urls.map((url) => ({ url }));
+        return this.orchestrateBatch(records, DATASET_ID.PRODUCT, opts);
     }
     /**
      * Scrape Amazon reviews — one-call trigger+poll+fetch.

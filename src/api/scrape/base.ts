@@ -1,9 +1,12 @@
-import { API_ENDPOINT } from '../../utils/constants.js';
+import { API_ENDPOINT, DEFAULT_CONCURRENCY } from '../../utils/constants.js';
 import { getLogger } from '../../utils/logger.js';
 import { Transport, assertResponse } from '../../core/transport.js';
 import { dropEmptyKeys, parseJSON, parseResponse } from '../../utils/misc.js';
 import { SnapshotMetaResponseSchema } from '../../schemas/responses.js';
 import { ScrapeJob } from './job.js';
+import { PromisePool } from '@supercharge/promise-pool';
+import { Deadline } from '../../utils/deadline.js';
+import { NetworkTimeoutError, TimeoutError } from '../../utils/errors.js';
 import type {
     DatasetOptions,
     OrchestrateOptions,
@@ -11,7 +14,7 @@ import type {
     SnapshotFormat,
     SnapshotOperations,
 } from '../../types/datasets.js';
-import type { ScrapeResult } from '../../models/result.js';
+import { ScrapeResult } from '../../models/result.js';
 
 interface WebhookDisabled {
     notify: undefined;
@@ -175,6 +178,118 @@ export class BaseAPI {
             pollInterval: opts?.pollInterval,
             pollTimeout: opts?.pollTimeout,
             onStatus: opts?.onStatus,
+        });
+    }
+
+    /**
+     * Trigger, poll, and fetch each input record independently.
+     *
+     * Unlike {@link orchestrate}, which treats the whole batch as a single
+     * snapshot, this triggers one snapshot per record and never lets one
+     * record's failure abort the others. Every record resolves to its own
+     * {@link ScrapeResult} (with `url` set to the original input), so
+     * successful data is preserved alongside per-record failure reasons.
+     *
+     * Each record reuses {@link ScrapeJob.toResult}, so single-record
+     * timeouts are reported as `status: 'timeout'` and the
+     * "status ready but fetch not ready" race keeps being retried.
+     *
+     * A single {@link Deadline} is shared across the whole batch: the total
+     * timeout covers the entire batch rather than restarting per record, and
+     * records still waiting when the budget is exhausted finish as timeouts.
+     *
+     * @param records - Input records (already mapped to `{ url }` form)
+     * @param datasetId - Bright Data dataset identifier
+     * @param opts - Orchestration options (poll interval, total timeout, format)
+     * @returns One ScrapeResult per record, in the same order as `records`
+     */
+    protected async orchestrateBatch(
+        records: UnknownRecord[],
+        datasetId: string,
+        opts?: OrchestrateOptions,
+    ): Promise<ScrapeResult[]> {
+        const pollTimeout = opts?.pollTimeout ?? 600_000;
+        // One deadline for the whole batch: every record draws from the same
+        // remaining budget, so the total timeout is not re-counted per record.
+        const deadline = new Deadline(pollTimeout);
+
+        const settleOne = async (
+            record: UnknownRecord,
+        ): Promise<ScrapeResult> => {
+            const url = typeof record.url === 'string' ? record.url : '';
+            let job: ScrapeJob;
+            try {
+                job = (await this.run([record], datasetId, {
+                    async: true,
+                    format: opts?.format,
+                })) as ScrapeJob;
+            } catch (e: unknown) {
+                // A failed trigger for one record must not sink the batch.
+                const isTimeout =
+                    e instanceof TimeoutError ||
+                    e instanceof NetworkTimeoutError;
+                return new ScrapeResult({
+                    success: false,
+                    url,
+                    error: (e as Error).message,
+                    status: isTimeout ? 'timeout' : 'error',
+                    platform: this.name,
+                    triggerSentAt: new Date(),
+                    dataFetchedAt: new Date(),
+                });
+            }
+
+            const result = await job.toResult({
+                pollInterval: opts?.pollInterval,
+                pollTimeout: deadline.remaining,
+                onStatus: opts?.onStatus,
+            });
+            return this.#withUrl(result, url);
+        };
+
+        const { results } = await PromisePool.for(records)
+            .withConcurrency(DEFAULT_CONCURRENCY)
+            .useCorrespondingResults()
+            .process(settleOne);
+
+        // settleOne never rejects, so every slot holds a ScrapeResult; guard
+        // against the pool's failure symbols defensively anyway.
+        return results.map((value, i) => {
+            if (value instanceof ScrapeResult) return value;
+            const record = records[i];
+            const url =
+                record && typeof record.url === 'string' ? record.url : '';
+            return new ScrapeResult({
+                success: false,
+                url,
+                error: 'batch item failed to complete',
+                status: 'error',
+                platform: this.name,
+                triggerSentAt: new Date(),
+                dataFetchedAt: new Date(),
+            });
+        });
+    }
+
+    /**
+     * Return a copy of a per-record ScrapeResult carrying the original URL.
+     * ScrapeJob.toResult() cannot know the input URL (one snapshot may cover
+     * many inputs), so the batch layer attaches it here.
+     */
+    #withUrl(result: ScrapeResult, url: string): ScrapeResult {
+        return new ScrapeResult({
+            success: result.success,
+            data: result.data,
+            error: result.error,
+            cost: result.cost,
+            url,
+            status: result.status,
+            snapshotId: result.snapshotId,
+            platform: result.platform,
+            method: result.method,
+            rowCount: result.rowCount,
+            triggerSentAt: result.triggerSentAt,
+            dataFetchedAt: result.dataFetchedAt,
         });
     }
 }
