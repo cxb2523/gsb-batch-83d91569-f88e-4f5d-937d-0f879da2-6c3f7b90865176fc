@@ -2,20 +2,17 @@
 // Schedules menu sends, update checks and calendar cron
 // Builds summary with weather and calendar events
 import { analyzeCalendarEvents, type ClassifiedCalendar } from '@util/calendarAnalytics.ts'
-import { type ParsedMenuResult, parseMenuHtml } from '@util/menuParser.ts'
+import { type ParsedMenuResult } from '@util/menuParser.ts'
 import { updateCalendarCache } from '@plugin/calendarParser.ts'
 import { getAllowedTagsList } from '@plugin/groupAnnouncer.ts'
 import { generateDailySummary } from '@util/dailySummary.ts'
-import { delay, randomDelay } from '@util/functions.ts'
+import { randomDelay } from '@util/functions.ts'
 import { fetchWeatherForecast } from '@util/weather.ts'
 import { sendMsg } from '@util/msgAbstractions.ts'
+import { getOldMenuText, persistMenuCache, scrapURMenu, updateMenuDate } from '@util/menuScraper.ts'
 import cache from '@plugin/cache.ts'
 
-let day = '',
-	month = '',
-	year = ''
-const numPadding = (n: number) => (n < 10 ? '0' + n : n.toString()) // 4 => 04
-updateDate()
+export default scrapURMenu
 
 export function scheduleURMenuMsg() {
 	// Deno.cron runs in UTC, so we translate UTC-3 (America/Sao_Paulo) to UTC
@@ -39,15 +36,18 @@ export function scheduleURMenuMsg() {
 	updateCalendarCache().catch(() => null)
 }
 
-let oldMenuText = ''
 async function checkForUpdates() {
 	await randomDelay()
-	const menu = await scrapURMenu()
-	if (!menu || !menu.hasMenu) return
+	const outcome = await scrapURMenu()
+	if (outcome.status !== 'success' || !outcome.menu?.hasMenu) {
+		if (outcome.status !== 'success' && outcome.status !== 'no-menu') {
+			print('MENUSCRAP', `Menu update check failed: ${outcome.reason}`, 'yellow')
+		}
+		return
+	}
+	const menu = outcome.menu
 
-	oldMenuText = oldMenuText ||
-		(await Deno.readTextFile('conf/gen/cache/menu.txt').catch(() => ''))
-
+	const oldMenuText = await getOldMenuText()
 	if (oldMenuText === menu.rawFullText) return
 	print('MENUSCRAP', 'Menu updated', 'blue')
 	sendURMenu(menu, 1)
@@ -60,11 +60,22 @@ export async function sendURMenu(
 	updated = 0,
 ) {
 	await randomDelay()
-	updateDate()
+	const { day, month, year } = updateMenuDate()
 	const date = new Date()
 
 	// 1. Fetch menu if not provided
-	const menu = menuData || (await scrapURMenu())
+	let menu = menuData
+	if (!menu) {
+		const outcome = await scrapURMenu()
+		if (outcome.status !== 'success') {
+			print(
+				'MENUSCRAP',
+				`Menu scrape failed (${outcome.status}): ${outcome.reason}`,
+				'yellow',
+			)
+		}
+		menu = outcome.menu
+	}
 
 	// 2. Fetch weather forecast in parallel
 	const weather = await fetchWeatherForecast()
@@ -128,41 +139,6 @@ export async function sendURMenu(
 		await randomDelay()
 	}
 
-	if (menu?.rawFullText) {
-		await Deno.writeTextFile('conf/gen/cache/menu.txt', menu.rawFullText)
-		oldMenuText = menu.rawFullText
-	}
-}
-
-// scrap university's restaurant menu
-export default async function scrapURMenu(
-	retries = 0,
-): Promise<ParsedMenuResult | null> {
-	updateDate()
-	try {
-		// Timeout so a hung RU site never wedges the bulletin; retries handle transient drops.
-		const res = await fetch(
-			`https://restaurante.saomateus.ufes.br/cardapio/${year}-${month}-${day}`,
-			{ signal: AbortSignal.timeout(10_000) },
-		)
-		if (!res.ok) return null
-		const txt = await res.text()
-		return parseMenuHtml(txt)
-	} catch (e: any) {
-		print('MENUSCRAP', 'Error scraping menu', e?.stack || e, 'red')
-		if (retries >= 3) {
-			print('MENUSCRAP', 'Max retries reached, giving up', 'red')
-			return null
-		}
-		await delay(60_000)
-		await randomDelay()
-		return await scrapURMenu(retries + 1)
-	}
-}
-
-function updateDate() {
-	const date = new Date()
-	day = global.menuDay || numPadding(date.getDate())
-	month = numPadding(date.getMonth() + 1)
-	year = date.getFullYear().toString()
+	// persist only real menus; a failed scrape must never clobber the last good cache
+	await persistMenuCache(menu)
 }

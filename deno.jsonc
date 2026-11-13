@@ -65,6 +65,7 @@
 		"db:pull": "deno run -A npm:drizzle-kit introspect",
 		"reset": "rm -r conf/gen/auth/* conf/gen/cache/* conf/gen/temp/*",
 		"check": "deno check",
+		"test": "deno test --allow-read --allow-write --allow-env test/",
 		"lint": "deno lint",
 		"fmt": "deno fmt",
 		"verify": "deno check && deno lint && deno fmt --check",
