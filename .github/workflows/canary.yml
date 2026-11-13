@@ -1,0 +1,489 @@
+# One real run against andieswim.com. tests.yml (deliberately) never touches
+# the site — see its own header.
+#
+# THIS CANARY NEEDS NO CREDENTIALS, and that is the whole point of it.
+#
+# The README's central claim is that you do not need a 2Captcha account to
+# scrape this site: measured 2026-09-18 from a datacenter address, every
+# route answered HTTP 200 with no key, no proxy, no User-Agent header at all,
+# and no challenge of any kind. A GitHub runner is a datacenter address too,
+# so this workflow re-measures that claim every Monday.
+#
+# A canary that CAN pass without a credential must never be gated on one,
+# and every job here must end red when it did not really test the site:
+# a block (exit 3), no rows, a run that never reached the store, or a job
+# whose secret is missing. If The store ever puts its
+# catalogue behind a key or a bot manager, this badge goes red the next
+# morning and the README's claim is retested without anyone remembering to.
+#
+# The third job exercises the PAID path (the Scraping Browser API over CDP),
+# which cannot run without a secret. Without one it FAILS with an ::error::
+# naming the secret rather than skipping green: a skipped job reads exactly
+# like a passing one on the badge.
+#
+#     gh secret set ANDIESWIM_CDP_ENDPOINT --repo 2scraper/andieswim-scraper
+#
+# `secrets` is not available in a job-level `if`, so presence is tested
+# through job `env` and read in each step's `if`.
+
+name: canary
+
+on:
+  schedule:
+    # 03:27 UTC. Not on the hour: every scheduled workflow on GitHub fires at
+    # :00 and the queue there is long.
+    - cron: "27 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # A collection holding ~180 products, run at a REDUCED page size so three
+  # pages really is three pages.
+  #
+  # The canary must request >=3 pages, because with one page
+  # pagination is never exercised — which is exactly how a silent
+  # single-page bug survived in a sibling repo. On this store that needs
+  # `--limit`: the default 250 is Shopify's cap and most collections fit in
+  # ONE request, so a default-limit canary would walk one page and prove
+  # nothing about pagination. 50 x 3 exercises it for real (measured
+  # 2026-09-18: 50 + 50 + 50 + 30 = 180, pages 1-4).
+  CANARY_URL: "https://andieswim.com/collections/one-pieces"
+  CANARY_LIMIT: "50"
+
+jobs:
+  listing:
+    name: listing (no credentials needed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Run
+        id: run
+        run: |
+          set +e   # GitHub runs `run:` under `bash -e`, and a non-zero exit
+                   # would abort the step BEFORE the echo below.
+          python playwright_scraper.py \
+            --url "$CANARY_URL" \
+            --limit "$CANARY_LIMIT" --pages 3 --format both --out canary
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Check what came back
+        run: |
+          python - <<'PY'
+          import json, os, sys
+
+          code = int(os.environ["EXIT_CODE"])
+          if code != 0:
+              print(f"::error::The run exited {code}.")
+              # Interpret it rather than just failing: the codes mean
+              # different things and only some of them are this repo's fault.
+              print({
+                  3: "Blocked (exit 3). The store refused a GitHub runner's "
+                     "address, which has never happened in testing. If this "
+                     "is real, the site started gating its catalogue and the "
+                     "README's central claim — that no key is needed — needs "
+                     "re-measuring TODAY.",
+                  4: "Zero products (exit 4). Either the category is empty "
+                     "now, or the page shape moved and the parser is reading "
+                     "nothing. Check the uploaded HTML dump.",
+                  5: "No rows and the content was never obtained (exit 5): a "
+                     "timeout, a dead proxy or a remote API error.",
+                  6: "Partial (exit 6): some pages came back and some did not.",
+              }.get(code, "See the log."))
+              sys.exit(1)
+
+          meta = json.load(open("canary.meta.json"))
+          rows = json.load(open("canary.json"))
+          print(json.dumps(meta, indent=1))
+
+          failures = []
+          def want(label, ok, detail):
+              if not ok:
+                  failures.append(f"{label}: {detail}")
+
+          # Fail on a parser failure BY NAME. "0 products" would send
+          # whoever reads this red badge to check the URL, when the thing
+          # that moved is the parser. This stop_reason means The store served
+          # a page that links to products and we turned it into nothing.
+          want("not a parser failure",
+               meta.get("stop_reason") != "parser_found_nothing",
+               "the store served a payload naming products and the parser "
+               "produced ZERO rows — check whether the top-level key is "
+               "still `products` and whether each entry still carries "
+               "`handle`, before checking the URL")
+
+          want("status", meta["status"] == "complete", meta["status"])
+          want("pages_completed", meta["pages_completed"] == 3,
+               f'{meta["pages_completed"]} of 3')
+          want("no failed pages", not meta["pages_failed"],
+               str(meta["pages_failed"]))
+
+          # 50 per page x 3 pages caps the run at 150. The floor tests the
+          # PARSER and pagination, not the size of the collection: rows on
+          # page 3 (asserted below) already mean pages 1-2 came back full,
+          # so 101 is the least a working run can produce. A floor near the
+          # cap would go red when the collection shrinks for the season.
+          want("row floor", len(rows) >= 101, f"{len(rows)} rows")
+
+          # There is deliberately NO check on a site-stated result count.
+          # This store publishes none, and the one count it does publish
+          # (`products_count` in the collection index) is NOT a count of
+          # products the storefront serves: 472 against 180 measured. It is
+          # carried for the reader and planned from by nothing, so what is
+          # asserted is that it is still being carried and still being
+          # ignored.
+          want("catalog_count is still reported",
+               isinstance(meta.get("catalog_count"), int),
+               f'catalog_count was {meta.get("catalog_count")!r}')
+          want("and the run is not clamped to it",
+               meta.get("stop_reason") != "page_cap_reached",
+               "a listing run should never report a site cap — this store "
+               "imposes none")
+
+          # The market a price belongs to. A file of prices without it is a
+          # file of numbers without units, because this store SETS prices
+          # per market rather than converting them.
+          want("locale recorded", meta.get("locale") == "en-us",
+               f'locale was {meta.get("locale")!r}')
+          want("every row carries its market",
+               all(r.get("locale") == "en-us" for r in rows),
+               "a row is missing its locale")
+
+          # Currency is resolved once per run from a document the store
+          # served, never inferred from the path. If this ever comes back
+          # null the resolution broke, and every price in the file is a
+          # number with no units.
+          want("currency resolved", meta.get("currency") == "USD",
+               f'currency was {meta.get("currency")!r}')
+          want("and from the source we think",
+               meta.get("currency_source") == "price_currency",
+               f'currency_source was {meta.get("currency_source")!r}')
+
+          # The JSON endpoint takes no ordering, so every row must record the
+          # one that really produced it. A row claiming anything else means a
+          # flag crept back in (see smoke_test's BANNED_FLAGS).
+          want("every row records the ordering it got",
+               {r.get("sort") for r in rows} == {"collection-default"},
+               str({r.get("sort") for r in rows}))
+
+          # Coverage, on the columns measured at 100% over 665 real products.
+          for column in ("title", "url", "sku", "handle", "price",
+                         "currency", "image_url", "product_type"):
+              filled = sum(1 for r in rows if r.get(column) not in (None, "", []))
+              share = 100.0 * filled / len(rows)
+              print(f"{column}: {filled}/{len(rows)} ({share:.0f}%)")
+              want(f"{column} coverage", share >= 99, f"{share:.0f}%")
+
+          # A price with no currency is a number with no units.
+          want("no price without a currency",
+               not any(r.get("price") is not None and not r.get("currency")
+                       for r in rows),
+               "a priced row has no currency")
+
+          # Provenance: which endpoint priced the row. A listing run must be
+          # entirely `products_json`; anything else means a mode or a route
+          # changed underneath.
+          sources = {r.get("price_source") for r in rows}
+          print(f"price_source values: {sorted(s for s in sources if s)}")
+          want("price_source is always recorded", None not in sources,
+               "a row has no price_source")
+          want("price_source is the listing endpoint",
+               sources == {"products_json"}, str(sources))
+
+          # in_stock must not be a constant. 179 of 180 in stock measured, so
+          # all-True is plausible on a good day and all-False never is.
+          stock = {r.get("in_stock") for r in rows}
+          print(f"in_stock values: {stock}")
+          want("in_stock is a real boolean column",
+               stock <= {True, False} and True in stock, str(stock))
+
+          # The size-level columns, which are the reason to scrape this store
+          # rather than read its prices off a tile.
+          want("variants_total is populated",
+               all(isinstance(r.get("variants_total"), int)
+                   and r["variants_total"] > 0 for r in rows),
+               "a row has no variant count")
+          partial = sum(1 for r in rows
+                        if 0 < (r.get("variants_available") or 0)
+                             < (r.get("variants_total") or 0))
+          print(f"partially available: {partial}/{len(rows)}")
+          # Stock, not the parser: a notice, never a failure.
+          if partial == 0:
+              print("::notice::every product has every size in stock; "
+                    "unusual, worth a look at the availability read")
+
+          # A was-price at or below its price is a negative
+          # discount on a product that is not discounted at all.
+          bad = [r for r in rows
+                 if r.get("original_price") is not None
+                 and r.get("price") is not None
+                 and r["original_price"] <= r["price"]]
+          want("no original_price at or below its price", not bad,
+               f"{len(bad)} row(s)")
+          want("no negative discount",
+               not any((r.get("discount_pct") or 0) < 0 for r in rows),
+               "a row has a negative discount")
+          reduced = sum(1 for r in rows if r.get("discount_pct"))
+          print(f"reduced: {reduced}/{len(rows)}")
+
+          # page+position must be unique across pages, or the column is
+          # worthless — position restarts at 1 on every page.
+          pairs = [(r["page"], r["position"]) for r in rows]
+          want("page+position unique", len(set(pairs)) == len(pairs),
+               f"{len(pairs) - len(set(pairs))} collisions")
+          want("sku unique", len({r["sku"] for r in rows}) == len(rows),
+               "duplicate skus")
+          want("pages 1-3 are all present",
+               sorted({r["page"] for r in rows}) == [1, 2, 3],
+               str(sorted({r["page"] for r in rows})))
+
+          print(f"{len(rows)} rows across {meta.get('pages_completed')} pages. "
+                f"The collection index says products_count="
+                f"{meta.get('catalog_count')}, which is NOT a target this run "
+                f"missed.")
+
+          if failures:
+              for line in failures:
+                  print(f"::error::{line}")
+              sys.exit(1)
+          print("All canary assertions passed.")
+          PY
+        env:
+          EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-listing
+          path: |
+            canary.json
+            canary.csv
+            canary.meta.json
+            canary_page*_debug.html
+          if-no-files-found: ignore
+
+  product:
+    name: product variants (no credentials needed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      # A product is a different ROUTE with a different document
+      # (`/products/{h}.js`, in integer cents, one row per variant), so the
+      # listing canary passing says nothing about it. It needs no credentials
+      # either.
+      #
+      # The URL is a core, long-running style rather than a seasonal one, so
+      # a red badge here means the route moved and not that a print sold out.
+      - name: Run
+        id: run
+        run: |
+          set +e
+          python playwright_scraper.py --mode product \
+            --url "https://andieswim.com/products/the-amalfi-flat-black-classic" \
+            --format json --out canary_product
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Check what came back
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          code = int(os.environ["EXIT_CODE"])
+          if code != 0:
+              print(f"::error::The product run exited {code}. Exit 4 here "
+                    f"usually means /products/{{handle}}.js stopped answering "
+                    f"in the shape this parser reads, or that product was "
+                    f"discontinued — check the dump before assuming the "
+                    f"parser broke.")
+              sys.exit(1)
+
+          rows = json.load(open("canary_product.json"))
+          meta = json.load(open("canary_product.meta.json"))
+          print(json.dumps(meta, indent=1))
+
+          failures = []
+          def want(label, ok, detail):
+              if not ok:
+                  failures.append(f"{label}: {detail}")
+
+          # ONE ROW PER VARIANT is the whole reason this mode exists. A
+          # single row back means the parser read the product and dropped its
+          # variant table.
+          want("more than one variant", len(rows) > 1, f"{len(rows)} rows")
+          want("variants have distinct skus",
+               len({r["sku"] for r in rows}) == len(rows), "duplicate skus")
+          want("every row names its product",
+               all(r.get("product_id") for r in rows),
+               "a row has no product_id")
+          want("all variants belong to ONE product",
+               len({r["product_id"] for r in rows}) == 1,
+               "rows from more than one product — a recommendation carousel "
+               "has probably been read as variants")
+          want("every variant is priced",
+               all(r.get("price") is not None for r in rows),
+               "a variant has no price")
+
+          # The unit trap. `.js` prices in integer cents, so a parser that
+          # stopped dividing publishes an $11,200 swimsuit. Anything over
+          # 1000 on this catalogue is that bug, not a price.
+          want("prices are in major units, not cents",
+               all(r["price"] < 1000 for r in rows),
+               f'max price was {max(r["price"] for r in rows)} — .js cents '
+               f'are no longer being converted')
+          want("price_source names the endpoint",
+               {r.get("price_source") for r in rows} == {"product_js"},
+               str({r.get("price_source") for r in rows}))
+
+          # Size read by OPTION NAME rather than by position — the trap a
+          # non-swimwear product exposes.
+          want("every variant has a size",
+               all(r.get("size") for r in rows), "a variant has no size")
+          want("sizes are distinct",
+               len({r["size"] for r in rows}) == len(rows),
+               "two variants share a size — options are probably being read "
+               "positionally again")
+
+          # `in_stock` must be a real boolean here: `.js` publishes it per
+          # variant and `.json` does not, so an all-None column means the
+          # endpoint choice silently reverted.
+          stock = {r.get("in_stock") for r in rows}
+          want("availability is stated per variant", None not in stock,
+               "in_stock is null — /products/{h}.json is being fetched "
+               "instead of .js, and it publishes no availability")
+          want("mode recorded", meta.get("mode") == "product", meta.get("mode"))
+          want("currency resolved in product mode too",
+               all(r.get("currency") for r in rows),
+               "a variant has no currency")
+
+          print(f"{len(rows)} variants, sizes: "
+                f"{sorted({r.get('size') for r in rows if r.get('size')})}, "
+                f"available: {sum(1 for r in rows if r.get('in_stock'))}")
+          if failures:
+              for line in failures:
+                  print(f"::error::{line}")
+              sys.exit(1)
+          print("All product-mode assertions passed.")
+          PY
+        env:
+          EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-product
+          path: |
+            canary_product.json
+            canary_product.meta.json
+          if-no-files-found: ignore
+
+  scraping-browser:
+    name: Scraping Browser API (needs a secret)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # `secrets` is not available in a job-level `if`, so presence is tested
+      # through job `env` and read in each step's `if`.
+      HAVE_CDP: ${{ secrets.ANDIESWIM_CDP_ENDPOINT != '' }}
+    steps:
+      - name: Missing secret
+        if: env.HAVE_CDP != 'true'
+        run: |
+          echo "::error::ANDIESWIM_CDP_ENDPOINT secret is not set, so the Scraping Browser path was NOT tested."
+          echo "This job exercises the PAID path — the one that has no free"
+          echo "equivalent to fall back on, and therefore the one worth"
+          echo "running before shipping, because credential-gated paths are"
+          echo "the paths nobody ran."
+          echo
+          echo "    gh secret set ANDIESWIM_CDP_ENDPOINT --repo 2scraper/andieswim-scraper"
+          echo
+          echo "Note the listing and product canaries need NO secret and cover"
+          echo "the parser end to end; what is untested is the CDP transport."
+          echo
+          echo "Scraping Browser profile credentials expire after a period that"
+          echo "varies; a 401 from this job means the secret needs refreshing."
+          exit 1
+
+      - uses: actions/checkout@v4
+        if: env.HAVE_CDP == 'true'
+      - uses: actions/setup-python@v5
+        if: env.HAVE_CDP == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        if: env.HAVE_CDP == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+
+      # The credential goes through the ENVIRONMENT, never a --proxy/--cdp
+      # flag on a command line: env_config.py already reads exactly
+      # this variable, and a secret in argv is readable by anything that can
+      # run `ps`.
+      - name: Run
+        if: env.HAVE_CDP == 'true'
+        id: run
+        env:
+          ANDIESWIM_CDP_ENDPOINT: ${{ secrets.ANDIESWIM_CDP_ENDPOINT }}
+        run: |
+          set +e
+          python playwright_scraper.py \
+            --url "$CANARY_URL" --pages 1 --format json --out canary_cdp
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Check what came back
+        if: env.HAVE_CDP == 'true'
+        env:
+          EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          code = int(os.environ["EXIT_CODE"])
+          if code != 0:
+              print(f"::error::The Scraping Browser run exited {code}. "
+                    f"Exit 5 means the endpoint itself refused — a "
+                    f"profile_locked (another run holds this pid) or expired "
+                    f"credentials, not a fault in this code.")
+              sys.exit(1)
+          rows = json.load(open("canary_cdp.json"))
+          if len(rows) < 20:
+              print(f"::error::only {len(rows)} rows over CDP")
+              sys.exit(1)
+          # The marker check that matters on this path: 2Captcha's auto-solve
+          # extension injects `cf-turnstile` into every page it loads, and a
+          # repo that carried that marker would report this good page as
+          # blocked. This repo does not carry it — exit 0 here is
+          # the proof, since a false positive would have been exit 3.
+          print(f"{len(rows)} rows over the Scraping Browser, exit 0.")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always() && env.HAVE_CDP == 'true'
+        with:
+          name: canary-cdp
+          path: |
+            canary_cdp.json
+            canary_cdp.meta.json
+          if-no-files-found: ignore

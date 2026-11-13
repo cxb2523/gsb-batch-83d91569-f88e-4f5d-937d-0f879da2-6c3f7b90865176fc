@@ -1,0 +1,39 @@
+# andieswim-scraper — core dependencies
+#
+#   pip install -r requirements.txt
+#
+# Needed by everything, including the two browserless clients
+# (scraper_api_client.py, fingerprint_client.py) and the offline test suite.
+requests>=2.31.0
+
+# NO beautifulsoup4 here, and the absence is deliberate rather than an
+# oversight — it is this repo's one deviation from the family's core
+# dependency set (the family makes `BeautifulSoup(html, "html.parser")` the
+# default), so it is written down rather than left to be discovered.
+#
+# The reason is the shape of this site: every field this repo publishes comes
+# out of a JSON document, because a collection page's HTML carries no product
+# grid and a product page publishes no Product JSON-LD. The only two things
+# ever read out of markup are the market's currency and the store's 404
+# template, and both are single anchored patterns over a document whose
+# structure is irrelevant. Souping 800 KB of theme to reach them cost 74 ms
+# per fetch when it was tried, measured, for nothing.
+#
+# Verified rather than assumed: every module imports and the parser still
+# returns 180 rows from a real capture in a virtualenv with only `requests`
+# installed. See the note at the top of product_parser.py — add a parser back
+# the moment a field has to come from the DOM, and add the dependency in the
+# same commit.
+
+# Then install exactly ONE engine — see the file per engine:
+#
+#   pip install -r requirements-playwright.txt && playwright install chromium
+#   pip install -r requirements-selenium.txt
+#   pip install -r requirements-puppeteer.txt
+#
+# Install one, not all three. playwright and pyppeteer declare mutually
+# unsatisfiable pins (pyee <12 vs >=13), and pyppeteer and selenium collide on
+# urllib3 (<2.0 vs >=2.6). All four do run side by side in practice, because
+# neither library touches the incompatible part — but `pip check` will report
+# the conflict, and pip may resolve it by downgrading something you wanted.
+# If you genuinely need more than one engine, use a virtualenv per engine.
