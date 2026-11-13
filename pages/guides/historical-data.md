@@ -83,7 +83,34 @@ print(close.tail())
 df = psxdata.stocks("ENGRO", cache=False)
 ```
 
+## Know what you actually got
+
+`stocks()` returns a DataFrame and raises when nothing could be fetched. When a
+fetch is degraded — a timeout or 5xx that a retry recovered, rows dropped by
+validation, or a 200 response with nothing parseable — use `stocks_report()` to
+get a result that says which rows were delivered and why a fetch was not clean:
+
+```python
+import psxdata
+
+report = psxdata.stocks_report("ENGRO", start="2025-01-01")
+
+print(report.outcome)      # HistoricalOutcome.COMPLETE / PARTIAL / FAILED / NO_DATA
+print(report.complete)     # True only for a clean fetch
+print(report.first_date, report.last_date)   # what the DataFrame actually covers
+print(report.message)      # human-readable conclusion
+print(len(report.data))    # validated, date-ascending rows that were delivered
+```
+
+`partial` means rows were delivered but the fetch was not clean; the rows are
+retained and `report.failure_reason` names the cause (`network_error`,
+`server_error_5xx`, ...). `failed` means nothing could be delivered and
+`report.error` holds the exception. `no_data` means PSX returned 200 with
+nothing parseable, or the `start`/`end` filter removed every row. Unlike
+`stocks()`, `stocks_report()` never raises on a transport failure.
+
 ## See also
 
 - [`PSXClient.stocks()`](../api/client.md) — full parameter reference
+- [`PSXClient.stocks_report()`](../api/client.md) — fetch outcome report
 - [Stock Screener guide](stock-screener.md) — find which stocks to analyse

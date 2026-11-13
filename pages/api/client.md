@@ -25,6 +25,8 @@ These wrap a lazy shared `PSXClient` instance. They are the recommended entry po
 
 ::: psxdata.client.stocks
 
+::: psxdata.client.stocks_report
+
 ::: psxdata.client.quote
 
 ::: psxdata.client.tickers

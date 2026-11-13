@@ -70,6 +70,7 @@ scrips = psxdata.eligible_scrips()
 | Function                               | Description                                      |
 | -------------------------------------- | ------------------------------------------------ |
 | `psxdata.stocks(symbol, start, end)` | Historical OHLCV DataFrame for a ticker          |
+| `psxdata.stocks_report(symbol, start, end)` | Same fetch as `stocks()` with an outcome report (rows kept even on partial success) |
 | `psxdata.tickers()`                  | All listed tickers (1000+)                       |
 | `psxdata.symbols()`                  | Symbol/sector/name metadata, optionally filtered |
 | `psxdata.quote(symbol)`              | Live quote row for a ticker                      |

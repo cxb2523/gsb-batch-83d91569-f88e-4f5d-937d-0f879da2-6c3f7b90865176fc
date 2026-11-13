@@ -10,18 +10,25 @@ from psxdata.client import (
     screener,
     sectors,
     stocks,
+    stocks_report,
     symbols,
     tickers,
 )
+from psxdata.models.results import HistoricalFetchResult, HistoricalOutcome
 from psxdata.scrapers.base import BaseScraper
+from psxdata.scrapers.historical import HistoricalScraper
 
 __version__ = "1.5.0"
 
 __all__ = [
     "BaseScraper",
+    "HistoricalScraper",
+    "HistoricalFetchResult",
+    "HistoricalOutcome",
     "PSXClient",
     "configure",
     "stocks",
+    "stocks_report",
     "tickers",
     "quote",
     "indices",

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import requests
@@ -38,6 +40,33 @@ from psxdata.scrapers.token import TokenProvider, get_default_provider
 from psxdata.utils import RateLimiter
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RequestAttempt:
+    """One HTTP attempt made by :meth:`BaseScraper._request`.
+
+    Passed to an ``on_attempt`` observer after every attempt — successful or
+    not — so callers can tell a clean first-try fetch from one that needed
+    retries, and can salvage a response body from an earlier attempt.
+
+    Attributes:
+        number: 1-based attempt number (an ``X-Req-Id`` refresh retry keeps
+            the same number — it is not a 5xx/network retry).
+        succeeded: Whether this attempt produced a 2xx response.
+        status_code: HTTP status if a response was received, else ``None``.
+        error: Exception raised for this attempt, if any.
+        response: The response object, when one was received.
+    """
+
+    number: int
+    succeeded: bool
+    status_code: int | None = None
+    error: Exception | None = None
+    response: requests.Response | None = None
+
+
+AttemptObserver = Callable[[RequestAttempt], None]
 
 
 class BaseScraper:
@@ -85,7 +114,13 @@ class BaseScraper:
     def _build_url(self, endpoint: str) -> str:
         return BASE_URL + ENDPOINTS[endpoint]
 
-    def _request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+    def _request(
+        self,
+        method: str,
+        url: str,
+        on_attempt: AttemptObserver | None = None,
+        **kwargs: Any,
+    ) -> requests.Response:
         """Execute an HTTP request with retry, rate limiting, and error mapping.
 
         Every request carries the PSX ``X-Req-Id`` token when one can be
@@ -97,6 +132,9 @@ class BaseScraper:
         Args:
             method: HTTP method ("GET" or "POST").
             url: Full URL to request.
+            on_attempt: Optional observer called with a :class:`RequestAttempt`
+                after every attempt, including failed ones. Exceptions raised by
+                the observer propagate — keep it cheap and non-throwing.
             **kwargs: Passed directly to requests.Session.request. A ``headers``
                 dict is merged with the token header (the caller's dict is not
                 modified).
@@ -122,6 +160,24 @@ class BaseScraper:
         last_exc: Exception | None = None
         attempt = 1
 
+        def notify(
+            *,
+            succeeded: bool,
+            status_code: int | None = None,
+            error: Exception | None = None,
+            response: requests.Response | None = None,
+        ) -> None:
+            if on_attempt is not None:
+                on_attempt(
+                    RequestAttempt(
+                        number=attempt,
+                        succeeded=succeeded,
+                        status_code=status_code,
+                        error=error,
+                        response=response,
+                    )
+                )
+
         while attempt <= MAX_RETRIES:
             token = provider.get_token()
             headers = {**caller_headers, TOKEN_HEADER: token} if token else dict(caller_headers)
@@ -135,44 +191,53 @@ class BaseScraper:
                     )
 
                 if resp.status_code == 429:
-                    raise PSXRateLimitError(
+                    exc: Exception = PSXRateLimitError(
                         f"PSX rate limit exceeded (429) on {url}"
                     )
+                    notify(succeeded=False, status_code=429, error=exc, response=resp)
+                    raise exc
                 if resp.status_code == 403 and token is not None and not auth_retry_used:
                     provider.invalidate(token)
                     if provider.get_token() is not None:
                         auth_retry_used = True
                         logger.debug("403 on %s; refreshed %s, retrying once", url, TOKEN_HEADER)
                         continue  # same attempt number — auth retry is not a 5xx retry
-                    raise PSXAuthError(
+                    exc = PSXAuthError(
                         f"PSX auth error (403) on {url}; {TOKEN_HEADER} token was "
                         "rejected and could not be refreshed"
                     )
+                    notify(succeeded=False, status_code=403, error=exc, response=resp)
+                    raise exc
                 if resp.status_code == 403:
                     detail = (
                         f"{TOKEN_HEADER} token was sent and refreshed once"
                         if token is not None
                         else f"no {TOKEN_HEADER} token could be obtained"
                     )
-                    raise PSXAuthError(f"PSX auth error (403) on {url}; {detail}")
+                    exc = PSXAuthError(f"PSX auth error (403) on {url}; {detail}")
+                    notify(succeeded=False, status_code=403, error=exc, response=resp)
+                    raise exc
                 if resp.status_code == 401:
-                    raise PSXAuthError(
-                        f"PSX auth error ({resp.status_code}) on {url}"
-                    )
+                    exc = PSXAuthError(f"PSX auth error ({resp.status_code}) on {url}")
+                    notify(succeeded=False, status_code=401, error=exc, response=resp)
+                    raise exc
                 if resp.status_code >= 500:
                     last_exc = PSXServerError(
                         f"PSX server error ({resp.status_code}) on {url}, "
                         f"attempt {attempt}/{MAX_RETRIES}"
                     )
+                    notify(succeeded=False, status_code=resp.status_code,
+                           error=last_exc, response=resp)
                     if attempt < MAX_RETRIES:
                         time.sleep(RETRY_DELAYS[attempt - 1])  # delays[0]=1s, delays[1]=2s
                         attempt += 1
                         continue
                     raise last_exc  # final attempt — raise immediately, no sleep
                 if 400 <= resp.status_code < 500:
-                    raise PSXParseError(
-                        f"Unexpected {resp.status_code} from {url}"
-                    )
+                    exc = PSXParseError(f"Unexpected {resp.status_code} from {url}")
+                    notify(succeeded=False, status_code=resp.status_code, error=exc, response=resp)
+                    raise exc
+                notify(succeeded=True, status_code=resp.status_code, response=resp)
                 return resp
 
             except requests.RequestException as exc:
@@ -185,6 +250,7 @@ class BaseScraper:
                     self._via,
                     redact_text(str(exc), self._proxies),
                 )
+                notify(succeeded=False, error=exc)
                 if attempt < MAX_RETRIES:
                     time.sleep(RETRY_DELAYS[attempt - 1])
                     attempt += 1
@@ -198,12 +264,25 @@ class BaseScraper:
         # Safety net — loop always returns or raises above
         raise PSXServerError(f"Exhausted retries for {url}")
 
-    def _get(self, endpoint: str, **kwargs: Any) -> requests.Response:
+    def _get(
+        self,
+        endpoint: str,
+        on_attempt: AttemptObserver | None = None,
+        **kwargs: Any,
+    ) -> requests.Response:
         """GET request to a named PSX endpoint."""
-        return self._request("GET", self._build_url(endpoint), **kwargs)
+        return self._request("GET", self._build_url(endpoint), on_attempt=on_attempt, **kwargs)
 
-    def _post(self, endpoint: str, data: dict[str, Any], **kwargs: Any) -> requests.Response:
+    def _post(
+        self,
+        endpoint: str,
+        data: dict[str, Any],
+        on_attempt: AttemptObserver | None = None,
+        **kwargs: Any,
+    ) -> requests.Response:
         """POST request to a named PSX endpoint."""
-        return self._request("POST", self._build_url(endpoint), data=data, **kwargs)
+        return self._request(
+            "POST", self._build_url(endpoint), data=data, on_attempt=on_attempt, **kwargs
+        )
 
 

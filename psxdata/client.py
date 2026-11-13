@@ -9,12 +9,14 @@ can use ``import psxdata; psxdata.stocks("ENGRO")`` without instantiation.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import date
 
 import pandas as pd
 
 from psxdata.cache.disk_cache import DiskCache
 from psxdata.constants import CACHE_DIR, CACHE_TTL_TODAY, TRADED_TODAY_MIN_SYMBOLS
+from psxdata.models.results import HistoricalFetchResult, HistoricalOutcome
 from psxdata.proxy import ProxyConfig, describe_proxies, normalize_proxy
 from psxdata.scrapers.debt_market import DebtMarketScraper
 from psxdata.scrapers.eligible_scrips import EligibleScripsScraper
@@ -178,6 +180,101 @@ class PSXClient:
                 self._cache.set(today_key, today_df, ttl=CACHE_TTL_TODAY)
 
         return self._filter_date_range(raw, start_ts, end_ts)
+
+    def stocks_report(
+        self,
+        symbol: str,
+        start: date | str | None = None,
+        end: date | str | None = None,
+    ) -> HistoricalFetchResult:
+        """Fetch one symbol's history and report exactly what was obtained.
+
+        Bypasses the cache: a report describes the live request, so serving it
+        from a cached frame would describe a fetch that did not happen. For a
+        cached frame use :meth:`stocks`.
+
+        Unlike :meth:`stocks`, a transport failure does not raise. The result
+        carries ``outcome`` (complete / partial / failed / no_data),
+        ``first_date`` and ``last_date`` for the delivered rows, and a
+        human-readable ``message``. Rows parsed before a later failure are
+        delivered as ``PARTIAL`` instead of being discarded.
+
+        Args:
+            symbol: PSX ticker, e.g. ``"ENGRO"``.
+            start: Start date (inclusive). ``None`` means earliest available.
+            end: End date (inclusive). ``None`` means today.
+
+        Returns:
+            :class:`~psxdata.models.results.HistoricalFetchResult`.
+
+        Raises:
+            ValueError: If ``start`` is after ``end``.
+
+        Example::
+
+            report = client.stocks_report("ENGRO", start="2024-01-01")
+            if report.outcome is psxdata.HistoricalOutcome.PARTIAL:
+                print(report.message)   # says why it is partial
+            df = report.data            # rows that were delivered
+        """
+        sym = symbol.upper()
+        today = _today()
+
+        start_ts = pd.Timestamp(start) if start is not None else None
+        end_ts = pd.Timestamp(end) if end is not None else today
+
+        if start_ts is not None and start_ts > end_ts:
+            raise ValueError(f"start ({start}) must not be after end ({end})")
+
+        report = self._historical.fetch_report(sym, start=None, end=None)
+
+        if report.data.empty:
+            return report
+
+        filtered = self._filter_date_range(report.data, start_ts, end_ts)
+        if filtered.empty:
+            message = (
+                f"No data: {sym} returned {len(report.data)} row(s) over "
+                f"{report.first_date}..{report.last_date}, but none fall in "
+                f"the requested range [{start_ts.date() if start_ts else 'none'}"
+                f"..{end_ts.date()}]."
+            )
+            if report.outcome is not HistoricalOutcome.COMPLETE:
+                message += f" The underlying fetch was {report.outcome.value}: {report.message}"
+            return replace(
+                report,
+                data=filtered,
+                complete=False,
+                outcome=HistoricalOutcome.NO_DATA,
+                first_date=None,
+                last_date=None,
+                failure_reason="filtered_out",
+                message=message,
+            )
+
+        first = filtered["date"].min()
+        last = filtered["date"].max()
+        first_date = first.date() if isinstance(first, pd.Timestamp) else first
+        last_date = last.date() if isinstance(last, pd.Timestamp) else last
+
+        if report.outcome is HistoricalOutcome.COMPLETE:
+            message = (
+                f"Complete: {sym} fetched {len(filtered)} row(s) covering "
+                f"{first_date}..{last_date}. Date filter applied: "
+                f"{start_ts.date() if start_ts else 'none'}..{end_ts.date()}."
+            )
+        else:
+            message = (
+                f"{report.message.rstrip('.')} Delivered range after filtering: "
+                f"{first_date}..{last_date}."
+            )
+        return replace(
+            report,
+            data=filtered,
+            first_date=first_date,
+            last_date=last_date,
+            message=message,
+        )
 
     def quote(self, symbol: str, cache: bool = True) -> pd.DataFrame:
         """Fetch the latest screener snapshot for a symbol.
@@ -678,6 +775,39 @@ def stocks(
         print(df.head())
     """
     return _client().stocks(symbol, start=start, end=end, cache=cache)
+
+
+def stocks_report(
+    symbol: str,
+    start: date | str | None = None,
+    end: date | str | None = None,
+) -> HistoricalFetchResult:
+    """Fetch one symbol's history with a verifiable outcome report.
+
+    Convenience wrapper around :meth:`PSXClient.stocks_report`. Bypasses the
+    cache and does not raise on transport failures — inspect ``outcome``
+    instead.
+
+    Args:
+        symbol: PSX ticker, e.g. ``"ENGRO"``.
+        start: Start date (inclusive). ``None`` means earliest available.
+        end: End date (inclusive). ``None`` means today.
+
+    Returns:
+        :class:`~psxdata.models.results.HistoricalFetchResult` with ``data``,
+        ``complete``, ``first_date``, ``last_date``, ``outcome`` and ``message``.
+
+    Raises:
+        ValueError: If ``start`` is after ``end``.
+
+    Example::
+
+        import psxdata
+        report = psxdata.stocks_report("ENGRO", start="2024-01-01")
+        print(report.outcome, report.first_date, report.last_date)
+        print(report.message)
+    """
+    return _client().stocks_report(symbol, start=start, end=end)
 
 
 def quote(symbol: str, cache: bool = True) -> pd.DataFrame:

@@ -25,6 +25,7 @@ Requires Python 3.11+
 ## Public API
 
 - `psxdata.stocks(symbol, start, end)` — Historical OHLCV DataFrame for a PSX ticker
+- `psxdata.stocks_report(symbol, start, end)` — Same fetch with a `HistoricalFetchResult`: validated DataFrame plus `complete`, delivered `first_date`/`last_date`, `outcome` (complete/partial/failed/no_data) and a human-readable `message`; keeps rows when a fetch is only partially successful and never raises on transport failure
 - `psxdata.tickers()` — All 1000+ listed PSX tickers
 - `psxdata.symbols()` — Symbol/sector/name metadata, optionally filtered
 - `psxdata.quote(symbol)` — Live quote (price, volume, sector, market cap)

@@ -44,6 +44,19 @@ class PSXParseError(PSXDataError):
     """
 
 
+class PSXMissingColumnsError(PSXParseError, ValueError):
+    """A parsed table is missing columns the caller requires.
+
+    Inherits :class:`ValueError` as well so code written against the older
+    ``validate_ohlc_dataframe`` error (which raised ``ValueError`` for missing
+    OHLCV columns) keeps catching it. ``missing`` holds the offending names.
+    """
+
+    def __init__(self, message: str, missing: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.missing: list[str] = list(missing or [])
+
+
 class InvalidSymbolError(PSXDataError):
     """The requested ticker symbol does not exist on PSX."""
 

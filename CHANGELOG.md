@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `stocks_report(symbol, start, end)` / `PSXClient.stocks_report()` and `HistoricalScraper.fetch_report()` — fetch one symbol's OHLCV history and get back a `HistoricalFetchResult` instead of a bare DataFrame. It carries the validated, date-ascending `data`; `complete`; the delivered `first_date` / `last_date`; `outcome` (`complete`, `partial`, `failed`, `no_data`); and a human-readable `message`.
+  - `partial`: rows were delivered but the fetch was not clean — a timeout or 5xx on an earlier attempt recovered by a retry, rows dropped by OHLC validation, or rows salvaged from an error response's body after retries were exhausted. Parsed rows are kept and `failure_reason` names the cause (`network_error`, `server_error_5xx`, ...); nothing is swallowed silently.
+  - `failed`: nothing could be delivered. `failure_reason` names the cause and the original exception is on `error`; `HistoricalScraper.fetch()` re-raises it, so code that only wants a DataFrame keeps raising on total failure.
+  - `no_data`: HTTP 200 with nothing parseable (no table, no headers, empty table, unparseable dates), or the in-memory `start`/`end` filter removed every row. The DataFrame is empty and is labelled as such rather than reported as success.
+  - Requests still go through `BaseScraper._post("historical", data={"symbol": ...})` with the existing retry, rate-limit and `X-Req-Id` handling. `BaseScraper._request` gained an optional `on_attempt` observer so callers can see per-attempt outcomes; existing calls are unchanged.
+  - `stocks_report()` bypasses the cache: a report describes a live request, so serving it from cache would describe a fetch that did not happen.
+
+### Changed
+
+- `HistoricalScraper.fetch()` (and therefore `stocks()`) now returns rows sorted by date ascending instead of the descending order PSX emits; filtering, validation and column names are unchanged. A table missing a required OHLCV column now raises `PSXMissingColumnsError` (a `PSXParseError` that also remains a `ValueError`) instead of the raw `ValueError` from the validator.
+
 ---
 
 ## [1.5.0] - 2026-11-13
