@@ -291,6 +291,8 @@ Receive HTTP callbacks when runs reach a terminal state. Webhooks can be standal
 | `GET`    | `/v2/webhooks/{webhookId}/deliveries` | List delivery attempts                                          |
 | `POST`   | `/v2/webhooks/{webhookId}/test`       | Send a test delivery                                            |
 
+Deliveries are also listed per run: `GET /v2/actor-runs/{runId}/webhook-deliveries` returns every delivery a run triggered — across global, actor-scoped, and per-run webhooks — with each row's status, attempt count vs. cap, HTTP response status, response summary, and `nextRetryAt` (null once terminal). Each item adds `requestUrl`, which is `null` when the webhook was deleted after the delivery was queued; the termination reason (private-network block, webhook/run deleted, retries exhausted) is recorded on the row's `responseBody` by the runner. An empty `items` list means the run matched no subscription.
+
 Supported event types are the four terminal run events:
 
 - `ACTOR.RUN.SUCCEEDED`

@@ -70,7 +70,9 @@ interface WebhookRow {
 
 interface DeliveryRow {
   id: string;
-  webhook_id: string;
+  // Nullable: webhook_deliveries.webhook_id is ON DELETE SET NULL so a
+  // deleted subscription's deliveries survive as terminated records.
+  webhook_id: string | null;
   run_id: string | null;
   event_type: string;
   status: string;
@@ -351,11 +353,15 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       const { webhookId } = request.params;
       // Per-run webhooks (run_id IS NOT NULL) ARE allowed to be deleted —
-      // this is an explicit "cancel pending deliveries" affordance for
-      // operators. The CASCADE on runs deletion handles the common case;
-      // manual DELETE is the rare-but-useful escape hatch. Inverse decision
-      // vs. PUT (which is rejected) because DELETE is unambiguous in intent
-      // while PUT could accidentally race with delivery.
+      // an explicit "stop subscribing" affordance for operators. Deletion
+      // does NOT erase queued deliveries: webhook_deliveries.webhook_id is
+      // ON DELETE SET NULL, so the rows survive and the runner's retry
+      // processor finalizes them FAILED with the reason recorded — the run
+      // page shows them as terminated rather than silently gone. The
+      // CASCADE on runs deletion handles the common per-run cleanup case.
+      // Inverse decision vs. PUT (which is rejected) because DELETE is
+      // unambiguous in intent while PUT could accidentally race with
+      // delivery.
       const result = await query(
         'DELETE FROM webhooks WHERE id = $1 AND user_id = $2 RETURNING id',
         [webhookId, request.user!.id]

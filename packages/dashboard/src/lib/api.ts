@@ -243,7 +243,10 @@ export interface RetentionStatus {
  */
 export interface WebhookDelivery {
   id: string;
-  webhookId: string;
+  /** Null when the webhook was deleted after this delivery was queued
+   *  (webhook_deliveries.webhook_id is ON DELETE SET NULL — the row
+   *  survives so the termination reason stays visible). */
+  webhookId: string | null;
   runId: string | null;
   eventType: string;
   /** 'PENDING' | 'DELIVERED' | 'FAILED' — uppercase, matches the DB enum */
@@ -1365,6 +1368,32 @@ export async function getWebhookDeliveries(id: string): Promise<WebhookDelivery[
   // the 404, which made the deliveries list silently empty).
   const res = await fetchApi<{ data: { items: WebhookDelivery[] } }>(
     `/v2/webhooks/${id}/deliveries`
+  );
+  return res.data.items;
+}
+
+/**
+ * Delivery shape returned by GET /v2/actor-runs/:runId/webhook-deliveries —
+ * everything WebhookDelivery carries, plus the target URL resolved
+ * server-side. `requestUrl` is null when the webhook was deleted after the
+ * delivery was queued; the row's own status/responseBody then say how the
+ * delivery ended. The dashboard renders these fields verbatim — retry
+ * scheduling and private-network blocking are decided by the runner and
+ * recorded on the row, never re-derived here.
+ */
+export interface RunWebhookDelivery extends WebhookDelivery {
+  /** Target URL of the webhook this delivery went to; null if the webhook was deleted. */
+  requestUrl: string | null;
+}
+
+/**
+ * Every delivery a run triggered, across all matching webhooks (global,
+ * actor-scoped, per-run). Empty array means the run matched no
+ * subscription — the run page shows that as "no matching subscriptions".
+ */
+export async function getRunWebhookDeliveries(runId: string): Promise<RunWebhookDelivery[]> {
+  const res = await fetchApi<{ data: { items: RunWebhookDelivery[] } }>(
+    `/v2/actor-runs/${runId}/webhook-deliveries`
   );
   return res.data.items;
 }

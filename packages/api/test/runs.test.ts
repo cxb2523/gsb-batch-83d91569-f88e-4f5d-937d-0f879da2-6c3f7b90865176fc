@@ -1454,4 +1454,134 @@ describe('Actor Runs Routes', () => {
       expect(mockQuery).not.toHaveBeenCalled();
     });
   });
+
+  describe('GET /v2/actor-runs/:runId/webhook-deliveries', () => {
+    const deliveryRow = (overrides = {}) => ({
+      id: 'dlv-1',
+      webhook_id: 'wh-1',
+      run_id: 'run-1',
+      event_type: 'ACTOR.RUN.SUCCEEDED',
+      status: 'DELIVERED',
+      attempt_count: 1,
+      max_attempts: 5,
+      next_retry_at: null,
+      response_status: 200,
+      response_body: '{"ok":true}',
+      request_body: '{"eventType":"ACTOR.RUN.SUCCEEDED"}',
+      created_at: new Date('2026-10-01T10:00:00Z'),
+      finished_at: new Date('2026-10-01T10:00:01Z'),
+      webhook_request_url: 'https://hooks.example.com/x',
+      ...overrides,
+    });
+
+    it('returns every delivery the run triggered, with the target URL joined in', async () => {
+      mockQuery
+        .mockResolvedValueOnce({ rows: [{ id: 'run-1' }] }) // ownership check
+        .mockResolvedValueOnce({
+          rows: [
+            deliveryRow(),
+            deliveryRow({
+              id: 'dlv-2',
+              webhook_id: 'wh-2',
+              status: 'PENDING',
+              attempt_count: 2,
+              next_retry_at: new Date('2026-10-01T10:05:00Z'),
+              response_status: 502,
+              response_body: 'bad gateway',
+              finished_at: null,
+              webhook_request_url: 'https://hooks.example.com/y',
+            }),
+          ],
+        });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/v2/actor-runs/run-1/webhook-deliveries',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const { data } = JSON.parse(response.body);
+      expect(data.total).toBe(2);
+      expect(data.items).toHaveLength(2);
+      const [first, second] = data.items;
+      expect(first).toMatchObject({
+        id: 'dlv-1',
+        webhookId: 'wh-1',
+        runId: 'run-1',
+        eventType: 'ACTOR.RUN.SUCCEEDED',
+        status: 'DELIVERED',
+        attemptCount: 1,
+        maxAttempts: 5,
+        responseStatus: 200,
+        responseBody: '{"ok":true}',
+        requestUrl: 'https://hooks.example.com/x',
+        nextRetryAt: null,
+      });
+      expect(second).toMatchObject({
+        id: 'dlv-2',
+        status: 'PENDING',
+        attemptCount: 2,
+        requestUrl: 'https://hooks.example.com/y',
+      });
+      expect(second.nextRetryAt).toBeTruthy();
+    });
+
+    it('returns requestUrl null when the webhook was deleted after queueing', async () => {
+      mockQuery
+        .mockResolvedValueOnce({ rows: [{ id: 'run-1' }] })
+        .mockResolvedValueOnce({
+          rows: [
+            deliveryRow({
+              status: 'FAILED',
+              response_body: 'Webhook was deleted before this delivery completed',
+              webhook_request_url: null, // LEFT JOIN found no webhooks row
+            }),
+          ],
+        });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/v2/actor-runs/run-1/webhook-deliveries',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const { data } = JSON.parse(response.body);
+      expect(data.items[0].requestUrl).toBeNull();
+      // The termination reason recorded by the runner is surfaced verbatim.
+      expect(data.items[0].responseBody).toBe(
+        'Webhook was deleted before this delivery completed'
+      );
+      expect(data.items[0].status).toBe('FAILED');
+    });
+
+    it('returns an empty items list when the run matched no subscription', async () => {
+      mockQuery
+        .mockResolvedValueOnce({ rows: [{ id: 'run-1' }] })
+        .mockResolvedValueOnce({ rows: [] });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/v2/actor-runs/run-1/webhook-deliveries',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const { data } = JSON.parse(response.body);
+      expect(data.total).toBe(0);
+      expect(data.items).toEqual([]);
+    });
+
+    it('404s for a run the user does not own', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [] }); // ownership check misses
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/v2/actor-runs/run-1/webhook-deliveries',
+      });
+
+      expect(response.statusCode).toBe(404);
+      expect(JSON.parse(response.body).error.type).toBe('record-not-found');
+      // The deliveries query must not run for a run that isn't the caller's.
+      expect(mockQuery).toHaveBeenCalledTimes(1);
+    });
+  });
 });

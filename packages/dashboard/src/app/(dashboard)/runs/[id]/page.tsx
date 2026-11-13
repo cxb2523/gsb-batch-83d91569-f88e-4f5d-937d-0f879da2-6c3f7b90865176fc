@@ -29,15 +29,16 @@ import {
   getRunDatasetItems,
   getRunInput,
   getRunLogs,
-  getWebhookDeliveries,
+  getRunWebhookDeliveries,
   getWebhooks,
   openInTabAsBlob,
   type Actor,
   type Run,
+  type RunWebhookDelivery,
   type Webhook,
-  type WebhookDelivery,
 } from '@/lib/api';
 import { DATASET_PREVIEW_LIMIT, LOG_TAIL_LIMIT } from '@/lib/constants';
+import { deliveryStatusLine } from '@/lib/deliveries';
 import { prefixPath } from '@/lib/path-prefix';
 import { RERUNNABLE } from '@/lib/rerun-targets';
 import { cn } from '@/lib/utils';
@@ -79,12 +80,10 @@ function RunDetail() {
   // Per-run hooks are immutable post-dispatch — one fetch on run-load is
   // enough. `null` distinguishes "not fetched yet" from "fetched, empty".
   const [runWebhooks, setRunWebhooks] = useState<Webhook[] | null>(null);
-  // Deliveries per webhook, lazy-loaded when the Webhooks tab is opened.
-  // Keyed by webhook id so multiple hooks can have their delivery history
-  // shown simultaneously without re-fetching as the user expands rows.
-  const [deliveriesByWebhook, setDeliveriesByWebhook] = useState<Record<string, WebhookDelivery[]>>(
-    {}
-  );
+  // Every delivery THIS run triggered (global, actor-scoped and per-run
+  // webhooks), lazy-loaded when the Webhooks tab is opened. `null` = not
+  // fetched yet; [] = fetched, the run matched no subscription.
+  const [runDeliveries, setRunDeliveries] = useState<RunWebhookDelivery[] | null>(null);
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -147,7 +146,7 @@ function RunDetail() {
     setInput(undefined);
     setDataset(null);
     setRunWebhooks(null);
-    setDeliveriesByWebhook({});
+    setRunDeliveries(null);
   }, [id]);
 
   // Resolve the actor lazily once we know which one this run targeted.
@@ -168,8 +167,8 @@ function RunDetail() {
 
   // Per-run webhooks: fetch once on first load. They can't be mutated after
   // dispatch (PUT is rejected server-side via `run_id IS NULL`), so polling
-  // adds no value — only the deliveries can change, and operators see those
-  // on /webhooks if they need detail.
+  // adds no value. These drive the config cards only — the runtime record
+  // (what was actually dispatched) comes from getRunWebhookDeliveries.
   const loadedRunId = run?.id;
   useEffect(() => {
     // `loadedRunId !== id` gate: right after navigation, `run` still holds
@@ -203,28 +202,35 @@ function RunDetail() {
         .catch(() => setDataset([]))
         .finally(() => setDatasetLoading(false));
     }
-    // Fetch deliveries for every per-run webhook the first time the
-    // Webhooks tab is opened. Parallel — webhook count is small (1-3
-    // typically). Subsequent tab visits reuse the cached results.
-    if (tab === 'webhooks' && runWebhooks && runWebhooks.length > 0) {
-      const missing = runWebhooks.filter((w) => !(w.id in deliveriesByWebhook));
-      if (missing.length > 0) {
-        void Promise.all(
-          missing.map((w) =>
-            getWebhookDeliveries(w.id)
-              .then((items) => [w.id, items] as const)
-              .catch(() => [w.id, [] as WebhookDelivery[]] as const)
-          )
-        ).then((results) => {
-          setDeliveriesByWebhook((prev) => {
-            const next = { ...prev };
-            for (const [id, items] of results) next[id] = items;
-            return next;
-          });
-        });
-      }
+    // Fetch this run's deliveries the first time the Webhooks tab is
+    // opened. One run-keyed call covers every webhook that matched —
+    // global and actor-scoped hooks included, which the per-webhook
+    // history endpoint can't see from here.
+    if (tab === 'webhooks' && runDeliveries === null) {
+      getRunWebhookDeliveries(id)
+        .then((items) => setRunDeliveries(items))
+        .catch(() => setRunDeliveries([]));
     }
-  }, [tab, id, input, inputLoading, dataset, datasetLoading, runWebhooks, deliveriesByWebhook]);
+  }, [tab, id, input, inputLoading, dataset, datasetLoading, runDeliveries]);
+
+  // While any delivery is still PENDING its row can change (attempts bump,
+  // next_retry_at advances, terminal reasons land). Re-read the rows on a
+  // slow self-scheduling poll — the scheduling itself stays server-side;
+  // this only re-fetches what the runner recorded.
+  const hasPendingDelivery = runDeliveries?.some((d) => d.status === 'PENDING') ?? false;
+  useEffect(() => {
+    if (tab !== 'webhooks' || !hasPendingDelivery) return;
+    let alive = true;
+    const timer = setTimeout(() => {
+      getRunWebhookDeliveries(id)
+        .then((items) => alive && setRunDeliveries(items))
+        .catch(() => {});
+    }, 5000);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [tab, id, hasPendingDelivery, runDeliveries]);
 
   // Auto-scroll log tail
   useEffect(() => {
@@ -316,14 +322,11 @@ function RunDetail() {
     { id: 'logs', label: 'Logs', icon: Terminal },
     { id: 'input', label: 'Input', icon: FileInput },
     { id: 'output', label: 'Output', icon: Database },
-    // Show Webhooks tab only when this run actually has per-run hooks.
-    // Most runs don't, so a permanent tab would be dead UI on every page.
-    // Conditional rendering matches the "negative space = no hooks" pattern
-    // — when the tab is absent, no hooks; when present, it's a strong
-    // affordance to look there.
-    ...((runWebhooks?.length ?? 0) > 0
-      ? [{ id: 'webhooks' as Tab, label: 'Webhooks', icon: WebhookIcon }]
-      : []),
+    // The Webhooks tab is always present: it's where the run's deliveries
+    // are explained, and a run that matched no subscription must say so
+    // explicitly ("no matching subscriptions") rather than hiding the tab
+    // and leaving the operator to guess.
+    { id: 'webhooks', label: 'Webhooks', icon: WebhookIcon },
   ];
 
   return (
@@ -611,19 +614,14 @@ function RunDetail() {
 
             {tab === 'webhooks' && (
               <div className="absolute inset-0 overflow-auto p-4 space-y-3">
-                {runWebhooks && runWebhooks.length > 0 ? (
-                  runWebhooks.map((w) => (
-                    <RunWebhookCard key={w.id} webhook={w} deliveries={deliveriesByWebhook[w.id]} />
-                  ))
-                ) : (
-                  <div className="h-full grid place-items-center text-center">
-                    <div>
-                      <WebhookIcon className="h-6 w-6 text-muted-foreground/40 mx-auto mb-2" />
-                      <p className="font-mono text-[11px] tracking-wider text-muted-foreground">
-                        [ NO PER-RUN WEBHOOKS ]
-                      </p>
-                    </div>
-                  </div>
+                <RunDeliveriesSection deliveries={runDeliveries} isLive={isLive} />
+                {runWebhooks && runWebhooks.length > 0 && (
+                  <>
+                    <p className="eyebrow pt-3">PER-RUN WEBHOOK CONFIGURATION</p>
+                    {runWebhooks.map((w) => (
+                      <RunWebhookCard key={w.id} webhook={w} />
+                    ))}
+                  </>
                 )}
               </div>
             )}
@@ -749,23 +747,81 @@ function DefRow({
 }
 
 /**
- * Full-detail card for one per-run webhook on the run page's Webhooks tab.
- * Focused on debug-by-evidence: the rendered request body (what we sent)
- * is the centerpiece, paired with the response (what came back) for each
- * delivery attempt. Headers are kept inline at the top; the configured
- * template is only shown as a fallback when no deliveries exist yet
- * (because once a delivery exists, the rendered body is strictly more
- * useful than the unresolved template).
+ * Every delivery this run triggered, across all matching webhooks (global,
+ * actor-scoped, per-run). This is the authoritative "where did the run's
+ * events go" view: each row shows the recorded status, attempt count vs.
+ * cap, HTTP response code, response summary, and either the next scheduled
+ * retry or the termination reason — all read straight off the delivery
+ * row, never re-derived in the browser.
+ *
+ * Empty states are explicit: a live run simply hasn't fired its webhooks
+ * yet; a finished run with zero rows matched no subscription.
+ */
+function RunDeliveriesSection({
+  deliveries,
+  isLive,
+}: {
+  deliveries: RunWebhookDelivery[] | null;
+  isLive: boolean;
+}) {
+  if (deliveries === null) {
+    return (
+      <div className="panel px-4 py-6 grid place-items-center">
+        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+  if (deliveries.length === 0) {
+    return (
+      <div className="panel px-4 py-8 grid place-items-center text-center">
+        <div>
+          <WebhookIcon className="h-6 w-6 text-muted-foreground/40 mx-auto mb-2" />
+          {isLive ? (
+            <>
+              <p className="font-mono text-[11px] tracking-wider text-muted-foreground">
+                [ NO DELIVERIES YET ]
+              </p>
+              <p className="text-[12px] text-muted-foreground mt-1">
+                Webhooks fire when the run reaches a terminal state.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="font-mono text-[11px] tracking-wider text-muted-foreground">
+                [ NO MATCHING SUBSCRIPTIONS ]
+              </p>
+              <p className="text-[12px] text-muted-foreground mt-1">
+                This run finished without any webhook subscribed to its events — nothing was
+                dispatched.
+              </p>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <section className="panel">
+      <p className="eyebrow px-4 pt-3 pb-2">DELIVERIES</p>
+      <ul className="divide-y divide-border">
+        {deliveries.map((d) => (
+          <DeliveryRowExpanded key={d.id} delivery={d} />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/**
+ * Config card for one per-run webhook on the run page's Webhooks tab.
+ * Config-only (URL, events, headers, payload template) — the runtime
+ * record of what was actually dispatched lives in the deliveries section
+ * above, keyed by run rather than by webhook so global and actor-scoped
+ * hooks show up too.
  *
  * Read-only: editing/deletion lives on /webhooks.
  */
-function RunWebhookCard({
-  webhook,
-  deliveries,
-}: {
-  webhook: Webhook;
-  deliveries: WebhookDelivery[] | undefined;
-}) {
+function RunWebhookCard({ webhook }: { webhook: Webhook }) {
   return (
     <article className="panel">
       <header className="px-4 py-3 border-b border-border space-y-2">
@@ -834,30 +890,14 @@ function RunWebhookCard({
       </section>
 
       <section>
-        <p className="eyebrow px-4 pt-3 pb-2">DELIVERIES</p>
-        {deliveries === undefined ? (
-          <div className="px-4 py-6 grid place-items-center">
-            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-          </div>
-        ) : deliveries.length === 0 ? (
-          // Fallback: no deliveries yet, so we show the configured template
-          // as a stand-in. This is the only case where the template (with
-          // unresolved {{placeholders}}) is genuinely useful — once a real
-          // delivery exists, its rendered body supersedes it for debugging.
-          <NoDeliveriesFallback template={webhook.payloadTemplate} />
-        ) : (
-          <ul className="divide-y divide-border">
-            {deliveries.map((d) => (
-              <DeliveryRowExpanded key={d.id} delivery={d} />
-            ))}
-          </ul>
-        )}
+        <p className="eyebrow px-4 pt-3 pb-2">PAYLOAD TEMPLATE</p>
+        <PayloadTemplate template={webhook.payloadTemplate} />
       </section>
     </article>
   );
 }
 
-function NoDeliveriesFallback({ template }: { template?: string | null }) {
+function PayloadTemplate({ template }: { template?: string | null }) {
   const pretty = (() => {
     if (!template) return null;
     try {
@@ -870,10 +910,6 @@ function NoDeliveriesFallback({ template }: { template?: string | null }) {
   })();
   return (
     <div className="px-4 pb-4 space-y-2">
-      <p className="font-mono text-[11px] text-muted-foreground">no deliveries yet</p>
-      <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">
-        configured payload template
-      </p>
       {pretty ? (
         <pre className="font-mono text-[11px] text-foreground bg-secondary/40 border border-border rounded-sm p-3 overflow-auto max-h-64 whitespace-pre-wrap break-all">
           {pretty}
@@ -888,12 +924,18 @@ function NoDeliveriesFallback({ template }: { template?: string | null }) {
 }
 
 /**
- * Single delivery row showing what was sent and what came back. Both bodies
- * are pretty-printed when they parse as JSON — operators reading webhook
- * payloads expect indented form, and the receiver's response is often JSON
- * too. Fallback to raw on parse failure.
+ * Single delivery row showing what was sent and what came back, plus the
+ * delivery's current standing: attempt count vs. cap, HTTP response code,
+ * and a status line that shows the next scheduled retry while PENDING or
+ * the recorded termination reason once FAILED. All of it comes straight
+ * from the delivery row — the page never recomputes retry or blocking
+ * decisions.
+ *
+ * Both bodies are pretty-printed when they parse as JSON — operators
+ * reading webhook payloads expect indented form, and the receiver's
+ * response is often JSON too. Fallback to raw on parse failure.
  */
-function DeliveryRowExpanded({ delivery: d }: { delivery: WebhookDelivery }) {
+function DeliveryRowExpanded({ delivery: d }: { delivery: RunWebhookDelivery }) {
   const prettyRequest = prettyJson(d.requestBody);
   const prettyResponse = prettyJson(d.responseBody);
 
@@ -919,6 +961,29 @@ function DeliveryRowExpanded({ delivery: d }: { delivery: WebhookDelivery }) {
         </span>
         <span className="text-muted-foreground">{new Date(d.createdAt).toLocaleString()}</span>
       </div>
+
+      <p className="font-mono text-[11px] break-all">
+        <span className="text-muted-foreground">→ </span>
+        {d.requestUrl ? (
+          <span className="text-foreground">{d.requestUrl}</span>
+        ) : (
+          // The webhook row is gone (deleted after this delivery was
+          // queued) — the URL is unrecoverable, so say that instead of
+          // rendering a blank target.
+          <span className="text-muted-foreground">[webhook deleted]</span>
+        )}
+      </p>
+
+      {/* Next retry while pending, termination reason once failed —
+          computed from the row's own fields by deliveryStatusLine. */}
+      <p
+        className={cn(
+          'font-mono text-[11px]',
+          d.status === 'FAILED' ? 'text-fail' : 'text-muted-foreground'
+        )}
+      >
+        {deliveryStatusLine(d)}
+      </p>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <div className="space-y-1">

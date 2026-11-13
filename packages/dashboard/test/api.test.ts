@@ -18,6 +18,7 @@ vi.hoisted(() => {
 import {
   getCurrentUser,
   getMyApifyProfile,
+  getRunWebhookDeliveries,
   listRuns,
   getRun,
   deleteActor,
@@ -379,5 +380,36 @@ describe('list querystring construction', () => {
 
     const [url] = fetchMock.mock.calls[0] as [string];
     expect(url).toBe('http://localhost:3000/v2/actor-runs');
+  });
+});
+
+describe('getRunWebhookDeliveries', () => {
+  it('calls the run-keyed deliveries endpoint and unwraps items', async () => {
+    const items = [
+      {
+        id: 'dlv-1',
+        webhookId: 'wh-1',
+        runId: 'run-1',
+        eventType: 'ACTOR.RUN.SUCCEEDED',
+        status: 'FAILED',
+        attemptCount: 1,
+        maxAttempts: 5,
+        nextRetryAt: null,
+        responseStatus: null,
+        responseBody: 'Webhook URL targets a private/internal network address',
+        requestBody: null,
+        requestUrl: 'http://169.254.169.254/latest/meta-data',
+        createdAt: '2026-10-01T10:00:00.000Z',
+        finishedAt: '2026-10-01T10:00:00.000Z',
+      },
+    ];
+    fetchMock.mockResolvedValue(jsonResponse({ data: { items } }));
+
+    const result = await getRunWebhookDeliveries('run-1');
+
+    expect((fetchMock.mock.calls[0] as [string])[0]).toBe(
+      'http://localhost:3000/v2/actor-runs/run-1/webhook-deliveries'
+    );
+    expect(result).toEqual(items);
   });
 });

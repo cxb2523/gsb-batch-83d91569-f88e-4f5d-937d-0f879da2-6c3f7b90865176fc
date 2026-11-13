@@ -257,9 +257,13 @@ CREATE INDEX IF NOT EXISTS idx_schedules_user ON schedules(user_id);
 CREATE INDEX IF NOT EXISTS idx_schedules_enabled ON schedules(is_enabled) WHERE is_enabled = true;
 
 -- Webhook deliveries (tracking + retry)
+-- webhook_id is nullable with ON DELETE SET NULL: deleting a subscription
+-- must NOT erase its queued deliveries — the run page has to show them as
+-- terminated-with-reason, and the retry processor finalizes the orphaned
+-- rows (status FAILED, reason in response_body) instead of them vanishing.
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
   id VARCHAR(21) PRIMARY KEY,
-  webhook_id VARCHAR(21) NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+  webhook_id VARCHAR(21) REFERENCES webhooks(id) ON DELETE SET NULL,
   run_id VARCHAR(21),
   event_type TEXT NOT NULL,
   status TEXT DEFAULT 'PENDING',
@@ -271,6 +275,14 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
   created_at TIMESTAMPTZ DEFAULT NOW(),
   finished_at TIMESTAMPTZ
 );
+
+-- Existing databases: migrate the webhook_id FK from CASCADE to SET NULL.
+-- Idempotent — drops the old constraint (if any) and re-adds the new one.
+ALTER TABLE webhook_deliveries DROP CONSTRAINT IF EXISTS webhook_deliveries_webhook_id_fkey;
+ALTER TABLE webhook_deliveries ALTER COLUMN webhook_id DROP NOT NULL;
+ALTER TABLE webhook_deliveries
+  ADD CONSTRAINT webhook_deliveries_webhook_id_fkey
+  FOREIGN KEY (webhook_id) REFERENCES webhooks(id) ON DELETE SET NULL;
 
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_pending
   ON webhook_deliveries(next_retry_at) WHERE status = 'PENDING';

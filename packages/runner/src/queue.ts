@@ -1394,14 +1394,17 @@ export async function scheduleRetry(
 export async function claimWebhookRetries(dbPool: pg.Pool): Promise<
   {
     id: string;
-    webhook_id: string;
+    // Null when the webhook was deleted after the delivery was queued
+    // (webhook_id is ON DELETE SET NULL) — processWebhookRetries finalizes
+    // these as FAILED with the reason recorded.
+    webhook_id: string | null;
     run_id: string;
     event_type: string;
   }[]
 > {
   const result = await dbPool.query<{
     id: string;
-    webhook_id: string;
+    webhook_id: string | null;
     run_id: string;
     event_type: string;
   }>(
@@ -1436,9 +1439,16 @@ export async function processWebhookRetries(db: pg.Pool = pool): Promise<void> {
       }>('SELECT * FROM webhooks WHERE id = $1', [delivery.webhook_id]);
 
       if (!webhook.rows[0]) {
-        // Webhook deleted — mark delivery as failed
+        // Webhook deleted — mark delivery as failed. The reason goes into
+        // response_body (the same column the private-URL guard and network
+        // errors use) so the dashboard can show WHY the delivery terminated
+        // without re-deriving it: the row is all the operator sees.
         await db.query(
-          `UPDATE webhook_deliveries SET status = 'FAILED', finished_at = NOW(), next_retry_at = NULL WHERE id = $1`,
+          `UPDATE webhook_deliveries
+           SET status = 'FAILED',
+               response_body = 'Webhook was deleted before this delivery completed',
+               finished_at = NOW(), next_retry_at = NULL
+           WHERE id = $1`,
           [delivery.id]
         );
         continue;
@@ -1446,9 +1456,14 @@ export async function processWebhookRetries(db: pg.Pool = pool): Promise<void> {
 
       const run = await db.query<RunJob>('SELECT * FROM runs WHERE id = $1', [delivery.run_id]);
       if (!run.rows[0]) {
-        // Run deleted — mark delivery as failed
+        // Run deleted (retention sweep or force-deleted actor) — same
+        // treatment: terminal, with the reason recorded on the row.
         await db.query(
-          `UPDATE webhook_deliveries SET status = 'FAILED', finished_at = NOW(), next_retry_at = NULL WHERE id = $1`,
+          `UPDATE webhook_deliveries
+           SET status = 'FAILED',
+               response_body = 'Run record no longer exists — delivery terminated',
+               finished_at = NOW(), next_retry_at = NULL
+           WHERE id = $1`,
           [delivery.id]
         );
         continue;

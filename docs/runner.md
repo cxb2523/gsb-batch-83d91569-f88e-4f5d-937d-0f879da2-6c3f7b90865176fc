@@ -178,6 +178,8 @@ Proxy credentials are resolved per run in three tiers: actor-level, then user-le
 
 On run completion the runner delivers webhooks with Apify-compatible payloads. Custom `payload_template` strings go through a template engine (`{{key}}` substitution with dot-notation lookups) that is kept byte-identical to the API's "test webhook" path, so a template verified in the dashboard behaves the same in production. Failed deliveries are picked up by a retry processor that runs every 10 seconds.
 
+Delivery outcomes are recorded on the `webhook_deliveries` row and shown verbatim on the run detail page (`GET /v2/actor-runs/{id}/webhook-deliveries`): URLs targeting loopback, RFC 1918, link-local/cloud-metadata, or unparseable addresses fail immediately with the reason in `response_body` (no request is sent, no retry scheduled); HTTP errors and network failures retry with 10/30/60/300/900 s backoff up to `max_attempts`; a delivery whose webhook or run row disappears is finalized as `FAILED` with the reason recorded. Retry claims are atomic (one `UPDATE … RETURNING` per batch) and push `next_retry_at` 600 s out, so two runners polling the same batch can't double-send.
+
 ---
 
 ## Auto-scaling

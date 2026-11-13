@@ -355,6 +355,10 @@ describe('processWebhookRetries', () => {
 
     const [failSql, failParams] = db.query.mock.calls[2] as [string, unknown[]];
     expect(failSql).toContain("status = 'FAILED'");
+    expect(failSql).toContain('next_retry_at = NULL');
+    // The termination reason is recorded on the row itself (response_body),
+    // so the dashboard can show it without re-deriving webhook state.
+    expect(failSql).toContain('Webhook was deleted before this delivery completed');
     expect(failParams).toEqual(['dlv-1']);
     expect(db.query).toHaveBeenCalledTimes(3);
   });
@@ -375,6 +379,7 @@ describe('processWebhookRetries', () => {
     const [failSql, failParams] = db.query.mock.calls[3] as [string, unknown[]];
     expect(failSql).toContain("status = 'FAILED'");
     expect(failSql).toContain('next_retry_at = NULL');
+    expect(failSql).toContain('Run record no longer exists');
     expect(failParams).toEqual(['dlv-1']);
     expect(db.query).toHaveBeenCalledTimes(4);
   });

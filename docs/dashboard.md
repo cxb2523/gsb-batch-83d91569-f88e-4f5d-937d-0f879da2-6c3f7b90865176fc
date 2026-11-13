@@ -33,6 +33,7 @@ In the Docker Compose stack the dashboard listens on port 3001 (set via `PORT=30
 - Abort running Actors
 - **Cost column** (since 1.4.0): per-run cost at a glance — `$0` for self-hosted runs, a dollar figure for droplet-attributed runs, `—` while running or when attribution was never recorded
 - **Cost Analysis card** on run details (since 1.3.0): items scraped, your cost, what the same run would cost on Apify, and savings % — shown once a run reaches a terminal status
+- **Webhooks tab** on run details: every delivery the run triggered (global, actor-scoped, and per-run subscriptions) with its status, attempt count vs. cap, HTTP response code, response summary, and the next scheduled retry — or the recorded termination reason (private-network block, webhook deleted, retries exhausted). A finished run with no matching subscription says so explicitly.
 
 ### Builds
 

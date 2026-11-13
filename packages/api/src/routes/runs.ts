@@ -403,6 +403,62 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
+   * GET /v2/actor-runs/:runId/webhook-deliveries - Every webhook delivery
+   * this run triggered (user-scoped via run ownership).
+   *
+   * Unlike GET /v2/webhooks/:id/deliveries (per-webhook history), this is
+   * keyed by RUN: it surfaces deliveries from every webhook that matched —
+   * global, actor-scoped, and per-run — which is what the run detail page
+   * needs to explain "where did this run's events go". A run that finished
+   * with no matching subscription simply returns an empty items list; the
+   * dashboard renders that as "no matching subscriptions" rather than
+   * hiding the section.
+   *
+   * Each item carries the delivery row verbatim (status, attempt/max,
+   * response status+summary, next_retry_at) plus `requestUrl` resolved
+   * through a LEFT JOIN — NULL when the webhook was deleted after the
+   * delivery was queued, so the UI can say "webhook deleted" instead of
+   * rendering a blank target. The terminal-state reasons (private-network
+   * block, webhook/run deleted, retries exhausted) are written onto the
+   * row by the runner at finalization time; this endpoint reports them,
+   * it does not recompute them.
+   */
+  fastify.get<{ Params: { runId: string } }>(
+    '/actor-runs/:runId/webhook-deliveries',
+    async (request, reply) => {
+      const { runId } = request.params;
+
+      const run = await query<{ id: string }>('SELECT id FROM runs WHERE id = $1 AND user_id = $2', [
+        runId,
+        request.user!.id,
+      ]);
+      if (!run.rows[0]) {
+        reply.status(404);
+        return { error: { type: 'record-not-found', message: 'Run not found' } };
+      }
+
+      const result = await query<RunDeliveryRow>(
+        `SELECT d.*, w.request_url AS webhook_request_url
+         FROM webhook_deliveries d
+         LEFT JOIN webhooks w ON w.id = d.webhook_id
+         WHERE d.run_id = $1
+         ORDER BY d.created_at ASC, d.id ASC`,
+        [runId]
+      );
+
+      return {
+        data: {
+          total: result.rows.length,
+          count: result.rows.length,
+          offset: 0,
+          limit: result.rows.length,
+          items: result.rows.map(formatRunDelivery),
+        },
+      };
+    }
+  );
+
+  /**
    * GET /v2/actor-runs/costs?ids=a,b,c - Batch your-cost for the runs list.
    *
    * Returns only { yourCostUsd } per run — the runs table shows a single
@@ -1280,6 +1336,56 @@ async function queueAbortedWebhooks(client: pg.PoolClient, run: RunRow): Promise
       [nanoid(), webhook.id, run.id, eventType]
     );
   }
+}
+
+/**
+ * Delivery row as returned by the run-keyed deliveries endpoint: the
+ * webhook_deliveries columns plus the webhook's request_url resolved via
+ * LEFT JOIN (NULL when the webhook no longer exists).
+ */
+interface RunDeliveryRow {
+  id: string;
+  // Nullable: ON DELETE SET NULL keeps the delivery row when its webhook
+  // is deleted — the row then carries the termination reason.
+  webhook_id: string | null;
+  run_id: string | null;
+  event_type: string;
+  status: string;
+  attempt_count: number;
+  max_attempts: number;
+  next_retry_at: Date | null;
+  response_status: number | null;
+  response_body: string | null;
+  request_body: string | null;
+  created_at: Date;
+  finished_at: Date | null;
+  webhook_request_url: string | null;
+}
+
+/**
+ * Wire shape for GET /v2/actor-runs/:runId/webhook-deliveries. Field names
+ * mirror formatDelivery in routes/webhooks.ts (the dashboard's
+ * WebhookDelivery type keys off both) with one addition: `requestUrl`,
+ * the delivery's target. Null when the webhook was deleted after queueing —
+ * the row's own response_body then carries the termination reason.
+ */
+function formatRunDelivery(row: RunDeliveryRow) {
+  return {
+    id: row.id,
+    webhookId: row.webhook_id,
+    runId: row.run_id,
+    eventType: row.event_type,
+    status: row.status,
+    attemptCount: row.attempt_count,
+    maxAttempts: row.max_attempts,
+    nextRetryAt: row.next_retry_at,
+    requestBody: row.request_body,
+    responseStatus: row.response_status,
+    responseBody: row.response_body,
+    requestUrl: row.webhook_request_url,
+    createdAt: row.created_at,
+    finishedAt: row.finished_at,
+  };
 }
 
 export function formatRun(row: RunRow) {
