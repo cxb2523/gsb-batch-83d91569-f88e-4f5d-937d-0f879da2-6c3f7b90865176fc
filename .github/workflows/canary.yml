@@ -1,0 +1,154 @@
+name: canary
+
+# One real run a week (Mondays), in two halves that need different things.
+#
+# 1. THE LISTING — always live. The listing comes from Constructor.io's browse
+#    API, which answered a plain request with no proxy from a residential
+#    address (2026-09-24). Whether it answers a GitHub runner's DATACENTRE
+#    address is exactly what this half measures. Three pages or more, so
+#    pagination is exercised: with one page it never is.
+# 2. A PRODUCT PAGE — needs the POTTERYBARN_PROXY secret (a US exit).
+#    potterybarn.com refuses every non-US address, and a runner is one. Without
+#    the secret this half FAILS with an ::error:: naming it: a skipped half
+#    reported green meant product pages went untested while the badge said
+#    otherwise.
+permissions:
+  contents: read
+
+on:
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    env:
+      # `secrets` is not available in a job-level `if`; test through env.
+      HAS_PROXY: ${{ secrets.POTTERYBARN_PROXY != '' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install (no browser needed for either half)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Listing — live, no secret needed
+        run: |
+          set +e
+          python api_scraper.py --group-id sofa --pages 3 --out canary_listing --verbose
+          echo "listing_rc=$?" >> "$GITHUB_ENV"
+          set -e
+
+      - name: Assert the listing data, not just the exit code
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          if not os.path.exists("canary_listing.latest_attempt.meta.json"):
+              print("::error::canary_listing: exit %s and no attempt sidecar was written" % os.environ.get("listing_rc"))
+              sys.exit(1)
+          meta = json.load(open("canary_listing.latest_attempt.meta.json"))
+          facts = meta.get("transport_facts", {})
+          print("exit code:", os.environ.get("listing_rc"), "states:", facts.get("states"))
+          fails = []
+          if os.environ.get("listing_rc") != "0":
+              fails.append("exit code %s" % os.environ.get("listing_rc"))
+          if meta["status"] != "complete":
+              fails.append("status=%s stop=%s" % (meta["status"], meta["stop_reason"]))
+          else:
+              rows = json.load(open("canary_listing.json"))
+              if meta["pages_completed"] < 3:
+                  fails.append("pages_completed=%s" % meta["pages_completed"])
+              # The API returned 3 x 24 RESULTS. Distinct products can be fewer:
+              # its order sometimes shifts mid-run and a product repeats on a
+              # later page (canary 2026-09-26: 1 repeat, 09-28: 4). The scraper
+              # dedupes and reports it; that is the site, not a regression.
+              seen = facts.get("results_seen")
+              repeats = facts.get("repeated_results") or 0
+              if seen != 72:
+                  fails.append("results_seen=%s, want 72 (3 x 24)" % seen)
+              if isinstance(seen, int) and len(rows) != seen - repeats:
+                  fails.append("rows=%d but results_seen-repeated=%d" % (len(rows), seen - repeats))
+              if repeats:
+                  print("::notice::%d of %d results repeated an earlier page's product "
+                        "(the API's order shifted); %d distinct kept" % (repeats, seen, len(rows)))
+              if any(r["sku"] not in (r["product_id"], r["sub_group_id"]) for r in rows):
+                  fails.append("a listing row's sku is neither its product nor its sub-group")
+              if sum(r["price"] is not None for r in rows) < len(rows):
+                  fails.append("a row has no price")
+              if {r["currency"] for r in rows} != {"USD"}:
+                  fails.append("currency set %r" % {r["currency"] for r in rows})
+              if any(r["price"] < 100 for r in rows):
+                  fails.append("a sofa under $100 — cents read as dollars?")
+              if any(r["original_price"] is not None and r["original_price"] <= r["price"] for r in rows):
+                  fails.append("original_price at or below price")
+              if (facts.get("total_num_results") or 0) < 100:
+                  fails.append("total_num_results=%s" % facts.get("total_num_results"))
+          if fails:
+              print("::error::listing canary failed: %s" % "; ".join(fails))
+              sys.exit(1)
+          print("listing canary OK")
+          PY
+
+      - name: Product page — secret missing
+        if: env.HAS_PROXY != 'true'
+        run: |
+          echo "::error::Product-page half NOT tested: the POTTERYBARN_PROXY secret is not set."
+          echo "potterybarn.com refuses every non-US address (measured 2026-09-23/24) and a"
+          echo "GitHub runner is a datacentre address, so this half needs a US proxy exit."
+          exit 1
+
+      - name: Product page — live
+        if: env.HAS_PROXY == 'true'
+        # The credential goes through the ENVIRONMENT, never a --proxy flag.
+        env:
+          POTTERYBARN_PROXY: ${{ secrets.POTTERYBARN_PROXY }}
+        run: |
+          set +e
+          # --dump-html: a served page that does not parse (2026-10-20: 536 KB,
+          # HTTP 200, classified empty) is only diagnosable from the page itself.
+          python http_scraper.py --url https://www.potterybarn.com/products/delaney-marble-end-table/ \
+            --out canary_product --verbose --dump-html canary_product.html --proxy-budget-mb 10
+          # GITHUB_ENV reaches LATER steps only; the check below is this step.
+          export product_rc=$?
+          echo "product_rc=$product_rc" >> "$GITHUB_ENV"
+          set -e
+          python - <<'PY'
+          import json, os, sys
+          if not os.path.exists("canary_product.latest_attempt.meta.json"):
+              print("::error::canary_product: exit %s and no attempt sidecar was written" % os.environ.get("product_rc"))
+              sys.exit(1)
+          meta = json.load(open("canary_product.latest_attempt.meta.json"))
+          if os.environ.get("product_rc") != "0" or meta["status"] != "complete":
+              print("::error::product canary: exit %s, %s / %s" % (
+                  os.environ.get("product_rc"), meta["status"], meta["stop_reason"]))
+              sys.exit(1)
+          rows = json.load(open("canary_product.json"))
+          if not rows or any(r["price"] is None or not r["sku"] for r in rows):
+              print("::error::product canary: %d rows, or a row without sku/price" % len(rows))
+              sys.exit(1)
+          check = meta["transport_facts"]["products"][0]["sku_check"]
+          if not check["closes"]:
+              print("::error::SKU count did not close: %r" % check); sys.exit(1)
+          print("product canary OK:", check)
+          PY
+
+      # What the product run sent through POTTERYBARN_PROXY, read from its
+      # sidecar; red when it stopped at the 10 MB budget (stop_reason
+      # proxy_budget_exceeded). The listing step above uses no proxy.
+      - name: Proxy traffic
+        if: always() && env.HAS_PROXY == 'true'
+        run: python3 .github/proxy_traffic_summary.py canary_product "live (product)" 10
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: canary-output
+          path: |
+            canary_*.json
+            canary_*.csv
+            canary_product_p*.html
+          if-no-files-found: ignore
