@@ -5,10 +5,12 @@ from __future__ import annotations
 import contextlib
 import http.server
 import io
+import json
 import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -95,8 +97,28 @@ class HttpCheckTests(unittest.TestCase):
         self.assertEqual(result.status, check_links.STATUS_BLOCKED)
         self.assertIn("bot protection", result.detail)
 
-    def test_rate_limit_is_blocked(self):
-        self.assertEqual(self.check("/rate-limited").status, check_links.STATUS_BLOCKED)
+    def test_rate_limit_is_rate_limited(self):
+        self.assertEqual(self.check("/rate-limited").status, check_links.STATUS_RATE_LIMITED)
+
+    def test_rate_limit_after_retries_is_rate_limited(self):
+        sleeps: list[float] = []
+        result = self.check(
+            "/rate-limited", retries=2, sleep=lambda seconds: sleeps.append(seconds)
+        )
+        self.assertEqual(result.status, check_links.STATUS_RATE_LIMITED)
+        self.assertEqual(result.http_status, 429)
+        self.assertEqual(result.attempts, 3)
+        self.assertIn("rate limited", result.detail)
+        self.assertEqual(len(sleeps), 2)
+
+    def test_rate_limit_is_not_a_failure_by_default(self):
+        limited = check_links.CheckResult(
+            target=check_links.LinkTarget(url=self.base + "/rate-limited"),
+            status=check_links.STATUS_RATE_LIMITED,
+            http_status=429,
+        )
+        self.assertFalse(check_links.has_failures([limited]))
+        self.assertTrue(check_links.has_failures([limited], fail_on_blocked=True))
 
     def test_server_error_is_error(self):
         result = self.check("/boom")
@@ -132,6 +154,252 @@ class HttpCheckTests(unittest.TestCase):
         self.assertEqual(result.status, check_links.STATUS_ERROR)
 
 
+class ConcurrencyTracker:
+    """Counts requests in flight and records when each one arrived."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+        self.starts: list[float] = []
+
+    def enter(self) -> None:
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.starts.append(time.monotonic())
+
+    def leave(self) -> None:
+        with self._lock:
+            self.active -= 1
+
+
+class TrackingHandler(http.server.BaseHTTPRequestHandler):
+    tracker: ConcurrencyTracker = None  # type: ignore[assignment]
+    delay = 0.0
+    barrier: threading.Barrier | None = None
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        if self.path.startswith("/no-head"):
+            self.tracker.enter()
+            try:
+                self.send_response(405)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            finally:
+                self.tracker.leave()
+            return
+        self.respond()
+
+    def do_GET(self) -> None:  # noqa: N802
+        self.respond()
+
+    def respond(self) -> None:
+        self.tracker.enter()
+        status = 200
+        try:
+            if self.barrier is not None:
+                try:
+                    self.barrier.wait(timeout=5)
+                except threading.BrokenBarrierError:
+                    status = 500
+            if self.delay:
+                time.sleep(self.delay)
+        finally:
+            self.tracker.leave()
+        self.send_response(status)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args) -> None:
+        return
+
+
+def serve(handler_class, host: str = "127.0.0.1"):
+    server = http.server.ThreadingHTTPServer((host, 0), handler_class)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+class PerHostSerialisationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tracker = ConcurrencyTracker()
+        handler = type(
+            "OneHostHandler",
+            (TrackingHandler,),
+            {"tracker": self.tracker, "delay": 0.15, "barrier": None},
+        )
+        self.server, self.thread = serve(handler)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+    def test_same_host_requests_run_one_at_a_time(self):
+        targets = [
+            check_links.LinkTarget(url=f"{self.base}/page-{index}") for index in range(4)
+        ]
+        results = check_links.run_checks(
+            targets,
+            jobs=4,
+            timeout=5,
+            retries=0,
+            insecure=False,
+            allowlist=[],
+            interval=0,
+        )
+        self.assertTrue(all(result.status == check_links.STATUS_OK for result in results))
+        self.assertEqual(self.tracker.max_active, 1)
+
+    def test_interval_is_a_fixed_wait_before_every_request(self):
+        sleeps: list[float] = []
+        limiter = check_links.HostLimiter(0.25, sleep=sleeps.append)
+        check_links.check_http(
+            self.base + "/ok", timeout=5, retries=0, limiter=limiter, sleep=lambda _s: None
+        )
+        self.assertEqual(sleeps, [0.25])
+
+    def test_interval_also_paces_the_get_fallback(self):
+        sleeps: list[float] = []
+        limiter = check_links.HostLimiter(0.1, sleep=sleeps.append)
+        result = check_links.check_http(
+            self.base + "/no-head", timeout=5, retries=0, limiter=limiter, sleep=lambda _s: None
+        )
+        self.assertEqual(result.status, check_links.STATUS_OK)
+        self.assertEqual(len(sleeps), 2)  # HEAD + GET fallback
+
+    def test_default_interval_is_below_default_timeout(self):
+        self.assertLess(check_links.DEFAULT_INTERVAL, check_links.DEFAULT_TIMEOUT)
+
+    def test_same_host_comparison_ignores_www_and_port(self):
+        self.assertEqual(check_links.host_key("https://www.example.com:8443/a"), "example.com")
+        self.assertEqual(check_links.host_key("http://example.com/b"), "example.com")
+
+
+class CrossHostConcurrencyTests(unittest.TestCase):
+    def test_different_hosts_run_in_parallel(self):
+        # 127.0.0.1 and 127.0.0.2 are two distinct hosts on the loopback device.
+        tracker = ConcurrencyTracker()
+        barrier = threading.Barrier(2)
+        handler = type(
+            "TwoHostHandler",
+            (TrackingHandler,),
+            {"tracker": tracker, "delay": 0.0, "barrier": barrier},
+        )
+        first, first_thread = serve(handler, "127.0.0.1")
+        second, second_thread = serve(handler, "127.0.0.2")
+        try:
+            targets = [
+                check_links.LinkTarget(url=f"http://127.0.0.1:{first.server_address[1]}/a"),
+                check_links.LinkTarget(url=f"http://127.0.0.2:{second.server_address[1]}/b"),
+            ]
+            results = check_links.run_checks(
+                targets,
+                jobs=2,
+                timeout=5,
+                retries=0,
+                insecure=False,
+                allowlist=[],
+                interval=0,
+            )
+        finally:
+            for server, thread in ((first, first_thread), (second, second_thread)):
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+        # The barrier only releases when both hosts are hit at the same time.
+        self.assertFalse(barrier.broken)
+        self.assertEqual([result.status for result in results], [check_links.STATUS_OK] * 2)
+        self.assertEqual(tracker.max_active, 2)
+
+
+class RateLimitReportingTests(unittest.TestCase):
+    def limited(self, url: str = "https://example.com/x") -> check_links.CheckResult:
+        return check_links.CheckResult(
+            target=check_links.LinkTarget(url=url, locations=[check_links.Location("README.md", 1)]),
+            status=check_links.STATUS_RATE_LIMITED,
+            http_status=429,
+            detail="HTTP 429 (rate limited after 3 attempts)",
+            attempts=3,
+        )
+
+    def test_text_report_has_its_own_section(self):
+        report = check_links.render_text([self.limited()], ["README.md"], 0.1)
+        self.assertIn("Rate limited", report)
+        self.assertIn("1 rate_limited", report)
+        self.assertIn("passed", report)
+
+    def test_markdown_report_has_its_own_section(self):
+        report = check_links.render_markdown([self.limited()], ["README.md"], 0.1)
+        self.assertIn("⏳ rate_limited", report)
+        self.assertIn("Rate limited (HTTP 429)", report)
+        self.assertNotIn("Links that need fixing", report)
+
+    def test_json_report_carries_the_category(self):
+        payload = json.loads(check_links.render_json([self.limited()]))
+        self.assertEqual(payload["summary"]["rate_limited"], 1)
+        self.assertFalse(payload["failed"])
+        self.assertEqual(payload["results"][0]["status"], "rate_limited")
+        self.assertEqual(payload["results"][0]["http_status"], 429)
+
+    def test_json_failed_flag_follows_fail_on_blocked(self):
+        payload = json.loads(check_links.render_json([self.limited()], fail_on_blocked=True))
+        self.assertTrue(payload["failed"])
+
+    def test_text_summary_follows_fail_on_blocked(self):
+        self.assertIn(
+            "FAILED", check_links.render_text([self.limited()], ["README.md"], 0.1, fail_on_blocked=True)
+        )
+
+    def test_text_summary_ignores_errors_with_no_fail_on_error(self):
+        error = check_links.CheckResult(
+            target=check_links.LinkTarget(
+                url="https://example.com/y", locations=[check_links.Location("README.md", 2)]
+            ),
+            status=check_links.STATUS_ERROR,
+            detail="timed out",
+        )
+        self.assertIn(
+            "FAILED", check_links.render_text([error], ["README.md"], 0.1)
+        )
+        self.assertIn(
+            "passed",
+            check_links.render_text([error], ["README.md"], 0.1, fail_on_error=False),
+        )
+
+
+class CliExitCodeTests(unittest.TestCase):
+    def run_against(self, path: str, handler_class, *extra: str) -> int:
+        server, thread = serve(handler_class)
+        try:
+            directory = Path(tempfile.mkdtemp())
+            page = directory / "README.md"
+            page.write_text(f"# T\n\n[link](http://127.0.0.1:{server.server_address[1]}{path})\n")
+            return silent_run(
+                [str(page), "--interval", "0", "--retries", "1", *extra]
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_rate_limit_does_not_fail_by_default(self):
+        self.assertEqual(self.run_against("/rate-limited", Handler), 0)
+
+    def test_rate_limit_fails_with_fail_on_blocked(self):
+        self.assertEqual(self.run_against("/rate-limited", Handler, "--fail-on-blocked"), 1)
+
+    def test_forbidden_still_fails_with_fail_on_blocked(self):
+        self.assertEqual(self.run_against("/blocked", Handler, "--fail-on-blocked"), 1)
+
+    def test_not_found_still_fails(self):
+        self.assertEqual(self.run_against("/missing", Handler), 1)
+
+
 class ClassificationTests(unittest.TestCase):
     def test_classify_status(self):
         self.assertEqual(check_links.classify_status(200), check_links.STATUS_OK)
@@ -140,8 +408,19 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(check_links.classify_status(404), check_links.STATUS_DEAD)
         self.assertEqual(check_links.classify_status(451), check_links.STATUS_DEAD)
         self.assertEqual(check_links.classify_status(403), check_links.STATUS_BLOCKED)
+        self.assertEqual(check_links.classify_status(429), check_links.STATUS_RATE_LIMITED)
         self.assertEqual(check_links.classify_status(999), check_links.STATUS_BLOCKED)
         self.assertEqual(check_links.classify_status(503), check_links.STATUS_ERROR)
+
+    def test_host_key_ignores_www_and_port(self):
+        self.assertEqual(check_links.host_key("https://www.Example.com:443/x"), "example.com")
+        self.assertEqual(check_links.host_key("http://example.com:8080/y"), "example.com")
+        self.assertEqual(check_links.host_key("https://example.com/x"), "example.com")
+        self.assertEqual(check_links.host_key("http://127.0.0.1:9/"), "127.0.0.1")
+        self.assertNotEqual(
+            check_links.host_key("http://a.example.com/"),
+            check_links.host_key("http://b.example.com/"),
+        )
 
     def test_trivial_redirects(self):
         self.assertTrue(check_links.is_trivial_redirect("https://clay.com", "https://www.clay.com/"))
@@ -279,6 +558,27 @@ class CliTests(unittest.TestCase):
 
     def test_no_input_files_returns_two(self):
         self.assertEqual(silent_run(["/tmp/nope.md", "--local-only"]), 2)
+
+    def test_local_only_makes_no_network_requests(self):
+        directory = Path(tempfile.mkdtemp())
+        path = directory / "README.md"
+        path.write_text("# T\n\n[site](https://example.com/)\n", encoding="utf-8")
+
+        def forbidden(*args, **kwargs):  # pragma: no cover - only runs on a bug
+            raise AssertionError("network request made during --local-only")
+
+        original = check_links._request
+        check_links._request = forbidden
+        try:
+            self.assertEqual(silent_run([str(path), "--local-only", "--quiet"]), 0)
+        finally:
+            check_links._request = original
+
+    def test_negative_interval_is_a_usage_error(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                check_links.run([str(ROOT / "README.md"), "--interval", "-1", "--local-only"])
+        self.assertEqual(caught.exception.code, 2)
 
 
 if __name__ == "__main__":

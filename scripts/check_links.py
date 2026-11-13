@@ -10,23 +10,30 @@ Examples:
     python3 scripts/check_links.py --local-only          # files + anchors only, no network
     python3 scripts/check_links.py --changed-only --base origin/main
     python3 scripts/check_links.py --format markdown --output link-report.md
+    python3 scripts/check_links.py --interval 0.5       # tighter per-host spacing
+
+Requests to the same host are queued one at a time and spaced by --interval
+seconds; different hosts are still checked concurrently up to --jobs. Hosts are
+compared by hostname only, ignoring a leading ``www.`` and the port.
 
 Classification:
-    ok          HTTP 2xx
-    redirect    HTTP 2xx but the URL permanently points somewhere else
-    blocked     HTTP 401/403/405/429/999 — bot protection, not a dead link
-    dead        HTTP 404/410/451 or another client error — must be fixed
-    error       timeout, DNS failure, 5xx after retries
-    allowlisted skipped on purpose, see .github/link-check-allowlist.txt
+    ok           HTTP 2xx
+    redirect     HTTP 2xx but the URL permanently points somewhere else
+    blocked      HTTP 401/403/405/999 — bot protection, not a dead link
+    rate_limited HTTP 429 after every retry — the host throttled us, not a dead link
+    dead         HTTP 404/410/451 or another client error — must be fixed
+    error        timeout, DNS failure, 5xx after retries
+    allowlisted  skipped on purpose, see .github/link-check-allowlist.txt
 
-Exit codes: 0 = every link answered, 1 = dead/broken links (or blocked links with
---fail-on-blocked), 2 = usage error.
+Exit codes: 0 = every link answered, 1 = dead/broken links (or blocked and
+rate-limited links with --fail-on-blocked), 2 = usage error.
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import json
 import os
 import random
@@ -34,6 +41,7 @@ import re
 import ssl
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -57,6 +65,7 @@ USER_AGENT = (
 STATUS_OK = "ok"
 STATUS_REDIRECT = "redirect"
 STATUS_BLOCKED = "blocked"
+STATUS_RATE_LIMITED = "rate_limited"
 STATUS_DEAD = "dead"
 STATUS_ERROR = "error"
 STATUS_ALLOWLISTED = "allowlisted"
@@ -64,18 +73,27 @@ STATUS_SKIPPED = "skipped"
 
 # Servers that answer HEAD with one of these usually answer GET just fine.
 HEAD_FALLBACK_STATUSES = {400, 401, 403, 405, 406, 409, 411, 429, 501, 999}
-BOT_PROTECTION_STATUSES = {401, 402, 403, 405, 406, 409, 418, 429, 999}
+BOT_PROTECTION_STATUSES = {401, 402, 403, 405, 406, 409, 418, 999}
+RATE_LIMITED_STATUS = 429
 DEAD_STATUSES = {404, 410, 451}
 
 STATUS_ICONS = {
     STATUS_OK: "✓",
     STATUS_REDIRECT: "↪",
     STATUS_BLOCKED: "⚠",
+    STATUS_RATE_LIMITED: "⏳",
     STATUS_DEAD: "✖",
     STATUS_ERROR: "✖",
     STATUS_ALLOWLISTED: "·",
     STATUS_SKIPPED: "·",
 }
+
+DEFAULT_TIMEOUT = 15.0
+DEFAULT_INTERVAL = 1.0
+
+# The default pacing must stay well below the request timeout, otherwise a
+# single host would take longer to walk than one request is allowed to take.
+assert DEFAULT_INTERVAL < DEFAULT_TIMEOUT
 
 
 # --------------------------------------------------------------------------- #
@@ -294,25 +312,69 @@ def changed_line_numbers(files: Iterable[Path], base: str) -> Optional[dict[str,
 # --------------------------------------------------------------------------- #
 
 
-def _request(url: str, method: str, timeout: float, insecure: bool) -> tuple[int, str]:
+def _request(
+    url: str, method: str, timeout: float, insecure: bool, limiter: Optional["HostLimiter"] = None
+) -> tuple[int, str]:
     request = urllib.request.Request(url, method=method, headers={"User-Agent": USER_AGENT})
     context = ssl.create_default_context()
     if insecure:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-    with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
-        final_url = response.geturl()
-        response.close()
-        return int(response.status), final_url
+    slot = limiter.slot(url) if limiter is not None else contextlib.nullcontext()
+    with slot:
+        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+            final_url = response.geturl()
+            response.close()
+            return int(response.status), final_url
+
+
+def host_key(url: str) -> str:
+    """The host a URL is grouped under: hostname only, no ``www.``, no port."""
+
+    hostname = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return hostname.removeprefix("www.")
+
+
+class HostLimiter:
+    """Serialise requests per host and pace them by ``interval`` seconds.
+
+    Only one request to a given host is in flight at a time, while requests to
+    different hosts stay independent and can run concurrently. Every request
+    waits ``interval`` seconds first, so a host never sees back-to-back hits
+    and the checker stays below rate limits and bot-protection thresholds.
+    """
+
+    def __init__(self, interval: float, *, sleep=time.sleep) -> None:
+        self.interval = max(0.0, float(interval))
+        self._sleep = sleep
+        self._guard = threading.Lock()
+        self._locks: dict[str, threading.Lock] = {}
+
+    def _lock_for(self, host: str) -> threading.Lock:
+        with self._guard:
+            lock = self._locks.get(host)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[host] = lock
+            return lock
+
+    @contextlib.contextmanager
+    def slot(self, url: str):
+        lock = self._lock_for(host_key(url))
+        with lock:
+            if self.interval:
+                self._sleep(self.interval)
+            yield
 
 
 def check_http(
     url: str,
     *,
-    timeout: float = 15.0,
+    timeout: float = DEFAULT_TIMEOUT,
     retries: int = 2,
     insecure: bool = False,
     sleep=time.sleep,
+    limiter: Optional[HostLimiter] = None,
 ) -> CheckResult:
     """Request a URL, retrying transient failures. Never raises."""
 
@@ -323,16 +385,16 @@ def check_http(
     for attempt in range(retries + 1):
         attempts = attempt + 1
         try:
-            status, final_url = _request(url, "HEAD", timeout, insecure)
+            status, final_url = _request(url, "HEAD", timeout, insecure, limiter)
             if status in HEAD_FALLBACK_STATUSES:
-                status, final_url = _request(url, "GET", timeout, insecure)
+                status, final_url = _request(url, "GET", timeout, insecure, limiter)
         except urllib.error.HTTPError as error:
             status = int(error.code)
             final_url = error.geturl()
             last_error = f"HTTP {status}"
             if status in HEAD_FALLBACK_STATUSES:
                 try:
-                    status, final_url = _request(url, "GET", timeout, insecure)
+                    status, final_url = _request(url, "GET", timeout, insecure, limiter)
                 except urllib.error.HTTPError as get_error:
                     status = int(get_error.code)
                     final_url = get_error.geturl()
@@ -383,10 +445,16 @@ def check_http(
             sleep(min(8.0, 0.75 * (2**attempt)) + random.uniform(0, 0.25))
 
     kind = classify_status(last_status) if last_status else STATUS_ERROR
-    detail = last_error or (f"HTTP {last_status}" if last_status else "no response")
+    if kind == STATUS_RATE_LIMITED:
+        noun = "attempt" if attempts == 1 else "attempts"
+        detail = f"HTTP 429 (rate limited after {attempts} {noun})"
+    else:
+        detail = last_error or (f"HTTP {last_status}" if last_status else "no response")
     return CheckResult(
         target=LinkTarget(url=url),
-        status=kind if kind in {STATUS_BLOCKED, STATUS_DEAD, STATUS_ERROR} else STATUS_ERROR,
+        status=kind
+        if kind in {STATUS_BLOCKED, STATUS_RATE_LIMITED, STATUS_DEAD, STATUS_ERROR}
+        else STATUS_ERROR,
         http_status=last_status or None,
         detail=detail,
         attempts=attempts,
@@ -398,6 +466,8 @@ def classify_status(status: int) -> str:
         return STATUS_OK
     if 300 <= status < 400:
         return STATUS_REDIRECT
+    if status == RATE_LIMITED_STATUS:
+        return STATUS_RATE_LIMITED
     if status in BOT_PROTECTION_STATUSES:
         return STATUS_BLOCKED
     if status in DEAD_STATUSES or 400 <= status < 500:
@@ -435,6 +505,9 @@ def run_checks(
     retries: int,
     insecure: bool,
     allowlist: list[AllowlistEntry],
+    interval: float = DEFAULT_INTERVAL,
+    sleep=time.sleep,
+    limiter: Optional[HostLimiter] = None,
 ) -> list[CheckResult]:
     results: list[CheckResult] = []
     pending: list[LinkTarget] = []
@@ -456,23 +529,48 @@ def run_checks(
     if not pending:
         return results
 
+    if limiter is None:
+        limiter = HostLimiter(interval, sleep=sleep)
+
+    # Group by host so a host with many links cannot hog the pool: each host
+    # gets one worker that walks its links serially, while other hosts are
+    # checked in parallel by the remaining workers.
+    by_host: dict[str, list[LinkTarget]] = {}
+    for target in pending:
+        by_host.setdefault(host_key(target.url), []).append(target)
+
+    def check_host(host_targets: list[LinkTarget]) -> list[CheckResult]:
+        return [
+            check_http(
+                target.url,
+                timeout=timeout,
+                retries=retries,
+                insecure=insecure,
+                sleep=sleep,
+                limiter=limiter,
+            )
+            for target in host_targets
+        ]
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
         futures = {
-            pool.submit(
-                check_http, target.url, timeout=timeout, retries=retries, insecure=insecure
-            ): target
-            for target in pending
+            pool.submit(check_host, host_targets): host_targets
+            for host_targets in by_host.values()
         }
         for future in concurrent.futures.as_completed(futures):
-            target = futures[future]
+            host_targets = futures[future]
             try:
-                result = future.result()
+                host_results = future.result()
             except Exception as exc:  # noqa: BLE001 - defensive programming
-                result = CheckResult(
-                    target=target, status=STATUS_ERROR, detail=f"{type(exc).__name__}: {exc}"
-                )
-            result.target = target
-            results.append(result)
+                host_results = [
+                    CheckResult(
+                        target=target, status=STATUS_ERROR, detail=f"{type(exc).__name__}: {exc}"
+                    )
+                    for target in host_targets
+                ]
+            for result, target in zip(host_results, host_targets):
+                result.target = target
+                results.append(result)
 
     results.sort(key=lambda item: (ORDER.get(item.status, 9), item.url))
     return results
@@ -482,10 +580,11 @@ ORDER = {
     STATUS_DEAD: 0,
     STATUS_ERROR: 1,
     STATUS_BLOCKED: 2,
-    STATUS_REDIRECT: 3,
-    STATUS_OK: 4,
-    STATUS_ALLOWLISTED: 5,
-    STATUS_SKIPPED: 6,
+    STATUS_RATE_LIMITED: 3,
+    STATUS_REDIRECT: 4,
+    STATUS_OK: 5,
+    STATUS_ALLOWLISTED: 6,
+    STATUS_SKIPPED: 7,
 }
 
 
@@ -507,7 +606,14 @@ def result_line(result: CheckResult) -> str:
     return f"{icon} {result.target.display}  {result.url}{detail}"
 
 
-def render_text(results: list[CheckResult], files: list[str], elapsed: float) -> str:
+def render_text(
+    results: list[CheckResult],
+    files: list[str],
+    elapsed: float,
+    *,
+    fail_on_blocked: bool = False,
+    fail_on_error: bool = True,
+) -> str:
     counts = count_by_status(results)
     total = len(results)
     lines = [
@@ -515,10 +621,12 @@ def render_text(results: list[CheckResult], files: list[str], elapsed: float) ->
         "",
     ]
 
+    note = "" if fail_on_blocked else " (not counted as failures)"
     sections = [
         (STATUS_DEAD, "Dead links"),
         (STATUS_ERROR, "Unreachable links"),
-        (STATUS_BLOCKED, "Blocked by bot protection (not counted as failures)"),
+        (STATUS_BLOCKED, f"Blocked by bot protection{note}"),
+        (STATUS_RATE_LIMITED, f"Rate limited, HTTP 429{note}"),
         (STATUS_REDIRECT, "Redirects"),
     ]
     for status, title in sections:
@@ -533,7 +641,8 @@ def render_text(results: list[CheckResult], files: list[str], elapsed: float) ->
     summary = " ".join(
         f"{counts[status]} {status}" for status in ORDER if status in counts
     )
-    lines.append(f"Summary: {summary or 'no links'} — {'FAILED' if has_failures(results) else 'passed'}")
+    failed = has_failures(results, fail_on_blocked=fail_on_blocked, fail_on_error=fail_on_error)
+    lines.append(f"Summary: {summary or 'no links'} — {'FAILED' if failed else 'passed'}")
     return "\n".join(lines)
 
 
@@ -574,13 +683,36 @@ def render_markdown(results: list[CheckResult], files: list[str], elapsed: float
             lines.append(f"| {result.target.display} | <{result.url}> | {result.http_status} |")
         lines += ["", "</details>"]
 
+    rate_limited = [result for result in results if result.status == STATUS_RATE_LIMITED]
+    if rate_limited:
+        lines += [
+            "",
+            "<details><summary>Rate limited (HTTP 429)</summary>",
+            "",
+            f"The host kept answering HTTP 429 after {rate_limited[0].attempts or 1} request(s); "
+            "these links are not counted as failures unless --fail-on-blocked is set.",
+            "",
+            "| File | URL | HTTP |",
+            "| --- | --- | --- |",
+        ]
+        for result in rate_limited:
+            lines.append(f"| {result.target.display} | <{result.url}> | {result.http_status} |")
+        lines += ["", "</details>"]
+
     return "\n".join(lines)
 
 
-def render_json(results: list[CheckResult]) -> str:
+def render_json(
+    results: list[CheckResult],
+    *,
+    fail_on_blocked: bool = False,
+    fail_on_error: bool = True,
+) -> str:
     payload = {
         "summary": count_by_status(results),
-        "failed": has_failures(results),
+        "failed": has_failures(
+            results, fail_on_blocked=fail_on_blocked, fail_on_error=fail_on_error
+        ),
         "results": [
             {
                 "url": result.url,
@@ -618,7 +750,7 @@ def has_failures(results: Iterable[CheckResult], fail_on_blocked: bool = False, 
             return True
         if result.status == STATUS_ERROR and fail_on_error:
             return True
-        if result.status == STATUS_BLOCKED and fail_on_blocked:
+        if result.status in (STATUS_BLOCKED, STATUS_RATE_LIMITED) and fail_on_blocked:
             return True
     return False
 
@@ -655,7 +787,18 @@ def run(argv: Optional[Iterable[str]] = None) -> int:
     )
     parser.add_argument("files", nargs="*", help=f"Markdown files (default: {' '.join(DEFAULT_FILES)})")
     parser.add_argument("--jobs", type=int, default=8, help="parallel requests (default: 8)")
-    parser.add_argument("--timeout", type=float, default=15.0, help="per-request timeout in seconds")
+    parser.add_argument(
+        "--timeout", type=float, default=DEFAULT_TIMEOUT, help="per-request timeout in seconds"
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=DEFAULT_INTERVAL,
+        help=(
+            "seconds to wait before every request to a host "
+            f"(default: {DEFAULT_INTERVAL}; keep it below --timeout)"
+        ),
+    )
     parser.add_argument("--retries", type=int, default=2, help="retries for timeouts and 5xx")
     parser.add_argument(
         "--allowlist",
@@ -688,7 +831,7 @@ def run(argv: Optional[Iterable[str]] = None) -> int:
         help="append the markdown report to $GITHUB_STEP_SUMMARY",
     )
     parser.add_argument(
-        "--fail-on-blocked", action="store_true", help="fail when a host blocks the checker"
+        "--fail-on-blocked", action="store_true", help="fail when a host blocks or rate-limits the checker"
     )
     parser.add_argument(
         "--no-fail-on-error",
@@ -698,6 +841,15 @@ def run(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--insecure", action="store_true", help="skip TLS verification")
     parser.add_argument("--quiet", action="store_true", help="only print the summary")
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.interval < 0:
+        parser.error("--interval must not be negative")
+    if args.interval >= args.timeout:
+        print(
+            f"warning: --interval ({args.interval}s) is not below --timeout "
+            f"({args.timeout}s); the check will be slow",
+            file=sys.stderr,
+        )
 
     files = [Path(name) for name in (args.files or DEFAULT_FILES)]
     files = [path for path in files if path.exists()]
@@ -740,6 +892,7 @@ def run(argv: Optional[Iterable[str]] = None) -> int:
             retries=args.retries,
             insecure=args.insecure,
             allowlist=allowlist,
+            interval=args.interval,
         )
 
     results.extend(local_problems)
@@ -747,12 +900,22 @@ def run(argv: Optional[Iterable[str]] = None) -> int:
     elapsed = time.time() - started
 
     file_names = [str(path) for path in files]
+    fail_on_blocked = args.fail_on_blocked
+    fail_on_error = not args.no_fail_on_error
     if args.format == "json":
-        report = render_json(results)
+        report = render_json(
+            results, fail_on_blocked=fail_on_blocked, fail_on_error=fail_on_error
+        )
     elif args.format == "markdown":
         report = render_markdown(results, file_names, elapsed)
     else:
-        report = render_text(results, file_names, elapsed)
+        report = render_text(
+            results,
+            file_names,
+            elapsed,
+            fail_on_blocked=fail_on_blocked,
+            fail_on_error=fail_on_error,
+        )
 
     if args.quiet and args.format == "text":
         report = report.splitlines()[-1]
@@ -773,8 +936,8 @@ def run(argv: Optional[Iterable[str]] = None) -> int:
 
     failed = has_failures(
         results,
-        fail_on_blocked=args.fail_on_blocked,
-        fail_on_error=not args.no_fail_on_error,
+        fail_on_blocked=fail_on_blocked,
+        fail_on_error=fail_on_error,
     )
     return 1 if failed else 0
 

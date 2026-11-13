@@ -66,6 +66,7 @@ Without `make`, call the scripts directly:
 python3 scripts/lint_readme.py README.md --strict
 python3 scripts/check_links.py --local-only
 python3 scripts/check_links.py                       # full link check
+python3 scripts/check_links.py --interval 2          # slower, gentler per-host pacing
 python3 scripts/lint_readme.py --list-rules          # every rule and its severity
 ```
 
@@ -74,7 +75,7 @@ python3 scripts/lint_readme.py --list-rules          # every rule and its severi
 | Checker | What it guarantees |
 | --- | --- |
 | `scripts/lint_readme.py` | Entry format, icon/link agreement, no duplicate tools or URLs, no tracking parameters, description style, table of contents in sync with the headings, no broken anchors, repository files present |
-| `scripts/check_links.py` | Every URL answers over HTTP: 404/410 fail the build, bot-protected hosts are reported but do not fail, redirects are listed; local files and heading anchors must exist |
+| `scripts/check_links.py` | Every URL answers over HTTP: 404/410 fail the build, bot-protected hosts and rate-limited (HTTP 429) links are reported but do not fail, redirects are listed; local files and heading anchors must exist |
 | `scripts/check_pr_title.py` | The PR title starts with a verb (`Add`, `Update`, `Fix`, `Remove`, `Docs`, `Chore`) |
 
 * **Lint failures** (`✖ error`) block the merge. `--strict` also blocks on
