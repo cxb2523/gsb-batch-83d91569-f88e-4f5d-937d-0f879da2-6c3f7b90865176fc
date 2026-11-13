@@ -1,0 +1,607 @@
+#!/usr/bin/env python3
+"""
+tractorsupply-scraper — pyppeteer edition (secondary engine)
+============================================================
+
+The same scrape as playwright_scraper.py, driven through pyppeteer. It must
+agree with its twins on exit codes, run status, and whether a run crashes or
+spends money. The fetch loop that decides all three lives in page_flow.py
+and is shared, so this file is browser plumbing and nothing else: how
+pyppeteer navigates, reads a document and issues a fetch().
+
+    --mode category   a catalogue listing, /tsc/catalog/{slug}
+    --mode search     a keyword search,    /tsc/search/{keyword}
+
+See playwright_scraper.py's header for why every request is a same-origin
+fetch() from the homepage rather than a rendered page.
+
+Two things to know before choosing this engine:
+
+  * **pyppeteer is effectively unmaintained** and its own README points at
+    Playwright. It is here for parity, and for anyone who already has it.
+  * Unlike the Selenium engine, it CAN authenticate a remote CDP endpoint
+    (`browserWSEndpoint` takes a full `ws://user:pass@host:port`), which is
+    the one client tractorsupply.com served in testing.
+
+Usage
+-----
+    python puppeteer_scraper.py --category poultry-feed-treats --pages 3
+
+Requires: pip install -r requirements.txt -r requirements-puppeteer.txt
+          (pyppeteer downloads its own Chromium on first run)
+"""
+
+import argparse
+import asyncio
+import concurrent.futures
+import logging
+import queue
+import re
+import sys
+import threading
+import time
+from typing import Optional
+
+# At module level, deliberately, and not inside the launch path. The offline
+# suite guards `import puppeteer_scraper` behind try/except ImportError and
+# REPORTS the skip, and CI's engine-smoke job fails on any reported skip.
+# That only works if importing this module actually requires the driver.
+from pyppeteer import launch, connect
+
+from product_parser import MAX_PAGE_SIZE, MODES, SORTS, DEFAULT_ZIP
+from output_writer import EXIT_API_ERROR
+import page_flow
+from proxy_pool import (from_args as proxy_pool_from_args, mask, ROTATE_MODES,
+                        ProxyError, split_credentials)
+import env_config
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("puppeteer_scraper")
+
+# Every await in this file goes through the bridge below with a timeout, so a
+# hung remote call ends the operation instead of the run. pyppeteer provides
+# no connect timeout of its own.
+DEFAULT_OP_TIMEOUT = 120
+CONNECT_TIMEOUT = 30
+
+# Chromium's own names for a proxy that could not be used.
+_PROXY_ERROR_MARKERS = (
+    "ERR_PROXY_CONNECTION_FAILED",
+    "ERR_TUNNEL_CONNECTION_FAILED",
+    "ERR_PROXY_AUTH_UNSUPPORTED",
+    "ERR_PROXY_AUTH_REQUESTED",
+    "ERR_PROXY_CERTIFICATE_INVALID",
+    "ERR_NO_SUPPORTED_PROXIES",
+    "ERR_SOCKS_CONNECTION_FAILED",
+    "ERR_MANDATORY_PROXY_CONFIGURATION_FAILED",
+)
+
+# pyppeteer's dialect of the fetch() in playwright_scraper.FETCH_JS: the
+# arguments arrive POSITIONALLY rather than as one array. Same body, same
+# headers, same return shape, same AbortController timeout.
+FETCH_JS = """
+async (url, method, body, headersJson, timeoutMs) => {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const init = {method, credentials: "include", signal: ctl.signal,
+                  headers: JSON.parse(headersJson)};
+    if (body !== null) {
+      init.headers["content-type"] = "application/json";
+      init.body = body;
+    }
+    const r = await fetch(url, init);
+    return {status: r.status, text: await r.text(), waf: null};
+  } catch (e) {
+    return {status: 0, text: "", waf: null, error: String(e)};
+  } finally {
+    clearTimeout(timer);
+  }
+}
+"""
+
+
+class _AsyncBridge:
+    """Runs pyppeteer's coroutines on a private event loop, synchronously.
+
+    Lets this engine drive page_flow's synchronous fetch loop unchanged,
+    and gives every call an explicit, enforced timeout: `.result(timeout)`
+    returns control even when the browser never answers, which pyppeteer's
+    own API does not offer.
+    """
+
+    def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._serve, daemon=True,
+                                        name="pyppeteer-loop")
+        self._thread.start()
+
+    def _serve(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.set_exception_handler(self._on_loop_exception)
+        self.loop.run_forever()
+
+    @staticmethod
+    def _on_loop_exception(loop, context):
+        # pyppeteer leaves CDP calls in flight when a browser closes, and the
+        # loop then logs each as an ERROR after a successful run has printed
+        # its results. Only that shape is swallowed; anything else still gets
+        # the default handler.
+        message = " | ".join(
+            str(context.get(k)) for k in ("exception", "message")
+            if context.get(k))
+        if any(m in message for m in (
+                "Target closed", "Connection closed",
+                "Task was destroyed but it is pending",
+                "Future exception was never retrieved",
+                "No session with given id",
+                # A rejected --cdp-endpoint handshake, raised by websockets in
+                # a task pyppeteer never awaits, AFTER the connect has already
+                # timed out and been reported with the reason.
+                "server rejected WebSocket connection",
+                "Event loop is closed")):
+            logger.debug("Ignoring teardown noise from pyppeteer: %s", message)
+            return
+        loop.default_exception_handler(context)
+
+    def run(self, coro, timeout: Optional[float] = DEFAULT_OP_TIMEOUT):
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        try:
+            return future.result(timeout)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise TimeoutError(
+                f"pyppeteer call did not return within {timeout}s")
+
+    def close(self):
+        """Stop the loop, CANCELLING what it still has in flight, on the loop
+        thread, so asyncio does not print a traceback per pending task after
+        a successful run."""
+        def _cancel_and_stop():
+            pending = [t for t in asyncio.all_tasks(self.loop)
+                       if t is not asyncio.current_task(self.loop)]
+            for task in pending:
+                task.cancel()
+            self.loop.stop()
+
+        self.loop.call_soon_threadsafe(_cancel_and_stop)
+        self._thread.join(timeout=5)
+
+
+# Every `scheme://user:pass@` in a string, however many times it occurs.
+_CREDENTIALS_IN_URL_RE = re.compile(r"([a-z][a-z0-9+.\-]*://)[^\s/@]+:[^\s/@]+@",
+                                    re.IGNORECASE)
+
+
+def _mask_credentials(text: str) -> str:
+    """`text` with any username:password in an embedded URL replaced."""
+    return _CREDENTIALS_IN_URL_RE.sub(r"\1***:***@", text or "")
+
+
+def _chrome_ua(version: str) -> str:
+    """A desktop-Chrome UA naming the browser's OWN real version.
+    pyppeteer's `browser.version()` returns "HeadlessChrome/115.0.0.0"."""
+    number = version.split("/")[-1] if "/" in version else version
+    return (f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Chrome/{number} Safari/537.36")
+
+
+def _proxy_failure(text) -> str:
+    text = str(text)
+    for marker in _PROXY_ERROR_MARKERS:
+        if marker in text:
+            return marker
+    return ""
+
+
+class _Ops:
+    """One pyppeteer browser + page, exposed as page_flow's named operations.
+
+    Same contract as playwright_scraper._Ops, including the rule that a
+    rotation means a genuinely FRESH browser.
+    """
+
+    def __init__(self, bridge: _AsyncBridge, args, pool):
+        self.bridge, self.args, self.pool = bridge, args, pool
+        self.remote = bool(args.cdp_endpoint)
+        self.browser = self.page = None
+        self._auth_session = None
+        self.landed = False
+
+    def open(self):
+        self.landed = False
+        if self.remote:
+            logger.info("Connecting to an existing browser over CDP: %s",
+                        _mask_credentials(self.args.cdp_endpoint))
+            err = None
+            for attempt in range(1, page_flow.CDP_CONNECT_ATTEMPTS + 1):
+                try:
+                    self.browser = self.bridge.run(
+                        connect(browserWSEndpoint=self.args.cdp_endpoint),
+                        timeout=page_flow.CDP_CONNECT_TIMEOUT_S)
+                    err = None
+                    break
+                except Exception as e:  # noqa: BLE001 — see below
+                    err = e
+                    if (attempt < page_flow.CDP_CONNECT_ATTEMPTS
+                            and page_flow.cdp_should_retry(str(e))):
+                        logger.warning("%s", page_flow.cdp_retry_message(
+                            _mask_credentials(str(e)), attempt))
+                        time.sleep(page_flow.cdp_retry_wait(str(e)))
+                        continue
+                    break
+            if err is not None:
+                # websockets' message ("server rejected WebSocket connection:
+                # HTTP 500") names neither the endpoint nor the reason.
+                # Re-raised masked, with the meaning spelled out, so
+                # __main__ can map it onto exit 5.
+                raise RuntimeError(
+                    "could not connect to --cdp-endpoint %s: %s\n%s"
+                    % (_mask_credentials(self.args.cdp_endpoint),
+                       _mask_credentials(str(err)),
+                       page_flow.cdp_connect_hint(str(err)))) from None
+            self.page = self.bridge.run(self.browser.newPage())
+            return self
+
+        launch_args = ["--no-sandbox", "--disable-dev-shm-usage",
+                       f"--lang={self.args.locale}"]
+        launch_kwargs = {}
+        if self.args.chromium_path:
+            launch_kwargs["executablePath"] = self.args.chromium_path
+        credentials = None
+        if self.pool:
+            exit_url = self.pool.current
+            # Credentials are answered through CDP, never put on the command
+            # line: --proxy-server= is part of the browser's argv, readable
+            # by anything that can run `ps`.
+            scrubbed, credentials = split_credentials(exit_url)
+            launch_args.append(f"--proxy-server={scrubbed}")
+            logger.info("Using proxy exit %s", mask(exit_url))
+        # Signal handlers off: pyppeteer installs them inside launch(), and
+        # `signal.signal` raises off the main thread, which is where this
+        # event loop lives. close() handles teardown instead.
+        self.browser = self.bridge.run(
+            launch(headless=self.args.headless, args=launch_args,
+                   ignoreHTTPSErrors=True, handleSIGINT=False,
+                   handleSIGTERM=False, handleSIGHUP=False, **launch_kwargs),
+            timeout=CONNECT_TIMEOUT * 2)
+        self.page = self.bridge.run(self.browser.newPage())
+        version = self.bridge.run(self.browser.version())
+        self.bridge.run(self.page.setUserAgent(_chrome_ua(version)))
+        if self.args.fingerprint:
+            self._apply_fingerprint()
+        if credentials:
+            self._install_proxy_auth(*credentials)
+        return self
+
+    def _install_proxy_auth(self, username: str, password: str):
+        """Answer the proxy's auth challenge through CDP's Fetch domain.
+
+        pyppeteer's `page.authenticate()` relies on
+        Network.setRequestInterception, which current Chromium no longer has:
+        a sibling repo's run died with "'Network.setRequestInterception'
+        wasn't found" before its first navigation (2026-09-24). `Fetch.enable`
+        with `handleAuthRequests` replaced it, and is what Playwright uses.
+
+        Every request is paused and continued unchanged; only an auth
+        challenge whose source is the PROXY is answered, with credentials
+        that never leave this process's memory.
+        """
+        async def _enable():
+            session = await self.page.target.createCDPSession()
+
+            def _paused(event):
+                asyncio.ensure_future(session.send(
+                    "Fetch.continueRequest", {"requestId": event["requestId"]}))
+
+            def _auth(event):
+                source = (event.get("authChallenge") or {}).get("source")
+                response = ({"response": "ProvideCredentials",
+                             "username": username, "password": password}
+                            if source == "Proxy" else {"response": "Default"})
+                asyncio.ensure_future(session.send(
+                    "Fetch.continueWithAuth",
+                    {"requestId": event["requestId"],
+                     "authChallengeResponse": response}))
+
+            session.on("Fetch.requestPaused", _paused)
+            session.on("Fetch.authRequired", _auth)
+            await session.send("Fetch.enable", {"handleAuthRequests": True,
+                                                "patterns": [{"urlPattern": "*"}]})
+            return session
+
+        self._auth_session = self.bridge.run(_enable(), timeout=30)
+
+    def _apply_fingerprint(self):
+        """The SAME init script the other two engines install, so no engine
+        applies a different half of one fingerprint."""
+        from fingerprint_client import (fingerprint_user_agent, get_fingerprint,
+                                        playwright_init_script)
+        fp = get_fingerprint(self.args.twocaptcha_key, tags=self.args.fp_tags,
+                             country=self.args.fp_country)
+        # The shared reader: the response keeps the UA at userAgent.userAgent
+        # (chromium format) or data.ua (raw), never at userAgent.value.
+        ua = fingerprint_user_agent(fp)
+        try:
+            if ua:
+                self.bridge.run(self.page.setUserAgent(ua))
+            self.bridge.run(
+                self.page.evaluateOnNewDocument(playwright_init_script(fp)))
+            logger.info("Using 2captcha fingerprint %s (%s)", fp.get("id"),
+                        fp.get("country"))
+        except Exception as e:  # noqa: BLE001 — a fingerprint is not the run
+            logger.warning("Could not apply the fingerprint (%s) — continuing "
+                           "without it.", e)
+
+    # ---- page_flow's operations -----------------------------------------
+
+    def goto(self, url: str):
+        try:
+            resp = self.bridge.run(self.page.goto(
+                url, waitUntil="domcontentloaded", timeout=60000), timeout=90)
+        except Exception as e:  # noqa: BLE001 — pyppeteer raises several types
+            raise page_flow.TransportError(_mask_credentials(str(e))) from None
+        return (resp.status if resp is not None else None), None
+
+    def document_text(self) -> str:
+        try:
+            return self.bridge.run(self.page.content()) or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def wait_ms(self, ms: int) -> None:
+        time.sleep(ms / 1000.0)
+
+    def fetch(self, req, timeout_ms: int = page_flow.FETCH_TIMEOUT_MS):
+        try:
+            got = self.bridge.run(self.page.evaluate(
+                FETCH_JS, req.url, req.method, req.body_json, req.headers_json,
+                timeout_ms), timeout=timeout_ms / 1000 + 15)
+        except Exception as e:  # noqa: BLE001
+            return None, "", None, _mask_credentials(str(e))
+        if not isinstance(got, dict):
+            return None, "", None, "fetch() returned nothing"
+        if got.get("error"):
+            return None, "", None, str(got["error"])
+        return got.get("status"), got.get("text") or "", got.get("waf"), None
+
+    def proxy_failure(self, text: str) -> str:
+        return _proxy_failure(text)
+
+    def relaunch(self):
+        """See playwright_scraper._Ops.relaunch: on a remote browser, a new
+        page in the same profile, or a reconnect when that fails."""
+        if self.remote:
+            self.landed = False
+            try:
+                self.bridge.run(self.page.close(), timeout=15)
+            except Exception as e:  # noqa: BLE001 — it may already be gone
+                logger.debug("Ignoring error closing the old page: %s", e)
+            try:
+                self.page = self.bridge.run(self.browser.newPage(), timeout=30)
+                return
+            except Exception as e:  # noqa: BLE001
+                logger.debug("New page failed (%s); reconnecting.", _mask_credentials(str(e)))
+            try:
+                self.bridge.run(self.browser.disconnect(), timeout=15)
+            except Exception:  # noqa: BLE001
+                pass
+            self.open()
+            return
+        try:
+            self.bridge.run(self.browser.close(), timeout=30)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Ignoring error while closing browser: %s", e)
+        self.open()
+
+    def close(self):
+        """Close the page, and on a REMOTE browser disconnect too: closing
+        only the page leaves the websocket open, and its unwinding prints
+        tracebacks after the output is written. The remote BROWSER is left
+        running; it is not ours."""
+        try:
+            if self.remote:
+                self.bridge.run(self.page.close(), timeout=30)
+                self.bridge.run(self.browser.disconnect(), timeout=30)
+            else:
+                self.bridge.run(self.browser.close(), timeout=30)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Ignoring error during browser teardown: %s", e)
+
+
+def _fetch_pages_concurrently(args, pool, query, page_nums, concurrency: int):
+    """Fetch `page_nums` across `concurrency` workers. Each owns its own event
+    loop, browser and exit; the page loop is page_flow.worker_loop."""
+    work = queue.Queue()
+    for n in page_nums:
+        work.put(n)
+    results, results_lock = [], threading.Lock()
+    exhausted = threading.Event()
+
+    def worker(index: int):
+        name = f"worker-{index + 1}"
+        bridge = _AsyncBridge()
+        try:
+            ops = _Ops(bridge, args, page_flow.worker_pool(pool, index)).open()
+            try:
+                page_flow.worker_loop(ops, args, query, work, results,
+                                      results_lock, exhausted, name,
+                                      _mask_credentials)
+            finally:
+                ops.close()
+        except Exception:  # noqa: BLE001 — a dead worker must not hang the run
+            logger.exception("[%s] died; its pages will be reported as failed.", name)
+        finally:
+            bridge.close()
+
+    threads = [threading.Thread(target=worker, args=(i,), name=f"page-worker-{i + 1}")
+               for i in range(concurrency)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    unattempted = []
+    while True:
+        try:
+            unattempted.append(work.get_nowait())
+        except queue.Empty:
+            break
+    return results, sorted(unattempted), exhausted.is_set()
+
+
+def scrape(args) -> int:
+    pool = proxy_pool_from_args(args)
+    if pool and args.cdp_endpoint:
+        logger.warning("Ignoring --proxy/--proxy-file: with --cdp-endpoint the "
+                       "remote browser has its own exit, and layering a second "
+                       "proxy on top would contradict it.")
+        pool = None
+    concurrency = page_flow.concurrency_for(args, pool)
+    bridge = _AsyncBridge()
+    try:
+        return page_flow.run_pages(
+            lambda: _Ops(bridge, args, pool).open(),
+            lambda ops: ops.close(),
+            lambda pages: _fetch_pages_concurrently(args, pool, args.query,
+                                                    pages, concurrency),
+            args, pool, args.query, concurrency, _mask_credentials)
+    finally:
+        bridge.close()
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(
+        description="tractorsupply.com listing scraper — categories and "
+                    "searches, priced per store (pyppeteer edition)")
+    p.add_argument("--mode", choices=list(MODES), default=None,
+                   help="category or search. Inferred from --url / --category "
+                        "/ --search; given explicitly, it must agree.")
+    p.add_argument("--url", default=None,
+                   help="A listing on the site: "
+                        "https://www.tractorsupply.com/tsc/catalog/{slug} or "
+                        "…/tsc/search/{keyword}. A URL carrying filters is "
+                        "refused rather than scraped wider. Also read from "
+                        "TRACTORSUPPLY_URL.")
+    p.add_argument("--category", default=None, metavar="SLUG",
+                   help="A category by its slug, the last part of its address "
+                        "(poultry-feed-treats, 3-point-sprayers).")
+    p.add_argument("--search", default=None, metavar="KEYWORD",
+                   help="A keyword search. The site answers a query it cannot "
+                        "match with unrelated products rather than nothing; "
+                        "the run warns when page 1 does not mention the query.")
+    p.add_argument("--sort", choices=list(SORTS), default=None,
+                   help="Ordering (default popular, the site's own \"Most "
+                        "Popular\"). Not cosmetic: a capped run holds the first "
+                        "N products by this key.")
+    p.add_argument("--zip", default=None,
+                   help="US ZIP code whose nearby stores the prices and stock "
+                        "are for (default %s, Brentwood TN). Prices differ "
+                        "between stores." % DEFAULT_ZIP)
+    p.add_argument("--page-size", type=page_flow.page_size_flag, default=None,
+                   help="Products per request (default 48, as the site's own "
+                        "grid; at most %d, which the endpoint enforces)."
+                        % MAX_PAGE_SIZE)
+    p.add_argument("--pages", type=page_flow.page_count, default=1,
+                   help="Pages to fetch. Planned against the total the site "
+                        "states on page 1, so asking for more than exist "
+                        "fetches all of them.")
+    p.add_argument("--delay", type=page_flow.delay_seconds, default=1.0,
+                   help="Delay between pages, seconds (default %(default)s)")
+    p.add_argument("--concurrency", type=page_flow.workers, default=1, metavar="N",
+                   help="Fetch pages through N parallel workers (default 1). "
+                        "Each worker runs its own browser and holds its own "
+                        "proxy exit. Ignored with --cdp-endpoint.")
+    p.add_argument("--retries", type=page_flow.attempts, default=3,
+                   help="Attempts per request on a transport failure (default "
+                        "3). The pause doubles each time. A request the "
+                        "endpoint REFUSED is not retried.")
+    p.add_argument("--retry-delay", type=page_flow.retry_delay_seconds, default=2.0,
+                   help="Seconds before the first retry, doubling thereafter.")
+    p.add_argument("--format", choices=["json", "csv", "both"], default="both")
+    p.add_argument("--out", default="tractorsupply_products", help="Output file prefix")
+    p.add_argument("--locale", default="en-US",
+                   help="Browser locale (default en-US).")
+    p.add_argument("--proxy", default=None,
+                   help="Proxy URL, e.g. http://ACCOUNT:PASSWORD@HOST:9999 "
+                        "(2captcha.com/proxy)")
+    p.add_argument("--proxy-file", default=None,
+                   help="File with one proxy URL per line to rotate across. "
+                        "Wins over --proxy.")
+    p.add_argument("--proxy-rotate", choices=list(ROTATE_MODES), default="per-run",
+                   help="per-run (default): one exit for the whole run. "
+                        "per-page: a new exit, and a fresh browser, per page.")
+    p.add_argument("--proxy-shuffle", action="store_true",
+                   help="Shuffle the pool at startup.")
+    p.add_argument("--proxy-block-retries", type=page_flow.block_retry_count, default=2,
+                   help="When a request is refused (Akamai), retry it from this "
+                        "many OTHER exits (default 2). Needs a pool of more "
+                        "than one.")
+    p.add_argument("--twocaptcha-key", default=None,
+                   help="2captcha.com API key, for --fingerprint. This repo "
+                        "solves no captcha: the site showed none.")
+    p.add_argument("--allow-empty", action="store_true",
+                   help="Write output files even when 0 rows were found.")
+    p.add_argument("--fingerprint", action="store_true",
+                   help="Apply a browser fingerprint from 2captcha's "
+                        "Fingerprint API. Needs --twocaptcha-key. Ignored with "
+                        "--cdp-endpoint.")
+    p.add_argument("--fp-tags", default="Windows",
+                   help="ONE OS-family tag for the fingerprint filter: "
+                        "Windows, Microsoft Windows or Android. NOT a list — "
+                        "Chrome, Desktop and Mobile are each rejected by the "
+                        "API with 400. (default: Windows)")
+    p.add_argument("--fp-country", default=None,
+                   help="Fingerprint country, ISO 3166-1 alpha-2. Match it to "
+                        "your proxy's exit country.")
+    p.add_argument("--cdp-endpoint", default=None,
+                   help="Connect to an already-running browser over CDP "
+                        "instead of launching Chromium, e.g. the Scraping "
+                        "Browser API endpoint ws://user:pass@host:port with "
+                        "country-us. The one client the site served in "
+                        "testing. --proxy and --headless/--headful are ignored.")
+    p.add_argument("--dump-html", default=None, metavar="PATH",
+                   help="Save the exact response the parser is given, on "
+                        "success as well as failure. It is newline-delimited "
+                        "JSON; the flag keeps the family's name.")
+    p.add_argument("--chromium-path", default=None, metavar="PATH",
+                   help="Browser executable to drive, instead of the Chromium "
+                        "pyppeteer downloads for itself. Needed where that "
+                        "build will not start: on an Apple Silicon Mac "
+                        "pyppeteer fetches an x86_64 Chromium that runs under "
+                        "Rosetta far enough to print --version and then fails "
+                        "to open its DevTools socket. Point it at a Chrome or "
+                        "Chromium of your own — Playwright's, if installed.")
+    p.add_argument("--headless", action="store_true", default=True)
+    p.add_argument("--headful", dest="headless", action="store_false")
+    args = p.parse_args(argv)
+    typed_url = args.url
+    env_config.apply(args)
+    args.url_from_env = typed_url is None and args.url is not None
+    args.query = page_flow.build_query(args, p.error)
+    args.mode = args.query.mode
+    return args
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    if args.fingerprint and not args.twocaptcha_key:
+        logger.error("--fingerprint needs --twocaptcha-key (the Fingerprint API "
+                     "uses the same key, though it's a separate subscription).")
+        sys.exit(2)
+    if args.fingerprint and args.cdp_endpoint:
+        logger.warning("--fingerprint is ignored with --cdp-endpoint: the "
+                       "Scraping Browser supplies its own fingerprint.")
+    try:
+        sys.exit(scrape(args))
+    except ProxyError as e:
+        logger.error("%s", e)
+        sys.exit(2)
+    except RuntimeError as e:
+        # A remote browser refusing the connection is a REMOTE API failure
+        # (exit 5), not a crash in this code (exit 1).
+        text = _mask_credentials(str(e))
+        if "connect to --cdp-endpoint" in text:
+            logger.error("%s", text)
+            sys.exit(EXIT_API_ERROR)
+        raise

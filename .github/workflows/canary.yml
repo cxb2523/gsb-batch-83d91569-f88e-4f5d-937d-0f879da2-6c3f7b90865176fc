@@ -1,0 +1,163 @@
+# One real run of each mode against tractorsupply.com. tests.yml
+# (deliberately) never touches the site.
+#
+# WEEKLY, and RED without its secret. Two measurements decide it:
+#
+#   * Akamai refused every client this repo tried except the 2Captcha
+#     Scraping Browser with a US exit (2026-09-28; the README's access
+#     table). A GitHub runner is a datacentre address running local
+#     Chromium, which is one of the refused rows, so a canary without the
+#     endpoint cannot reach the data. Without the secret it FAILS with an
+#     ::error:: naming TRACTORSUPPLY_CDP_ENDPOINT: a canary that never
+#     reached the site has tested nothing, and a green skip would read as a
+#     pass.
+#   * How long a Scraping Browser endpoint's credentials live. This was
+#     dispatch-only on an inherited figure of "about a day", copied rather
+#     than measured. Measured: the endpoint set here on 2026-09-28 was still
+#     served on 2026-10-08, when a canary ran on it by accident and passed
+#     (144 of 270, 144 of 1,070), and again by the scheduled run on
+#     2026-10-12. So a weekly run tests the real path for
+#     most of an endpoint's life, and when it expires the run goes red with
+#     exit 5 and a 401 — which says exactly what to do. A third-party audit
+#     (2026-10-08) asked for continuous live monitoring; this is the part of
+#     that the measurement supports. To rotate:
+#
+#     gh secret set TRACTORSUPPLY_CDP_ENDPOINT --repo 2scraper/tractorsupply-scraper
+#     gh workflow run canary.yml --repo 2scraper/tractorsupply-scraper
+#
+# The endpoint goes through the ENVIRONMENT, not a --cdp-endpoint line:
+# env_config.py reads exactly that variable, an unset secret arrives as an
+# empty string which the loader treats as unset, and the credential never
+# reaches a command line.
+
+name: canary
+
+on:
+  schedule:
+    # Mondays 05:47 UTC. Not on the hour: every scheduled workflow fires at :00.
+    - cron: "47 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: ${{ matrix.mode }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      # One at a time: a Scraping Browser profile takes ONE live connection,
+      # and two jobs on the same pid collide with profile_locked.
+      max-parallel: 1
+      matrix:
+        include:
+          # 272 products on 2026-09-28, so three pages of 48 are full.
+          - mode: category
+            args: "--category poultry-feed-treats"
+            floor: 120
+          # 1,076 results on 2026-09-28.
+          - mode: search
+            args: "--search 'dog food' --sort price-asc"
+            floor: 120
+    env:
+      TRACTORSUPPLY_CDP_ENDPOINT: ${{ secrets.TRACTORSUPPLY_CDP_ENDPOINT }}
+    steps:
+      - name: Fail without the Scraping Browser endpoint
+        if: env.TRACTORSUPPLY_CDP_ENDPOINT == ''
+        run: |
+          echo "::error::The secret TRACTORSUPPLY_CDP_ENDPOINT is not set, so this canary cannot reach tractorsupply.com: a GitHub runner is one of the clients the site refuses (see the README). Set a fresh endpoint as the secret and dispatch again."
+          exit 1
+
+      - uses: actions/checkout@v4
+        if: env.TRACTORSUPPLY_CDP_ENDPOINT != ''
+      - uses: actions/setup-python@v5
+        if: env.TRACTORSUPPLY_CDP_ENDPOINT != ''
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        if: env.TRACTORSUPPLY_CDP_ENDPOINT != ''
+        # No `playwright install`: over --cdp-endpoint the browser is remote.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+
+      # >= 3 pages, because with one page pagination is never exercised.
+      - name: Run
+        id: run
+        if: env.TRACTORSUPPLY_CDP_ENDPOINT != ''
+        run: |
+          set +e   # `run:` is `bash -e`; without this a non-zero exit aborts
+                   # the step before the echo below records it.
+          python playwright_scraper.py ${{ matrix.args }} --pages 3 \
+            --out canary --format both --dump-html canary_dump.ndjson
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Interpret
+        if: env.TRACTORSUPPLY_CDP_ENDPOINT != ''
+        run: |
+          code="${{ steps.run.outputs.exit_code }}"
+          echo "exit code: $code"
+          case "$code" in
+            0) ;;
+            3) echo "::error::Blocked by Akamai even through the Scraping Browser. That is the one client the README says is served, so this is the README's central claim failing; see canary_page*_debug.html."; exit 1 ;;
+            4) echo "::error::Zero rows from a listing that is never empty. The endpoint's shape has moved; see canary_dump.ndjson."; exit 1 ;;
+            6) echo "::error::Rows arrived but the run is incomplete (a page failed, or a served page that states rows parsed to none: stop_reason parser_found_nothing). See canary.meta.json."; exit 1 ;;
+            5) echo "::error::The data never arrived, or the endpoint REFUSED the parameters (the log names the site's own complaint). A 401 on connect means the endpoint's credentials expired."; exit 1 ;;
+            *) echo "::error::Unexpected exit $code."; exit 1 ;;
+          esac
+
+      - name: Assert
+        if: env.TRACTORSUPPLY_CDP_ENDPOINT != ''
+        run: |
+          python - <<'EOF'
+          import json, sys
+          meta = json.load(open("canary.meta.json"))
+          rows = json.load(open("canary.json"))
+          mode, floor = "${{ matrix.mode }}", ${{ matrix.floor }}
+          problems = []
+          if meta["status"] != "complete":
+              problems.append("status %r (%s)" % (meta["status"], meta["stop_reason"]))
+          if meta["pages_completed"] != 3:
+              problems.append("pages_completed %r, not 3" % meta["pages_completed"])
+          if len(rows) < floor:
+              problems.append("%d rows, floor %d" % (len(rows), floor))
+          if not meta.get("total_results"):
+              problems.append("no total_results in the sidecar")
+          if not (meta.get("query") or {}).get("store_ids"):
+              problems.append("no store set in the sidecar")
+          if {r["mode"] for r in rows} != {mode}:
+              problems.append("rows name modes %r" % {r["mode"] for r in rows})
+          pairs = [(r["page"], r["position"]) for r in rows]
+          if len(set(pairs)) != len(pairs):
+              problems.append("page+position is not unique")
+          priced = sum(1 for r in rows if isinstance(r["price"], float))
+          if priced < 0.99 * len(rows):
+              problems.append("%d of %d rows have a price" % (priced, len(rows)))
+          if any(r["price_max"] is not None and r["price"] is not None
+                 and r["price_max"] < r["price"] for r in rows):
+              problems.append("a price range whose high end is below its low end")
+          if any(r["original_price"] is not None and r["original_price"] <= r["price"]
+                 for r in rows):
+              problems.append("an original_price at or below its price")
+          if mode == "search" and (meta.get("query_relevance") or 0) < 0.5:
+              problems.append("query_relevance %r" % meta.get("query_relevance"))
+          if problems:
+              print("canary FAILED: " + "; ".join(problems))
+              sys.exit(1)
+          print("canary OK: %d %s rows of %s, complete" % (len(rows), mode, meta["total_results"]))
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always() && env.TRACTORSUPPLY_CDP_ENDPOINT != ''
+        with:
+          name: canary-${{ matrix.mode }}
+          path: |
+            canary.json
+            canary.csv
+            canary.meta.json
+            canary_dump.ndjson*
+            canary_page*_debug.html
+          if-no-files-found: ignore
