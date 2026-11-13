@@ -158,15 +158,77 @@ def refusal_advice(state: str) -> str:
             "--proxy-file, or --cdp-endpoint.")
 
 
-def stop_reason_for(outcome) -> str:
-    """The run's stop_reason when `outcome` is the page that ended it."""
-    if getattr(outcome, "blocked_by", None):
-        return "blocked_%s" % outcome.blocked_by
-    if getattr(outcome, "parse_failed", False):
-        return "parser_found_nothing"
-    if getattr(outcome, "state", None) == "throttled":
-        return "throttled"
-    return "page_load_timeout"
+# ---------------------------------------------------------------------------
+# What each page's ending is called, and the run's one stop_reason
+# ---------------------------------------------------------------------------
+#
+# One vocabulary for the three engines, built in this file, so a reader of
+# `<out>.meta.json` can tell which pages arrived, which did not and why the
+# run stopped without opening the log. The two zero-row outcomes are the
+# distinction the sidecar exists for:
+#
+#     empty   the page SAID it had content (rows in its markup, a More link,
+#             a comment count) and the parser read none of it — this repo's
+#             bug, and never the end of a list
+#     end     a served page with nothing on it and no claim of any (one page
+#             past the end of a list, `No such item.`) — the site's own
+#             answer, and where a listing genuinely stops
+PAGE_OK = "ok"
+PAGE_FAILED = "failed"
+PAGE_BLOCKED = "blocked"
+PAGE_EMPTY = "empty"
+PAGE_END = "end"
+
+# Used when the loop did not record a more specific sentence (the fake
+# drivers in the offline suite build PageOutcome objects directly).
+PAGE_REASONS = {
+    PAGE_OK: "the page was served and parsed into rows.",
+    PAGE_FAILED: "the request never completed and its retries ran out.",
+    PAGE_BLOCKED: "the site refused the request (HTTP 403) after every retry.",
+    PAGE_EMPTY: "the page said it had content and parsed to no rows - the "
+                "markup has probably changed.",
+    PAGE_END: "the site served a page with no rows and no claim of any - "
+              "nothing left to read.",
+}
+
+STOP_PAGE_FAILED = "page_failed"
+STOP_PARSER_FOUND_NOTHING = "parser_found_nothing"
+
+
+def resolve_stop_reason(outcomes: List, fallback: str) -> str:
+    """The run's ONE stop_reason, from the per-page records, by fixed order.
+
+    More than one page-level fact can be true of a run at once: under
+    --concurrency a timeout on page 3 is recorded while page 4 is still being
+    parsed to nothing, and a refusal may sit behind an empty page that ended
+    a sequential walk. Left to the page that happened to end the loop, the
+    answer would depend on timing. So the order is decided here and nowhere
+    else:
+
+        any page failed or blocked -> page_failed
+        else any page empty        -> parser_found_nothing
+        else                       -> the loop's natural reason
+                                      (end_of_listing, no_new_products,
+                                      single_page_mode, pages_unattempted)
+
+    A page that never got requested is NOT a failure and does not appear in
+    `outcomes` at all; it is listed separately as `pages_unrequested`.
+    """
+    kinds = {o.page_outcome for o in outcomes}
+    if PAGE_FAILED in kinds or PAGE_BLOCKED in kinds:
+        return STOP_PAGE_FAILED
+    if PAGE_EMPTY in kinds:
+        return STOP_PARSER_FOUND_NOTHING
+    return fallback
+
+
+def page_record(outcome) -> dict:
+    """One sidecar entry: which page, how it ended, and why in one sentence."""
+    kind = outcome.page_outcome
+    return {"page": outcome.page_num,
+            "outcome": kind,
+            "rows": len(outcome.products),
+            "reason": outcome.reason or PAGE_REASONS[kind]}
 
 
 # ---------------------------------------------------------------------------
@@ -260,14 +322,22 @@ def query_summary(query: Query) -> dict:
 
 
 def finish(args, query: Query, outcomes: List, stop_reason: str,
-           blocked: bool, extra: Optional[dict] = None) -> int:
+           blocked: bool, extra: Optional[dict] = None,
+           pages_unrequested: Optional[List[int]] = None) -> int:
     """Merge the pages in PAGE order, write the output, return the exit code.
 
     One implementation for the three engines, so the merge order, the
     dedupe and the sidecar cannot differ between them.
+
+    `stop_reason` is already resolved (resolve_stop_reason) by the caller, so
+    the sidecar's `stop_reason` and its `pages` array are decided from the
+    same records. `pages_unrequested` is the page numbers the run never asked
+    for; they are recorded separately and are NOT failures, because a page
+    nobody requested says nothing about the site.
     """
     rows, seen = [], set()
-    for oc in sorted(outcomes, key=lambda o: o.page_num):
+    ordered = sorted(outcomes, key=lambda o: o.page_num)
+    for oc in ordered:
         fresh = dedupe_by_key(oc.products, seen, key="sku")
         if len(fresh) < len(oc.products):
             log.info("Page %d: dropped %d duplicate row(s) — the live list "
@@ -293,6 +363,11 @@ def finish(args, query: Query, outcomes: List, stop_reason: str,
         sidecar["item"] = meta
     if first is not None and first.next_agrees is not None:
         sidecar["addressable"] = bool(first.next_agrees)
+    # The per-page record the run is judged by, in page order, and the page
+    # numbers nobody asked for. They travel through finish_run's own
+    # parameters rather than through `extra`: a key already in the sidecar
+    # wins over `extra`, so nesting them there would silently drop the
+    # record this change exists to write.
     sidecar.update(extra or {})
     return finish_run(
         rows, args.out, args.format, args.allow_empty,
@@ -300,7 +375,9 @@ def finish(args, query: Query, outcomes: List, stop_reason: str,
         pages_requested=args.pages, pages_completed=len(ok_pages),
         pages_failed=failed_pages, mode=query.mode, source=SOURCE_DEFAULT,
         start_url=query.url(), final_url=last_url or query.url(),
-        extra=sidecar)
+        extra=sidecar,
+        pages=[page_record(o) for o in ordered],
+        pages_unrequested=pages_unrequested)
 
 
 # ---------------------------------------------------------------------------
@@ -358,10 +435,38 @@ class PageOutcome:
     # The page was served and states it has content, but parsed to none.
     parse_failed: bool = False
 
+    # How this page ended, in the vocabulary the sidecar's `pages` array
+    # uses (PAGE_OK / PAGE_FAILED / PAGE_BLOCKED / PAGE_EMPTY / PAGE_END),
+    # and one sentence saying why. Filled in by fetch_one_page, so the
+    # record and the log cannot disagree about the same page. `outcome` is
+    # a TRUTHY name for every ending, which is why `ok` below is keyed on it
+    # rather than on the absence of failures: a page that never ran the
+    # classification would otherwise read as a success.
+    outcome: Optional[str] = None
+    reason: str = ""
+
+    @property
+    def page_outcome(self) -> str:
+        """This page's ending, derived from the flags when not set outright.
+
+        `fetch_one_page` sets `outcome` on every path it returns from. The
+        derivation is for the offline suite's fake drivers, which build
+        PageOutcome objects directly; it reads the same flags `ok` used to,
+        so a hand-built outcome behaves exactly as it did before.
+        """
+        if self.outcome:
+            return self.outcome
+        if self.blocked_by:
+            return PAGE_BLOCKED
+        if self.load_failed:
+            return PAGE_FAILED
+        if self.parse_failed:
+            return PAGE_EMPTY
+        return PAGE_OK if self.products else PAGE_END
+
     @property
     def ok(self) -> bool:
-        return (not self.load_failed and self.blocked_by is None
-                and not self.parse_failed)
+        return self.page_outcome in (PAGE_OK, PAGE_END)
 
 
 # The columns the site filled on EVERY row of every capture, per mode. Below
@@ -429,6 +534,9 @@ def fetch_one_page(ops, args, pool, query: Query, page_num: int,
                      else BLOCK_RETRIES_WITHOUT_POOL)
     throttles = 0
     state, text, last_error, exit_failed = "unknown", "", None, None
+    # How many requests this page cost in all (summed over the block-rotation
+    # attempts too), so the recorded reason can say what was actually sent.
+    attempts = 0
 
     for block_attempt in range(block_retries + 1):
         log.info("Fetching page %d/%d: %s", page_num, args.pages, req.label)
@@ -436,6 +544,7 @@ def fetch_one_page(ops, args, pool, query: Query, page_num: int,
         attempt = 0
         while attempt < args.retries:
             attempt += 1
+            attempts += 1
             status, text, last_error = ops.fetch(req.url)
             if last_error:
                 state = "load_failed"
@@ -486,11 +595,18 @@ def fetch_one_page(ops, args, pool, query: Query, page_num: int,
     outcome.state = state
     if state == "load_failed" or exit_failed:
         outcome.load_failed = True
+        outcome.outcome = PAGE_FAILED
+        outcome.reason = ("the request never completed after %d attempt(s)%s."
+                          % (attempts,
+                             ": " + mask(last_error) if last_error else ""))
         log.error("Gave up on page %d: %s", page_num,
                   mask(last_error or "the request never completed"))
         return outcome
     if counts_as_blocked(state):
         outcome.blocked_by = refusal_name(state)
+        outcome.outcome = PAGE_BLOCKED
+        outcome.reason = ("the site refused the request (%s) after every "
+                          "retry." % outcome.blocked_by)
         debug = _save_debug(args, page_num, text)
         log.error("Blocked by %s on page %d — saved to %s. This is exit 3, "
                   "distinct from an empty result (exit 4). %s",
@@ -499,6 +615,12 @@ def fetch_one_page(ops, args, pool, query: Query, page_num: int,
     if not should_parse(state):
         # throttled past its budget, or never the site's page at all
         outcome.load_failed = True
+        outcome.outcome = PAGE_FAILED
+        outcome.reason = ("the page never came back as the site's page (%s) "
+                          "after %d attempt(s)%s."
+                          % (state, attempts,
+                             "; the throttle wait ran out" if state == "throttled"
+                             else ""))
         debug = _save_debug(args, page_num, text)
         log.error("Page %d never came back as the site's page (%s) — saved "
                   "to %s. %s", page_num, state, debug,
@@ -522,15 +644,26 @@ def fetch_one_page(ops, args, pool, query: Query, page_num: int,
         # answer: recorded as a failed page so a run never calls it the end
         # of the list or a complete one.
         outcome.parse_failed = True
+        outcome.outcome = PAGE_EMPTY
+        outcome.reason = ("the page said it had content (a More link, a comment "
+                          "count or rows in its markup) and parsed to no "
+                          "rows: the markup has probably changed.")
         debug = _save_debug(args, page_num, text)
         log.error("Page %d was served with content on it and parsed to no "
                   "rows — the markup has probably changed. Saved to %s; "
                   "please open an issue with it.", page_num, debug)
         return outcome
-    if state == "empty" and not rows:
+    if not rows:
+        # A served page with nothing on it and no claim of any: the site's
+        # own answer, and where a list genuinely ends. Not a failure.
+        outcome.outcome = PAGE_END
+        outcome.reason = ("the site served a page with no rows and no claim "
+                          "of any (%s)." % (_empty_reason(text)))
         log.info("Page %d: the site answered with nothing to list (%s).",
                  page_num, _empty_reason(text))
     else:
+        outcome.outcome = PAGE_OK
+        outcome.reason = "the page was served and parsed into %d row(s)." % len(rows)
         log.info("Parsed %d row(s) from page %d.", len(rows), page_num)
     _core_field_warnings(rows, query.mode, page_num)
     return outcome
@@ -579,7 +712,7 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
     Playwright, its thread) is the one thing that cannot be shared.
     """
     outcomes: List[PageOutcome] = []
-    blocked, stop_reason = False, "completed"
+    blocked, fallback = False, "end_of_listing"
     ops = open_ops()
     try:
         # Page 1 is always fetched alone: whether the site's own link to page
@@ -587,23 +720,22 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
         first = fetch_one_page(ops, args, pool, query, 1, mask)
         outcomes.append(first)
         if not first.ok:
-            stop_reason = stop_reason_for(first)
             blocked = first.blocked_by is not None
         elif query.mode != "listing":
             # An item page holds every comment and a profile is one row: there
             # is no page 2 to ask for, whatever --pages says.
-            stop_reason = "single_page_mode"
+            fallback = "single_page_mode"
             if args.pages > 1:
                 log.info("--pages %d ignored: --mode %s is one page (an item "
                          "page carries its whole comment tree).",
                          args.pages, query.mode)
         elif not first.products:
-            stop_reason = "end_of_listing"
+            fallback = "end_of_listing"
         elif first.next_url is None:
             if args.pages > 1:
                 log.info("The site links no next page from page 1 — this "
                          "list is one page, so the run is complete.")
-            stop_reason = "end_of_listing" if args.pages > 1 else "completed"
+            fallback = "end_of_listing"
         elif args.pages > 1:
             plan = min(args.pages, MAX_PAGES)
             splittable = first.next_agrees is True
@@ -621,14 +753,31 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
                          concurrency, f" over {len(pool)} exit(s)" if pool else "")
                 more, unattempted, exhausted = run_concurrently(rest)
                 outcomes.extend(more)
-                failed = [o for o in more if not o.ok]
-                if failed:
-                    stop_reason = stop_reason_for(min(failed, key=lambda o: o.page_num))
-                    blocked = any(o.blocked_by for o in more)
-                elif exhausted:
-                    stop_reason = "end_of_listing"
+                blocked = any(o.blocked_by for o in more)
+                # A worker can die AFTER taking a page, so that page is in
+                # neither `more` nor `unattempted` — it was requested and no
+                # one answered. Recording it as failed is the difference
+                # between "the run stopped for a reason" and a page quietly
+                # missing from the record.
+                lost = sorted(set(rest) - {o.page_num for o in more}
+                              - set(unattempted))
+                if lost:
+                    log.error("Page(s) %s were taken by a worker that never "
+                              "returned them — recorded as failed.",
+                              ", ".join(map(str, lost)))
+                    for n in lost:
+                        dead = PageOutcome(page_num=n, url="")
+                        dead.outcome = PAGE_FAILED
+                        dead.reason = ("the worker fetching this page died "
+                                       "before it returned a result.")
+                        outcomes.append(dead)
+                if exhausted:
+                    fallback = "end_of_listing"
                 elif unattempted:
-                    stop_reason = "pages_unattempted"
+                    fallback = "pages_unattempted"
+                # A failed page does not need a fallback: resolve_stop_reason
+                # names it `page_failed` from the record itself, whichever
+                # worker happened to meet it first.
             else:
                 previous = first
                 for page_num in range(2, plan + 1):
@@ -642,13 +791,12 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
                                              mask, url=previous.next_url)
                     outcomes.append(outcome)
                     if not outcome.ok:
-                        stop_reason = stop_reason_for(outcome)
                         blocked = outcome.blocked_by is not None
                         break
                     if not outcome.products:
                         log.info("Page %d came back empty — the list ended.",
                                  page_num)
-                        stop_reason = "end_of_listing"
+                        fallback = "end_of_listing"
                         break
                     seen_before = {r.sku for o in outcomes[:-1] for r in o.products}
                     if all(r.sku in seen_before for r in outcome.products):
@@ -656,18 +804,26 @@ def run_pages(open_ops, close_ops, run_concurrently, args, pool,
                         # page that adds nothing new is a re-served page.
                         log.info("Page %d added no new story — treating the "
                                  "list as ended.", page_num)
-                        stop_reason = "no_new_products"
+                        fallback = "no_new_products"
                         break
                     if outcome.next_url is None:
                         log.info("Page %d has no More link — the list ends "
                                  "here.", page_num)
-                        stop_reason = "end_of_listing"
+                        fallback = "end_of_listing"
                         break
                     previous = outcome
     finally:
         if ops is not None:
             close_ops(ops)
-    return finish(args, query, outcomes, stop_reason, blocked)
+    # Pages the run never sent a request for: the tail of --pages a list that
+    # ended early did not need, the ones MAX_PAGES caps off, and any a worker
+    # never took. Recorded by number and counted as neither success nor
+    # failure — nobody asked the site for them, so they say nothing about it.
+    requested = {o.page_num for o in outcomes}
+    unrequested = [n for n in range(1, args.pages + 1) if n not in requested]
+    stop_reason = resolve_stop_reason(outcomes, fallback)
+    return finish(args, query, outcomes, stop_reason, blocked,
+                  pages_unrequested=unrequested)
 
 
 def worker_loop(ops, args, query: Query, work, results, results_lock,

@@ -433,7 +433,9 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
              pages_completed: int, start_url: str, final_url: str,
              products: int, pages_failed: Optional[List[int]] = None,
              mode: str = "listing", source: str = SOURCE_DEFAULT,
-             extra: Optional[dict] = None) -> dict:
+             extra: Optional[dict] = None,
+             pages: Optional[List[dict]] = None,
+             pages_unrequested: Optional[List[int]] = None) -> dict:
     """Build the metadata dict for a finished run.
 
     `status` is the field a consumer branches on:
@@ -461,6 +463,15 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
     a description once pages can be fetched independently and page 3 can fail
     while 4 and 5 succeed. Recording the numbers keeps the sidecar honest
     about WHICH part of the list is missing, not just how much.
+
+    `pages` is the per-page record: one entry per page that was actually
+    requested, each with its number, how it ended (`ok`, `failed`, `blocked`,
+    `empty`, `end`) and a one-sentence reason. It is why a reader can say
+    which pages came back without reading the log, and it is the evidence
+    `stop_reason` (page_failed / parser_found_nothing / end_of_listing) was
+    derived from. `pages_unrequested` lists the page numbers the run never
+    asked for: they count as neither success nor failure, because nobody
+    asked the site for them.
     """
     meta = {
         "source": source,
@@ -470,6 +481,11 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
         "pages_requested": pages_requested,
         "pages_completed": pages_completed,
         "pages_failed": pages_failed or [],
+        # The per-page record and the pages nobody asked for. Both are always
+        # present (empty lists rather than absent keys), so a consumer can
+        # read `meta["pages"]` unconditionally.
+        "pages": pages or [],
+        "pages_unrequested": sorted(pages_unrequested or []),
         # The family's name for the row count. A row here is a story, a
         # comment or a profile; consumers read this key by name across repos.
         "products": products,
@@ -549,6 +565,12 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
 # bug worth naming: a sibling produced exit 6 for a correct run that way.
 # Reaching the real end of a list means the run has everything the site will
 # give it.
+#
+# Deliberately ABSENT: `page_failed` and `parser_found_nothing`. Both mean a
+# requested page did not yield its data, so the run is not a whole view of the
+# list: with rows it is `partial` (exit 6), without any it is exit 5. Their
+# absence from this tuple (and the `pages_failed` evidence beside it) is what
+# makes that true without the exit-code branch having to know their names.
 COMPLETE_STOP_REASONS = ("completed", "pagination_exhausted", "no_new_products",
                          "single_page_mode", "end_of_listing")
 
@@ -559,7 +581,9 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
                start_url: str, final_url: str,
                pages_failed: Optional[List[int]] = None,
                mode: str = "listing", source: str = SOURCE_DEFAULT,
-               extra: Optional[dict] = None) -> int:
+               extra: Optional[dict] = None,
+               pages: Optional[List[dict]] = None,
+               pages_unrequested: Optional[List[int]] = None) -> int:
     """Write output + the run-metadata sidecar; return the exit code.
 
     Shared by all three browser engines so the status/exit-code mapping
@@ -605,7 +629,7 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
             pages_requested=pages_requested, pages_completed=pages_completed,
             pages_failed=pages_failed, mode=mode, source=source,
             start_url=start_url, final_url=final_url, products=len(rows),
-            extra=extra))
+            extra=extra, pages=pages, pages_unrequested=pages_unrequested))
 
     if not rows:
         # Nothing gathered at all, and WHY decides the code. The three

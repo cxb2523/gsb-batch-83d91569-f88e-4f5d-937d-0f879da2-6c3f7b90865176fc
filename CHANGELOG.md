@@ -9,6 +9,20 @@ said so at the top of its release notes.
 
 ## [Unreleased]
 
+### Added
+
+- **The sidecar now says what happened to each page.** `<out>.meta.json`
+  carries a `pages` array, one entry per requested page in page order, each
+  with the page number, its `outcome` (`ok`, `failed`, `blocked`, `empty` or
+  `end`), the row count and a one-sentence `reason`; and `pages_unrequested`,
+  the page numbers the run never asked for (they count as neither success nor
+  failure). `stop_reason` is derived from that record by a fixed priority —
+  any `failed`/`blocked` page is `page_failed`, else any `empty` page is
+  `parser_found_nothing`, else the list's own ending is `end_of_listing`
+  — so the same run cannot report two different reasons. Built once in
+  `page_flow.py` and shared by the three browser engines and the Scraper API
+  client. Existing sidecar fields are unchanged.
+
 ### Changed
 
 - CI only: the canary now runs weekly (Mondays 05:40 UTC) and on a manual dispatch, with its optional secret `HACKERNEWS_PROXY` passed on every run; the daily schedule is removed.

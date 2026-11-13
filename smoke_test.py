@@ -511,6 +511,8 @@ def check_markup_drift_is_a_parser_failure_not_the_end_of_the_list():
     equal("page 2 drifted: exit 6, partial, parser_found_nothing",
           (rc, meta["status"], meta["stop_reason"], meta["pages_failed"]),
           (6, "partial", "parser_found_nothing", [2]))
+    equal("...the drifted page is recorded `empty`, not `failed`",
+          [(p["page"], p["outcome"]) for p in meta["pages"]], [(1, "ok"), (2, "empty")])
     equal("...page 1's 30 rows kept", len(rows), 30)
     rc, meta, rows, ops = _run(_FakeOps({H + "news": [(200, fx("news").replace("athing", "athing-v2"))]}),
                                pages=1)
@@ -814,8 +816,9 @@ def _run(ops, pages=3, query=None, concurrency=1, run_concurrently=None, **extra
                                  run_concurrently or (lambda pages: ([], [], False)),
                                  args, None, q, concurrency)
         meta_path = args.out + ".meta.json"
-        meta = json.load(open(meta_path)) if os.path.exists(meta_path) else None
-        rows = (json.load(open(args.out + ".json"))
+        meta = (json.load(open(meta_path, encoding="utf-8"))
+                if os.path.exists(meta_path) else None)
+        rows = (json.load(open(args.out + ".json", encoding="utf-8"))
                 if os.path.exists(args.out + ".json") else None)
     return rc, meta, rows, ops
 
@@ -860,7 +863,7 @@ def check_a_cursor_list_is_walked_link_to_link():
     rc, meta, rows, ops = _run(_FakeOps({H + "newest": [(200, fx("newest"))]}), pages=1,
                                query=Query("listing", feed="newest"))
     equal("--pages 1 on a cursor list never asks for a second page", (rc, meta["stop_reason"]),
-          (0, "completed"))
+          (0, "end_of_listing"))
 
 
 def check_concurrency_is_ignored_for_a_cursor_list_and_says_why():
@@ -983,7 +986,10 @@ def check_a_page_two_failure_is_a_partial_run_with_the_page_named():
     rc, meta, rows, ops = _run(ops, pages=3)
     equal("rows on page 1, refusal on page 2: exit 6", rc, 6)
     equal("...partial, page 2 named", (meta["status"], meta["pages_failed"]), ("partial", [2]))
-    equal("...stop reason names the refusal", meta["stop_reason"], "blocked_http-403")
+    equal("...stop reason is the page-level one, whatever the state was",
+          meta["stop_reason"], "page_failed")
+    equal("...and the refused page is recorded as blocked",
+          [(p["page"], p["outcome"]) for p in meta["pages"]], [(1, "ok"), (2, "blocked")])
     equal("...page 1's rows are kept", len(rows), 30)
 
 
@@ -994,6 +1000,109 @@ def check_a_page_that_adds_nothing_new_ends_the_run_on_the_data():
     equal("page 2 = page 1 again: exit 0, complete", (rc, meta["status"]), (0, "complete"))
     equal("...stop reason is data-based", meta["stop_reason"], "no_new_products")
     equal("...30 rows, and page 3 was never asked for", (len(rows), len(ops.fetches)), (30, 2))
+
+
+def check_every_page_ending_and_the_one_stop_reason():
+    """The sidecar's per-page record and its single stop_reason, for the
+    three ways a run stops early and the one way it ends on its own.
+
+    Each first assertion is the SIDECAR's, not the log's: the point of the
+    record is that a reader who never opened the log can tell which pages
+    arrived, which did not and why the run stopped.
+    """
+    # 1. A transport failure on page 3, retries exhausted: `failed`.
+    ops = _news_ops(errors={H + "news?p=3": ["Page.goto: timeout 60000ms"]})
+    rc, meta, rows, ops = _run(ops, pages=4)
+    equal("a timeout on page 3 of 4: exit 6, partial", (rc, meta["status"]),
+          (6, "partial"))
+    equal("...stop_reason is page_failed, not the page it happened to end on",
+          meta["stop_reason"], "page_failed")
+    equal("...pages 1-2 ok, page 3 failed", [(p["page"], p["outcome"]) for p in meta["pages"]],
+          [(1, "ok"), (2, "ok"), (3, "failed")])
+    equal("...the unrequested page is listed, not counted as a failure",
+          (meta["pages_unrequested"], meta["pages_failed"]), ([4], [3]))
+    check("...a failed page says why in one sentence",
+          all(isinstance(p["reason"], str) and p["reason"] for p in meta["pages"]),
+          repr(meta["pages"]))
+    equal("...and it names the transport failure", meta["pages"][2]["rows"], 0)
+
+    # 2. HTTP 403 on page 2, and the retry from a fresh browser refuses too:
+    #    `blocked`. FakeOps repeats its last answer, so both attempts refuse.
+    #    The run stops there; pages 3-4 are unrequested.
+    ops = _FakeOps({H + "news": [(200, fx("news"))],
+                    H + "news?p=2": [(403, "<html>Forbidden</html>")]})
+    rc, meta, rows, ops = _run(ops, pages=4)
+    equal("a 403 that survives its retry: exit 6, partial", (rc, meta["status"]),
+          (6, "partial"))
+    equal("...stop_reason is page_failed, and the refusal is named in the record",
+          (meta["stop_reason"], [(p["page"], p["outcome"]) for p in meta["pages"]]),
+          ("page_failed", [(1, "ok"), (2, "blocked")]))
+    equal("...it was retried before the run gave up", len(ops.fetches), 3)
+    equal("...pages 3 and 4 are unrequested, not failed",
+          (meta["pages_failed"], meta["pages_unrequested"]), ([2], [3, 4]))
+
+    # 3. A page the site served with a More link that the parser reads as no
+    #    rows: `empty`, and the run stopped because of the PARSER, not the
+    #    site.
+    drifted = fx("news2").replace("athing", "athing-v2")
+    ops = _FakeOps({H + "news": [(200, fx("news"))], H + "news?p=2": [(200, drifted)]})
+    rc, meta, rows, ops = _run(ops, pages=4)
+    equal("a drifted page 2: exit 6, partial", (rc, meta["status"]), (6, "partial"))
+    equal("...stop_reason is parser_found_nothing",
+          meta["stop_reason"], "parser_found_nothing")
+    equal("...the page is `empty`, distinct from `failed` and from the end",
+          [(p["page"], p["outcome"]) for p in meta["pages"]],
+          [(1, "ok"), (2, "empty")])
+    equal("...pages 3 and 4 unrequested", meta["pages_unrequested"], [3, 4])
+
+    # 4. Every requested page arrives and the list ends on its own: the record
+    #    says `end` for the page past the end, and `stop_reason` is the
+    #    listing's own ending.
+    rc, meta, rows, ops = _run(_news_ops(), pages=3)
+    equal("all three pages answered, page 3 empty: exit 0, complete",
+          (rc, meta["status"], meta["stop_reason"]), (0, "complete", "end_of_listing"))
+    equal("...pages 1-2 ok, page 3 is the site's own end",
+          [(p["page"], p["outcome"]) for p in meta["pages"]],
+          [(1, "ok"), (2, "ok"), (3, "end")])
+    equal("...nothing was left unrequested", meta["pages_unrequested"], [])
+
+
+def check_the_stop_reason_priority_is_fixed():
+    """A failed page outranks an empty one, whichever page came first.
+
+    Under --concurrency both can be recorded for ONE run, and the answer must
+    not depend on which worker finished first or which page the loop
+    happened to name last.
+    """
+    import page_flow
+
+    def oc(n, outcome):
+        o = page_flow.PageOutcome(page_num=n, url="u")
+        o.outcome = outcome
+        return o
+
+    equal("failed beats empty (failed first)",
+          page_flow.resolve_stop_reason([oc(1, "ok"), oc(2, "failed"), oc(3, "empty")],
+                                        "end_of_listing"), "page_failed")
+    equal("failed beats empty (empty first)",
+          page_flow.resolve_stop_reason([oc(1, "ok"), oc(2, "empty"), oc(3, "failed")],
+                                        "end_of_listing"), "page_failed")
+    equal("blocked beats empty too",
+          page_flow.resolve_stop_reason([oc(1, "empty"), oc(2, "blocked")],
+                                        "end_of_listing"), "page_failed")
+    equal("empty outranks the loop's natural reason",
+          page_flow.resolve_stop_reason([oc(1, "ok"), oc(2, "empty")],
+                                        "end_of_listing"), "parser_found_nothing")
+    equal("a run of nothing but ok/end keeps the loop's own reason",
+          page_flow.resolve_stop_reason([oc(1, "ok"), oc(2, "end")],
+                                        "end_of_listing"), "end_of_listing")
+    equal("...and an unrequested page is not an outcome at all",
+          page_flow.resolve_stop_reason([oc(1, "ok")], "end_of_listing"),
+          "end_of_listing")
+    equal("the class names one outcome per page wording",
+          (page_flow.PAGE_OK, page_flow.PAGE_FAILED, page_flow.PAGE_BLOCKED,
+           page_flow.PAGE_EMPTY, page_flow.PAGE_END),
+          ("ok", "failed", "blocked", "empty", "end"))
 
 
 def check_a_run_that_starts_on_page_three_says_so():
@@ -1023,6 +1132,32 @@ def check_worker_path_uses_independent_addresses():
     rc, meta, rows, ops = _run(ops, pages=6, concurrency=3, run_concurrently=fake_workers)
     equal("pages 2..6 go to the workers", seen, [[2, 3, 4, 5, 6]])
     equal("page 1 was fetched alone first", ops.fetches, [H + "news"])
+
+
+def check_a_page_a_dead_worker_swallowed_is_recorded_as_failed():
+    """A worker can die AFTER taking a page. The page is then in neither the
+    results nor the queue, and before this was recorded it vanished from the
+    sidecar entirely — a run that lost a page read as a clean one."""
+    import page_flow
+
+    def fake_workers(pages):
+        from output_writer import Story
+        delivered = [page_flow.PageOutcome(page_num=n, url="u") for n in (2, 3)]
+        for i, o in enumerate(delivered):
+            o.products = [Story(sku="s%d" % o.page_num, url="u")]
+            o.outcome = "ok"
+        # Page 4 was taken by a worker that never returned it; 5 and 6 stayed
+        # in the queue.
+        return delivered, [5, 6], False
+    ops = _news_ops()
+    rc, meta, rows, ops = _run(ops, pages=6, concurrency=3, run_concurrently=fake_workers)
+    equal("the lost page is in the record as failed",
+          [(p["page"], p["outcome"]) for p in meta["pages"]],
+          [(1, "ok"), (2, "ok"), (3, "ok"), (4, "failed")])
+    equal("...and the run says page_failed rather than a clean end",
+          (rc, meta["stop_reason"]), (6, "page_failed"))
+    equal("...never-taken pages are unrequested, not failures",
+          (meta["pages_failed"], meta["pages_unrequested"]), ([4], [5, 6]))
 
 
 def check_every_engine_implements_the_operations_page_flow_uses():
@@ -1193,10 +1328,10 @@ def check_exit_codes():
           (3, 4, 5, 6))
     for reason in ("end_of_listing", "single_page_mode", "no_new_products", "completed"):
         check("%s is a COMPLETE stop reason" % reason, reason in O.COMPLETE_STOP_REASONS)
-    for reason in ("throttled", "page_load_timeout", "blocked_http-403", "pages_unattempted"):
+    for reason in ("page_failed", "parser_found_nothing", "pages_unattempted"):
         check("%s is NOT complete" % reason, reason not in O.COMPLETE_STOP_REASONS)
     rc = O.finish_run([], "/nonexistent/x", "json", False, blocked=False,
-                      stop_reason="throttled", pages_requested=1, pages_completed=0,
+                      stop_reason="page_failed", pages_requested=1, pages_completed=0,
                       start_url="u", final_url="u")
     equal("finish_run: nothing gathered and not complete is 5, never 4", rc, 5)
 
@@ -1289,11 +1424,25 @@ def check_sidecar_shape():
                     pages_completed=3, pages_failed=[], products=90,
                     mode="listing", source="news.ycombinator.com",
                     start_url=H + "news", final_url=H + "news?p=3",
-                    extra={"query": {"feed": "news"}, "addressable": True})
+                    extra={"query": {"feed": "news"}, "addressable": True},
+                    pages=[{"page": 1, "outcome": "ok", "rows": 30, "reason": "x"}],
+                    pages_unrequested=[2, 3])
     for key in ("status", "stop_reason", "pages_requested", "pages_completed",
-                "pages_failed", "mode", "source", "products", "query", "addressable"):
+                "pages_failed", "mode", "source", "products", "query", "addressable",
+                "pages", "pages_unrequested"):
         check("the sidecar records %r" % key, key in meta)
     check("pages_failed is a LIST", isinstance(meta["pages_failed"], list))
+    check("pages is a LIST of records, each with page/outcome/reason",
+          isinstance(meta["pages"], list) and set(meta["pages"][0]) ==
+          {"page", "outcome", "rows", "reason"}, repr(meta["pages"]))
+    equal("pages_unrequested is sorted page numbers", meta["pages_unrequested"], [2, 3])
+    equal("both are present even when empty",
+          (run_meta(status="completed", stop_reason="completed", pages_requested=1,
+                    pages_completed=1, products=1, start_url="u", final_url="u")
+           ["pages"], run_meta(status="completed", stop_reason="completed",
+                               pages_requested=1, pages_completed=1, products=1,
+                               start_url="u", final_url="u")["pages_unrequested"]),
+          ([], []))
 
 
 # ---------------------------------------------------------------------------

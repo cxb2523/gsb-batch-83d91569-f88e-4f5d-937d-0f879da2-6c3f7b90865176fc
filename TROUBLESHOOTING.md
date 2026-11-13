@@ -1,7 +1,11 @@
 # Troubleshooting
 
 Find your exit code first (`echo $?` straight after the run), then the
-sidecar's `stop_reason` in `<out>.meta.json` if one was written.
+sidecar's `stop_reason` and `pages` array in `<out>.meta.json` if one was
+written. The `pages` array names every page the run asked for, how each one
+ended (`ok`, `failed`, `blocked`, `empty`, `end`) and why, so you can see
+which pages came back without reading the log; `pages_unrequested` lists the
+page numbers nobody asked for, and those are not failures.
 
 Everything below about the site was measured on 2026-09-30 from a datacentre
 address, unless it says otherwise.
@@ -20,7 +24,9 @@ HTTP 403. **Not observed**: every page kind this repo reads was served HTTP
 with no key, proxy, cookie, account, captcha or challenge. This repo does not
 implement captcha solving, because none was ever seen. If you get a 403, a
 different exit (`--proxy`, or `--cdp-endpoint`) is the thing to try, and a
-report with the sidecar's `stop_reason` is welcome.
+report with the sidecar's `stop_reason` is welcome. In the sidecar the page is
+recorded as `blocked`, and the run's `stop_reason` is `page_failed` — a 403
+outranks an `empty` page, because a refusal is never this repo's parser.
 
 ## Exit 4 — zero rows
 

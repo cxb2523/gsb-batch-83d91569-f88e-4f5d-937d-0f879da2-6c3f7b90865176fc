@@ -230,6 +230,28 @@ whether the list is `addressable`, and for `--mode item` the story the comments
 sit under. `diff_runs.py` refuses to compare runs that are not both `complete`,
 that are different modes, or that asked different queries.
 
+It also records **what happened to each page**, so a run can be judged without
+reading its log:
+
+* `pages` — one entry per page that was actually requested, in page order,
+  each with `page`, `outcome`, `rows` and a one-sentence `reason`. The
+  `outcome` is one of `ok` (served and parsed into rows), `failed` (transport
+  failure, retries exhausted), `blocked` (HTTP 403 after every retry), `empty`
+  (the page said it had content and the parser read none) or `end` (a served
+  page with nothing on it and no claim of any: the site's own answer).
+* `pages_unrequested` — page numbers the run never asked for, because the list
+  ended sooner, `--pages` was one, or a worker never took them. They are not
+  failures: nobody asked the site for them.
+
+`stop_reason` is derived from that record by a fixed priority, so the same run
+cannot report two things: any `failed` or `blocked` page makes it
+`page_failed`; otherwise any `empty` page makes it `parser_found_nothing`;
+otherwise a list that genuinely ran out makes it `end_of_listing` (and
+`single_page_mode` for `--mode item`/`user`). `status` follows from the pages
+that arrived: `complete` when every page was read or the listing ended,
+`partial` when some pages were read and the run stopped early, `failed` when
+none were.
+
 ## Engines
 
 | Engine | File | Notes |
